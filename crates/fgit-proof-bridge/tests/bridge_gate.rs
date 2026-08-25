@@ -125,6 +125,12 @@ fn the_projected_corpus_exercises_seals_publications_and_outcomes() {
                     AbstractOp::SealRequest { .. } => seals += 1,
                     AbstractOp::Decide { .. } => decides += 1,
                     AbstractOp::Publish { .. } => publishes += 1,
+                    // A re-decide against an already-terminal transaction.
+                    // The checked-in corpus happens to record none yet; the
+                    // assertion lives with the golden that introduces one,
+                    // because a census that pinned zero here would refuse
+                    // exactly the histories this bead is adding.
+                    AbstractOp::Retry { .. } => {}
                     AbstractOp::InterruptedPublication { .. } => interrupted += 1,
                 }
             }

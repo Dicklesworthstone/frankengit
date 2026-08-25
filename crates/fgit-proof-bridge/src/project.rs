@@ -16,9 +16,13 @@
 
 use std::collections::BTreeMap;
 
+use fgit_reference::intent::{ForgeStreamId, ForgeStreamPosition};
 use fgit_reference::machine::ModelInput;
-use fgit_reference::trace::{GoldenTrace, ObservedOutcome};
+use fgit_reference::state::RepositoryRoots;
+use fgit_reference::trace::{GoldenTrace, ObservedOutcome, decode_roots};
 use fgit_types::TxId;
+use fgit_types::native::GitOid;
+use fgit_types::refs::RefName;
 
 /// The Lean model's terminal outcomes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,22 +46,36 @@ impl AbstractOutcome {
 
 /// One `OrderedResidue.Operation`.
 ///
-/// `crash`, `lostResponse` and `retry` exist in the Lean model but are not
-/// produced here: the reference model records a cancellation, not a crash, and
-/// mapping one onto the other would assert a correspondence nothing checks. A
-/// vector set that never exercises them is a stated limit, not a silent one.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// `crash` and `lostResponse` exist in the Lean model but are not produced
+/// here: the reference model records a cancellation, not a crash, and mapping
+/// one onto the other would assert a correspondence nothing checks. `retry`
+/// IS produced, exactly where the recorded history shows one: a decide that
+/// found its transaction already terminal. A vector set that never exercises
+/// `crash` or `lostResponse` is a stated limit, not a silent one.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AbstractOp {
     /// `Operation.sealRequest`.
     SealRequest {
         /// The abstract transaction index.
         target: u64,
     },
-    /// `Operation.decide`.
+    /// `Operation.decide`, emitted only where a decision became canonical: at
+    /// a won compare-and-swap that made every batch capsule terminal.
     Decide {
         /// The abstract transaction index.
         target: u64,
         /// What it was decided as.
+        outcome: AbstractOutcome,
+    },
+    /// `Operation.retry`: a decide re-presented against an already-terminal
+    /// transaction. The Lean model applies it as a no-op that preserves the
+    /// recorded outcome and refuses to overwrite it, which is exactly what
+    /// the reference model's §10.14 revalidation observes — so this mapping
+    /// asserts only what both sides see, never a fabricated first decision.
+    Retry {
+        /// The abstract transaction index.
+        target: u64,
+        /// The outcome the history had already recorded.
         outcome: AbstractOutcome,
     },
     /// `Operation.publish`.
@@ -66,6 +84,14 @@ pub enum AbstractOp {
         predecessor: u64,
         /// Generation the batch takes.
         generation: u64,
+        /// Dictionary-encoded identities of every ref the publication
+        /// created, changed, or removed, ascending by name. Empty when the
+        /// batch moved no ref.
+        ref_effects: Vec<u64>,
+        /// Flattened `(stream, new position)` pairs — stream dictionary index
+        /// then raw position, ascending stream order — for every forge stream
+        /// the publication advanced. Empty when it advanced none.
+        forge_effects: Vec<u64>,
     },
     /// `Operation.interruptedPublication`.
     InterruptedPublication {
@@ -151,6 +177,16 @@ pub enum ProjectionRefusal {
         /// The origin every generation must be at or above.
         genesis: u64,
     },
+    /// A step's recorded roots could not be decoded.
+    ///
+    /// The effect vectors come from decoding the canonical roots each step
+    /// recorded; bytes that fail their own frame cannot be projected, and
+    /// guessing past the refusal would put invented effects into a proof
+    /// artifact.
+    UnreadableRoots {
+        /// Step whose roots refused to decode.
+        concrete_index: usize,
+    },
 }
 
 /// Projects one recorded history onto the abstract model.
@@ -175,6 +211,14 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
     // from one that refused: DecisionBodyIdentity holds both a commit id and a
     // refusal-record id without saying which one applies.
     let mut repository_sequence: Option<u64> = None;
+    // Decoded roots of the previous step, kept so a won compare-and-swap can
+    // report exactly which authenticated positions its publication moved.
+    let mut previous_roots: Option<RepositoryRoots> = None;
+    // Dictionary encodings that keep the emitted effect vectors small enough
+    // for kernel reduction: ref names and forge streams become stable small
+    // indices on first sight, assigned in ascending order within each step.
+    let mut ref_dictionary: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+    let mut stream_dictionary: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
     let index_of = |tx: TxId, indices: &mut BTreeMap<TxId, u64>, order: &mut Vec<(u64, String)>| {
         if let Some(found) = indices.get(&tx) {
@@ -188,6 +232,8 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
 
     for (concrete_index, step) in trace.steps.iter().enumerate() {
         let generation_after = step.head.generation.get();
+        let roots_now = decode_roots(&step.roots)
+            .map_err(|_| ProjectionRefusal::UnreadableRoots { concrete_index })?;
         let mut operations = Vec::new();
         let projected = match (&step.input, &step.observed) {
             (
@@ -231,28 +277,19 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
                     .ok_or(ProjectionRefusal::UnknownCapsule { concrete_index })?;
                 let target = index_of(tx, &mut indices, &mut order);
                 match observed {
-                    ObservedOutcome::DecidedCommit => {
-                        decided.insert(target, AbstractOutcome::Committed);
-                        Some(AbstractOp::Decide {
-                            target,
-                            outcome: AbstractOutcome::Committed,
-                        })
-                    }
-                    ObservedOutcome::DecidedRefuse(_) => {
-                        decided.insert(target, AbstractOutcome::Refused);
-                        Some(AbstractOp::Decide {
-                            target,
-                            outcome: AbstractOutcome::Refused,
-                        })
-                    }
-                    // The Lean `decide` is already a no-op on a decided target
-                    // (OrderedResidue.lean's `some _ => state` arm), so replaying
-                    // the outcome this history recorded earlier reproduces the
-                    // concrete step exactly. Replaying a DIFFERENT outcome would
-                    // also be a no-op, which is why this reads the recorded one
-                    // rather than picking either: the vector has to mean
-                    // something even where the model would not notice.
-                    ObservedOutcome::DecidedAlreadyTerminal => Some(AbstractOp::Decide {
+                    // §10.14: deciding revalidates and concludes WITHOUT
+                    // changing state. Emitting an abstract decide here would
+                    // record an outcome the concrete step did not —
+                    // fabricating exactly the pre-terminal decision
+                    // `terminal_outcome_is_unique` forbids — so a fresh
+                    // verdict stutters and waits for the compare-and-swap
+                    // that actually makes it canonical.
+                    ObservedOutcome::DecidedCommit | ObservedOutcome::DecidedRefuse(_) => None,
+                    // Re-deciding a terminal transaction observes the
+                    // recorded outcome without changing anything, which is
+                    // precisely the Lean model's retry: `apply` preserves an
+                    // existing outcome and refuses to overwrite it.
+                    ObservedOutcome::DecidedAlreadyTerminal => Some(AbstractOp::Retry {
                         target,
                         outcome: *decided.get(&target).ok_or(
                             ProjectionRefusal::AlreadyTerminalWithoutDecision { concrete_index },
@@ -269,9 +306,21 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
                         // The publication comes first: a decision is canonical
                         // because the head moved, not the other way round, and
                         // the Lean `decide` requires the target already sealed.
+                        let ref_effects = ref_effect_identities(
+                            previous_roots.as_ref().map(|roots| &roots.refs),
+                            &roots_now.refs,
+                            &mut ref_dictionary,
+                        );
+                        let forge_effects = forge_effect_identities(
+                            previous_roots.as_ref().map(|roots| &roots.forge_positions),
+                            &roots_now.forge_positions,
+                            &mut stream_dictionary,
+                        );
                         operations.push(AbstractOp::Publish {
                             predecessor,
                             generation,
+                            ref_effects,
+                            forge_effects,
                         });
                         let key = request
                             .batch
@@ -336,6 +385,7 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
             .latest_repository_sequence
             .map(fgit_types::RepositorySequence::get)
             .or(repository_sequence);
+        previous_roots = Some(roots_now);
         operations.extend(projected);
         steps.push(ProjectedStep {
             concrete_index,
@@ -364,4 +414,58 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The dictionary index for `key`, assigning the next free index on first
+/// sight. Indices stay stable for the whole trace because the dictionaries
+/// outlive single steps.
+fn dictionary_index(dictionary: &mut BTreeMap<Vec<u8>, u64>, key: &[u8]) -> u64 {
+    let next = u64::try_from(dictionary.len()).unwrap_or(u64::MAX);
+    *dictionary.entry(key.to_vec()).or_insert(next)
+}
+
+/// Identities of every ref the step created, changed, or removed, encoded as
+/// dictionary indices and sorted ascending so the vector stays a pure
+/// function of the root content rather than of map iteration order.
+fn ref_effect_identities(
+    previous: Option<&BTreeMap<RefName, GitOid>>,
+    current: &BTreeMap<RefName, GitOid>,
+    dictionary: &mut BTreeMap<Vec<u8>, u64>,
+) -> Vec<u64> {
+    let mut names: Vec<Vec<u8>> = Vec::new();
+    for (name, oid) in current {
+        if !previous.map_or(true, |prev| prev.get(name) == Some(oid)) {
+            names.push(name.as_bytes().to_vec());
+        }
+    }
+    if let Some(prev) = previous {
+        for name in prev.keys() {
+            if !current.contains_key(name) {
+                names.push(name.as_bytes().to_vec());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+        .iter()
+        .map(|name| dictionary_index(dictionary, name))
+        .collect()
+}
+
+/// Flattened `(stream, new position)` pairs for every forge stream the step
+/// created or advanced, ascending by stream identity.
+fn forge_effect_identities(
+    previous: Option<&BTreeMap<ForgeStreamId, ForgeStreamPosition>>,
+    current: &BTreeMap<ForgeStreamId, ForgeStreamPosition>,
+    dictionary: &mut BTreeMap<Vec<u8>, u64>,
+) -> Vec<u64> {
+    let mut effects = Vec::new();
+    for (stream, position) in current {
+        if !previous.map_or(true, |prev| prev.get(stream) == Some(position)) {
+            effects.push(dictionary_index(dictionary, stream.label().as_bytes()));
+            effects.push(position.get());
+        }
+    }
+    effects
 }

@@ -36,6 +36,11 @@ const HEADER: &str = "\
 -- ordered residue that `proofs/fg041/OrderedResidue.lean` models. Steps the
 -- abstract model does not observe appear as `Operation.none` stutters, so step
 -- indices here still name real steps in the concrete trace.
+--
+-- Effect vectors on `publish` carry dictionary-encoded identities: ref names
+-- and forge streams become small stable indices in order of first appearance
+-- within their trace, and forge effects flatten `(stream, position)` pairs so
+-- the field stays one list of Nats.
 ";
 
 /// Renders every projected history into one Lean source file.
@@ -53,12 +58,16 @@ pub fn render(traces: &[ProjectedTrace]) -> String {
 namespace FgitBridge
 
 /-- The abstract operations, mirroring `OrderedResidue.Operation` without
-importing it. Deliverable (2) of FG-041d is the checker that maps these onto
-that type and replays them; until it exists this file is data, and says so. -/
+importing it. `retry` mirrors that model's own retry operation; the effect
+lists on `publish` fill the corresponding fields of its `Batch`. Deliverable
+(2) of FG-041d is the checker that maps these onto those types and replays
+them; until it exists this file is data, and says so. -/
 inductive Op where
   | sealRequest (target : Nat)
   | decide (target : Nat) (committed : Bool)
+  | retry (target : Nat) (committed : Bool)
   | publish (predecessor : Nat) (generation : Nat)
+      (refEffects : List Nat := []) (forgeEffects : List Nat := [])
   | interruptedPublication (predecessor : Nat) (generation : Nat)
   deriving Repr
 
@@ -111,7 +120,7 @@ structure Trace where
             let ops = step
                 .operations
                 .iter()
-                .map(|op| render_op(*op))
+                .map(render_op)
                 .collect::<Vec<_>>()
                 .join(", ");
             let _ = write!(
@@ -141,22 +150,41 @@ structure Trace where
     out
 }
 
-fn render_op(op: AbstractOp) -> String {
+fn render_op(op: &AbstractOp) -> String {
     match op {
         AbstractOp::SealRequest { target } => format!("Op.sealRequest {target}"),
         AbstractOp::Decide { target, outcome } => format!(
             "Op.decide {target} {}",
             matches!(outcome, crate::project::AbstractOutcome::Committed)
         ),
+        AbstractOp::Retry { target, outcome } => format!(
+            "Op.retry {target} {}",
+            matches!(outcome, crate::project::AbstractOutcome::Committed)
+        ),
         AbstractOp::Publish {
             predecessor,
             generation,
-        } => format!("Op.publish {predecessor} {generation}"),
+            ref_effects,
+            forge_effects,
+        } => format!(
+            "Op.publish {predecessor} {generation} [{}] [{}]",
+            nat_list(ref_effects),
+            nat_list(forge_effects),
+        ),
         AbstractOp::InterruptedPublication {
             predecessor,
             generation,
         } => format!("Op.interruptedPublication {predecessor} {generation}"),
     }
+}
+
+/// Renders a slice of numbers as a Lean list literal.
+fn nat_list(values: &[u64]) -> String {
+    values
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Turns a golden's file stem into a Lean identifier.

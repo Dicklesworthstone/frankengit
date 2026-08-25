@@ -30,14 +30,21 @@
 //!
 //! # Stated limits of the corpus
 //!
-//! The projection produces `sealRequest`, `decide`, `publish` and
-//! `interruptedPublication`. It never produces `crash`, `lostResponse` or
-//! `retry`: the reference model records cancellations rather than crashes, and
-//! mapping one onto the other would assert a correspondence nothing checks. The
-//! emitted batches also carry no ref or forge effect vectors, so these vectors
-//! exercise the ordering and outcome theorems and **not**
-//! `ref_and_forge_visibility_is_atomic`. Both are limits of the corpus, not of
-//! the Lean model, and both are stated here rather than discovered later.
+//! The projection produces `sealRequest`, `decide`, `retry`, `publish` and
+//! `interruptedPublication`. It never produces `crash` or `lostResponse`: the
+//! reference model records cancellations rather than crashes, and mapping one
+//! onto the other would assert a correspondence nothing checks. A pure §10.14
+//! decide — one that concludes without changing state — also stutters:
+//! emitting an abstract decide for it would fabricate exactly the
+//! pre-terminal decision the uniqueness theorem forbids. Only decisions that
+//! became canonical at a won compare-and-swap project onto `decide`, and a
+//! re-decide against an already-terminal transaction projects onto `retry`,
+//! whose Lean application preserves the recorded outcome. Published batches
+//! carry real effect vectors now, dictionary-encoded from the canonical roots
+//! each step recorded, so a golden that moves a ref or advances a forge
+//! stream exercises `ref_and_forge_visibility_is_atomic` through the bridge.
+//! Whether any claim row may cite which theorem remains the claims registry's
+//! decision, not this crate's.
 
 pub mod emit;
 pub mod gate;

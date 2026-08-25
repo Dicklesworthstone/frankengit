@@ -6,6 +6,9 @@ Vectors.lean is a history the executable reference model actually produced,
 projected onto the ordered residue. Replaying it here and requiring the head
 generation to agree at every step is what makes the proof a statement about the
 implementation's behaviour rather than about a model free to drift from it.
+Published batches now carry their decoded effect vectors, so a history that
+moves a ref or advances a forge stream exercises the atomic-visibility theorem's
+data path as well.
 
 Discharged with kernel `decide`, never `native_decide`: toolchain.json pins the
 trusted base to the Lean kernel and the bundled Init and Std, and native_decide
@@ -33,11 +36,13 @@ def toOperation (genesis : Nat) : FgitBridge.Op → Operation
   | .sealRequest target => .sealRequest target
   | .decide target committed =>
       .decide target (if committed then TerminalOutcome.committed else TerminalOutcome.refused)
-  | .publish predecessor generation =>
+  | .retry target committed =>
+      .retry target (if committed then TerminalOutcome.committed else TerminalOutcome.refused)
+  | .publish predecessor generation refEffects forgeEffects =>
       .publish { predecessor := rebase genesis predecessor
                , generation := rebase genesis generation
-               , refEffects := []
-               , forgeEffects := [] }
+               , refEffects := refEffects
+               , forgeEffects := forgeEffects }
   | .interruptedPublication predecessor generation =>
       .interruptedPublication { predecessor := rebase genesis predecessor
                               , generation := rebase genesis generation

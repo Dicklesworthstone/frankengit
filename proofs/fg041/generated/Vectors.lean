@@ -8,16 +8,25 @@
 -- ordered residue that `proofs/fg041/OrderedResidue.lean` models. Steps the
 -- abstract model does not observe appear as `Operation.none` stutters, so step
 -- indices here still name real steps in the concrete trace.
+--
+-- Effect vectors on `publish` carry dictionary-encoded identities: ref names
+-- and forge streams become small stable indices in order of first appearance
+-- within their trace, and forge effects flatten `(stream, position)` pairs so
+-- the field stays one list of Nats.
 
 namespace FgitBridge
 
 /-- The abstract operations, mirroring `OrderedResidue.Operation` without
-importing it. Deliverable (2) of FG-041d is the checker that maps these onto
-that type and replays them; until it exists this file is data, and says so. -/
+importing it. `retry` mirrors that model's own retry operation; the effect
+lists on `publish` fill the corresponding fields of its `Batch`. Deliverable
+(2) of FG-041d is the checker that maps these onto those types and replays
+them; until it exists this file is data, and says so. -/
 inductive Op where
   | sealRequest (target : Nat)
   | decide (target : Nat) (committed : Bool)
+  | retry (target : Nat) (committed : Bool)
   | publish (predecessor : Nat) (generation : Nat)
+      (refEffects : List Nat := []) (forgeEffects : List Nat := [])
   | interruptedPublication (predecessor : Nat) (generation : Nat)
   deriving Repr
 
@@ -57,11 +66,11 @@ def trace_cas_loss_retry : Trace :=
     , { concreteIndex := 5, ops := [], generationAfter := 1 }
     , { concreteIndex := 6, ops := [], generationAfter := 1 }
     , { concreteIndex := 7, ops := [], generationAfter := 1 }
-    , { concreteIndex := 8, ops := [Op.publish 1 2, Op.decide 1 true], generationAfter := 2 }
+    , { concreteIndex := 8, ops := [Op.publish 1 2 [0] [], Op.decide 1 true], generationAfter := 2 }
     , { concreteIndex := 9, ops := [Op.interruptedPublication 1 2], generationAfter := 2 }
     , { concreteIndex := 10, ops := [], generationAfter := 2 }
     , { concreteIndex := 11, ops := [], generationAfter := 2 }
-    , { concreteIndex := 12, ops := [Op.publish 2 3, Op.decide 0 true], generationAfter := 3 }
+    , { concreteIndex := 12, ops := [Op.publish 2 3 [1] [], Op.decide 0 true], generationAfter := 3 }
     ]
   }
 
@@ -87,7 +96,7 @@ def trace_idempotent_duplicate : Trace :=
     , { concreteIndex := 2, ops := [], generationAfter := 1 }
     , { concreteIndex := 3, ops := [], generationAfter := 1 }
     , { concreteIndex := 4, ops := [], generationAfter := 1 }
-    , { concreteIndex := 5, ops := [Op.publish 1 2, Op.decide 0 true], generationAfter := 2 }
+    , { concreteIndex := 5, ops := [Op.publish 1 2 [0] [], Op.decide 0 true], generationAfter := 2 }
     , { concreteIndex := 6, ops := [Op.sealRequest 0], generationAfter := 2 }
     ]
   }
@@ -106,7 +115,7 @@ def trace_multi_decision_batch : Trace :=
     , { concreteIndex := 3, ops := [], generationAfter := 1 }
     , { concreteIndex := 4, ops := [], generationAfter := 1 }
     , { concreteIndex := 5, ops := [], generationAfter := 1 }
-    , { concreteIndex := 6, ops := [Op.publish 1 2], generationAfter := 2 }
+    , { concreteIndex := 6, ops := [Op.publish 1 2 [0] []], generationAfter := 2 }
     ]
   }
 
@@ -120,7 +129,7 @@ def trace_refusal_only : Trace :=
     [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
     , { concreteIndex := 1, ops := [], generationAfter := 1 }
     , { concreteIndex := 2, ops := [], generationAfter := 1 }
-    , { concreteIndex := 3, ops := [Op.publish 1 2, Op.decide 0 false], generationAfter := 2 }
+    , { concreteIndex := 3, ops := [Op.publish 1 2 [] [], Op.decide 0 false], generationAfter := 2 }
     ]
   }
 
@@ -135,7 +144,7 @@ def trace_simple_commit : Trace :=
     , { concreteIndex := 1, ops := [], generationAfter := 1 }
     , { concreteIndex := 2, ops := [], generationAfter := 1 }
     , { concreteIndex := 3, ops := [], generationAfter := 1 }
-    , { concreteIndex := 4, ops := [Op.publish 1 2, Op.decide 0 true], generationAfter := 2 }
+    , { concreteIndex := 4, ops := [Op.publish 1 2 [0] [], Op.decide 0 true], generationAfter := 2 }
     ]
   }
 
