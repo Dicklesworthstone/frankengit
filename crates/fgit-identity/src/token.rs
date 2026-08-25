@@ -133,21 +133,7 @@ impl Display for TokenHandle {
     }
 }
 
-/// Whether the caller consulted the revocation record, and what it said.
-///
-/// This exists so the obligation is discharged at the type level. A caller that
-/// cannot be bothered to check has exactly one way to say so —
-/// [`Self::NotChecked`] — and that answer is refused for high-impact
-/// operations.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RevocationEvidence {
-    /// The revocation record was consulted and this handle is live.
-    Live,
-    /// The revocation record was consulted and this handle is revoked.
-    Revoked,
-    /// The revocation record was not consulted.
-    NotChecked,
-}
+pub use crate::revocation::RevocationEvidence;
 
 /// Every way a token is declined.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

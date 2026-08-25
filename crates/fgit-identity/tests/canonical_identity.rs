@@ -28,26 +28,17 @@
 use fgit_codec::CodecRefusal;
 use fgit_codec::CryptoBodyIdentity;
 use fgit_codec::attest::body_id;
+use fgit_crypto::{PUBLIC_KEY_BYTES, VerifyingKey};
 use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventPayload, PullRequestNumber};
 use fgit_identity::{DeployKeyBinding, DeployKeyScope, TokenGrant, TokenHandle, TokenOperation};
 use fgit_types::identity::OPAQUE_ID_LEN;
-use fgit_types::{Digest, DigestAlgorithmId, DigestBytes, PrincipalId, RepositoryId};
-
-const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
-const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
-
-fn digest(tag: u8) -> Digest {
-    Digest::new(
-        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
-            .expect("nonzero corpus fixture algorithm slot"),
-        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
-    )
-}
+use fgit_types::{PrincipalId, RepositoryId};
 
 fn binding() -> DeployKeyBinding {
     DeployKeyBinding::register(
         RepositoryId::from_bytes([0x11; OPAQUE_ID_LEN]),
-        digest(0x40),
+        PrincipalId::from_bytes([0x33; OPAQUE_ID_LEN]),
+        VerifyingKey::from_bytes([0x40; PUBLIC_KEY_BYTES]),
         &[DeployKeyScope::Read],
     )
     .expect("registers")
