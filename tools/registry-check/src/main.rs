@@ -62,6 +62,7 @@ impl CheckSet {
             "claims-status" => Ok(Self::ClaimsStatus),
             "layer-report" => Ok(Self::LayerReport),
             "ledger-policy" => Ok(Self::LedgerPolicy),
+            "ledger-fsqlite-policy" => Ok(Self::LedgerFsqlitePolicy),
             "ledger-sqlmodel-policy" => Ok(Self::LedgerSqlmodelPolicy),
             "ledger-tui-policy" => Ok(Self::LedgerTuiPolicy),
             "ledger-constellation" => Ok(Self::LedgerConstellation),
@@ -7055,6 +7056,29 @@ impl CanonicalBody for EvidenceRecordBody {
         assert!(report.errors.is_empty(), "{:?}", report.errors);
     }
 
+    #[test]
+    fn sqlmodel_substrate_wasm_surface_stays_fail_closed() {
+        // The unsupported-target half of the acceptance line: a `wasm`
+        // feature resolving on any fsqlite* node while the substrate is
+        // linked is refused for the semantic-surface reason, independent of
+        // the constellation target-support column.
+        let packages = vec![
+            lock_package("sqlmodel-frankensqlite"),
+            lock_package("fsqlite-vfs"),
+        ];
+        let mut metadata = MetadataSnapshot::default();
+        metadata.feature_closures.insert(
+            ("fsqlite-vfs".to_owned(), "0.0.0".to_owned()),
+            BTreeSet::from(["native".to_owned(), "wasm".to_owned()]),
+        );
+        let mut report = Report::new();
+        check_sqlmodel_substrate_feature_profile(&packages, &metadata, &mut report);
+        assert_error(
+            &report,
+            "`fsqlite-vfs` resolved with excluded feature `wasm`",
+        );
+    }
+
     fn assert_no_error(report: &Report, unexpected: &str) {
         assert!(
             !report.errors.iter().any(|error| error.contains(unexpected)),
@@ -7508,6 +7532,31 @@ impl CanonicalBody for EvidenceRecordBody {
         assert_eq!(config.root_version, "0.4.1");
         assert_eq!(config.decision, "allow_transitive_admitted_sqlmodel");
         assert_eq!(config.owner, "projection");
+        assert_ne!(
+            config,
+            admission_ledger_config(CheckSet::LedgerFsqlitePolicy)
+                .expect("storage policy generator must have a configuration")
+        );
+        assert_ne!(
+            config,
+            admission_ledger_config(CheckSet::LedgerPolicy)
+                .expect("runtime policy generator must have a configuration")
+        );
+    }
+
+    #[test]
+    fn tui_admission_ledger_configuration_is_exact_and_distinct() {
+        let config = admission_ledger_config(CheckSet::LedgerTuiPolicy)
+            .expect("tui policy generator must have a configuration");
+        assert_eq!(config.root_package, "ftui-runtime");
+        assert_eq!(config.root_version, "0.6.0");
+        assert_eq!(config.decision, "allow_transitive_admitted_tui");
+        assert_eq!(config.owner, "tui");
+        assert_ne!(
+            config,
+            admission_ledger_config(CheckSet::LedgerSqlmodelPolicy)
+                .expect("projection policy generator must have a configuration")
+        );
         assert_ne!(
             config,
             admission_ledger_config(CheckSet::LedgerFsqlitePolicy)
