@@ -6,8 +6,8 @@
 //! ```text
 //! fgit-schema-gen generate [dir]                         write the artifacts
 //! fgit-schema-gen check    [dir] [--workspace-root dir]  refuse if artifacts
-//!                                                        or an explicit workspace
-//!                                                        body-description check fails
+//!                                                        or workspace body
+//!                                                        descriptions fail
 //! ```
 //!
 //! `check` never writes. A gate that repairs what it finds cannot fail, so the
@@ -36,7 +36,7 @@ fn usage() -> ExitCode {
     eprintln!();
     eprintln!("  generate   write the schema artifacts, creating the directory if needed");
     eprintln!("  check      refuse if any committed artifact differs from the descriptors");
-    eprintln!("             --workspace-root also checks canonical-body descriptions there");
+    eprintln!("             canonical-body descriptions are checked at the workspace root");
     eprintln!();
     eprintln!("exit 0 clean, 1 stale or missing, 2 usage");
     ExitCode::from(2)
@@ -79,11 +79,10 @@ fn main() -> ExitCode {
         eprintln!("fgit-schema-gen: {refusal}");
         return ExitCode::from(1);
     }
-    if let Some(root) = workspace_root {
-        if let Err(refusal) = workspace_bodies::check_workspace_descriptions(&root) {
-            eprintln!("fgit-schema-gen: {refusal}");
-            return ExitCode::from(1);
-        }
+    let workspace_root = workspace_root.unwrap_or_else(workspace_bodies::default_workspace_root);
+    if let Err(refusal) = workspace_bodies::check_workspace_descriptions(&workspace_root) {
+        eprintln!("fgit-schema-gen: {refusal}");
+        return ExitCode::from(1);
     }
 
     match mode.as_str() {

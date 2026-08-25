@@ -1,0 +1,12 @@
+# fgit-canonical-body-descriptions-v1
+# family<TAB>canonical payload description
+admission-invariant-evidence	Opaque bytes of the transaction evaluator's invariant-fold witness.
+admission-object-closure	The ordered permitted Git-object closure: object identifiers and the admission evidence that authorizes them.
+admission-policy-decision	The sealed transaction identity, request digest, principal-snapshot identity, and policy epoch used for one admission decision.
+admission-ref-delta	The canonical surviving ref effects: each target ref, old and new Git object identifiers, and the ordered effect metadata.
+admission-refusal-evidence	The principal snapshot, authority-head basis, transaction identity, policy epoch, and terminal refusal code supporting an admission refusal.
+forge-event-evidence	Opaque canonical bytes for the forge-event partition of an admitted target-disjoint effect set.
+outbox-effect-batch	Opaque canonical bytes for the outbox-effect partition of an admitted target-disjoint effect set.
+principal-snapshot	Tenant, repository, principal, and configuration-root bytes identifying the authenticated admission basis.
+ref-state	The canonical ordered ref map, each ref name with its native Git object identifier, used as an admission snapshot.
+retention-delta	Opaque canonical bytes for the retention-effect partition of an admitted target-disjoint effect set.

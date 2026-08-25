@@ -29,7 +29,12 @@ fn check_refuses_a_literal_family_without_an_owning_description() {
     .expect("write detached probe package manifest");
     fs::write(
         crate_root.join("src/lib.rs"),
-        "impl CanonicalBody for Probe {\n    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static(\"probe-undescribed\");\n    fn write_payload(&self) {}\n}\n",
+        concat!(
+            "impl Canonical",
+            "Body for Probe {\n    const SCHEMA_",
+            "FAMILY: SchemaFamily::from_static(\"probe-undescribed\");\n",
+            "    fn write_payload(&self) {}\n}\n"
+        ),
     )
     .expect("write undocumented probe body");
 

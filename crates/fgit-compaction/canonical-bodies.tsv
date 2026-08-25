@@ -1,0 +1,3 @@
+# fgit-canonical-body-descriptions-v1
+# family<TAB>canonical payload description
+frankengit.compaction-record	Compaction input head and decision range, input roots, algorithm and profile tags, toolchain fingerprint, outputs, equivalence and totality witnesses, resource receipt, and rejected-layout evidence root.

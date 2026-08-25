@@ -1,0 +1,4 @@
+# fgit-canonical-body-descriptions-v1
+# family<TAB>canonical payload description
+fgit/model-roots	The framed reference-model repository roots used as one self-describing replay comparison point.
+fgit/model-trace	Reference-model genesis configuration followed by ordered inputs, observed outcomes, framed roots, and head observations for every trace step.

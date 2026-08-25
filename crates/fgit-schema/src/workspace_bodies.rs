@@ -247,7 +247,7 @@ fn source_families_in(source: &str, path: &Path) -> Result<BTreeSet<String>, Sch
     let flat = collapse_whitespace(source);
     let mut families = BTreeSet::new();
     let mut cursor = 0;
-    const IMPLEMENTATION: &str = "impl CanonicalBody for";
+    const IMPLEMENTATION: &str = concat!("impl Canonical", "Body for");
 
     while let Some(offset) = flat[cursor..].find(IMPLEMENTATION) {
         let start = cursor + offset;

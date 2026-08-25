@@ -104,6 +104,42 @@ fn every_refusal_variant_prints_and_has_a_distinct_kind() {
             name: "no-such-structure".into(),
             container: "structure",
         },
+        SchemaRefusal::WorkspaceMetadataFailed {
+            root: "/workspace".into(),
+            detail: "cargo metadata exited with status 1".into(),
+        },
+        SchemaRefusal::CanonicalBodyDescriptionManifestMissing {
+            crate_name: "fgit-probe".into(),
+            manifest: "/workspace/crates/fgit-probe/canonical-bodies.tsv".into(),
+        },
+        SchemaRefusal::CanonicalBodyDescriptionManifestMalformed {
+            manifest: "/workspace/crates/fgit-probe/canonical-bodies.tsv".into(),
+            line: 2,
+            detail: "expected exactly two tab-separated columns".into(),
+        },
+        SchemaRefusal::CanonicalBodyDescriptionDuplicated {
+            manifest: "/workspace/crates/fgit-probe/canonical-bodies.tsv".into(),
+            family: "probe-body".into(),
+        },
+        SchemaRefusal::CanonicalBodyDescriptionMissing {
+            crate_name: "fgit-probe".into(),
+            source: "/workspace/crates/fgit-probe/src/lib.rs".into(),
+            family: "probe-body".into(),
+        },
+        SchemaRefusal::CanonicalBodyDescriptionPhantom {
+            crate_name: "fgit-probe".into(),
+            manifest: "/workspace/crates/fgit-probe/canonical-bodies.tsv".into(),
+            family: "obsolete-probe-body".into(),
+        },
+        SchemaRefusal::CanonicalBodyDescriptionConflicting {
+            family: "shared-body".into(),
+            first_manifest: "/workspace/crates/fgit-a/canonical-bodies.tsv".into(),
+            second_manifest: "/workspace/crates/fgit-b/canonical-bodies.tsv".into(),
+        },
+        SchemaRefusal::CanonicalBodyFamilyUnresolvable {
+            source: "/workspace/crates/fgit-probe/src/lib.rs".into(),
+            expression: "FAMILY_ALIAS".into(),
+        },
     ];
     let mut kinds = std::collections::BTreeSet::new();
     for sample in &samples {
@@ -126,7 +162,15 @@ fn every_refusal_variant_prints_and_has_a_distinct_kind() {
             | SchemaRefusal::ArtifactStale { .. }
             | SchemaRefusal::ArtifactMissing { .. }
             | SchemaRefusal::FamilyDuplicated { .. }
-            | SchemaRefusal::ReferenceUnresolved { .. } => {}
+            | SchemaRefusal::ReferenceUnresolved { .. }
+            | SchemaRefusal::WorkspaceMetadataFailed { .. }
+            | SchemaRefusal::CanonicalBodyDescriptionManifestMissing { .. }
+            | SchemaRefusal::CanonicalBodyDescriptionManifestMalformed { .. }
+            | SchemaRefusal::CanonicalBodyDescriptionDuplicated { .. }
+            | SchemaRefusal::CanonicalBodyDescriptionMissing { .. }
+            | SchemaRefusal::CanonicalBodyDescriptionPhantom { .. }
+            | SchemaRefusal::CanonicalBodyDescriptionConflicting { .. }
+            | SchemaRefusal::CanonicalBodyFamilyUnresolvable { .. } => {}
         }
     }
 }

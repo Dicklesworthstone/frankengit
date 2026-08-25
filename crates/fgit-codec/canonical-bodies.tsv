@@ -1,0 +1,11 @@
+# fgit-canonical-body-descriptions-v1
+# family<TAB>canonical payload description
+authority-head	Repository identity, monotone generation, optional predecessor and tail positions, current authenticated roots, epochs, and optional checkpoint identity.
+decision-batch	Prepared-against head, first decision position, ordered terminal decisions and committed records, resulting roots and epochs, evidence root, and optional compaction link.
+hidden-ref-policy	Ordered raw hide-rule byte strings; order is semantic because the last matching rule wins.
+rcr	One committed repository transition: repository and transaction positions, principal and request bindings, and all ref, object, forge, policy, invariant, outbox, and retention roots.
+refusal-record	Transaction and seal identities, terminal decision position and code, policy epoch, bounded detail text, and refusal-evidence root.
+repository-configuration	Versioned repository configuration bytes: root-layout and object-format tags, with the selected major adding incarnation and optional hidden-ref-policy commitments.
+repository-creation-attempt	Tenant and repository identities, requested layout and object format, idempotency-key digest, and the minted repository-incarnation identity.
+signed-envelope	The framed canonical body bytes plus the canonical set of detached signature records that attest to that exact frame.
+txn-seal	Stable transaction identity, tenant, repository and authenticated principal identities, idempotency-key and request digests, and request schema identifier.

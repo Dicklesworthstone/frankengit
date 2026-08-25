@@ -1,0 +1,6 @@
+# fgit-canonical-body-descriptions-v1
+# family<TAB>canonical payload description
+backup-export-bundle	Backup export metadata: format version, repository identity, selected authority head and retained immutable body references.
+outcome-index-checkpoint	Repository identity, optional decision-tail position and predecessor checkpoint, followed by retained terminal decisions in canonical order.
+repository-capsule	Repository identity, selected head and positions, authenticated state roots, policy and format epochs, optional outcome checkpoint, and backup-profile tag.
+restore-report	Restore result metadata and the ordered verification findings that report what the recovery process reconstructed and checked.
