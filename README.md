@@ -2,7 +2,7 @@
 
 **A clean-room, pure-Rust, Git-compatible forge designed for humans, autonomous coding agents, extreme scale, and independently verifiable recovery.**
 
-> **Status:** pre-implementation architecture and public design review. FrankenGit is not yet a usable Git server or GitHub replacement.
+> **Status:** active implementation and pre-release integration. FrankenGit now contains substantial final-abstraction slices and a narrow executable one-node boundary, but it is not yet a general-purpose Git server, a production-ready forge, or a GitHub replacement.
 >
 > **License:** `LicenseRef-MIT-OpenAI-Anthropic-Rider` — the MIT licence plus the OpenAI/Anthropic rider. Decision D14 was resolved by the repository owner on 2026-08-23.
 >
@@ -24,12 +24,13 @@ Those product-stack choices are settled, while integration is deliberately gated
 
 ## Current executable one-node boundary
 
-The repository remains pre-release and is not yet a general-purpose Git server.
-The checked-in `fg` binary nevertheless has a narrow, configuration-free
-one-node bootstrap surface for exercising canonical authority-head visibility.
-It does not consult a configuration file: callers supply the storage directory,
-tenant ID, and repository ID explicitly. This is not a claim that a selected
-durable publication epoch has completed.
+The checked-in `fg` binary has a narrow, configuration-free one-node surface for
+exercising the same authority, admission, and object-selection abstractions the
+finished system will use. It does not consult a configuration file: callers
+supply the storage directory, tenant ID, and repository ID explicitly. The
+surface is useful for implementation and conformance work, but it is not yet a
+complete server profile and does not by itself prove that a selected durability
+epoch or broader compatibility matrix has completed.
 
 ```bash
 cargo run -p fgit-cli -- init ./fgit-data \
@@ -41,16 +42,24 @@ cargo run -p fgit-cli -- doctor ./fgit-data \
   22222222222222222222222222222222
 ```
 
-`init` creates or re-authenticates only the empty canonical authority head;
-`doctor` authenticates that head and can re-verify one explicitly named native
-object. `serve` accepts a bounded legacy git-daemon upload-pack service run,
-drains every admitted session, and reports the accepted/completed/refused
-receipt before it exits. Its compatibility default remains one session and one
-in-flight client; callers explicitly opt into a larger non-zero
-`--max-sessions` / `--max-in-flight` bound. The bring-up transcript below
-deliberately names the one-session bound. `export` writes only an
-authority-selected pack to a previously absent path. Neither command treats
-local object placement or a connection-local ref map as canonical state.
+`init` creates or re-authenticates the empty canonical authority head. `import`
+verifies a bounded loose-object source and publishes its source refs through the
+sealed admission/RCR/head-CAS path. `doctor` authenticates the head and can
+re-verify one explicitly named native object; it is not yet a complete replay,
+fabric, repair, or causal-diagnosis suite. `export` writes an authority-selected
+pack to a previously absent path.
+
+`serve` accepts a bounded raw git-daemon **upload-pack** service run, drains
+every admitted session, and reports accepted/completed/refused counts before it
+exits. Its compatibility default remains one session and one in-flight client;
+callers explicitly opt into larger non-zero `--max-sessions` and
+`--max-in-flight` bounds. The bring-up transcript below deliberately names the
+one-session bound. The daemon does not serve receive-pack, smart HTTP, SSH, or a
+native API. Receive parsing, quarantine, validation, and durable admission exist
+as lower-level and loopback composition slices, but ordinary network push will
+remain unsupported until those slices are connected to a production transport.
+No command treats local object placement, a routing hint, or a
+connection-local ref map as canonical state.
 
 For a clean-machine transcript of the implemented empty-repository lifecycle,
 run [`scripts/one_node_bringup.sh`](scripts/one_node_bringup.sh) with a new
@@ -71,10 +80,42 @@ prebuilt `fg` binary to avoid its default `cargo run -p fgit-cli --` launcher.
 It intentionally exercises an empty repository and does not claim a complete
 clone, fetch, or push workflow.
 
-`fg import` accepts a verified bounded loose-object source and publishes its
-source ref commands through the ordinary sealed admission/RCR/head-publication
-path. That bounded import surface does not widen the one-node lifecycle above
-into a general Git-server compatibility claim.
+### Reality snapshot: 2026-08-25
+
+The implementation has moved well beyond an architecture-only repository, but
+most of the product vision remains ahead:
+
+- The canonical core is real code: typed SHA-1/SHA-256 identities, canonical
+  bodies, transaction seals, intent/effect folding, immutable decision batches,
+  terminal outcomes, authenticated heads, and exact-predecessor CAS publication
+  have reference, laboratory, and durable embedded slices.
+- The clean-room Git substrate now includes bounded object parsing, owned
+  DEFLATE, pack/delta read and write paths, pkt-line, upload-pack, receive-pack
+  parsing, quarantine/admission, authority-selected pack materialization, and
+  raw git-daemon upload-pack composition. Those parts do not yet amount to a
+  completed Git compatibility matrix.
+- Object fabric, ATP-Git, TreeFS, RaptorQ repair, verified-read proofs, forge
+  events and merge computation, graph algorithms, agent/evidence protocols,
+  hostile-runner policy, recovery, and release attempts have bounded vertical
+  slices. Several are internal libraries or refusal-bounded compositions rather
+  than deployable product surfaces.
+- Network receive-pack/push, smart HTTP, production SSH, the native REST/API
+  gateway, projections, search, issues/notifications, the web UI, the TUI, MCP,
+  production hostile-execution isolation, and the actual release publication
+  path are not complete. The durable forge merge composition also has a known
+  materialization defect that prevents an otherwise permitted merge from
+  reaching head CAS.
+- The dependency graph tracks these gaps, including external convergence gates
+  for fastapi_rust, sqlmodel/FrankenSQLite, and FrankenTUI. The smart-HTTP gap is
+  tracked explicitly by FG-105 rather than being hidden inside raw-socket or
+  REST work.
+
+The claims registry remains the public proof boundary. Its verified rows cover
+narrow artifact identity and contained Lean-model theorems; they do not prove
+general Git compatibility, Rust refinement of the complete implementation,
+forge completeness, multi-region readiness, performance leadership, or release
+readiness. Closed beads, crate count, test presence, and a successful local
+scenario will not be treated as substitutes for revision-bound evidence.
 
 ---
 
@@ -292,27 +333,60 @@ See [`docs/LOCAL_VERIFICATION_AND_RELEASE_PIPELINE.md`](docs/LOCAL_VERIFICATION_
 
 ## Beyond parity: what the architecture unlocks
 
-The core innovations above make FrankenGit a correct, economical forge. The same primitives — one authenticated head, an immutable decision stream, content-addressed evidence, and pinned build capsules — also unlock five capabilities no incumbent forge can copy without rebuilding its storage layer. All five are proposal-class designs (see the claim lattice); each has a comprehensive-plan section and a backlog slice.
+The core innovations above are intended to make FrankenGit a correct,
+economical forge. The same primitives — one authenticated head, an immutable
+decision stream, content-addressed evidence, and pinned build capsules — will
+also unlock five capabilities that are difficult to graft onto a mutable forge.
+The repository contains bounded internal slices for several of them, but none
+is yet a shipped end-user capability. Each will remain scoped by the claim
+lattice, its comprehensive-plan section, and its backlog work.
 
 ### Verifiable reads, not just verifiable writes
 
-Every FrankenGit read already derives from an authenticated `RepositoryAuthorityHead`. The verified-read protocol goes all the way: any ref, object-membership, PR-state, or outcome answer can be served with a Merkle inclusion proof connecting it to a head the client verifies independently. A verifying client trusts only the head chain — not the serving cell, mirror, or CDN. That makes FrankenGit the first forge with trustless read serving: to verifying clients, mirrors and caches become cryptographically incapable of lying, because a wrong answer fails proof verification instead of being believed. The authenticated roots already exist in the head schema; this is an API surface, not new truth machinery. (Plan §18.7, backlog FG-037.)
+Every supported FrankenGit read will derive from an authenticated
+`RepositoryAuthorityHead`. The verified-read protocol will let a ref,
+object-membership, PR-state, or outcome answer carry a Merkle proof connecting
+it to a head the client verifies independently. The authenticated roots and
+bounded proof/verifier slices exist; public API integration, complete proof
+coverage, mirror/CDN serving, and product UX do not. When those surfaces land, a
+verifying client will trust the head chain rather than the serving cell. (Plan
+§18.7, backlog FG-037.)
 
 ### Time travel as a product primitive
 
-Because canonical state is an immutable decision stream, “the entire forge at decision N” is a well-defined object — not a reconstruction heuristic over mutable tables. `fg at <decision>` opens a complete read-only forge snapshot: refs, pull requests, reviews, the policy epoch, and CI receipts exactly as they stood. Bisection generalizes from commits to forge state — binary-search the decision sequence for the transition that changed a policy outcome, a review requirement, or a CI result. Incumbent forges cannot offer this without rebuilding storage around an immutable stream. (Plan §31.8, backlog FG-038.)
+Because canonical state will remain an immutable decision stream, “the entire
+forge at decision N” will be a well-defined object rather than a reconstruction
+heuristic over mutable tables. `fg at <decision>` is planned to open a complete
+read-only forge snapshot, and bisection will generalize from commits to forge
+state. Snapshot/bisection work is still incomplete and no such finished CLI
+experience exists yet. (Plan §31.8, backlog FG-038.)
 
 ### The evidence economy
 
-Evidence-Carrying Changes and check receipts are content-addressed and self-describing, so they can travel between organizations with their claims intact. A dependency bump can arrive carrying its upstream’s replayable test evidence and provenance, verified locally under the same claim-class rules the local repository enforces — imported evidence can tighten but never bypass local checks, and a claim never upgrades in transit. This turns the claim lattice from an internal discipline into a network protocol, and it compounds: organizations that publish strong evidence make their artifacts cheaper for everyone downstream to adopt safely. (Plan §34.8, backlog FG-039.)
+Evidence-Carrying Changes and check receipts will be content-addressed and
+self-describing so they can travel between organizations without silently
+upgrading their claims. Schema, signing, import-policy, and adversarial slices
+exist, but no deployed cross-organization exchange service exists. Imported
+evidence will be allowed to tighten local checks and will never bypass them.
+(Plan §34.8, backlog FG-039.)
 
 ### Deterministic build outputs as derived state
 
-FrankenGit already treats packs and indexes as “compute once, share by profile identity.” CI outputs with fully pinned `BuildInputCapsule`s are the same shape: when a workflow step is declared deterministic, its outputs become trust-scoped, content-addressed derived state keyed by exact capsule identity. A global build cache — remote-build-cache economics in the style of Bazel — falls out of machinery the CI protocol already requires, with the same trust-domain isolation that protects ordinary caches from fork poisoning. (Plan §29.8, backlog FG-040.)
+FrankenGit will treat deterministic CI outputs like other profile-identified
+derived artifacts: trust-scoped, content-addressed, and keyed by the exact
+`BuildInputCapsule`. Internal reuse and poisoning-evidence slices exist, while
+the production workflow coordinator, hostile-execution substrate, and deployed
+cache service remain incomplete. (Plan §29.8, backlog FG-040.)
 
 ### Formal verification of the tiny core
 
-The whole design concentrates trust into a deliberately small ordered residue: seals, terminal outcomes, batch admission, one head compare-and-swap, root-last publication. That core is small enough for actual mechanized proof, not just bounded model checking — theorems like terminal-outcome uniqueness, head-chain continuity, and anti-rollback under interrupted publication, machine-checked against the same executable reference model the differential tests use. The top of the claim lattice (`proof`, `invariant`) becomes occupied, not just defined. (Plan §40.8, backlog FG-041.)
+The design concentrates trust into a deliberately small ordered residue: seals,
+terminal outcomes, batch admission, one head compare-and-swap, and root-last
+publication. Contained Lean theorems now cover named properties under explicit
+boundary assumptions, as recorded in the generated claim table below. They are
+not a proof of the production Rust implementation: the refinement bridge still
+has uncovered histories and no claim may cross that boundary without matching
+evidence. (Plan §40.8, backlog FG-041.)
 
 ---
 
@@ -458,11 +532,17 @@ The initial local commands are:
 
 The documentation/constitution/fast bootstrap lanes exist today. `full` and `release` deliberately return a typed exit-3 refusal until real conformance, fault, native-target, and artifact gates land; a dormant gate never reports success.
 
+No invocation is evidence for a later revision. A green local crate test, a
+dirty-worktree lane, a `batch_pending` bead, or an older replay artifact will not
+be described as proof that current `main` is verified. The orchestrated batch
+gate and the generated claim registry will remain the revision-bound sources of
+truth.
+
 See [`VERIFY_SPEC.md`](VERIFY_SPEC.md) and [`docs/NEGATIVE_EVIDENCE_LEDGER.md`](docs/NEGATIVE_EVIDENCE_LEDGER.md).
 
 ---
 
-## Planned workspace
+## Workspace progress and planned expansion
 
 Crates appear only with a real final-abstraction slice. The prospective strict DAG contains:
 
@@ -472,12 +552,15 @@ Crates appear only with a real final-abstraction slice. The prospective strict D
 - derived systems: search, typed graphs, document lineage, agents, CI protocol, packages, projections;
 - products/adapters: gateway, API, CLI, node, runner, operations, browser/WASM.
 
-The repository currently contains 33 first-party `fgit-*` crates, each admitted with a real
-final-abstraction slice and its tests (foundation codec/authority/txn/evidence layers, Git
-object/pack/wire/fabric primitives, TreeFS, repair, statistics, lab, node, CLI), plus the
-constitutional registry checker. No empty placeholder crates exist; derived systems (search,
-graphs, forge projections) and product surfaces (API/web/TUI) remain unbuilt by design until
-their owning slices open.
+The repository now contains dozens of first-party `fgit-*` crates plus the
+constitutional registry checker. Implemented crate-level slices include the
+foundation, Git/storage, transaction/chronicle, embedded authority, object
+fabric, TreeFS, repair, statistics, graph, forge, identity/policy, agent,
+runner, release, node, and CLI layers. A crate being present means only that its
+bounded final-abstraction slice exists; it does not mean the complete subsystem
+or its product integration is ready. Search, projection, gateway/API, web, TUI,
+operations, package-registry, and several hosted-service surfaces will still
+need their owning implementation and evidence slices.
 
 See the full map in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md#43-prospective-implementation-architecture).
 
@@ -515,16 +598,26 @@ Machine-validated registries live under [`registries/`](registries/README.md).
 
 ## Near-term execution
 
-1. Freeze constitutions, registries, terminology, canonical primitives, and goldens.
-2. Implement the std-only registry/constitution checker and local evidence pack.
-3. Build the pure reference transaction/head state machine and faultable authority store.
-4. Add the FrankenSQLite embedded authority profile and prove equivalence.
-5. Implement exact Git object framing and pack/delta quarantine in pure Rust.
-6. Complete one ordinary upload-pack/receive-pack vertical slice.
-7. Add immutable segments and the first ATP-Git exact have/delta/dedupe path.
-8. Prototype per-core preparation and flat combining against the reference model.
-9. Implement TreeFS direct API and export-to-Git-intent.
-10. Expand only when the corresponding conformance/fault/security evidence closes.
+The next integration work will prioritize capability gaps rather than crate
+count:
+
+1. The node will expose receive-pack through a production transport and close
+   the pinned-client clone/fetch/push campaign, including incremental-transfer
+   and restart/fault evidence.
+2. Forge merges will move from real computation plus an incomplete durable
+   composition to the same asynchronous materialization and exactly-one-head-CAS
+   path used by admitted receive operations.
+3. Identity and policy will be wired into receive, merge, transport, and
+   disclosure boundaries before broader multi-tenant surfaces open.
+4. fastapi_rust, sqlmodel/FrankenSQLite, and FrankenTUI will converge on the one
+   runtime/dependency constellation before smart HTTP, native REST,
+   projections/search, web, and TUI product layers are admitted.
+5. Workflow coordination and production hostile-execution isolation will land
+   before CI is described as deployable; release publication will remain
+   refused until the full/release gates and native target matrix are real.
+6. Multi-cell, repair, verified-read, performance, and hosted-service claims
+   will expand only from revision-bound conformance, fault, security, and
+   economics evidence.
 
 The phase plan is in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md#44-delivery-roadmap).
 
@@ -542,7 +635,14 @@ The phase plan is in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md`](COMP
 - not graph/model output used as hidden policy authority;
 - not agent text interpreted as capabilities;
 - not GitHub-hosted Actions used as release truth;
-- not yet implemented, benchmarked, production-ready, or honestly describable as OSI open source under the current license (D14 resolved it as `LicenseRef-MIT-OpenAI-Anthropic-Rider`, whose OSI marker is `no`).
+- not yet a complete network push service, smart-HTTP/SSH forge, native API,
+  hosted multi-region service, or releasable product;
+- not yet supported by evidence broad enough to claim general Git
+  compatibility, performance leadership, production readiness, or complete
+  Rust-level formal verification;
+- not honestly describable as OSI open source under the current license (D14
+  resolved it as `LicenseRef-MIT-OpenAI-Anthropic-Rider`, whose OSI marker is
+  `no`).
 
 ---
 
@@ -556,4 +656,9 @@ The rider withholds all rights from OpenAI, Anthropic, their affiliates, and any
 
 ## Public design review
 
-The architecture is intentionally public before implementation so contradictions can be found while they are cheap. Useful review focuses on concrete invariants, counterexamples, protocol compatibility, authority-store semantics, resource/security bounds, graph/transport algorithms, dependency closure, and executable evidence—not on whether the plan sounds ambitious.
+The architecture and its growing implementation are intentionally public so
+contradictions can be found before they harden into product semantics. Useful
+review will continue to focus on concrete invariants, counterexamples, protocol
+compatibility, authority-store semantics, resource/security bounds,
+graph/transport algorithms, dependency closure, and executable evidence—not on
+whether the plan sounds ambitious or the repository contains many files.
