@@ -55,6 +55,8 @@ const SOURCE_OID: &str = "3333333333333333333333333333333333333333";
 const BASE_OID: &str = "1111111111111111111111111111111111111111";
 const FIRST_MERGE_OID: &str = "4444444444444444444444444444444444444444";
 const RIVAL_MERGE_OID: &str = "5555555555555555555555555555555555555555";
+const THIRD_MERGE_OID: &str = "6666666666666666666666666666666666666666";
+const THREE_WAY_SCHEDULE_SEED: u64 = 0x168;
 
 fn digest(seed: u8) -> Digest {
     Digest::new(
@@ -312,6 +314,49 @@ fn sealed<'a>(
     }
 }
 
+/// The campaign boundary between a scenario and its admission driver.
+///
+/// The scenarios below do not call the synchronous production entry point
+/// directly.  The current adapter drives `admit_merge`; a durable adapter can
+/// implement this same test-only boundary when asa3 lands without changing the
+/// race, retry, and publication-fault assertions.
+trait MergeAdmissionPath {
+    fn admit(
+        &self,
+        context: &AdmissionContext,
+        sealed: &SealedMerge<'_>,
+    ) -> Result<fgit_authority::TerminalOutcome, fgit_admission::AdmissionError>;
+}
+
+struct SyncMergeAdmissionPath<'a, Authority: ?Sized, Projection: ?Sized, CommitmentStore: ?Sized> {
+    store: &'a Authority,
+    projection: &'a Projection,
+    commitments: &'a CommitmentStore,
+}
+
+impl<Authority, Projection, CommitmentStore> MergeAdmissionPath
+    for SyncMergeAdmissionPath<'_, Authority, Projection, CommitmentStore>
+where
+    Authority: AuthorityStore + ?Sized,
+    Projection: AdmissionProjection + ?Sized,
+    CommitmentStore: CanonicalAdmissionStore + ForgeBodyStore + ?Sized,
+{
+    fn admit(
+        &self,
+        context: &AdmissionContext,
+        sealed: &SealedMerge<'_>,
+    ) -> Result<fgit_authority::TerminalOutcome, fgit_admission::AdmissionError> {
+        admit_merge(
+            self.store,
+            context,
+            sealed,
+            AdmissionLimits::default(),
+            self.projection,
+            self.commitments,
+        )
+    }
+}
+
 struct Rival<'a> {
     context: AdmissionContext,
     sealed: SealedMerge<'a>,
@@ -373,19 +418,94 @@ impl AdmissionSnapshotProjection for ScheduledProjection<'_, '_> {
         let snapshot = self.production.snapshot(basis, authenticated)?;
         if first_snapshot {
             self.step("merge-b");
-            let terminal = admit_merge(
-                self.store.as_ref(),
-                &self.rival.context,
-                &self.rival.sealed,
-                AdmissionLimits::default(),
-                &self.production,
-                &self.commitments,
-            )
-            .expect("scheduled rival reaches one terminal decision");
+            let path = SyncMergeAdmissionPath {
+                store: self.store.as_ref(),
+                projection: &self.production,
+                commitments: &self.commitments,
+            };
+            let terminal = path
+                .admit(&self.rival.context, &self.rival.sealed)
+                .expect("scheduled rival reaches one terminal decision");
             self.rival_terminal.borrow_mut().replace(terminal);
             self.step("merge-a");
         }
         Ok(snapshot)
+    }
+}
+
+/// A re-entrant schedule gate for a seeded N-way race.
+///
+/// Each candidate pauses only after reading its real authenticated snapshot.
+/// The next candidate is then admitted through its own adapter, so the final
+/// candidate reaches the authority CAS first and every earlier candidate must
+/// replan against that real publication.
+struct NestedScheduledProjection<'schedule, 'trigger> {
+    production: ProductionProjection,
+    cursor: Rc<RefCell<StepCursor<'schedule>>>,
+    raced: Cell<bool>,
+    snapshot_actor: &'static str,
+    cas_actor: &'static str,
+    after_snapshot: Option<Box<dyn Fn() + 'trigger>>,
+}
+
+impl NestedScheduledProjection<'_, '_> {
+    fn step(&self, expected_actor: &str) {
+        let mut cursor = self.cursor.borrow_mut();
+        let actual = cursor
+            .next_step()
+            .expect("the seeded schedule declares every three-way race boundary");
+        assert_eq!(
+            actual.as_str(),
+            expected_actor,
+            "seeded three-way merge schedule drifted at an admission boundary"
+        );
+    }
+
+    fn schedule_exhausted(&self) -> bool {
+        self.cursor.borrow().is_exhausted()
+    }
+}
+
+impl AdmissionSnapshotProjection for NestedScheduledProjection<'_, '_> {
+    fn snapshot(
+        &self,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+    ) -> Result<AdmissionSnapshot, RefusalCode> {
+        let first_snapshot = !self.raced.replace(true);
+        if first_snapshot {
+            self.step(self.snapshot_actor);
+        }
+        let snapshot = self.production.snapshot(basis, authenticated)?;
+        if first_snapshot {
+            if let Some(after_snapshot) = &self.after_snapshot {
+                after_snapshot();
+            }
+            self.step(self.cas_actor);
+        }
+        Ok(snapshot)
+    }
+}
+
+impl AdmissionProjection for NestedScheduledProjection<'_, '_> {
+    fn materialize_commit(
+        &self,
+        basis: &PublicationBasis,
+        request: &TransactionRequest,
+        fold: &fgit_txn::TransactionFoldReport,
+        closure: &ValidatedClosure,
+    ) -> Result<fgit_admission::CommitMaterialization, ProjectionFailure> {
+        self.production
+            .materialize_commit(basis, request, fold, closure)
+    }
+
+    fn materialize_refusal(
+        &self,
+        basis: &PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+    ) -> Result<RefusalMaterialization, RefusalCode> {
+        self.production.materialize_refusal(basis, tx_id, code)
     }
 }
 
@@ -443,15 +563,17 @@ fn scheduled_merge_race_has_one_winner_and_no_half_merged_ref_state() {
         rival_terminal: RefCell::new(None),
     };
 
-    let loser = admit_merge(
-        store.as_ref(),
-        &first_context,
-        &sealed(&first_package, &attempt, &first_closure),
-        AdmissionLimits::default(),
-        &scheduled,
-        &commitments,
-    )
-    .expect("the candidate that loses its CAS still gets a terminal decision");
+    let path = SyncMergeAdmissionPath {
+        store: store.as_ref(),
+        projection: &scheduled,
+        commitments: &commitments,
+    };
+    let loser = path
+        .admit(
+            &first_context,
+            &sealed(&first_package, &attempt, &first_closure),
+        )
+        .expect("the candidate that loses its CAS still gets a terminal decision");
     let winner = scheduled.rival_terminal();
 
     assert!(
@@ -498,6 +620,291 @@ fn scheduled_merge_race_has_one_winner_and_no_half_merged_ref_state() {
     );
 }
 
+#[test]
+fn seeded_three_way_merge_race_has_exactly_one_winner_for_one_pull_request() {
+    let schedule = LabSchedule::seeded(
+        vec![
+            StepId::new("merge-a"),
+            StepId::new("merge-b"),
+            StepId::new("merge-c"),
+        ],
+        6,
+        THREE_WAY_SCHEDULE_SEED,
+    )
+    .expect("the three-way participants are unique");
+    assert_eq!(
+        schedule.canonical_line(),
+        "fgit-lab-schedule-v1|seed=360|participants=merge-a,merge-b,merge-c|steps=6|order=merge-a,merge-b,merge-c,merge-c,merge-b,merge-a",
+        "the chosen seed must reproduce the intended nested schedule"
+    );
+
+    let (first_context, store, production, commitments) = repository();
+    let attempt = attempt();
+    let first_package = package(FIRST_MERGE_OID);
+    let first_closure = closure(FIRST_MERGE_OID);
+    let first_sealed = sealed(&first_package, &attempt, &first_closure);
+    let second_context = context_for(b"lab-merge-b");
+    let second_package = package(RIVAL_MERGE_OID);
+    let second_closure = closure(RIVAL_MERGE_OID);
+    let second_sealed = sealed(&second_package, &attempt, &second_closure);
+    let third_context = context_for(b"lab-merge-c");
+    let third_package = package(THIRD_MERGE_OID);
+    let third_closure = closure(THIRD_MERGE_OID);
+    let third_sealed = sealed(&third_package, &attempt, &third_closure);
+    let cursor = Rc::new(RefCell::new(schedule.cursor()));
+    let second_terminal = Rc::new(RefCell::new(None));
+    let third_terminal = Rc::new(RefCell::new(None));
+
+    let third_projection = NestedScheduledProjection {
+        production: CanonicalAdmissionProjection::new(commitments.clone(), Evidence),
+        cursor: Rc::clone(&cursor),
+        raced: Cell::new(false),
+        snapshot_actor: "merge-c",
+        cas_actor: "merge-c",
+        after_snapshot: None,
+    };
+    let third_path = SyncMergeAdmissionPath {
+        store: store.as_ref(),
+        projection: &third_projection,
+        commitments: &commitments,
+    };
+    let second_projection = NestedScheduledProjection {
+        production: CanonicalAdmissionProjection::new(commitments.clone(), Evidence),
+        cursor: Rc::clone(&cursor),
+        raced: Cell::new(false),
+        snapshot_actor: "merge-b",
+        cas_actor: "merge-b",
+        after_snapshot: Some(Box::new(|| {
+            let terminal = third_path
+                .admit(&third_context, &third_sealed)
+                .expect("third contender reaches a terminal decision");
+            third_terminal.borrow_mut().replace(terminal);
+        })),
+    };
+    let second_path = SyncMergeAdmissionPath {
+        store: store.as_ref(),
+        projection: &second_projection,
+        commitments: &commitments,
+    };
+    let first_projection = NestedScheduledProjection {
+        production,
+        cursor,
+        raced: Cell::new(false),
+        snapshot_actor: "merge-a",
+        cas_actor: "merge-a",
+        after_snapshot: Some(Box::new(|| {
+            let terminal = second_path
+                .admit(&second_context, &second_sealed)
+                .expect("second contender reaches a terminal decision");
+            second_terminal.borrow_mut().replace(terminal);
+        })),
+    };
+    let first_path = SyncMergeAdmissionPath {
+        store: store.as_ref(),
+        projection: &first_projection,
+        commitments: &commitments,
+    };
+
+    let first_terminal = first_path
+        .admit(&first_context, &first_sealed)
+        .expect("first contender reaches a terminal decision");
+    let second_terminal = second_terminal
+        .borrow_mut()
+        .take()
+        .expect("second contender was scheduled");
+    let third_terminal = third_terminal
+        .borrow_mut()
+        .take()
+        .expect("third contender was scheduled");
+
+    assert!(
+        first_projection.schedule_exhausted(),
+        "every boundary in the seeded N-way schedule ran"
+    );
+    let terminals = [first_terminal, second_terminal, third_terminal];
+    assert_eq!(
+        terminals
+            .iter()
+            .filter(|terminal| matches!(terminal.outcome, DecisionOutcome::Committed { .. }))
+            .count(),
+        1,
+        "N contenders for one pull request must leave exactly one committed terminal"
+    );
+    assert!(
+        matches!(third_terminal.outcome, DecisionOutcome::Committed { .. }),
+        "the last nested contender reaches the one real authority CAS first"
+    );
+    for terminal in [first_terminal, second_terminal] {
+        assert!(
+            matches!(
+                terminal.outcome,
+                DecisionOutcome::Refused {
+                    code: RefusalCode::TargetRefMoved,
+                    ..
+                }
+            ),
+            "every stale contender receives the typed target-moved terminal"
+        );
+    }
+    let HeadRead::Present(head) = store
+        .read_head(&first_context.head_key)
+        .expect("authority head remains readable after the N-way race")
+    else {
+        panic!("authority head cannot vanish during the N-way merge race");
+    };
+    let body: RepositoryAuthorityHeadBody =
+        fgit_codec::decode_body(head.body(), fgit_codec::DecodeLimits::DEFAULT)
+            .expect("N-way winner head decodes");
+    let refs = commitments
+        .resolve_ref_state(body.ref_root)
+        .expect("N-way winner names staged canonical refs");
+    assert_eq!(
+        refs.refs()
+            .get(&RefName::try_new(MAIN_REF).expect("fixture ref name")),
+        Some(&oid(THIRD_MERGE_OID)),
+        "the published ref state belongs wholly to the one winning contender"
+    );
+}
+
+#[test]
+fn lost_merge_response_retries_to_the_one_committed_terminal() {
+    let (context, store, production, commitments) = repository();
+    let package = package(FIRST_MERGE_OID);
+    let attempt = attempt();
+    let closure = closure(FIRST_MERGE_OID);
+    let sealed = sealed(&package, &attempt, &closure);
+    let path = SyncMergeAdmissionPath {
+        store: store.as_ref(),
+        projection: &production,
+        commitments: &commitments,
+    };
+
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::LoseResponse,
+    )]));
+    let interrupted = path.admit(&context, &sealed);
+    assert!(
+        interrupted.is_err(),
+        "a lost post-CAS response must not invent a terminal result: {interrupted:?}"
+    );
+    assert!(
+        !store.is_crashed(),
+        "lost delivery is distinct from a crash and leaves the authority available"
+    );
+    let fired = store
+        .fault_log()
+        .records()
+        .first()
+        .copied()
+        .expect("the planned lost response must be recorded");
+    assert_eq!(fired.op_kind, AuthorityOpKind::CompareExchangeHead);
+    assert!(
+        fired.effect_reached,
+        "the lost response drill only proves retry convergence when the CAS did publish"
+    );
+
+    store.install_fault_plan(FaultPlan::default());
+    let recovered = path
+        .admit(&context, &sealed)
+        .expect("retry must resolve the terminal decision that survived the lost response");
+    let replayed = path
+        .admit(&context, &sealed)
+        .expect("a second retry must recover the same one terminal decision");
+    assert_eq!(
+        recovered, replayed,
+        "lost-response retries converge on one exact terminal outcome"
+    );
+    assert!(
+        matches!(recovered.outcome, DecisionOutcome::Committed { .. }),
+        "the recovered terminal is the one committed merge"
+    );
+    let HeadRead::Present(head) = store
+        .read_head(&context.head_key)
+        .expect("authority head remains readable after lost-response recovery")
+    else {
+        panic!("lost-response recovery cannot erase the authority head");
+    };
+    let body: RepositoryAuthorityHeadBody =
+        fgit_codec::decode_body(head.body(), fgit_codec::DecodeLimits::DEFAULT)
+            .expect("recovered authority head decodes");
+    let refs = commitments
+        .resolve_ref_state(body.ref_root)
+        .expect("recovered head root names staged canonical refs");
+    assert_eq!(
+        refs.refs()
+            .get(&RefName::try_new(MAIN_REF).expect("fixture ref name")),
+        Some(&oid(FIRST_MERGE_OID)),
+        "a lost response cannot expose a partial merge ref state"
+    );
+}
+
+/// The synchronous merge seam has one authority publication operation.  This
+/// test drills its before-effect crash point; the paired after-effect point is
+/// below.  Durable staging and outbox publication are deliberately not claimed
+/// until asa3 owns and exposes those publication points.
+#[test]
+fn crash_before_merge_cas_leaves_the_sealed_merge_undecided_for_retry() {
+    let (context, store, production, commitments) = repository();
+    let package = package(FIRST_MERGE_OID);
+    let attempt = attempt();
+    let closure = closure(FIRST_MERGE_OID);
+    let sealed = sealed(&package, &attempt, &closure);
+    let path = SyncMergeAdmissionPath {
+        store: store.as_ref(),
+        projection: &production,
+        commitments: &commitments,
+    };
+
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::Crash {
+            position: FaultPosition::BeforeEffect,
+        },
+    )]));
+    let interrupted = path.admit(&context, &sealed);
+    assert!(
+        interrupted.is_err(),
+        "a pre-effect crash cannot return a terminal result: {interrupted:?}"
+    );
+    assert!(store.is_crashed(), "the planned pre-CAS crash must fire");
+    let fired = store
+        .fault_log()
+        .records()
+        .first()
+        .copied()
+        .expect("the planned pre-CAS crash must be recorded");
+    assert_eq!(fired.op_kind, AuthorityOpKind::CompareExchangeHead);
+    assert!(
+        !fired.effect_reached,
+        "the before-effect counterpart must prove no authority publication happened"
+    );
+
+    store.restart();
+    let HeadRead::Present(head) = store
+        .read_head(&context.head_key)
+        .expect("restarted authority head remains readable")
+    else {
+        panic!("a pre-effect crash cannot erase the authority head");
+    };
+    assert_eq!(
+        head.generation(),
+        HeadGeneration::FIRST,
+        "the pre-effect crash leaves the authority head at genesis"
+    );
+
+    store.install_fault_plan(FaultPlan::default());
+    let recovered = path
+        .admit(&context, &sealed)
+        .expect("the exact sealed merge remains retryable after a pre-CAS crash");
+    assert!(
+        matches!(recovered.outcome, DecisionOutcome::Committed { .. }),
+        "the retry publishes the one complete merge terminal"
+    );
+}
+
 /// A crash after the merge CAS applied leaves an ambiguous caller, not a
 /// half-publication.
 ///
@@ -513,6 +920,11 @@ fn crash_after_merge_cas_recovers_the_same_terminal_and_complete_ref_state() {
     let attempt = attempt();
     let closure = closure(FIRST_MERGE_OID);
     let sealed = sealed(&package, &attempt, &closure);
+    let path = SyncMergeAdmissionPath {
+        store: store.as_ref(),
+        projection: &production,
+        commitments: &commitments,
+    };
 
     store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
         0,
@@ -521,14 +933,7 @@ fn crash_after_merge_cas_recovers_the_same_terminal_and_complete_ref_state() {
             position: FaultPosition::AfterEffect,
         },
     )]));
-    let interrupted = admit_merge(
-        store.as_ref(),
-        &context,
-        &sealed,
-        AdmissionLimits::default(),
-        &production,
-        &commitments,
-    );
+    let interrupted = path.admit(&context, &sealed);
     assert!(
         interrupted.is_err(),
         "a post-effect crash must hide the terminal response from its caller: {interrupted:?}"
@@ -550,15 +955,16 @@ fn crash_after_merge_cas_recovers_the_same_terminal_and_complete_ref_state() {
 
     store.restart();
     store.install_fault_plan(FaultPlan::default());
-    let recovered = admit_merge(
-        store.as_ref(),
-        &context,
-        &sealed,
-        AdmissionLimits::default(),
-        &production,
-        &commitments,
-    )
-    .expect("retry after restart resolves the already-published terminal decision");
+    let recovered = path
+        .admit(&context, &sealed)
+        .expect("retry after restart resolves the already-published terminal decision");
+    let replayed = path
+        .admit(&context, &sealed)
+        .expect("a second retry recovers the same already-published terminal decision");
+    assert_eq!(
+        recovered, replayed,
+        "post-effect crash recovery converges on one exact terminal outcome"
+    );
     assert!(
         matches!(recovered.outcome, DecisionOutcome::Committed { .. }),
         "the post-effect crash must recover the committed merge, not publish a second decision"
