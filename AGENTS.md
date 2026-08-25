@@ -342,6 +342,12 @@ product.
   Commit rate is a saturation signal, never a KPI (SM-1/RH-4).
 - Builds run locally (128 cores): always set `RCH_CARGO_WRAPPER_BYPASS=1` so
   the rch offload wrapper is bypassed.
+- Every pane uses its OWN target directory: cargo serializes on
+  `target/debug/.cargo-lock`, so sixteen panes sharing one `target/` queue behind
+  each other for tens of minutes. Prefix every cargo invocation with
+  `CARGO_TARGET_DIR=/data/frankengit-targets/<pane-label>` (e.g. `cc_3`, `cod_7`);
+  the orchestrator's lane uses its own worktree and target. Never point a pane at
+  the shared `target/`.
 
 ### 16.3 Honest credit
 
