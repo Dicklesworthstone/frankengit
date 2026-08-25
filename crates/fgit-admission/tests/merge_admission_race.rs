@@ -434,6 +434,116 @@ fn a_single_merge_attempt_commits_and_its_record_carries_both_roots() {
     );
 }
 
+/// A helper that commits one merge and hands back its committed record.
+///
+/// Factored out because the two drills below both need a real committed RCR and
+/// differ only in what they read off it. Building the repository twice inside one
+/// test would be two histories, not one comparison.
+fn commit_one_merge(merge_commit: &str) -> fgit_codec::schema::RepositoryCommitRecord {
+    let (context, store, projection, commitments) = repository();
+    let package = package(merge_commit);
+    let attempt = attempt();
+    let closure = closure(merge_commit);
+
+    let terminal = admit_merge(
+        store.as_ref(),
+        &context,
+        &sealed(&package, &attempt, &closure),
+        AdmissionLimits::default(),
+        &projection,
+        &commitments,
+    )
+    .expect("a fresh merge is admitted");
+    match terminal.outcome {
+        DecisionOutcome::Committed { .. } => {}
+        refused @ DecisionOutcome::Refused { .. } => {
+            panic!("a fresh merge must commit, got {refused:?}")
+        }
+    }
+
+    let HeadRead::Present(head) = store.read_head(&context.head_key).expect("head reads") else {
+        panic!("the repository head must exist after genesis");
+    };
+    let body: RepositoryAuthorityHeadBody =
+        fgit_codec::decode_body(head.body(), fgit_codec::DecodeLimits::DEFAULT)
+            .expect("head body decodes");
+    let tail = body
+        .decision_tail_id
+        .expect("a committed decision leaves a decision tail on the head");
+    let batch = fgit_authority::read_decision_batch_body(store.as_ref(), tail)
+        .expect("the decision batch the head points at is readable");
+    let [record] = batch.committed_rcrs.as_slice() else {
+        panic!(
+            "one merge commits one record, got {}",
+            batch.committed_rcrs.len()
+        )
+    };
+    record.clone()
+}
+
+/// The committed record's `ref_delta_root` is a canonical ref delta, not the
+/// package's ref intent.
+///
+/// `BlackOx`'s SCHEMA STOP: `fgit_forge::RefIntent` and
+/// `fgit_admission::CanonicalRefDelta` both claimed
+/// `frankengit/admission-ref-delta/v1` with incompatible payloads, and the merge
+/// path put the intent's identity into the RCR field that every other admission
+/// path computes from a canonical delta. One identity domain decoded to two body
+/// shapes, and one RCR field meant two different things depending on which path
+/// produced it.
+///
+/// # Why the second merge is here
+///
+/// The first assertion alone is satisfied by a `ref_delta_root` that is any
+/// constant unrelated to the package -- including a hardcoded digest. So the
+/// drill also commits a DIFFERENT merge on the same ref and requires the field
+/// to move with the movement it commits to. Together: not the intent's identity,
+/// and not a constant either.
+#[test]
+fn the_committed_record_carries_a_canonical_ref_delta_not_the_packages_ref_intent() {
+    let record = commit_one_merge(FIRST_MERGE_OID);
+    let intent_root = package(FIRST_MERGE_OID)
+        .roots(&fgit_codec::CryptoBodyIdentity)
+        .expect("the package has canonical roots")
+        .ref_intent_root;
+
+    assert_ne!(
+        record.ref_delta_root, intent_root,
+        "the RCR ref delta must not be the package's ref-intent identity"
+    );
+
+    // Nor a copy of any neighbouring root on the same record.
+    for neighbour in [
+        record.resulting_ref_root,
+        record.object_closure_root,
+        record.forge_event_batch_root,
+        record.resulting_forge_position_root,
+        record.canonical_request_digest,
+    ] {
+        assert_ne!(
+            record.ref_delta_root, neighbour,
+            "the RCR ref delta must not be a copy of another root"
+        );
+    }
+
+    // And it is derived from the movement rather than being any constant: a
+    // different merge commit on the same ref is a different delta.
+    let rival = commit_one_merge(RIVAL_MERGE_OID);
+    assert_ne!(
+        record.ref_delta_root, rival.ref_delta_root,
+        "a different ref movement must produce a different canonical ref delta"
+    );
+
+    // The permitted twin of that: the SAME movement, committed into its own
+    // fresh repository, produces the same delta. Without this the assertion
+    // above would also pass on a per-run random value.
+    let again = commit_one_merge(FIRST_MERGE_OID);
+    assert_eq!(
+        record.ref_delta_root, again.ref_delta_root,
+        "the same ref movement must produce the same canonical ref delta"
+    );
+}
+
 /// Two merges, one head, exactly one winner — and the loser is typed.
 ///
 /// The loser does not spin and does not retry against a state its merge was

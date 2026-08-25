@@ -21,6 +21,19 @@ use crate::{ForgeRefusal, MergeSide, StaleTips};
 /// The expected tip is part of the intent rather than a separate check so the
 /// condition travels with the effect. An intent that carried only the new tip
 /// would be a last-writer-wins ref write wearing a transaction's clothes.
+///
+/// # Why this is not `fgit-admission`'s `CanonicalRefDelta`
+///
+/// It used to claim that body's identity, and the two are genuinely different
+/// shapes: this is one ref with the tip it is conditional on -- what a merge
+/// *requests* -- while a canonical ref delta is the surviving net effect over
+/// every ref a transaction moved, which is what a decision *published*. A
+/// request that gets refused produces no delta at all.
+///
+/// Sharing `frankengit/admission-ref-delta/v1` made both decodable in one
+/// identity space, so a reader holding a digest could not tell which body shape
+/// it named. Section 5.2 requires exactly that case to fail closed, so the
+/// intent has its own domain and the delta keeps the original.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RefIntent {
     /// Full reference name.
@@ -32,8 +45,8 @@ pub struct RefIntent {
 }
 
 impl CanonicalBody for RefIntent {
-    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/admission-ref-delta/v1");
-    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("admission-ref-delta");
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/forge-ref-intent/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("forge-ref-intent");
     const SCHEMA_MAJOR: u16 = 1;
     const SCHEMA_MINOR: u16 = 0;
 
@@ -199,10 +212,18 @@ pub struct MergeEffectPackage {
 }
 
 /// The two roots this crate is responsible for producing.
+///
+/// Both are derived from the package's own bytes, and neither is the RCR's
+/// `ref_delta_root`. That field commits to the ref effect a decision published,
+/// which only admission can compute, and it arrives on [`RecordFrame`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectRoots {
-    /// Identity of the ref delta.
-    pub ref_delta_root: Digest,
+    /// Identity of the conditional ref movement the merge requests.
+    ///
+    /// Named for the intent rather than the delta because that is the body it
+    /// commits to: [`RefIntent`], under `frankengit/forge-ref-intent/v1`. It
+    /// belongs to the merge's request identity, not to its published effect.
+    pub ref_intent_root: Digest,
     /// Identity of the batch of forge events.
     pub forge_event_batch_root: Digest,
 }
@@ -227,6 +248,16 @@ pub struct RecordFrame {
     pub principal_snapshot_id: PrincipalSnapshotId,
     /// Digest of the canonical request.
     pub canonical_request_digest: Digest,
+    /// Identity of the canonical ref delta this decision publishes.
+    ///
+    /// Supplied rather than derived here, and that is the layer boundary again:
+    /// a canonical ref delta is the surviving net effect over every ref the
+    /// transaction moved, which only the admitting crate can fold. This crate
+    /// holds one requested movement and could at best restate it, which is how
+    /// the RCR field came to carry a [`RefIntent`] identity while every other
+    /// admission path computed it from a canonical delta -- one field, two
+    /// meanings.
+    pub ref_delta_root: Digest,
     /// Ref state after the movement.
     pub resulting_ref_root: Digest,
     /// Closure over the objects the decision needs.
@@ -274,7 +305,7 @@ impl MergeEffectPackage {
     {
         let batch = ForgeEventBatch::of_one(self.event.clone());
         Ok(EffectRoots {
-            ref_delta_root: root_of(identity, &self.ref_intent, "RefIntent")?,
+            ref_intent_root: root_of(identity, &self.ref_intent, "RefIntent")?,
             forge_event_batch_root: root_of(identity, &batch, "ForgeEventBatch")?,
         })
     }
@@ -286,6 +317,12 @@ impl MergeEffectPackage {
     /// admissible history in which the ref moved and the event did not, or the
     /// reverse. A caller cannot split them, because there is no second record
     /// to put either one on.
+    ///
+    /// The event root is derived here from the package's own bytes; the ref
+    /// delta root is the frame's, because it commits to the folded effect
+    /// rather than to the requested movement. Atomicity is unchanged by that
+    /// split -- both still land on one record -- and what it buys is that the
+    /// field means the same thing on this path as on every other.
     ///
     /// # Errors
     ///
@@ -306,7 +343,7 @@ impl MergeEffectPackage {
             tx_id: frame.tx_id,
             principal_snapshot_id: frame.principal_snapshot_id,
             canonical_request_digest: frame.canonical_request_digest,
-            ref_delta_root: roots.ref_delta_root,
+            ref_delta_root: frame.ref_delta_root,
             resulting_ref_root: frame.resulting_ref_root,
             object_closure_root: frame.object_closure_root,
             forge_event_batch_root: roots.forge_event_batch_root,

@@ -31,6 +31,11 @@
 //! them itself rather than trusting the caller. The workspace epoch is supplied
 //! by the caller: admission has no workspace and cannot derive it, and a value
 //! it invented would be a second source of truth for someone else's state.
+//!
+//! The object closure's own commitment is recomputed from the objects rather
+//! than believed, and the package's forge event is checked to be an event about
+//! THIS merge. One axis is deliberately not checked -- see the non-claim on
+//! [`check_parts_describe_one_merge`].
 
 use fgit_authority::{
     AuthenticatedHead, CumulativeOutcomes, SealAttempt, collect_cumulative_outcomes,
@@ -197,9 +202,14 @@ fn tip_of(snapshot: &AdmissionSnapshot, name: &[u8]) -> GitOid {
 /// is for: "which subsystem owns the meaning of this entry".
 const FORGE_NAMESPACE: fgit_types::AsciiSlug = fgit_types::AsciiSlug::from_static("forge");
 
-/// The identity of the ref delta the merge requests.
-const MERGE_REF_DELTA_KEY: fgit_types::AsciiSlug =
-    fgit_types::AsciiSlug::from_static("merge.ref-delta-root");
+/// The identity of the conditional ref movement the merge requests.
+///
+/// Named for the intent, not the delta, because that is the body it commits to:
+/// `fgit_forge::RefIntent` under `frankengit/forge-ref-intent/v1`. The RCR's
+/// `ref_delta_root` is a different body computed by admission, and calling both
+/// of them "ref delta" is how the two came to share one identity domain.
+const MERGE_REF_INTENT_KEY: fgit_types::AsciiSlug =
+    fgit_types::AsciiSlug::from_static("merge.ref-intent-root");
 
 /// The identity of the event batch the merge requests.
 const MERGE_EVENT_BATCH_KEY: fgit_types::AsciiSlug =
@@ -223,6 +233,29 @@ const MERGE_WORKSPACE_EPOCH_KEY: fgit_types::AsciiSlug =
 /// coherent, because a request that is internally contradictory is still
 /// contradictory once it has its own identity. So both exist, and this one runs
 /// first.
+///
+/// # TYPED NON-CLAIM: the event's tips are not compared to the ref intent
+///
+/// [`check_event_describes_this_merge`] compares the event's target ref, its
+/// aggregate, and its two tips against each other. It does NOT compare
+/// `target_tip_before` with `ref_intent.expected_tip`, or `target_tip_after`
+/// with `ref_intent.new_tip`, and that is a boundary rather than an oversight.
+///
+/// `ForgeEventPayload::MergeCommitted` carries its positions as
+/// [`fgit_types::Digest`] -- an internal digest with its own algorithm registry
+/// -- while a ref intent carries [`fgit_types::GitOid`], a native Git object
+/// identity. `AGENTS.md` section 6 makes those separate typed domains and
+/// `fgit-types` offers no conversion between them, deliberately. Comparing them
+/// would mean comparing raw bytes across two domains, which is the confusion
+/// that separation exists to prevent.
+///
+/// The honest fix is for `MergeCommitted` to carry `GitOid`, since a merge
+/// commit IS a Git object. That changes the canonical bytes of every
+/// `MergeCommitted` event and therefore moves published `ForgeEventId`s, which
+/// `fgit-forge/tests/aggregate_discriminant.rs` pins byte-exact against a
+/// capture taken at 8cee164. Moving a published wire identity is a
+/// constitutional decision and is recorded on `frankengit-asa3` as such, not
+/// taken here.
 ///
 /// # Errors
 ///
@@ -256,6 +289,80 @@ fn check_parts_describe_one_merge(sealed: &SealedMerge<'_>) -> Result<(), Admiss
     {
         return Err(AdmissionError::MergeIncoherent {
             field: "created objects outside the validated closure",
+        });
+    }
+    // The closure's own commitment is RECOMPUTED, not believed. Containment
+    // above says the package's objects are in the list; it says nothing about
+    // whether the root travelling with that list is the root OF that list. A
+    // caller supplying real objects under some other root would have the ref
+    // moved and the RCR's object_closure_root naming a closure nothing can
+    // resolve. The common admission path already recomputes this
+    // (`prepare_canonical_commit`); the merge path was taking the caller's word.
+    let recomputed = crate::permitted_object_closure_root(&crate::PermittedObjectClosure::new(
+        sealed.closure.objects.clone(),
+    ))
+    .map_err(|_| AdmissionError::MergeIncoherent {
+        field: "object closure root",
+    })?;
+    if recomputed != sealed.closure.object_closure_root {
+        return Err(AdmissionError::MergeIncoherent {
+            field: "object closure root",
+        });
+    }
+    check_event_describes_this_merge(sealed)
+}
+
+/// Refuses a package whose forge event describes a different merge than its
+/// attempt and ref intent do.
+///
+/// Split out because the checks above compare the attempt against the ref
+/// intent, and these compare the EVENT against both. An attempt for pull
+/// request X carrying an event for pull request Y, or an event naming another
+/// target ref, sealed as one coherent merge until now: the event reached the
+/// request digest as a root, so varying it varied the `TxId`, but nothing
+/// required it to be an event ABOUT this merge.
+///
+/// # Errors
+///
+/// [`AdmissionError::MergeIncoherent`] naming the part that disagreed.
+fn check_event_describes_this_merge(sealed: &SealedMerge<'_>) -> Result<(), AdmissionError> {
+    // A merge package carries a merge. An event of any other kind under a
+    // MergeEffectPackage is not a coherent request, whatever else agrees.
+    let fgit_forge::ForgeEventPayload::MergeCommitted {
+        merge_commit,
+        target_ref,
+        target_tip_before,
+        target_tip_after,
+    } = &sealed.package.event.payload
+    else {
+        return Err(AdmissionError::MergeIncoherent {
+            field: "forge event kind",
+        });
+    };
+    if sealed.package.event.aggregate
+        != fgit_forge::AggregateId::PullRequest(sealed.attempt.pull_request)
+    {
+        return Err(AdmissionError::MergeIncoherent {
+            field: "event aggregate",
+        });
+    }
+    if *target_ref != sealed.package.ref_intent.name {
+        return Err(AdmissionError::MergeIncoherent {
+            field: "event target ref",
+        });
+    }
+    // The event's own two tips, checked against each other and against the
+    // merge commit it names. A merge whose target ends where it started did not
+    // move the ref the event says it moved, and a merge whose new tip is not the
+    // merge commit is an event about some other commit.
+    if merge_commit != target_tip_after {
+        return Err(AdmissionError::MergeIncoherent {
+            field: "event merge commit",
+        });
+    }
+    if target_tip_before == target_tip_after {
+        return Err(AdmissionError::MergeIncoherent {
+            field: "event target tips",
         });
     }
     Ok(())
@@ -303,8 +410,8 @@ fn forge_transition_entries(
     Ok(vec![
         fgit_authority::ScopedEntry::new(
             FORGE_NAMESPACE,
-            MERGE_REF_DELTA_KEY,
-            roots.ref_delta_root.bytes().as_bytes(),
+            MERGE_REF_INTENT_KEY,
+            roots.ref_intent_root.bytes().as_bytes(),
         )?,
         fgit_authority::ScopedEntry::new(
             FORGE_NAMESPACE,
@@ -704,6 +811,39 @@ where
     })
 }
 
+/// The RCR `ref_delta_root` for a merge: a canonical ref delta, as on every
+/// other admission path.
+///
+/// # Why this is not the package's own ref-intent root
+///
+/// It used to be. `fgit_forge::RefIntent` and [`crate::CanonicalRefDelta`] then
+/// declared the same `frankengit/admission-ref-delta/v1` identity with
+/// incompatible payloads -- one conditional movement against a map from every
+/// moved ref to its surviving value -- so one domain decoded to two body
+/// shapes, which §5.2 requires to fail closed. The intent keeps its own domain
+/// and its root still binds the REQUEST (see [`forge_transition_entries`]); the
+/// record's field is the published EFFECT and is computed here.
+///
+/// The effect is a one-entry delta because a merge moves exactly one ref: the
+/// target, to the merge commit. That is the same movement
+/// [`decide_from_snapshot`] applies to the resulting ref state, derived from the
+/// same field, so the delta cannot describe a movement the state does not make.
+///
+/// # Errors
+///
+/// [`AdmissionError`] when the ref name or the delta body cannot be
+/// canonicalized.
+fn merge_ref_delta_root(sealed: &SealedMerge<'_>) -> Result<fgit_types::Digest, AdmissionError> {
+    let name = RefName::try_new(&sealed.package.ref_intent.name)
+        .map_err(|_| AdmissionError::MaterializationMismatch("merge ref name"))?;
+    let effects = std::collections::BTreeMap::from([(
+        name,
+        fgit_reference::effect::RefEffect::Set(sealed.package.ref_intent.new_tip),
+    )]);
+    crate::canonical_ref_delta_root(&crate::CanonicalRefDelta::from_effects(&effects))
+        .map_err(|_| AdmissionError::MaterializationMismatch("merge ref delta root"))
+}
+
 /// Turns the sealed package into the one record authority will publish.
 ///
 /// The record is built by `fgit-forge` itself, from the package's own bytes, so
@@ -726,6 +866,7 @@ fn materialize(
 ) -> Result<crate::CommitMaterialization, AdmissionError> {
     let ref_root = crate::canonical_ref_state_root(next_state)
         .map_err(|_| AdmissionError::MaterializationMismatch("merge resulting ref root"))?;
+    let ref_delta_root = merge_ref_delta_root(sealed)?;
 
     // Stage the immutable bodies this decision results in, exactly as
     // CanonicalAdmissionProjection::materialize_commit does for receive-pack.
@@ -792,6 +933,7 @@ fn materialize(
         principal_snapshot_id: sealed.evidence.principal_snapshot_id,
         canonical_request_digest: fgit_authority::canonical_request_digest(&attempt.request)
             .map_err(|failure| AdmissionError::Seal(Box::new(failure.into())))?,
+        ref_delta_root,
         resulting_ref_root: roots.ref_root,
         object_closure_root: sealed.closure.object_closure_root,
         resulting_forge_position_root: roots.forge_position_root,

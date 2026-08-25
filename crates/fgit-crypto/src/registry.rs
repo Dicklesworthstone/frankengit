@@ -529,6 +529,20 @@ pub enum IdentityDomain {
     /// identities computable in the same space, so a reader could not tell
     /// which body an identity named.
     ForgeEventEvidence,
+    /// One immutable forge ref-intent body: the conditional ref movement a
+    /// merge *requests*.
+    ///
+    /// Distinct from [`Self::AdmissionRefDelta`], which is the ref effect a
+    /// decision *published*. The two were one domain until `frankengit-asa3`
+    /// separated them, and they are not two spellings of one thing: an intent
+    /// names one ref with the tip it is conditional on, while a delta is the
+    /// surviving net effect over every ref the transaction moved. An intent
+    /// that is refused produces no delta at all.
+    ///
+    /// Sharing one domain made the two decodable in the same identity space, so
+    /// a reader holding a digest could not tell which body shape it named — the
+    /// §5.2 key-reuse case that must fail closed.
+    ForgeRefIntent,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -832,14 +846,22 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/hidden-ref-policy/v1",
         None,
     ),
-    // Last by construction: DOMAIN_REGISTRY asserts registry_id == index + 1
-    // (registry.rs:1012), so a new domain appends rather than slotting in
-    // beside its sibling. The relationship to ForgeEventBatch is documented on
-    // the variant instead.
+    // The rows below append rather than slot in beside the sibling each one was
+    // split away from: DOMAIN_REGISTRY asserts registry_id == index + 1, so a
+    // row inserted next to its relative would renumber every row after it and
+    // change the meaning of identities already published. Each split is
+    // documented on its variant instead -- ForgeEventEvidence against
+    // ForgeEventBatch, ForgeRefIntent against AdmissionRefDelta.
     owned_row(
         48,
         IdentityDomain::ForgeEventEvidence,
         "frankengit/forge-event-evidence/v1",
+        None,
+    ),
+    owned_row(
+        49,
+        IdentityDomain::ForgeRefIntent,
+        "frankengit/forge-ref-intent/v1",
         None,
     ),
 ];
@@ -1077,6 +1099,7 @@ impl IdentityDomain {
         Self::OutcomeIndexCheckpoint,
         Self::HiddenRefPolicy,
         Self::ForgeEventEvidence,
+        Self::ForgeRefIntent,
     ];
 
     /// Compile-time completeness guard for [`IdentityDomain::ALL`].
@@ -1146,6 +1169,7 @@ impl IdentityDomain {
             | Self::RepositoryConfiguration
             | Self::RepositoryCreationAttempt
             | Self::OutcomeIndexCheckpoint
+            | Self::ForgeRefIntent
             | Self::HiddenRefPolicy => (),
         }
     }

@@ -103,6 +103,7 @@ fn frame() -> RecordFrame {
         tx_id: derived!(TxId, 0x60),
         principal_snapshot_id: derived!(PrincipalSnapshotId, 0x61),
         canonical_request_digest: digest(0x62),
+        ref_delta_root: digest(0x6a),
         resulting_ref_root: digest(0x63),
         object_closure_root: digest(0x64),
         resulting_forge_position_root: digest(0x65),
@@ -129,6 +130,21 @@ fn seal(package: &MergeEffectPackage) -> RepositoryCommitRecord {
 /// the check is that each root equals the identity of the body it is supposed
 /// to commit to, that the two differ from each other, and that neither collides
 /// with any other root on the record.
+///
+/// # What `frankengit-asa3` changed here, and what it deliberately did not
+///
+/// The event root is still derived from the package's own bytes. The ref delta
+/// root is now the frame's, because the RCR field commits to the ref effect a
+/// decision published -- a fold over every ref the transaction moved -- and
+/// this crate holds one requested movement. It previously stamped the
+/// `RefIntent` identity into that field, which is why `RefIntent` and
+/// admission's `CanonicalRefDelta` had come to share one identity domain.
+///
+/// The atomicity property this test exists for is untouched: both roots still
+/// land on ONE record, and there is still no second record to split them onto.
+/// What is added is the assertion that the two identities are now distinct
+/// bodies, which is the thing that would silently regress if the domains were
+/// ever merged back.
 #[test]
 fn the_merge_record_carries_the_ref_delta_and_the_event_together() {
     let package = package();
@@ -137,15 +153,20 @@ fn the_merge_record_carries_the_ref_delta_and_the_event_together() {
         .expect("both bodies have identities");
     let record = seal(&package);
 
-    assert_eq!(record.ref_delta_root, roots.ref_delta_root);
+    assert_eq!(record.ref_delta_root, frame().ref_delta_root);
     assert_eq!(record.forge_event_batch_root, roots.forge_event_batch_root);
     assert_ne!(
         record.ref_delta_root, record.forge_event_batch_root,
         "two different bodies must not commit to the same root"
     );
+    assert_ne!(
+        record.ref_delta_root, roots.ref_intent_root,
+        "the published ref delta and the requested ref intent are different \
+         bodies and must not share one identity"
+    );
 
-    // The two roots this crate produces are not any of the roots the frame
-    // supplied, so neither field is a copy of a neighbour.
+    // The event root this crate produces is not any of the roots the frame
+    // supplied, so the field is not a copy of a neighbour.
     for supplied in [
         record.resulting_ref_root,
         record.object_closure_root,
@@ -161,34 +182,47 @@ fn the_merge_record_carries_the_ref_delta_and_the_event_together() {
     }
 }
 
-/// The two roots are independently load-bearing.
+/// The two roots this crate derives are independently load-bearing.
 ///
-/// This is the test that would fail if `seal_into_record` derived one root and
-/// reused it, or if the event were left out of the batch that gets hashed.
-/// Changing the event must move the event root and leave the ref root alone,
-/// and changing the ref intent must do the reverse.
+/// This is the test that would fail if `roots` derived one root and reused it,
+/// or if the event were left out of the batch that gets hashed. Changing the
+/// event must move the event root and leave the ref intent root alone, and
+/// changing the ref intent must do the reverse.
+///
+/// Asserted on `roots()` rather than on the sealed record, because since
+/// `frankengit-asa3` the record's `ref_delta_root` is supplied by the frame:
+/// reading independence off the record would now be reading it off a constant,
+/// which is a test that passes while proving nothing about this crate. The
+/// companion assertion -- that the record faithfully carries what each side
+/// produced -- lives in
+/// `the_merge_record_carries_the_ref_delta_and_the_event_together`.
 #[test]
 fn each_root_moves_only_for_its_own_body() {
-    let baseline = seal(&package());
+    let derive = |package: &MergeEffectPackage| {
+        package
+            .roots(&CryptoBodyIdentity)
+            .expect("both bodies have identities")
+    };
+    let baseline = derive(&package());
 
     let mut altered_event = package();
     altered_event.event.version = AggregateVersion::try_new(5).expect("a nonzero version");
-    let altered_event = seal(&altered_event);
+    let altered_event = derive(&altered_event);
     assert_ne!(
         baseline.forge_event_batch_root, altered_event.forge_event_batch_root,
         "a different event must produce a different event root"
     );
     assert_eq!(
-        baseline.ref_delta_root, altered_event.ref_delta_root,
-        "changing the event must not disturb the ref delta root"
+        baseline.ref_intent_root, altered_event.ref_intent_root,
+        "changing the event must not disturb the ref intent root"
     );
 
     let mut altered_ref = package();
     altered_ref.ref_intent.new_tip = oid(0x7a);
-    let altered_ref = seal(&altered_ref);
+    let altered_ref = derive(&altered_ref);
     assert_ne!(
-        baseline.ref_delta_root, altered_ref.ref_delta_root,
-        "a different ref intent must produce a different ref delta root"
+        baseline.ref_intent_root, altered_ref.ref_intent_root,
+        "a different ref intent must produce a different ref intent root"
     );
     assert_eq!(
         baseline.forge_event_batch_root, altered_ref.forge_event_batch_root,
@@ -581,6 +615,51 @@ impl BodyIdentity for RefusingIdentity {
 
 fn unregistered() -> CodecRefusal {
     CodecRefusal::identity_domain_unregistered(ForgeEvent::DOMAIN)
+}
+
+/// A ref intent is identified as a ref intent, not as an admission ref delta.
+///
+/// `frankengit-asa3`, the SCHEMA STOP `BlackOx` raised. [`RefIntent`] used to
+/// declare `frankengit/admission-ref-delta/v1`, the identity that
+/// `fgit_admission::CanonicalRefDelta` also declares, with an incompatible
+/// payload: one ref plus the tip it is conditional on, against a map from every
+/// moved ref to its surviving value. One identity domain that decodes to two
+/// body shapes is the §5.2 key-reuse case that must fail closed.
+///
+/// Pinned as literals rather than compared against the sibling constant,
+/// because the sibling is in `fgit-admission` at L4 and this crate is L2. The
+/// cross-crate half of this property -- that the same logical movement produces
+/// two different digests under the two domains -- is asserted from admission,
+/// where both types are nameable.
+///
+/// This is a claim about a published wire identity, so it is written as an
+/// exact expected value: a test that merely asserted the two constants differ
+/// would keep passing if a future edit moved `RefIntent` onto some third
+/// domain, which is a different published meaning again.
+#[test]
+fn a_ref_intent_carries_its_own_identity_domain() {
+    assert_eq!(
+        RefIntent::DOMAIN,
+        DomainTag::from_static("frankengit/forge-ref-intent/v1")
+    );
+    assert_eq!(
+        RefIntent::SCHEMA_FAMILY,
+        fgit_types::SchemaFamily::from_static("forge-ref-intent")
+    );
+    assert_ne!(
+        RefIntent::DOMAIN,
+        DomainTag::from_static("frankengit/admission-ref-delta/v1"),
+        "the ref intent must not reclaim the canonical ref delta's identity"
+    );
+
+    // The permitted twin of the refusal above: this domain is registered, so a
+    // real identity resolves for it rather than being refused as unknown. A
+    // domain constant nothing has registered would make every merge unsealable.
+    assert!(
+        package()
+            .roots(&CryptoBodyIdentity)
+            .is_ok_and(|roots| roots.ref_intent_root != roots.forge_event_batch_root)
+    );
 }
 
 /// An unregistered domain is reported as a missing identity, not as a codec
