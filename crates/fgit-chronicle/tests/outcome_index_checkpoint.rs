@@ -14,7 +14,7 @@ use fgit_chronicle::{
     freeze_capsule_with_outcome_index_checkpoint,
 };
 use fgit_codec::{
-    CanonicalBody, CryptoBodyIdentity, DecisionOutcome, DecodeLimits, RepositoryAuthorityHeadBody,
+    CanonicalBody, CryptoBodyIdentity, DecodeLimits, RepositoryAuthorityHeadBody,
     RepositoryDecision, RepositoryDecisionBatchBody, decode_body, encode_body,
 };
 use fgit_crypto::IdentityDomain;
@@ -26,9 +26,10 @@ use fgit_resource::algebra::{Grade, ResourceVector};
 use fgit_resource::custody::{LeakDisposition, ObligationLedger};
 use fgit_resource::{OpaqueHandle, RegionId};
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, DecisionSequence, Digest, DigestAlgorithmId, DigestBytes,
-    GitHashAlgorithm, HeadGeneration, OPAQUE_ID_LEN, PolicyEpoch, RefusalCode, RefusalRecordId,
-    RegistryEpoch, RepositoryDecisionBatchId, RepositoryId, SegmentManifestId, TenantId, TxId,
+    CANONICAL_CODEC_VERSION, DecisionOutcome, DecisionSequence, Digest, DigestAlgorithmId,
+    DigestBytes, GitHashAlgorithm, HeadGeneration, OPAQUE_ID_LEN, PolicyEpoch, RefusalCode,
+    RefusalRecordId, RegistryEpoch, RepositoryDecisionBatchId, RepositoryId, SegmentManifestId,
+    TenantId, TxId,
 };
 
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
@@ -206,7 +207,7 @@ fn stage_leaf_archive(
     let fabric = ReferenceMemoryFabric::open(
         ReferenceMemoryConfig::new(
             archive.namespace().to_vec(),
-            OpaqueHandle::new(b"outcome-checkpoint-failure-domain")
+            OpaqueHandle::new(b"outcome-checkpoint-fail-domain")
                 .expect("fixture failure domain handle is valid"),
             OpaqueHandle::new(b"outcome-checkpoint-encryption")
                 .expect("fixture encryption handle is valid"),
