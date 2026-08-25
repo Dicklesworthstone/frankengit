@@ -143,8 +143,12 @@ if [[ "${oracle_setup_exit}" -eq 0 ]]; then
       advertisement_exit=0
       env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" "${ORACLE}" capture "${ORACLE_PIN}" "${ORACLE_RUN}" \
         dangling.git dangling-advertisement -- upload-pack --advertise-refs . || advertisement_exit=$?
+      advertisement_output=''
+      if [[ -f "${ORACLE_RUN}/transcripts/dangling-advertisement/stdout.bin" ]]; then
+        advertisement_output="$(<"${ORACLE_RUN}/transcripts/dangling-advertisement/stdout.bin")"
+      fi
       fge_assert_not_contains FG-097-TAGS-018 \
-        "$(<"${ORACLE_RUN}/transcripts/dangling-advertisement/stdout.bin")" \
+        "${advertisement_output}" \
         'refs/tags/dangling' \
         'pinned Git never advertises a dangling annotated tag'
       fge_assert_cmd FG-097-TAGS-019 \
