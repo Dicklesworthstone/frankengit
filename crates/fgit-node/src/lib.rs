@@ -21,8 +21,8 @@ use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use fgit_admission::evidence::{
@@ -84,7 +84,7 @@ use fgit_runtime::{
 use fgit_txn::TransactionFoldReport;
 use fgit_types::cell::{
     CellReadiness, CellRefusal, CellState, CellTransition, CellTransitionCause, ReadLabel,
-    ServingCell, admits_read,
+    ServingCell, admits_read, admits_staging_intake,
 };
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::{
@@ -3201,6 +3201,12 @@ pub enum NodeSourceImportRefusal {
     /// The shared async admission driver could not publish or resolve a
     /// terminal outcome.
     Admission(Box<AdmissionError>),
+    /// The cell's state does not admit taking work in at all.
+    ///
+    /// The source-import twin of [`NodeReceiveTransportRefusal::CellState`],
+    /// raised BEFORE the local source is read, so a cell nobody brought into
+    /// service never stages objects nothing downstream could publish.
+    CellState(CellRefusal),
 }
 
 impl Display for NodeSourceImportRefusal {
@@ -3222,6 +3228,7 @@ impl Display for NodeSourceImportRefusal {
                 write!(formatter, "source import validation refused: {code:?}")
             }
             Self::Admission(error) => Display::fmt(error, formatter),
+            Self::CellState(refusal) => Display::fmt(refusal, formatter),
         }
     }
 }
@@ -3232,7 +3239,13 @@ impl Error for NodeSourceImportRefusal {
             Self::Idempotency(error) => Some(error.as_ref()),
             Self::Staging(error) => Some(error.as_ref()),
             Self::Admission(error) => Some(error.as_ref()),
-            Self::ObjectCountOutOfRange { .. } | Self::ClosureRoot(_) | Self::Validation(_) => None,
+            // `CellState` carries a STATE, not a failure beneath: nothing went
+            // wrong under it, the cell simply is not in a state that admits the
+            // operation. Same reasoning as the receive-transport twin.
+            Self::ObjectCountOutOfRange { .. }
+            | Self::ClosureRoot(_)
+            | Self::Validation(_)
+            | Self::CellState(_) => None,
         }
     }
 }
@@ -3512,6 +3525,153 @@ impl Display for GitDaemonSessionTimeoutRefusal {
 }
 
 impl Error for GitDaemonSessionTimeoutRefusal {}
+
+/// Explicit bounds for one node-owned legacy git-daemon service run.
+///
+/// The listener stops accepting after `max_sessions` connections, then drains
+/// every child it already admitted. `max_in_flight` is independent from the
+/// runtime blocking-pool limit: it is the protocol-facing admission ceiling
+/// that prevents a client flood from turning the daemon into an unbounded set
+/// of authenticated-head reads and pack planners.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GitDaemonServerLimits {
+    max_sessions: usize,
+    max_in_flight: usize,
+}
+
+impl GitDaemonServerLimits {
+    /// The one-session compatibility profile for callers that omit explicit
+    /// service bounds. Multi-session serving is opt-in at the CLI boundary so
+    /// existing one-session operational scripts retain their exact lifecycle.
+    pub const DEFAULT: Self = Self {
+        max_sessions: 1,
+        max_in_flight: 1,
+    };
+
+    /// Creates a non-zero bounded daemon profile.
+    pub const fn try_new(
+        max_sessions: usize,
+        max_in_flight: usize,
+    ) -> Result<Self, GitDaemonServerLimitRefusal> {
+        if max_sessions == 0 {
+            return Err(GitDaemonServerLimitRefusal::ZeroSessionLimit);
+        }
+        if max_in_flight == 0 {
+            return Err(GitDaemonServerLimitRefusal::ZeroInFlightLimit);
+        }
+        Ok(Self {
+            max_sessions,
+            max_in_flight,
+        })
+    }
+
+    /// The total accepted-session budget before the listener begins draining.
+    #[must_use]
+    pub const fn max_sessions(self) -> usize {
+        self.max_sessions
+    }
+
+    /// The maximum number of simultaneously admitted sessions.
+    #[must_use]
+    pub const fn max_in_flight(self) -> usize {
+        self.max_in_flight
+    }
+}
+
+/// Why a git-daemon service budget is not admissible.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitDaemonServerLimitRefusal {
+    /// An empty service run would be a lifecycle no-op rather than a bound.
+    ZeroSessionLimit,
+    /// No connection could ever be admitted under a zero concurrency limit.
+    ZeroInFlightLimit,
+}
+
+impl Display for GitDaemonServerLimitRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroSessionLimit => {
+                formatter.write_str("git-daemon session limit must be non-zero")
+            }
+            Self::ZeroInFlightLimit => {
+                formatter.write_str("git-daemon in-flight session limit must be non-zero")
+            }
+        }
+    }
+}
+
+impl Error for GitDaemonServerLimitRefusal {}
+
+/// Drained receipt for one bounded node-owned git-daemon service run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GitDaemonServerReceipt {
+    accepted_sessions: usize,
+    completed_sessions: usize,
+    refused_sessions: usize,
+}
+
+impl GitDaemonServerReceipt {
+    /// Number of connections admitted beneath the configured session budget.
+    #[must_use]
+    pub const fn accepted_sessions(self) -> usize {
+        self.accepted_sessions
+    }
+
+    /// Number of admitted sessions that reached a complete upload-pack outcome.
+    #[must_use]
+    pub const fn completed_sessions(self) -> usize {
+        self.completed_sessions
+    }
+
+    /// Number of admitted sessions that ended in a typed refusal or node-open failure.
+    #[must_use]
+    pub const fn refused_sessions(self) -> usize {
+        self.refused_sessions
+    }
+}
+
+/// Failure while accepting or scheduling a bounded git-daemon service run.
+#[derive(Debug)]
+pub enum NodeGitDaemonServerRefusal {
+    /// The caller supplied an empty service bound.
+    Limits(GitDaemonServerLimitRefusal),
+    /// The listener could not accept another connection before the run ended.
+    Accept(Box<GitDaemonTransportRefusal>),
+    /// The owned runtime stopped admitting bounded blocking children.
+    Runtime(RuntimeRefusal),
+    /// A submitted child did not report completion after every retained task
+    /// handle was drained. Returning a receipt here would falsely claim that
+    /// node shutdown cannot race an outstanding session.
+    DrainIncomplete {
+        /// Sessions still marked active after retained child handles drained.
+        active_sessions: usize,
+    },
+}
+
+impl Display for NodeGitDaemonServerRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Limits(refusal) => Display::fmt(refusal, formatter),
+            Self::Accept(refusal) => Display::fmt(refusal, formatter),
+            Self::Runtime(refusal) => Display::fmt(refusal, formatter),
+            Self::DrainIncomplete { active_sessions } => write!(
+                formatter,
+                "git-daemon service drain left {active_sessions} active session(s)"
+            ),
+        }
+    }
+}
+
+impl Error for NodeGitDaemonServerRefusal {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Limits(refusal) => Some(refusal),
+            Self::Accept(refusal) => Some(refusal.as_ref()),
+            Self::Runtime(refusal) => Some(refusal),
+            Self::DrainIncomplete { .. } => None,
+        }
+    }
+}
 
 /// Absolute elapsed-time accounting for one accepted git-daemon connection.
 ///
@@ -4837,6 +4997,11 @@ pub struct OneNode {
     git_daemon_session_timeout: GitDaemonSessionTimeout,
     /// Which cell this process is, stamped onto answers it serves.
     serving_cell: ServingCell,
+    /// Re-openable service configuration for independently owned transport
+    /// children. A child never inherits an already-open database connection;
+    /// it re-authenticates the repository through this same configuration and
+    /// closes its own node before the parent service reports it drained.
+    service_config: NodeConfig,
     runtime: NodeRuntime,
 }
 
@@ -5106,6 +5271,7 @@ impl OneNode {
                 AuthorityLimits::default(),
             ))
             .map_err(authority_engine_refusal)?;
+        let service_config = config.clone();
         Ok(Self {
             readiness: CellReadiness::bootstrapping(),
             runtime,
@@ -5124,6 +5290,7 @@ impl OneNode {
             segment_limits: config.segment_limits,
             git_daemon_session_timeout: config.git_daemon_session_timeout,
             serving_cell: config.serving_cell,
+            service_config,
         })
     }
 
@@ -5166,6 +5333,88 @@ impl OneNode {
         at_generation: HeadGeneration,
     ) -> Result<&CellTransition, CellRefusal> {
         self.readiness.transition_to(next, cause, at_generation)
+    }
+
+    /// Walk a freshly opened cell from [`CellState::Bootstrapping`] into
+    /// [`CellState::Serving`], auditing both hops.
+    ///
+    /// # Why this is not done inside `init` or `open_existing`
+    ///
+    /// The cell lifecycle is operator-driven on purpose: a node that came up
+    /// is not the same thing as a node someone put into service, and the whole
+    /// value of [`CellState::Bootstrapping`] is that the difference is
+    /// representable. Transitioning silently at construction would delete that
+    /// distinction for every caller at once, and the audit would then record
+    /// two hops that no decision was ever made about. A caller that intends to
+    /// carry traffic says so, here, and the audit says who.
+    ///
+    /// # Why two hops and not one
+    ///
+    /// [`CellState::Bootstrapping`]'s only forward edge is
+    /// [`CellState::VerifiedReadOnly`], so `Serving` is genuinely two
+    /// decisions and the transition table refuses to let them be collapsed
+    /// into one. Both are claims this node can actually back: opening
+    /// authenticated the authority head, which is what `VerifiedReadOnly`
+    /// asserts, and the process was started to carry traffic, which is what
+    /// `Serving` asserts. [`CellTransitionCause::ServiceBringUp`] records the
+    /// second half honestly — nobody instructed this, the process decided it
+    /// about itself.
+    ///
+    /// `at_generation` is the head generation the caller believes current, so
+    /// an audit entry says which head the cell was looking at when it moved.
+    ///
+    /// # Errors
+    ///
+    /// [`CellRefusal::IllegalTransition`] naming the state it found, when this
+    /// cell is not in `Bootstrapping`. That is deliberately strict rather than
+    /// idempotent: a cell in some other state was moved there by somebody, and
+    /// quietly succeeding here would let a bring-up overwrite a decision — a
+    /// `Draining` cell, say — that was made on purpose.
+    pub fn bring_into_service(&mut self, at_generation: HeadGeneration) -> Result<(), CellRefusal> {
+        if self.cell_state() != CellState::Bootstrapping {
+            return Err(CellRefusal::IllegalTransition {
+                from: self.cell_state(),
+                to: CellState::VerifiedReadOnly,
+            });
+        }
+        for hop in [CellState::VerifiedReadOnly, CellState::Serving] {
+            self.readiness.transition_to(
+                hop,
+                CellTransitionCause::ServiceBringUp,
+                at_generation,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The write-side cell policy for a receive whose intake already happened.
+    ///
+    /// Shared by the two entry points that take an already-validated receive.
+    /// [`Self::receive_loopback_pack_durable_in`] deliberately does NOT use it
+    /// and asks the two halves separately, because there the halves fire at
+    /// different moments: the intake check must run before a byte is parsed,
+    /// and the publication check must run after quarantine and validation have
+    /// completed, which is the whole of §22.6's middle response.
+    ///
+    /// Two distinct refusals, because they mean different things to a client:
+    ///
+    /// * a state that admits no staging at all refuses with
+    ///   [`NodeReceiveTransportRefusal::CellState`] — the cell is not taking
+    ///   receive work in, and re-sending will not help until it is;
+    /// * [`CellState::StagingOnly`] refuses with
+    ///   [`NodeReceiveTransportRefusal::StagedWithoutPublication`] — §22.6's
+    ///   middle response, where the work is held and only publication is
+    ///   withheld, so the caller retries the PUBLICATION rather than the pack.
+    ///
+    /// Collapsing the two into one refusal would tell a staging-only cell's
+    /// client to re-send bytes the cell already has.
+    fn receive_publication_admitted(&self) -> Result<(), NodeReceiveTransportRefusal> {
+        let state = self.cell_state();
+        admits_staging_intake(state).map_err(NodeReceiveTransportRefusal::CellState)?;
+        if state == CellState::StagingOnly {
+            return Err(NodeReceiveTransportRefusal::StagedWithoutPublication { state });
+        }
+        Ok(())
     }
 
     /// Serve a ref advertisement carrying the read mode it was served under.
@@ -5528,6 +5777,10 @@ impl OneNode {
         let authenticated = session
             .authenticated_session()
             .ok_or(NodeReceiveTransportRefusal::Unauthenticated)?;
+        // Intake already happened wherever this `ValidatedReceive` was built,
+        // so the question this entry point owns is publication. A gate on only
+        // the raw-bytes method would be a policy with a public bypass.
+        self.receive_publication_admitted()?;
         let context = AdmissionContext {
             head_key: self.head_key.clone(),
             tenant_id: self.tenant_id,
@@ -5559,6 +5812,10 @@ impl OneNode {
         let authenticated = session
             .authenticated_session()
             .ok_or(NodeReceiveTransportRefusal::Unauthenticated)?;
+        // Same reasoning as the sibling above: this is a publication boundary
+        // reachable without going through the raw-bytes method, so it asks the
+        // policy itself rather than trusting whoever validated the receive.
+        self.receive_publication_admitted()?;
         let context = AdmissionContext {
             head_key: self.head_key.clone(),
             tenant_id: self.tenant_id,
@@ -5606,20 +5863,27 @@ impl OneNode {
             return Err(NodeReceiveTransportRefusal::Unauthenticated);
         }
 
-        // INTAKE GATE: NOT WIRED YET, and deliberately so. The ruling asks for
-        // "isolated/read-only/refuse states: typed refusal before intake", and
-        // `admits_staging_intake` implements exactly that. Wiring it here
-        // refuses EVERY receive today, because a node from `OneNode::init`
-        // sits in Bootstrapping and nothing in the ordinary lifecycle
-        // transitions it — only an operator path (fgit-slo) does. Measured: it
-        // broke three existing receive tests with
-        // `CellState(StateAdmitsNoStaging { state: Bootstrapping })`.
+        // INTAKE GATE. §22.6's "isolated/read-only/refuse states: typed refusal
+        // before intake", now wired: a cell whose state admits no staging
+        // refuses HERE, before a single byte of the offered pack is retained,
+        // parsed or quarantined. Quarantining bytes a cell has no business
+        // holding is a cost with no corresponding benefit, because nothing
+        // downstream can ever use them.
         //
-        // Bootstrapping is a STARTUP state, not one of §22.6's isolation
-        // responses, so whether it should admit intake is a question the
-        // ruling did not answer rather than one I should decide by picking the
-        // reading that compiles. Raised on the bead; the gate lands the moment
-        // it is settled.
+        // ORDER MATTERS AND IS ASSERTED. Authentication stays ahead of this
+        // check because it retains nothing; the state check is the first thing
+        // that looks at the request at all. `StagingOnly` deliberately PASSES
+        // here — it is the one isolation response that accepts and holds — and
+        // meets its refusal at the publication gate below, after quarantine and
+        // validation have completed.
+        //
+        // A node from `OneNode::init` or `open_existing` sits in Bootstrapping
+        // and is refused. That is the intended behaviour and not an oversight:
+        // the cell lifecycle is operator-driven, so a node nobody brought into
+        // service does not take pushes. A caller that means to carry traffic
+        // calls `bring_into_service` and says so in the audit.
+        // `GoldLotus`'s 2026-08-24 ruling, option (A). `frankengit-fg036b`.
+        admits_staging_intake(self.cell_state()).map_err(NodeReceiveTransportRefusal::CellState)?;
 
         let expected_format = match self.object_format {
             GitHashAlgorithm::Sha1 => fgit_wire::GitObjectFormat::Sha1,
@@ -5719,6 +5983,19 @@ impl OneNode {
         principal_id: PrincipalId,
         idempotency_key: &[u8],
     ) -> Result<AdmissionResult, NodeSourceImportRefusal> {
+        // The same intake question the receive transport asks, at the one
+        // production site that reaches this crate from outside: `fg import`.
+        // A source import reads a local tree and PUBLISHES its refs, so a cell
+        // nobody brought into service must refuse it for exactly the reason it
+        // refuses a push. Raised before the source is read, so an unserving
+        // cell stages nothing.
+        //
+        // There is no staging-only middle response here. §22.6's middle
+        // response exists because a receive-pack session has already spent the
+        // bytes by the time publication is decided; a local directory has not
+        // been consumed and can simply be re-offered, so holding it would
+        // create staged state with no client waiting on it.
+        admits_staging_intake(self.cell_state()).map_err(NodeSourceImportRefusal::CellState)?;
         let idempotency_key = IdempotencyKey::new(idempotency_key.to_vec())
             .map_err(|error| NodeSourceImportRefusal::Idempotency(Box::new(error)))?;
         let limits = AdmissionLimits::default();
@@ -5946,12 +6223,27 @@ impl OneNode {
         listener: &TcpListener,
         limits: WireLimits,
     ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal> {
-        let (mut stream, _) = listener.accept().map_err(|source| {
+        let (stream, _) = listener.accept().map_err(|source| {
             NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Io {
                 operation: "accept git-daemon connection",
                 source,
             })
         })?;
+        self.serve_git_daemon_stream_with_limits(stream, limits)
+    }
+
+    /// Serves one previously accepted daemon stream through the authenticated
+    /// upload-pack path.
+    ///
+    /// This extraction keeps the wire/session implementation singular: the
+    /// one-shot compatibility API above and the bounded multi-session service
+    /// below execute the exact same greeting, authenticated admission, pack
+    /// selection, deadline, and EOF rules.
+    fn serve_git_daemon_stream_with_limits(
+        &self,
+        mut stream: TcpStream,
+        limits: WireLimits,
+    ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal> {
         let mut response_stream = stream.try_clone().map_err(|source| {
             NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Io {
                 operation: "duplicate git-daemon connection for response writes",
@@ -6096,6 +6388,119 @@ impl OneNode {
                 })
             })?;
         Ok(served)
+    }
+
+    /// Accepts a bounded number of git-daemon sessions and drains every child
+    /// before returning its receipt.
+    ///
+    /// Each admitted session is submitted to the node runtime's configured
+    /// blocking pool because the current wire adapter intentionally exposes
+    /// synchronous `Read`/`Write` traits. The session reopens and
+    /// re-authenticates the durable node state rather than sharing a mutable
+    /// connection or treating the parent node's materialization as authority.
+    /// The parent retains a protocol-level in-flight limit, waits for all
+    /// children after its accept budget is exhausted, and only then lets CLI
+    /// lifecycle code call [`Self::shutdown`].
+    pub fn serve_git_daemon_bounded(
+        &self,
+        listener: &TcpListener,
+        server_limits: GitDaemonServerLimits,
+        wire_limits: WireLimits,
+    ) -> Result<GitDaemonServerReceipt, NodeGitDaemonServerRefusal> {
+        if server_limits.max_sessions == 0 {
+            return Err(NodeGitDaemonServerRefusal::Limits(
+                GitDaemonServerLimitRefusal::ZeroSessionLimit,
+            ));
+        }
+        if server_limits.max_in_flight == 0 {
+            return Err(NodeGitDaemonServerRefusal::Limits(
+                GitDaemonServerLimitRefusal::ZeroInFlightLimit,
+            ));
+        }
+        listener.set_nonblocking(true).map_err(|source| {
+            NodeGitDaemonServerRefusal::Accept(Box::new(GitDaemonTransportRefusal::Io {
+                operation: "configure bounded git-daemon listener",
+                source,
+            }))
+        })?;
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let refused = Arc::new(AtomicUsize::new(0));
+        let mut child_tasks = Vec::with_capacity(server_limits.max_sessions);
+        let mut accepted = 0_usize;
+        let mut terminal_refusal = None;
+
+        while accepted < server_limits.max_sessions {
+            if active.load(Ordering::Acquire) >= server_limits.max_in_flight {
+                self.runtime.wait_for(Duration::from_millis(1));
+                continue;
+            }
+            let (stream, _) = match listener.accept() {
+                Ok(accepted_stream) => accepted_stream,
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                    self.runtime.wait_for(Duration::from_millis(1));
+                    continue;
+                }
+                Err(source) => {
+                    terminal_refusal = Some(NodeGitDaemonServerRefusal::Accept(Box::new(
+                        GitDaemonTransportRefusal::Io {
+                            operation: "accept bounded git-daemon connection",
+                            source,
+                        },
+                    )));
+                    break;
+                }
+            };
+            accepted = accepted.saturating_add(1);
+            active.fetch_add(1, Ordering::AcqRel);
+            let child_config = self.service_config.clone();
+            let child_active = Arc::clone(&active);
+            let child_completed = Arc::clone(&completed);
+            let child_refused = Arc::clone(&refused);
+            let child_wire_limits = wire_limits.clone();
+            let task = match self.runtime.submit_blocking(move || {
+                let completed_cleanly = match OneNode::open_existing(child_config) {
+                    Ok(child) => {
+                        let served =
+                            child.serve_git_daemon_stream_with_limits(stream, child_wire_limits);
+                        let cleanup = child.shutdown();
+                        served.is_ok() && cleanup.is_ok()
+                    }
+                    Err(_) => false,
+                };
+                if completed_cleanly {
+                    child_completed.fetch_add(1, Ordering::AcqRel);
+                } else {
+                    child_refused.fetch_add(1, Ordering::AcqRel);
+                }
+                child_active.fetch_sub(1, Ordering::AcqRel);
+            }) {
+                Ok(task) => task,
+                Err(runtime) => {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    terminal_refusal = Some(NodeGitDaemonServerRefusal::Runtime(runtime));
+                    break;
+                }
+            };
+            child_tasks.push(task);
+        }
+
+        for task in &child_tasks {
+            task.wait();
+        }
+        if let Some(refusal) = terminal_refusal {
+            return Err(refusal);
+        }
+        let active_sessions = active.load(Ordering::Acquire);
+        if active_sessions != 0 {
+            return Err(NodeGitDaemonServerRefusal::DrainIncomplete { active_sessions });
+        }
+        Ok(GitDaemonServerReceipt {
+            accepted_sessions: accepted,
+            completed_sessions: completed.load(Ordering::Acquire),
+            refused_sessions: refused.load(Ordering::Acquire),
+        })
     }
 
     /// Opens the current durable authority state as a bounded V0 upload-pack view.
@@ -6315,6 +6720,41 @@ impl OneNode {
         object_type: ObjectType,
         body: Vec<u8>,
     ) -> Result<StoredObject, NodeRefusal> {
+        self.put_git_object_through(&self.fabric, object_type, body)
+    }
+
+    /// [`Self::put_git_object`]'s whole body, over an explicitly supplied
+    /// fabric.
+    ///
+    /// # Why this seam exists, and why it is not `pub`
+    ///
+    /// `OneNode` holds one concrete [`LocalFilesystemFabric`], and
+    /// [`ImmutableObjectFabric`] is not object-safe (`publish_retention_root`
+    /// is generic), so the node cannot hold a boxed fabric and making the type
+    /// generic would be a signature change for every consumer of the crate.
+    /// Naming the fabric as a parameter of the FUNCTION instead is additive:
+    /// the public method is unchanged, and it passes the field, so production
+    /// still has exactly one fabric.
+    ///
+    /// It stays crate-private deliberately. A public form would let a caller
+    /// place objects into a fabric the node never reads back from — the same
+    /// defect `admit_merge_durable_in` documents for its commitment store — and
+    /// the containment guard below is the only thing that needs the seam.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeRefusal`] for a refused placement, and
+    /// [`NodeRefusal::ResourceContainment`] when the placement region does not
+    /// close quiescent.
+    fn put_git_object_through<Fabric>(
+        &self,
+        fabric: &Fabric,
+        object_type: ObjectType,
+        body: Vec<u8>,
+    ) -> Result<StoredObject, NodeRefusal>
+    where
+        Fabric: ImmutableObjectFabric,
+    {
         let offered = u64::try_from(body.len()).map_err(|_| NodeRefusal::ObjectLengthOverflow)?;
         if offered > self.max_object_bytes {
             return Err(NodeRefusal::ObjectTooLarge {
@@ -6349,36 +6789,41 @@ impl OneNode {
         let grant = ledger
             .grant(placement_resources(offered))
             .map_err(NodeRefusal::from)?;
-        let outcome = self
-            .fabric
-            .put_if_absent(verified, PlacementAdmission::new(&ledger, grant));
+        let outcome = fabric.put_if_absent(verified, PlacementAdmission::new(&ledger, grant));
         let closed = ledger.close();
         // Containment is checked BEFORE the placement's own error is raised, so
         // a leaked region outranks whatever the fabric refused. Keep that order:
         // a refusal that is reported while resources are still outstanding tells
         // the caller the wrong thing about what the node is still holding.
         //
-        // Defensive, and measured to be unreachable through this function with
-        // the concrete fabric it holds (`LocalFilesystemFabric`), because nothing on
-        // that path leaks. Every pre-reservation refusal releases the budget
-        // explicitly; `ObligationLedger::reserve` releases on both of its failure
-        // paths; and of the three post-reservation `?` operators that would drop a
-        // live `ReservedObligation`, two cannot fire from here and the third does
+        // REACHABILITY, measured rather than asserted, and it differs by fabric.
+        //
+        // With the concrete `LocalFilesystemFabric` the node holds in
+        // production, this branch cannot fire: every pre-reservation refusal
+        // releases the budget explicitly; `ObligationLedger::reserve` releases
+        // the grant on both of its failure paths; and of the three
+        // post-reservation `?` operators that would drop a live
+        // `ReservedObligation`, two cannot fire from here and the third does
         // not leak:
         //   - `payload_identity` fails only on `ObjectKind::Internal`, and
-        //     `fabric_object_kind` is a wildcard-free match over `ObjectType` that maps
-        //     no variant to it -- adding one breaks that match rather than
-        //     quietly opening this path;
-        //   - `AdmittedObject::verified` is handed `StructureVerdict::Verified` as a
-        //     literal, and its two length operands are the same variable;
-        //   - `settle_admission_abort` recovers its obligation and settles it before
-        //     returning an error.
+        //     `fabric_object_kind` is a wildcard-free match over `ObjectType`
+        //     that maps no variant to it -- adding one breaks that match rather
+        //     than quietly opening this path;
+        //   - `AdmittedObject::verified` is handed `StructureVerdict::Verified`
+        //     as a literal, and its two length operands are the same variable;
+        //   - `settle_admission_abort` recovers its obligation and settles it
+        //     before returning an error.
+        // Walked at e872bcf for frankengit-fg036b, and that walk is why this is
+        // NOT dead code: the guard is against a fabric that leaks, and the
+        // production one does not.
         //
-        // So a test driving this refusal through `put_git_object` today would be
-        // vacuous, and is deliberately not written. This becomes reachable the
-        // moment the fabric is made injectable or a second implementation of the
-        // fabric trait is placed behind it -- either of which should bring the
-        // test with it. Walked at e872bcf for frankengit-fg036b.
+        // `ImmutableObjectFabric` is a public trait with more than one
+        // implementation, so "the fabric never leaks" is a property of today's
+        // field, not of this function. The seam above is what lets a test say
+        // so out loud: `containment_failure_outranks_the_fabrics_own_refusal`
+        // drives this body with a fabric that drops its obligation, and asserts
+        // both halves -- that the refusal is raised, and that it outranks the
+        // fabric's own error rather than being masked by it.
         if !matches!(closed, RegionCloseOutcome::Quiescent(_)) {
             return Err(NodeRefusal::ResourceContainment);
         }
@@ -6634,6 +7079,22 @@ fn admission_cache_resources() -> ResourceVector {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_daemon_server_limits_require_nonzero_session_and_in_flight_bounds() {
+        assert!(matches!(
+            super::GitDaemonServerLimits::try_new(0, 1),
+            Err(super::GitDaemonServerLimitRefusal::ZeroSessionLimit)
+        ));
+        assert!(matches!(
+            super::GitDaemonServerLimits::try_new(1, 0),
+            Err(super::GitDaemonServerLimitRefusal::ZeroInFlightLimit)
+        ));
+        let limits = super::GitDaemonServerLimits::try_new(2, 1)
+            .expect("a positive bounded daemon profile is accepted");
+        assert_eq!(limits.max_sessions(), 2);
+        assert_eq!(limits.max_in_flight(), 1);
+    }
+
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::convert::Infallible;
@@ -9869,6 +10330,150 @@ mod tests {
             OneNode::open_existing(config),
             Err(NodeRefusal::AuthorityHeadAbsent)
         ));
+    }
+    /// A fabric that refuses a placement, and can be told whether to settle the
+    /// budget grant it was handed on the way out.
+    ///
+    /// `frankengit-fg036b`. The production `LocalFilesystemFabric` releases its
+    /// grant on every refusal path, which is why
+    /// `NodeRefusal::ResourceContainment` cannot fire through it -- measured and
+    /// recorded at the guard. `ImmutableObjectFabric` is a public trait with
+    /// more than one implementation, so that is a property of today's field and
+    /// not of the function, and this double is what lets the difference be
+    /// stated rather than assumed.
+    ///
+    /// `settles` is the whole experiment. BOTH arms return the SAME fabric
+    /// error, so the only thing that varies between them is whether the region
+    /// closes quiescent -- which is what makes the outranking claim below a
+    /// measurement instead of a restatement of the code.
+    struct RefusingFabric {
+        settles: bool,
+    }
+
+    impl RefusingFabric {
+        const REFUSAL: StoreRefusal = StoreRefusal::TooManyPlacements;
+    }
+
+    impl ImmutableObjectFabric for RefusingFabric {
+        fn capabilities(&self) -> fgit_object_fabric::fabric::FabricCapabilities {
+            fgit_object_fabric::fabric::FabricCapabilities::new(&[])
+        }
+
+        fn put_if_absent(
+            &self,
+            _object: super::VerifiedObject,
+            admission: super::PlacementAdmission<'_>,
+        ) -> Result<super::PutIfAbsent, StoreRefusal> {
+            let (_ledger, budget) = admission.into_parts();
+            if self.settles {
+                // What production does: settle custody, then refuse. The region
+                // closes quiescent and the fabric's own error is the answer.
+                let _receipt = budget.release();
+            } else {
+                // `BudgetGrant` has no `Drop` impl -- it is an explicit-custody
+                // token and `release()` is the only settlement -- so dropping it
+                // here IS the leak, by exactly the mechanism the resource layer
+                // uses to refuse to let an obligation vanish.
+                drop(budget);
+            }
+            Err(Self::REFUSAL)
+        }
+
+        fn read_whole(
+            &self,
+            _identity: GitOid,
+        ) -> Result<fgit_object_fabric::fabric::WholeObjectRead, StoreRefusal> {
+            Err(Self::REFUSAL)
+        }
+
+        fn read_range_verified(
+            &self,
+            _identity: GitOid,
+            _range: fgit_object_fabric::fabric::ObjectRange,
+        ) -> Result<fgit_object_fabric::fabric::VerifiedRangeRead, StoreRefusal> {
+            Err(Self::REFUSAL)
+        }
+
+        fn write_manifest(
+            &self,
+            _manifest: &fgit_object_fabric::fabric::SegmentManifest,
+        ) -> Result<fgit_types::SegmentManifestId, StoreRefusal> {
+            Err(Self::REFUSAL)
+        }
+
+        fn read_manifest(
+            &self,
+            _identity: fgit_types::SegmentManifestId,
+        ) -> Result<fgit_object_fabric::fabric::SegmentManifest, StoreRefusal> {
+            Err(Self::REFUSAL)
+        }
+
+        fn publish_retention_root<R: fgit_object_fabric::fabric::AuthenticatedRetentionRegistry>(
+            &self,
+            _registry: &R,
+            _proposal: &fgit_object_fabric::fabric::RetentionRootProposal,
+        ) -> Result<fgit_object_fabric::fabric::PublicationState, StoreRefusal> {
+            Err(Self::REFUSAL)
+        }
+
+        fn delete_if_unretained<R: fgit_object_fabric::fabric::AuthenticatedRetentionRegistry>(
+            &self,
+            _registry: &R,
+            _identity: GitOid,
+        ) -> Result<fgit_object_fabric::fabric::DeletionReceipt, StoreRefusal> {
+            Err(Self::REFUSAL)
+        }
+    }
+
+    #[test]
+    fn containment_failure_outranks_the_fabrics_own_refusal() {
+        // The node-level half of "authority reachable but placements impaired
+        // (durability-closure admission checks)". The fabric layer's own
+        // behaviour under fault is covered by `fabric_fault_suite.rs`; what had
+        // no test anywhere was the node's REACTION -- the branch that turns a
+        // non-quiescent close into `NodeRefusal::ResourceContainment`.
+        //
+        // The property is an ORDERING, and it is deliberate: containment is
+        // checked BEFORE the placement's own error is raised, so a leaked region
+        // outranks whatever the fabric refused. A refusal reported while
+        // resources are still outstanding tells the caller the wrong thing about
+        // what the node is still holding.
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes canonical refs");
+        let body = b"impaired placement\n".to_vec();
+
+        // THE CONTROL FIRST, because without it the probe measures nothing: a
+        // fabric that refuses AND settles must surface the FABRIC's error. If
+        // this arm also returned `ResourceContainment`, the probe below would be
+        // satisfied by a node that refuses everything that way.
+        let settled = node
+            .put_git_object_through(
+                &RefusingFabric { settles: true },
+                super::ObjectType::Blob,
+                body.clone(),
+            )
+            .expect_err("a refusing fabric refuses");
+        assert!(
+            matches!(&settled, NodeRefusal::Fabric(error) if **error == RefusingFabric::REFUSAL),
+            "a settled region must let the fabric's own refusal through, got {settled:?}"
+        );
+
+        // THE PROBE: same node, same object, same fabric error -- the ONLY
+        // difference is that custody is dropped instead of released.
+        let leaked = node
+            .put_git_object_through(
+                &RefusingFabric { settles: false },
+                super::ObjectType::Blob,
+                body,
+            )
+            .expect_err("a leaked placement region refuses the write");
+        assert!(
+            matches!(leaked, NodeRefusal::ResourceContainment),
+            "containment must outrank the fabric's own refusal, got {leaked:?}"
+        );
+
+        node.shutdown().expect("node closes cleanly");
     }
 }
 #[cfg(test)]

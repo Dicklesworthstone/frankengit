@@ -11,9 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_node::{
-    DoctorReport, GitDaemonSessionOutcome, NodeConfig, NodeGitDaemonServeRefusal,
-    NodeInitialization, NodeSourceImportRefusal, OneNode, RepositoryResolutionInput,
+    DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, NodeConfig,
+    NodeGitDaemonServeRefusal, NodeGitDaemonServerRefusal, NodeInitialization,
+    NodeSourceImportRefusal, OneNode, RepositoryResolutionInput,
 };
+use fgit_types::numeric::HeadGeneration;
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefusalCode, RepositoryId,
     RepositoryIncarnationId, TenantId,
@@ -60,6 +62,24 @@ pub enum CliRefusal {
     Listener(io::Error),
     /// A one-session git-daemon serve attempt refused.
     Serve(NodeGitDaemonServeRefusal),
+    /// A bounded multi-session git-daemon service run refused before it could
+    /// drain its accepted children.
+    ServeServer(NodeGitDaemonServerRefusal),
+    /// A bounded multi-session daemon refusal and the required node shutdown
+    /// both failed, so neither lifecycle outcome is discarded.
+    ServeServerCleanup {
+        /// The service-run refusal before cleanup.
+        serving: Box<NodeGitDaemonServerRefusal>,
+        /// The failed explicit lifecycle close.
+        cleanup: Box<fgit_node::NodeRefusal>,
+    },
+    /// A requested daemon-service bound was not a non-zero decimal integer.
+    InvalidServeLimit {
+        /// The command-line field that was invalid.
+        field: &'static str,
+        /// The caller-supplied token.
+        value: String,
+    },
     /// The authority-selected pack could not be materialized for export.
     ExportMaterialization(Box<fgit_node::NodePackMaterializationRefusal>),
     /// The export destination had no final filename component.
@@ -145,7 +165,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -165,6 +185,14 @@ impl Display for CliRefusal {
             }
             Self::Listener(error) => write!(formatter, "cannot bind fg serve listener: {error}"),
             Self::Serve(error) => Display::fmt(error, formatter),
+            Self::ServeServer(error) => Display::fmt(error, formatter),
+            Self::ServeServerCleanup { serving, cleanup } => write!(
+                formatter,
+                "bounded serve failed ({serving}) and node shutdown also failed ({cleanup})"
+            ),
+            Self::InvalidServeLimit { field, value } => {
+                write!(formatter, "invalid fg serve {field} `{value}`: expected a non-zero decimal integer")
+            }
             Self::ExportMaterialization(error) => {
                 write!(formatter, "cannot materialize authority-selected export: {error}")
             }
@@ -239,6 +267,8 @@ impl Error for CliRefusal {
             Self::Import(error) => Some(error.as_ref()),
             Self::Listener(error) => Some(error),
             Self::Serve(error) => Some(error),
+            Self::ServeServer(error) => Some(error),
+            Self::ServeServerCleanup { serving, .. } => Some(serving.as_ref()),
             Self::ExportMaterialization(error) => Some(error.as_ref()),
             Self::ExportFile { source, .. } | Self::ExportFileCleanup { source, .. } => {
                 Some(source.as_ref())
@@ -253,7 +283,8 @@ impl Error for CliRefusal {
             | Self::UnsupportedObjectFormat(_)
             | Self::ExportDestination
             | Self::ExportDestinationExists(_)
-            | Self::ImportRefused(_) => None,
+            | Self::ImportRefused(_)
+            | Self::InvalidServeLimit { .. } => None,
         }
     }
 }
@@ -275,12 +306,13 @@ pub enum CliOutcome {
     /// scan. It opens an already initialized node, authenticates its current
     /// head receipt, and then shuts the node down cleanly.
     Doctor(DoctorReport),
-    /// `fg serve` completed one fully drained git-daemon session.
+    /// `fg serve` completed one bounded, fully drained git-daemon service run.
     Served {
-        /// Socket address actually bound for this bounded session.
+        /// Socket address actually bound for this bounded service run.
         listen_address: SocketAddr,
-        /// Whether the session completed an empty advertisement or a pack.
-        session: GitDaemonSessionOutcome,
+        /// The exact accepted/completed/refused counts after all admitted
+        /// session children drained.
+        service: GitDaemonServerReceipt,
     },
     /// `fg export` made a completed authority-selected Git pack visible at a
     /// previously absent local path.
@@ -449,7 +481,14 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             )?),
         ),
         [command, storage_root, tenant, repository, listen_address] if command == "serve" => {
-            run_serve(storage_root, tenant, repository, listen_address, None)
+            run_serve(
+                storage_root,
+                tenant,
+                repository,
+                listen_address,
+                None,
+                GitDaemonServerLimits::DEFAULT,
+            )
         }
         [
             command,
@@ -468,7 +507,60 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 incarnation,
                 RepositoryResolutionInput::TransportTarget,
             )?),
+            GitDaemonServerLimits::DEFAULT,
         ),
+        [
+            command,
+            storage_root,
+            tenant,
+            repository,
+            listen_address,
+            sessions_flag,
+            sessions,
+            in_flight_flag,
+            in_flight,
+        ] if command == "serve"
+            && sessions_flag == "--max-sessions"
+            && in_flight_flag == "--max-in-flight" =>
+        {
+            run_serve(
+                storage_root,
+                tenant,
+                repository,
+                listen_address,
+                None,
+                parse_server_limits(sessions, in_flight)?,
+            )
+        }
+        [
+            command,
+            storage_root,
+            tenant,
+            repository,
+            listen_address,
+            incarnation_flag,
+            incarnation,
+            sessions_flag,
+            sessions,
+            in_flight_flag,
+            in_flight,
+        ] if command == "serve"
+            && incarnation_flag == "--expected-incarnation"
+            && sessions_flag == "--max-sessions"
+            && in_flight_flag == "--max-in-flight" =>
+        {
+            run_serve(
+                storage_root,
+                tenant,
+                repository,
+                listen_address,
+                Some(parse_resolution_input(
+                    incarnation,
+                    RepositoryResolutionInput::TransportTarget,
+                )?),
+                parse_server_limits(sessions, in_flight)?,
+            )
+        }
         _ => Err(CliRefusal::Usage),
     }
 }
@@ -491,7 +583,7 @@ fn run_init(
     Ok(CliOutcome::Initialized(initialization))
 }
 
-/// Serves one bounded git-daemon session.
+/// Serves one explicitly bounded multi-session git-daemon run.
 ///
 /// The repository's object format is selected from its authenticated canonical
 /// configuration, not supplied by this open-path command.
@@ -501,6 +593,7 @@ fn run_serve(
     repository: &str,
     listen_address: &str,
     resolution_input: Option<RepositoryResolutionInput>,
+    server_limits: GitDaemonServerLimits,
 ) -> Result<CliOutcome, CliRefusal> {
     {
         {
@@ -514,22 +607,57 @@ fn run_serve(
                 resolution_input,
             )?)
             .map_err(CliRefusal::Node)?;
-            let serving = node.serve_git_daemon_once(&listener);
+            let serving =
+                node.serve_git_daemon_bounded(&listener, server_limits, Default::default());
             let cleanup = node.shutdown();
             match (serving, cleanup) {
-                (Ok(session), Ok(())) => Ok(CliOutcome::Served {
+                (Ok(service), Ok(())) => Ok(CliOutcome::Served {
                     listen_address,
-                    session,
+                    service,
                 }),
-                (Err(serving), Ok(())) => Err(CliRefusal::Serve(serving)),
+                (Err(serving), Ok(())) => Err(CliRefusal::ServeServer(serving)),
                 (Ok(_), Err(cleanup)) => Err(CliRefusal::Node(cleanup)),
-                (Err(serving), Err(cleanup)) => Err(CliRefusal::ServeCleanup {
+                (Err(serving), Err(cleanup)) => Err(CliRefusal::ServeServerCleanup {
                     serving: Box::new(serving),
                     cleanup: Box::new(cleanup),
                 }),
             }
         }
     }
+}
+
+fn parse_server_limits(
+    sessions: &str,
+    in_flight: &str,
+) -> Result<GitDaemonServerLimits, CliRefusal> {
+    let sessions = sessions
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value != 0)
+        .ok_or_else(|| CliRefusal::InvalidServeLimit {
+            field: "--max-sessions",
+            value: sessions.to_owned(),
+        })?;
+    let in_flight = in_flight
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value != 0)
+        .ok_or_else(|| CliRefusal::InvalidServeLimit {
+            field: "--max-in-flight",
+            value: in_flight.to_owned(),
+        })?;
+    GitDaemonServerLimits::try_new(sessions, in_flight).map_err(|refusal| match refusal {
+        fgit_node::GitDaemonServerLimitRefusal::ZeroSessionLimit => CliRefusal::InvalidServeLimit {
+            field: "--max-sessions",
+            value: sessions.to_string(),
+        },
+        fgit_node::GitDaemonServerLimitRefusal::ZeroInFlightLimit => {
+            CliRefusal::InvalidServeLimit {
+                field: "--max-in-flight",
+                value: in_flight.to_string(),
+            }
+        }
+    })
 }
 
 fn run_import(
@@ -541,7 +669,7 @@ fn run_import(
     source: &Path,
     resolution_input: Option<RepositoryResolutionInput>,
 ) -> Result<CliOutcome, CliRefusal> {
-    let node = OneNode::open_existing(node_config(
+    let mut node = OneNode::open_existing(node_config(
         storage_root,
         tenant,
         repository,
@@ -549,6 +677,33 @@ fn run_import(
         resolution_input,
     )?)
     .map_err(CliRefusal::Node)?;
+    // BRING THIS CELL INTO SERVICE, EXPLICITLY. `frankengit-fg036b`,
+    // `GoldLotus`'s option (A) ruling: the cell lifecycle is operator-driven, so
+    // `open_existing` leaves the cell in `CellState::Bootstrapping` and the
+    // source import below refuses to publish from there. Nothing transitions a
+    // node silently at construction — a node that came up is not a node someone
+    // put into service, and deleting that distinction inside `init` would
+    // delete it for every consumer at once.
+    //
+    // `CellTransitionCause::ServiceBringUp` rather than `Operator`, because
+    // that is what happened: no control-plane instruction arrived, this process
+    // was started to import and decided about itself. Recording `Operator`
+    // would put an instruction in the audit that nobody gave.
+    //
+    // Refusals travel as `CliRefusal::Import`, which already carries a
+    // source-import refusal, so a cell that cannot be brought into service
+    // reports through the same channel as a source that cannot be imported.
+    if let Err(refusal) = node.bring_into_service(HeadGeneration::FIRST) {
+        let cleanup = node.shutdown();
+        return Err(match cleanup {
+            Ok(()) => CliRefusal::Import(Box::new(NodeSourceImportRefusal::CellState(refusal))),
+            Err(cleanup) => CliRefusal::ImportCleanup {
+                import: Box::new(NodeSourceImportRefusal::CellState(refusal)),
+                cleanup: Box::new(cleanup),
+            },
+        });
+    }
+    let node = node;
     let request = node.request_context();
     let imported = node
         .runtime()
@@ -903,6 +1058,47 @@ mod tests {
     #[test]
     fn serve_requires_a_complete_bounded_listener_configuration() {
         assert!(matches!(run(&["serve".to_owned()]), Err(CliRefusal::Usage)));
+    }
+
+    #[test]
+    fn serve_refuses_zero_session_or_in_flight_bounds_before_opening_a_node() {
+        let zero_sessions = vec![
+            "serve".to_owned(),
+            "/missing".to_owned(),
+            "11111111111111111111111111111111".to_owned(),
+            "22222222222222222222222222222222".to_owned(),
+            "127.0.0.1:9418".to_owned(),
+            "--max-sessions".to_owned(),
+            "0".to_owned(),
+            "--max-in-flight".to_owned(),
+            "1".to_owned(),
+        ];
+        assert!(matches!(
+            run(&zero_sessions),
+            Err(CliRefusal::InvalidServeLimit {
+                field: "--max-sessions",
+                ..
+            })
+        ));
+
+        let zero_in_flight = vec![
+            "serve".to_owned(),
+            "/missing".to_owned(),
+            "11111111111111111111111111111111".to_owned(),
+            "22222222222222222222222222222222".to_owned(),
+            "127.0.0.1:9418".to_owned(),
+            "--max-sessions".to_owned(),
+            "1".to_owned(),
+            "--max-in-flight".to_owned(),
+            "0".to_owned(),
+        ];
+        assert!(matches!(
+            run(&zero_in_flight),
+            Err(CliRefusal::InvalidServeLimit {
+                field: "--max-in-flight",
+                ..
+            })
+        ));
     }
 
     /// `fg init` accepts Git's two defined repository formats explicitly.

@@ -119,9 +119,10 @@ grep -Fqx 'initialized authority head' "$transcript"
 record_fg doctor "$storage_root" "$tenant_id" "$repository_id"
 grep -F 'authenticated authority head at generation ' "$transcript" >/dev/null
 
-printf '+ fg serve %q %q %q %q\n' \
+printf '+ fg serve %q %q %q %q --max-sessions 1 --max-in-flight 1\n' \
   "$storage_root" "$tenant_id" "$repository_id" "$listen_address" >>"$transcript"
 fg serve "$storage_root" "$tenant_id" "$repository_id" "$listen_address" \
+  --max-sessions 1 --max-in-flight 1 \
   >"$serve_output" 2>&1 &
 serve_pid=$!
 
@@ -143,7 +144,8 @@ exec 3<&-
 wait "$serve_pid"
 serve_pid=''
 tee -a "$transcript" <"$serve_output"
-grep -F 'served an authenticated empty repository session on ' "$serve_output" >/dev/null
+grep -F 'served bounded git-daemon run on ' "$serve_output" >/dev/null
+grep -F 'accepted=1, completed=1, refused=0' "$serve_output" >/dev/null
 test -s "$advertisement"
 printf 'received %s bytes of empty-repository advertisement\n' "$(wc -c <"$advertisement")" \
   | tee -a "$transcript"

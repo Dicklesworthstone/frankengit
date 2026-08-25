@@ -195,3 +195,132 @@ fge_assert_eq FG-036B-E2E-010 "$EXPECTED_CELL_RECORDS" "$CELL_COUNT_A" \
 
 fge_assert_ndjson FG-036B-E2E-011 "$RUN_A" \
   'every evidence line the campaign emits is a valid JSON object'
+
+# ---------------------------------------------------------------------------
+# THE WRITE-SIDE CELL GATE, receipted here because this bead's scope names all
+# three of §22.6's isolation responses and the campaign above covers none of
+# them: the campaign runs against the authority store, and these run against a
+# node. Added by GoldLotus's 11:32 ruling (staging-only) and their 23:40
+# option (A) ruling (refuse before intake).
+#
+# SEPARATE CAPTURES, NOT ENTRIES IN `CAMPAIGN[@]`, and the reason is not tidiness.
+# These targets live in a different crate and emit NO campaign NDJSON. Folding
+# them into the campaign runs would put a second binary's output into OUT_A/OUT_B,
+# which feeds evidence_records(): the marker grep would ignore it so the digests
+# would not move, but RC_A/RC_B would then conflate two binaries' exit codes and
+# a node-side failure would be reported as a campaign failure.
+#
+# ID ALLOCATION. Fixed assertions hold the low ids (001,002,008..011 and now
+# 012..019); the scenario loop runs from 100 up. The two ranges collided once
+# before and two checks silently shared an id, so they stay apart.
+# ---------------------------------------------------------------------------
+
+# THE ANCHOR IS THE EXPLICIT LIST BELOW, NOT THE SOURCE FILE.
+#
+# The first version of this block derived the expected case count by grepping
+# `#[test]` out of the target's own source. That is the defect it was written to
+# prevent: delete a case and BOTH the expectation and the observation drop by
+# one, so the check passes while the property it guards is gone. An expectation
+# computed from the same input as the observation cannot detect a change to that
+# input.
+#
+# So the expected set is written out here, by name, and the source-derived count
+# is used only in the opposite direction -- to catch a case ADDED to the file
+# and never named here, which would otherwise be invisible.
+STAGING_TARGET=staging_only_receive
+STAGING_SOURCE="$E2E_ROOT/../../crates/fgit-node/tests/staging_only_receive.rs"
+STAGING_CASE_NAMES=(
+  a_staging_only_cell_refuses_publication_and_a_serving_cell_does_not
+  healing_a_staging_only_cell_does_not_silently_publish_what_it_held
+  a_cell_nobody_brought_into_service_refuses_receive_intake
+  a_verified_read_only_cell_refuses_receive_intake
+  the_cell_state_gate_runs_before_a_single_byte_is_parsed
+  authentication_is_answered_ahead_of_the_cell_state_gate
+  bringing_a_cell_into_service_audits_two_hops_under_an_honest_cause
+)
+
+TRANSPORT_TARGET=authenticated_receive_transport
+TRANSPORT_SOURCE="$E2E_ROOT/../../crates/fgit-node/tests/authenticated_receive_transport.rs"
+TRANSPORT_CASE_NAMES=(
+  authenticated_loopback_session_admits_a_validated_push
+  anonymous_loopback_session_is_refused_before_admission
+  a_cell_nobody_brought_into_service_refuses_a_source_import
+)
+
+declared_cases() {
+  local count
+  count=$(grep -c '^#\[test\]' "$1")
+  printf '%s' "${count// /}"
+}
+
+passed_cases() {
+  # The harness's own summary line, not a per-case count: under --nocapture cargo
+  # writes "test <name> ... " with NO newline, so a case that prints anything
+  # lands on the same line and a `... ok$` anchor stops matching. A FAILED run
+  # emits "test result: FAILED." and this yields nothing, which is why callers
+  # substitute a non-numeric sentinel rather than an empty string.
+  grep -oE '^test result: ok\. [0-9]+ passed' "$1" | grep -oE '[0-9]+' | head -1
+}
+
+missing_case_names() {
+  local capture=$1 missing='' name
+  shift
+  for name in "$@"; do
+    grep -qF "$name" "$capture" || missing="$missing $name"
+  done
+  printf '%s' "$missing"
+}
+
+fge_capture "run-$STAGING_TARGET" env RCH_CARGO_WRAPPER_BYPASS=1 \
+  cargo test -p fgit-node --test "$STAGING_TARGET" -- --nocapture --test-threads=1 || true
+RC_STAGING=$FGE_LAST_EXIT
+OUT_STAGING=$FGE_LAST_STDOUT_FILE
+fge_artifact "$OUT_STAGING"
+
+fge_capture "run-$TRANSPORT_TARGET" env RCH_CARGO_WRAPPER_BYPASS=1 \
+  cargo test -p fgit-node --test "$TRANSPORT_TARGET" -- --nocapture --test-threads=1 || true
+RC_TRANSPORT=$FGE_LAST_EXIT
+OUT_TRANSPORT=$FGE_LAST_STDOUT_FILE
+fge_artifact "$OUT_TRANSPORT"
+
+fge_assert_exit FG-036B-E2E-012 0 "$RC_STAGING" \
+  'the write-side cell-gate slice passes'
+
+# FIRES BY CONSTRUCTION ON A DELETED CASE: the expected value is the length of
+# the literal list above and cannot move when the source file does.
+staging_passed=$(passed_cases "$OUT_STAGING")
+fge_assert_eq FG-036B-E2E-013 "${#STAGING_CASE_NAMES[@]}" "${staging_passed:-none-reported}" \
+  'the write-side gate target reports exactly the cases named here, so a deleted or skipped case fails'
+
+# Every case by NAME. A green total cannot tell "ran and passed" from "was
+# renamed and silently stopped running", and §16.3 requires the permitted twin
+# to be visible: asserting only the refusals would stay green if every twin were
+# deleted, leaving a suite that proves cells refuse without proving any serves.
+fge_assert_eq FG-036B-E2E-014 '' \
+  "$(missing_case_names "$OUT_STAGING" "${STAGING_CASE_NAMES[@]}")" \
+  'every write-side cell-gate case ran, named individually rather than inferred from a total'
+
+# The other direction, and the reason this is not circular: a case ADDED to the
+# source and never named above would be caught by nothing else here.
+fge_assert_eq FG-036B-E2E-015 "$(declared_cases "$STAGING_SOURCE")" \
+  "${#STAGING_CASE_NAMES[@]}" \
+  'the named list covers every case the target declares, so 013 and 014 cannot go stale'
+
+fge_assert_exit FG-036B-E2E-016 0 "$RC_TRANSPORT" \
+  'the authenticated receive-transport slice passes'
+
+transport_passed=$(passed_cases "$OUT_TRANSPORT")
+fge_assert_eq FG-036B-E2E-017 "${#TRANSPORT_CASE_NAMES[@]}" "${transport_passed:-none-reported}" \
+  'the receive-transport target reports exactly the cases named here'
+
+# The source-import half of the gate is named individually because it is the ONE
+# production construction site the workspace measurement for this ruling found:
+# `fg import`, at fgit-cli/src/lib.rs. If it disappears, the gate still holds on
+# paths nothing in production reaches, and nothing else here would say so.
+fge_assert_eq FG-036B-E2E-018 '' \
+  "$(missing_case_names "$OUT_TRANSPORT" "${TRANSPORT_CASE_NAMES[@]}")" \
+  'the receive-transport cases ran, including the source-import gate at the one production site'
+
+fge_assert_eq FG-036B-E2E-019 "$(declared_cases "$TRANSPORT_SOURCE")" \
+  "${#TRANSPORT_CASE_NAMES[@]}" \
+  'the receive-transport named list is complete against its source'

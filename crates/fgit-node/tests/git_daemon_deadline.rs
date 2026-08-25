@@ -17,6 +17,7 @@ use fgit_node::{
 use fgit_node::{NodeConfig, NodeGitDaemonServeRefusal, NodePackMaterializationRefusal, OneNode};
 use fgit_runtime::{BudgetClass, BudgetPolicy, ClassLimits, Exhaustion};
 use fgit_types::GitHashAlgorithm;
+use fgit_types::numeric::HeadGeneration;
 use fgit_types::{PrincipalId, RepositoryId, TenantId};
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, Packet,
@@ -269,7 +270,7 @@ fn run_one_node_after_advertisement_delay(
     let wanted = write_loose_blob_repository(&source_root);
     let session_timeout = GitDaemonSessionTimeout::try_new(ONE_NODE_SESSION_TIMEOUT)
         .expect("the one-node test session deadline is finite and non-zero");
-    let (node, _) = OneNode::init(
+    let (mut node, _) = OneNode::init(
         NodeConfig::new(
             node_root,
             TenantId::from_bytes([0x51; 16]),
@@ -279,6 +280,13 @@ fn run_one_node_after_advertisement_delay(
         .with_git_daemon_session_timeout(session_timeout),
     )
     .expect("the bounded one-node daemon initializes");
+    // The source import below publishes refs, and a cell nobody brought into
+    // service refuses to publish. `frankengit-fg036b`: the lifecycle is
+    // operator-driven, so this fixture makes the same decision `fg import`
+    // makes at `fgit-cli/src/lib.rs` before it imports.
+    node.bring_into_service(HeadGeneration::FIRST)
+        .expect("the bounded one-node daemon comes into service before importing");
+    let node = node;
     let import_request = node.request_context();
     node.runtime()
         .block_on(node.import_loose_git_directory_durable_in(

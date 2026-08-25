@@ -43,10 +43,14 @@ cargo run -p fgit-cli -- doctor ./fgit-data \
 
 `init` creates or re-authenticates only the empty canonical authority head;
 `doctor` authenticates that head and can re-verify one explicitly named native
-object. `serve` accepts one bounded legacy git-daemon upload-pack session, and
-`export` writes only an authority-selected pack to a previously absent path.
-Neither command treats local object placement or a connection-local ref map as
-canonical state.
+object. `serve` accepts a bounded legacy git-daemon upload-pack service run,
+drains every admitted session, and reports the accepted/completed/refused
+receipt before it exits. Its compatibility default remains one session and one
+in-flight client; callers explicitly opt into a larger non-zero
+`--max-sessions` / `--max-in-flight` bound. The bring-up transcript below
+deliberately names the one-session bound. `export` writes only an
+authority-selected pack to a previously absent path. Neither command treats
+local object placement or a connection-local ref map as canonical state.
 
 For a clean-machine transcript of the implemented empty-repository lifecycle,
 run [`scripts/one_node_bringup.sh`](scripts/one_node_bringup.sh) with a new
@@ -60,8 +64,8 @@ scripts/one_node_bringup.sh "$(mktemp -d)" \
   /tmp/frankengit-one-node.pack
 ```
 
-The script records the exact `fg init` → `fg doctor` → one bounded `fg serve`
-session → `fg export` commands and their observed output in
+The script records the exact `fg init` → `fg doctor` → one explicitly bounded
+`fg serve` session → `fg export` commands and their observed output in
 `bring-up.transcript` below the supplied storage directory. Set `FG_BIN` to a
 prebuilt `fg` binary to avoid its default `cargo run -p fgit-cli --` launcher.
 It intentionally exercises an empty repository and does not claim a complete

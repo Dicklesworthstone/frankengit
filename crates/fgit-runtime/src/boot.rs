@@ -23,7 +23,7 @@ use asupersync::cx::wrappers::narrow;
 use asupersync::runtime::config::{
     BlockingPoolConfig, RuntimeConfig, SchedulerPlacementMode, SpawnAdmissionMode,
 };
-use asupersync::runtime::{Runtime, RuntimeHandle};
+use asupersync::runtime::{BlockingTaskHandle, Runtime, RuntimeHandle};
 use asupersync::types::id::Time;
 use fgit_resource::{WorkerBudgetInputs, WorkerBudgetRefusal, plan};
 
@@ -660,6 +660,35 @@ impl NodeRuntime {
     /// Run a future to completion on the calling thread.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         self.runtime.block_on(future)
+    }
+
+    /// Submit one bounded blocking child to this node's owned runtime.
+    ///
+    /// Socket adapters that still expose synchronous `Read`/`Write` traits use
+    /// this bridge rather than creating an unowned operating-system thread.
+    /// The runtime's configured blocking-pool limit remains the hard ceiling;
+    /// callers retain responsibility for their protocol-level admission bound
+    /// and for draining every submitted child before node shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeRefusal::RuntimeUnavailable`] when the owned runtime
+    /// no longer admits blocking children.
+    pub fn submit_blocking<F>(&self, work: F) -> Result<BlockingTaskHandle, RuntimeRefusal>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.runtime
+            .spawn_blocking(work)
+            .ok_or(RuntimeRefusal::RuntimeUnavailable)
+    }
+
+    /// Advances this runtime's own timer while waiting for a bounded adapter
+    /// retry. This keeps service backoff under the same owned runtime instead
+    /// of creating an ambient sleeper thread.
+    pub fn wait_for(&self, duration: Duration) {
+        self.runtime
+            .block_on(asupersync::time::sleep(self.now(), duration));
     }
 
     /// The profile identity, for evidence.

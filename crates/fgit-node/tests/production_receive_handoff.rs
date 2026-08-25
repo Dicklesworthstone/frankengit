@@ -8,6 +8,8 @@ use fgit_authority::IdempotencyKey;
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest};
 use fgit_git_object::ParseLimits;
 use fgit_node::{LoopbackReceiveSession, NodeConfig, NodeReceiveTransportRefusal, OneNode};
+use fgit_types::cell::CellState;
+use fgit_types::numeric::HeadGeneration;
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, PrincipalId, RefName, RefusalCode, RepositoryId, TenantId,
 };
@@ -49,6 +51,22 @@ fn node(root: PathBuf) -> OneNode {
     ))
     .expect("node initializes")
     .0
+}
+
+/// A node that has been brought into service, which is what a cell must be
+/// before it will take receive work in at all.
+///
+/// `OneNode::init` leaves the cell in `CellState::Bootstrapping` and nothing in
+/// the library moves it: the lifecycle is operator-driven, so a caller that
+/// means to accept pushes says so. Every test below that exercises the receive
+/// path itself needs this; the anonymous case deliberately does NOT use it, and
+/// says why at its own call site. `frankengit-fg036b`.
+fn serving_node(root: PathBuf) -> OneNode {
+    let mut node = node(root);
+    node.bring_into_service(HeadGeneration::FIRST)
+        .expect("a freshly initialised cell comes into service");
+    assert_eq!(node.cell_state(), CellState::Serving);
+    node
 }
 
 fn receive_context() -> ReceiveContext {
@@ -154,7 +172,7 @@ const fn zero_oid() -> &'static str {
 #[test]
 fn raw_object_bearing_receive_is_quarantined_then_durably_admitted() {
     let scratch = ScratchDirectory::new();
-    let node = node(scratch.path().join("node"));
+    let node = serving_node(scratch.path().join("node"));
     let materialization_request = node.request_context();
     let materialized = node
         .runtime()
@@ -201,6 +219,11 @@ fn raw_object_bearing_receive_is_quarantined_then_durably_admitted() {
 
 #[test]
 fn raw_receive_refuses_anonymous_session_before_unpacking() {
+    // DELIBERATELY NOT `serving_node`. This cell is left in `Bootstrapping`, so
+    // the offer below violates BOTH write-side guards at once — anonymous
+    // session AND a state that admits no staging — and the assertion that
+    // authentication is the one named is therefore a statement about their
+    // ORDER, which a cell already in service could not make.
     let scratch = ScratchDirectory::new();
     let node = node(scratch.path().join("node"));
     let materialization_request = node.request_context();
@@ -234,7 +257,7 @@ fn raw_receive_refuses_anonymous_session_before_unpacking() {
 #[test]
 fn raw_receive_cancellation_prevents_quarantine_handoff_and_publication() {
     let scratch = ScratchDirectory::new();
-    let node = node(scratch.path().join("node"));
+    let node = serving_node(scratch.path().join("node"));
     let materialization_request = node.request_context();
     let materialized = node
         .runtime()
@@ -277,7 +300,7 @@ fn raw_receive_cancellation_prevents_quarantine_handoff_and_publication() {
 #[test]
 fn stale_validation_basis_refuses_thin_base_after_successor_omits_it() {
     let scratch = ScratchDirectory::new();
-    let node = node(scratch.path().join("node"));
+    let node = serving_node(scratch.path().join("node"));
     let base_body = b"basis-selected blob\n";
     let base_id = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, base_body);
     let target_body = b"basis-selected blob\n!";

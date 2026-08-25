@@ -1,12 +1,20 @@
 #![forbid(unsafe_code)]
-//! §22.6's middle isolation response, end to end. `frankengit-fg036b`.
+//! §22.6's isolation responses on the receive path, end to end.
+//! `frankengit-fg036b`.
 //!
-//! `GoldLotus`'s ruling on this bead: *"`StagingOnly`: quarantine + validation
-//! proceed but PUBLICATION refuses typed (staged, never visible — §5.4
-//! staged/visible split is the vocabulary)"*, plus a differential arm — *"a
-//! `StagingOnly` cell under the fault schedule accepts and stages but publishes
-//! nothing, and the healed cell's publication carries the staged work or
-//! refuses it stale — assert which, do not leave it ambiguous."*
+//! `GoldLotus`'s 11:32 ruling on this bead gave the middle response: *"`StagingOnly`:
+//! quarantine + validation proceed but PUBLICATION refuses typed (staged, never
+//! visible — §5.4 staged/visible split is the vocabulary)"*, plus a differential
+//! arm — *"a `StagingOnly` cell under the fault schedule accepts and stages but
+//! publishes nothing, and the healed cell's publication carries the staged work
+//! or refuses it stale — assert which, do not leave it ambiguous."*
+//!
+//! Their 23:40 ruling, option (A), added the third: *"a node nobody brought into
+//! service refuses receive intake with a typed refusal (and its permitted twin:
+//! a cell walked Bootstrapping -> `VerifiedReadOnly` -> Serving admits)"*. So
+//! this file now holds all three — refuse before intake, stage without
+//! publishing, and serve — together, because the only way to show they are
+//! three different answers is to drive byte-identical input at each of them.
 //!
 //! # Why the fixture is duplicated rather than shared
 //!
@@ -26,7 +34,7 @@ use fgit_authority::IdempotencyKey;
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest};
 use fgit_git_object::ParseLimits;
 use fgit_node::{LoopbackReceiveSession, NodeConfig, NodeReceiveTransportRefusal, OneNode};
-use fgit_types::cell::{CellState, CellTransitionCause};
+use fgit_types::cell::{CellRefusal, CellState, CellTransitionCause};
 use fgit_types::numeric::HeadGeneration;
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 use fgit_wire::receive::{ReceiveContext, ReceiveLimits, SignedPushProfile};
@@ -148,22 +156,51 @@ const fn zero_oid() -> &'static str {
 
 /// Walk a freshly initialised cell to the requested state.
 ///
-/// `Bootstrapping -> VerifiedReadOnly -> Serving -> StagingOnly` is the only
-/// legal path into staging-only, so reaching it is itself an assertion that the
-/// transition table admits the isolation response the ruling describes.
+/// The first two hops go through `OneNode::bring_into_service`, which is the
+/// production bring-up API rather than a fixture shortcut: `Bootstrapping ->
+/// VerifiedReadOnly -> Serving` is the only legal way into a staging-admitting
+/// state, and driving it here means these tests exercise the same call
+/// `fg import` makes. Anything past `Serving` is a genuine operator decision
+/// and is recorded as one.
 fn walk_to(node: &mut OneNode, target: CellState) {
-    for hop in [
-        CellState::VerifiedReadOnly,
-        CellState::Serving,
-        CellState::StagingOnly,
-    ] {
-        node.transition_cell_state(hop, CellTransitionCause::Operator, HeadGeneration::FIRST)
-            .expect("each hop is an admitted edge");
-        if hop == target {
-            return;
-        }
+    node.bring_into_service(HeadGeneration::FIRST)
+        .expect("a freshly initialised cell comes into service");
+    if target != CellState::Serving {
+        node.transition_cell_state(target, CellTransitionCause::Operator, HeadGeneration::FIRST)
+            .expect("the operator edge into the target state is admitted");
     }
-    panic!("target {target} was not on the walked path");
+    assert_eq!(node.cell_state(), target);
+}
+
+/// Offer arbitrary bytes to the production loopback receive path.
+///
+/// Exists so the ORDER of the two write-side guards can be observed. A single
+/// well-formed push cannot distinguish "the state gate runs before the parser"
+/// from "the state gate runs after it", because a valid pack parses either
+/// way. Malformed bytes make the two orders produce different refusals.
+fn push_raw(
+    node: &OneNode,
+    input: &[u8],
+) -> Result<fgit_admission::AdmissionResult, NodeReceiveTransportRefusal> {
+    let materialization_request = node.request_context();
+    let materialized = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&materialization_request))
+        .expect("genesis state materializes");
+    let request = node.request_context();
+    let mut live = || true;
+
+    node.runtime()
+        .block_on(node.receive_loopback_pack_durable_in(
+            &request,
+            &authenticated_session(),
+            &materialized,
+            receive_context(),
+            input,
+            ParseLimits::default(),
+            AdmissionLimits::default(),
+            &mut live,
+        ))
 }
 
 /// Push one blob-bearing pack through the production loopback receive path.
@@ -226,12 +263,7 @@ fn a_staging_only_cell_refuses_publication_and_a_serving_cell_does_not() {
     // THE PERMITTED TWIN: same bytes, same session, a Serving cell.
     let serving_scratch = ScratchDirectory::new();
     let mut serving = node(serving_scratch.path().join("node"));
-    for hop in [CellState::VerifiedReadOnly, CellState::Serving] {
-        serving
-            .transition_cell_state(hop, CellTransitionCause::Operator, HeadGeneration::FIRST)
-            .expect("each hop is an admitted edge");
-    }
-    assert_eq!(serving.cell_state(), CellState::Serving);
+    walk_to(&mut serving, CellState::Serving);
     push_blob(&serving, blob).expect("a serving cell publishes the same pack");
 }
 
@@ -268,4 +300,257 @@ fn healing_a_staging_only_cell_does_not_silently_publish_what_it_held() {
     // refusal is what makes the answer unambiguous: the staged work is neither
     // auto-published on heal nor poisoned against a retry.
     push_blob(&cell, blob).expect("the re-offered push publishes once the cell serves");
+}
+
+#[test]
+fn a_cell_nobody_brought_into_service_refuses_receive_intake() {
+    // Option (A). The cell lifecycle here is operator-driven on purpose:
+    // `OneNode::init` and `open_existing` leave a cell in `Bootstrapping`, and
+    // nothing in the library moves it. A node nobody put into service is
+    // therefore not a node with a bug — it is a node that has not been asked to
+    // carry traffic, and it must say so rather than take a push.
+    let scratch = ScratchDirectory::new();
+    let bootstrapping = node(scratch.path().join("node"));
+    assert_eq!(bootstrapping.cell_state(), CellState::Bootstrapping);
+
+    let blob = b"offered to a cell nobody started\n";
+    let refusal = push_blob(&bootstrapping, blob)
+        .expect_err("a cell that admits no staging must not take receive work in");
+
+    // BY VARIANT, and by the variant that means "before intake". An `is_err()`
+    // here is satisfied by `StagedWithoutPublication` — the §22.6 response that
+    // quarantines and validates first — which is the opposite of what this gate
+    // claims to do.
+    assert!(
+        matches!(
+            refusal,
+            NodeReceiveTransportRefusal::CellState(CellRefusal::StateAdmitsNoStaging {
+                state: CellState::Bootstrapping
+            })
+        ),
+        "expected a pre-intake state refusal naming Bootstrapping, got {refusal:?}"
+    );
+
+    // THE PERMITTED TWIN the ruling names explicitly: the same bytes, the same
+    // session, a cell walked Bootstrapping -> VerifiedReadOnly -> Serving. This
+    // is what stops the refusal above from being satisfied by a receive path
+    // that is simply broken.
+    let serving_scratch = ScratchDirectory::new();
+    let mut serving = node(serving_scratch.path().join("node"));
+    walk_to(&mut serving, CellState::Serving);
+    push_blob(&serving, blob).expect("a cell brought into service publishes the same pack");
+}
+
+#[test]
+fn a_verified_read_only_cell_refuses_receive_intake() {
+    // §22.6's read-only isolation response, and the case that says what the
+    // gate is actually keyed on. `VerifiedReadOnly` is not a start-up state:
+    // this cell IS in service and IS serving verified reads. It still refuses
+    // receive work, because the predicate is `admits_staging`, not "has the
+    // process finished starting". Without this case the gate above would read
+    // as "a node that has not booted yet", which is a different and much weaker
+    // property.
+    let scratch = ScratchDirectory::new();
+    let mut read_only = node(scratch.path().join("node"));
+    read_only
+        .transition_cell_state(
+            CellState::VerifiedReadOnly,
+            CellTransitionCause::AuthorityObservation,
+            HeadGeneration::FIRST,
+        )
+        .expect("Bootstrapping -> VerifiedReadOnly is an admitted edge");
+    assert_eq!(read_only.cell_state(), CellState::VerifiedReadOnly);
+
+    let refusal = push_blob(&read_only, b"offered to a read-only cell\n")
+        .expect_err("a read-only cell takes no receive work in");
+    assert!(
+        matches!(
+            refusal,
+            NodeReceiveTransportRefusal::CellState(CellRefusal::StateAdmitsNoStaging {
+                state: CellState::VerifiedReadOnly
+            })
+        ),
+        "expected a pre-intake state refusal naming VerifiedReadOnly, got {refusal:?}"
+    );
+
+    // The permitted twin at the exact boundary: ONE further admitted hop, and
+    // the identical offer is taken.
+    read_only
+        .transition_cell_state(
+            CellState::Serving,
+            CellTransitionCause::AuthorityObservation,
+            HeadGeneration::FIRST,
+        )
+        .expect("VerifiedReadOnly -> Serving is an admitted edge");
+    push_blob(&read_only, b"offered to a read-only cell\n")
+        .expect("one hop later the same offer is taken");
+}
+
+#[test]
+fn the_cell_state_gate_runs_before_a_single_byte_is_parsed() {
+    // "Typed refusal BEFORE intake" is an ORDERING claim, and a single-fault
+    // probe cannot see an ordering: a valid pack parses whether the state check
+    // runs first or last, so every test above would pass under either order.
+    //
+    // Two faults that overlap make it observable. These bytes are not a
+    // receive request at all. If the state gate runs first, an unserving cell
+    // refuses on its STATE and never looks at them; if it ran after the parser,
+    // the parser would speak first and the refusal would name the garbage.
+    let malformed = b"this is not a pkt-line receive request at all";
+
+    let scratch = ScratchDirectory::new();
+    let bootstrapping = node(scratch.path().join("node"));
+    let state_first =
+        push_raw(&bootstrapping, malformed).expect_err("an unserving cell refuses the offer");
+    assert!(
+        matches!(
+            state_first,
+            NodeReceiveTransportRefusal::CellState(CellRefusal::StateAdmitsNoStaging {
+                state: CellState::Bootstrapping
+            })
+        ),
+        "the state gate must answer before the parser sees the bytes, got {state_first:?}"
+    );
+
+    // THE SAME BYTES at a serving cell get PAST the state gate and are refused
+    // downstream instead. That is what makes the assertion above a statement
+    // about ordering rather than about the input: identical input, one
+    // difference in cell state, two refusals from two different stages.
+    //
+    // Asserted as "not the state refusal" rather than as a specific parse
+    // error, deliberately. Both the quarantine validator and the pack parser
+    // map into `Admission`, and which of the two speaks first is not a property
+    // this test establishes -- claiming "the parser refused it" would be
+    // reporting a stage I have not distinguished.
+    let serving_scratch = ScratchDirectory::new();
+    let mut serving = node(serving_scratch.path().join("node"));
+    walk_to(&mut serving, CellState::Serving);
+    let downstream =
+        push_raw(&serving, malformed).expect_err("malformed bytes are refused somewhere");
+    assert!(
+        matches!(downstream, NodeReceiveTransportRefusal::Admission(_)),
+        "a serving cell must pass the state gate and refuse downstream of it, got {downstream:?}"
+    );
+}
+
+#[test]
+fn authentication_is_answered_ahead_of_the_cell_state_gate() {
+    // The other overlapping-fault pair, and the reason the anonymous cases in
+    // `production_receive_handoff.rs` still hold: authentication and the state
+    // gate are BOTH violated here — an anonymous session against a cell that
+    // admits no staging — and exactly one of them may be named.
+    //
+    // Authentication wins, and that is the documented order: the auth check
+    // retains nothing, so refusing there tells an anonymous caller the truth
+    // about its session rather than leaking which state this cell happens to be
+    // in. A cell's readiness is not something an unauthenticated caller has
+    // asked a question worth answering about.
+    let scratch = ScratchDirectory::new();
+    let bootstrapping = node(scratch.path().join("node"));
+    let materialization_request = bootstrapping.request_context();
+    let materialized = bootstrapping
+        .runtime()
+        .block_on(bootstrapping.materialize_admission_in(&materialization_request))
+        .expect("genesis state materializes");
+    let request = bootstrapping.request_context();
+    let mut live = || true;
+
+    let refusal = bootstrapping
+        .runtime()
+        .block_on(bootstrapping.receive_loopback_pack_durable_in(
+            &request,
+            &LoopbackReceiveSession::anonymous(),
+            &materialized,
+            receive_context(),
+            b"never parsed, and never state-checked either",
+            ParseLimits::default(),
+            AdmissionLimits::default(),
+            &mut live,
+        ))
+        .expect_err("an anonymous session is refused");
+
+    assert!(
+        matches!(refusal, NodeReceiveTransportRefusal::Unauthenticated),
+        "authentication must be answered before the cell-state gate, got {refusal:?}"
+    );
+
+    // The complementary case, which is what makes the assertion above a
+    // statement about ORDER rather than about anonymity. Same cell, same
+    // unserving state, same unparseable bytes — authenticate the session and
+    // the SECOND guard becomes the one that answers.
+    let state_refusal = push_raw(
+        &bootstrapping,
+        b"never parsed, and never state-checked either",
+    )
+    .expect_err("an authenticated offer still meets the state gate");
+    assert!(
+        matches!(
+            state_refusal,
+            NodeReceiveTransportRefusal::CellState(CellRefusal::StateAdmitsNoStaging {
+                state: CellState::Bootstrapping
+            })
+        ),
+        "with authentication satisfied the state gate must answer, got {state_refusal:?}"
+    );
+}
+
+#[test]
+fn bringing_a_cell_into_service_audits_two_hops_under_an_honest_cause() {
+    // The audit is the deliverable here, not the state. §37.3 requires
+    // transitions to be audited AND to enforce capability changes, and a
+    // bring-up that recorded `Operator` would put an instruction in the record
+    // that nobody ever gave — which is exactly what the ruling forbids.
+    let scratch = ScratchDirectory::new();
+    let mut cell = node(scratch.path().join("node"));
+    assert!(
+        cell.readiness_audit().is_empty(),
+        "a freshly initialised cell has made no transitions"
+    );
+
+    cell.bring_into_service(HeadGeneration::FIRST)
+        .expect("a Bootstrapping cell comes into service");
+
+    let audit = cell.readiness_audit();
+    assert_eq!(
+        audit.len(),
+        2,
+        "Bootstrapping's only forward edge is VerifiedReadOnly, so reaching Serving is two \
+         audited decisions and not one"
+    );
+    assert_eq!(audit[0].from(), CellState::Bootstrapping);
+    assert_eq!(audit[0].to(), CellState::VerifiedReadOnly);
+    assert_eq!(audit[1].from(), CellState::VerifiedReadOnly);
+    assert_eq!(audit[1].to(), CellState::Serving);
+    for entry in audit {
+        assert_eq!(
+            entry.cause(),
+            CellTransitionCause::ServiceBringUp,
+            "a process that started itself did not receive an operator instruction"
+        );
+        assert_ne!(entry.cause(), CellTransitionCause::Operator);
+        assert_eq!(entry.at_generation(), HeadGeneration::FIRST);
+    }
+
+    // STRICT, NOT IDEMPOTENT, and this is the half that has teeth. A cell in
+    // some other state was moved there by somebody; a bring-up that quietly
+    // succeeded could walk a Draining cell back into service and the audit
+    // would show a decision that contradicts the one before it.
+    let repeated = cell
+        .bring_into_service(HeadGeneration::FIRST)
+        .expect_err("a cell already in service is not brought into service again");
+    assert!(
+        matches!(
+            repeated,
+            CellRefusal::IllegalTransition {
+                from: CellState::Serving,
+                to: CellState::VerifiedReadOnly
+            }
+        ),
+        "the refusal must name the state it found, got {repeated:?}"
+    );
+    assert_eq!(
+        cell.readiness_audit().len(),
+        2,
+        "a refused bring-up records nothing"
+    );
 }

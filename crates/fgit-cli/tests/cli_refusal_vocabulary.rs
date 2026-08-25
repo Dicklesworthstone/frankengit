@@ -77,8 +77,9 @@ use std::mem::variant_count;
 
 use fgit_cli::{CliOutcome, CliRefusal, run};
 use fgit_node::{
-    AdmissionMaterializationRefusal, NodeGitDaemonServeRefusal, NodePackMaterializationRefusal,
-    NodeRefusal, NodeSourceImportRefusal,
+    AdmissionMaterializationRefusal, GitDaemonServerLimitRefusal, NodeGitDaemonServeRefusal,
+    NodeGitDaemonServerRefusal, NodePackMaterializationRefusal, NodeRefusal,
+    NodeSourceImportRefusal,
 };
 use fgit_types::RefusalCode;
 
@@ -149,7 +150,7 @@ fn an_unknown_command_or_wrong_arity_is_a_usage_refusal() {
         &["fetch", "/unused", TENANT, REPOSITORY],
         &["init"],
         &["init", "/unused", TENANT],
-        &["init", "/unused", TENANT, REPOSITORY, "extra"],
+        &["init", "/unused", TENANT, REPOSITORY, "sha1", "extra"],
         &["export", "/unused", TENANT, REPOSITORY],
     ];
     for arguments in cases {
@@ -481,6 +482,21 @@ fn every_cli_refusal_variant() -> Vec<(&'static str, CliRefusal, Cause)> {
             "Serve",
             CliRefusal::Serve(NodeGitDaemonServeRefusal::RepositoryPathMismatch),
             Cause::CarriesSource,
+        ),
+        (
+            "ServeServer",
+            CliRefusal::ServeServer(NodeGitDaemonServerRefusal::Limits(
+                GitDaemonServerLimitRefusal::ZeroSessionLimit,
+            )),
+            Cause::CarriesSource,
+        ),
+        (
+            "InvalidServeLimit",
+            CliRefusal::InvalidServeLimit {
+                field: "--max-sessions",
+                value: "0".to_owned(),
+            },
+            Cause::Causeless,
         ),
         (
             "ExportMaterialization",

@@ -10,7 +10,12 @@ use fgit_admission::{
     permitted_object_closure_root, validate_receive,
 };
 use fgit_authority::IdempotencyKey;
-use fgit_node::{LoopbackReceiveSession, NodeConfig, NodeReceiveTransportRefusal, OneNode};
+use fgit_node::{
+    LoopbackReceiveSession, NodeConfig, NodeReceiveTransportRefusal, NodeSourceImportRefusal,
+    OneNode,
+};
+use fgit_types::cell::{CellRefusal, CellState};
+use fgit_types::numeric::HeadGeneration;
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefusalCode, RepositoryId, TenantId,
 };
@@ -52,6 +57,21 @@ fn node(root: PathBuf) -> OneNode {
     ))
     .expect("node initializes")
     .0
+}
+
+/// A node brought into service, which every write-side path now requires.
+///
+/// `frankengit-fg036b`. The cell lifecycle is operator-driven: `init` and
+/// `open_existing` leave the cell in `CellState::Bootstrapping`, and both the
+/// receive transport and the source import refuse there. A caller that means to
+/// carry traffic performs the transition itself, and `fg import` does exactly
+/// this at `fgit-cli/src/lib.rs`.
+fn serving_node(root: PathBuf) -> OneNode {
+    let mut node = node(root);
+    node.bring_into_service(HeadGeneration::FIRST)
+        .expect("a freshly initialised cell comes into service");
+    assert_eq!(node.cell_state(), CellState::Serving);
+    node
 }
 
 fn decode_hex(text: &str) -> Vec<u8> {
@@ -154,7 +174,7 @@ fn validated_delete(old: AnyGitOid) -> fgit_admission::ValidatedReceive {
 #[test]
 fn authenticated_loopback_session_admits_a_validated_push() {
     let scratch = ScratchDirectory::new();
-    let node = node(scratch.path().join("node"));
+    let node = serving_node(scratch.path().join("node"));
     let source = scratch.path().join("source");
     let old = write_loose_blob_repository(&source);
 
@@ -200,6 +220,8 @@ fn authenticated_loopback_session_admits_a_validated_push() {
 
 #[test]
 fn anonymous_loopback_session_is_refused_before_admission() {
+    // DELIBERATELY NOT `serving_node`: this cell violates the state gate too,
+    // so naming `Unauthenticated` is a claim about which guard runs first.
     let scratch = ScratchDirectory::new();
     let node = node(scratch.path().join("node"));
     let old = GitOid::from_hex(
@@ -222,4 +244,72 @@ fn anonymous_loopback_session_is_refused_before_admission() {
         Err(NodeReceiveTransportRefusal::Unauthenticated)
     ));
     node.shutdown().expect("node closes cleanly");
+}
+
+#[test]
+fn a_cell_nobody_brought_into_service_refuses_a_source_import() {
+    // `frankengit-fg036b`, `GoldLotus`'s option (A). The workspace measurement
+    // for this ruling found that the receive transport has ZERO production
+    // callers and that `fgit-cli`'s `run_import` is the ONE production site at
+    // which a `OneNode` takes external work in and publishes it. Gating only
+    // the receive path would therefore have satisfied the ruling's letter with
+    // nothing at stake, so the source import asks the same question — and this
+    // is the case that holds it to it.
+    let scratch = ScratchDirectory::new();
+    let bootstrapping = node(scratch.path().join("node"));
+    let source = scratch.path().join("source");
+    write_loose_blob_repository(&source);
+    assert_eq!(bootstrapping.cell_state(), CellState::Bootstrapping);
+
+    let request = bootstrapping.request_context();
+    let refusal = bootstrapping
+        .runtime()
+        .block_on(bootstrapping.import_loose_git_directory_durable_in(
+            &request,
+            &source,
+            PrincipalId::from_bytes([0x01; 16]),
+            b"fg036b-import-into-an-unserving-cell",
+        ))
+        .expect_err("a cell nobody brought into service publishes nothing");
+
+    // BY VARIANT. `is_err()` here is satisfied by a staging failure, a
+    // validation refusal, or an admission fault — none of which is the claim.
+    // The claim is that the cell's STATE was consulted, and consulted before
+    // the local source was read at all.
+    assert!(
+        matches!(
+            refusal,
+            NodeSourceImportRefusal::CellState(CellRefusal::StateAdmitsNoStaging {
+                state: CellState::Bootstrapping
+            })
+        ),
+        "expected a pre-intake state refusal naming Bootstrapping, got {refusal:?}"
+    );
+    bootstrapping.shutdown().expect("node closes cleanly");
+
+    // THE PERMITTED TWIN: the identical source, the identical principal and
+    // retry key, at a cell walked Bootstrapping -> VerifiedReadOnly -> Serving.
+    let served_scratch = ScratchDirectory::new();
+    let serving = serving_node(served_scratch.path().join("node"));
+    let served_source = served_scratch.path().join("source");
+    write_loose_blob_repository(&served_source);
+    let served_request = serving.request_context();
+    let admission = serving
+        .runtime()
+        .block_on(serving.import_loose_git_directory_durable_in(
+            &served_request,
+            &served_source,
+            PrincipalId::from_bytes([0x01; 16]),
+            b"fg036b-import-into-an-unserving-cell",
+        ))
+        .expect("a cell in service imports the same source");
+    assert_eq!(admission.commands.len(), 1);
+    assert!(
+        matches!(
+            admission.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ),
+        "the permitted twin must actually publish, not merely avoid the state refusal"
+    );
+    serving.shutdown().expect("node closes cleanly");
 }

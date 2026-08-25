@@ -31,18 +31,14 @@ fn main() -> ExitCode {
         }
         Ok(fgit_cli::CliOutcome::Served {
             listen_address,
-            session,
+            service,
         }) => {
-            match session {
-                fgit_node::GitDaemonSessionOutcome::EmptyRepository(_) => {
-                    println!(
-                        "served an authenticated empty repository session on {listen_address}"
-                    );
-                }
-                fgit_node::GitDaemonSessionOutcome::Pack(_) => {
-                    println!("served an authenticated pack session on {listen_address}");
-                }
-            }
+            println!(
+                "served bounded git-daemon run on {listen_address}: accepted={}, completed={}, refused={}",
+                service.accepted_sessions(),
+                service.completed_sessions(),
+                service.refused_sessions(),
+            );
             ExitCode::SUCCESS
         }
         Ok(fgit_cli::CliOutcome::Exported { destination, bytes }) => {
