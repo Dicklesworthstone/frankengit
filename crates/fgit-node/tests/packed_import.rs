@@ -10,7 +10,8 @@ use fgit_node::{LooseGitImportRefusal, NodeConfig, NodeSourceImportRefusal, OneN
 use fgit_pack::PackError;
 use fgit_types::numeric::HeadGeneration;
 use fgit_types::{
-    DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefName, RepositoryId, TenantId,
+    DecisionOutcome, GitHashAlgorithm, GitOid, MAX_REF_NAME_LEN, PrincipalId, RefName,
+    RepositoryId, TenantId,
 };
 
 static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -610,6 +611,76 @@ fn selected_pack_input_bytes_are_bounded_before_reading_the_file() {
                     observed: 67_108_865,
                     ..
                 }
+            )
+        },
+    );
+}
+
+#[test]
+fn head_input_bytes_are_bounded_without_advancing_authority() {
+    assert_source_refusal(
+        |repository| {
+            fs::write(repository.root.join("HEAD"), vec![b'x'; 1_031])
+                .expect("N+1 HEAD fixture writes");
+        },
+        |refusal| {
+            matches!(
+                refusal,
+                LooseGitImportRefusal::RefInputBytesExceeded {
+                    limit: 1_030,
+                    observed: 1_031,
+                    ..
+                }
+            )
+        },
+    );
+}
+
+#[test]
+fn loose_ref_input_bytes_are_bounded_without_advancing_authority() {
+    assert_source_refusal(
+        |repository| {
+            fs::write(repository.root.join("refs/heads/main"), vec![b'1'; 42])
+                .expect("N+1 SHA-1 loose-ref fixture writes");
+        },
+        |refusal| {
+            matches!(
+                refusal,
+                LooseGitImportRefusal::RefInputBytesExceeded {
+                    limit: 41,
+                    observed: 42,
+                    ..
+                }
+            )
+        },
+    );
+}
+
+#[test]
+fn packed_refs_input_bytes_are_bounded_by_the_command_profile() {
+    const MAX_SOURCE_COMMANDS: usize = 64;
+    const SHA1_HEX_BYTES: usize = 40;
+    const PACKED_REFS_HEADER_BYTES: usize = 1_024;
+    let direct_line_bytes = SHA1_HEX_BYTES + 1 + MAX_REF_NAME_LEN + 2;
+    let peeled_line_bytes = SHA1_HEX_BYTES + 3;
+    let limit =
+        MAX_SOURCE_COMMANDS * (direct_line_bytes + peeled_line_bytes) + PACKED_REFS_HEADER_BYTES;
+    let limit_u64 = u64::try_from(limit).expect("packed-refs fixture limit fits u64");
+    let excess_u64 = u64::try_from(limit + 1).expect("packed-refs N+1 fixture size fits u64");
+
+    assert_source_refusal(
+        |repository| {
+            fs::write(repository.root.join("packed-refs"), vec![b'#'; limit + 1])
+                .expect("N+1 packed-refs fixture writes");
+        },
+        |refusal| {
+            matches!(
+                refusal,
+                LooseGitImportRefusal::RefInputBytesExceeded {
+                    limit: observed_limit,
+                    observed,
+                    ..
+                } if *observed_limit == limit_u64 && *observed == excess_u64
             )
         },
     );

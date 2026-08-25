@@ -14,7 +14,7 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use fgit_admission::{CanonicalRefState, PermittedObjectClosure};
@@ -26,7 +26,7 @@ use fgit_pack::{
     CachedResolver, IdxV2, NativeChecksumVerifier, PackError, PackLimits, ResolutionBudget,
     read_verified_pack, validate_idx_entry_crc, validate_idx_pack_count, verify_native_object,
 };
-use fgit_types::{GitHashAlgorithm, GitOid, RefName, TypeRefusal};
+use fgit_types::{GitHashAlgorithm, GitOid, MAX_REF_NAME_LEN, RefName, TypeRefusal};
 
 use super::{NodeRefusal, OneNode, crypto_object_kind};
 
@@ -39,6 +39,7 @@ const MAX_IMPORT_PACKS: usize = 128;
 const MAX_IMPORT_PACK_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMPORT_TOTAL_PACK_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_IMPORT_TOTAL_INDEX_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IMPORT_PACKED_REFS_HEADER_BYTES: usize = 1024;
 const MAX_IMPORT_REF_DEPTH: usize = 32;
 const MAX_IMPORT_DIRECTORY_ENTRIES: usize = 1_000_000;
 
@@ -82,7 +83,7 @@ impl StagedLooseGitImport {
     }
 }
 
-/// Refusal while reading a bounded ordinary loose-object Git directory.
+/// Refusal while reading a bounded ordinary local Git directory.
 #[derive(Debug)]
 pub enum LooseGitImportRefusal {
     /// The source path or one required child could not be inspected or read.
@@ -125,6 +126,16 @@ pub enum LooseGitImportRefusal {
         /// Selected byte ceiling.
         limit: u64,
         /// Observed or attempted bytes.
+        observed: u64,
+    },
+    /// `HEAD`, one loose ref, or `packed-refs` exceeded its derived byte
+    /// envelope before the importer parsed or retained the complete file.
+    RefInputBytesExceeded {
+        /// Exact ref-control file whose envelope was exceeded.
+        path: Box<PathBuf>,
+        /// Derived byte ceiling for this file and import profile.
+        limit: u64,
+        /// Observed bytes, or the first byte beyond `limit` for a growing file.
         observed: u64,
     },
     /// A selected idx/pack pair failed structural, checksum, association,
@@ -258,6 +269,15 @@ impl Display for LooseGitImportRefusal {
                 "local Git import input {} is {observed} bytes, exceeding {limit}",
                 path.display()
             ),
+            Self::RefInputBytesExceeded {
+                path,
+                limit,
+                observed,
+            } => write!(
+                formatter,
+                "local Git ref input {} is {observed} bytes, exceeding {limit}",
+                path.display()
+            ),
             Self::PackedObject { path, source } => write!(
                 formatter,
                 "local Git packed object source {} refused: {source}",
@@ -381,6 +401,7 @@ impl Error for LooseGitImportRefusal {
             | Self::PackDirectoryEntryUnsupported(_)
             | Self::PackFileLimitExceeded { .. }
             | Self::PackInputBytesExceeded { .. }
+            | Self::RefInputBytesExceeded { .. }
             | Self::ObjectAlternatesUnsupported(_)
             | Self::SymbolicRefUnsupported(_)
             | Self::HeadMissing(_)
@@ -665,8 +686,13 @@ impl PackedObjectSources {
                 }
                 (None, None) => unreachable!("a pack pair is created only for a pack or index"),
             };
-            let index_bytes =
-                read_regular_bounded(&index_path, "read pack index", MAX_IMPORT_PACK_BYTES)?;
+            let index_bytes = read_regular_bounded(
+                &index_path,
+                "read pack index",
+                "regular pack index file",
+                MAX_IMPORT_PACK_BYTES,
+                BoundedInputClass::PackOrIndex,
+            )?;
             total_index_bytes = total_index_bytes
                 .checked_add(u64::try_from(index_bytes.len()).unwrap_or(u64::MAX))
                 .unwrap_or(u64::MAX);
@@ -739,8 +765,13 @@ impl PackedObjectSources {
         }
         let source = &self.sources[source_index];
         let pack_path = source.pack_path.clone();
-        let pack_bytes =
-            read_regular_bounded(&pack_path, "read packed object file", MAX_IMPORT_PACK_BYTES)?;
+        let pack_bytes = read_regular_bounded(
+            &pack_path,
+            "read packed object file",
+            "regular packed object file",
+            MAX_IMPORT_PACK_BYTES,
+            BoundedInputClass::PackOrIndex,
+        )?;
         let next_pack_bytes = self
             .loaded_pack_bytes
             .checked_add(u64::try_from(pack_bytes.len()).unwrap_or(u64::MAX))
@@ -794,8 +825,8 @@ impl PackedObjectSources {
                 return Err(pack_refusal(
                     source.index_path.clone(),
                     PackError::ObjectCountMismatch {
-                        declared: source.index.entries().len() as u32,
-                        actual: quarantined.entries().len() as u32,
+                        declared: u32::try_from(source.index.entries().len()).unwrap_or(u32::MAX),
+                        actual: u32::try_from(quarantined.entries().len()).unwrap_or(u32::MAX),
                     },
                 ));
             };
@@ -877,10 +908,11 @@ impl PackedObjectSources {
 
 fn import_pack_limits(max_object_bytes: u64) -> PackLimits {
     PackLimits {
-        max_input_bytes: MAX_IMPORT_PACK_BYTES as usize,
+        max_input_bytes: usize::try_from(MAX_IMPORT_PACK_BYTES).unwrap_or(usize::MAX),
         max_object_bytes: usize::try_from(max_object_bytes).unwrap_or(usize::MAX),
-        max_total_expanded_bytes: MAX_IMPORT_TOTAL_OBJECT_BYTES as usize,
-        max_cached_bytes: MAX_IMPORT_TOTAL_OBJECT_BYTES as usize,
+        max_total_expanded_bytes: usize::try_from(MAX_IMPORT_TOTAL_OBJECT_BYTES)
+            .unwrap_or(usize::MAX),
+        max_cached_bytes: usize::try_from(MAX_IMPORT_TOTAL_OBJECT_BYTES).unwrap_or(usize::MAX),
         ..PackLimits::default()
     }
 }
@@ -892,10 +924,39 @@ fn is_ignored_pack_accelerator(path: &Path) -> bool {
     )
 }
 
+#[derive(Clone, Copy)]
+enum BoundedInputClass {
+    PackOrIndex,
+    RefControl,
+    CompressedLooseObject,
+}
+
+impl BoundedInputClass {
+    fn limit_refusal(self, path: &Path, limit: u64, observed: u64) -> LooseGitImportRefusal {
+        match self {
+            Self::PackOrIndex => LooseGitImportRefusal::PackInputBytesExceeded {
+                path: Box::new(path.to_path_buf()),
+                limit,
+                observed,
+            },
+            Self::RefControl => LooseGitImportRefusal::RefInputBytesExceeded {
+                path: Box::new(path.to_path_buf()),
+                limit,
+                observed,
+            },
+            Self::CompressedLooseObject => {
+                LooseGitImportRefusal::CompressedObjectBytesExceeded { limit, observed }
+            }
+        }
+    }
+}
+
 fn read_regular_bounded(
     path: &Path,
     operation: &'static str,
+    expected: &'static str,
     limit: u64,
+    class: BoundedInputClass,
 ) -> Result<Vec<u8>, LooseGitImportRefusal> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
@@ -906,26 +967,45 @@ fn read_regular_bounded(
     }
     if !metadata.is_file() {
         return Err(LooseGitImportRefusal::PathKind {
-            expected: "regular pack or index file",
+            expected,
             path: Box::new(path.to_path_buf()),
         });
     }
     if metadata.len() > limit {
-        return Err(LooseGitImportRefusal::PackInputBytesExceeded {
+        return Err(class.limit_refusal(path, limit, metadata.len()));
+    }
+
+    // The path can grow or be replaced after the first metadata check. Read
+    // from one opened handle and stop after the first byte beyond the selected
+    // envelope, so growth beyond the envelope causes a typed refusal rather
+    // than an unbounded `fs::read` allocation.
+    let file =
+        fs::File::open(path).map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
+    if !opened_metadata.is_file() {
+        return Err(LooseGitImportRefusal::PathKind {
+            expected,
             path: Box::new(path.to_path_buf()),
-            limit,
-            observed: metadata.len(),
         });
     }
-    let bytes = fs::read(path).map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
+    if opened_metadata.len() > limit {
+        return Err(class.limit_refusal(path, limit, opened_metadata.len()));
+    }
+    let bytes = read_through_first_excess_byte(file, limit)
+        .map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
     let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     if observed > limit {
-        return Err(LooseGitImportRefusal::PackInputBytesExceeded {
-            path: Box::new(path.to_path_buf()),
-            limit,
-            observed,
-        });
+        return Err(class.limit_refusal(path, limit, observed));
     }
+    Ok(bytes)
+}
+
+fn read_through_first_excess_byte(reader: impl Read, limit: u64) -> Result<Vec<u8>, io::Error> {
+    let mut bounded = reader.take(limit.saturating_add(1));
+    let mut bytes = Vec::new();
+    bounded.read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
@@ -934,6 +1014,42 @@ fn pack_refusal(path: PathBuf, source: PackError) -> LooseGitImportRefusal {
         path: Box::new(path),
         source: Box::new(source),
     }
+}
+
+fn direct_ref_input_limit(object_format: GitHashAlgorithm) -> u64 {
+    u64::try_from(
+        object_format
+            .digest_len()
+            .saturating_mul(2)
+            .saturating_add(1),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+fn head_input_limit() -> u64 {
+    u64::try_from(
+        b"ref: "
+            .len()
+            .saturating_add(MAX_REF_NAME_LEN)
+            .saturating_add(1),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+fn packed_refs_input_limit(object_format: GitHashAlgorithm, max_refs: usize) -> u64 {
+    let oid_hex_bytes = object_format.digest_len().saturating_mul(2);
+    let direct_line_bytes = oid_hex_bytes
+        .saturating_add(1)
+        .saturating_add(MAX_REF_NAME_LEN)
+        // `str::lines` admits both LF and CRLF, so the input envelope must
+        // retain the larger line ending even though Git normally writes LF.
+        .saturating_add(2);
+    let peeled_line_bytes = oid_hex_bytes.saturating_add(3);
+    let per_ref_bytes = direct_line_bytes.saturating_add(peeled_line_bytes);
+    let total = max_refs
+        .saturating_mul(per_ref_bytes)
+        .saturating_add(MAX_IMPORT_PACKED_REFS_HEADER_BYTES);
+    u64::try_from(total).unwrap_or(u64::MAX)
 }
 
 fn read_direct_refs(
@@ -988,7 +1104,13 @@ fn read_head_target(git_directory: &Path) -> Result<RefName, LooseGitImportRefus
         });
     }
 
-    let bytes = fs::read(&head).map_err(|error| io_refusal("read HEAD", head.clone(), error))?;
+    let bytes = read_regular_bounded(
+        &head,
+        "read HEAD",
+        "HEAD file",
+        head_input_limit(),
+        BoundedInputClass::RefControl,
+    )?;
     let Some(rest) = bytes.strip_prefix(b"ref: ") else {
         return Err(LooseGitImportRefusal::HeadNotSymbolic(Box::new(head)));
     };
@@ -1026,8 +1148,13 @@ fn read_packed_refs(
             path: Box::new(packed),
         });
     }
-    let bytes =
-        fs::read(&packed).map_err(|error| io_refusal("read packed refs", packed.clone(), error))?;
+    let bytes = read_regular_bounded(
+        &packed,
+        "read packed refs",
+        "packed refs file",
+        packed_refs_input_limit(object_format, max_refs),
+        BoundedInputClass::RefControl,
+    )?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| LooseGitImportRefusal::PackedRefContents(Box::new(packed.clone())))?;
     let mut refs = BTreeMap::new();
@@ -1102,8 +1229,13 @@ fn collect_loose_refs(
             });
         }
         let name = ref_name_from_path(root, &path)?;
-        let bytes =
-            fs::read(&path).map_err(|error| io_refusal("read loose ref", path.clone(), error))?;
+        let bytes = read_regular_bounded(
+            &path,
+            "read loose ref",
+            "loose ref file",
+            direct_ref_input_limit(object_format),
+            BoundedInputClass::RefControl,
+        )?;
         let identity = parse_direct_ref(&path, &bytes, object_format)?;
         refs.insert(name, identity);
         if refs.len() > max_refs {
@@ -1203,15 +1335,13 @@ fn try_read_loose_object(
             path: Box::new(path),
         });
     }
-    let compressed_bytes = metadata.len();
-    if compressed_bytes > MAX_IMPORT_COMPRESSED_OBJECT_BYTES {
-        return Err(LooseGitImportRefusal::CompressedObjectBytesExceeded {
-            limit: MAX_IMPORT_COMPRESSED_OBJECT_BYTES,
-            observed: compressed_bytes,
-        });
-    }
-    let compressed =
-        fs::read(&path).map_err(|error| io_refusal("read loose object", path, error))?;
+    let compressed = read_regular_bounded(
+        &path,
+        "read loose object",
+        "loose object file",
+        MAX_IMPORT_COMPRESSED_OBJECT_BYTES,
+        BoundedInputClass::CompressedLooseObject,
+    )?;
     let maximum = usize::try_from(max_object_bytes).unwrap_or(usize::MAX);
     let inflate_limits = InflateLimits {
         max_input_bytes: MAX_IMPORT_COMPRESSED_OBJECT_BYTES_USIZE,
@@ -1382,7 +1512,7 @@ mod tests {
     use fgit_crypto::GitObjectKind;
     use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, TenantId};
 
-    use super::{LooseGitImportRefusal, OneNode};
+    use super::{LooseGitImportRefusal, OneNode, read_through_first_excess_byte};
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -1495,6 +1625,16 @@ mod tests {
             b = (b + a) % 65_521;
         }
         (b << 16) | a
+    }
+
+    #[test]
+    fn bounded_file_reader_consumes_only_the_first_excess_byte() {
+        let mut input = std::io::Cursor::new(b"123456789".to_vec());
+        let observed = read_through_first_excess_byte(&mut input, 4)
+            .expect("the bounded in-memory reader completes");
+
+        assert_eq!(observed, b"12345");
+        assert_eq!(input.position(), 5);
     }
 
     #[test]

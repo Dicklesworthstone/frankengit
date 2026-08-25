@@ -49,13 +49,15 @@ cargo run -p fgit-cli -- doctor ./fgit-data \
 `init` will create or re-authenticate the empty canonical authority head.
 `import` will verify a bounded local object source composed of loose objects and
 checksum-bound idx-v2/pack-v2 pairs, then publish its source refs through the
-sealed admission/RCR/head-CAS path. The pack-import code and its 14-test focused
-integration target are checked in, but the slice will remain batch-pending until
-the node package gate is green; a separate verified-read failure currently keeps
-that wider gate red. `doctor` will authenticate the head and can re-verify one
-explicitly named native object; it will not yet be a complete replay, fabric,
-repair, or causal-diagnosis suite. `export` will write an authority-selected pack
-to a previously absent path.
+sealed admission/RCR/head-CAS path. The pack-import code and its expanded
+17-test focused integration target are checked in. Its original 14 cases passed
+at the initial implementation revision; the fresh resource-bound cases will
+remain in progress until orchestrated batch verification, and a separate
+verified-read failure currently keeps the wider node package gate red. `doctor`
+will authenticate the head and can re-verify one explicitly named native
+object; it will not yet be a complete replay, fabric, repair, or
+causal-diagnosis suite. `export` will write an authority-selected pack to a
+previously absent path.
 
 `serve` will accept a bounded raw git-daemon **upload-pack** service run, drain
 every admitted session, and report accepted/completed/refused counts before it
@@ -102,10 +104,11 @@ most of the product vision remains ahead:
   DEFLATE, pack/delta read and write paths, pkt-line, upload-pack, receive-pack
   parsing, quarantine/admission, authority-selected pack materialization, local
   loose-plus-idx/pack source reconstruction, and raw git-daemon upload-pack
-  composition. The focused pack-import target passes at its implementation
-  revision, while the containing node package gate remains red on a separate
-  verified-read defect. Those parts do not yet amount to a completed Git
-  compatibility matrix.
+  composition. The original 14-case focused pack-import target passed at its
+  implementation revision; its fresh bounded-read expansion will remain
+  unverified until the next orchestrated batch, while the containing node
+  package gate remains red on a separate verified-read defect. Those parts do
+  not yet amount to a completed Git compatibility matrix.
 - Object fabric, ATP-Git, TreeFS, RaptorQ repair, verified-read proofs, forge
   events and merge computation, graph algorithms, agent/evidence protocols,
   hostile-runner policy, recovery, and release attempts have bounded vertical
