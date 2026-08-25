@@ -43,6 +43,8 @@ enum CheckSet {
     LayerReport,
     LedgerPolicy,
     LedgerFsqlitePolicy,
+    LedgerSqlmodelPolicy,
+    LedgerTuiPolicy,
     LedgerConstellation,
     LedgerUnsafe,
 }
@@ -60,11 +62,12 @@ impl CheckSet {
             "claims-status" => Ok(Self::ClaimsStatus),
             "layer-report" => Ok(Self::LayerReport),
             "ledger-policy" => Ok(Self::LedgerPolicy),
-            "ledger-fsqlite-policy" => Ok(Self::LedgerFsqlitePolicy),
+            "ledger-sqlmodel-policy" => Ok(Self::LedgerSqlmodelPolicy),
+            "ledger-tui-policy" => Ok(Self::LedgerTuiPolicy),
             "ledger-constellation" => Ok(Self::LedgerConstellation),
             "ledger-unsafe" => Ok(Self::LedgerUnsafe),
             other => Err(format!(
-                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, crate-graph, claims, claims-status, layer-report, ledger-policy, ledger-fsqlite-policy, ledger-constellation, or ledger-unsafe"
+                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, crate-graph, claims, claims-status, layer-report, ledger-policy, ledger-fsqlite-policy, ledger-sqlmodel-policy, ledger-tui-policy, ledger-constellation, or ledger-unsafe"
             )),
         }
     }
@@ -85,7 +88,8 @@ impl CheckSet {
         matches!(
             self,
             Self::LedgerPolicy
-                | Self::LedgerFsqlitePolicy
+                | Self::LedgerSqlmodelPolicy
+                | Self::LedgerTuiPolicy
                 | Self::LedgerConstellation
                 | Self::LedgerUnsafe
         )
@@ -2817,6 +2821,18 @@ const fn admission_ledger_config(command: CheckSet) -> Option<AdmissionLedgerCon
             decision: "allow_transitive_admitted_fsqlite",
             owner: "storage",
         }),
+        CheckSet::LedgerSqlmodelPolicy => Some(AdmissionLedgerConfig {
+            root_package: "sqlmodel-frankensqlite",
+            root_version: "0.4.1",
+            decision: "allow_transitive_admitted_sqlmodel",
+            owner: "projection",
+        }),
+        CheckSet::LedgerTuiPolicy => Some(AdmissionLedgerConfig {
+            root_package: "ftui-runtime",
+            root_version: "0.6.0",
+            decision: "allow_transitive_admitted_tui",
+            owner: "tui",
+        }),
         _ => None,
     }
 }
@@ -5189,9 +5205,17 @@ fn check_forbidden_constellation_surfaces(
 
 /// FrankenSQLite surface markers that ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md
 /// §3.2 keeps off unless a named consumer proves marginal need: the extension
-/// set, session support, and the Linux io_uring profile. Matched as exact
-/// resolved feature names against every `fsqlite*` package closure.
-const FSQLITE_CALLER_PROFILE_EXCLUSIONS: [&str; 9] = [
+/// set and session support. Matched as exact resolved feature names against
+/// every `fsqlite*` package closure.
+///
+/// `linux-asupersync-uring` is deliberately NOT in this list. §3.2 classifies
+/// io_uring as "a target-specific profile, not an unconditional semantic
+/// dependency", and upstream `fsqlite-vfs` 0.3.x makes `native` imply it
+/// unconditionally, so the admitted authority-adapter closure (`fsqlite` with
+/// `async-api,native`) already resolves it in production. Refusing the
+/// projection substrate for that same closure would prove too much while the
+/// semantic surfaces below still catch every real defaults-widening.
+const FSQLITE_CALLER_PROFILE_EXCLUSIONS: [&str; 8] = [
     "extensions",
     "json",
     "fts5",
@@ -5199,20 +5223,21 @@ const FSQLITE_CALLER_PROFILE_EXCLUSIONS: [&str; 9] = [
     "icu",
     "misc",
     "session",
-    "linux-asupersync-uring",
     "wasm",
 ];
 
 /// The sqlmodel projection substrate may enter only alongside the minimal
-/// FrankenSQLite caller profile. The published `sqlmodel-frankensqlite` 0.4.x
-/// requests the fsqlite family WITHOUT `default-features = false`, so wiring
-/// it today would silently widen every workspace consumer's resolved fsqlite
+/// FrankenSQLite caller profile. The published `sqlmodel-frankensqlite` up to
+/// 0.4.0 requested the fsqlite family WITHOUT `default-features = false`, so
+/// wiring it silently widened every workspace consumer's resolved fsqlite
 /// surface -- including the authority adapter pinned at DEP-176..218 -- to
-/// json/fts5/rtree/icu/misc plus an unconditional io_uring profile. Cargo has
-/// no consumer-side feature downgrade, so this gate turns that widening into a
-/// typed refusal naming the upstream prerequisite instead of unnoticed
-/// evidence drift, and goes quiet on its own the moment upstream publishes
-/// minimal-profile requests; no checker edit ships with the fix.
+/// json/fts5/rtree/icu/misc. Cargo has no consumer-side feature downgrade, so
+/// this gate turns that widening into a typed refusal naming the upstream
+/// prerequisite instead of unnoticed evidence drift, and goes quiet on its own
+/// the moment upstream publishes minimal-profile requests; no checker edit
+/// ships with the fix. (0.4.1 published 2026-08-25 requests the family with
+/// `default-features = false` + `{native, async-api}`; the semantic exclusions
+/// above stay armed against regressions.)
 fn check_sqlmodel_substrate_feature_profile(
     packages: &[LockPackage],
     metadata: &MetadataSnapshot,
@@ -5241,9 +5266,9 @@ fn check_sqlmodel_substrate_feature_profile(
                 report.error(format!(
                     "sqlmodel projection substrate requires the minimal FrankenSQLite caller \
                      profile: `{}` resolved with excluded feature `{feature}`; integration \
-                     profile §3.2 keeps extensions, session, and io_uring off unless a named \
-                     consumer proves need, so upstream must publish sqlmodel-frankensqlite \
-                     requesting the fsqlite family with default-features = false",
+                     profile §3.2 keeps the extension and session surfaces off unless a named \
+                     consumer proves need, so sqlmodel-frankensqlite must request the fsqlite \
+                     family with default-features = false",
                     package.name
                 ));
             }
@@ -6955,10 +6980,11 @@ impl CanonicalBody for EvidenceRecordBody {
         let mut report = Report::new();
         check_sqlmodel_substrate_feature_profile(&packages, &metadata, &mut report);
         assert_error(&report, "`fsqlite` resolved with excluded feature `json`");
-        assert_error(
-            &report,
-            "`fsqlite` resolved with excluded feature `linux-asupersync-uring`",
-        );
+        // §3.2 classifies io_uring as a target-specific profile, not a
+        // semantic surface, and the admitted authority-adapter closure
+        // (`async-api,native`) already resolves it; only semantic widening
+        // refuses.
+        assert_no_error(&report, "excluded feature `linux-asupersync-uring`");
         assert_no_error(&report, "excluded feature `native`");
         assert_no_error(&report, "excluded feature `async-api`");
     }
@@ -6998,6 +7024,31 @@ impl CanonicalBody for EvidenceRecordBody {
         metadata.feature_closures.insert(
             ("fsqlite-types".to_owned(), "0.0.0".to_owned()),
             BTreeSet::from(["native".to_owned()]),
+        );
+        let mut report = Report::new();
+        check_sqlmodel_substrate_feature_profile(&packages, &metadata, &mut report);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+
+    #[test]
+    fn sqlmodel_substrate_vfs_uring_parity_closure_stays_silent() {
+        // The exact closure production already admits: fsqlite-vfs derives
+        // `linux-asupersync-uring` from its own `native` profile (upstream
+        // recursion through 0.3.9), so refusing the substrate for it would
+        // refuse what the authority adapter runs today.
+        let packages = vec![
+            lock_package("sqlmodel-frankensqlite"),
+            lock_package("fsqlite"),
+            lock_package("fsqlite-vfs"),
+        ];
+        let mut metadata = MetadataSnapshot::default();
+        metadata.feature_closures.insert(
+            ("fsqlite".to_owned(), "0.3.7".to_owned()),
+            BTreeSet::from(["async-api".to_owned(), "native".to_owned()]),
+        );
+        metadata.feature_closures.insert(
+            ("fsqlite-vfs".to_owned(), "0.3.7".to_owned()),
+            BTreeSet::from(["native".to_owned(), "linux-asupersync-uring".to_owned()]),
         );
         let mut report = Report::new();
         check_sqlmodel_substrate_feature_profile(&packages, &metadata, &mut report);
@@ -7442,6 +7493,26 @@ impl CanonicalBody for EvidenceRecordBody {
         assert_eq!(config.root_version, "0.3.7");
         assert_eq!(config.decision, "allow_transitive_admitted_fsqlite");
         assert_eq!(config.owner, "storage");
+        assert_ne!(
+            config,
+            admission_ledger_config(CheckSet::LedgerPolicy)
+                .expect("runtime policy generator must have a configuration")
+        );
+    }
+
+    #[test]
+    fn sqlmodel_admission_ledger_configuration_is_exact_and_distinct() {
+        let config = admission_ledger_config(CheckSet::LedgerSqlmodelPolicy)
+            .expect("sqlmodel policy generator must have a configuration");
+        assert_eq!(config.root_package, "sqlmodel-frankensqlite");
+        assert_eq!(config.root_version, "0.4.1");
+        assert_eq!(config.decision, "allow_transitive_admitted_sqlmodel");
+        assert_eq!(config.owner, "projection");
+        assert_ne!(
+            config,
+            admission_ledger_config(CheckSet::LedgerFsqlitePolicy)
+                .expect("storage policy generator must have a configuration")
+        );
         assert_ne!(
             config,
             admission_ledger_config(CheckSet::LedgerPolicy)
