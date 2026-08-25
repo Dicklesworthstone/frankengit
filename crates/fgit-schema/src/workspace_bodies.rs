@@ -279,7 +279,7 @@ fn source_families_in(source: &str, path: &Path) -> Result<BTreeSet<String>, Sch
                 found.trim()
             });
 
-        if expression == "$family" && source.contains("macro_rules! bytes_body") {
+        if expression.contains("$family") && source.contains("macro_rules! bytes_body") {
             continue;
         }
         if let Some(family) = resolve_family(expression, &flat) {
