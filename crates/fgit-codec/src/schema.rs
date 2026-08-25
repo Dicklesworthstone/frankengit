@@ -664,14 +664,24 @@ pub struct RepositoryConfigurationBody {
     /// rather than a built policy because this crate depends only on
     /// `fgit-crypto` and `fgit-types` and cannot name `fgit-wire`'s type.
     ///
-    /// A consumer is *expected* to build the policy by feeding each rule to
-    /// `push_rule`, which validates every pattern and bounds the count against
-    /// `max_ref_prefixes`. As of this commit **no production code does so**: the
-    /// fetch view ignores `AdmissionSnapshot.hidden_refs` entirely and the push
-    /// view takes its policy as a caller argument, so a repository can store
-    /// rules here and still hide nothing. Said plainly rather than left to be
-    /// inferred from the present tense, because a reader who assumes the wiring
-    /// exists will not go looking for it. Tracked on `frankengit-jkbo`.
+    /// A consumer builds the policy by feeding each rule to `push_rule`, which
+    /// validates every pattern and bounds the count against `max_ref_prefixes`.
+    /// The consumers now exist: `fgit-node`'s durable materializer does exactly
+    /// that loop when a head selects this body, and both advertisement views
+    /// read the resulting `AdmissionSnapshot::hidden_refs` — the fetch view
+    /// derives its whole visible set from it, and the push view takes the
+    /// disjunction of it with the caller's policy. An earlier revision of this
+    /// paragraph said no production code did so; that was true when written and
+    /// stopped being true on `frankengit-jkbo`.
+    ///
+    /// What is still true, and is the part worth knowing before storing rules
+    /// here: **no production path stages a schema-major-1 configuration body.**
+    /// `stage_repository_configuration` has only test callers, and
+    /// `OneNode::init` stages the major-2 incarnation carrier, whose 2.1 minor
+    /// selects a policy by `policy_root` into a separate `HiddenRefPolicyBody`.
+    /// So a head that selects *this* body does get these rules honoured, and
+    /// nothing in production creates such a head. This is the legacy carrier;
+    /// `HiddenRefPolicyBody` is the one a repository built today actually uses.
     ///
     /// Order is semantic, so this encodes as a sequence and never as a
     /// canonical set: sorting the rules would silently change which one wins.
