@@ -20,6 +20,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use fgit_crypto::sha256_digest;
 use fgit_types::PrincipalId;
 
+use crate::oauth::base64url_encode_unpadded;
 use crate::revocation::RevocationEvidence;
 use crate::session::AuthenticationStrength;
 
@@ -222,6 +223,22 @@ impl PasskeyCredential {
                 now,
             });
         }
+        // Bind the issued challenge into the signed payload. The signature
+        // covers `auth_data || client_data_hash`, so without these checks a
+        // caller-supplied hash decouples the signed bytes from this
+        // challenge entirely: any captured assertion would replay against
+        // every later challenge for an authenticator whose counter never
+        // advances, which is the modern passkey default. The hash is
+        // recomputed here rather than trusted, and the canonical challenge
+        // token must appear in the signed client data.
+        let computed_hash = sha256_digest(&assertion.client_data_json);
+        if computed_hash != assertion.client_data_hash {
+            return Err(PasskeyRefusal::ClientDataHashMismatch);
+        }
+        let token = challenge.challenge_token();
+        if !contains_subslice(&assertion.client_data_json, token.as_bytes()) {
+            return Err(PasskeyRefusal::ChallengeNotBound);
+        }
         match revocation {
             RevocationEvidence::Revoked => return Err(PasskeyRefusal::Revoked),
             RevocationEvidence::NotChecked => {
@@ -336,6 +353,15 @@ impl PasskeyAssertionChallenge {
     pub fn client_data_hash(client_data_json: &[u8]) -> [u8; 32] {
         sha256_digest(client_data_json)
     }
+
+    /// The canonical token this challenge must contribute to clientDataJSON:
+    /// the unpadded base64url encoding of the challenge bytes. An assertion
+    /// whose signed client data lacks this token proves nothing about this
+    /// challenge, whatever its signature says.
+    #[must_use]
+    pub fn challenge_token(&self) -> String {
+        base64url_encode_unpadded(&self.challenge)
+    }
 }
 
 /// An assertion payload produced by the authenticator during authentication.
@@ -345,6 +371,8 @@ pub struct PasskeyAssertion {
     pub credential_id: PasskeyId,
     /// SHA-256 hash of the clientDataJSON.
     pub client_data_hash: [u8; 32],
+    /// The exact clientDataJSON bytes the hash and signed payload commit to.
+    pub client_data_json: Vec<u8>,
     /// Raw authenticator data bytes.
     pub auth_data: Vec<u8>,
     /// Digital signature over `auth_data || client_data_hash`.
@@ -397,6 +425,11 @@ pub enum PasskeyRefusal {
     },
     /// The cryptographic signature was invalid.
     InvalidSignature,
+    /// The recomputed clientDataJSON digest did not match the asserted hash.
+    ClientDataHashMismatch,
+    /// The issued challenge does not appear in the signed client data, so
+    /// this assertion proves nothing about this challenge.
+    ChallengeNotBound,
 }
 
 impl Display for PasskeyRefusal {
@@ -430,8 +463,22 @@ impl Display for PasskeyRefusal {
             Self::InvalidSignature => {
                 f.write_str("invalid cryptographic signature in passkey assertion")
             }
+            Self::ClientDataHashMismatch => {
+                f.write_str("clientDataJSON digest does not match the asserted hash")
+            }
+            Self::ChallengeNotBound => f.write_str(
+                "issued challenge is absent from the signed client data: possible replay",
+            ),
         }
     }
 }
 
 impl core::error::Error for PasskeyRefusal {}
+
+/// Whether `needle` occurs anywhere in `haystack`, without allocating.
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}

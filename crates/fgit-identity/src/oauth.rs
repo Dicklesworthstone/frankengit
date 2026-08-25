@@ -25,7 +25,7 @@ const BASE64URL_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// Encodes binary digest bytes to base64url without padding.
-fn base64url_encode_unpadded(input: &[u8]) -> String {
+pub(crate) fn base64url_encode_unpadded(input: &[u8]) -> String {
     let mut out = String::with_capacity((input.len() * 4 + 2) / 3);
     let mut i = 0;
     while i < input.len() {
@@ -159,10 +159,31 @@ pub fn validate_redirect_uri(uri: &str) -> Result<(), OAuthRefusal> {
     if uri.starts_with("https://") {
         return Ok(());
     }
-    if uri.starts_with("http://localhost") || uri.starts_with("http://127.0.0.1") {
+    if http_loopback_authority(uri) {
         return Ok(());
     }
     Err(OAuthRefusal::InsecureRedirectUri)
+}
+
+/// Whether the `http://` URI's authority names a loopback host exactly.
+///
+/// The authority is the component up to the first `/`, `?` or `#`; user
+/// information (everything before the last `@`) is discarded before the host
+/// is compared, so `http://localhost.evil.com`, `http://localhost@evil.com`
+/// and `http://localhost:8080@evil.com` all fail despite sharing their prefix
+/// with a legitimate loopback redirect.
+fn http_loopback_authority(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("http://") else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host_port = match authority.rsplit_once('@') {
+        Some((_, host_port)) => host_port,
+        None => authority,
+    };
+    let host = host_port.split(':').next().unwrap_or("");
+    host == "localhost" || host == "127.0.0.1"
 }
 
 /// An authorization code issued during an OAuth/OIDC authorization flow.

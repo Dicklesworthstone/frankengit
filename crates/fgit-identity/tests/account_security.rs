@@ -40,6 +40,39 @@ fn test_repo() -> RepositoryId {
     RepositoryId::from_bytes([9u8; 16])
 }
 
+/// Crafts an assertion whose client data honestly carries the challenge's
+/// canonical token and whose signature covers `auth_data || client_data_hash`
+/// — the shape a real authenticator produces.
+fn bound_assertion(
+    challenge: &PasskeyAssertionChallenge,
+    signing_key: &SigningKey,
+    credential_id: PasskeyId,
+    auth_data: Vec<u8>,
+    sign_count: u32,
+    user_present: bool,
+    user_verified: bool,
+) -> PasskeyAssertion {
+    let client_data_json = format!(
+        "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\"}}",
+        challenge.challenge_token()
+    )
+    .into_bytes();
+    let client_data_hash = PasskeyAssertionChallenge::client_data_hash(&client_data_json);
+    let mut payload = auth_data.clone();
+    payload.extend_from_slice(&client_data_hash);
+    let signature = signing_key.sign(&payload).to_bytes().to_vec();
+    PasskeyAssertion {
+        credential_id,
+        client_data_hash,
+        client_data_json,
+        auth_data,
+        signature,
+        sign_count,
+        user_present,
+        user_verified,
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Passkey / WebAuthn Tests
 // -----------------------------------------------------------------------------
@@ -74,9 +107,14 @@ fn passkey_registration_and_assertion_roundtrip() {
     let challenge_bytes = [7u8; 32];
     let challenge = PasskeyAssertionChallenge::new(challenge_bytes, rp_id, principal, 2000);
 
-    // Client data
-    let client_data_json = b"{\"type\":\"webauthn.get\",\"challenge\":\"...\"}";
-    let client_data_hash = PasskeyAssertionChallenge::client_data_hash(client_data_json);
+    // Client data carrying the canonical challenge token, hash recomputed
+    // from the exact bytes the signature will cover.
+    let client_data_json = format!(
+        "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\"}}",
+        challenge.challenge_token()
+    )
+    .into_bytes();
+    let client_data_hash = PasskeyAssertionChallenge::client_data_hash(&client_data_json);
 
     let auth_data = vec![1, 2, 3, 4];
     let mut payload = Vec::new();
@@ -88,6 +126,7 @@ fn passkey_registration_and_assertion_roundtrip() {
     let assertion = PasskeyAssertion {
         credential_id: cred_id,
         client_data_hash,
+        client_data_json,
         auth_data,
         signature,
         sign_count: 15, // advance counter
@@ -130,23 +169,18 @@ fn passkey_counter_regression_refused() {
     let challenge =
         PasskeyAssertionChallenge::new([0u8; 32], "forge.example.com", test_principal(), 2000);
 
-    let client_data_hash = [3u8; 32];
-    let auth_data = vec![0x49];
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&auth_data);
-    payload.extend_from_slice(&client_data_hash);
-    let signature = signing_key.sign(&payload).to_bytes().to_vec();
-
-    // Replay / clone with regression (received 50 <= recorded 50)
-    let assertion = PasskeyAssertion {
-        credential_id: cred_id,
-        client_data_hash,
-        auth_data,
-        signature,
-        sign_count: 50,
-        user_present: true,
-        user_verified: true,
-    };
+    // Replay / clone with regression (received 50 <= recorded 50). The client
+    // data is honestly bound to this challenge so the refusal lands on the
+    // counter rather than on an earlier gate.
+    let assertion = bound_assertion(
+        &challenge,
+        &signing_key,
+        cred_id,
+        vec![0x49],
+        50,
+        true,
+        true,
+    );
 
     let err = credential
         .verify_assertion(
@@ -190,6 +224,7 @@ fn passkey_expired_challenge_and_rp_mismatch_refused() {
     let assertion = PasskeyAssertion {
         credential_id: cred_id,
         client_data_hash: [0u8; 32],
+        client_data_json: vec![],
         auth_data: vec![],
         signature: vec![],
         sign_count: 5,
@@ -250,15 +285,7 @@ fn passkey_user_verification_and_presence_enforced() {
         PasskeyAssertionChallenge::new([0u8; 32], "forge.example.com", test_principal(), 2000);
 
     // Missing user presence
-    let no_up = PasskeyAssertion {
-        credential_id: cred_id,
-        client_data_hash: [0u8; 32],
-        auth_data: vec![],
-        signature: vec![],
-        sign_count: 2,
-        user_present: false,
-        user_verified: true,
-    };
+    let no_up = bound_assertion(&challenge, &signing_key, cred_id, vec![], 2, false, true);
     assert_eq!(
         credential
             .verify_assertion(
@@ -273,15 +300,7 @@ fn passkey_user_verification_and_presence_enforced() {
     );
 
     // Missing user verification when required
-    let no_uv = PasskeyAssertion {
-        credential_id: cred_id,
-        client_data_hash: [0u8; 32],
-        auth_data: vec![],
-        signature: vec![],
-        sign_count: 2,
-        user_present: true,
-        user_verified: false,
-    };
+    let no_uv = bound_assertion(&challenge, &signing_key, cred_id, vec![], 2, true, false);
     assert_eq!(
         credential
             .verify_assertion(
@@ -343,6 +362,29 @@ fn redirect_uri_validation_rules() {
     assert_eq!(
         validate_redirect_uri("https://*.example.com/callback").unwrap_err(),
         OAuthRefusal::WildcardInRedirectUri
+    );
+    // Loopback prefix must never widen into a different host: longer
+    // hostnames, userinfo tricks, and port-then-userinfo tricks all name a
+    // remote authority and are refused.
+    assert_eq!(
+        validate_redirect_uri("http://localhost.evil.com/callback").unwrap_err(),
+        OAuthRefusal::InsecureRedirectUri
+    );
+    assert_eq!(
+        validate_redirect_uri("http://127.0.0.1.evil.com/callback").unwrap_err(),
+        OAuthRefusal::InsecureRedirectUri
+    );
+    assert_eq!(
+        validate_redirect_uri("http://localhost@evil.com/callback").unwrap_err(),
+        OAuthRefusal::InsecureRedirectUri
+    );
+    assert_eq!(
+        validate_redirect_uri("http://localhost:8080@evil.com/callback").unwrap_err(),
+        OAuthRefusal::InsecureRedirectUri
+    );
+    assert_eq!(
+        validate_redirect_uri("http://localhostly/callback").unwrap_err(),
+        OAuthRefusal::InsecureRedirectUri
     );
 }
 
@@ -688,4 +730,82 @@ fn privilege_elevation_lifecycle_and_strength_bounds() {
             .unwrap_err(),
         ReauthRefusal::AlreadyConsumed
     );
+}
+
+#[test]
+fn passkey_replay_against_a_fresh_challenge_is_refused() {
+    let signing_key = SigningKey::from_bytes(&[42u8; 32]);
+    let cred_id = PasskeyId::try_new(105).unwrap();
+    let mut credential = PasskeyCredential::register(
+        cred_id,
+        test_principal(),
+        "forge.example.com",
+        PasskeyAlgorithm::Ed25519,
+        &signing_key.verifying_key().to_bytes(),
+        0, // zero-counter authenticator: the counter check never fires
+        1000,
+    )
+    .unwrap();
+
+    // A first, entirely legitimate assertion.
+    let first =
+        PasskeyAssertionChallenge::new([1u8; 32], "forge.example.com", test_principal(), 2000);
+    let captured = bound_assertion(&first, &signing_key, cred_id, vec![7], 0, true, true);
+    credential
+        .verify_assertion(
+            &first,
+            &captured,
+            UserVerificationRequirement::Preferred,
+            1100,
+            RevocationEvidence::Live,
+        )
+        .expect("the original assertion is genuine");
+
+    // Replaying the identical bytes against a brand-new challenge must not
+    // authenticate: nothing in the signed data speaks for the new challenge.
+    let second =
+        PasskeyAssertionChallenge::new([2u8; 32], "forge.example.com", test_principal(), 4000);
+    let err = credential
+        .verify_assertion(
+            &second,
+            &captured,
+            UserVerificationRequirement::Preferred,
+            3000,
+            RevocationEvidence::Live,
+        )
+        .expect_err("a captured assertion must not satisfy a fresh challenge");
+    assert_eq!(err, PasskeyRefusal::ChallengeNotBound);
+}
+
+#[test]
+fn passkey_client_data_hash_mismatch_is_refused() {
+    let signing_key = SigningKey::from_bytes(&[42u8; 32]);
+    let cred_id = PasskeyId::try_new(106).unwrap();
+    let mut credential = PasskeyCredential::register(
+        cred_id,
+        test_principal(),
+        "forge.example.com",
+        PasskeyAlgorithm::Ed25519,
+        &signing_key.verifying_key().to_bytes(),
+        0,
+        1000,
+    )
+    .unwrap();
+
+    let challenge =
+        PasskeyAssertionChallenge::new([3u8; 32], "forge.example.com", test_principal(), 2000);
+    let mut tampered = bound_assertion(&challenge, &signing_key, cred_id, vec![9], 1, true, true);
+    // Swap in client data that no longer hashes to the asserted digest.
+    tampered.client_data_json = b"{\"type\":\"webauthn.get\",\"challenge\":\"nope\"}".to_vec();
+
+    let err = credential
+        .verify_assertion(
+            &challenge,
+            &tampered,
+            UserVerificationRequirement::Preferred,
+            1100,
+            RevocationEvidence::Live,
+        )
+        .expect_err("client data that fails its own hash must be refused");
+    assert_eq!(err, PasskeyRefusal::ClientDataHashMismatch);
 }
