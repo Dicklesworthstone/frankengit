@@ -543,6 +543,38 @@ pub enum IdentityDomain {
     /// a reader holding a digest could not tell which body shape it named — the
     /// §5.2 key-reuse case that must fail closed.
     ForgeRefIntent,
+    /// One deploy-key binding body: an ed25519 public key bound to one
+    /// repository, naming the principal it speaks as and the scopes it holds
+    /// there.
+    ///
+    /// Registered so the record can be NAMED. A credential body exists so
+    /// something else can point at it, and while this row was missing `body_id`
+    /// refused every deploy-key binding with `IdentityDomainUnregistered` --
+    /// which no encode/decode test could see, because neither consults the
+    /// registry.
+    DeployKeyBinding,
+    /// One token-grant body: a bounded, revocable, audience-bound grant to act
+    /// as a principal.
+    ///
+    /// Separate from [`Self::DeployKeyBinding`] because they are different
+    /// bodies with different bounds. Sharing one domain would make their
+    /// identities computable in the same space, so a reader holding a digest
+    /// could not tell which credential it named.
+    TokenGrant,
+    /// One session body: an authenticated principal, the strength it
+    /// authenticated with, and the deadline it inherits.
+    ///
+    /// Separate from the credentials above because a session is not a
+    /// credential: it is what exists AFTER one was accepted, it is revocable
+    /// independently, and its authentication strength is an authorization input
+    /// that no credential body carries.
+    Session,
+    /// One policy-snapshot body.
+    ///
+    /// Owned by FG-043a. Registered here because domain rows append in one
+    /// place and `registry_id == index + 1` makes the append order
+    /// load-bearing.
+    PolicySnapshot,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -864,6 +896,25 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/forge-ref-intent/v1",
         None,
     ),
+    owned_row(
+        50,
+        IdentityDomain::DeployKeyBinding,
+        "frankengit/deploy-key-binding/v1",
+        None,
+    ),
+    owned_row(
+        51,
+        IdentityDomain::TokenGrant,
+        "frankengit/token-grant/v1",
+        None,
+    ),
+    owned_row(52, IdentityDomain::Session, "frankengit/session/v1", None),
+    owned_row(
+        53,
+        IdentityDomain::PolicySnapshot,
+        "frankengit/policy-snapshot/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -1100,6 +1151,10 @@ impl IdentityDomain {
         Self::HiddenRefPolicy,
         Self::ForgeEventEvidence,
         Self::ForgeRefIntent,
+        Self::DeployKeyBinding,
+        Self::TokenGrant,
+        Self::Session,
+        Self::PolicySnapshot,
     ];
 
     /// Compile-time completeness guard for [`IdentityDomain::ALL`].
@@ -1170,6 +1225,10 @@ impl IdentityDomain {
             | Self::RepositoryCreationAttempt
             | Self::OutcomeIndexCheckpoint
             | Self::ForgeRefIntent
+            | Self::DeployKeyBinding
+            | Self::TokenGrant
+            | Self::Session
+            | Self::PolicySnapshot
             | Self::HiddenRefPolicy => (),
         }
     }

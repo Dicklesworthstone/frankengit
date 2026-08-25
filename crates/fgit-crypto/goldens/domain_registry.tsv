@@ -49,3 +49,7 @@ id	domain_tag	algorithm	durable_object_row	derived_identity	status
 47	frankengit/hidden-ref-policy/v1	sha256	-	-	active
 48	frankengit/forge-event-evidence/v1	sha256	-	-	active
 49	frankengit/forge-ref-intent/v1	sha256	-	-	active
+50	frankengit/deploy-key-binding/v1	sha256	-	-	active
+51	frankengit/token-grant/v1	sha256	-	-	active
+52	frankengit/session/v1	sha256	-	-	active
+53	frankengit/policy-snapshot/v1	sha256	-	-	active
