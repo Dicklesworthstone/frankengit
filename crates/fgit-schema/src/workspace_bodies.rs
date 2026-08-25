@@ -253,6 +253,16 @@ fn source_families_in(source: &str, path: &Path) -> Result<BTreeSet<String>, Sch
         let start = cursor + offset;
         cursor = start + IMPLEMENTATION.len();
         let implementation = &flat[start..];
+        if source.contains("macro_rules! bytes_body")
+            && implementation.trim_start().starts_with("$body")
+        {
+            // The recognized macro definition is not itself a body. Its
+            // concrete `bytes_body!` invocations are scanned below, where
+            // their family literal is available; treating `$body` as an
+            // implementation here would make the coverage gate depend on a
+            // macro placeholder rather than an emitted canonical family.
+            continue;
+        }
         let Some(end) = implementation.find("fn write_payload") else {
             return Err(SchemaRefusal::CanonicalBodyFamilyUnresolvable {
                 source: display_path(path).into(),
