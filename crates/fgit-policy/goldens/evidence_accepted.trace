@@ -1,0 +1,15 @@
+policy evidence_accepted
+decision deny
+subject 0 refs/heads/main non_fast_forward -> allow
+  governed-by (default)
+  reason (none)
+  evidence code-review forge.review issued 1000 expires 5000
+  consulted reviewed_only unmatched deny
+subject 1 refs/tags/v1.0.0 create -> deny
+  governed-by reviewed_only
+  reason "no accepted review for this ref"
+  consulted reviewed_only matched deny
+subject 2 refs/heads/stale delete -> deny
+  governed-by reviewed_only
+  reason "no accepted review for this ref"
+  consulted reviewed_only matched deny

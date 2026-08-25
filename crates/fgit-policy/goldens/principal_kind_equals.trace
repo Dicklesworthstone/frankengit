@@ -1,0 +1,14 @@
+policy principal_kind_equals
+decision deny
+subject 0 refs/heads/main non_fast_forward -> deny
+  governed-by (default)
+  reason "only human ref creation is permitted here"
+  consulted human_creates unmatched allow
+subject 1 refs/tags/v1.0.0 create -> allow
+  governed-by human_creates
+  reason (none)
+  consulted human_creates matched allow
+subject 2 refs/heads/stale delete -> deny
+  governed-by (default)
+  reason "only human ref creation is permitted here"
+  consulted human_creates unmatched allow

@@ -1,0 +1,14 @@
+policy update_kind_equals
+decision deny
+subject 0 refs/heads/main non_fast_forward -> allow
+  governed-by (default)
+  reason (none)
+  consulted no_delete unmatched deny
+subject 1 refs/tags/v1.0.0 create -> allow
+  governed-by (default)
+  reason (none)
+  consulted no_delete unmatched deny
+subject 2 refs/heads/stale delete -> deny
+  governed-by no_delete
+  reason "deletions are not allowed"
+  consulted no_delete matched deny

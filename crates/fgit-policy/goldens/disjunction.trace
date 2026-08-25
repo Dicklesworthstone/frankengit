@@ -1,0 +1,14 @@
+policy disjunction
+decision deny
+subject 0 refs/heads/main non_fast_forward -> allow
+  governed-by (default)
+  reason (none)
+  consulted tags_or_deletes unmatched deny
+subject 1 refs/tags/v1.0.0 create -> deny
+  governed-by tags_or_deletes
+  reason "deletes and tag writes are refused"
+  consulted tags_or_deletes matched deny
+subject 2 refs/heads/stale delete -> deny
+  governed-by tags_or_deletes
+  reason "deletes and tag writes are refused"
+  consulted tags_or_deletes matched deny

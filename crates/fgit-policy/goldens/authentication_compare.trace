@@ -1,0 +1,14 @@
+policy authentication_compare
+decision deny
+subject 0 refs/heads/main non_fast_forward -> deny
+  governed-by (default)
+  reason "creation requires multi-factor authentication"
+  consulted strong_auth_creates unmatched allow
+subject 1 refs/tags/v1.0.0 create -> allow
+  governed-by strong_auth_creates
+  reason (none)
+  consulted strong_auth_creates matched allow
+subject 2 refs/heads/stale delete -> deny
+  governed-by (default)
+  reason "creation requires multi-factor authentication"
+  consulted strong_auth_creates unmatched allow

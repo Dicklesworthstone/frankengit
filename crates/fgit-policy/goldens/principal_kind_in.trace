@@ -1,0 +1,14 @@
+policy principal_kind_in
+decision deny
+subject 0 refs/heads/main non_fast_forward -> deny
+  governed-by (default)
+  reason "only people and services may create refs"
+  consulted people_or_services_create unmatched allow
+subject 1 refs/tags/v1.0.0 create -> allow
+  governed-by people_or_services_create
+  reason (none)
+  consulted people_or_services_create matched allow
+subject 2 refs/heads/stale delete -> deny
+  governed-by (default)
+  reason "only people and services may create refs"
+  consulted people_or_services_create unmatched allow

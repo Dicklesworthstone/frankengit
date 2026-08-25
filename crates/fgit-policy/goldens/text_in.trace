@@ -1,0 +1,14 @@
+policy text_in
+decision deny
+subject 0 refs/heads/main non_fast_forward -> deny
+  governed-by protected_set
+  reason "protected branch"
+  consulted protected_set matched deny
+subject 1 refs/tags/v1.0.0 create -> allow
+  governed-by (default)
+  reason (none)
+  consulted protected_set unmatched deny
+subject 2 refs/heads/stale delete -> allow
+  governed-by (default)
+  reason (none)
+  consulted protected_set unmatched deny

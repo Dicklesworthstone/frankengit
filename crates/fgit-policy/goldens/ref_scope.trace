@@ -1,0 +1,14 @@
+policy ref_scope
+decision deny
+subject 0 refs/heads/main non_fast_forward -> allow
+  governed-by heads_scope
+  reason (none)
+  consulted heads_scope matched allow
+subject 1 refs/tags/v1.0.0 create -> deny
+  governed-by (default)
+  reason "not a branch update"
+  consulted heads_scope unmatched allow
+subject 2 refs/heads/stale delete -> allow
+  governed-by heads_scope
+  reason (none)
+  consulted heads_scope matched allow

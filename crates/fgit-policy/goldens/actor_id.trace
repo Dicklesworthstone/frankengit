@@ -1,0 +1,14 @@
+policy actor_id
+decision deny
+subject 0 refs/heads/main non_fast_forward -> deny
+  governed-by (default)
+  reason "unknown actor or unsupported update"
+  consulted known_actor unmatched allow
+subject 1 refs/tags/v1.0.0 create -> allow
+  governed-by known_actor
+  reason (none)
+  consulted known_actor matched allow
+subject 2 refs/heads/stale delete -> deny
+  governed-by (default)
+  reason "unknown actor or unsupported update"
+  consulted known_actor unmatched allow

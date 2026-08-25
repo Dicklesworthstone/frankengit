@@ -1,0 +1,14 @@
+policy capability_contains
+decision deny
+subject 0 refs/heads/main non_fast_forward -> deny
+  governed-by force_needs_admin
+  reason "forced update without the admin capability"
+  consulted force_needs_admin matched deny
+subject 1 refs/tags/v1.0.0 create -> allow
+  governed-by (default)
+  reason (none)
+  consulted force_needs_admin unmatched deny
+subject 2 refs/heads/stale delete -> allow
+  governed-by (default)
+  reason (none)
+  consulted force_needs_admin unmatched deny

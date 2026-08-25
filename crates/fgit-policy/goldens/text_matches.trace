@@ -1,0 +1,14 @@
+policy text_matches
+decision deny
+subject 0 refs/heads/main non_fast_forward -> allow
+  governed-by (default)
+  reason (none)
+  consulted tag_namespace unmatched deny
+subject 1 refs/tags/v1.0.0 create -> deny
+  governed-by tag_namespace
+  reason "tags are immutable"
+  consulted tag_namespace matched deny
+subject 2 refs/heads/stale delete -> allow
+  governed-by (default)
+  reason (none)
+  consulted tag_namespace unmatched deny

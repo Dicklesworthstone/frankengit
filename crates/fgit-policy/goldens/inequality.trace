@@ -1,0 +1,14 @@
+policy inequality
+decision deny
+subject 0 refs/heads/main non_fast_forward -> allow
+  governed-by (default)
+  reason (none)
+  consulted non_branch unmatched deny
+subject 1 refs/tags/v1.0.0 create -> deny
+  governed-by non_branch
+  reason "only branch updates are permitted"
+  consulted non_branch matched deny
+subject 2 refs/heads/stale delete -> allow
+  governed-by (default)
+  reason (none)
+  consulted non_branch unmatched deny

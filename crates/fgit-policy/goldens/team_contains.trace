@@ -1,0 +1,14 @@
+policy team_contains
+decision deny
+subject 0 refs/heads/main non_fast_forward -> deny
+  governed-by (default)
+  reason "only the platform team may create refs"
+  consulted platform_team_creates unmatched allow
+subject 1 refs/tags/v1.0.0 create -> allow
+  governed-by platform_team_creates
+  reason (none)
+  consulted platform_team_creates matched allow
+subject 2 refs/heads/stale delete -> deny
+  governed-by (default)
+  reason "only the platform team may create refs"
+  consulted platform_team_creates unmatched allow

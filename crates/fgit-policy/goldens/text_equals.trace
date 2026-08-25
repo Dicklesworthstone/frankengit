@@ -1,0 +1,14 @@
+policy text_equals
+decision deny
+subject 0 refs/heads/main non_fast_forward -> deny
+  governed-by main_only
+  reason "the main branch is protected"
+  consulted main_only matched deny
+subject 1 refs/tags/v1.0.0 create -> allow
+  governed-by (default)
+  reason (none)
+  consulted main_only unmatched deny
+subject 2 refs/heads/stale delete -> allow
+  governed-by (default)
+  reason (none)
+  consulted main_only unmatched deny

@@ -1,0 +1,14 @@
+policy force_requested
+decision deny
+subject 0 refs/heads/main non_fast_forward -> deny
+  governed-by no_force
+  reason "forced updates are not allowed"
+  consulted no_force matched deny
+subject 1 refs/tags/v1.0.0 create -> allow
+  governed-by (default)
+  reason (none)
+  consulted no_force unmatched deny
+subject 2 refs/heads/stale delete -> allow
+  governed-by (default)
+  reason (none)
+  consulted no_force unmatched deny

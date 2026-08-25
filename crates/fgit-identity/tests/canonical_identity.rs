@@ -1,38 +1,44 @@
 //! Whether this crate's canonical bodies can receive canonical identities.
 //!
-//! # Why this file asserts a DEFECT rather than the behaviour we want
+//! # Why this file exists
 //!
-//! Neither `frankengit/deploy-key-binding/v1` nor `frankengit/token-grant/v1`
-//! is registered in `fgit-crypto`'s `DOMAIN_REGISTRY`, so `body_id` refuses
-//! both with `IdentityDomainUnregistered`. That is a real defect: a credential
-//! record exists so something else can point at it, and a body that cannot be
-//! named by identity cannot be pointed at.
+//! A credential record exists so something else can point at it, and a body
+//! that cannot be named by identity cannot be pointed at. `body_id` refuses any
+//! body whose domain is absent from `fgit-crypto`'s `DOMAIN_REGISTRY`, so
+//! "defines a `CanonicalBody`" and "can be named" are two different facts.
 //!
-//! It shipped in `f13638e` and `de1f5be` and survived 21 passing tests, because
-//! every one of those exercises `encode_body`/`decode_body`, which never
-//! consult the registry. The axis was untested, not merely broken.
+//! They came apart once. `frankengit/deploy-key-binding/v1` and
+//! `frankengit/token-grant/v1` shipped in `f13638e` and `de1f5be` with no
+//! registry row, and 21 passing tests said nothing, because every one of them
+//! exercised `encode_body`/`decode_body` — neither of which consults the
+//! registry. The axis was untested, not merely broken. `33d4d36` pinned the gap
+//! as a deliberate tripwire that asserted the refusals, with the instruction
+//! that whoever added the rows should delete it and assert the opposite.
 //!
-//! The registry lives in another crate and its export is a golden, so adding
-//! the rows is the fgit-codec owner's call, not something to regenerate on the
-//! way past. Until then the honest thing is to pin what is actually true, so
-//! the gap is visible in the suite instead of invisible.
+//! The rows are in (registry ids 50, 51 and 52). This file is that replacement,
+//! and it asserts strictly more than the tripwire did: every canonical body
+//! this crate defines identifies, and `body_id` is still capable of refusing.
 //!
-//! # This is a tripwire, and it is meant to fail
+//! # The negative twin is the load-bearing half
 //!
-//! The moment the two rows land, `the_identity_bodies_cannot_yet_receive_
-//! canonical_ids` FAILS. That is the point: it cannot be quietly outlived.
-//! Whoever adds the rows should delete that test and keep
-//! `a_registered_domain_can_receive_a_canonical_id` as the positive assertion,
-//! extending it to cover both identity bodies.
+//! Four `is_ok()` assertions would also pass if `body_id` had been changed to
+//! compute an identity for anything at all — which is exactly the failure the
+//! registry exists to prevent. `an_unregistered_domain_is_still_refused` plants
+//! a body under a domain that is deliberately absent from the registry and
+//! requires the refusal, so the positive results above it mean "these domains
+//! are registered" rather than "nothing is ever refused".
 
-use fgit_codec::CodecRefusal;
-use fgit_codec::CryptoBodyIdentity;
 use fgit_codec::attest::body_id;
+use fgit_codec::wire::CanonicalBody;
+use fgit_codec::{CodecRefusal, CryptoBodyIdentity, Decoder, Encoder};
 use fgit_crypto::{PUBLIC_KEY_BYTES, VerifyingKey};
 use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventPayload, PullRequestNumber};
-use fgit_identity::{DeployKeyBinding, DeployKeyScope, TokenGrant, TokenHandle, TokenOperation};
+use fgit_identity::{
+    AuthenticationStrength, DeployKeyBinding, DeployKeyScope, Session, SessionId, TokenGrant,
+    TokenHandle, TokenOperation,
+};
 use fgit_types::identity::OPAQUE_ID_LEN;
-use fgit_types::{PrincipalId, RepositoryId};
+use fgit_types::{DomainTag, PrincipalId, RepositoryId, SchemaFamily};
 
 fn binding() -> DeployKeyBinding {
     DeployKeyBinding::register(
@@ -57,13 +63,48 @@ fn token() -> TokenGrant {
     .expect("issues")
 }
 
-/// The control: a body whose domain IS registered receives an id.
+fn session() -> Session {
+    Session::establish(
+        SessionId::try_new(1).expect("nonzero"),
+        PrincipalId::from_bytes([0x33; OPAQUE_ID_LEN]),
+        RepositoryId::from_bytes([0x11; OPAQUE_ID_LEN]),
+        AuthenticationStrength::Token,
+        1_000,
+    )
+}
+
+/// A body under a domain that is deliberately NOT in the registry.
 ///
-/// Without this, the refusals below would be consistent with `body_id` being
-/// broken for everything, or with `CryptoBodyIdentity` being misused here. This
-/// pins that the difference is the registry row and nothing else.
+/// The tag is nonsense on purpose. If someone ever registers it, this test
+/// fails loudly rather than quietly becoming vacuous — which is the failure
+/// mode a planted negative has to be protected against.
+struct UnregisteredBody;
+
+impl CanonicalBody for UnregisteredBody {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/deliberately-unregistered/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("deliberately-unregistered");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        out.write_scalar(0_u64);
+        Ok(())
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        input.read_scalar::<u64>("unregistered.value")?;
+        Ok(Self)
+    }
+}
+
+/// The control: a body owned by another crate, whose domain has been registered
+/// since long before this bead.
+///
+/// Without it, a refusal below could be read as "something about this crate's
+/// encodings" rather than "that domain has no row". This pins that the
+/// difference is the registry row and nothing else.
 #[test]
-fn a_registered_domain_can_receive_a_canonical_id() {
+fn a_registered_domain_from_another_crate_can_receive_a_canonical_id() {
     let event = ForgeEvent {
         aggregate: AggregateId::PullRequest(PullRequestNumber::try_new(7).expect("nonzero")),
         version: AggregateVersion::try_new(1).expect("nonzero"),
@@ -75,31 +116,78 @@ fn a_registered_domain_can_receive_a_canonical_id() {
     );
 }
 
-/// KNOWN DEFECT, pinned so it is visible. Delete this when the rows land.
+/// Every canonical body this crate defines can be named by identity.
+///
+/// This is the assertion the tripwire in `33d4d36` asked its remover to write.
+/// It covers all three rather than the two that were originally missing,
+/// because the property is "this crate does not define a body it cannot name",
+/// not "those two specific bodies were fixed".
 #[test]
-fn the_identity_bodies_cannot_yet_receive_canonical_ids() {
-    for (what, refusal) in [
+fn every_canonical_body_in_this_crate_can_receive_a_canonical_id() {
+    assert!(
+        body_id(&CryptoBodyIdentity, &binding()).is_ok(),
+        "frankengit/deploy-key-binding/v1 is registry row 50 and must identify"
+    );
+    assert!(
+        body_id(&CryptoBodyIdentity, &token()).is_ok(),
+        "frankengit/token-grant/v1 is registry row 51 and must identify"
+    );
+    assert!(
+        body_id(&CryptoBodyIdentity, &session()).is_ok(),
+        "frankengit/session/v1 is registry row 52 and must identify"
+    );
+}
+
+/// The identities are DISTINCT across bodies, pairwise.
+///
+/// Three bodies that all "identify" would also satisfy the test above if they
+/// collapsed onto one value. Domain separation is the property that makes an
+/// identity mean which body it names, so it is asserted rather than assumed —
+/// and every pair is compared, not each against one pivot, because N-1
+/// comparisons against a single pivot leave the other pairs unasserted.
+#[test]
+fn the_three_bodies_receive_pairwise_distinct_identities() {
+    let identities = [
         (
-            "frankengit/deploy-key-binding/v1",
-            body_id(&CryptoBodyIdentity, &binding()).expect_err("unregistered today"),
+            "deploy-key-binding",
+            body_id(&CryptoBodyIdentity, &binding()),
         ),
-        (
-            "frankengit/token-grant/v1",
-            body_id(&CryptoBodyIdentity, &token()).expect_err("unregistered today"),
-        ),
-    ] {
-        match refusal {
-            CodecRefusal::IdentityDomainUnregistered { ref domain } => {
-                assert_eq!(
-                    &**domain, what,
-                    "the refusal must name the domain that is missing a row"
-                );
-            }
-            other => panic!(
-                "{what}: expected IdentityDomainUnregistered, got {other:?}. If this body now \
-                 identifies, the registry rows have landed -- delete this test and extend \
-                 a_registered_domain_can_receive_a_canonical_id to cover both bodies."
-            ),
+        ("token-grant", body_id(&CryptoBodyIdentity, &token())),
+        ("session", body_id(&CryptoBodyIdentity, &session())),
+    ]
+    .map(|(name, result)| (name, result.expect("every domain above is registered")));
+
+    for (index, (left_name, left)) in identities.iter().enumerate() {
+        for (right_name, right) in &identities[index + 1..] {
+            assert_ne!(
+                left, right,
+                "{left_name} and {right_name} must not share an identity"
+            );
         }
+    }
+}
+
+/// `body_id` still refuses a domain the registry does not know.
+///
+/// The negative twin. Without it, the positive assertions above are consistent
+/// with `body_id` having been changed to compute an identity for anything —
+/// the precise failure the registry exists to prevent, since an identity under
+/// an unregistered domain is one nothing else could verify.
+#[test]
+fn an_unregistered_domain_is_still_refused() {
+    let refusal =
+        body_id(&CryptoBodyIdentity, &UnregisteredBody).expect_err("the domain has no row");
+    match refusal {
+        CodecRefusal::IdentityDomainUnregistered { ref domain } => {
+            assert_eq!(
+                &**domain, "frankengit/deliberately-unregistered/v1",
+                "the refusal must name the domain that is missing a row"
+            );
+        }
+        other => panic!(
+            "expected IdentityDomainUnregistered, got {other:?}. If this body now identifies, \
+             someone registered the deliberately-unregistered domain and this test has become \
+             vacuous -- pick a new unregistered tag rather than deleting the check."
+        ),
     }
 }
