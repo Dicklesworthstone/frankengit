@@ -36,7 +36,8 @@ use std::path::PathBuf;
 
 use fgit_reference::harness::{IdentityMint, RequestBuilder, label};
 use fgit_reference::intent::{
-    DurabilityProfile, IdempotencyKey, Intent, RefIntent, TransactionRequest,
+    DurabilityProfile, ForgeEntityId, ForgeEventKind, ForgeIntent, ForgeStreamId,
+    ForgeStreamPosition, IdempotencyKey, Intent, RefIntent, TransactionRequest,
 };
 use fgit_reference::machine::ModelInput;
 use fgit_reference::refs::ExpectedRefState;
@@ -454,6 +455,135 @@ fn history_idempotent_duplicate() -> GoldenTrace {
     recorder.finish()
 }
 
+/// A decision observed twice: once as a pure §10.14 revalidation before the
+/// batch published (which changes nothing and is recorded as DecidedCommit),
+/// and once after publication, when the same sealed request re-prepares
+/// against the new head and deciding the fresh capsule reports
+/// AlreadyTerminal. This is the history that pins terminal uniqueness end to
+/// end: the second observation must carry the first CAS's outcome and change
+/// nothing, which is exactly what the proof bridge projects onto
+/// `Operation.retry`.
+fn history_duplicate_decide_terminal_uniqueness() -> GoldenTrace {
+    let mut fixture = Fixture::new(1007);
+    let mut recorder = TraceRecorder::new(fixture.genesis.clone());
+    let new = oid(1);
+    let request = fixture.request("k1", "refs/heads/main", ExpectedRefState::Absent, new);
+
+    let seal_id = fixture.mint.seal();
+    recorder
+        .apply(ModelInput::Seal(Box::new(SealRequest {
+            seal_id,
+            request: request.clone(),
+        })))
+        .expect("seal");
+    recorder
+        .apply(ModelInput::StageObjects(QuarantineRequest {
+            tx_id: request.tx_id,
+            objects: vec![object(new, &[])],
+        }))
+        .expect("quarantine");
+    let capsule_id = fixture.mint.capsule();
+    recorder
+        .apply(ModelInput::Prepare(Box::new(PrepareRequest {
+            capsule_id,
+            request: request.clone(),
+            principal_snapshot: fixture.mint.principal_snapshot(),
+            profile: IdentityMint::preparation_profile(),
+            granularity: fgit_reference::capsule::WitnessGranularity::Refined,
+        })))
+        .expect("prepare");
+    // The pure revalidation: concludes Commit without changing state.
+    recorder
+        .apply(ModelInput::Decide {
+            capsule: capsule_id,
+        })
+        .expect("pure decide");
+    let batch_id = fixture.mint.batch();
+    recorder
+        .apply(ModelInput::Stage(StageRequest {
+            batch_id,
+            candidate_head_id: fixture.mint.head(),
+            capsules: vec![capsule_id],
+            bodies: fixture.bodies(&request),
+            durability_satisfied: true,
+        }))
+        .expect("stage");
+    let head = recorder.state().head();
+    recorder
+        .apply(ModelInput::CompareAndSwap(CasRequest {
+            expected_head: head.id,
+            expected_generation: head.body.generation,
+            batch: batch_id,
+        }))
+        .expect("cas");
+    // The publication swept the original capsule, but the seal survives
+    // (§5.2): the same sealed request may re-prepare against the new head.
+    let stale_capsule = fixture.mint.capsule();
+    recorder
+        .apply(ModelInput::Prepare(Box::new(PrepareRequest {
+            capsule_id: stale_capsule,
+            request: request.clone(),
+            principal_snapshot: fixture.mint.principal_snapshot(),
+            profile: IdentityMint::preparation_profile(),
+            granularity: fgit_reference::capsule::WitnessGranularity::Refined,
+        })))
+        .expect("re-prepare after publication");
+    // Deciding the stale basis observes the recorded outcome — the duplicate
+    // decision terminal uniqueness is about.
+    recorder
+        .apply(ModelInput::Decide {
+            capsule: stale_capsule,
+        })
+        .expect("post-terminal decide");
+    recorder.finish()
+}
+
+/// One sealed transaction whose single statement couples a pull-request merge
+/// event with the exact ref update it describes — §7's only permitted shape
+/// for a merge. One won compare-and-swap makes the ref movement and the forge
+/// position advance visible together, which is the history the atomic-
+/// visibility theorem's data path needs.
+fn history_ref_forge_atomic_visibility() -> GoldenTrace {
+    let mut fixture = Fixture::new(1008);
+    let mut recorder = TraceRecorder::new(fixture.genesis.clone());
+
+    let stream = ForgeStreamId::new(label("pulls"));
+    let entity = ForgeEntityId::new(label("pr-1"));
+    let new = oid(7);
+    let request = RequestBuilder::new(
+        fixture.tenant,
+        fixture.repository,
+        fixture.author,
+        schema(),
+        IdempotencyKey::new(label("k-merge")),
+    )
+    .statement(
+        MismatchPolicy::TxnAbort,
+        vec![
+            Intent::Forge(ForgeIntent {
+                stream,
+                expected_position: ForgeStreamPosition::GENESIS,
+                event: ForgeEventKind::PullRequestMerged {
+                    pull_request: entity,
+                    target: name("refs/heads/main"),
+                },
+            }),
+            update("refs/heads/main", ExpectedRefState::Absent, new),
+        ],
+    )
+    .promising(new)
+    .build(&mut fixture.mint);
+
+    apply_full_transaction(
+        &mut recorder,
+        &mut fixture,
+        &request,
+        &[object(new, &[])],
+        true,
+    );
+    recorder.finish()
+}
+
 /// Drives one request through seal, quarantine, prepare, stage, and the head
 /// compare-and-swap, recording every step.
 fn apply_full_transaction(
@@ -521,6 +651,14 @@ fn goldens() -> Vec<(&'static str, GoldenTrace)> {
         ("multi_decision_batch", history_multi_decision_batch()),
         ("cas_loss_retry", history_cas_loss_retry()),
         ("idempotent_duplicate", history_idempotent_duplicate()),
+        (
+            "duplicate_decide_terminal_uniqueness",
+            history_duplicate_decide_terminal_uniqueness(),
+        ),
+        (
+            "ref_forge_atomic_visibility",
+            history_ref_forge_atomic_visibility(),
+        ),
     ]
 }
 
@@ -646,18 +784,25 @@ fn every_golden_round_trips_through_the_codec_without_moving_a_byte() {
 }
 
 #[test]
-fn the_six_required_histories_are_all_present_and_distinct() {
+fn the_required_histories_are_all_present_and_distinct() {
     let names = goldens()
         .iter()
         .map(|(name, _)| *name)
         .collect::<BTreeSet<_>>();
+    // The six required-v1 histories must never shrink. The two entries below
+    // them joined when frankengit-njsz / frankengit-4sh7 added a duplicate-
+    // decide terminal-uniqueness history and a ref+forge atomic-visibility
+    // history: without them no checked-in golden decides the same transaction
+    // twice or moves a forge stream, so those proof paths had no data.
     assert_eq!(
         names,
         BTreeSet::from([
             "cas_loss_retry",
+            "duplicate_decide_terminal_uniqueness",
             "genesis",
             "idempotent_duplicate",
             "multi_decision_batch",
+            "ref_forge_atomic_visibility",
             "refusal_only",
             "simple_commit",
         ])

@@ -74,6 +74,24 @@ def trace_cas_loss_retry : Trace :=
     ]
   }
 
+/-- Transactions in `duplicate_decide_terminal_uniqueness`, abstract index to concrete identity:
+    0 = 00000000000003ef000000000000000400000000000000000000000000000000
+-/
+def trace_duplicate_decide_terminal_uniqueness : Trace :=
+  { name := "duplicate_decide_terminal_uniqueness"
+  , genesisGeneration := 1
+  , steps :=
+    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
+    , { concreteIndex := 1, ops := [], generationAfter := 1 }
+    , { concreteIndex := 2, ops := [], generationAfter := 1 }
+    , { concreteIndex := 3, ops := [], generationAfter := 1 }
+    , { concreteIndex := 4, ops := [], generationAfter := 1 }
+    , { concreteIndex := 5, ops := [Op.publish 1 2 [0] [], Op.decide 0 true], generationAfter := 2 }
+    , { concreteIndex := 6, ops := [], generationAfter := 2 }
+    , { concreteIndex := 7, ops := [Op.retry 0 true], generationAfter := 2 }
+    ]
+  }
+
 /-- Transactions in `genesis`, abstract index to concrete identity:
 -/
 def trace_genesis : Trace :=
@@ -119,6 +137,21 @@ def trace_multi_decision_batch : Trace :=
     ]
   }
 
+/-- Transactions in `ref_forge_atomic_visibility`, abstract index to concrete identity:
+    0 = 00000000000003f0000000000000000400000000000000000000000000000000
+-/
+def trace_ref_forge_atomic_visibility : Trace :=
+  { name := "ref_forge_atomic_visibility"
+  , genesisGeneration := 1
+  , steps :=
+    [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
+    , { concreteIndex := 1, ops := [], generationAfter := 1 }
+    , { concreteIndex := 2, ops := [], generationAfter := 1 }
+    , { concreteIndex := 3, ops := [], generationAfter := 1 }
+    , { concreteIndex := 4, ops := [Op.publish 1 2 [0] [0, 1], Op.decide 0 true], generationAfter := 2 }
+    ]
+  }
+
 /-- Transactions in `refusal_only`, abstract index to concrete identity:
     0 = 00000000000003eb000000000000000400000000000000000000000000000000
 -/
@@ -151,9 +184,11 @@ def trace_simple_commit : Trace :=
 /-- Every projected history in this build. -/
 def all : List Trace :=
   [ trace_cas_loss_retry
+  , trace_duplicate_decide_terminal_uniqueness
   , trace_genesis
   , trace_idempotent_duplicate
   , trace_multi_decision_batch
+  , trace_ref_forge_atomic_visibility
   , trace_refusal_only
   , trace_simple_commit
   ]

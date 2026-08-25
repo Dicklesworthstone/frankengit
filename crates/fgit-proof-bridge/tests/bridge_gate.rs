@@ -118,19 +118,30 @@ fn the_projected_corpus_exercises_seals_publications_and_outcomes() {
     let mut decides = 0_usize;
     let mut publishes = 0_usize;
     let mut interrupted = 0_usize;
+    let mut retries = 0_usize;
+    let mut ref_effect_publications = 0_usize;
+    let mut forge_effect_publications = 0_usize;
     for trace in &corpus {
         for step in &trace.steps {
             for op in &step.operations {
                 match op {
                     AbstractOp::SealRequest { .. } => seals += 1,
                     AbstractOp::Decide { .. } => decides += 1,
-                    AbstractOp::Publish { .. } => publishes += 1,
+                    AbstractOp::Publish {
+                        ref_effects,
+                        forge_effects,
+                        ..
+                    } => {
+                        publishes += 1;
+                        if !ref_effects.is_empty() {
+                            ref_effect_publications += 1;
+                        }
+                        if !forge_effects.is_empty() {
+                            forge_effect_publications += 1;
+                        }
+                    }
                     // A re-decide against an already-terminal transaction.
-                    // The checked-in corpus happens to record none yet; the
-                    // assertion lives with the golden that introduces one,
-                    // because a census that pinned zero here would refuse
-                    // exactly the histories this bead is adding.
-                    AbstractOp::Retry { .. } => {}
+                    AbstractOp::Retry { .. } => retries += 1,
                     AbstractOp::InterruptedPublication { .. } => interrupted += 1,
                 }
             }
@@ -151,6 +162,19 @@ fn the_projected_corpus_exercises_seals_publications_and_outcomes() {
     assert!(
         interrupted > 0,
         "no interruptedPublication projected: the vectors say nothing about anti-rollback"
+    );
+    assert!(
+        retries > 0,
+        "no retry projected: the vectors say nothing about a duplicate decision \
+         against an already-terminal transaction"
+    );
+    assert!(
+        ref_effect_publications > 0,
+        "no publication carries ref effects: the atomic-visibility data path is unexercised"
+    );
+    assert!(
+        forge_effect_publications > 0,
+        "no publication carries forge effects: the atomic-visibility data path is unexercised"
     );
 }
 
