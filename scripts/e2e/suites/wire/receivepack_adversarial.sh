@@ -42,16 +42,16 @@ readonly TEST_NAME='receivepack_adversarial'
 # quietly shrinking it.
 readonly WIRE_PROBES=9
 readonly ADMISSION_PROBES=4
-# Updated 10 -> 14 (frankengit-fg019c): the corpus GREW -- three hidden-ref
-# push probes (38bb98f) and one retention-boundary probe (1dcdf43). Revising
-# a pin UPWARD to match a corpus that gained tests is the maintenance this pin
-# exists for; it still fails if the corpus ever SHRINKS, which is the direction
-# it was written to catch. Counted two independent ways at 1dcdf43: this lane
-# own grep over the target output, and the test attributes in the source.
-# Both said 14; now 16 -- the concurrent thread race and the scheduled
-# stale-CAS race, the production basis-bound loser-status probe, and the
-# object-bearing hidden-ref refusal with its permitted twin.
-readonly RACE_PROBES=20
+# Revised UPWARD as the corpus grows, which is the maintenance a pin exists
+# for; it still fails on a SHRINKING corpus, which is the direction it was
+# written to catch. The narrative that used to sit here had gone stale behind
+# its own revisions -- it read "now 16" beside a pin of 20 -- so it is replaced
+# by the rule plus the current delta rather than a history nobody re-measured.
+# 20 -> 21 (frankengit-fg019c, CloudyTiger): the client-visible hidden-ref
+# disclosure probe. Counted two independent ways rather than incremented by
+# eye: the `#[test]` attributes in the source, and this lane's own grep over
+# the target output.
+readonly RACE_PROBES=21
 readonly PROPAGATION_PROBES=3
 
 main() {
@@ -153,6 +153,13 @@ main() {
   fge_assert_contains 'FG-019C-E2E-033' "${race_out}" \
     'a_scheduled_race_through_the_basis_bound_entrypoint_refuses_the_stale_witness' \
     'the basis-bound scheduled race is present in the run'
+  # Acceptance line 1's disclosure half, named for the same reason: the other
+  # hidden-ref probes pin the internal RefusalCode, and only this one pins the
+  # bytes a client receives. A corpus that lost it would still satisfy the
+  # count while losing the property the line is about.
+  fge_assert_contains 'FG-019C-E2E-034' "${race_out}" \
+    'a_hidden_ref_push_reports_the_same_client_bytes_as_a_push_to_a_ref_the_principal_cannot_see' \
+    'the hidden-ref client-visible disclosure probe is present in the run'
   fge_assert_contains 'FG-019C-E2E-024' "${race_out}" \
     'a_transaction_that_cannot_be_resolved_is_classified_stuck' \
     'the presence case proving the forbidden state is detectable is present in the run'
@@ -186,7 +193,7 @@ fge_context bead frankengit-fg019c-receivepack-adversarial-sht
 fge_context evidence_class adversarial
 fge_context method 'independent adversary over ProudJaguar receive-pack (fgit-wire) and admission (fgit-admission); every probe drives the public API and no source of theirs is modified'
 fge_context covered 'quarantine discard proven non-vacuously (real bytes buffered then asserted gone); cancellation contract exactly as its owner specified; quota bound refused past and accepted at; pre-seal refusal boundary with its documented delete-only twin; authority-layer disconnect matrix over fault-kind x every operation position a push reaches, classified from the authenticated decision stream; decide-once under a lost response; a duplicated head CAS does not decide one push twice; two sessions each answered from their own authenticated decision'
-fge_context hidden_refs 'NO LONGER BLOCKED, and corrected here rather than left standing. This line previously recorded that RefusalCode::HiddenRefUnauthorized (0x0206) was PRODUCED BY NOTHING and that no layer knew principal ref visibility. That was true when written and is false now: fgit-admission raises it at src/lib.rs:2001 via hides_any_target, and three probes drive it (a_push_targeting_a_hidden_ref_is_refused_as_hidden_ref_unauthorized, its permitted twin, and a_prefix_hide_rule_refuses_a_push_beneath_it, 38bb98f). Upstream agrees this is the right shape: pinned git-2.54.0 Documentation/config/receive.adoc:111 says an attempt to update or delete a hidden ref by git push is rejected. What remains open is NOT the ref-name refusal but whether ref visibility should partition the OBJECT closure, which is an owner ruling recorded on the bead'
+fge_context hidden_refs 'NO LONGER BLOCKED, and corrected here rather than left standing. This line previously recorded that RefusalCode::HiddenRefUnauthorized (0x0206) was PRODUCED BY NOTHING and that no layer knew principal ref visibility. That was true when written and is false now: fgit-admission raises it at src/lib.rs:2001 via hides_any_target, and three probes drive it (a_push_targeting_a_hidden_ref_is_refused_as_hidden_ref_unauthorized, its permitted twin, and a_prefix_hide_rule_refuses_a_push_beneath_it, 38bb98f). Upstream agrees this is the right shape: pinned git-2.54.0 Documentation/config/receive.adoc:111 says an attempt to update or delete a hidden ref by git push is rejected. What remains open is NOT the ref-name refusal but whether ref visibility should partition the OBJECT closure, which is an owner ruling recorded on the bead. The DISCLOSURE half is now pinned at the bytes rather than at the code: a_hidden_ref_push_reports_the_same_client_bytes_as_a_push_to_a_ref_the_principal_cannot_see drives a hidden push and a push to a ref the principal cannot see through admission and requires identical client-visible status, with a ProtectedRefTransitionDenied control so the identity is not satisfied by an emit route that says one thing to everyone'
 fge_context claim_class 'BOUNDED MODEL, not invariant. The disconnect results range over seven fault kinds crossed with every operation position a clean admission reaches. They do not quantify over all schedules'
 fge_context projection_bound 'RETRACTION, ProudJaguar 9209: the test adapters are NOT conforming projections. snapshot ignores the PublicationBasis and AuthenticatedHead it is handed, and materialize_commit mints roots from seed bytes rather than from state, so three adapters are three variants of ONE unbound adapter and quantifying over them buys nothing about ref semantics. Every claim resting on ref state or on a session observing the successor basis is WITHDRAWN. What survives never depended on the adapter: faults are injected in the store beneath it, and the assertions are about whether a transaction can be RESOLVED and whether it is DECIDED ONCE, never about what was decided'
 fge_context stuck_state_is_detectable 'the forbidden stuck-intermediate class is proven reachable and recognised by driving the exported reconcile_outcome to its fail-closed accelerator-conflict arm, with an agreeing-reads twin, so the matrix assertion can fail in the direction that matters'

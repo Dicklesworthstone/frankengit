@@ -2631,6 +2631,115 @@ fn a_prefix_hide_rule_refuses_a_push_beneath_it() {
 }
 
 // ---------------------------------------------------------------------------
+// What the CLIENT sees for a hidden-ref push (frankengit-fg019c acceptance
+// line 1, first half: "zero unauthorized DISCLOSURE").
+//
+// The three probes above pin the internal `RefusalCode`. That is not the
+// disclosure property. `RefusalCode::HiddenRefUnauthorized` documents itself as
+// "the request touched a ref hidden from this principal"; emitted to a client
+// that announces the ref exists and turns a push into an enumeration oracle for
+// the hidden namespace. A corpus that pins only the code passes while the wire
+// leaks.
+//
+// This is NOT already covered by fgit-admission's own
+// `the_emitted_status_for_a_hidden_target_matches_an_unknown_one_byte_for_byte`
+// (src/lib.rs, `frankengit-eeb8`). That test hands `status_from_terminal` a
+// hand-built `DecisionOutcome`, so it establishes the CODE-TO-BYTES MAPPING; it
+// does not establish that an admitted hidden-ref push takes that mapping, and it
+// lives in the lib target, which this bead's registered lane does not run.
+// Composing the two facts is an argument. This drives both cases through the
+// real admission path and compares what admission emits.
+// ---------------------------------------------------------------------------
+
+/// The client-visible status bytes for a push to a HIDDEN ref are identical to
+/// those for a push to a ref the principal's view does not carry.
+///
+/// # Why the equality alone would prove nothing
+///
+/// An emit route returning one constant for every refusal satisfies it. The
+/// third case is the control: `ProtectedRefTransitionDenied` reaches its
+/// terminal decision on the same admission path, through the same emit route,
+/// and its bytes must still DIFFER. Without that, "indistinguishable" is free.
+///
+/// The two indistinguishable cases are refused by DIFFERENT guards -- the
+/// hidden one before the fold by `hides_any_target`, the unknown one by the
+/// fold itself on an unsatisfied expected-old -- so this is byte agreement
+/// across two genuinely different code paths, not one path observed twice.
+#[test]
+fn a_hidden_ref_push_reports_the_same_client_bytes_as_a_push_to_a_ref_the_principal_cannot_see() {
+    // Hidden: the projection's ref table carries `refs/heads/main` and the
+    // policy hides it, so `hides_any_target` refuses before the fold.
+    let hidden = admitted_statuses(
+        b"fg019c-disclosure-hidden",
+        UnboundAdapter::with_main("disclosure-hidden", 0x60).hiding(MAIN_REF),
+    );
+    // Unknown: no hide rule at all, and the ref table does not carry
+    // `refs/heads/main`, so the delete's expected-old is unsatisfied and the
+    // FOLD refuses `ExpectedOldRefMismatch`.
+    let unknown = admitted_statuses(
+        b"fg019c-disclosure-unknown",
+        UnboundAdapter::new("disclosure-unknown", 0x61),
+    );
+
+    assert_eq!(
+        hidden, unknown,
+        "a push to a hidden ref must report the same bytes as a push to a ref the \
+         principal's view does not carry; a difference lets a client enumerate the \
+         hidden namespace one push at a time"
+    );
+    assert_eq!(
+        hidden,
+        vec![fgit_wire::receive::ReceiveCommandStatus::Rejected {
+            message: b"stale info".to_vec()
+        }],
+        "and both must be the ordinary stale-info rejection rather than some third \
+         shape that merely happens to be shared between these two cases"
+    );
+
+    // The control.
+    let protected = admitted_statuses(
+        b"fg019c-disclosure-control",
+        UnboundAdapter::with_main("disclosure-control", 0x62)
+            .refusing_commit(RefusalCode::ProtectedRefTransitionDenied),
+    );
+    assert_ne!(
+        hidden, protected,
+        "genuinely different refusals must stay distinguishable on the wire, or the \
+         byte identity above is satisfied by an emit route that says one thing to \
+         every client"
+    );
+}
+
+/// Admits `delete_main()` through `projection` and returns exactly the statuses
+/// admission would hand `report-status`.
+///
+/// `AdmissionResult::command_statuses` documents itself as the sole route from
+/// admission to `report-status`, and `AdmissionResult::report_packets` encodes
+/// these same values into the `ng <ref> <message>` lines, so these are the
+/// client-visible payloads rather than an internal projection of them.
+fn admitted_statuses(
+    session: &[u8],
+    projection: UnboundAdapter,
+) -> Vec<fgit_wire::receive::ReceiveCommandStatus> {
+    let context = context(session);
+    let store = store_with_genesis(&context);
+    let result = admit_validated_receive(
+        &store,
+        &context,
+        &delete_main(),
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("every case here reaches a terminal decision rather than failing open");
+    assert_eq!(
+        result.commands.len(),
+        1,
+        "the fixture pushes one command, so exactly one status is expected"
+    );
+    result.command_statuses()
+}
+
+// ---------------------------------------------------------------------------
 // The retention boundary on the PUSH path (frankengit-fg019c acceptance line 1,
 // second half: "zero unauthorized disclosure/RETENTION").
 //
