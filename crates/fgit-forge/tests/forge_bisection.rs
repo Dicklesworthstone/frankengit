@@ -9,9 +9,9 @@ use fgit_codec::schema::{
 };
 use fgit_forge::aggregate::{AggregateId, AggregateVersion, PullRequestNumber};
 use fgit_forge::bisection::{
-    BisectionContext, BisectionRange, BisectionRefusal, BisectionTermination, MonotonicityShape,
-    PredicateOutcome, PullRequestStatePredicate, TransitionDirection, execute_bisection,
-    linear_scan_oracle, logarithmic_probe_budget,
+    BisectionContext, BisectionRange, BisectionReceipt, BisectionRefusal, BisectionTermination,
+    MonotonicityShape, PredicateOutcome, ProbeRecord, PullRequestStatePredicate,
+    TransitionDirection, execute_bisection, linear_scan_oracle, logarithmic_probe_budget,
 };
 use fgit_forge::event::{ForgeEvent, ForgeEventPayload};
 use fgit_forge::snapshot::{
@@ -677,5 +677,139 @@ fn test_invalid_range_refusal() {
     assert_eq!(
         res,
         Err(BisectionRefusal::InvalidRange { start: 10, end: 5 })
+    );
+}
+
+#[test]
+fn test_receipt_digest_binds_probe_outcomes() {
+    let repo = RepositoryId::from_bytes([7u8; 16]);
+    let range = BisectionRange::new(
+        DecisionSequence::try_new(1).unwrap(),
+        DecisionSequence::try_new(8).unwrap(),
+    )
+    .unwrap();
+    let shape = MonotonicityShape::GuaranteedMonotone {
+        expected_direction: Some(TransitionDirection::UnsatisfiedToSatisfied),
+    };
+    let termination = BisectionTermination::NoTransition {
+        uniform_outcome: PredicateOutcome::Unsatisfied,
+    };
+
+    let probe = |outcome| ProbeRecord {
+        step_index: 0,
+        sequence: DecisionSequence::try_new(4).unwrap(),
+        outcome,
+        head_id: fake_head_id(3),
+        policy_epoch: PolicyEpoch::FIRST,
+        replayed_batches: 0,
+    };
+
+    let satisfied = BisectionReceipt::compute_digest(
+        repo,
+        &range,
+        &shape,
+        1,
+        None,
+        &termination,
+        &[probe(Ok(PredicateOutcome::Satisfied))],
+    );
+    let unsatisfied = BisectionReceipt::compute_digest(
+        repo,
+        &range,
+        &shape,
+        1,
+        None,
+        &termination,
+        &[probe(Ok(PredicateOutcome::Unsatisfied))],
+    );
+    assert_ne!(
+        satisfied, unsatisfied,
+        "two runs whose probes disagree must not share a receipt digest"
+    );
+}
+
+#[test]
+fn test_receipt_digest_binds_monotonicity_shape() {
+    let repo = RepositoryId::from_bytes([8u8; 16]);
+    let range = BisectionRange::new(
+        DecisionSequence::try_new(1).unwrap(),
+        DecisionSequence::try_new(8).unwrap(),
+    )
+    .unwrap();
+    let termination = BisectionTermination::NoTransition {
+        uniform_outcome: PredicateOutcome::Unsatisfied,
+    };
+
+    let monotone = BisectionReceipt::compute_digest(
+        repo,
+        &range,
+        &MonotonicityShape::GuaranteedMonotone {
+            expected_direction: None,
+        },
+        0,
+        None,
+        &termination,
+        &[],
+    );
+    let segmented = BisectionReceipt::compute_digest(
+        repo,
+        &range,
+        &MonotonicityShape::BoundedSegmented {
+            segment_size: 2,
+            max_steps: 9,
+        },
+        0,
+        None,
+        &termination,
+        &[],
+    );
+    assert_ne!(
+        monotone, segmented,
+        "the declared search contract must participate in the receipt digest"
+    );
+}
+
+#[test]
+fn test_receipt_digest_binds_refusal_reason() {
+    let repo = RepositoryId::from_bytes([9u8; 16]);
+    let range = BisectionRange::new(
+        DecisionSequence::try_new(1).unwrap(),
+        DecisionSequence::try_new(8).unwrap(),
+    )
+    .unwrap();
+    let shape = MonotonicityShape::LinearOnly { max_steps: 4 };
+
+    let budget = BisectionReceipt::compute_digest(
+        repo,
+        &range,
+        &shape,
+        5,
+        None,
+        &BisectionTermination::Refused {
+            reason: BisectionRefusal::BudgetExhausted {
+                steps_taken: 5,
+                max_budget: 4,
+            },
+        },
+        &[],
+    );
+    let nonmonotone = BisectionReceipt::compute_digest(
+        repo,
+        &range,
+        &shape,
+        5,
+        None,
+        &BisectionTermination::Refused {
+            reason: BisectionRefusal::NonMonotoneDetected {
+                sequence: 4,
+                expected: "unsatisfied".to_string(),
+                observed: "satisfied".to_string(),
+            },
+        },
+        &[],
+    );
+    assert_ne!(
+        budget, nonmonotone,
+        "different refusal reasons must not share a receipt digest"
     );
 }

@@ -341,22 +341,35 @@ pub struct BisectionReceipt {
     pub transition_found: Option<DecisionSequence>,
     /// Terminal outcome status.
     pub termination: BisectionTermination,
-    /// Deterministic hash digest computed over receipt contents.
+    /// Deterministic hash digest over every receipt field: repository, range,
+    /// declared shape, probe count, transition, terminal status, refusal
+    /// text, and each individual probe record.
     pub receipt_digest: Digest,
 }
 
 impl BisectionReceipt {
-    /// Generates the canonical deterministic digest over the receipt structure.
+    /// Generates the canonical deterministic digest over the full receipt.
+    ///
+    /// Every observation an auditor would verify is inside the hash: the
+    /// declared [`MonotonicityShape`], and each [`ProbeRecord`] with its
+    /// sequence, outcome, observed head id, policy epoch, and replay count,
+    /// plus the refusal text on a refused termination. Two executions that
+    /// differ anywhere in those observations produce different digests;
+    /// leaving any of them out would let a tampered or fabricated probe
+    /// history verify against an untouched digest.
     #[must_use]
     pub fn compute_digest(
         repository_id: RepositoryId,
         range: &BisectionRange,
+        monotonicity_shape: &MonotonicityShape,
         steps_taken: usize,
         transition_found: Option<DecisionSequence>,
         termination: &BisectionTermination,
+        probes: &[ProbeRecord],
     ) -> Digest {
         let mut canonical_bytes = Vec::with_capacity(128);
         canonical_bytes.extend_from_slice(repository_id.as_bytes());
+        fold_shape(&mut canonical_bytes, monotonicity_shape);
         canonical_bytes.extend_from_slice(&range.start().get().to_be_bytes());
         canonical_bytes.extend_from_slice(&range.end().get().to_be_bytes());
         canonical_bytes.extend_from_slice(&(steps_taken as u64).to_be_bytes());
@@ -378,15 +391,70 @@ impl BisectionReceipt {
                 canonical_bytes.push(2);
                 canonical_bytes.push(if uniform_outcome.is_satisfied() { 1 } else { 0 });
             }
-            BisectionTermination::Refused { .. } => {
+            BisectionTermination::Refused { reason } => {
                 canonical_bytes.push(3);
+                let reason_text = reason.to_string();
+                canonical_bytes.extend_from_slice(&(reason_text.len() as u64).to_be_bytes());
+                canonical_bytes.extend_from_slice(reason_text.as_bytes());
             }
+        }
+        canonical_bytes.extend_from_slice(&(probes.len() as u64).to_be_bytes());
+        for probe in probes {
+            fold_probe(&mut canonical_bytes, probe);
         }
         let raw = sha256_digest(&canonical_bytes);
         let digest_bytes =
             DigestBytes::try_new(&raw).expect("32-byte sha256 output is valid digest length");
         Digest::new(fgit_crypto::DigestAlgorithm::Sha256.id(), digest_bytes)
     }
+}
+
+/// Folds the declared search contract into the canonical digest bytes.
+fn fold_shape(bytes: &mut Vec<u8>, shape: &MonotonicityShape) {
+    match shape {
+        MonotonicityShape::GuaranteedMonotone { expected_direction } => {
+            bytes.push(1);
+            match expected_direction {
+                None => bytes.push(0),
+                Some(TransitionDirection::UnsatisfiedToSatisfied) => bytes.push(1),
+                Some(TransitionDirection::SatisfiedToUnsatisfied) => bytes.push(2),
+            }
+        }
+        MonotonicityShape::BoundedSegmented {
+            segment_size,
+            max_steps,
+        } => {
+            bytes.push(2);
+            bytes.extend_from_slice(&(*segment_size as u64).to_be_bytes());
+            bytes.extend_from_slice(&(*max_steps as u64).to_be_bytes());
+        }
+        MonotonicityShape::LinearOnly { max_steps } => {
+            bytes.push(3);
+            bytes.extend_from_slice(&(*max_steps as u64).to_be_bytes());
+        }
+    }
+}
+
+/// Folds one probe record into the canonical digest bytes, length-prefixing
+/// variable-length fields so distinct observations cannot collide by
+/// concatenation.
+fn fold_probe(bytes: &mut Vec<u8>, probe: &ProbeRecord) {
+    bytes.extend_from_slice(&(probe.step_index as u64).to_be_bytes());
+    bytes.extend_from_slice(&probe.sequence.get().to_be_bytes());
+    match &probe.outcome {
+        Ok(outcome) => {
+            bytes.push(0);
+            bytes.push(if outcome.is_satisfied() { 1 } else { 0 });
+        }
+        Err(error) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&(error.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(error.as_bytes());
+        }
+    }
+    bytes.extend_from_slice(probe.head_id.as_internal_object_id().digest().as_bytes());
+    bytes.extend_from_slice(&probe.policy_epoch.get().to_be_bytes());
+    bytes.extend_from_slice(&(probe.replayed_batches as u64).to_be_bytes());
 }
 
 /// Ways the bisection engine refuses to proceed or declines an invalid operation.
@@ -675,9 +743,11 @@ where
     let receipt_digest = BisectionReceipt::compute_digest(
         repo_id,
         &range,
+        &shape,
         step_index,
         transition_found,
         &termination,
+        &probes,
     );
 
     BisectionReceipt {
