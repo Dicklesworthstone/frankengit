@@ -125,4 +125,4 @@ fge_assert_contains FG056B-E2E-027 "${test_det_out}" \
   'test test_determinism_across_instances ... ok' \
   'determinism test passed'
 
-fge_finish
+fge_phase teardown
