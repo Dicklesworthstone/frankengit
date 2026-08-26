@@ -311,4 +311,9 @@ fn notes_merge_strategies_ours_theirs_union_catsortuniq() {
         NotesMergeStrategy::CatSortUniq,
     );
     assert_eq!(csu_bytes, b"line A\nline B\nline C\n");
+
+    // 5. CatSortUniq with blank lines preserved per sort -u semantics
+    let csu_blank_bytes =
+        merge_note_blob_bytes(b"a\n\nb\n", b"c\n\nb\n", NotesMergeStrategy::CatSortUniq);
+    assert_eq!(csu_blank_bytes, b"\na\nb\nc\n");
 }

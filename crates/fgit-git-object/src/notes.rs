@@ -502,10 +502,13 @@ pub fn merge_note_blob_bytes(
         NotesMergeStrategy::CatSortUniq => {
             let mut lines = Vec::new();
             for slice in [ours_bytes, theirs_bytes] {
-                for line in slice.split(|b| *b == b'\n') {
-                    if !line.is_empty() {
-                        lines.push(line);
+                let mut iter = slice.split(|b| *b == b'\n').peekable();
+                while let Some(line) = iter.next() {
+                    // Skip the trailing empty slice resulting from a terminal newline
+                    if iter.peek().is_none() && line.is_empty() {
+                        continue;
                     }
+                    lines.push(line);
                 }
             }
             lines.sort();
