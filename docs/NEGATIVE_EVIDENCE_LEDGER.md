@@ -446,3 +446,42 @@ while the checker had no way to express it, and nothing compared the two. The
 vocabulary lived in exactly one place — the code — with prose beside it that
 nobody checked against it. Recorded on bead
 `frankengit-negative-evidence-supersession-status-8373`.
+
+### NEG-031 — notes emission fanout shape is not a count function (FG-084)
+
+**Hypothesis.** In pinned git-2.54.0, the shape of a written notes tree
+(flat vs 2-hex fanout) is determined by the number of entries: below some
+threshold flat, above it fanned. A compatible emitter can therefore pick its
+layout from `count` alone.
+
+**Disproven by paired execution.** Two independent pinned-oracle runs on this
+host disagree at the *same* count:
+
+- The FG-084 corpus build (`scripts/e2e/oracle/notes_corpus.sh`, incremental
+  `git notes add`) produced a **fully fanned** root at 255 entries — about a
+  hundred two-hex directories holding one to three leaves each, nested at
+  least two levels deep by 257.
+- An independent crossing probe (fresh repository, same operation pattern,
+  counts 249 through 256) stayed **entirely flat** at every count including
+  255 and 256.
+
+Same binary, same pin, same operation, same count — different tree shape.
+Whatever the upstream writer keys on (write history, consolidation timing,
+internal rebalancing), it is not observable as a function of entry count from
+these datasets.
+
+**Consequence.** Any FrankenGit emitter that guesses a threshold would match
+one dataset and diverge from the other. Rather than ship a guess,
+`FG084-DIV-001` records flat-versus-fanned-at-the-boundary as a **versioned
+accepted divergence**: parse equality is asserted byte-exactly against every
+captured tree, emission equality is asserted only where both datasets agree
+(flat at low counts), and the boundary stays an explicit non-claim until a
+dedicated study pins the writer rule.
+
+**Why this row survives.** The attractive claim ("fan out past 256") has a
+mechanism, matches folklore, and is *almost* right — which is exactly why a
+guessed threshold would have passed a two-point test and shipped. Both
+datasets are preserved (`/data/tmp/notes-out-7QoZ/corpus-sha1`,
+`/data/tmp/notes-xc-out/crossing.tsv`), and the harness that produced them
+(`notes_corpus.sh` + `notes_differential.rs`) re-runs the comparison on any
+future oracle pin.
