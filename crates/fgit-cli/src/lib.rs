@@ -19,10 +19,12 @@ use fgit_node::{
     NodeGitDaemonServeRefusal, NodeGitDaemonServerRefusal, NodeInitialization,
     NodeSourceImportRefusal, OneNode, RepositoryResolutionInput,
 };
-use fgit_types::numeric::{DecisionSequence, HeadGeneration, RepositorySequence};
+use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
+use fgit_types::numeric::{CodecVersion, DecisionSequence, HeadGeneration, RepositorySequence};
 use fgit_types::{
-    DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefusalCode, RepositoryAuthorityHeadId,
-    RepositoryCapsuleId, RepositoryCommitId, RepositoryId, RepositoryIncarnationId, TenantId,
+    CANONICAL_CODEC_VERSION, DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefusalCode,
+    RepositoryAuthorityHeadId, RepositoryCapsuleId, RepositoryCommitId, RepositoryId,
+    RepositoryIncarnationId, TenantId,
 };
 
 const EXPORT_TEMPORARY_ATTEMPTS: usize = 16;
@@ -1004,6 +1006,42 @@ fn run_doctor(
     }
 }
 
+fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>, CliRefusal> {
+    if hex.len() % 2 != 0 {
+        return Err(CliRefusal::InvalidPosition(hex.to_string()));
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for chunk in hex.as_bytes().chunks_exact(2) {
+        let high = match chunk[0] {
+            b'0'..=b'9' => chunk[0] - b'0',
+            b'a'..=b'f' => chunk[0] - b'a' + 10,
+            b'A'..=b'F' => chunk[0] - b'A' + 10,
+            _ => return Err(CliRefusal::InvalidPosition(hex.to_string())),
+        };
+        let low = match chunk[1] {
+            b'0'..=b'9' => chunk[1] - b'0',
+            b'a'..=b'f' => chunk[1] - b'a' + 10,
+            b'A'..=b'F' => chunk[1] - b'A' + 10,
+            _ => return Err(CliRefusal::InvalidPosition(hex.to_string())),
+        };
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn parse_derived_id_from_hex<T>(
+    token: &str,
+    hex_str: &str,
+    ctor: fn(DigestAlgorithmId, CodecVersion, DigestBytes) -> T,
+) -> Result<T, CliRefusal> {
+    let bytes = parse_hex_bytes(hex_str)?;
+    let digest =
+        DigestBytes::try_new(&bytes).map_err(|_| CliRefusal::InvalidPosition(token.to_string()))?;
+    let alg = DigestAlgorithmId::try_new(1)
+        .map_err(|_| CliRefusal::InvalidPosition(token.to_string()))?;
+    Ok(ctor(alg, CANONICAL_CODEC_VERSION, digest))
+}
+
 fn parse_position_target(token: &str) -> Result<PositionTarget, CliRefusal> {
     if token.eq_ignore_ascii_case("latest") {
         return Ok(PositionTarget::Latest);
@@ -1013,11 +1051,11 @@ fn parse_position_target(token: &str) -> Result<PositionTarget, CliRefusal> {
             .parse::<u64>()
             .map_err(|_| CliRefusal::InvalidPosition(token.to_string()))?;
         let seq = DecisionSequence::try_new(seq)
-            .ok_or_else(|| CliRefusal::InvalidPosition(token.to_string()))?;
+            .map_err(|_| CliRefusal::InvalidPosition(token.to_string()))?;
         return Ok(PositionTarget::Decision(seq));
     }
     if let Some(rest) = token.strip_prefix("commit:") {
-        let id = RepositoryCommitId::from_hex(rest).map_err(CliRefusal::Repository)?;
+        let id = parse_derived_id_from_hex(token, rest, RepositoryCommitId::from_digest)?;
         return Ok(PositionTarget::Commit(id));
     }
     if let Some(rest) = token.strip_prefix("sequence:") {
@@ -1025,19 +1063,19 @@ fn parse_position_target(token: &str) -> Result<PositionTarget, CliRefusal> {
             .parse::<u64>()
             .map_err(|_| CliRefusal::InvalidPosition(token.to_string()))?;
         let seq = RepositorySequence::try_new(seq)
-            .ok_or_else(|| CliRefusal::InvalidPosition(token.to_string()))?;
+            .map_err(|_| CliRefusal::InvalidPosition(token.to_string()))?;
         return Ok(PositionTarget::Sequence(seq));
     }
     if let Some(rest) = token.strip_prefix("head:") {
-        let id = RepositoryAuthorityHeadId::from_hex(rest).map_err(CliRefusal::Repository)?;
+        let id = parse_derived_id_from_hex(token, rest, RepositoryAuthorityHeadId::from_digest)?;
         return Ok(PositionTarget::Head(id));
     }
     if let Some(rest) = token.strip_prefix("capsule:") {
-        let id = RepositoryCapsuleId::from_hex(rest).map_err(CliRefusal::Repository)?;
+        let id = parse_derived_id_from_hex(token, rest, RepositoryCapsuleId::from_digest)?;
         return Ok(PositionTarget::Capsule(id));
     }
     if let Ok(seq) = token.parse::<u64>() {
-        if let Some(seq) = DecisionSequence::try_new(seq) {
+        if let Ok(seq) = DecisionSequence::try_new(seq) {
             return Ok(PositionTarget::Decision(seq));
         }
     }
@@ -1208,19 +1246,20 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
             .map_err(CliRefusal::Snapshot)?,
         };
 
-        if let Some(actor) = actor_id {
-            let policy = SnapshotDisclosurePolicy {
-                actor,
-                allowed_refs: admission.snapshot().refs.keys().cloned().collect(),
-                allowed_prs: Default::default(),
-                is_authorized: true,
+        if let Some(_actor) = actor_id {
+            let policy = SnapshotDisclosurePolicy::Restricted {
+                allowed_refs: Some(admission.snapshot().refs.keys().cloned().collect()),
+                revoked_refs: std::collections::BTreeSet::new(),
+                allowed_prs: None,
+                revoked_prs: std::collections::BTreeSet::new(),
+                repository_access_revoked: false,
             };
             snapshot = policy
                 .evaluate_and_filter(&snapshot)
                 .map_err(CliRefusal::Snapshot)?;
         }
 
-        match subcommand {
+        match opts.subcommand {
             None => {
                 let summary = snapshot.summary();
                 Ok(CliOutcome::At(AtReport::Summary {
