@@ -48,6 +48,52 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        Ok(fgit_cli::CliOutcome::At(report)) => {
+            match report {
+                fgit_cli::AtReport::Summary {
+                    snapshot_summary,
+                    target,
+                    head_id,
+                    decision_sequence,
+                    refs_count,
+                    prs_count,
+                } => {
+                    println!(
+                        "snapshot at {target} (head {head_id}, decision {:?}): {refs_count} refs, {prs_count} pull requests; {snapshot_summary}",
+                        decision_sequence
+                    );
+                }
+                fgit_cli::AtReport::Refs { position, refs } => {
+                    println!("references at {position} ({} total):", refs.len());
+                    for (name, oid) in refs {
+                        println!("  {name} -> {oid}");
+                    }
+                }
+                fgit_cli::AtReport::PullRequests {
+                    position,
+                    pull_requests,
+                } => {
+                    println!(
+                        "pull requests at {position} ({} total):",
+                        pull_requests.len()
+                    );
+                    for (number, title, state, branch) in pull_requests {
+                        println!("  #{number} [{state}] {title} (into {branch})");
+                    }
+                }
+                fgit_cli::AtReport::Diff {
+                    older,
+                    newer,
+                    ref_changes_count,
+                    pr_changes_count,
+                } => {
+                    println!(
+                        "diff between {older} and {newer}: {ref_changes_count} ref changes, {pr_changes_count} pull request changes"
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("fg: {error}");
             ExitCode::from(2)
