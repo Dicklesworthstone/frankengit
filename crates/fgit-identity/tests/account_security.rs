@@ -47,17 +47,31 @@ fn bound_assertion(
     challenge: &PasskeyAssertionChallenge,
     signing_key: &SigningKey,
     credential_id: PasskeyId,
-    auth_data: Vec<u8>,
     sign_count: u32,
     user_present: bool,
     user_verified: bool,
 ) -> PasskeyAssertion {
     let client_data_json = format!(
-        "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\"}}",
-        challenge.challenge_token()
+        "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\",\"origin\":\"{}\"}}",
+        challenge.challenge_token(),
+        challenge.origin()
     )
     .into_bytes();
     let client_data_hash = PasskeyAssertionChallenge::client_data_hash(&client_data_json);
+    // Canonical authenticator data shape: 32-byte RP ID hash placeholder,
+    // the §6.1 flags byte carrying this ceremony's UP/UV bits, then the
+    // big-endian counter. Verification derives the flags from these signed
+    // bytes, so fixtures must encode them here - there is no side channel.
+    let mut auth_data = vec![0u8; 32];
+    let mut flags = 0u8;
+    if user_present {
+        flags |= 0x01;
+    }
+    if user_verified {
+        flags |= 0x04;
+    }
+    auth_data.push(flags);
+    auth_data.extend_from_slice(&sign_count.to_be_bytes());
     let mut payload = auth_data.clone();
     payload.extend_from_slice(&client_data_hash);
     let signature = signing_key.sign(&payload).to_bytes().to_vec();
@@ -68,8 +82,6 @@ fn bound_assertion(
         auth_data,
         signature,
         sign_count,
-        user_present,
-        user_verified,
     }
 }
 
@@ -105,18 +117,30 @@ fn passkey_registration_and_assertion_roundtrip() {
 
     // Issue challenge
     let challenge_bytes = [7u8; 32];
-    let challenge = PasskeyAssertionChallenge::new(challenge_bytes, rp_id, principal, 2000);
+    let challenge = PasskeyAssertionChallenge::new(
+        challenge_bytes,
+        rp_id,
+        principal,
+        "https://forge.example.com",
+        2000,
+    );
 
-    // Client data carrying the canonical challenge token, hash recomputed
-    // from the exact bytes the signature will cover.
+    // Client data carrying the canonical challenge token and the ceremony
+    // origin, hash recomputed from the exact bytes the signature covers.
     let client_data_json = format!(
-        "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\"}}",
-        challenge.challenge_token()
+        "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\",\"origin\":\"{}\"}}",
+        challenge.challenge_token(),
+        "https://forge.example.com"
     )
     .into_bytes();
     let client_data_hash = PasskeyAssertionChallenge::client_data_hash(&client_data_json);
 
-    let auth_data = vec![1, 2, 3, 4];
+    // Canonical authenticator data: RP ID hash placeholder, flags byte with
+    // UP|UV (0x05) - the bits verification derives from these signed bytes -
+    // then the big-endian counter.
+    let mut auth_data = vec![0u8; 32];
+    auth_data.push(0x05);
+    auth_data.extend_from_slice(&15u32.to_be_bytes());
     let mut payload = Vec::new();
     payload.extend_from_slice(&auth_data);
     payload.extend_from_slice(&client_data_hash);
@@ -130,8 +154,6 @@ fn passkey_registration_and_assertion_roundtrip() {
         auth_data,
         signature,
         sign_count: 15, // advance counter
-        user_present: true,
-        user_verified: true,
     };
 
     // Verify assertion at now = 1500
@@ -153,8 +175,15 @@ fn passkey_registration_and_assertion_roundtrip() {
 fn passkey_counter_regression_refused() {
     let signing_key = SigningKey::from_bytes(&[42u8; 32]);
     let vk = signing_key.verifying_key();
-
     let cred_id = PasskeyId::try_new(102).unwrap();
+    let challenge = PasskeyAssertionChallenge::new(
+        [0u8; 32],
+        "forge.example.com",
+        test_principal(),
+        "https://forge.example.com",
+        2000,
+    );
+
     let mut credential = PasskeyCredential::register(
         cred_id,
         test_principal(),
@@ -166,21 +195,10 @@ fn passkey_counter_regression_refused() {
     )
     .unwrap();
 
-    let challenge =
-        PasskeyAssertionChallenge::new([0u8; 32], "forge.example.com", test_principal(), 2000);
-
     // Replay / clone with regression (received 50 <= recorded 50). The client
     // data is honestly bound to this challenge so the refusal lands on the
     // counter rather than on an earlier gate.
-    let assertion = bound_assertion(
-        &challenge,
-        &signing_key,
-        cred_id,
-        vec![0x49],
-        50,
-        true,
-        true,
-    );
+    let assertion = bound_assertion(&challenge, &signing_key, cred_id, 50, true, true);
 
     let err = credential
         .verify_assertion(
@@ -218,8 +236,13 @@ fn passkey_expired_challenge_and_rp_mismatch_refused() {
     .unwrap();
 
     // Expired challenge
-    let challenge =
-        PasskeyAssertionChallenge::new([0u8; 32], "forge.example.com", test_principal(), 1500);
+    let challenge = PasskeyAssertionChallenge::new(
+        [0u8; 32],
+        "forge.example.com",
+        test_principal(),
+        "https://forge.example.com",
+        1500,
+    );
 
     let assertion = PasskeyAssertion {
         credential_id: cred_id,
@@ -228,8 +251,6 @@ fn passkey_expired_challenge_and_rp_mismatch_refused() {
         auth_data: vec![],
         signature: vec![],
         sign_count: 5,
-        user_present: true,
-        user_verified: true,
     };
 
     let err = credential
@@ -251,8 +272,13 @@ fn passkey_expired_challenge_and_rp_mismatch_refused() {
     );
 
     // RP ID mismatch
-    let bad_rp_challenge =
-        PasskeyAssertionChallenge::new([0u8; 32], "evil.attacker.com", test_principal(), 2000);
+    let bad_rp_challenge = PasskeyAssertionChallenge::new(
+        [0u8; 32],
+        "evil.attacker.com",
+        test_principal(),
+        "https://forge.example.com",
+        2000,
+    );
     let err_rp = credential
         .verify_assertion(
             &bad_rp_challenge,
@@ -281,11 +307,19 @@ fn passkey_user_verification_and_presence_enforced() {
     )
     .unwrap();
 
-    let challenge =
-        PasskeyAssertionChallenge::new([0u8; 32], "forge.example.com", test_principal(), 2000);
+    let challenge = PasskeyAssertionChallenge::new(
+        [0u8; 32],
+        "forge.example.com",
+        test_principal(),
+        "https://forge.example.com",
+        2000,
+    );
 
     // Missing user presence
-    let no_up = bound_assertion(&challenge, &signing_key, cred_id, vec![], 2, false, true);
+    let no_up = bound_assertion(&challenge, &signing_key, cred_id, 2, false, true);
+
+    // Missing user verification when required
+    let no_uv = bound_assertion(&challenge, &signing_key, cred_id, 2, true, false);
     assert_eq!(
         credential
             .verify_assertion(
@@ -300,7 +334,7 @@ fn passkey_user_verification_and_presence_enforced() {
     );
 
     // Missing user verification when required
-    let no_uv = bound_assertion(&challenge, &signing_key, cred_id, vec![], 2, true, false);
+    let no_uv = bound_assertion(&challenge, &signing_key, cred_id, 2, true, false);
     assert_eq!(
         credential
             .verify_assertion(
@@ -748,9 +782,14 @@ fn passkey_replay_against_a_fresh_challenge_is_refused() {
     .unwrap();
 
     // A first, entirely legitimate assertion.
-    let first =
-        PasskeyAssertionChallenge::new([1u8; 32], "forge.example.com", test_principal(), 2000);
-    let captured = bound_assertion(&first, &signing_key, cred_id, vec![7], 0, true, true);
+    let first = PasskeyAssertionChallenge::new(
+        [1u8; 32],
+        "forge.example.com",
+        test_principal(),
+        "https://forge.example.com",
+        2000,
+    );
+    let captured = bound_assertion(&first, &signing_key, cred_id, 0, true, true);
     credential
         .verify_assertion(
             &first,
@@ -763,8 +802,13 @@ fn passkey_replay_against_a_fresh_challenge_is_refused() {
 
     // Replaying the identical bytes against a brand-new challenge must not
     // authenticate: nothing in the signed data speaks for the new challenge.
-    let second =
-        PasskeyAssertionChallenge::new([2u8; 32], "forge.example.com", test_principal(), 4000);
+    let second = PasskeyAssertionChallenge::new(
+        [2u8; 32],
+        "forge.example.com",
+        test_principal(),
+        "https://forge.example.com",
+        4000,
+    );
     let err = credential
         .verify_assertion(
             &second,
@@ -791,10 +835,14 @@ fn passkey_client_data_hash_mismatch_is_refused() {
         1000,
     )
     .unwrap();
-
-    let challenge =
-        PasskeyAssertionChallenge::new([3u8; 32], "forge.example.com", test_principal(), 2000);
-    let mut tampered = bound_assertion(&challenge, &signing_key, cred_id, vec![9], 1, true, true);
+    let challenge = PasskeyAssertionChallenge::new(
+        [3u8; 32],
+        "forge.example.com",
+        test_principal(),
+        "https://forge.example.com",
+        2000,
+    );
+    let mut tampered = bound_assertion(&challenge, &signing_key, cred_id, 1, true, true);
     // Swap in client data that no longer hashes to the asserted digest.
     tampered.client_data_json = b"{\"type\":\"webauthn.get\",\"challenge\":\"nope\"}".to_vec();
 

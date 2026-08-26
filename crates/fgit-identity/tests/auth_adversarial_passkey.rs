@@ -43,7 +43,13 @@ fn registered_credential(key: &SigningKey) -> PasskeyCredential {
 }
 
 fn challenge(bytes: [u8; 32], rp: &str) -> PasskeyAssertionChallenge {
-    PasskeyAssertionChallenge::new(bytes, rp, principal(0x33), CHALLENGE_EXPIRES)
+    PasskeyAssertionChallenge::new(
+        bytes,
+        rp,
+        principal(0x33),
+        "https://example.org",
+        CHALLENGE_EXPIRES,
+    )
 }
 
 /// Builds a correctly signed assertion bound to `challenge`.
@@ -59,7 +65,12 @@ fn genuine_assertion(
     )
     .into_bytes();
     let client_data_hash = PasskeyAssertionChallenge::client_data_hash(&client_data_json);
-    let auth_data = vec![0x01; 37]; // flags + counters, shape only
+    // Canonical authenticator data: RP ID hash placeholder, flags byte with
+    // UP|UV (0x05) - the bits verification derives from these signed bytes -
+    // then the big-endian counter.
+    let mut auth_data = vec![0u8; 32];
+    auth_data.push(0x05);
+    auth_data.extend_from_slice(&sign_count.to_be_bytes());
     let mut signed_payload = auth_data.clone();
     signed_payload.extend_from_slice(&client_data_hash);
     let signature = key.sign(&signed_payload).to_bytes().to_vec();
@@ -70,8 +81,6 @@ fn genuine_assertion(
         auth_data,
         signature,
         sign_count,
-        user_present: true,
-        user_verified: true,
     }
 }
 
@@ -110,12 +119,17 @@ fn rp_mismatch_and_credential_mismatch_are_refused() {
         Err(PasskeyRefusal::CredentialMismatch)
     );
 }
-
 #[test]
 fn expired_challenges_are_refused_with_a_live_twin() {
     let key = signing_key([2; 32]);
     let mut credential = registered_credential(&key);
-    let stale = PasskeyAssertionChallenge::new([7; 32], "example.org", principal(0x33), NOW - 1);
+    let stale = PasskeyAssertionChallenge::new(
+        [7; 32],
+        "example.org",
+        principal(0x33),
+        "https://example.org",
+        NOW - 1,
+    );
     assert_eq!(
         credential.verify_assertion(
             &stale,
@@ -251,7 +265,13 @@ fn presence_verification_and_revocation_are_each_load_bearing() {
     let chal = challenge([0xDD; 32], "example.org");
     let mut assertion = genuine_assertion(&key, PasskeyId::try_new(1).unwrap(), &chal, 1);
 
-    assertion.user_present = false;
+    // The flags live INSIDE the signed authenticator data (byte 32: bit
+    // 0x01 user presence, bit 0x04 user verification). Flipping a bit here
+    // changes what the signature covers - that is exactly what makes the
+    // policy gates load-bearing rather than advisory.
+
+    // Drop user presence inside the signed bytes.
+    assertion.auth_data[32] &= !0x01;
     assert_eq!(
         credential.verify_assertion(
             &chal,
@@ -262,8 +282,10 @@ fn presence_verification_and_revocation_are_each_load_bearing() {
         ),
         Err(PasskeyRefusal::UserPresenceRequired)
     );
-    assertion.user_present = true;
-    assertion.user_verified = false;
+
+    // Restore presence, drop user verification under a Required policy.
+    assertion.auth_data[32] |= 0x01;
+    assertion.auth_data[32] &= !0x04;
     assert_eq!(
         credential.verify_assertion(
             &chal,
@@ -275,8 +297,8 @@ fn presence_verification_and_revocation_are_each_load_bearing() {
         Err(PasskeyRefusal::UserVerificationRequired)
     );
 
-    // Permitted twin: both flags set verifies to MultiFactor.
-    assertion.user_verified = true;
+    // Permitted twin: both bits set verifies to MultiFactor.
+    assertion.auth_data[32] |= 0x04;
     assert_eq!(
         credential.verify_assertion(
             &chal,
@@ -288,8 +310,10 @@ fn presence_verification_and_revocation_are_each_load_bearing() {
         Ok(fgit_identity::AuthenticationStrength::MultiFactor)
     );
 
-    // Revocation evidence gates remain independent of cryptography.
-    assertion.user_present = false;
+    // Revocation evidence gates remain independent of cryptography. Presence
+    // is cleared again in the signed bytes; the revocation refusal must win
+    // on evidence grounds regardless.
+    assertion.auth_data[32] &= !0x01;
     assert!(matches!(
         credential.verify_assertion(
             &chal,

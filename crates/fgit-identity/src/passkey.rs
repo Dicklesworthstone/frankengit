@@ -239,6 +239,21 @@ impl PasskeyCredential {
         if !contains_subslice(&assertion.client_data_json, token.as_bytes()) {
             return Err(PasskeyRefusal::ChallengeNotBound);
         }
+        // The signed clientDataJSON must also name the web origin the
+        // ceremony was issued for. RP ID scoping alone would let an
+        // assertion minted inside one relying party's page authenticate on
+        // another page sharing the ID.
+        let Some(observed_origin) =
+            extract_client_data_string(&assertion.client_data_json, b"\"origin\":\"")
+        else {
+            return Err(PasskeyRefusal::OriginMissingInClientData);
+        };
+        if !constant_time_eq(observed_origin, challenge.origin.as_bytes()) {
+            return Err(PasskeyRefusal::OriginMismatch {
+                expected: challenge.origin.clone(),
+                observed: String::from_utf8_lossy(observed_origin).into_owned(),
+            });
+        }
         match revocation {
             RevocationEvidence::Revoked => return Err(PasskeyRefusal::Revoked),
             RevocationEvidence::NotChecked => {
@@ -246,10 +261,23 @@ impl PasskeyCredential {
             }
             RevocationEvidence::Live => {}
         }
-        if !assertion.user_present {
+        // WebAuthn §6.1: user presence (bit 0x01) and user verification
+        // (bit 0x04) live in the flags byte of the SIGNED authenticator
+        // data, after the 32-byte RP ID hash. Deriving them here - rather
+        // than trusting caller-supplied booleans - is what makes the policy
+        // gates below bind to the signature instead of to its arguments.
+        if assertion.auth_data.len() < 37 {
+            return Err(PasskeyRefusal::AuthDataTooShort {
+                len: assertion.auth_data.len(),
+            });
+        }
+        let flags = assertion.auth_data[32];
+        let user_present = flags & 0x01 != 0;
+        let user_verified = flags & 0x04 != 0;
+        if !user_present {
             return Err(PasskeyRefusal::UserPresenceRequired);
         }
-        if uv_req == UserVerificationRequirement::Required && !assertion.user_verified {
+        if uv_req == UserVerificationRequirement::Required && !user_verified {
             return Err(PasskeyRefusal::UserVerificationRequired);
         }
 
@@ -304,22 +332,28 @@ pub struct PasskeyAssertionChallenge {
     challenge: [u8; 32],
     rp_id: String,
     user_id: PrincipalId,
+    /// The web origin (`scheme://host[:port]`) this ceremony was issued for.
+    /// Assertions whose signed clientDataJSON names a different origin are
+    /// refused: an RP-ID match alone would let one relying party's ceremony
+    /// feed another sharing the ID.
+    origin: String,
     expires_at: u64,
 }
 
 impl PasskeyAssertionChallenge {
-    /// Issues a new challenge.
     #[must_use]
     pub fn new(
         challenge: [u8; 32],
         rp_id: impl Into<String>,
         user_id: PrincipalId,
+        origin: impl Into<String>,
         expires_at: u64,
     ) -> Self {
         Self {
             challenge,
             rp_id: rp_id.into(),
             user_id,
+            origin: origin.into(),
             expires_at,
         }
     }
@@ -340,6 +374,12 @@ impl PasskeyAssertionChallenge {
     #[must_use]
     pub const fn user_id(&self) -> PrincipalId {
         self.user_id
+    }
+
+    /// The web origin this challenge was issued for.
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        &self.origin
     }
 
     /// Deadline when this challenge expires.
@@ -378,15 +418,16 @@ pub struct PasskeyAssertion {
     /// Digital signature over `auth_data || client_data_hash`.
     pub signature: Vec<u8>,
     /// The signature counter reported by the authenticator.
+    ///
+    /// User-presence and user-verification flags are deliberately NOT fields
+    /// here: [`PasskeyCredential::verify_assertion`] derives them from the
+    /// signed authenticator data's flags byte, so policy binds to what the
+    /// signature covers rather than to caller-supplied booleans.
     pub sign_count: u32,
-    /// Whether user presence was asserted.
-    pub user_present: bool,
-    /// Whether user verification (biometric/PIN) succeeded.
-    pub user_verified: bool,
 }
 
 /// Every way a passkey operation is refused.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PasskeyRefusal {
     /// The public key bytes were invalid for the algorithm.
     InvalidPublicKey,
@@ -430,6 +471,22 @@ pub enum PasskeyRefusal {
     /// The issued challenge does not appear in the signed client data, so
     /// this assertion proves nothing about this challenge.
     ChallengeNotBound,
+    /// The signed authenticator data is too short to carry the WebAuthn
+    /// §6.1 flags byte.
+    AuthDataTooShort {
+        /// The observed byte length.
+        len: usize,
+    },
+    /// The signed clientDataJSON carries no `origin` string.
+    OriginMissingInClientData,
+    /// The signed clientDataJSON names a different web origin than the
+    /// ceremony was issued for.
+    OriginMismatch {
+        /// The origin the challenge was issued for.
+        expected: String,
+        /// The origin named by the signed client data.
+        observed: String,
+    },
 }
 
 impl Display for PasskeyRefusal {
@@ -469,10 +526,20 @@ impl Display for PasskeyRefusal {
             Self::ChallengeNotBound => f.write_str(
                 "issued challenge is absent from the signed client data: possible replay",
             ),
+            Self::AuthDataTooShort { len } => write!(
+                f,
+                "authenticator data is {len} bytes; WebAuthn flags need at least 37"
+            ),
+            Self::OriginMissingInClientData => {
+                f.write_str("signed clientDataJSON carries no origin string")
+            }
+            Self::OriginMismatch { expected, observed } => write!(
+                f,
+                "clientDataJSON origin `{observed}` does not match ceremony origin `{expected}`"
+            ),
         }
     }
 }
-
 impl core::error::Error for PasskeyRefusal {}
 
 /// Whether `needle` occurs anywhere in `haystack`, without allocating.
@@ -481,4 +548,37 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         && haystack
             .windows(needle.len())
             .any(|window| window == needle)
+}
+
+/// Constant-time byte-slice equality: length differences exit early (length
+/// is not secret here - both sides are client-visible shapes), contents never
+/// short-circuit.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Extracts the string value following `key_marker` (e.g. `"origin":"`) from
+/// clientDataJSON bytes, up to the next unescaped double quote. This is a
+/// bounded byte-level scan, not a JSON parser: it is sufficient for the
+/// flat, browser-produced client data this module verifies and keeps the
+/// crate dependency-free. A malformed or escaped payload simply fails the
+/// origin check it exists to serve.
+fn extract_client_data_string<'a>(
+    client_data_json: &'a [u8],
+    key_marker: &[u8],
+) -> Option<&'a [u8]> {
+    let start = client_data_json
+        .windows(key_marker.len())
+        .position(|window| window == key_marker)?
+        + key_marker.len();
+    let rest = &client_data_json[start..];
+    let end = rest.iter().position(|byte| *byte == b'"')?;
+    rest.get(..end)
 }
