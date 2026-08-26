@@ -4152,6 +4152,7 @@ mod tests {
                 retention: self.retention.clone(),
                 outbox: self.outbox.clone(),
                 hidden_refs: RefVisibility::new(),
+                tag_peels: BTreeMap::new(),
             })
         }
     }
