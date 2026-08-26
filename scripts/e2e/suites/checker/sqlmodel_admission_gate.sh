@@ -55,6 +55,9 @@ sm_fixture() {
   cp "$SM_REPO/LICENSE" "$root/LICENSE"
   cp "$SM_REPO/Cargo.toml" "$root/Cargo.toml"
   cp -a "$SM_REPO/crates" "$root/crates"
+  # fgit-projection requires sqlmodel-frankensqlite 0.4.1; remove it from the fixture copy
+  # so it does not conflict with the 0.4.0 version under test in sm-link-fixture.
+  rm -rf "$root/crates/fgit-projection"
   cp -a "$SM_REPO/tools/registry-check" "$root/tools/registry-check"
   mkdir -p "$root/crates/sm-link-fixture/src"
   cat >"$root/crates/sm-link-fixture/Cargo.toml" <<EOF
