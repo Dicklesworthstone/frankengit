@@ -64,6 +64,7 @@ pub mod evidence;
 /// Admitting a sealed merge; see the module for what it does and does not
 /// re-check.
 pub mod merge;
+pub mod policy_bridge;
 
 /// Bounds enforced before creating per-command work or retrying a stale plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

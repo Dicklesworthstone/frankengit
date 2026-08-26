@@ -628,6 +628,7 @@ dependencies = [
  "fgit-git-object",
  "fgit-lab",
  "fgit-pack",
+ "fgit-policy",
  "fgit-reference",
  "fgit-txn",
  "fgit-types",

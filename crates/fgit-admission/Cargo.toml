@@ -5,6 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+fgit-policy.workspace = true
 fgit-authority.workspace = true
 fgit-chronicle.workspace = true
 fgit-codec.workspace = true
