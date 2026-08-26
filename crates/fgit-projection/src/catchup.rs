@@ -96,6 +96,7 @@ pub async fn apply_batch<C: Connection>(
             record,
             "catching_up",
             session.identity().schema_generation(),
+            session.identity(),
         )
         .await?;
         if Some(after) == held {
@@ -159,5 +160,136 @@ mod tests {
         assert_eq!(r.seq.get(), 9);
         assert_eq!(r.digest, "deadbeef");
         assert_eq!(r.authority_head, "head-test");
+    }
+
+    fn identity() -> crate::identity::ProjectionIdentity {
+        crate::identity::ProjectionIdentity::new(
+            "inc-test",
+            "head-test",
+            1,
+            1,
+            1,
+            crate::identity::BuildIdentity::current(),
+        )
+    }
+
+    #[test]
+    fn fold_refuses_records_from_a_foreign_binding() {
+        let node = fgit_runtime::boot::RuntimeProfile::deterministic()
+            .build()
+            .expect("node builds");
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime builds");
+        let outcome: Result<(), ProjectionError> = {
+            let cx = node.request_cx(fgit_runtime::meter::BudgetClass::Request);
+            rt.block_on(async {
+                let cx = &cx;
+                let session = ProjectionSession::open_memory(identity())?;
+                session.install_schema(cx).await?;
+
+                let foreign_head = DecisionRecord {
+                    authority_head: "head-evil".to_owned(),
+                    ..record(1, "d1")
+                };
+                let err = apply_batch(&session, cx, &[foreign_head])
+                    .await
+                    .expect_err("a record naming another head must be refused");
+                assert!(matches!(
+                    err,
+                    ProjectionError::Identity(
+                        crate::identity::IdentityAdvanceError::BindingMismatch {
+                            field: "authority_head",
+                            ..
+                        }
+                    )
+                ));
+
+                let foreign_incarnation = DecisionRecord {
+                    source_incarnation: "inc-evil".to_owned(),
+                    ..record(1, "d1")
+                };
+                let err = apply_batch(&session, cx, &[foreign_incarnation])
+                    .await
+                    .expect_err("a record naming another incarnation must be refused");
+                assert!(matches!(
+                    err,
+                    ProjectionError::Identity(
+                        crate::identity::IdentityAdvanceError::BindingMismatch {
+                            field: "source_incarnation",
+                            ..
+                        }
+                    )
+                ));
+
+                // Nothing from the refused records persisted.
+                assert_eq!(
+                    session
+                        .load_watermark_row(cx)
+                        .await?
+                        .map(|row| row.last_position),
+                    None
+                );
+
+                // The honestly-bound record still folds.
+                let report = apply_batch(&session, cx, &[record(1, "d1")]).await?;
+                assert_eq!(report.applied, 1);
+                Ok(())
+            })
+        };
+        outcome.expect("fold binding regressions pass");
+    }
+
+    #[test]
+    fn stored_watermark_binding_must_match_the_sessions_identity() {
+        let node = fgit_runtime::boot::RuntimeProfile::deterministic()
+            .build()
+            .expect("node builds");
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime builds");
+        let outcome: Result<(), ProjectionError> = {
+            let cx = node.request_cx(fgit_runtime::meter::BudgetClass::Request);
+            rt.block_on(async {
+                let cx = &cx;
+                let session = ProjectionSession::open_memory(identity())?;
+                session.install_schema(cx).await?;
+                apply_batch(&session, cx, &[record(1, "d1")]).await?;
+
+                // A later binary claiming a different identity over the same
+                // database must refuse at the stored row, not fold on top of
+                // a generation it does not own.
+                let other = crate::identity::ProjectionIdentity::new(
+                    "inc-other",
+                    "head-test",
+                    1,
+                    1,
+                    1,
+                    crate::identity::BuildIdentity::current(),
+                );
+                let err = advance_within_transaction(
+                    session.connection_ref(),
+                    cx,
+                    Some(ProjectionPosition::new(1)),
+                    &record(2, "d2"),
+                    "catching_up",
+                    other.schema_generation(),
+                    &other,
+                )
+                .await
+                .expect_err("a foreign identity must not advance a stored fold");
+                assert!(matches!(
+                    err,
+                    ProjectionError::Identity(
+                        crate::identity::IdentityAdvanceError::BindingMismatch {
+                            field: "source_incarnation",
+                            ..
+                        }
+                    )
+                ));
+                Ok(())
+            })
+        };
+        outcome.expect("stored-binding regression passes");
     }
 }

@@ -97,7 +97,6 @@ pub struct ProjectionSession<C: Connection> {
     connection: C,
     identity: ProjectionIdentity,
 }
-
 impl ProjectionSession<sqlmodel_frankensqlite::FrankenConnection> {
     /// Open an in-memory projection database bound to `identity`.
     ///
@@ -179,6 +178,13 @@ impl<C: Connection> ProjectionSession<C> {
     /// Persist the receipt of the current identity. Called during install so
     /// a reader can always answer "which generation am I looking at".
     ///
+    /// The receipt carries the identity as constructed at install time: its
+    /// closed decision range does not yet advance with folds (no caller
+    /// drives [`crate::identity::ProjectionIdentity::advance_range`] yet).
+    /// Until that lands with the FG-093c rebuild campaign, the authoritative
+    /// completeness answer is the watermark row, not this receipt's range
+    /// field.
+    ///
     /// # Errors
     /// Driver failures surface verbatim.
     pub async fn persist_identity_receipt(&self, cx: &Cx) -> Result<(), ProjectionError> {
@@ -219,10 +225,32 @@ pub async fn advance_within_transaction<'a, C: Connection>(
     record: &crate::catchup::DecisionRecord,
     new_state_text: &str,
     schema_generation: u32,
+    identity: &crate::identity::ProjectionIdentity,
 ) -> Result<ProjectionPosition, ProjectionError>
 where
     C::Tx<'a>: TransactionOps,
 {
+    // The fold may only ever advance the identity it is bound to. A record
+    // naming a different incarnation or head would mix two canonical streams
+    // into one read model while every receipt kept claiming the original —
+    // refused by name before any row moves.
+    if record.source_incarnation != identity.source_incarnation() {
+        return Err(crate::identity::IdentityAdvanceError::BindingMismatch {
+            field: "source_incarnation",
+            expected: identity.source_incarnation().to_owned(),
+            observed: record.source_incarnation.clone(),
+        }
+        .into());
+    }
+    if record.authority_head != identity.authority_head() {
+        return Err(crate::identity::IdentityAdvanceError::BindingMismatch {
+            field: "authority_head",
+            expected: identity.authority_head().to_owned(),
+            observed: record.authority_head.clone(),
+        }
+        .into());
+    }
+
     let tx = flatten(connection.begin(cx).await, "begin")?;
 
     // The stored watermark position is authoritative under the row lock;
@@ -230,12 +258,39 @@ where
     let held_row = flatten(
         tx.query_one(
             cx,
-            "SELECT last_position FROM fgit_projection_watermark WHERE singleton = 1",
+            "SELECT source_incarnation, authority_head, last_position \
+             FROM fgit_projection_watermark WHERE singleton = 1",
             &[],
         )
         .await,
         "select_watermark",
     )?;
+    // A stored watermark pins the binding it was folded under. This session's
+    // identity must agree with it, or the database and the receipt describe
+    // two different generations.
+    if let Some(ref row) = held_row {
+        for (field, observed) in [
+            ("source_incarnation", row.get_by_name("source_incarnation")),
+            ("authority_head", row.get_by_name("authority_head")),
+        ] {
+            let observed = observed
+                .and_then(Value::as_str)
+                .ok_or(StoreReadError::MissingColumn(field))?;
+            let expected = match field {
+                "source_incarnation" => identity.source_incarnation(),
+                _ => identity.authority_head(),
+            };
+            if observed != expected {
+                drop(tx);
+                return Err(crate::identity::IdentityAdvanceError::BindingMismatch {
+                    field,
+                    expected: expected.to_owned(),
+                    observed: observed.to_owned(),
+                }
+                .into());
+            }
+        }
+    }
     let held = held_from_row(held_row.as_ref())?;
     if let Some(expected) = expected_held {
         if held != Some(expected) {

@@ -210,6 +210,19 @@ pub enum IdentityAdvanceError {
     },
     /// The sequence space is exhausted; no further decision can be folded.
     Overflow,
+    /// The record (or stored watermark) names a different incarnation or
+    /// authority head than the projection identity this fold runs under.
+    /// Folding it would mix generations into one read model — the exact lie
+    /// the identity exists to make impossible — so it is refused by name.
+    BindingMismatch {
+        /// Which binding field disagreed (`source_incarnation` or
+        /// `authority_head`).
+        field: &'static str,
+        /// The value the session's identity carries.
+        expected: String,
+        /// The value the record or stored row carried.
+        observed: String,
+    },
 }
 
 impl fmt::Display for IdentityAdvanceError {
@@ -219,6 +232,14 @@ impl fmt::Display for IdentityAdvanceError {
                 write!(f, "projection gap: expected decision {expected}, got {got}")
             }
             Self::Overflow => f.write_str("projection sequence overflow"),
+            Self::BindingMismatch {
+                field,
+                expected,
+                observed,
+            } => write!(
+                f,
+                "projection binding mismatch on {field}: identity expects {expected:?}, record carries {observed:?}"
+            ),
         }
     }
 }
