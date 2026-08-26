@@ -1,0 +1,20 @@
+[package]
+name = "fgit-projection"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+description = "Watermarked derived-state projection substrate on the admitted sqlmodel-frankensqlite stack (FG-093b): typed identity, watermark state machine, transactional catch-up, and the authority-negative read boundary."
+
+[dependencies]
+asupersync.workspace = true
+fgit-types.workspace = true
+sqlmodel-core = { version = "0.4.1", default-features = false }
+sqlmodel-frankensqlite = { version = "0.4.1", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -42,6 +42,7 @@ fgit-pack	L1	L0,L1	pack	active
 # fgit-codec body: L2 admits L2 edges, as fgit-evidence -> fgit-codec already
 # does. Layer chosen per GoldLotus dispatch 2026-08-24T23:45Z (fg043a).
 fgit-policy	L2	L0,L1,L2	policy	active
+fgit-projection	L3	L0,L1,L2	projection	active
 fgit-proof-bridge	L2	L0,L1,L2	proof-bridge	active
 fgit-raptorq	L2	L0,L1,L2	object-fabric	active
 fgit-reference	L2	L0,L1,L2	reference-model	active
