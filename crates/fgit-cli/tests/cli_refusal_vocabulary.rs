@@ -590,7 +590,9 @@ fn every_cli_refusal_variant() -> Vec<(&'static str, CliRefusal, Cause)> {
         ),
         (
             "Snapshot",
-            CliRefusal::Snapshot(fgit_forge::snapshot::SnapshotRefusal::TargetAheadOfHistory),
+            CliRefusal::Snapshot(fgit_forge::snapshot::SnapshotRefusal::AccessDenied {
+                reason: "test",
+            }),
             Cause::CarriesSource,
         ),
         (

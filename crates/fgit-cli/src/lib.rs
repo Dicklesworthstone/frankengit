@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_forge::snapshot::{
-    ForgeSnapshot, ForgeSnapshotDiff, PositionTarget, PullRequestSnapshot,
-    SnapshotDisclosurePolicy, SnapshotLimits, SnapshotRefusal, project_snapshot_from_history,
+    ForgeSnapshot, ForgeSnapshotDiff, PositionTarget, SnapshotDisclosurePolicy, SnapshotLimits,
+    SnapshotRefusal, project_snapshot_from_history,
 };
 use fgit_node::{
     DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, NodeConfig,
@@ -235,7 +235,7 @@ impl Display for CliRefusal {
                 temporary.display()
             ),
             Self::ExportVisibleCleanup {
-                destination,
+                destination: _,
                 temporary,
                 cleanup,
             } => write!(
@@ -1174,7 +1174,7 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
         opts.repository,
         None,
         opts.resolution_input,
-    ))
+    )?)
     .map_err(CliRefusal::Node)?;
 
     let result = node.runtime().block_on(async {
@@ -1194,22 +1194,43 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
         let head_body: fgit_codec::schema::RepositoryAuthorityHeadBody =
             fgit_codec::decode_body(receipt.body(), fgit_codec::DecodeLimits::DEFAULT).map_err(
                 |e| {
-                    CliRefusal::Node(fgit_node::NodeRefusal::AuthorityFailure(
-                        fgit_authority::AuthorityRefusal::InvalidArtifact(e.to_string()),
-                    ))
+                    CliRefusal::Node(fgit_node::NodeRefusal::AdmissionMaterialization(Box::new(
+                        fgit_node::AdmissionMaterializationRefusal::HeadBody(
+                            fgit_authority::HeadBodyRefusal::Codec(e),
+                        ),
+                    )))
                 },
             )?;
-        let head_id = fgit_codec::body_id(&head_body).map_err(|e| {
-            CliRefusal::Node(fgit_node::NodeRefusal::AuthorityFailure(
-                fgit_authority::AuthorityRefusal::InvalidArtifact(e.to_string()),
-            ))
-        })?;
+        let head_id = fgit_codec::body_id(&fgit_codec::CryptoBodyIdentity, &head_body)
+            .map_err(|e| {
+                CliRefusal::Node(fgit_node::NodeRefusal::AdmissionMaterialization(Box::new(
+                    fgit_node::AdmissionMaterializationRefusal::HeadIdentity(e),
+                )))
+            })
+            .and_then(|identity| {
+                fgit_types::RepositoryAuthorityHeadId::from_internal_object_id(identity).map_err(
+                    |e| {
+                        CliRefusal::Node(fgit_node::NodeRefusal::AdmissionMaterialization(
+                            Box::new(
+                                fgit_node::AdmissionMaterializationRefusal::HeadIdentityDomain(e),
+                            ),
+                        ))
+                    },
+                )
+            })?;
 
         let admission = node.materialize_admission_in(&request).await.map_err(|e| {
             CliRefusal::Node(fgit_node::NodeRefusal::AdmissionMaterialization(Box::new(
                 e,
             )))
         })?;
+
+        let live_refs: std::collections::BTreeMap<Vec<u8>, GitOid> = admission
+            .snapshot()
+            .refs
+            .iter()
+            .map(|(k, v)| (k.as_bytes().to_vec(), *v))
+            .collect();
 
         let live_snapshot = ForgeSnapshot {
             target_position: PositionTarget::Latest,
@@ -1221,7 +1242,7 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
             ref_root: head_body.ref_root,
             forge_position_root: head_body.forge_position_root,
             historical_policy_epoch: head_body.policy_epoch,
-            refs: admission.snapshot().refs.clone(),
+            refs: live_refs.clone(),
             pull_requests: Default::default(),
             check_receipts: Default::default(),
             replayed_batches_count: 0,
@@ -1240,7 +1261,7 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
                 &head_body,
                 &[],
                 &[],
-                &admission.snapshot().refs,
+                &live_refs,
                 &SnapshotLimits::default(),
             )
             .map_err(CliRefusal::Snapshot)?,
@@ -1248,14 +1269,14 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
 
         if let Some(_actor) = actor_id {
             let policy = SnapshotDisclosurePolicy::Restricted {
-                allowed_refs: Some(admission.snapshot().refs.keys().cloned().collect()),
+                allowed_refs: Some(live_refs.keys().cloned().collect()),
                 revoked_refs: std::collections::BTreeSet::new(),
                 allowed_prs: None,
                 revoked_prs: std::collections::BTreeSet::new(),
                 repository_access_revoked: false,
             };
             snapshot = policy
-                .evaluate_and_filter(&snapshot)
+                .filter_snapshot(snapshot)
                 .map_err(CliRefusal::Snapshot)?;
         }
 
@@ -1305,7 +1326,7 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
             Some("diff") => {
                 let other_target = diff_target.ok_or(CliRefusal::Usage)?;
                 let older_snapshot = snapshot;
-                let diff = ForgeSnapshotDiff::between(&older_snapshot, &live_snapshot);
+                let diff = ForgeSnapshotDiff::diff(&older_snapshot, &live_snapshot);
                 Ok(CliOutcome::At(AtReport::Diff {
                     older: format!("{position_target}"),
                     newer: format!("{other_target}"),
