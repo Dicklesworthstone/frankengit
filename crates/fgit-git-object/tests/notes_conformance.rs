@@ -302,7 +302,7 @@ fn notes_merge_strategies_ours_theirs_union_catsortuniq() {
         b"line C\nline A\n",
         NotesMergeStrategy::Union,
     );
-    assert_eq!(union_bytes, b"line B\nline A\nline C\nline A\n");
+    assert_eq!(union_bytes, b"line B\nline A\n\nline C\nline A\n");
 
     // 4. CatSortUniq helper
     let csu_bytes = merge_note_blob_bytes(

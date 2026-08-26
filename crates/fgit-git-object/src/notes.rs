@@ -484,15 +484,19 @@ pub fn merge_note_blob_bytes(
 ) -> Vec<u8> {
     match strategy {
         NotesMergeStrategy::Union => {
-            let mut result = Vec::with_capacity(ours_bytes.len() + theirs_bytes.len() + 1);
+            // Pinned-oracle byte rule (git-2.54.0, fixtures in
+            // scripts/e2e/oracle/notes_corpus.sh): normalize OURS to end
+            // with exactly one newline, then append one newline separator,
+            // then THEIRS verbatim. Verified byte-exact on both fixture
+            // variants (a: both sides end NL -> blank-line junction;
+            // b: neither ends NL -> ours gains one, theirs stays raw).
+            let mut result = Vec::with_capacity(ours_bytes.len() + theirs_bytes.len() + 2);
             result.extend_from_slice(ours_bytes);
-            if !ours_bytes.is_empty() && !ours_bytes.ends_with(b"\n") {
+            if !ours_bytes.ends_with(b"\n") {
                 result.push(b'\n');
             }
+            result.push(b'\n');
             result.extend_from_slice(theirs_bytes);
-            if !theirs_bytes.is_empty() && !theirs_bytes.ends_with(b"\n") {
-                result.push(b'\n');
-            }
             result
         }
         NotesMergeStrategy::CatSortUniq => {
