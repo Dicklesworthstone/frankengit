@@ -20,7 +20,7 @@
 
 use crate::RefusalCode;
 use fgit_policy::content::PolicySnapshotId;
-use fgit_policy::eval::{Decision, PolicyEvaluation, SubjectOutcome};
+use fgit_policy::{Decision, PolicyEvaluation};
 use std::collections::BTreeMap;
 
 /// Fetches one pinned snapshot by identity.
@@ -142,7 +142,6 @@ pub fn evaluate_protection(
 }
 
 fn first_refusal(evaluation: &PolicyEvaluation, codes: &SubjectCodeMap) -> Option<RefusalCode> {
-    use fgit_policy::eval::Decision;
     if matches!(evaluation.decision(), Decision::Allow) {
         return None;
     }

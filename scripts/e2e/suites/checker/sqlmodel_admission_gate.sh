@@ -125,6 +125,10 @@ live_diagnostic=$SM_DIAGNOSTIC
 # resolve the converged 0.4.1, which is the positive path owned by
 # suites/admission/sqlmodel_dependency_admission.sh, not this refusal.)
 published=$(sm_fixture published 'sqlmodel-frankensqlite = "=0.4.0"')
+# The live tree's own fgit-projection pins sqlmodel-frankensqlite =0.4.1;
+# exact-incompatible requirements (=0.4.0 here) cannot share one resolution
+# graph, so the historical-refusal fixture drops that crate before resolving.
+rm -rf "$published/crates/fgit-projection"
 sm_resolve "$published" published-substrate
 resolve_exit=$SM_RESOLVE_EXIT
 sm_gate "$published" published-substrate \
