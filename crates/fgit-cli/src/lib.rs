@@ -235,12 +235,13 @@ impl Display for CliRefusal {
                 temporary.display()
             ),
             Self::ExportVisibleCleanup {
-                destination: _,
+                destination,
                 temporary,
                 cleanup,
             } => write!(
                 formatter,
-                "export output became visible, but staged hard link `{}` could not be reaped: {cleanup}",
+                "export output became visible at `{}`, but staged hard link `{}` could not be reaped: {cleanup}",
+                destination.display(),
                 temporary.display(),
             ),
             Self::ImportCleanup { import, cleanup } => write!(
@@ -1422,6 +1423,7 @@ mod tests {
         fs::create_dir_all(ref_path.parent().expect("source ref parent exists"))
             .expect("source ref directory creates");
         fs::write(ref_path, format!("{commit}\n")).expect("source direct ref writes");
+        fs::write(root.join("HEAD"), b"ref: refs/heads/main\n").expect("source HEAD writes");
         commit
     }
 

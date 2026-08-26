@@ -443,6 +443,11 @@ fn every_cli_refusal_variant() -> Vec<(&'static str, CliRefusal, Cause)> {
     vec![
         ("Usage", CliRefusal::Usage, Cause::Causeless),
         (
+            "UnsupportedObjectFormat",
+            CliRefusal::UnsupportedObjectFormat("sha512".to_string()),
+            Cause::Causeless,
+        ),
+        (
             "Tenant",
             CliRefusal::Tenant(type_refusal),
             Cause::CarriesSource,
@@ -450,6 +455,11 @@ fn every_cli_refusal_variant() -> Vec<(&'static str, CliRefusal, Cause)> {
         (
             "Repository",
             CliRefusal::Repository(type_refusal),
+            Cause::CarriesSource,
+        ),
+        (
+            "RepositoryIncarnation",
+            CliRefusal::RepositoryIncarnation(type_refusal),
             Cause::CarriesSource,
         ),
         (
@@ -488,6 +498,16 @@ fn every_cli_refusal_variant() -> Vec<(&'static str, CliRefusal, Cause)> {
             CliRefusal::ServeServer(NodeGitDaemonServerRefusal::Limits(
                 GitDaemonServerLimitRefusal::ZeroSessionLimit,
             )),
+            Cause::CarriesSource,
+        ),
+        (
+            "ServeServerCleanup",
+            CliRefusal::ServeServerCleanup {
+                serving: Box::new(NodeGitDaemonServerRefusal::Limits(
+                    GitDaemonServerLimitRefusal::ZeroSessionLimit,
+                )),
+                cleanup: Box::new(NodeRefusal::EmptyStorageRoot),
+            },
             Cause::CarriesSource,
         ),
         (
