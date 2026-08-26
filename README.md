@@ -2,7 +2,7 @@
 
 **A clean-room, pure-Rust, Git-compatible forge designed for humans, autonomous coding agents, extreme scale, and independently verifiable recovery.**
 
-> **Status:** active implementation and pre-release integration. FrankenGit now contains substantial final-abstraction slices and a narrow executable one-node boundary, but it is not yet a general-purpose Git server, a production-ready forge, or a GitHub replacement.
+> **Status:** active implementation and pre-release integration (spec-first design, transitioning from pre-implementation). FrankenGit now contains substantial final-abstraction slices and a narrow executable one-node boundary, but it is not yet a general-purpose Git server, a production-ready forge, or a GitHub replacement.
 >
 > **License:** `LicenseRef-MIT-OpenAI-Anthropic-Rider` — the MIT licence plus the OpenAI/Anthropic rider. Decision D14 was resolved by the repository owner on 2026-08-23.
 >
