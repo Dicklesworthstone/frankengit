@@ -21,9 +21,27 @@ use fgit_types::{
     TypeRefusal,
 };
 
+pub mod artifact;
 pub mod fabric;
 pub mod local;
+pub mod package;
+pub mod provenance;
 pub mod reference;
+pub mod retention;
+
+pub use artifact::{
+    ArtifactEntry, ArtifactIdentity, ArtifactManifest, ArtifactPayloadKind, ArtifactRefusal,
+    MediaType, RetentionProfile,
+};
+pub use package::{
+    ExpectedNamespaceBasis, NamespacePublicationEvent, PackageNamespace, PackageRefusal,
+    PackageRegistry, PackageVersion, PublishIntent, StoredVersionRecord, VersionState, YankIntent,
+};
+pub use provenance::{
+    EvidenceClass, ProvenanceEdge, ProvenanceError, ProvenanceGraph, ProvenanceNode,
+    ProvenanceVerificationReceipt,
+};
+pub use retention::{ArtifactRetentionRegistry, ArtifactRetentionRoot};
 
 const ENVELOPE_MAGIC: &[u8; 4] = b"FGEN";
 const SEGMENT_MAGIC: &[u8; 4] = b"FGMS";
