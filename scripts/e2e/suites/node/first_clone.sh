@@ -171,7 +171,7 @@ if [ "$SERVE_STATE" = ok ]; then
     >"$WORK/clone-v2.out" 2>&1 || V2_RC=$?
 fi
 fge_reap "$V2_NAME"
-fge_assert_eq FG-028B-CLONE-013 0 "$V2_RC" \
+fge_assert_eq FG-028B-CLONE-018 0 "$V2_RC" \
   'a real git clone over protocol v2 exits zero'
 # Identity, not just exit status: v2 negotiates refs through ls-refs rather
 # than the v1 advertisement, so the tips are re-derived on a different path and
@@ -180,7 +180,7 @@ V2_OIDS=''
 if [ -d "$V2_CLONE/.git" ]; then
   V2_OIDS=$(git -C "$V2_CLONE" show-ref --hash | sort -u)
 fi
-fge_assert_eq FG-028B-CLONE-014 "$OID_SRC" "$V2_OIDS" \
+fge_assert_eq FG-028B-CLONE-019 "$OID_SRC" "$V2_OIDS" \
   'protocol v2 transfers the same advertised ref tip identities as v1'
 
 # Abrupt-client containment. Kill timing is scheduling on purpose; what is
