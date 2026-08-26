@@ -68,18 +68,17 @@ fn valid_intent() -> BreakGlassIntent {
     approvers.insert(PrincipalId::from_bytes([2; 16]));
     approvers.insert(PrincipalId::from_bytes([3; 16]));
 
-    BreakGlassIntent {
-        reason: "Incident INC-4029: Rollback compromised binary".to_owned(),
-        actor: PrincipalId::from_bytes([1; 16]),
-        scope: RefPattern::compile("refs/heads/main").unwrap(),
-        target_ref: RefName::try_new(b"refs/heads/main").unwrap(),
-        displaced_state: dummy_oid(1),
-        proposed_oid: dummy_oid(2),
+    BreakGlassIntent::new(
+        "Incident INC-4029: Rollback compromised binary".to_owned(),
+        PrincipalId::from_bytes([1; 16]),
+        RefPattern::compile("refs/heads/main").unwrap(),
+        RefName::try_new(b"refs/heads/main").unwrap(),
+        dummy_oid(1),
+        dummy_oid(2),
         approvers,
-        issued_at: PolicyInstant::from_seconds(100),
-        expires_at: PolicyInstant::from_seconds(3700), // 1 hour duration
-        audit_token: dummy_oid(9),
-    }
+        PolicyInstant::from_seconds(100),
+        PolicyInstant::from_seconds(3700), // 1 hour duration
+    )
 }
 
 #[test]
@@ -213,6 +212,7 @@ fn self_approval_is_strictly_forbidden() {
     let mut intent = valid_intent();
     // Actor attempts to add themselves (id 1) to approvers list
     intent.approvers.insert(PrincipalId::from_bytes([1; 16]));
+    intent.audit_token = intent.compute_audit_token();
 
     let principal = dummy_principal(AuthenticationStrength::HardwareBacked, 1);
     let input = build_input(
@@ -244,6 +244,7 @@ fn insufficient_threshold_approvals_is_refused() {
     let mut intent = valid_intent();
     intent.approvers.clear();
     intent.approvers.insert(PrincipalId::from_bytes([2; 16])); // only 1 approver
+    intent.audit_token = intent.compute_audit_token();
 
     let principal = dummy_principal(AuthenticationStrength::HardwareBacked, 1);
     let input = build_input(
@@ -303,6 +304,7 @@ fn scope_and_displaced_state_mismatches_are_refused() {
     // 2. Scope mismatch (intent target ref changed outside scope pattern)
     let mut bad_scope_intent = intent;
     bad_scope_intent.target_ref = RefName::try_new(b"refs/heads/other-branch").unwrap();
+    bad_scope_intent.audit_token = bad_scope_intent.compute_audit_token();
     let input_scope = build_input(
         "refs/heads/other-branch",
         dummy_oid(1),
@@ -319,4 +321,37 @@ fn scope_and_displaced_state_mismatches_are_refused() {
     )
     .unwrap_err();
     assert!(matches!(scope_err, BreakGlassRefusal::ScopeMismatch { .. }));
+}
+
+#[test]
+fn mismatched_audit_token_is_refused() {
+    let mut intent = valid_intent();
+    let original_token = intent.audit_token;
+    intent.audit_token = dummy_oid(99);
+
+    let principal = dummy_principal(AuthenticationStrength::HardwareBacked, 1);
+    let input = build_input(
+        "refs/heads/main",
+        dummy_oid(1),
+        dummy_oid(2),
+        principal,
+        1500,
+    );
+
+    let err = evaluate_break_glass(
+        &intent,
+        &input,
+        &dummy_oid(1),
+        2,
+        AuthenticationStrength::HardwareBacked,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        BreakGlassRefusal::AuditTokenMismatch {
+            actual: dummy_oid(99),
+            expected: original_token,
+        }
+    );
 }

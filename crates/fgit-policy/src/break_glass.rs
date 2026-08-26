@@ -15,6 +15,7 @@
 
 use std::collections::BTreeSet;
 
+use fgit_crypto::DigestHasher;
 use fgit_types::native::GitOid;
 use fgit_types::refs::RefName;
 use fgit_types::{AsciiSlug, PrincipalId};
@@ -60,6 +61,8 @@ pub enum BreakGlassRefusal {
     ScopeMismatch { ref_name: String, pattern: String },
     /// The current ref tip does not match the displaced state recorded in the intent.
     DisplacedStateMismatch { actual: GitOid, expected: GitOid },
+    /// The audit token provided in the intent does not match the content-addressed derivation.
+    AuditTokenMismatch { actual: GitOid, expected: GitOid },
 }
 
 impl core::fmt::Display for BreakGlassRefusal {
@@ -122,6 +125,12 @@ impl core::fmt::Display for BreakGlassRefusal {
                     "displaced state mismatch: expected current {expected}, observed {actual}"
                 )
             }
+            Self::AuditTokenMismatch { actual, expected } => {
+                write!(
+                    f,
+                    "break-glass audit token mismatch: expected {expected}, observed {actual}"
+                )
+            }
         }
     }
 }
@@ -152,6 +161,78 @@ pub struct BreakGlassIntent {
 }
 
 impl BreakGlassIntent {
+    /// Computes the deterministic content-addressed audit token for this intent.
+    #[must_use]
+    pub fn compute_audit_token(&self) -> GitOid {
+        let mut hasher = fgit_crypto::Sha256Hasher::new();
+        hasher.update(b"frankengit/break-glass-intent/v1\n");
+        hasher.update(self.reason.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.actor.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.scope.as_str().as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.target_ref.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.displaced_state.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.proposed_oid.as_bytes());
+        hasher.update(b"\n");
+        for approver in &self.approvers {
+            hasher.update(approver.as_bytes());
+            hasher.update(b"\n");
+        }
+        hasher.update(&self.issued_at.seconds().to_be_bytes());
+        hasher.update(&self.expires_at.seconds().to_be_bytes());
+        let digest = hasher.finish();
+        match self.displaced_state {
+            GitOid::Sha1(_) => {
+                let mut sha1_hasher = fgit_crypto::Sha1Hasher::new();
+                sha1_hasher.update(&digest);
+                let sha1_digest = sha1_hasher.finish();
+                GitOid::Sha1(fgit_types::native::GitOidSha1::from_bytes(sha1_digest))
+            }
+            GitOid::Sha256(_) => {
+                GitOid::Sha256(fgit_types::native::GitOidSha256::from_bytes(digest))
+            }
+        }
+    }
+
+    /// Constructs a new break-glass intent with its content-addressed audit token.
+    #[must_use]
+    pub fn new(
+        reason: String,
+        actor: PrincipalId,
+        scope: RefPattern,
+        target_ref: RefName,
+        displaced_state: GitOid,
+        proposed_oid: GitOid,
+        approvers: BTreeSet<PrincipalId>,
+        issued_at: PolicyInstant,
+        expires_at: PolicyInstant,
+    ) -> Self {
+        let dummy = match displaced_state {
+            GitOid::Sha1(_) => GitOid::Sha1(fgit_types::native::GitOidSha1::from_bytes([0u8; 20])),
+            GitOid::Sha256(_) => {
+                GitOid::Sha256(fgit_types::native::GitOidSha256::from_bytes([0u8; 32]))
+            }
+        };
+        let mut intent = Self {
+            reason,
+            actor,
+            scope,
+            target_ref,
+            displaced_state,
+            proposed_oid,
+            approvers,
+            issued_at,
+            expires_at,
+            audit_token: dummy,
+        };
+        intent.audit_token = intent.compute_audit_token();
+        intent
+    }
+
     /// Validates internal structural bounds on the intent.
     pub fn validate_bounds(&self) -> Result<(), BreakGlassRefusal> {
         if self.reason.trim().is_empty() {
@@ -196,7 +277,16 @@ pub fn evaluate_break_glass(
     // 1. Structural validity
     intent.validate_bounds()?;
 
-    // 2. Active time window check
+    // 2. Audit token content-addressing verification
+    let expected_audit_token = intent.compute_audit_token();
+    if intent.audit_token != expected_audit_token {
+        return Err(BreakGlassRefusal::AuditTokenMismatch {
+            actual: intent.audit_token,
+            expected: expected_audit_token,
+        });
+    }
+
+    // 3. Active time window check
     let now = input.instant();
     if now < intent.issued_at {
         return Err(BreakGlassRefusal::NotYetActive {
