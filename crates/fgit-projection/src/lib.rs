@@ -42,6 +42,7 @@
 pub mod boundary;
 pub mod catchup;
 pub mod identity;
+pub mod model;
 pub mod rebuild;
 pub mod session;
 pub mod store;
@@ -49,6 +50,7 @@ pub mod watermark;
 
 pub use catchup::{DecisionRecord, ProjectionConflict, apply_batch};
 pub use identity::{ProjectionIdentity, ProjectionPosition};
+pub use model::{AppliedDecision, read_applied_range};
 pub use rebuild::{SchemaReconciliation, ensure_schema_generation};
 pub use session::ProjectionSession;
 pub use store::install_schema_statements;
