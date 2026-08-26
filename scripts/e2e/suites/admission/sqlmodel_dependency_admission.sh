@@ -96,7 +96,7 @@ da_resolve() {
 # output computed against the fixture's own resolved closure.
 da_regenerate_constellation() {
   local root=$1
-  fge_capture "constellation-ledger-$1" \
+  fge_capture "constellation-ledger-$(basename "$root")" \
     env RCH_CARGO_WRAPPER_BYPASS=1 cargo run --quiet \
     --manifest-path "$DA_REPO/tools/registry-check/Cargo.toml" \
     -- ledger-constellation --root "$root" || true
@@ -124,11 +124,13 @@ da_gate() {
 fge_phase action
 
 # --- converged admission: the published 0.4.1 shape ---------------------------
-# The dependency line below IS the published contract of sqlmodel-frankensqlite
-# 0.4.1 (pinned exactly: a bare "0.4.1" would be a caret request) plus the
-# runtime handle a downstream integration consumes. Nothing extra is planted.
+# The dependency line below IS the converged contract: sqlmodel-frankensqlite
+# 0.4.1 pinned exactly (a bare "0.4.1" would be a caret request) and requested
+# with `default-features = false` - the §3.2 minimal caller profile this whole
+# bead exists to admit - plus the runtime handle a downstream integration
+# consumes. Nothing extra is planted.
 converged=$(da_fixture converged \
-  'sqlmodel-frankensqlite = "=0.4.1"
+  'sqlmodel-frankensqlite = { version = "=0.4.1", default-features = false }
 asupersync = { version = "=0.4.9", default-features = false }' \
   '// The admission probe: the one-runtime context type must remain nameable
 // from a substrate consumer without any second runtime entering the graph.
@@ -158,7 +160,14 @@ fge_capture "compile-probe-converged" \
 compile_exit=$FGE_LAST_EXIT
 
 # --- historical refusal: the pre-convergence 0.4.0 shape ----------------------
+# The fixture drops crates/fgit-projection: the live tree's projection slice
+# pins sqlmodel-frankensqlite =0.4.1, and exact-incompatible requirements
+# (=0.4.0 here, =0.4.1 there) cannot coexist in one resolution graph. The
+# refusal case tests the §3.2 rule against the historical closure shape and
+# needs neither the projection crate nor live-lock inheritance beyond what
+# the copied policy rows provide.
 published=$(da_fixture published 'sqlmodel-frankensqlite = "=0.4.0"')
+rm -rf "$published/crates/fgit-projection"
 da_resolve "$published" published-substrate
 published_resolve_exit=$DA_RESOLVE_EXIT
 da_gate "$published" published-refused 'minimal FrankenSQLite caller profile'
