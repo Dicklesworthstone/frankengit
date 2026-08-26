@@ -1004,6 +1004,12 @@ mod tests {
                 NodeReceiveTransportRefusal::StagedWithoutPublication { state } => panic!(
                     "a receive-core refusal must not be reported as a withheld publication, got {state:?}"
                 ),
+                // Quota containment happens at TRANSPORT intake, before any
+                // ReceiveError exists, so it cannot arise from this
+                // conversion; the honest arm stays a panic like its peers.
+                NodeReceiveTransportRefusal::QuotaContained { code, expires_secs } => panic!(
+                    "a receive-core refusal must not be reported as quota containment ({code}, {expires_secs}s)"
+                ),
             }
         }
     }

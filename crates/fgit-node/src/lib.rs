@@ -3325,11 +3325,83 @@ impl LoopbackReceiveSession {
     }
 }
 
-/// Typed refusal emitted by the authenticated loopback receive transport.
+/// Abuse-skeleton state for the push surface (plan 36.6): a per-principal
+/// sliding-window rate limit with reversible containment. Containment never
+/// destroys data and expires on its own; the moderation record for audit is
+/// emitted by the caller that applies the verdict.
+pub(crate) struct PushQuota {
+    limit: fgit_resource::quota::abuse::RateLimit,
+    windows: Mutex<BTreeMap<PrincipalId, fgit_resource::quota::abuse::RateWindow>>,
+}
+
+impl std::fmt::Debug for PushQuota {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Windows are live counters, not identity: summarize rather than
+        // dump per-principal state into refusal diagnostics.
+        let tracked = self.windows.lock().map(|w| w.len()).unwrap_or(0);
+        formatter
+            .debug_struct("PushQuota")
+            .field("max_events", &self.limit.max_events)
+            .field("window_secs", &self.limit.window.as_secs())
+            .field("tracked_principals", &tracked)
+            .finish()
+    }
+}
+
+impl Default for PushQuota {
+    /// Deliberately conservative operator default: 120 pushes per principal
+    /// per minute. Tuning belongs to configuration, which arrives through
+    /// the same review path as every other named profile input.
+    fn default() -> Self {
+        Self {
+            limit: fgit_resource::quota::abuse::RateLimit {
+                max_events: 120,
+                window: Duration::from_secs(60),
+            },
+            windows: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl PushQuota {
+    fn evaluate(&self, principal: &PrincipalId) -> Result<(), NodeReceiveTransportRefusal> {
+        let now = std::time::Instant::now();
+        let mut windows = self.windows.lock().expect("push quota mutex");
+        match fgit_resource::quota::abuse::evaluate_push(
+            &self.limit,
+            windows.entry(*principal).or_default(),
+            &fgit_resource::quota::fairness::FairnessKey {
+                tenant: TenantId::from_bytes([0; 16]),
+                principal: *principal,
+            },
+            now,
+        ) {
+            fgit_resource::quota::abuse::PushVerdict::Admitted => Ok(()),
+            fgit_resource::quota::abuse::PushVerdict::Contain { containment } => {
+                Err(NodeReceiveTransportRefusal::QuotaContained {
+                    code: containment.reason.code(),
+                    expires_secs: containment.expires.as_secs(),
+                })
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum NodeReceiveTransportRefusal {
     /// The transport supplied no authenticated principal or client retry key.
     Unauthenticated,
+    /// The authenticated principal exceeded its push rate limit (plan 36.6).
+    ///
+    /// Reversible containment: the containment expires on its own and no
+    /// offered bytes were retained. `code` is the stable machine code for
+    /// event streams; `expires_secs` advises when to retry.
+    QuotaContained {
+        /// Stable machine code for the containment reason.
+        code: &'static str,
+        /// Advised wait, in seconds.
+        expires_secs: u64,
+    },
     /// The authenticated request was refused by canonical admission.
     Admission(Box<AdmissionError>),
     /// The cell's state does not admit taking receive work in at all.
@@ -3357,6 +3429,10 @@ impl Display for NodeReceiveTransportRefusal {
             Self::Unauthenticated => {
                 formatter.write_str("receive transport did not authenticate a principal")
             }
+            Self::QuotaContained { code, expires_secs } => write!(
+                formatter,
+                "push rate limit exceeded ({code}); contained reversibly, retry after {expires_secs}s"
+            ),
             Self::Admission(error) => Display::fmt(error, formatter),
             Self::CellState(refusal) => Display::fmt(refusal, formatter),
             Self::StagedWithoutPublication { state } => write!(
@@ -3375,9 +3451,10 @@ impl Error for NodeReceiveTransportRefusal {
             // Error, but reporting it as the `source` of a staging refusal
             // would suggest something went wrong beneath, when the cell simply
             // is not in a state that admits the operation.
-            Self::Unauthenticated | Self::CellState(_) | Self::StagedWithoutPublication { .. } => {
-                None
-            }
+            Self::Unauthenticated
+            | Self::QuotaContained { .. }
+            | Self::CellState(_)
+            | Self::StagedWithoutPublication { .. } => None,
             Self::Admission(error) => Some(error.as_ref()),
         }
     }
@@ -5004,6 +5081,8 @@ pub struct OneNode {
     /// it re-authenticates the repository through this same configuration and
     /// closes its own node before the parent service reports it drained.
     service_config: NodeConfig,
+    /// Abuse-skeleton state (plan 36.6) for push intake.
+    pub(crate) push_quota: PushQuota,
     runtime: NodeRuntime,
 }
 
@@ -5293,6 +5372,7 @@ impl OneNode {
             git_daemon_session_timeout: config.git_daemon_session_timeout,
             serving_cell: config.serving_cell,
             service_config,
+            push_quota: PushQuota::default(),
         })
     }
 
@@ -5861,9 +5941,16 @@ impl OneNode {
     where
         Cancellation: ReceiveCancellation,
     {
-        if session.authenticated_session().is_none() {
+        let Some(authenticated) = session.authenticated_session() else {
             return Err(NodeReceiveTransportRefusal::Unauthenticated);
-        }
+        };
+
+        // ABUSE SKELETON (plan 36.6): per-principal push rate limit,
+        // evaluated AFTER authentication (which retains nothing) and BEFORE
+        // any intake gate so a contained principal retains no quarantined
+        // bytes. Reversible by construction: containment expires on its own
+        // and re-admits without data loss.
+        self.push_quota.evaluate(&authenticated.principal_id())?;
 
         // INTAKE GATE. §22.6's "isolated/read-only/refuse states: typed refusal
         // before intake", now wired: a cell whose state admits no staging
@@ -10540,5 +10627,63 @@ mod drain_politeness_tests {
             client.reads, 1,
             "a framing refusal ends the drain without another read"
         );
+    }
+}
+
+#[cfg(test)]
+mod push_quota_tests {
+    use super::*;
+
+    #[test]
+    fn a_principal_within_its_window_is_admitted() {
+        let quota = PushQuota::default();
+        let principal = PrincipalId::from_bytes([0xAA; 16]);
+        assert!(quota.evaluate(&principal).is_ok());
+    }
+
+    #[test]
+    fn exceeding_the_window_contains_reversibly_with_typed_refusal() {
+        let limit = fgit_resource::quota::abuse::RateLimit {
+            max_events: 2,
+            window: Duration::from_secs(60),
+        };
+        let quota = PushQuota {
+            limit,
+            windows: Mutex::new(BTreeMap::new()),
+        };
+        let principal = PrincipalId::from_bytes([0xBB; 16]);
+
+        assert!(quota.evaluate(&principal).is_ok());
+        assert!(quota.evaluate(&principal).is_ok());
+
+        match quota.evaluate(&principal) {
+            Err(NodeReceiveTransportRefusal::QuotaContained { code, expires_secs }) => {
+                assert_eq!(code, "rate_exceeded");
+                assert_eq!(expires_secs, 60);
+            }
+            other => panic!("expected quota containment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn containment_is_per_principal_and_never_touches_other_keys() {
+        let limit = fgit_resource::quota::abuse::RateLimit {
+            max_events: 1,
+            window: Duration::from_secs(60),
+        };
+        let quota = PushQuota {
+            limit,
+            windows: Mutex::new(BTreeMap::new()),
+        };
+        let contained = PrincipalId::from_bytes([0xCC; 16]);
+        let bystander = PrincipalId::from_bytes([0xDD; 16]);
+
+        assert!(quota.evaluate(&contained).is_ok());
+        assert!(matches!(
+            quota.evaluate(&contained),
+            Err(NodeReceiveTransportRefusal::QuotaContained { .. })
+        ));
+        // The bystander's window is independent: reversibility is per key.
+        assert!(quota.evaluate(&bystander).is_ok());
     }
 }
