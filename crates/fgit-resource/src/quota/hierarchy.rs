@@ -150,21 +150,24 @@ impl ScopeCeilings {
             acc = Some(match acc {
                 None => *ceiling,
                 Some(current) => {
-                    let merged = current
-                        .pairs()
-                        .map(|(grade, amount)| {
-                            let tighter = ceiling.get(grade);
-                            (
-                                grade,
-                                if tighter > 0 && tighter < amount {
-                                    tighter
-                                } else {
-                                    amount
-                                },
-                            )
+                    let pairs: Vec<(Grade, u64)> = Grade::ALL
+                        .into_iter()
+                        .filter_map(|grade| {
+                            let c1 = current.get(grade);
+                            let c2 = ceiling.get(grade);
+                            let merged = match (c1, c2) {
+                                (0, c) => c,
+                                (c, 0) => c,
+                                (a, b) => a.min(b),
+                            };
+                            if merged > 0 {
+                                Some((grade, merged))
+                            } else {
+                                None
+                            }
                         })
-                        .to_vec();
-                    ResourceVector::from_grades(&merged)
+                        .collect();
+                    ResourceVector::from_grades(&pairs)
                 }
             });
         }
@@ -287,5 +290,79 @@ mod tests {
             ScopeChain::new(segments).unwrap_err(),
             ScopeError::PrincipalMustBeLeaf
         );
+    }
+
+    #[test]
+    fn multi_level_independent_grade_declarations_combine_and_tighten() {
+        let mut ceilings = ScopeCeilings::new();
+        let org_slug = AsciiSlug::try_new("org", b"infra").expect("slug");
+        ceilings
+            .declare(
+                vec![ScopeSegment::Tenant(tenant(2))],
+                ResourceVector::single(Grade::Bytes, 500),
+            )
+            .expect("declare tenant");
+        ceilings
+            .declare(
+                vec![
+                    ScopeSegment::Tenant(tenant(2)),
+                    ScopeSegment::Organization(org_slug.clone()),
+                ],
+                ResourceVector::single(Grade::EgressBytes, 200),
+            )
+            .expect("declare org");
+        ceilings
+            .declare(
+                vec![
+                    ScopeSegment::Tenant(tenant(2)),
+                    ScopeSegment::Organization(org_slug.clone()),
+                    ScopeSegment::Repository(repo(9)),
+                ],
+                ResourceVector::from_grades(&[(Grade::Bytes, 300), (Grade::CpuMicros, 1_000)]),
+            )
+            .expect("declare repo");
+
+        let chain = ScopeChain::new(vec![
+            ScopeSegment::Tenant(tenant(2)),
+            ScopeSegment::Organization(org_slug),
+            ScopeSegment::Repository(repo(9)),
+            ScopeSegment::Principal(principal(5)),
+        ])
+        .expect("chain");
+
+        let effective = chain.effective_ceiling(&ceilings);
+        assert_eq!(effective.get(Grade::Bytes), 300); // repo tightened tenant (500 -> 300)
+        assert_eq!(effective.get(Grade::EgressBytes), 200); // inherited from org
+        assert_eq!(effective.get(Grade::CpuMicros), 1_000); // declared at repo
+        assert_eq!(effective.get(Grade::FileDescriptors), 0); // undeclared
+    }
+
+    #[test]
+    fn descendant_cannot_widen_ancestor_ceiling() {
+        let mut ceilings = ScopeCeilings::new();
+        ceilings
+            .declare(
+                vec![ScopeSegment::Tenant(tenant(3))],
+                ResourceVector::single(Grade::Bytes, 100),
+            )
+            .expect("tenant");
+        ceilings
+            .declare(
+                vec![
+                    ScopeSegment::Tenant(tenant(3)),
+                    ScopeSegment::Principal(principal(1)),
+                ],
+                ResourceVector::single(Grade::Bytes, 500), // tries to widen
+            )
+            .expect("principal");
+
+        let chain = ScopeChain::new(vec![
+            ScopeSegment::Tenant(tenant(3)),
+            ScopeSegment::Principal(principal(1)),
+        ])
+        .expect("chain");
+
+        let effective = chain.effective_ceiling(&ceilings);
+        assert_eq!(effective.get(Grade::Bytes), 100); // ancestor ceiling of 100 wins
     }
 }
