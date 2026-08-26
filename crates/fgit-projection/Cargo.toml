@@ -14,7 +14,7 @@ sqlmodel-core = { version = "0.4.1", default-features = false }
 sqlmodel-frankensqlite = { version = "0.4.1", default-features = false }
 
 [dev-dependencies]
-tempfile = "3"
+fgit-runtime.workspace = true
 
 [lints]
 workspace = true

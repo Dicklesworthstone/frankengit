@@ -26,7 +26,7 @@ pub fn install_schema_statements() -> Vec<CanonicalStatement> {
              authority_head TEXT NOT NULL,\
              authority_head_generation INTEGER NOT NULL,\
              last_position INTEGER NOT NULL,\
-             state TEXT NOT NULL,\
+             state_text TEXT NOT NULL,\
              schema_generation INTEGER NOT NULL)",
             vec![],
         ),
@@ -42,6 +42,21 @@ pub fn install_schema_statements() -> Vec<CanonicalStatement> {
              digest TEXT NOT NULL) WITHOUT ROWID",
             vec![],
         ),
+    ]
+}
+
+/// The drop order for derived-state teardown. Derived tables only: nothing
+/// here touches canonical history, which is what makes wipe-and-rebuild a
+/// recovery strategy instead of a destructive act.
+#[must_use]
+pub fn teardown_statements() -> Vec<CanonicalStatement> {
+    vec![
+        (
+            "DROP TABLE IF EXISTS fgit_projection_applied_decision",
+            vec![],
+        ),
+        ("DROP TABLE IF EXISTS fgit_projection_watermark", vec![]),
+        ("DROP TABLE IF EXISTS fgit_projection_identity", vec![]),
     ]
 }
 
@@ -103,6 +118,7 @@ pub struct StoredWatermarkRow {
     /// `None` means "installed, nothing folded" (stored position 0).
     pub last_position: Option<crate::identity::ProjectionPosition>,
     pub state_text: String,
+    pub schema_generation: u32,
 }
 
 /// Decode a watermark row returned by
@@ -110,7 +126,7 @@ pub struct StoredWatermarkRow {
 ///
 /// # Errors
 /// [`StoreReadError::MissingColumn`] when the row lacks a required column;
-/// [`StoreReadError::NegativePosition`] when stored positions are negative.
+/// [`StoreReadError::NegativePosition`] when stored counters are negative.
 pub fn decode_watermark_row(
     row: &sqlmodel_core::Row,
 ) -> Result<StoredWatermarkRow, StoreReadError> {
@@ -128,18 +144,26 @@ pub fn decode_watermark_row(
 
     let source_incarnation = text("source_incarnation")?;
     let authority_head = text("authority_head")?;
+
     let generation_raw = int("authority_head_generation")?;
     let authority_head_generation = u64::try_from(generation_raw)
         .map_err(|_| StoreReadError::NegativePosition(generation_raw))?;
+
     let last_raw = int("last_position")?;
-    let last_position = if last_raw == 0 {
-        None
-    } else {
-        let widened =
-            u64::try_from(last_raw).map_err(|_| StoreReadError::NegativePosition(last_raw))?;
-        Some(crate::identity::ProjectionPosition::new(widened))
+    let last_position = match last_raw {
+        0 => None,
+        positive => {
+            let widened =
+                u64::try_from(positive).map_err(|_| StoreReadError::NegativePosition(positive))?;
+            Some(crate::identity::ProjectionPosition::new(widened))
+        }
     };
+
     let state_text = text("state_text")?;
+
+    let schema_raw = int("schema_generation")?;
+    let schema_generation =
+        u32::try_from(schema_raw).map_err(|_| StoreReadError::NegativePosition(schema_raw))?;
 
     Ok(StoredWatermarkRow {
         source_incarnation,
@@ -147,6 +171,7 @@ pub fn decode_watermark_row(
         authority_head_generation,
         last_position,
         state_text,
+        schema_generation,
     })
 }
 
@@ -168,6 +193,15 @@ mod tests {
         assert!(statements[2].0.ends_with("WITHOUT ROWID"));
         // Constant statements bind nothing; parameters live at call time only.
         assert!(statements.iter().all(|(_, params)| params.is_empty()));
+    }
+
+    #[test]
+    fn teardown_drops_derived_tables_child_first() {
+        let drops = teardown_statements();
+        assert_eq!(drops.len(), 3);
+        assert!(drops[0].0.contains("fgit_projection_applied_decision"));
+        assert!(drops[2].0.contains("fgit_projection_identity"));
+        assert!(drops.iter().all(|(_, params)| params.is_empty()));
     }
 
     #[test]

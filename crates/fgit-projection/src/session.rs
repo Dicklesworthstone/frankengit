@@ -165,7 +165,8 @@ impl<C: Connection> ProjectionSession<C> {
             .query_one(
                 cx,
                 "SELECT source_incarnation, authority_head, authority_head_generation, \
-                 last_position, state_text FROM fgit_projection_watermark WHERE singleton = 1",
+                 last_position, state_text, schema_generation \
+                 FROM fgit_projection_watermark WHERE singleton = 1",
                 &[],
             )
             .await;

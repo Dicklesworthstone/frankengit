@@ -118,6 +118,19 @@ impl ProjectionIdentity {
     }
 
     #[must_use]
+    pub fn source_incarnation(&self) -> &str {
+        &self.source_incarnation
+    }
+
+    #[must_use]
+    pub fn authority_head(&self) -> &str {
+        &self.authority_head
+    }
+
+    #[must_use]
+    pub const fn authority_head_generation(&self) -> u64 {
+        self.authority_head_generation
+    }
     pub const fn schema_generation(&self) -> u32 {
         self.schema_generation
     }

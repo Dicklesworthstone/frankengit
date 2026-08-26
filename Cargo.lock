@@ -923,10 +923,10 @@ name = "fgit-projection"
 version = "0.0.1"
 dependencies = [
  "asupersync",
+ "fgit-runtime",
  "fgit-types",
  "sqlmodel-core",
  "sqlmodel-frankensqlite",
- "tempfile",
 ]
 
 [[package]]

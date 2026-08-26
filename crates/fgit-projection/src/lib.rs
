@@ -47,17 +47,9 @@ pub mod session;
 pub mod store;
 pub mod watermark;
 
-pub use catchup::{DecisionRecord, ProjectionConflict, apply_batch};
+pub use catchup::{apply_batch, DecisionRecord, ProjectionConflict};
 pub use identity::{ProjectionIdentity, ProjectionPosition};
-pub use rebuild::{SchemaReconciliation, ensure_schema_generation};
+pub use rebuild::{ensure_schema_generation, SchemaReconciliation};
 pub use session::ProjectionSession;
 pub use store::install_schema_statements;
 pub use watermark::{Watermark, WatermarkRefusal, WatermarkState};
-
-/// Test-only constructor so integration fixtures can build identities without
-/// depending on this crate's private test modules.
-#[doc(hidden)]
-#[must_use]
-pub fn __test_build_identity() -> identity::BuildIdentity {
-    identity::BuildIdentity::current()
-}
