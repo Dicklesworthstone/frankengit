@@ -120,7 +120,11 @@ where
     GitOid<A>: Ord,
 {
     let corpus = corpus_directory();
-    let limits = ParseLimits::default();
+    // tree_reference_bytes MUST match the algorithm domain: the default is
+    // SHA-1's 20 bytes, and a 20-byte read width on SHA-256 bodies misaligns
+    // every subsequent entry (misread later as mode garbage).
+    let mut limits = ParseLimits::default();
+    limits.tree_reference_bytes = A::HEX_LEN / 2;
     // Full-corpus evaluation: every row reports, no early abort, so one
     // confirmed divergence cannot mask another row's verdict.
     let mut failures: Vec<String> = Vec::new();
