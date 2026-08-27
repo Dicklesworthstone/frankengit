@@ -96,14 +96,14 @@ fn nonexistent_accounts_walk_the_same_lockout_branch() {
     // A principal that never recorded anything admits...
     assert!(
         limiter
-            .check_admission(Some(principal(0x99)), NOW_NOW())
+            .check_admission(Some(principal(0x99)), NOW_NOW)
             .is_ok()
     );
     // ...and an unknown principal (None) goes through the dummy record with
     // identical refusal semantics once the dummy is locked. Seed nothing:
     // both start admitted; the parity that matters is that NEITHER path can
     // be distinguished by an early-success shortcut.
-    let _ = limiter.check_admission(None, NOW_NOW());
+    let _ = limiter.check_admission(None, NOW_NOW);
 }
 
 #[test]
@@ -127,9 +127,7 @@ fn failures_track_per_principal_without_cross_tenant_bleed() {
     let _: HashMap<(), ()> = HashMap::new();
 }
 
-const fn NOW_NOW() -> u64 {
-    1_000
-}
+const NOW_NOW: u64 = 1_000;
 
 // --- elevation tokens ------------------------------------------------------------
 

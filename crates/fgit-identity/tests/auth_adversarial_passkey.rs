@@ -11,18 +11,14 @@ use fgit_identity::{
     PasskeyAlgorithm, PasskeyAssertion, PasskeyAssertionChallenge, PasskeyCredential, PasskeyId,
     PasskeyRefusal, RevocationEvidence, UserVerificationRequirement,
 };
+use fgit_types::PrincipalId;
 use fgit_types::identity::OPAQUE_ID_LEN;
-use fgit_types::{PrincipalId, RepositoryId};
 
 const NOW: u64 = 5_000;
 const CHALLENGE_EXPIRES: u64 = 6_000;
 
 const fn principal(tag: u8) -> PrincipalId {
     PrincipalId::from_bytes([tag; OPAQUE_ID_LEN])
-}
-
-const fn repository() -> RepositoryId {
-    RepositoryId::from_bytes([0x11; OPAQUE_ID_LEN])
 }
 
 fn signing_key(seed: [u8; 32]) -> SigningKey {
