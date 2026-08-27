@@ -195,7 +195,7 @@ fn notes_crud_operations_and_pruning() {
     assert!(!notes.contains(&commit2));
 
     // Prune: keep only commit1, commit3 is pruned
-    let live_objects = vec![commit1];
+    let live_objects = [commit1];
     let pruned = notes.prune(|oid| live_objects.contains(oid));
     assert_eq!(pruned, vec![commit3]);
     assert_eq!(notes.len(), 1);
@@ -281,7 +281,10 @@ fn notes_merge_strategies_ours_theirs_union_catsortuniq() {
             |_, _, _| unreachable!(),
         )
         .unwrap();
-    assert!(conflicts.is_empty());
+    assert_eq!(
+        conflicts,
+        [] as [fgit_git_object::NotesMergeConflict<fgit_crypto::Sha1>; 0]
+    );
     assert_eq!(merged_ours.get(&commit), Some(&ours_blob));
 
     // 2. Theirs strategy
@@ -293,7 +296,10 @@ fn notes_merge_strategies_ours_theirs_union_catsortuniq() {
             |_, _, _| unreachable!(),
         )
         .unwrap();
-    assert!(conflicts.is_empty());
+    assert_eq!(
+        conflicts,
+        [] as [fgit_git_object::NotesMergeConflict<fgit_crypto::Sha1>; 0]
+    );
     assert_eq!(merged_theirs.get(&commit), Some(&theirs_blob));
 
     // 3. Union helper

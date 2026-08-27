@@ -98,7 +98,7 @@ impl ScrubMode {
                 let bytes = target.as_internal_object_id().digest().as_bytes();
                 let high = bytes.first().copied().unwrap_or(0);
                 let low = bytes.get(1).copied().unwrap_or(0);
-                let bucket = u16::from_be_bytes([high, low]) % denominator.get();
+                let bucket = u16::from_be_bytes([high, low]) % denominator;
                 bucket < numerator
             }
         }

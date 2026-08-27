@@ -232,7 +232,7 @@ where
 {
     /// Creates an empty notes tree with the default fanout threshold.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
             fanout_threshold: DEFAULT_NOTES_FANOUT_THRESHOLD,
@@ -241,7 +241,7 @@ where
 
     /// Creates an empty notes tree with a custom fanout threshold.
     #[must_use]
-    pub fn with_fanout_threshold(fanout_threshold: usize) -> Self {
+    pub const fn with_fanout_threshold(fanout_threshold: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
             fanout_threshold,
@@ -262,12 +262,12 @@ where
 
     /// Returns the configured fanout threshold.
     #[must_use]
-    pub fn fanout_threshold(&self) -> usize {
+    pub const fn fanout_threshold(&self) -> usize {
         self.fanout_threshold
     }
 
     /// Sets the fanout threshold.
-    pub fn set_fanout_threshold(&mut self, threshold: usize) {
+    pub const fn set_fanout_threshold(&mut self, threshold: usize) {
         self.fanout_threshold = threshold;
     }
 

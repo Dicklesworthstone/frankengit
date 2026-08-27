@@ -20,23 +20,23 @@ use fgit_types::{PrincipalId, RepositoryId};
 
 use crate::session::{AuthenticationStrength, Session, SessionId};
 
-/// Base64URL unpadded character encoding table.
+/// `Base64URL` unpadded character encoding table.
 const BASE64URL_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// Encodes binary digest bytes to base64url without padding.
 pub(crate) fn base64url_encode_unpadded(input: &[u8]) -> String {
-    let mut out = String::with_capacity((input.len() * 4 + 2) / 3);
+    let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
     let mut i = 0;
     while i < input.len() {
-        let b0 = input[i] as u32;
+        let b0 = u32::from(input[i]);
         let b1 = if i + 1 < input.len() {
-            input[i + 1] as u32
+            u32::from(input[i + 1])
         } else {
             0
         };
         let b2 = if i + 2 < input.len() {
-            input[i + 2] as u32
+            u32::from(input[i + 2])
         } else {
             0
         };

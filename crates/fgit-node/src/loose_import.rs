@@ -694,11 +694,10 @@ impl PackedObjectSources {
                 BoundedInputClass::PackOrIndex,
             )?;
             total_index_bytes = total_index_bytes
-                .checked_add(u64::try_from(index_bytes.len()).unwrap_or(u64::MAX))
-                .unwrap_or(u64::MAX);
+                .saturating_add(u64::try_from(index_bytes.len()).unwrap_or(u64::MAX));
             if total_index_bytes > MAX_IMPORT_TOTAL_INDEX_BYTES {
                 return Err(LooseGitImportRefusal::PackInputBytesExceeded {
-                    path: Box::new(pack_directory.clone()),
+                    path: Box::new(pack_directory),
                     limit: MAX_IMPORT_TOTAL_INDEX_BYTES,
                     observed: total_index_bytes,
                 });
@@ -774,8 +773,7 @@ impl PackedObjectSources {
         )?;
         let next_pack_bytes = self
             .loaded_pack_bytes
-            .checked_add(u64::try_from(pack_bytes.len()).unwrap_or(u64::MAX))
-            .unwrap_or(u64::MAX);
+            .saturating_add(u64::try_from(pack_bytes.len()).unwrap_or(u64::MAX));
         if next_pack_bytes > MAX_IMPORT_TOTAL_PACK_BYTES {
             return Err(LooseGitImportRefusal::PackInputBytesExceeded {
                 path: Box::new(pack_path),
@@ -861,10 +859,7 @@ impl PackedObjectSources {
                 total.checked_add(u64::try_from(entry.inflated.len()).ok()?)
             })
             .unwrap_or(u64::MAX);
-        let next_inflated = self
-            .loaded_inflated_bytes
-            .checked_add(inflated_bytes)
-            .unwrap_or(u64::MAX);
+        let next_inflated = self.loaded_inflated_bytes.saturating_add(inflated_bytes);
         if next_inflated > MAX_IMPORT_TOTAL_OBJECT_BYTES {
             return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
                 limit: MAX_IMPORT_TOTAL_OBJECT_BYTES,

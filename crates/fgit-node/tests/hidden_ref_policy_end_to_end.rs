@@ -289,7 +289,7 @@ fn push(
     outcome
         .commands
         .iter()
-        .map(|command| command.terminal.outcome.clone())
+        .map(|command| command.terminal.outcome)
         .collect()
 }
 

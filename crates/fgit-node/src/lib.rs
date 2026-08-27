@@ -6572,7 +6572,7 @@ impl OneNode {
             let child_refused = Arc::clone(&refused);
             let child_wire_limits = wire_limits.clone();
             let task = match self.runtime.submit_blocking(move || {
-                let completed_cleanly = match OneNode::open_existing(child_config) {
+                let completed_cleanly = match Self::open_existing(child_config) {
                     Ok(mut child) => {
                         let brought_in = child.bring_into_service(HeadGeneration::FIRST);
                         let served =

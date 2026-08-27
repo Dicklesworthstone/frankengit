@@ -188,14 +188,12 @@ impl Watermark {
         Ok(())
     }
 
-    fn admit_tip(&mut self, tip: ProjectionPosition) -> Result<(), WatermarkRefusal> {
+    const fn admit_tip(&mut self, tip: ProjectionPosition) -> Result<(), WatermarkRefusal> {
         match self.last_seen_tip {
-            Some(seen) if tip.get() < seen.get() => {
-                return Err(WatermarkRefusal::Regression {
-                    held: seen,
-                    offered: tip,
-                });
-            }
+            Some(seen) if tip.get() < seen.get() => Err(WatermarkRefusal::Regression {
+                held: seen,
+                offered: tip,
+            }),
             _ => {
                 self.last_seen_tip = Some(tip);
                 Ok(())

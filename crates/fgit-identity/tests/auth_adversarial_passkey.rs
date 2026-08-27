@@ -17,11 +17,11 @@ use fgit_types::{PrincipalId, RepositoryId};
 const NOW: u64 = 5_000;
 const CHALLENGE_EXPIRES: u64 = 6_000;
 
-fn principal(tag: u8) -> PrincipalId {
+const fn principal(tag: u8) -> PrincipalId {
     PrincipalId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
-fn repository() -> RepositoryId {
+const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([0x11; OPAQUE_ID_LEN])
 }
 

@@ -67,6 +67,7 @@ pub struct InMemoryPolicySnapshots {
 }
 
 impl InMemoryPolicySnapshots {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }

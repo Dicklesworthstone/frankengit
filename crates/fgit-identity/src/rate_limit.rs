@@ -66,7 +66,7 @@ impl RateLimitRecord {
     ///
     /// [`RateLimitRefusal::AccountLocked`] if currently in a lockout period.
     /// [`RateLimitRefusal::RateLimitExceeded`] if attempts in window exceed the limit.
-    pub fn check(&self, config: &RateLimitConfig, now: u64) -> Result<(), RateLimitRefusal> {
+    pub const fn check(&self, config: &RateLimitConfig, now: u64) -> Result<(), RateLimitRefusal> {
         if self.locked_until > now {
             return Err(RateLimitRefusal::AccountLocked {
                 locked_until: self.locked_until,
@@ -85,7 +85,7 @@ impl RateLimitRecord {
     }
 
     /// Records a failed validation attempt at `now`, updating counters and lockout if needed.
-    pub fn record_failure(&mut self, config: &RateLimitConfig, now: u64) {
+    pub const fn record_failure(&mut self, config: &RateLimitConfig, now: u64) {
         if now >= self.window_start + config.window_seconds {
             // Window reset
             self.window_start = now;
@@ -100,7 +100,7 @@ impl RateLimitRecord {
     }
 
     /// Records a successful authentication, resetting failed attempts.
-    pub fn record_success(&mut self) {
+    pub const fn record_success(&mut self) {
         self.failed_attempts = 0;
         self.locked_until = 0;
     }
@@ -123,7 +123,7 @@ pub struct PrincipalRateLimiter {
 impl PrincipalRateLimiter {
     /// Creates a new rate limiter with the given configuration.
     #[must_use]
-    pub fn new(config: RateLimitConfig) -> Self {
+    pub const fn new(config: RateLimitConfig) -> Self {
         Self {
             config,
             records: Vec::new(),

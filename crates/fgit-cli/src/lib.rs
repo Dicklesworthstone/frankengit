@@ -342,14 +342,14 @@ pub enum AtReport {
     Refs {
         /// Formatted target position.
         position: String,
-        /// List of (ref_name, target_oid).
+        /// List of (`ref_name`, `target_oid`).
         refs: Vec<(String, String)>,
     },
     /// Detailed listing of pull requests as of snapshot position.
     PullRequests {
         /// Formatted target position.
         position: String,
-        /// List of (pr_number, title, state_desc, target_branch).
+        /// List of (`pr_number`, title, `state_desc`, `target_branch`).
         pull_requests: Vec<(u64, String, String, String)>,
     },
     /// Difference between two snapshot positions.
@@ -1009,11 +1009,11 @@ fn run_doctor(
 }
 
 fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>, CliRefusal> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(CliRefusal::InvalidPosition(hex.to_string()));
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for chunk in hex.as_bytes().chunks_exact(2) {
+    for chunk in hex.as_bytes().as_chunks::<2>().0 {
         let high = match chunk[0] {
             b'0'..=b'9' => chunk[0] - b'0',
             b'a'..=b'f' => chunk[0] - b'a' + 10,
@@ -1076,10 +1076,10 @@ fn parse_position_target(token: &str) -> Result<PositionTarget, CliRefusal> {
         let id = parse_derived_id_from_hex(token, rest, RepositoryCapsuleId::from_digest)?;
         return Ok(PositionTarget::Capsule(id));
     }
-    if let Ok(seq) = token.parse::<u64>() {
-        if let Ok(seq) = DecisionSequence::try_new(seq) {
-            return Ok(PositionTarget::Decision(seq));
-        }
+    if let Ok(seq) = token.parse::<u64>()
+        && let Ok(seq) = DecisionSequence::try_new(seq)
+    {
+        return Ok(PositionTarget::Decision(seq));
     }
     Err(CliRefusal::InvalidPosition(token.to_string()))
 }

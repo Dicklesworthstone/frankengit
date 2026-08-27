@@ -222,7 +222,7 @@ fn parse_lower_hex_32(text: &str) -> Result<[u8; 32], ReleaseKeyRefusal> {
         return Err(ReleaseKeyRefusal::KeyFileMalformed);
     }
     let mut output = [0_u8; 32];
-    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = hex_nibble(pair[0]).ok_or(ReleaseKeyRefusal::KeyFileMalformed)?;
         let low = hex_nibble(pair[1]).ok_or(ReleaseKeyRefusal::KeyFileMalformed)?;
         output[index] = (high << 4) | low;
@@ -271,7 +271,7 @@ fn key_io(operation: &'static str, path: PathBuf, error: std::io::Error) -> Rele
 }
 
 #[cfg(test)]
-pub(crate) struct TestRootSecretKeyProvider {
+pub struct TestRootSecretKeyProvider {
     root: RootSecret,
     epoch: KeyEpoch,
 }

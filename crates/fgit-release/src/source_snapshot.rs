@@ -2,7 +2,7 @@
 //!
 //! This is deliberately a small, read-only object-store boundary.  It opens
 //! the caller-named checkout's own `.git/objects` directory and its local pack
-//! files using FrankenGit parsers; it never invokes `git` or accepts a raw
+//! files using `FrankenGit` parsers; it never invokes `git` or accepts a raw
 //! working-directory walk as source truth.  The working tree is compared only
 //! after the exact commit tree has been assembled.
 

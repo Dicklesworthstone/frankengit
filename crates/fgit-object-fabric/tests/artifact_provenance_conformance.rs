@@ -157,7 +157,7 @@ fn package_namespace_publication_and_yank_lifecycle() {
     registry
         .publish(PublishIntent {
             namespace: namespace.clone(),
-            version: ver_1_1_0.clone(),
+            version: ver_1_1_0,
             artifact_id: art_1_1,
             expected_basis: ExpectedNamespaceBasis::MustNotExist,
             retention_profile: RetentionProfile::ReleasePermanent,
@@ -232,7 +232,7 @@ fn provenance_chain_end_to_end_query_and_verification() {
     // Source -> Capsule (E1)
     graph
         .add_edge(
-            node_source.clone(),
+            node_source,
             node_capsule.clone(),
             EvidenceClass::E1DeterministicDerivation,
             "Runner snapshot assembled from source tree",
@@ -242,7 +242,7 @@ fn provenance_chain_end_to_end_query_and_verification() {
     // Capsule -> CheckReceipt (E2)
     graph
         .add_edge(
-            node_capsule.clone(),
+            node_capsule,
             node_check.clone(),
             EvidenceClass::E2MeasuredUsage,
             "Isolated container build completed with test pass",
@@ -262,7 +262,7 @@ fn provenance_chain_end_to_end_query_and_verification() {
     // CheckReceipt -> SBOM Artifact (E1)
     graph
         .add_edge(
-            node_check.clone(),
+            node_check,
             node_sbom.clone(),
             EvidenceClass::E1DeterministicDerivation,
             "Generated SPDX 2.3 SBOM",
@@ -272,7 +272,7 @@ fn provenance_chain_end_to_end_query_and_verification() {
     // Binary Artifact -> Release Manifest (E4)
     graph
         .add_edge(
-            node_bin.clone(),
+            node_bin,
             node_rel.clone(),
             EvidenceClass::E4SignedAttestation,
             "Signed release manifest published",
@@ -282,8 +282,8 @@ fn provenance_chain_end_to_end_query_and_verification() {
     // SBOM Artifact -> Release Manifest (E4)
     graph
         .add_edge(
-            node_sbom.clone(),
-            node_rel.clone(),
+            node_sbom,
+            node_rel,
             EvidenceClass::E4SignedAttestation,
             "Signed release manifest published",
         )

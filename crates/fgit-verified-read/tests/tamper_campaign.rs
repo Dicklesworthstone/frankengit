@@ -1121,7 +1121,7 @@ fn the_honest_object_answers_are_accepted() {
     let obj = honest_object();
     let genuine_membership = VerifiedReadEnvelope::new(
         obj.head.clone(),
-        Some(honest().configuration.clone()),
+        Some(honest().configuration),
         VerifiedReadAnswer::ObjectMembership {
             oid: obj.queried,
             proof: Box::new(obj.proof),
@@ -1169,7 +1169,7 @@ fn an_object_envelope_is_checked_against_the_object_closure_root() {
         Some(base.configuration.clone()),
         VerifiedReadAnswer::ObjectMembership {
             oid: obj.queried,
-            proof: Box::new(obj.proof.clone()),
+            proof: Box::new(obj.proof),
         },
     );
     assert_eq!(
@@ -1185,8 +1185,7 @@ fn an_object_envelope_is_checked_against_the_object_closure_root() {
     );
 
     // Refused: wrong object closure root on pin
-    let pin_wrong_root =
-        PinnedAuthorityHead::new_with_object_closure(base.head.clone(), digest(0xEE));
+    let pin_wrong_root = PinnedAuthorityHead::new_with_object_closure(base.head, digest(0xEE));
     assert_eq!(
         verify_envelope(&pin_wrong_root, &genuine),
         Err(VerifiedReadRefusal::ProofRejected),

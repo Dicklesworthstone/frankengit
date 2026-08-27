@@ -79,7 +79,7 @@ fn fake_tx_id(byte: u8) -> TxId {
     )
 }
 
-fn fake_oid(byte: u8) -> GitOid {
+const fn fake_oid(byte: u8) -> GitOid {
     let mut bytes = [0_u8; 20];
     bytes[0] = byte;
     GitOid::Sha1(fgit_types::GitOidSha1::from_bytes(bytes))

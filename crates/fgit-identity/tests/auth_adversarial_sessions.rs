@@ -16,19 +16,19 @@ use fgit_types::{PrincipalId, RepositoryId};
 const T0: u64 = 1_000;
 const EXPIRES: u64 = 2_000;
 
-fn principal(tag: u8) -> PrincipalId {
+const fn principal(tag: u8) -> PrincipalId {
     PrincipalId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
-fn repository(tag: u8) -> RepositoryId {
+const fn repository(tag: u8) -> RepositoryId {
     RepositoryId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
-fn sid(value: u64) -> SessionId {
+const fn sid(value: u64) -> SessionId {
     SessionId::try_new(value).expect("nonzero id")
 }
 
-fn live_session(principal_tag: u8, repo_tag: u8) -> Session {
+const fn live_session(principal_tag: u8, repo_tag: u8) -> Session {
     Session::establish(
         sid(42),
         principal(principal_tag),

@@ -103,7 +103,7 @@ pub enum ProvenanceNode {
 impl ProvenanceNode {
     /// The unique digest representing this node's identity.
     #[must_use]
-    pub fn digest(&self) -> &Digest {
+    pub const fn digest(&self) -> &Digest {
         match self {
             Self::SourceCommit(d)
             | Self::BuildCapsule(d)
@@ -116,7 +116,7 @@ impl ProvenanceNode {
 
     /// Short descriptive label.
     #[must_use]
-    pub fn kind_label(&self) -> &'static str {
+    pub const fn kind_label(&self) -> &'static str {
         match self {
             Self::SourceCommit(_) => "source_commit",
             Self::BuildCapsule(_) => "build_capsule",
@@ -156,6 +156,7 @@ pub struct ProvenanceGraph {
 
 impl ProvenanceGraph {
     /// Creates a new empty provenance graph.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -213,12 +214,12 @@ impl ProvenanceGraph {
         let mut queue = vec![*target_digest];
 
         while let Some(current) = queue.pop() {
-            if visited.insert(current) {
-                if let Some(incoming_edges) = self.incoming.get(&current) {
-                    for edge in incoming_edges {
-                        edges.push(edge.clone());
-                        queue.push(*edge.from.digest());
-                    }
+            if visited.insert(current)
+                && let Some(incoming_edges) = self.incoming.get(&current)
+            {
+                for edge in incoming_edges {
+                    edges.push(edge.clone());
+                    queue.push(*edge.from.digest());
                 }
             }
         }
@@ -242,10 +243,10 @@ impl ProvenanceGraph {
         for edge in &chain {
             checked_nodes.insert(*edge.from.digest());
             checked_nodes.insert(*edge.to.digest());
-            if let ProvenanceNode::SourceCommit(rcr) = &edge.from {
-                if rcr == expected_source_rcr {
-                    has_source_rcr = true;
-                }
+            if let ProvenanceNode::SourceCommit(rcr) = &edge.from
+                && rcr == expected_source_rcr
+            {
+                has_source_rcr = true;
             }
         }
 

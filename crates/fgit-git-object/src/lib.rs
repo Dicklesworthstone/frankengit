@@ -830,7 +830,7 @@ pub enum TagTargetType {
 }
 
 impl TagTargetType {
-    fn parse(value: &[u8]) -> Result<Self, ObjectError> {
+    const fn parse(value: &[u8]) -> Result<Self, ObjectError> {
         match value {
             b"blob" => Ok(Self::Blob),
             b"tree" => Ok(Self::Tree),

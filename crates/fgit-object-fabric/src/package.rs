@@ -271,7 +271,8 @@ pub struct PackageRegistry {
 
 impl PackageRegistry {
     /// Creates a new empty package registry.
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             namespaces: RwLock::new(BTreeMap::new()),
         }

@@ -215,7 +215,7 @@ impl SnapshotDisclosurePolicy {
 
     /// Builds a restricted disclosure policy for an actor with revoked refs.
     #[must_use]
-    pub fn with_revoked_refs(revoked_refs: BTreeSet<Vec<u8>>) -> Self {
+    pub const fn with_revoked_refs(revoked_refs: BTreeSet<Vec<u8>>) -> Self {
         Self::Restricted {
             allowed_refs: None,
             revoked_refs,
@@ -227,7 +227,7 @@ impl SnapshotDisclosurePolicy {
 
     /// Builds a policy where the actor's repository access was completely revoked.
     #[must_use]
-    pub fn revoked_actor() -> Self {
+    pub const fn revoked_actor() -> Self {
         Self::Restricted {
             allowed_refs: None,
             revoked_refs: BTreeSet::new(),
@@ -266,10 +266,10 @@ impl SnapshotDisclosurePolicy {
                     if revoked_refs.contains(name) {
                         return false;
                     }
-                    if let Some(allowed) = allowed_refs {
-                        if !allowed.contains(name) {
-                            return false;
-                        }
+                    if let Some(allowed) = allowed_refs
+                        && !allowed.contains(name)
+                    {
+                        return false;
                     }
                     true
                 });
@@ -284,10 +284,10 @@ impl SnapshotDisclosurePolicy {
                     {
                         return false;
                     }
-                    if let Some(allowed) = allowed_prs {
-                        if !allowed.contains(num) {
-                            return false;
-                        }
+                    if let Some(allowed) = allowed_prs
+                        && !allowed.contains(num)
+                    {
+                        return false;
                     }
                     true
                 });
@@ -431,11 +431,11 @@ impl ForgeSnapshotDiff {
             }
         }
 
-        let policy_epoch_change = if older.historical_policy_epoch != newer.historical_policy_epoch
+        let policy_epoch_change = if older.historical_policy_epoch == newer.historical_policy_epoch
         {
-            Some((older.historical_policy_epoch, newer.historical_policy_epoch))
-        } else {
             None
+        } else {
+            Some((older.historical_policy_epoch, newer.historical_policy_epoch))
         };
 
         Self {
@@ -859,11 +859,10 @@ pub fn project_snapshot_from_history(
                 for decision in &b.batch.decisions {
                     if let fgit_types::vocabulary::DecisionOutcome::Committed { .. } =
                         decision.outcome
+                        && decision.decision_sequence.get() == req_seq.get()
                     {
-                        if decision.decision_sequence.get() == req_seq.get() {
-                            found_seq = Some(decision.decision_sequence);
-                            break;
-                        }
+                        found_seq = Some(decision.decision_sequence);
+                        break;
                     }
                 }
                 if found_seq.is_some() {
@@ -908,14 +907,14 @@ pub fn project_snapshot_from_history(
     // 2. Checkpoint seeking: find closest capsule at or before target_limit
     let mut nearest_capsule: Option<&CandidateCapsule> = None;
     for cap in capsules {
-        if let Some(cap_seq) = cap.capsule.latest_decision_sequence {
-            if cap_seq <= target_limit {
-                match nearest_capsule {
-                    None => nearest_capsule = Some(cap),
-                    Some(current) => {
-                        if cap_seq > current.capsule.latest_decision_sequence.unwrap() {
-                            nearest_capsule = Some(cap);
-                        }
+        if let Some(cap_seq) = cap.capsule.latest_decision_sequence
+            && cap_seq <= target_limit
+        {
+            match nearest_capsule {
+                None => nearest_capsule = Some(cap),
+                Some(current) => {
+                    if cap_seq > current.capsule.latest_decision_sequence.unwrap() {
+                        nearest_capsule = Some(cap);
                     }
                 }
             }
@@ -972,10 +971,10 @@ pub fn project_snapshot_from_history(
             .map(|d| d.decision_sequence)
             .unwrap_or(first_seq);
 
-        if let Some(start) = start_seq {
-            if last_seq <= start {
-                continue;
-            }
+        if let Some(start) = start_seq
+            && last_seq <= start
+        {
+            continue;
         }
 
         if first_seq <= target_limit {

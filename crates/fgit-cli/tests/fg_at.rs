@@ -76,7 +76,7 @@ fn fg_at_refs_and_prs_subcommands() {
     match outcome {
         CliOutcome::At(AtReport::Refs { position, refs }) => {
             assert_eq!(position, "latest");
-            assert!(refs.is_empty());
+            assert_eq!(refs, [] as [(std::string::String, std::string::String); 0]);
         }
         other => panic!("expected AtReport::Refs, got {other:?}"),
     }
@@ -90,7 +90,15 @@ fn fg_at_refs_and_prs_subcommands() {
             pull_requests,
         }) => {
             assert_eq!(position, "latest");
-            assert!(pull_requests.is_empty());
+            assert_eq!(
+                pull_requests,
+                [] as [(
+                    u64,
+                    std::string::String,
+                    std::string::String,
+                    std::string::String
+                ); 0]
+            );
         }
         other => panic!("expected AtReport::PullRequests, got {other:?}"),
     }

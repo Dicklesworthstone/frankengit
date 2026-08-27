@@ -471,7 +471,7 @@ fn capsule_terminated_fold_crosses_the_replay_bound_and_matches_the_direct_leaf_
             DecisionSequence::try_new(u64::try_from(index).expect("fixture index fits") + 2)
                 .expect("tail decision sequence is nonzero");
     }
-    let mut direct = checkpoint_decisions.clone();
+    let mut direct = checkpoint_decisions;
     direct.extend(tail.clone());
     let expected_root = root_of(&direct);
 

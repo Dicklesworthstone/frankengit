@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 //! E3 notes differential test driven by the pinned upstream-Git oracle.
 //!
-//! STAGED for fg084 (MagentaJay, 2026-08-25). Lands in
+//! STAGED for fg084 (`MagentaJay`, 2026-08-25). Lands in
 //! `crates/fgit-git-object/tests/notes_differential.rs` together with
 //! `scripts/e2e/oracle/notes_corpus.sh` only if the fg084 owner accepts
 //! disposition (a); the corpus generator supplies the environment below.
@@ -26,7 +26,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use fgit_crypto::{GitHashAlgorithm, GitOid, Sha1, Sha256};
-use fgit_git_object::notes::{oid_from_hex, oid_to_hex};
+use fgit_git_object::notes::oid_to_hex;
 use fgit_git_object::{
     AcceptanceProfile, NotesError, NotesMergeStrategy, ParseLimits, emit_notes_tree,
     merge_note_blob_bytes, parse_notes_tree,
@@ -178,12 +178,10 @@ where
                 // counts), so only PARSE equality is asserted for them.
                 let accepted_divergence =
                     row.last().map(String::as_str) == Some("accepted:FG084-DIV-001");
-                if !accepted_divergence {
-                    if emission.root_tree_body != oracle_tree {
-                        failures.push(format!(
-                            "{label}: EMIT-DIVERGENCE re-emitted root tree bytes differ from git's"
-                        ));
-                    }
+                if !accepted_divergence && emission.root_tree_body != oracle_tree {
+                    failures.push(format!(
+                        "{label}: EMIT-DIVERGENCE re-emitted root tree bytes differ from git's"
+                    ));
                 }
                 let oracle_root =
                     String::from_utf8(transcript_bytes(&corpus, &row[2])).expect("OID transcript");
@@ -303,7 +301,7 @@ fn notes_sha256_differential() {
 }
 
 /// Isolated evaluation of the merge-blob rows so a confirmed fanout-boundary
-/// divergence cannot mask the union/cat_sort_uniq verdicts.
+/// divergence cannot mask the `union/cat_sort_uniq` verdicts.
 #[test]
 #[ignore = "requires the pinned shell notes corpus from notes_differential.sh"]
 fn notes_merge_rows_only() {

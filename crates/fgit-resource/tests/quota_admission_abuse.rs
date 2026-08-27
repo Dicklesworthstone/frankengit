@@ -12,7 +12,7 @@
 //!   * Ceiling-before-pool ordering: over-ceiling requests hard-refuse without touching ledger state;
 //!   * Degraded profile escape hatch: full ask over capacity + degraded under capacity admits degraded; degraded over capacity falls back;
 //!   * Queue deadline zero disables queueing and yields caller-anchored retry hint;
-//!   * Ledger overflow produces HardRefusal while conservation failure produces RetryableRefusal;
+//!   * Ledger overflow produces `HardRefusal` while conservation failure produces `RetryableRefusal`;
 //!   * Determinism: identical admission sequences produce identical outcome traces across independent instances.
 
 use fgit_resource::algebra::{Grade, ResourceVector};
@@ -29,7 +29,7 @@ use fgit_resource::quota::hierarchy::{ScopeCeilings, ScopeChain, ScopeSegment};
 use fgit_types::{AsciiSlug, PrincipalId, RepositoryId, TenantId};
 use std::time::{Duration, Instant};
 
-fn tenant(id: u8) -> TenantId {
+const fn tenant(id: u8) -> TenantId {
     TenantId::from_bytes([id; 16])
 }
 
@@ -37,11 +37,11 @@ fn org(slug: &str) -> AsciiSlug {
     AsciiSlug::try_new("org", slug.as_bytes()).expect("valid ascii slug")
 }
 
-fn repo(id: u8) -> RepositoryId {
+const fn repo(id: u8) -> RepositoryId {
     RepositoryId::from_bytes([id; 16])
 }
 
-fn principal(id: u8) -> PrincipalId {
+const fn principal(id: u8) -> PrincipalId {
     PrincipalId::from_bytes([id; 16])
 }
 
@@ -145,10 +145,7 @@ fn test_multi_level_hierarchy_tightest_bound() {
     // Org level: Bytes=800, CpuMicros=2000 (tightens Bytes to 800, sets CpuMicros)
     ceilings
         .declare(
-            vec![
-                ScopeSegment::Tenant(t),
-                ScopeSegment::Organization(o.clone()),
-            ],
+            vec![ScopeSegment::Tenant(t), ScopeSegment::Organization(o)],
             ResourceVector::from_grades(&[(Grade::Bytes, 800), (Grade::CpuMicros, 2000)]),
         )
         .expect("org");
@@ -158,7 +155,7 @@ fn test_multi_level_hierarchy_tightest_bound() {
         .declare(
             vec![
                 ScopeSegment::Tenant(t),
-                ScopeSegment::Organization(o.clone()),
+                ScopeSegment::Organization(o),
                 ScopeSegment::Repository(r),
             ],
             ResourceVector::from_grades(&[(Grade::Bytes, 600), (Grade::Objects, 4)]),
@@ -170,7 +167,7 @@ fn test_multi_level_hierarchy_tightest_bound() {
         .declare(
             vec![
                 ScopeSegment::Tenant(t),
-                ScopeSegment::Organization(o.clone()),
+                ScopeSegment::Organization(o),
                 ScopeSegment::Repository(r),
                 ScopeSegment::Principal(p),
             ],

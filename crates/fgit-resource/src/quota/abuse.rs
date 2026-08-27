@@ -39,6 +39,7 @@ pub enum ContainmentReason {
 
 impl ContainmentReason {
     /// Stable machine code for the NDJSON event stream.
+    #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
             Self::RateExceeded { .. } => "rate_exceeded",
@@ -115,7 +116,7 @@ pub struct ModerationEvent {
 /// Intake surfaces call this EXACTLY WHEN they apply a [`PushVerdict::Contain`]
 /// so records and enforcement cannot drift apart.
 #[must_use = "a moderation event is evidence; dropping it destroys the audit trail"]
-pub fn record_containment(
+pub const fn record_containment(
     sequence: u64,
     key: &FairnessKey,
     at: Instant,

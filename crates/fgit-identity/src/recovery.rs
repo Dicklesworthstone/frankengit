@@ -27,7 +27,7 @@ pub const MIN_RECOVERY_DELAY_SECONDS: u64 = 86_400;
 pub struct RecoveryId(u64);
 
 impl RecoveryId {
-    /// Constructs a new RecoveryId, refusing zero.
+    /// Constructs a new `RecoveryId`, refusing zero.
     #[must_use]
     pub const fn try_new(val: u64) -> Option<Self> {
         if val == 0 { None } else { Some(Self(val)) }
@@ -82,7 +82,7 @@ impl RecoveryRequest {
     ///
     /// [`RecoveryRefusal::DelayTooShort`] if `unlock_at < requested_at + MIN_RECOVERY_DELAY_SECONDS`.
     /// [`RecoveryRefusal::NotificationRequired`] if notification was not dispatched.
-    pub fn initiate(
+    pub const fn initiate(
         id: RecoveryId,
         principal: PrincipalId,
         repository: RepositoryId,
@@ -152,7 +152,7 @@ impl RecoveryRequest {
     /// # Errors
     ///
     /// [`RecoveryRefusal::AlreadyCompleted`] or [`RecoveryRefusal::AlreadyCancelled`].
-    pub fn cancel(&mut self, now: u64) -> Result<(), RecoveryRefusal> {
+    pub const fn cancel(&mut self, now: u64) -> Result<(), RecoveryRefusal> {
         match self.state {
             RecoveryState::Pending => {
                 self.state = RecoveryState::Cancelled { cancelled_at: now };
@@ -166,13 +166,13 @@ impl RecoveryRequest {
     /// Completes the recovery request after the delay period has elapsed.
     ///
     /// Crucially, the resulting session is established with [`AuthenticationStrength::SingleFactor`].
-    /// Recovery never yields MultiFactor strength.
+    /// Recovery never yields `MultiFactor` strength.
     ///
     /// # Errors
     ///
     /// [`RecoveryRefusal::DelayNotElapsed`], [`RecoveryRefusal::AlreadyCompleted`], or
     /// [`RecoveryRefusal::AlreadyCancelled`].
-    pub fn complete(
+    pub const fn complete(
         &mut self,
         session_id: SessionId,
         session_expires_at: u64,

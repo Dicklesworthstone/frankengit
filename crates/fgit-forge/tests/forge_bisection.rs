@@ -73,7 +73,7 @@ fn fake_tx_id(byte: u8) -> TxId {
     )
 }
 
-fn test_repo_id() -> RepositoryId {
+const fn test_repo_id() -> RepositoryId {
     RepositoryId::from_bytes([0x42; 16])
 }
 

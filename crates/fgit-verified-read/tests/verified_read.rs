@@ -445,7 +445,7 @@ fn authorized_object_absence_verifies_across_v1_positions_and_membership_remains
         ("empty", Vec::new(), oid(0x15)),
         ("before-first", objects.clone(), oid(0x05)),
         ("between", objects.clone(), oid(0x15)),
-        ("after-last", objects.clone(), oid(0x40)),
+        ("after-last", objects, oid(0x40)),
     ] {
         let root = object_closure_merkle_root(&state).expect("root");
         let proof = object_closure_non_membership_proof(&state, &query).expect("absence proof");

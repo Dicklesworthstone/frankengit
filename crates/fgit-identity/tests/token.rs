@@ -16,15 +16,15 @@ const OTHER_AUDIENCE: &[u8] = b"fgit-node/upload-pack";
 const EXPIRES_AT: u64 = 1_000;
 const BUDGET: u64 = 10;
 
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0x33; OPAQUE_ID_LEN])
 }
 
-fn repository(tag: u8) -> RepositoryId {
+const fn repository(tag: u8) -> RepositoryId {
     RepositoryId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
-fn handle(value: u64) -> TokenHandle {
+const fn handle(value: u64) -> TokenHandle {
     TokenHandle::try_new(value).expect("nonzero handle")
 }
 
@@ -420,7 +420,7 @@ fn an_unknown_operation_tag_on_the_wire_is_refused_and_a_known_one_is_not() {
         .zip(write_bytes.iter())
         .position(|(left, right)| left != right)
         .expect("the frames differ at the operation tag");
-    let mut tampered = read_bytes.clone();
+    let mut tampered = read_bytes;
     tampered[divergence] = 0x6b;
     let refusal = decode_body::<TokenGrant>(&tampered, DecodeLimits::DEFAULT)
         .expect_err("an unknown operation tag is refused");

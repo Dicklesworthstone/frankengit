@@ -28,7 +28,7 @@ const fn oid(seed: u8) -> GitOid {
 
 /// A closure whose members sort in seed order, so the query positions below are
 /// chosen rather than discovered.
-fn closure() -> [GitOid; 3] {
+const fn closure() -> [GitOid; 3] {
     [oid(0x10), oid(0x20), oid(0x30)]
 }
 

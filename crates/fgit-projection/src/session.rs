@@ -292,15 +292,15 @@ where
         }
     }
     let held = held_from_row(held_row.as_ref())?;
-    if let Some(expected) = expected_held {
-        if held != Some(expected) {
-            drop(tx);
-            return Err(WatermarkRefusal::Gap {
-                expected: held.unwrap_or(ProjectionPosition::genesis()),
-                offered: record.seq,
-            }
-            .into());
+    if let Some(expected) = expected_held
+        && held != Some(expected)
+    {
+        drop(tx);
+        return Err(WatermarkRefusal::Gap {
+            expected: held.unwrap_or(ProjectionPosition::genesis()),
+            offered: record.seq,
         }
+        .into());
     }
 
     // Idempotency and conflict detection against the applied prefix.

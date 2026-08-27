@@ -216,10 +216,7 @@ impl ObjectDisclosurePolicy for DisclosureScope<'_> {
                 }
             }
         }
-        if pointed_to_by_hidden && !pointed_to_by_visible {
-            return false;
-        }
-        true
+        !(pointed_to_by_hidden && !pointed_to_by_visible)
     }
 }
 
@@ -1167,10 +1164,7 @@ mod tests {
 
         let absent_oid = GitOid::Sha1(fgit_types::native::GitOidSha1::from_bytes([0x99; 20]));
         let closure_root = object_closure_merkle_root(&[present_oid]).expect("closure root");
-        let pin = PinnedAuthorityHead::new_with_object_closure(
-            independently_fetched.clone(),
-            closure_root,
-        );
+        let pin = PinnedAuthorityHead::new_with_object_closure(independently_fetched, closure_root);
 
         // Unproven query
         let unproven = node

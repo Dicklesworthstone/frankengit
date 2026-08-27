@@ -62,7 +62,7 @@ pub fn check_workspace_descriptions(workspace_root: &Path) -> Result<(), SchemaR
         for (family, source) in &source_families {
             if !descriptions.contains_key(family) {
                 return Err(SchemaRefusal::CanonicalBodyDescriptionMissing {
-                    crate_name: crate_name.clone().into(),
+                    crate_name: crate_name.into(),
                     source: display_path(source).into(),
                     family: family.clone().into(),
                 });
@@ -71,7 +71,7 @@ pub fn check_workspace_descriptions(workspace_root: &Path) -> Result<(), SchemaR
         for family in descriptions.keys() {
             if !source_families.contains_key(family) {
                 return Err(SchemaRefusal::CanonicalBodyDescriptionPhantom {
-                    crate_name: crate_name.clone().into(),
+                    crate_name: crate_name.into(),
                     manifest: display_path(&manifest).into(),
                     family: family.clone().into(),
                 });

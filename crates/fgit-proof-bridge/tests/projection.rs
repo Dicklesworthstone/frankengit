@@ -288,7 +288,7 @@ fn history_with_decides(pure_decide: bool, post_terminal_decide: bool) -> Golden
         recorder
             .apply(ModelInput::Prepare(Box::new(PrepareRequest {
                 capsule_id: stale_capsule,
-                request: request.clone(),
+                request,
                 principal_snapshot: fixture.mint.principal_snapshot(),
                 profile: IdentityMint::preparation_profile(),
                 granularity: WitnessGranularity::Refined,

@@ -3,7 +3,7 @@
 //!
 //! Recovery is the classic takeover path. The controls under attack here:
 //! notification evidence is mandatory at initiation; a mandatory delay
-//! separates request from unlock; a recovered session is SingleFactor and can
+//! separates request from unlock; a recovered session is `SingleFactor` and can
 //! never present itself as anything stronger; completion is one-shot.
 //! Every refusal is paired with its near-identical permitted twin.
 
@@ -17,15 +17,15 @@ use fgit_types::{PrincipalId, RepositoryId};
 const T0: u64 = 10_000;
 const UNLOCK: u64 = T0 + MIN_RECOVERY_DELAY_SECONDS;
 
-fn principal(tag: u8) -> PrincipalId {
+const fn principal(tag: u8) -> PrincipalId {
     PrincipalId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
-fn repository() -> RepositoryId {
+const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([0x11; OPAQUE_ID_LEN])
 }
 
-fn recovery_id(value: u64) -> RecoveryId {
+const fn recovery_id(value: u64) -> RecoveryId {
     RecoveryId::try_new(value).expect("nonzero")
 }
 
@@ -57,7 +57,7 @@ fn initiation_without_notification_dispatch_is_refused() {
         Err(RecoveryRefusal::NotificationRequired)
     );
     // Permitted twin: with dispatch recorded, the same request initiates.
-    assert!(notified_request(1).id().get() == 1);
+    assert_eq!(notified_request(1).id().get(), 1);
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn initiation_cannot_shrink_the_delay_below_the_floor() {
         })
     );
     // Boundary twin: exactly the floor unlocks.
-    assert!(notified_request(2).id().get() == 2);
+    assert_eq!(notified_request(2).id().get(), 2);
 }
 
 // --- completion timing ---------------------------------------------------------

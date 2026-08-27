@@ -28,15 +28,15 @@ use fgit_identity::revocation::RevocationEvidence;
 use fgit_identity::session::{AuthenticationStrength, SessionId};
 use fgit_types::{PrincipalId, RepositoryId};
 
-fn test_principal() -> PrincipalId {
+const fn test_principal() -> PrincipalId {
     PrincipalId::from_bytes([1u8; 16])
 }
 
-fn other_principal() -> PrincipalId {
+const fn other_principal() -> PrincipalId {
     PrincipalId::from_bytes([2u8; 16])
 }
 
-fn test_repo() -> RepositoryId {
+const fn test_repo() -> RepositoryId {
     RepositoryId::from_bytes([9u8; 16])
 }
 
@@ -319,7 +319,7 @@ fn passkey_user_verification_and_presence_enforced() {
     let no_up = bound_assertion(&challenge, &signing_key, cred_id, 2, false, true);
 
     // Missing user verification when required
-    let no_uv = bound_assertion(&challenge, &signing_key, cred_id, 2, true, false);
+    let _no_uv = bound_assertion(&challenge, &signing_key, cred_id, 2, true, false);
     assert_eq!(
         credential
             .verify_assertion(

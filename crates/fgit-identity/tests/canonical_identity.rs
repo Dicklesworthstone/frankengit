@@ -63,7 +63,7 @@ fn token() -> TokenGrant {
     .expect("issues")
 }
 
-fn session() -> Session {
+const fn session() -> Session {
     Session::establish(
         SessionId::try_new(1).expect("nonzero"),
         PrincipalId::from_bytes([0x33; OPAQUE_ID_LEN]),

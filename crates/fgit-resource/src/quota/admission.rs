@@ -69,7 +69,8 @@ pub struct AdmissionRequest {
 
 impl AdmissionRequest {
     /// A plain request: no degradation, no queueing, immediate retry hint.
-    pub fn exact(requested: ResourceVector) -> Self {
+    #[must_use]
+    pub const fn exact(requested: ResourceVector) -> Self {
         Self {
             requested,
             degraded_profile: None,
@@ -95,6 +96,7 @@ fn exceeds_ceiling(ask: &ResourceVector, ceiling: &ResourceVector) -> Option<Gra
 const CAPACITY_HINT: &str = "capacity-contention";
 
 /// Decides one admission against `chain`'s effective ceiling and `ledger`.
+#[must_use]
 pub fn admit(
     ledger: &crate::custody::ObligationLedger,
     chain: &ScopeChain,
@@ -119,21 +121,21 @@ pub fn admit(
         }
     }
 
-    if let Some(degraded) = &request.degraded_profile {
-        if exceeds_ceiling(degraded, &ceiling).is_none() {
-            match ledger.grant(*degraded) {
-                Ok(grant) => {
-                    return AdmissionOutcome::DegradedOptionalProfile {
-                        grant,
-                        original_request: request.requested,
-                    };
-                }
-                Err(ResourceError::Conservation { .. }) => {}
-                Err(ResourceError::Overflow { grade, .. }) => {
-                    return AdmissionOutcome::HardRefusal {
-                        reason: HardRefusalReason::LedgerOverflow { grade },
-                    };
-                }
+    if let Some(degraded) = &request.degraded_profile
+        && exceeds_ceiling(degraded, &ceiling).is_none()
+    {
+        match ledger.grant(*degraded) {
+            Ok(grant) => {
+                return AdmissionOutcome::DegradedOptionalProfile {
+                    grant,
+                    original_request: request.requested,
+                };
+            }
+            Err(ResourceError::Conservation { .. }) => {}
+            Err(ResourceError::Overflow { grade, .. }) => {
+                return AdmissionOutcome::HardRefusal {
+                    reason: HardRefusalReason::LedgerOverflow { grade },
+                };
             }
         }
     }

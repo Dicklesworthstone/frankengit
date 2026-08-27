@@ -31,7 +31,7 @@ const fn incarnation_configuration() -> RepositoryIncarnationConfigurationBody {
     }
 }
 
-fn incarnation_configuration_v2_1(
+const fn incarnation_configuration_v2_1(
     policy_root: Option<Digest>,
 ) -> RepositoryIncarnationConfigurationBodyV2_1 {
     RepositoryIncarnationConfigurationBodyV2_1 {

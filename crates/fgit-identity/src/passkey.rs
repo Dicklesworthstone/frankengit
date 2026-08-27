@@ -72,7 +72,7 @@ pub enum UserVerificationRequirement {
 pub struct PasskeyId(u64);
 
 impl PasskeyId {
-    /// Constructs a new PasskeyId, refusing zero.
+    /// Constructs a new `PasskeyId`, refusing zero.
     #[must_use]
     pub const fn try_new(val: u64) -> Option<Self> {
         if val == 0 { None } else { Some(Self(val)) }

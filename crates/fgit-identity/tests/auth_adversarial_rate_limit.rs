@@ -13,11 +13,11 @@ use fgit_identity::{
 };
 use fgit_types::{PrincipalId, RepositoryId};
 
-fn principal(tag: u8) -> PrincipalId {
+const fn principal(tag: u8) -> PrincipalId {
     PrincipalId::from_bytes([tag; 16])
 }
 
-fn config() -> RateLimitConfig {
+const fn config() -> RateLimitConfig {
     RateLimitConfig {
         max_attempts: 3,
         window_seconds: 900,
@@ -57,7 +57,7 @@ fn lockout_engages_after_max_attempts_and_expires_on_schedule() {
 #[test]
 fn exceeded_window_refuses_even_without_lockout() {
     let cfg = config();
-    let mut record = RateLimitRecord {
+    let record = RateLimitRecord {
         failed_attempts: 4,
         window_start: 0,
         locked_until: 0,

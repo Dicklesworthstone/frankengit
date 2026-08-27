@@ -17,19 +17,19 @@ use fgit_types::{PrincipalId, RepositoryId};
 
 const EXPIRES_AT: u64 = 1_000;
 
-fn repository(tag: u8) -> RepositoryId {
+const fn repository(tag: u8) -> RepositoryId {
     RepositoryId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0x33; OPAQUE_ID_LEN])
 }
 
-fn session_id(value: u64) -> SessionId {
+const fn session_id(value: u64) -> SessionId {
     SessionId::try_new(value).expect("nonzero")
 }
 
-fn session(strength: AuthenticationStrength) -> Session {
+const fn session(strength: AuthenticationStrength) -> Session {
     Session::establish(
         session_id(1),
         principal(),
@@ -434,7 +434,7 @@ fn an_unknown_strength_tag_on_the_wire_is_refused_and_a_known_one_is_not() {
     // The permitted twin: untampered, it decodes.
     assert!(decode_body::<Session>(&token, DecodeLimits::DEFAULT).is_ok());
 
-    let mut tampered = token.clone();
+    let mut tampered = token;
     tampered[divergence] = 0x7f;
     let refusal = decode_body::<Session>(&tampered, DecodeLimits::DEFAULT)
         .expect_err("an unknown strength tag is refused");

@@ -13,15 +13,15 @@ use fgit_identity::{DeployKeyBinding, DeployKeyRefusal, DeployKeyScope, Revocati
 use fgit_types::identity::OPAQUE_ID_LEN;
 use fgit_types::{PrincipalId, RepositoryId};
 
-fn key(tag: u8) -> VerifyingKey {
+const fn key(tag: u8) -> VerifyingKey {
     VerifyingKey::from_bytes([tag; PUBLIC_KEY_BYTES])
 }
 
-fn repository(tag: u8) -> RepositoryId {
+const fn repository(tag: u8) -> RepositoryId {
     RepositoryId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0x33; OPAQUE_ID_LEN])
 }
 
@@ -186,7 +186,7 @@ fn an_unknown_scope_tag_on_the_wire_is_refused_and_a_known_one_is_not() {
     assert!(decode_body::<DeployKeyBinding>(&read_bytes, DecodeLimits::DEFAULT).is_ok());
 
     // The refusal: a tag this build does not implement, at that exact byte.
-    let mut tampered = read_bytes.clone();
+    let mut tampered = read_bytes;
     tampered[divergence] = 0x7f;
     let refusal = decode_body::<DeployKeyBinding>(&tampered, DecodeLimits::DEFAULT)
         .expect_err("an unknown scope tag is refused");
@@ -421,11 +421,7 @@ fn resolution_finds_the_unique_binding_and_refuses_absence_or_ambiguity() {
         DeployKeyBinding::register(repo, principal(), key(0x41), &[DeployKeyScope::Write])
             .expect("registers");
 
-    let registry = [
-        read_here.clone(),
-        write_elsewhere.clone(),
-        different_key.clone(),
-    ];
+    let registry = [read_here.clone(), write_elsewhere, different_key];
 
     // The permitted case: exactly one binding matches this key on this
     // repository, and it is the one bound HERE, not the same key bound

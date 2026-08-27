@@ -49,6 +49,7 @@ pub struct FairnessQueue {
 }
 
 impl FairnessQueue {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -68,12 +69,14 @@ impl FairnessQueue {
     }
 
     /// Number of parked contenders across all lanes.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.lanes.iter().map(|lane| lane.tickets.len()).sum()
     }
 
     /// True when nothing is parked.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.lanes.is_empty()
     }
 
@@ -82,6 +85,7 @@ impl FairnessQueue {
     /// Rule order: (1) an escalated lane wins; (2) otherwise the lane at the
     /// rotation cursor wins. With a single lane the receipt is
     /// [`PickReason::SoleContender`].
+    #[must_use]
     pub fn peek_pick(&self) -> Option<(u64, PickReason)> {
         if self.lanes.is_empty() {
             return None;

@@ -456,10 +456,10 @@ fn history_idempotent_duplicate() -> GoldenTrace {
 }
 
 /// A decision observed twice: once as a pure §10.14 revalidation before the
-/// batch published (which changes nothing and is recorded as DecidedCommit),
+/// batch published (which changes nothing and is recorded as `DecidedCommit`),
 /// and once after publication, when the same sealed request re-prepares
 /// against the new head and deciding the fresh capsule reports
-/// AlreadyTerminal. This is the history that pins terminal uniqueness end to
+/// `AlreadyTerminal`. This is the history that pins terminal uniqueness end to
 /// end: the second observation must carry the first CAS's outcome and change
 /// nothing, which is exactly what the proof bridge projects onto
 /// `Operation.retry`.

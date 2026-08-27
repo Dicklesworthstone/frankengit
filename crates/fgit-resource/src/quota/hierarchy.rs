@@ -91,6 +91,7 @@ impl ScopeChain {
     }
 
     /// The segments in attribution order.
+    #[must_use]
     pub fn segments(&self) -> &[ScopeSegment] {
         &self.segments
     }
@@ -99,6 +100,7 @@ impl ScopeChain {
     /// prefix this chain extends. Dimensions never declared anywhere are
     /// zero — an uncapped economy must be capped above this module before
     /// any reservation exists.
+    #[must_use]
     pub fn effective_ceiling(&self, declarations: &ScopeCeilings) -> ResourceVector {
         declarations.minimum_over(&self.segments)
     }
@@ -116,6 +118,7 @@ pub struct ScopeCeilings {
 
 impl ScopeCeilings {
     /// Empty economy: nothing declared, everything effectively zero-capped.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -306,7 +309,7 @@ mod tests {
             .declare(
                 vec![
                     ScopeSegment::Tenant(tenant(2)),
-                    ScopeSegment::Organization(org_slug.clone()),
+                    ScopeSegment::Organization(org_slug),
                 ],
                 ResourceVector::single(Grade::EgressBytes, 200),
             )
@@ -315,7 +318,7 @@ mod tests {
             .declare(
                 vec![
                     ScopeSegment::Tenant(tenant(2)),
-                    ScopeSegment::Organization(org_slug.clone()),
+                    ScopeSegment::Organization(org_slug),
                     ScopeSegment::Repository(repo(9)),
                 ],
                 ResourceVector::from_grades(&[(Grade::Bytes, 300), (Grade::CpuMicros, 1_000)]),

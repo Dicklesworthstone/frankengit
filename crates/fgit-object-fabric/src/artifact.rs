@@ -70,7 +70,7 @@ pub enum ArtifactPayloadKind {
     BuildLog = 2,
     /// Distribution binary / tarball / package for a software release.
     ReleaseAsset = 3,
-    /// Software Bill of Materials (SPDX / CycloneDX).
+    /// Software Bill of Materials (SPDX / `CycloneDX`).
     Sbom = 4,
     /// Cryptographic detached signature or certificate.
     Signature = 5,
@@ -88,7 +88,7 @@ impl ArtifactPayloadKind {
     }
 
     /// Decodes a payload kind from its wire code.
-    pub fn from_wire_code(code: u8) -> Result<Self, ArtifactRefusal> {
+    pub const fn from_wire_code(code: u8) -> Result<Self, ArtifactRefusal> {
         match code {
             1 => Ok(Self::CiArtifact),
             2 => Ok(Self::BuildLog),
@@ -283,6 +283,7 @@ pub struct ArtifactIdentity {
 
 impl ArtifactIdentity {
     /// Constructs a verified artifact identity from its structural parameters.
+    #[must_use]
     pub fn new(
         payload_digest: Digest,
         payload_len: u64,

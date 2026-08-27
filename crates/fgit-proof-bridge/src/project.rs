@@ -434,7 +434,7 @@ fn ref_effect_identities(
 ) -> Vec<u64> {
     let mut names: Vec<Vec<u8>> = Vec::new();
     for (name, oid) in current {
-        if !previous.map_or(true, |prev| prev.get(name) == Some(oid)) {
+        if previous.is_some_and(|prev| prev.get(name) != Some(oid)) {
             names.push(name.as_bytes().to_vec());
         }
     }
@@ -462,7 +462,7 @@ fn forge_effect_identities(
 ) -> Vec<u64> {
     let mut effects = Vec::new();
     for (stream, position) in current {
-        if !previous.map_or(true, |prev| prev.get(stream) == Some(position)) {
+        if previous.is_some_and(|prev| prev.get(stream) != Some(position)) {
             effects.push(dictionary_index(dictionary, stream.label().as_bytes()));
             effects.push(position.get());
         }

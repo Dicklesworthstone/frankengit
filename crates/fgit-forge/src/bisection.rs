@@ -116,7 +116,10 @@ pub struct BisectionRange {
 
 impl BisectionRange {
     /// Creates a new valid bisection range where `start <= end`.
-    pub fn new(start: DecisionSequence, end: DecisionSequence) -> Result<Self, BisectionRefusal> {
+    pub const fn new(
+        start: DecisionSequence,
+        end: DecisionSequence,
+    ) -> Result<Self, BisectionRefusal> {
         if start.get() > end.get() {
             return Err(BisectionRefusal::InvalidRange {
                 start: start.get(),
@@ -181,7 +184,7 @@ pub trait BisectionPredicate {
     fn evaluate(&self, snapshot: &ForgeSnapshot) -> Result<PredicateOutcome, Self::Error>;
 
     /// Human-readable label for receipt diagnostics.
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "unnamed_predicate"
     }
 }
@@ -217,7 +220,7 @@ impl BisectionPredicate for RefTargetPredicate {
         }
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "ref_target_match"
     }
 }
@@ -241,7 +244,7 @@ impl BisectionPredicate for PullRequestStatePredicate {
         }
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "pull_request_state_match"
     }
 }
@@ -264,7 +267,7 @@ impl BisectionPredicate for PolicyEpochPredicate {
         }
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "policy_epoch_threshold"
     }
 }
@@ -389,7 +392,7 @@ impl BisectionReceipt {
             }
             BisectionTermination::NoTransition { uniform_outcome } => {
                 canonical_bytes.push(2);
-                canonical_bytes.push(if uniform_outcome.is_satisfied() { 1 } else { 0 });
+                canonical_bytes.push(u8::from(uniform_outcome.is_satisfied()));
             }
             BisectionTermination::Refused { reason } => {
                 canonical_bytes.push(3);
@@ -444,7 +447,7 @@ fn fold_probe(bytes: &mut Vec<u8>, probe: &ProbeRecord) {
     match &probe.outcome {
         Ok(outcome) => {
             bytes.push(0);
-            bytes.push(if outcome.is_satisfied() { 1 } else { 0 });
+            bytes.push(u8::from(outcome.is_satisfied()));
         }
         Err(error) => {
             bytes.push(1);
@@ -602,7 +605,7 @@ pub struct BisectionContext<'a> {
     pub snapshot_limits: SnapshotLimits,
 }
 
-impl<'a> BisectionContext<'a> {
+impl BisectionContext<'_> {
     /// Projects a snapshot for a specific decision sequence.
     pub fn project_sequence(
         &self,
@@ -634,7 +637,7 @@ impl<'a> BisectionContext<'a> {
 
 /// Calculates the theoretical logarithmic probe bound for a range size: `ceil(log2(N)) + 2`.
 #[must_use]
-pub fn logarithmic_probe_budget(range_len: u64) -> usize {
+pub const fn logarithmic_probe_budget(range_len: u64) -> usize {
     if range_len <= 1 {
         return 2;
     }

@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Tests for Git notes ref namespace validation, lifecycle intents, and lowering to RefIntent.
+//! Tests for Git notes ref namespace validation, lifecycle intents, and lowering to `RefIntent`.
 
 use fgit_reference::intent::{
     DEFAULT_NOTES_REF, NotesIntent, NotesIntentRefusal, NotesRefName, RefIntent,
@@ -12,7 +12,7 @@ fn name(text: &str) -> RefName {
     RefName::try_new(text.as_bytes()).expect("valid ref name")
 }
 
-fn oid(val: u8) -> GitOid {
+const fn oid(val: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([val; GitOidSha1::LEN]))
 }
 

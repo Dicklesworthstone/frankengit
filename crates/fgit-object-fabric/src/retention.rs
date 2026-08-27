@@ -39,6 +39,7 @@ pub struct ArtifactRetentionRoot {
 
 impl ArtifactRetentionRoot {
     /// Computes an authenticated retention root from categorized live artifact sets.
+    #[must_use]
     pub fn new(
         live_artifact_ids: BTreeSet<Digest>,
         permanent_artifact_ids: BTreeSet<Digest>,
@@ -94,7 +95,7 @@ pub struct ArtifactRetentionRegistry {
 impl ArtifactRetentionRegistry {
     /// Creates a new empty retention registry.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             artifacts: BTreeMap::new(),
         }
@@ -107,6 +108,7 @@ impl ArtifactRetentionRegistry {
     }
 
     /// Computes the complete set of retained roots and returns the authenticated root.
+    #[must_use]
     pub fn compute_retention_root(
         &self,
         active_package_versions: &BTreeSet<Digest>,

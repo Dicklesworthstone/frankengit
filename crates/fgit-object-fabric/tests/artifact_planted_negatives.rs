@@ -151,8 +151,8 @@ fn planted_negative_namespace_race_collision_typed_refusal() {
     // Publisher 2 races to publish same version: MUST fail closed with VersionAlreadyExists
     let err = registry
         .publish(PublishIntent {
-            namespace: namespace.clone(),
-            version: version.clone(),
+            namespace,
+            version,
             artifact_id: loser_art,
             expected_basis: ExpectedNamespaceBasis::MustNotExist,
             retention_profile: RetentionProfile::ReleasePermanent,
@@ -228,8 +228,8 @@ fn planted_negative_yank_precondition_and_double_yank_refused() {
     // 3. Second yank fails with VersionAlreadyYanked
     let err_double = registry
         .yank(YankIntent {
-            namespace: namespace.clone(),
-            version: version.clone(),
+            namespace,
+            version,
             expected_artifact_id: correct_art,
             reason: "duplicate request".to_string(),
             yanked_by: "admin".to_string(),

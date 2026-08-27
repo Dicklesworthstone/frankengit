@@ -131,6 +131,7 @@ impl ProjectionIdentity {
     pub const fn authority_head_generation(&self) -> u64 {
         self.authority_head_generation
     }
+    #[must_use]
     pub const fn schema_generation(&self) -> u32 {
         self.schema_generation
     }
