@@ -183,6 +183,7 @@ pub struct AdmissionUploadPackRepository {
     object_format: GitHashAlgorithm,
     refs: Vec<AdvertisedRef>,
     head_target: Option<RefName>,
+    closure_objects: BTreeSet<GitOid>,
 }
 
 impl AdmissionUploadPackRepository {
@@ -269,7 +270,15 @@ impl AdmissionUploadPackRepository {
             object_format,
             refs,
             head_target,
+            closure_objects: BTreeSet::new(),
         })
+    }
+
+    /// Attaches the authority-selected closure objects to resolve common haves.
+    #[must_use]
+    pub fn with_closure_objects(mut self, objects: BTreeSet<GitOid>) -> Self {
+        self.closure_objects = objects;
+        self
     }
 
     /// Evaluates the production admission surface at exactly one authority basis.
@@ -307,6 +316,10 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
 
     fn contains_want(&self, oid: AnyGitOid) -> bool {
         self.refs.iter().any(|reference| reference.oid == oid)
+            || match GitOid::try_from(oid) {
+                Ok(oid) => self.closure_objects.contains(&oid),
+                Err(_) => false,
+            }
     }
 
     fn is_common(&self, oid: AnyGitOid) -> bool {
@@ -1751,9 +1764,7 @@ impl DurableAdmissionMaterializer {
                     // normalizes to no policy, while 2.1 supplies an immutable
                     // policy root to resolve beside the authenticated
                     // configuration root.
-                    Err(fgit_authority::OutcomeFailure::Codec(
-                        fgit_codec::CodecRefusal::SchemaMajorUnsupported { observed: 2, .. },
-                    )) => {
+                    Err(fgit_authority::OutcomeFailure::Codec(_)) => {
                         let configuration = read_repository_incarnation_configuration_async(
                             authority,
                             cx,
@@ -6067,7 +6078,7 @@ impl OneNode {
     /// caller-supplied closure roots nor a caller-supplied publication basis.
     pub async fn import_loose_git_directory_durable_in(
         &self,
-        request: &NodeRequestContext,
+        _request: &NodeRequestContext,
         source: &Path,
         principal_id: PrincipalId,
         idempotency_key: &[u8],
@@ -6131,9 +6142,15 @@ impl OneNode {
             idempotency_key,
             object_format: self.object_format,
         };
-        self.admit_validated_source_import_durable_in(request, &context, &validated, limits)
-            .await
-            .map_err(|error| NodeSourceImportRefusal::Admission(Box::new(error)))
+        let admission_request = self.request_context();
+        self.admit_validated_source_import_durable_in(
+            &admission_request,
+            &context,
+            &validated,
+            limits,
+        )
+        .await
+        .map_err(|error| NodeSourceImportRefusal::Admission(Box::new(error)))
     }
 
     /// Materializes a bounded Git pack from exactly one authority-selected closure.
@@ -6378,6 +6395,9 @@ impl OneNode {
             self.object_format,
             &limits,
         )
+        .map(|repo| {
+            repo.with_closure_objects(materialized.selected_closure().closure().objects().clone())
+        })
         .map_err(|error| NodeGitDaemonServeRefusal::from(NodeAdmissionViewRefusal::from(error)))?;
         let advertised_capabilities =
             git_daemon_capabilities(self.object_format, repository.symref_target(b"HEAD"));
@@ -6468,14 +6488,14 @@ impl OneNode {
         )
         .map_err(classify_session_serve_error)
         .map_err(node_git_daemon_serve_error)?;
-        response_stream
-            .shutdown(Shutdown::Write)
-            .map_err(|source| {
-                NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Io {
-                    operation: "send git-daemon response EOF",
-                    source,
-                })
-            })?;
+        let _ = response_stream.shutdown(Shutdown::Write);
+        let mut drain_buf = [0_u8; 1024];
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(1000)));
+        while let Ok(n) = stream.read(&mut drain_buf) {
+            if n == 0 {
+                break;
+            }
+        }
         Ok(served)
     }
 
@@ -6526,7 +6546,10 @@ impl OneNode {
                 continue;
             }
             let (stream, _) = match listener.accept() {
-                Ok(accepted_stream) => accepted_stream,
+                Ok((stream, addr)) => {
+                    let _ = stream.set_nonblocking(false);
+                    (stream, addr)
+                }
                 Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
                     self.runtime.wait_for(Duration::from_millis(1));
                     continue;
@@ -6550,11 +6573,12 @@ impl OneNode {
             let child_wire_limits = wire_limits.clone();
             let task = match self.runtime.submit_blocking(move || {
                 let completed_cleanly = match OneNode::open_existing(child_config) {
-                    Ok(child) => {
+                    Ok(mut child) => {
+                        let brought_in = child.bring_into_service(HeadGeneration::FIRST);
                         let served =
                             child.serve_git_daemon_stream_with_limits(stream, child_wire_limits);
                         let cleanup = child.shutdown();
-                        served.is_ok() && cleanup.is_ok()
+                        brought_in.is_ok() && served.is_ok() && cleanup.is_ok()
                     }
                     Err(_) => false,
                 };

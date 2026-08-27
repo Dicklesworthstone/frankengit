@@ -526,10 +526,7 @@ impl OneNode {
             Ok(RepositoryIncarnationConfigurationEvidence::V2_1(body)) => {
                 Ok(VerifiedReadConfiguration::RepositoryIncarnationV2_1(body))
             }
-            Err(OutcomeFailure::Codec(fgit_codec::CodecRefusal::SchemaMajorUnsupported {
-                observed: 1,
-                ..
-            })) => read_repository_configuration_async(
+            Err(OutcomeFailure::Codec(_)) => read_repository_configuration_async(
                 &self.authority,
                 request.authority(),
                 configuration_root,
@@ -837,7 +834,7 @@ mod tests {
             .expect("components open before authoritative genesis");
         let request = node.request_context();
         let configuration = RepositoryIncarnationConfigurationBody {
-            root_layout: RootLayoutVersion::RefStateMerkleV1,
+            root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
             object_format: GitHashAlgorithm::Sha1,
             repository_incarnation_id: RepositoryIncarnationId::from_bytes(
                 *node.repository_incarnation_id.as_bytes(),
@@ -857,7 +854,7 @@ mod tests {
                 &node.authority,
                 request.authority(),
                 node.repository_id(),
-                RootLayoutVersion::RefStateMerkleV1,
+                RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
                 CanonicalRefState::default(),
             ))
             .expect("the empty canonical ref state stages");
@@ -898,7 +895,7 @@ mod tests {
                 &node.authority,
                 request.authority(),
                 node.repository_id(),
-                RootLayoutVersion::RefStateMerkleV1,
+                RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
                 CanonicalRefState::new(refs),
             ))
             .expect("the successor ref state stages before publication");

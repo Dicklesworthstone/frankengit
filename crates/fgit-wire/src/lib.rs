@@ -1963,8 +1963,12 @@ impl LegacyUploadPack {
                     return Err(WireError::MissingWant);
                 }
                 self.state = LegacyState::AwaitHave;
+                let output = match self.ack_mode {
+                    AckMode::MultiAck | AckMode::MultiAckDetailed => vec![line_packet(b"NAK\n")],
+                    AckMode::None => Vec::new(),
+                };
                 Ok(Transition {
-                    output: vec![line_packet(b"NAK\n")],
+                    output,
                     events: Vec::new(),
                 })
             }
@@ -2090,7 +2094,20 @@ impl LegacyUploadPack {
                 });
             }
             self.state = LegacyState::Complete;
-            let mut transition = self.final_ack_transition();
+            let output = self
+                .last_common
+                .map_or_else(Vec::new, |oid| match self.ack_mode {
+                    AckMode::MultiAckDetailed => vec![line_packet(
+                        format!("ACK {oid_hex} ready\n", oid_hex = oid_hex(oid)).into_bytes(),
+                    )],
+                    AckMode::None | AckMode::MultiAck => vec![line_packet(
+                        format!("ACK {oid_hex}\n", oid_hex = oid_hex(oid)).into_bytes(),
+                    )],
+                });
+            let mut transition = Transition {
+                output,
+                events: Vec::new(),
+            };
             transition
                 .events
                 .push(WireEvent::PackRequested(self.pack_request()));
@@ -2181,13 +2198,8 @@ impl LegacyUploadPack {
     }
 
     fn final_ack_transition(&self) -> Transition {
-        let output = self.last_common.map_or_else(
-            // The want-phase flush already emitted NAK when no common object
-            // was known.  Git 2.54.0 does not duplicate it at `done` (or at a
-            // negotiated `no-done` terminal flush) before handing off to the
-            // pack writer.
-            Vec::new,
-            |oid| match self.ack_mode {
+        let output = match self.last_common {
+            Some(oid) => match self.ack_mode {
                 AckMode::MultiAckDetailed => vec![line_packet(
                     format!("ACK {oid_hex} ready\n", oid_hex = oid_hex(oid)).into_bytes(),
                 )],
@@ -2195,7 +2207,11 @@ impl LegacyUploadPack {
                     format!("ACK {oid_hex}\n", oid_hex = oid_hex(oid)).into_bytes(),
                 )],
             },
-        );
+            None => match self.ack_mode {
+                AckMode::None => vec![line_packet(b"NAK\n")],
+                AckMode::MultiAck | AckMode::MultiAckDetailed => Vec::new(),
+            },
+        };
         Transition {
             output,
             events: Vec::new(),
@@ -2735,21 +2751,29 @@ impl V2UploadPack {
 
     fn finish_fetch(
         &mut self,
-        _repository: &impl UploadPackRepository,
+        repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
         if self.wants.is_empty() {
             return Err(WireError::MissingWant);
         }
-        if !self.done {
-            return Err(WireError::IllegalTransition {
-                state: "v2 fetch without done",
-                packet: "flush",
-            });
-        }
         let mut output = Vec::new();
-        output
-            .try_reserve(1)
-            .map_err(|_| WireError::AllocationFailure)?;
+        if !self.done && !self.haves.is_empty() {
+            output.push(line_packet(b"acknowledgments\n"));
+            let mut any_common = false;
+            for &have in &self.haves {
+                if repository.is_common(have) {
+                    output.push(line_packet(
+                        format!("ACK {oid_hex}\n", oid_hex = oid_hex(have)).into_bytes(),
+                    ));
+                    any_common = true;
+                }
+            }
+            if !any_common {
+                output.push(line_packet(b"NAK\n"));
+            }
+            output.push(line_packet(b"ready\n"));
+            output.push(Packet::Delimiter);
+        }
         output.push(line_packet(b"packfile\n"));
         self.state = V2State::Complete;
         Ok(Transition {

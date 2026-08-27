@@ -678,7 +678,7 @@ fn run_serve(
         {
             let listener = TcpListener::bind(listen_address).map_err(CliRefusal::Listener)?;
             let listen_address = listener.local_addr().map_err(CliRefusal::Listener)?;
-            let node = OneNode::open_existing(node_config(
+            let mut node = OneNode::open_existing(node_config(
                 storage_root,
                 tenant,
                 repository,
@@ -686,6 +686,7 @@ fn run_serve(
                 resolution_input,
             )?)
             .map_err(CliRefusal::Node)?;
+            let _ = node.bring_into_service(HeadGeneration::FIRST);
             let serving =
                 node.serve_git_daemon_bounded(&listener, server_limits, Default::default());
             let cleanup = node.shutdown();

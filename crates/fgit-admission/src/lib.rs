@@ -2261,16 +2261,24 @@ where
         )?)
     } else {
         let mut outcomes = Vec::with_capacity(plan.lowered.len());
+        let mut current_validation_basis = input.validation_basis;
         for request in &plan.lowered {
-            outcomes.push(admit_one(
+            let outcome = admit_one(
                 store,
                 context,
                 input.closure,
-                input.validation_basis,
+                current_validation_basis,
                 request,
                 projection,
                 limits,
-            )?);
+            )?;
+            if matches!(
+                outcome.outcome,
+                fgit_types::DecisionOutcome::Committed { .. }
+            ) {
+                current_validation_basis = None;
+            }
+            outcomes.push(outcome);
         }
         SessionTerminals::PerCommand(outcomes)
     };
@@ -3773,20 +3781,26 @@ where
         )
     } else {
         let mut outcomes = Vec::with_capacity(plan.lowered.len());
+        let mut current_validation_basis = input.validation_basis;
         for request in &plan.lowered {
-            outcomes.push(
-                admit_one_async(
-                    store,
-                    cx,
-                    context,
-                    input.closure,
-                    input.validation_basis,
-                    request,
-                    projection,
-                    limits,
-                )
-                .await?,
-            );
+            let outcome = admit_one_async(
+                store,
+                cx,
+                context,
+                input.closure,
+                current_validation_basis,
+                request,
+                projection,
+                limits,
+            )
+            .await?;
+            if matches!(
+                outcome.outcome,
+                fgit_types::DecisionOutcome::Committed { .. }
+            ) {
+                current_validation_basis = None;
+            }
+            outcomes.push(outcome);
         }
         SessionTerminals::PerCommand(outcomes)
     };

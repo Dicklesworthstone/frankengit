@@ -74,13 +74,13 @@ use std::time::Duration;
 
 use fgit_admission::AdmissionLimits;
 use fgit_authority::{
-    AuthorityLimits, CasOutcome, HeadKey, HeadRead, IdempotencyKey, StoreInstanceId,
+    AuthorityLimits, HeadGeneration, HeadKey, HeadRead, IdempotencyKey, StoreInstanceId,
     authority_head_identity, read_repository_incarnation_configuration_async,
     stage_hidden_ref_policy_async, stage_latest_repository_incarnation_configuration_async,
 };
 use fgit_authority_fsqlite::FsqliteAuthorityStore;
 use fgit_codec::{
-    DecodeLimits, HiddenRefPolicyBody, RepositoryAuthorityHeadBody,
+    CryptoBodyIdentity, DecodeLimits, HiddenRefPolicyBody, RepositoryAuthorityHeadBody,
     RepositoryIncarnationConfigurationBodyV2_1, decode_body, encode_body,
 };
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest};
@@ -91,7 +91,8 @@ use fgit_node::{
 };
 use fgit_runtime::{BudgetClass, RuntimeProfile};
 use fgit_types::{
-    DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefusalCode, RepositoryId, TenantId,
+    DecisionOutcome, DigestAlgorithmId, DigestBytes, GitHashAlgorithm, GitOid, PrincipalId,
+    RefusalCode, RefusalRecordId, RepositoryId, TenantId, TxId,
 };
 use fgit_wire::receive::{ReceiveContext, ReceiveLimits, SignedPushProfile};
 use fgit_wire::{
@@ -353,7 +354,7 @@ fn publish_policy(root: &Path, repository_id: RepositoryId, rules: &[&[u8]]) {
         else {
             panic!("the initialized repository unexpectedly has no authority head");
         };
-        let mut advanced: RepositoryAuthorityHeadBody =
+        let advanced: RepositoryAuthorityHeadBody =
             decode_body(receipt.body(), DecodeLimits::DEFAULT)
                 .expect("the current authority head decodes");
 
@@ -393,24 +394,108 @@ fn publish_policy(root: &Path, repository_id: RepositoryId, rules: &[&[u8]]) {
 
         let predecessor =
             authority_head_identity(&advanced).expect("the predecessor head has an identity");
-        advanced.generation = advanced
-            .generation
-            .next()
-            .expect("the current generation has a successor");
-        advanced.predecessor_head_id = Some(predecessor);
-        advanced.configuration_root = configuration_root;
-        let advanced_bytes = encode_body(&advanced).expect("the head selecting the policy encodes");
+        let next_sequence = advanced
+            .latest_decision_sequence
+            .map_or(fgit_types::DecisionSequence::FIRST, |seq| {
+                seq.next().expect("next decision sequence")
+            });
+        let tx_id = TxId::from_digest(
+            DigestAlgorithmId::try_new(2).expect("valid slot"),
+            fgit_types::CANONICAL_CODEC_VERSION,
+            DigestBytes::try_new(&[0x55; 32]).expect("32 bytes"),
+        );
+        let decisions = vec![fgit_codec::RepositoryDecision {
+            tx_id,
+            decision_sequence: next_sequence,
+            outcome: DecisionOutcome::Refused {
+                code: RefusalCode::QuotaExceeded,
+                refusal_record_id: RefusalRecordId::from_digest(
+                    DigestAlgorithmId::try_new(2).expect("valid slot"),
+                    fgit_types::CANONICAL_CODEC_VERSION,
+                    DigestBytes::try_new(&[0x77; 32]).expect("32 bytes"),
+                ),
+            },
+        }];
+        let dummy_evidence_root = fgit_types::Digest::new(
+            DigestAlgorithmId::try_new(2).expect("valid slot"),
+            DigestBytes::try_new(&[0; 32]).expect("32 bytes"),
+        );
+        let mut batch = fgit_codec::RepositoryDecisionBatchBody {
+            repository_id: advanced.repository_id,
+            predecessor_head_id: predecessor,
+            predecessor_head_generation: advanced.generation,
+            first_decision_sequence: next_sequence,
+            decisions,
+            committed_rcrs: vec![],
+            resulting_ref_root: advanced.ref_root,
+            resulting_forge_position_root: advanced.forge_position_root,
+            resulting_outcome_index_root: advanced.outcome_index_root,
+            resulting_retention_root: advanced.retention_root,
+            resulting_outbox_root: advanced.outbox_root,
+            resulting_policy_epoch: advanced.policy_epoch,
+            batch_evidence_root: dummy_evidence_root,
+            compaction_generation_link: None,
+        };
+        batch.batch_evidence_root =
+            fgit_chronicle::batch_evidence_root(&batch).expect("batch evidence root derives");
+        let predecessor_head_key = fgit_authority::body_key(
+            fgit_crypto::IdentityDomain::RepositoryAuthorityHead,
+            &advanced,
+        )
+        .expect("predecessor head key");
+        let predecessor_head_bytes = encode_body(&advanced).expect("predecessor head encodes");
+        runtime
+            .block_on(store.put_if_absent(&cx, &predecessor_head_key, &predecessor_head_bytes))
+            .expect("predecessor head persists");
+
+        let batch_id = fgit_chronicle::batch_identity(&CryptoBodyIdentity, &batch)
+            .expect("batch identity derives");
+        let batch_key =
+            fgit_authority::body_key(fgit_crypto::IdentityDomain::RepositoryDecisionBatch, &batch)
+                .expect("batch key");
+        let batch_bytes = encode_body(&batch).expect("batch encodes");
+        runtime
+            .block_on(store.put_if_absent(&cx, &batch_key, &batch_bytes))
+            .expect("batch persists");
+
+        let new_head = RepositoryAuthorityHeadBody {
+            generation: advanced.generation.next().expect("next generation"),
+            predecessor_head_id: Some(predecessor),
+            repository_id: advanced.repository_id,
+            decision_tail_id: Some(batch_id),
+            latest_decision_sequence: Some(next_sequence),
+            latest_committed_rcr_id: advanced.latest_committed_rcr_id,
+            latest_repository_sequence: advanced.latest_repository_sequence,
+            ref_root: advanced.ref_root,
+            forge_position_root: advanced.forge_position_root,
+            outcome_index_root: advanced.outcome_index_root,
+            retention_root: advanced.retention_root,
+            outbox_root: advanced.outbox_root,
+            configuration_root,
+            policy_epoch: advanced.policy_epoch,
+            format_registry_epoch: advanced.format_registry_epoch,
+            last_checkpoint_id: advanced.last_checkpoint_id,
+        };
+        let new_head_bytes = encode_body(&new_head).expect("head encodes");
+        let new_head_key = fgit_authority::body_key(
+            fgit_crypto::IdentityDomain::RepositoryAuthorityHead,
+            &new_head,
+        )
+        .expect("new head key");
+        runtime
+            .block_on(store.put_if_absent(&cx, &new_head_key, &new_head_bytes))
+            .expect("new head persists");
         assert!(matches!(
             runtime
                 .block_on(store.compare_exchange_head(
                     &cx,
                     &head_key,
                     receipt.token(),
-                    advanced.generation,
-                    &advanced_bytes,
+                    new_head.generation,
+                    &new_head_bytes,
                 ))
                 .expect("the authenticated exact-predecessor CAS publishes the head"),
-            CasOutcome::Committed(_)
+            fgit_authority::CasOutcome::Committed(_)
         ));
 
         runtime
@@ -482,8 +567,11 @@ fn open_repository(rules: Option<&[&[u8]]>) -> (ScratchDirectory, OneNode) {
     let scratch = ScratchDirectory::new();
     let node_config = config(scratch.0.clone());
 
-    let (created, _) =
+    let (mut created, _) =
         OneNode::init(node_config.clone()).expect("the genesis configuration persists");
+    created
+        .bring_into_service(HeadGeneration::FIRST)
+        .expect("the initialized node enters service");
     push_two_refs(&created);
     created.shutdown().expect("the initialized node quiesces");
 
@@ -491,7 +579,9 @@ fn open_repository(rules: Option<&[&[u8]]>) -> (ScratchDirectory, OneNode) {
         publish_policy(&scratch.0, REPOSITORY_ID, rules);
     }
 
-    let node = OneNode::open_existing(node_config).expect("the published head opens");
+    let mut node = OneNode::open_existing(node_config).expect("the published head opens");
+    node.bring_into_service(HeadGeneration::FIRST)
+        .expect("the reopened node enters service");
     (scratch, node)
 }
 

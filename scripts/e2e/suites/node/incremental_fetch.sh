@@ -97,7 +97,7 @@ pack_names() { # path, output file
 }
 
 incremental_bytes_since() { # local worktree, before-names file
-  local repository=$1 before=$2 pack_file name bytes total=0
+  local repository=$1 before=$2 pack_file loose_file name bytes total=0
   while IFS= read -r pack_file; do
     name=${pack_file##*/}
     if ! grep -Fqx -- "${name}" "${before}"; then
@@ -106,6 +106,11 @@ incremental_bytes_since() { # local worktree, before-names file
       total=$((total + bytes))
     fi
   done < <(find "${repository}/.git/objects/pack" -type f -name '*.pack' -print | LC_ALL=C sort)
+  while IFS= read -r loose_file; do
+    bytes=$(wc -c <"${loose_file}")
+    bytes=${bytes// /}
+    total=$((total + bytes))
+  done < <(find "${repository}/.git/objects" -maxdepth 2 -type f ! -path '*/pack/*' ! -name 'pack*' ! -name '*.idx' ! -name '*.rev' -print | LC_ALL=C sort)
   printf '%s\n' "${total}"
 }
 
