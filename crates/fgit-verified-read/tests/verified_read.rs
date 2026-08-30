@@ -100,6 +100,27 @@ fn v1_configuration() -> (RepositoryConfigurationBody, Digest) {
     )
 }
 
+/// The cumulative layout for the object-family cases: only
+/// `RefStateAndObjectClosureMerkleV1` admits object-closure proofs
+/// (`RootLayoutVersion::admits_object_closure_membership_proof`), so a head
+/// under the ref-only V1 layout must refuse every honest object answer with
+/// `ObjectLayout(LayoutAdmitsNoProof)` — that is the layout contract working,
+/// not a bug. The ref-path fixtures below deliberately keep `v1_configuration`
+/// so both layouts stay covered.
+fn combined_configuration() -> (RepositoryConfigurationBody, Digest) {
+    let configuration = RepositoryConfigurationBody {
+        root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+        object_format: GitHashAlgorithm::Sha1,
+        hidden_ref_rules: Vec::new(),
+    };
+    let identity = body_id(&CryptoBodyIdentity, &configuration)
+        .expect("the canonical configuration has an identity");
+    (
+        configuration,
+        Digest::new(identity.algorithm(), *identity.digest()),
+    )
+}
+
 fn ref_fixture() -> (PinnedAuthorityHead, VerifiedReadEnvelope, RefName, GitOid) {
     let main = name(b"refs/heads/main");
     let entries = vec![
@@ -391,7 +412,7 @@ fn an_object_envelope_verifies_against_the_pinned_object_closure_root() {
     let objects = vec![oid(0x11), oid(0x22), oid(0x33)];
     let root = object_closure_merkle_root(&objects).expect("object closure root");
     let proof = object_closure_membership_proof(&objects, &oid(0x22)).expect("object proof");
-    let (configuration, configuration_root) = v1_configuration();
+    let (configuration, configuration_root) = combined_configuration();
     let mut head = genesis_head();
     head.configuration_root = configuration_root;
     let pinned = PinnedAuthorityHead::new_with_object_closure(head.clone(), root);
@@ -451,7 +472,7 @@ fn authorized_object_absence_verifies_across_v1_positions_and_membership_remains
         let proof = object_closure_non_membership_proof(&state, &query).expect("absence proof");
         let absence = authorize_object_absence(&AllowAllObject, query, |_| false)
             .expect("authorized absence");
-        let (configuration, configuration_root) = v1_configuration();
+        let (configuration, configuration_root) = combined_configuration();
         let mut head = genesis_head();
         head.configuration_root = configuration_root;
         let pinned = PinnedAuthorityHead::new_with_object_closure(head.clone(), root);

@@ -90,6 +90,24 @@ fn v1_configuration() -> (RepositoryConfigurationBody, Digest) {
     )
 }
 
+/// The cumulative layout: only `RefStateAndObjectClosureMerkleV1` admits
+/// object-closure proofs, so the object round-trip must pin a head that
+/// selected it. The ref fixture keeps `v1_configuration` so the ref-only
+/// layout stays covered on the wire too.
+fn combined_configuration() -> (RepositoryConfigurationBody, Digest) {
+    let configuration = RepositoryConfigurationBody {
+        root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+        object_format: GitHashAlgorithm::Sha1,
+        hidden_ref_rules: Vec::new(),
+    };
+    let identity = body_id(&CryptoBodyIdentity, &configuration)
+        .expect("the canonical configuration has an identity");
+    (
+        configuration,
+        Digest::new(identity.algorithm(), *identity.digest()),
+    )
+}
+
 fn ref_fixture() -> (PinnedAuthorityHead, VerifiedReadEnvelope) {
     let main = name(b"refs/heads/main");
     let entries = vec![
@@ -445,7 +463,7 @@ fn object_proofs_and_envelopes_round_trip_and_verify() {
     );
 
     // Object membership envelope
-    let (configuration, configuration_root) = v1_configuration();
+    let (configuration, configuration_root) = combined_configuration();
     let mut head = fgit_codec::harness::genesis_head();
     head.configuration_root = configuration_root;
     let pinned = PinnedAuthorityHead::new_with_object_closure(head.clone(), obj_root);

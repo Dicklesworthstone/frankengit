@@ -189,9 +189,18 @@ fn ref_state() -> Vec<(RefName, GitOid)> {
     ]
 }
 
+/// The corpus's honest configuration carries the cumulative layout: the
+/// object-family cases verify object-closure proofs, and per
+/// `RootLayoutVersion::admits_object_closure_membership_proof` only
+/// `RefStateAndObjectClosureMerkleV1` admits those — under the ref-only V1
+/// layout the object closure root is still a whole-body digest, and the
+/// verifier must refuse every honest object answer with
+/// `ObjectLayout(LayoutAdmitsNoProof)`. The cumulative layout inherits V1's
+/// ref-state tree, so the ref and outcome families verify identically under
+/// it; production genesis (fgit-node) publishes this layout too.
 fn configuration() -> RepositoryConfigurationBody {
     RepositoryConfigurationBody {
-        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
         object_format: GitHashAlgorithm::Sha1,
         hidden_ref_rules: vec![b"refs/secret".to_vec()],
     }
@@ -205,9 +214,11 @@ fn configuration() -> RepositoryConfigurationBody {
 /// removed the rules that withhold `refs/secret`. If the body were accepted
 /// without identifying to the head, a mirror could widen disclosure without
 /// touching a single proof.
+/// Identical to [`configuration`] except the hidden-ref policy is STRIPPED —
+/// the substitution under test — so it must carry the same layout.
 const fn other_configuration() -> RepositoryConfigurationBody {
     RepositoryConfigurationBody {
-        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        root_layout: RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
         object_format: GitHashAlgorithm::Sha1,
         hidden_ref_rules: Vec::new(),
     }
