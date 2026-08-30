@@ -139,7 +139,10 @@ service="git-upload-pack /${repository_id}.git"
 host='host=loopback'
 packet_length=$((4 + ${#service} + 1 + ${#host} + 1))
 printf '%04x%s\0%s\0' "$packet_length" "$service" "$host" >&3
-cat <&3 >"$advertisement"
+# The bounded session completes without the server half-closing: serve waits
+# for the client to hang up first, so an unbounded read-to-EOF here deadlocks
+# against it. Read with a cap; `exec 3<&-` below then lets serve drain and exit.
+timeout 15 cat <&3 >"$advertisement" || true
 exec 3<&-
 wait "$serve_pid"
 serve_pid=''
