@@ -531,3 +531,40 @@ manifests, regenerate the lock, re-admit the closure rows, and rerun the lane;
 (2) asupersync moves `visibility` out of `test-internals` — same bump-and-verify
 path; (3) the checker grows an owned, ledgered exception mechanism sanctioned by a
 ruling — then and only then record the edge as an explicit exception instead.
+
+### NEG-028 — an ambient, unpinned, or silently downloaded proof assistant can support a FG-041 machine-proof claim
+
+**Hypothesis.** A proof lane that invokes whatever Lean is on `PATH`, downloads a
+toolchain on demand, or accepts any checker binary could back a `CLAIM-002`
+("machine-checked") row with evidence from an environment nobody pinned — making the
+formal-verification claim a function of the host rather than of the repository.
+
+**Why it looked right.** Provisioning proof toolchains on demand is the default
+posture almost everywhere else in the ecosystem, the lane's theorems are small and
+machine-checked either way, and an unpinned invocation is invisible in the resulting
+output: a green `Lean` verdict prints no version, no source, and no checker identity.
+
+**What settled it.** The lane refuses the entire premise instead of managing it:
+`proofs/fg041/check.sh` accepts only the installed exact toolchain
+`leanprover/lean4:v4.32.0` with the exact checker identity pinned in
+`proofs/fg041/toolchain.json`, refuses to run when that toolchain is absent rather
+than fetching it, and is required to reject a planted false theorem before any real
+claim is trusted. Dependency row `DEP-221` carries the supply-chain side. A proof
+claim is therefore reproducible from the repository alone, on any host that has the
+pinned toolchain, and a compromised or drifting toolchain turns the lane red instead
+of silently re-verifying.
+
+**Consequence.** `fgit-registry-check` may promote FG-041 rows to `verified` only
+against artifacts bound to that exact checker; any future proof lane (new theorem
+families, new assistants) must clone the same pattern — exact identity, offline
+refusal, planted-negative control — or its claims stay below `CLAIM-002`.
+
+**Why this row survives.** The tempting shortcut ("just use whatever Lean is
+installed") reappears every time a new proof lane is proposed, and the failure mode
+is silent: an unpinned checker still prints green. The row is the review-time
+counterexample to reach for.
+
+**Revisit conditions:** only when toolchain supply-chain admission is separately
+reviewed AND a replacement checker passes the same offline identity and
+planted-false-theorem controls — at which point `proofs/fg041/toolchain.json` and the
+row are updated together, never separately.
