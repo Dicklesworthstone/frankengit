@@ -137,7 +137,9 @@ git -C "$CLONE" fsck --strict >/dev/null 2>&1 || FSCK_RC=$?
 fge_assert_eq FG-028B-CLONE-008 0 "$FSCK_RC" 'every transferred object passes strict fsck'
 
 CHECKOUT_RC=0
-git -C "$CLONE" checkout -q -b main origin/main 2>/dev/null || CHECKOUT_RC=$?
+# `-B` (not `-b`): the node now advertises symref=HEAD:refs/heads/main, so the
+# clone already created local main; `-b` would fail with "already exists" (128).
+git -C "$CLONE" checkout -q -B main origin/main 2>/dev/null || CHECKOUT_RC=$?
 fge_assert_eq FG-028B-CLONE-009 0 "$CHECKOUT_RC" 'main checks out from the transferred refs'
 
 DIFF_RC=0
@@ -220,7 +222,8 @@ fi
 fge_reap "$RETRY_NAME"
 fge_assert_eq FG-028B-CLONE-013 0 "$RETRY_RC" 'node still serves completely after an aborted session'
 CO2_RC=0
-git -C "$WORK/retry" checkout -q -b main origin/main 2>/dev/null || CO2_RC=$?
+# Same `-B` rationale as FG-028B-CLONE-009 above.
+git -C "$WORK/retry" checkout -q -B main origin/main 2>/dev/null || CO2_RC=$?
 fge_assert_eq FG-028B-CLONE-017 0 "$CO2_RC" 'post-abort clone checks main out from transferred refs'
 DIFF2_RC=0
 diff -r --exclude=.git "$SRC" "$WORK/retry" >/dev/null 2>&1 || DIFF2_RC=$?
