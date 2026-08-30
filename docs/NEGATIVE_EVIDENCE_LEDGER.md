@@ -485,3 +485,49 @@ datasets are preserved (`/data/tmp/notes-out-7QoZ/corpus-sha1`,
 `/data/tmp/notes-xc-out/crossing.tsv`), and the harness that produced them
 (`notes_corpus.sh` + `notes_differential.rs`) re-runs the comparison on any
 future oracle pin.
+
+### NEG-032 — an admitted sibling's normal dependency can silently unify a proc-macro into every first-party manifest (sqlmodel-core 0.4.x)
+
+**Class:** dependency. **Status context:** recorded 2026-08-29 at `be60ac19` after the
+reality-check constitution-lane investigation.
+
+**What was believed:** admitting a published, registry-sourced sibling crate
+(`sqlmodel-core 0.4.1`, FG-093a admission) carries no first-party consequence beyond
+the rows admitted with it, because our manifests declare it `default-features = false`.
+
+**What the resolved graph shows:** `sqlmodel-core` requests `asupersync` in
+**normal** dependencies with `features = ["test-internals"]` (verified in the packed
+manifests of **both** published 0.4.x releases, 0.4.0 and 0.4.1). `test-internals` is
+asupersync's private-API/test feature ("NOT for production use") and pulls
+`dep:visibility` — a proc-macro crate. One consuming first-party crate
+(`fgit-projection`, commit `40afdfef`) is therefore enough for cargo feature
+unification to activate `test-internals` for asupersync **workspace-wide**:
+`cargo tree --locked --offline -i visibility -e features` renders
+`visibility ← asupersync feature "test-internals" ← sqlmodel-core ← fgit-projection`,
+and the Cargo.lock asupersync entry lists `tracing-log`, `tracing-subscriber`,
+`visibility`. The FG-069 derive guard (GoldLotus ruling 5) then correctly refuses all
+8 first-party manifests that declare asupersync directly, and `verify.sh fast` cannot
+go green.
+
+**Why it matters:** the derive-macro supply-chain boundary is only as strong as the
+weakest normal dependency in any admitted crate. "Published + registry-sourced +
+default-features = false" does not bound the transitive macro surface; only reading
+the *resolved* graph does (which is exactly what `derive_acquisitions` now does).
+
+**Verified non-fixes (do not retry):** feature choices in our manifests (the sibling's
+asupersync edge is unconditional); downgrade (0.4.0 identical); `[patch.crates-io]`
+path substitution (violates the no-unpublished-path rule, AGENTS 3.3, and undoes
+FG-093a); weakening `derive_acquisitions` (RH-1 gate self-weakening).
+
+**Disposition:** unfixable inside frankengit until the owned sibling republishes.
+Tracked as blocked bead `frankengit-sqlmodel-test-internals-defect-o7qc` with the full
+upstream-fix specification. The constitution lane stays red on exactly these 8 errors
+— an honest, precisely-explained red rather than a laundered green.
+
+**Revisit conditions:** (1) sqlmodel-core (and sqlmodel-frankensqlite if it repeats
+the pattern) publishes ≥ 0.4.2 with the asupersync edge moved to dev-dependencies or
+removed, and asupersync keeps `visibility` inside `test-internals` — then bump our
+manifests, regenerate the lock, re-admit the closure rows, and rerun the lane;
+(2) asupersync moves `visibility` out of `test-internals` — same bump-and-verify
+path; (3) the checker grows an owned, ledgered exception mechanism sanctioned by a
+ruling — then and only then record the edge as an explicit exception instead.

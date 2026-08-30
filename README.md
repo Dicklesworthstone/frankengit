@@ -28,13 +28,12 @@ The checked-in `fgit-cli` library contains a narrow, configuration-free one-node
 surface for exercising the same authority, admission, and object-selection
 abstractions the finished system will use. It does not consult a configuration
 file: callers supply the storage directory, tenant ID, and repository ID
-explicitly. The final `fg` binary will expose this surface after the current CLI
-integration regression is repaired: `CliOutcome::At` has no top-level rendering
-arm, so the binary target at this snapshot is not buildable even though the
-library command handlers exist. The surface will remain an implementation and
-conformance boundary rather than a complete server profile, and it will not by
-itself prove that a selected durability epoch or broader compatibility matrix
-has completed.
+explicitly. The final `fg` binary exposes this surface: the `CliOutcome::At`
+rendering arm (missing at the 2026-08-25 snapshot, repaired in `0f6a81b7`) is
+landed, and `cargo check -p fgit-cli --all-targets` passes at the current
+revision. The surface remains an implementation and conformance boundary
+rather than a complete server profile, and it will not by itself prove that a
+selected durability epoch or broader compatibility matrix has completed.
 
 ```bash
 cargo run -p fgit-cli -- init ./fgit-data \
@@ -46,35 +45,36 @@ cargo run -p fgit-cli -- doctor ./fgit-data \
   22222222222222222222222222222222
 ```
 
-`init` will create or re-authenticate the empty canonical authority head.
-`import` will verify a bounded local object source composed of loose objects and
-checksum-bound idx-v2/pack-v2 pairs, then publish its source refs through the
-sealed admission/RCR/head-CAS path. The pack-import code and its expanded
-17-test focused integration target are checked in. Its original 14 cases passed
-at the initial implementation revision; the fresh resource-bound cases will
-remain in progress until orchestrated batch verification, and a separate
-verified-read failure currently keeps the wider node package gate red. `doctor`
-will authenticate the head and can re-verify one explicitly named native
-object; it will not yet be a complete replay, fabric, repair, or
-causal-diagnosis suite. `export` will write an authority-selected pack to a
-previously absent path.
+`init` creates or re-authenticates the empty canonical authority head.
+`import` verifies a bounded local object source composed of loose objects and
+checksum-bound idx-v2/pack-v2 pairs, then publishes its source refs through the
+sealed admission/RCR/head-CAS path. The pack-import focused integration target
+is checked in and all 17 cases — the original 14 plus the resource-bound
+expansion — pass in a local run at `e296eb3f`; orchestrated batch
+verification remains the revision-bound gate. The verified-read defect that
+previously kept the wider node package gate red was fixed in `7ccaf8b`
+(layout-selected ref roots), and the whole `fgit-node` target set passes
+locally at that revision. `doctor` authenticates the head and can re-verify
+one explicitly named native object; it is not yet a complete replay, fabric,
+repair, or causal-diagnosis suite. `export` writes an authority-selected pack
+to a previously absent path.
 
-`serve` will accept a bounded raw git-daemon **upload-pack** service run, drain
-every admitted session, and report accepted/completed/refused counts before it
-exits. Its compatibility default will remain one session and one in-flight
-client; callers will explicitly opt into larger non-zero `--max-sessions` and
+`serve` accepts a bounded raw git-daemon **upload-pack** service run, drains
+every admitted session, and reports accepted/completed/refused counts before
+it exits. Its compatibility default remains one session and one in-flight
+client; callers explicitly opt into larger non-zero `--max-sessions` and
 `--max-in-flight` bounds. The bring-up transcript below deliberately names the
-one-session bound. The daemon will not serve receive-pack, smart HTTP, SSH, or a
-native API. Receive parsing, quarantine, validation, and durable admission exist
-as lower-level and loopback composition slices, but ordinary network push will
-remain unsupported until those slices are connected to a production transport.
-No command will treat local object placement, a routing hint, or a
-connection-local ref map as canonical state.
+one-session bound. The daemon does not serve receive-pack, smart HTTP, SSH, or
+a native API. Receive parsing, quarantine, validation, and durable admission
+exist as lower-level and loopback composition slices, but ordinary network
+push remains unsupported until those slices are connected to a production
+transport (tracked by `frankengit-hh37`). No command treats local object
+placement, a routing hint, or a connection-local ref map as canonical state.
 
-After the binary integration regression is repaired,
-[`scripts/one_node_bringup.sh`](scripts/one_node_bringup.sh) will exercise the
-intended empty-repository lifecycle with a new empty storage directory, an
-unused loopback address, and an absent export path:
+[`scripts/one_node_bringup.sh`](scripts/one_node_bringup.sh) exercises the
+intended empty-repository lifecycle end to end — verified at `be60ac19`,
+completing in about 40 s — with a new empty storage directory, an unused
+loopback address, and an absent export path:
 
 ```bash
 scripts/one_node_bringup.sh "$(mktemp -d)" \
@@ -84,14 +84,16 @@ scripts/one_node_bringup.sh "$(mktemp -d)" \
   /tmp/frankengit-one-node.pack
 ```
 
-The script will record the exact `fg init` → `fg doctor` → one explicitly bounded
+The script records the exact `fg init` → `fg doctor` → one explicitly bounded
 `fg serve` session → `fg export` commands and their observed output in
 `bring-up.transcript` below the supplied storage directory. Set `FG_BIN` to a
 prebuilt `fg` binary to avoid its default `cargo run -p fgit-cli --` launcher.
 It intentionally exercises an empty repository and does not claim a complete
-clone, fetch, or push workflow.
+clone, fetch, or push workflow; the non-empty clone campaign is pinned by the
+`first_clone.sh` E2E suite, which passes 19/19 assertions against a real `git`
+client over protocol v1 and v2 at this revision.
 
-### Reality snapshot: 2026-08-25
+### Reality snapshot: 2026-08-29
 
 The implementation has moved well beyond an architecture-only repository, but
 most of the product vision remains ahead:
@@ -104,11 +106,12 @@ most of the product vision remains ahead:
   DEFLATE, pack/delta read and write paths, pkt-line, upload-pack, receive-pack
   parsing, quarantine/admission, authority-selected pack materialization, local
   loose-plus-idx/pack source reconstruction, and raw git-daemon upload-pack
-  composition. The original 14-case focused pack-import target passed at its
-  implementation revision; its fresh bounded-read expansion will remain
-  unverified until the next orchestrated batch, while the containing node
-  package gate remains red on a separate verified-read defect. Those parts do
-  not yet amount to a completed Git compatibility matrix.
+  composition. All 17 cases of the focused pack-import target — including the
+  resource-bound expansion — and the full `fgit-node` test set pass in local
+  runs at `e296eb3f` (the verified-read defect named by the 2026-08-25
+  snapshot was fixed in `7ccaf8b`); orchestrated batch verification remains
+  the revision-bound gate. Those parts do not yet amount to a completed Git
+  compatibility matrix.
 - Object fabric, ATP-Git, TreeFS, RaptorQ repair, verified-read proofs, forge
   events and merge computation, graph algorithms, agent/evidence protocols,
   hostile-runner policy, recovery, and release attempts have bounded vertical
@@ -120,17 +123,25 @@ most of the product vision remains ahead:
   path are not complete. The durable forge merge composition also has a known
   materialization defect that prevents an otherwise permitted merge from
   reaching head CAS.
-- A position-addressed forge snapshot projector and `fg at` library command
-  have landed, but the product path is not complete: the CLI supplies no
-  authority history or capsules to non-latest projection, does not project the
-  second endpoint of a requested diff, does not call the continuous-consistency
-  check, and does not render the outcome from the binary entry point. Time
-  travel will remain unshipped until those gaps are repaired in the original
-  FG-038a slice and exercised over non-empty durable history.
+- A position-addressed forge snapshot projector and the `fg at` command
+  (parser, projection, and binary rendering, repaired in `0f6a81b7`) have
+  landed, but the product path is not complete: the CLI supplies no authority
+  history or capsules to non-latest projection, does not project the second
+  endpoint of a requested diff, and does not call the continuous-consistency
+  check. Time travel will remain unshipped until those gaps are repaired in
+  the original FG-038a slice and exercised over non-empty durable history.
 - The dependency graph tracks these gaps, including external convergence gates
   for fastapi_rust, sqlmodel/FrankenSQLite, and FrankenTUI. The smart-HTTP gap is
   tracked explicitly by FG-105 rather than being hidden inside raw-socket or
   REST work.
+- The constitution lane currently reports exactly 8 errors, all one root
+  cause: `sqlmodel-core` 0.4.x requests asupersync's `test-internals` feature
+  (which vendors the `visibility` proc-macro) in a *normal* dependency, so
+  feature unification arms the derive guard against every first-party manifest
+  that declares asupersync. The fix is an owned-sibling republish, specified in
+  blocked bead `frankengit-sqlmodel-test-internals-defect-o7qc` and recorded as
+  NEG-032; the 42 pre-admission registry-row drift errors that shared the lane
+  were corrected at `60e57e5e`.
 
 The claims registry remains the public proof boundary. Its verified rows cover
 narrow artifact identity and contained Lean-model theorems; they do not prove
