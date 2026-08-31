@@ -120,9 +120,13 @@ most of the product vision remains ahead:
 - Network receive-pack/push, smart HTTP, production SSH, the native REST/API
   gateway, projections, search, issues/notifications, the web UI, the TUI, MCP,
   production hostile-execution isolation, and the actual release publication
-  path are not complete. The durable forge merge composition also has a known
-  materialization defect that prevents an otherwise permitted merge from
-  reaching head CAS.
+  path are not complete. The sealed-merge admission path through the real
+  store+projection reaches head CAS correctly at HEAD `1b8561c1`
+  (`fgit-admission/tests/merge_admission_race.rs` 6/6, exactly-one-winner
+  holds); the remaining half of FG-029a is routing admitted merge's
+  forge events through the existing outbox — neither code path nor a
+  dedicated test exists for that half today, and the bead is in flight
+  (`frankengit-asa3`).
 - A position-addressed forge snapshot projector and the `fg at` command
   (parser, projection, and binary rendering, repaired in `0f6a81b7`) have
   landed, but the product path is not complete: the CLI supplies no authority
