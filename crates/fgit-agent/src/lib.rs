@@ -1,57 +1,34 @@
 #![forbid(unsafe_code)]
-//! Agent intent runs, attenuated capabilities, and the effect broker.
+//! Agent identity, capability, context, workspace, effect, evidence, and
+//! observation protocols.
 //!
-//! This crate implements the slice of `docs/AGENT_PROTOCOL.md` that FG-030a
-//! names: the capability model of §6 with attenuation-only delegation, the
-//! Intent Run of §5 as the machine-enforced scope, and the effect broker of §9
-//! that authorizes every consequential operation before it happens.
+//! This crate owns the machine protocol for one sponsored agent run:
 //!
-//! # The one property everything here exists to hold
+//! - an [`IntentRun`] with explicit authority basis, operation classes, and
+//!   resource ceilings;
+//! - an authenticated [`AuthorityReadReceipt`] and single-generation
+//!   [`ContextPacket`] boundaries that keep control metadata separate from
+//!   visibly untrusted source bytes;
+//! - attenuated [`Capability`] values and brokered [`EffectGrant`]s with
+//!   authority refresh;
+//! - a two-phase [`EffectLedger`] (`reserve -> commit|abort`) with explicit
+//!   external acknowledgement and cancellation drain;
+//! - a [`WorkspaceBinding`] over the real `fgit-treefs`
+//!   [`fgit_treefs::WorkspaceSnapshotBody`], whose proposal becomes the same
+//!   canonical [`fgit_authority::SemanticRequest`] used by non-agent
+//!   admission;
+//! - an [`EvidenceCarryingChange`] schema that closes every declared
+//!   requirement, binds independently produced attestations, records explicit
+//!   non-claims, and can carry a same-head authority-refresh receipt;
+//! - an [`AgentSituationReceipt`] over one authenticated head and an explicit
+//!   observed-or-omitted control-plane component set, plus deterministic
+//!   [`SituationDelta`] refreshes.
 //!
-//! Authority only ever narrows. A run cannot exceed its sponsor's grant, a
-//! delegated capability cannot exceed its parent, and an effect cannot exceed
-//! either the run or the capability presented for it. §6.2 states the rule for
-//! delegation and §5.1 for the objective text; this crate makes both checkable
-//! rather than aspirational.
-//!
-//! [`capability`] discharges that in two places, because it fails in two
-//! places: widening is *unrepresentable* through the API, and *refused* by the
-//! verifier when it arrives as bytes. Neither substitutes for the other, and
-//! the module documents why.
-//!
-//! # Current boundary
-//!
-//! [`protocol`] now binds an Intent Run's base to the full authenticated §4.1
-//! `AuthorityReadReceipt` and constructs bounded, single-generation §7 Context
-//! Packets with structurally separate control and untrusted-source channels.
-//! Revocation interpreted at a canonical position (§6.3) remains outside this
-//! slice: [`Capability::is_valid_at`] checks a window, which is freshness, not
-//! revocation.
-//!
-//! §4.3's refresh relations ARE here, in [`refresh`] — but only the typed
-//! record of a refresh and the constraints on it, not the act. Rebasing,
-//! replaying intents and merging are workspace operations owned by
-//! `fgit-treefs`; a receipt binds identities, it does not compute them. The
-//! module header says which half is which.
-//!
-//! §10 and §11 are **partly** here, and the boundary matters. [`ecc`] delivers
-//! the evidence classes, the requirement dispositions of §10.2, the non-claims
-//! of §10.3, the machine-classified verifier independence that normative
-//! contract 25 requires be enforced rather than self-declared, and a canonical
-//! codec encoding for the bundle checked against a golden corpus this crate did
-//! not emit. It does **not**
-//! deliver the rest of the §10 bundle — the proposed object/tree closure and
-//! diff commitment (they need §8's `TreeFS` export), the effect record from
-//! [`broker`] (it is not yet embedded in the ECC body), or context-packet
-//! bodies in the ECC itself — nor most of §11: the deterministic verification services
-//! of §11.1 and the human review view of §11.3 are absent. [`ecc`]'s own
-//! header lists these individually. The separate [`protocol`] module does bind
-//! real context packets, `TreeFS` snapshots, and a normal sealed-ref attempt; it
-//! does not claim to synthesize those fields into an ECC.
-//!
-//! The obligation lifecycle is not reimplemented either. `fgit-resource` owns
-//! it, and [`broker`] explains exactly which half of an effect's reservation
-//! this crate holds and which half belongs to the component that performs it.
+//! The crate intentionally exposes no authority-head mutation API. TreeFS
+//! proposals and agent-originated ref commands become inert
+//! [`AgentRefTransaction`] values, then ordinary
+//! [`fgit_authority::SealAttempt`]s. Actual sealing, admission, and head CAS
+//! remain owned by the existing authority/admission path.
 
 pub mod broker;
 pub mod capability;
@@ -60,28 +37,59 @@ pub mod ecc;
 pub mod intent;
 pub mod protocol;
 pub mod refresh;
+pub mod situation;
 
 pub use broker::{
-    AgentInstanceId, BrokerRefusal, DeferredOutboxEffect, EffectBroker, EffectClass, EffectGrant,
-    EffectId, EffectJournalEntry, EffectJournalEvent, EffectJournalRefusal, EffectJournalReplay,
-    EffectRecord, EffectRequest, EffectTerminalOutcome, EscalatedOutboxEffect,
-    ExternalEffectOutcome, OutboxCommitRefused, OutboxReservationRefused, ReconciliationEvidence,
-    ReconciliationRefused, ReservedOutboxEffect,
+    EffectAbortReason, EffectAction, EffectBroker, EffectGrant, EffectGrantRequest, EffectLedger,
+    EffectOutcome, EffectReceipt, EffectRefusal, EffectRequest, EffectState, EvidenceRecordKind,
+    ExternalAcknowledgement, ObligationId, ObligationState, ReservedEffect, ReservedEffectMetadata,
 };
 pub use capability::{
-    AttenuationRefused, AttenuationRequest, Capability, CapabilityId, ChainRefused, IssueRefused,
-    LogicalTime, SealRefused, SealedCapability, verify_chain,
+    Capability, CapabilityRefusal, CapabilityScope, Expiry, KeyBrokerCapability,
+    KeyOperationClasses, LogicalTime, SecretBrokerCapability, SecretOperationClasses,
 };
-pub use classes::{CLASS_COUNT, ClassSet, OperationClass, UnknownClassBits};
+pub use classes::{
+    ClassSet, EffectClass, EvidenceClass, ObjectClass, OperationClass, SecretClass,
+};
 pub use ecc::{
-    EccPolicy, EccRefusal, EvidenceCarryingChange, EvidenceClass, EvidenceRecordRef,
-    IndependenceClassification, IndependenceDimension, PartyFacts, RequirementDisposition,
-    VerifierAttestation, classify_independence,
+    AgentClaimedInvariant, AgentRequirement, AuthorityRefreshReceipt, ChangeRequirement,
+    EvidenceCarryingChange, EvidenceCarryingChangeId, EvidenceCarryingChangeRefusal,
+    RequirementDisposition, VerifierAttestation, VerifierIndependence,
 };
-pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
+pub use intent::{AuthorityBasisRef, IntentRun, IntentRunRefusal, RunId};
 pub use protocol::{
     AgentRefTransaction, AuthorityReadReceipt, ContextControl, ContextPacket, ContextPacketId,
-    ContextSource, MAX_CONTEXT_SOURCE_BYTES, MAX_CONTEXT_SOURCES, MAX_CONTEXT_TOTAL_BYTES,
-    ProtocolRefusal, RetrievalChannel, WorkspaceBinding,
+    ContextSource, ProtocolRefusal, RetrievalChannel, WorkspaceBinding,
 };
-pub use refresh::{RefreshReceipt, RefreshRelation, RefreshSide};
+pub use refresh::{
+    AuthorityBasisPolicy, RefreshReceipt, RefreshRefusal, RefreshTransition, RefreshValidator,
+};
+pub use situation::{
+    AgentSituationReceipt, SITUATION_COMPONENT_COUNT, SituationAuthorityChange,
+    SituationComponent, SituationComponentChange, SituationComponentKind,
+    SituationComponentTransition, SituationDelta, SituationId, SituationOmissionReason,
+    SituationRefusal, SituationWorkspace,
+};
+
+/// Current implementation boundary.
+///
+/// This slice now covers:
+///
+/// - typed run opening and attenuation;
+/// - complete authenticated authority-read receipts at agent ingress;
+/// - control/source-separated, single-generation context packets;
+/// - real TreeFS workspace binding and ordinary authority-request preparation;
+/// - brokered effects with reserve/commit/abort/acknowledge/drain semantics;
+/// - ECC finalization with exact requirement closure, explicit non-claims,
+///   evidence records, verifier attestations, optional authority refresh, and
+///   canonical identity;
+/// - authority-bound situation receipts whose full v1 component set is either
+///   observed at one head or explicitly omitted, plus anti-rollback,
+///   same-generation-fork-refusing situation deltas.
+///
+/// It does **not** yet implement context retrieval/ranking, capability-token
+/// signing, task-frontier ranking, change-plan persistence, handoff capsules,
+/// a hostile runner, CI execution, or automatic publication. Those remain
+/// separate final-abstraction slices; none is faked here.
+pub const IMPLEMENTED_BOUNDARY: &str =
+    "intent-run+authenticated-authority-receipt+context-packet+treefs-binding+effect-ledger+ecc+situation-receipt-and-delta";
