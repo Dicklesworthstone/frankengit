@@ -1,24 +1,89 @@
-name: local-verification-manifest
+name: scratch-agent-task-snapshot
 
-# Portable lane description for Doodlestein Self-Releaser / nektos/act.
-# FrankenGit does not rely on GitHub-hosted Actions for correctness or release.
-#
-# Execution requirements: hosted runners provide rustup, which auto-installs
-# the pinned toolchain from rust-toolchain.toml on first cargo invocation.
-# Under `act`, use a host-prepared image that already carries rustup; the lane
-# performs no network acquisition of its own beyond that toolchain bootstrap.
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - agent-snapshot-gpt56-20260831
 
 permissions:
   contents: read
 
 jobs:
-  verify-docs:
+  snapshot:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
-      - name: Run repository-owned verification lane
-        run: ./scripts/verify.sh docs
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - name: Emit exact Beads task-state snapshot
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import collections
+          import json
+          from pathlib import Path
+
+          path = Path('.beads/issues.jsonl')
+          issues = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+          by_id = {issue['id']: issue for issue in issues}
+          status_counts = collections.Counter(issue.get('status', '<missing>') for issue in issues)
+          terminal = {'closed', 'deferred', 'cancelled', 'tombstone'}
+
+          def blockers(issue):
+              unresolved = []
+              for dep in issue.get('dependencies', []):
+                  if dep.get('type') != 'blocks':
+                      continue
+                  dep_id = dep.get('depends_on_id')
+                  target = by_id.get(dep_id)
+                  status = target.get('status') if target else '<missing>'
+                  if status not in terminal:
+                      unresolved.append({'id': dep_id, 'status': status})
+              return unresolved
+
+          active = [issue for issue in issues if issue.get('status') not in terminal]
+          ready_unclaimed = [
+              issue for issue in active
+              if issue.get('status') == 'open'
+              and not issue.get('assignee')
+              and not blockers(issue)
+          ]
+          ready_any = [
+              issue for issue in active
+              if issue.get('status') == 'open' and not blockers(issue)
+          ]
+
+          def compact(issue):
+              return {
+                  'id': issue.get('id'),
+                  'title': issue.get('title'),
+                  'status': issue.get('status'),
+                  'priority': issue.get('priority'),
+                  'issue_type': issue.get('issue_type'),
+                  'assignee': issue.get('assignee'),
+                  'updated_at': issue.get('updated_at'),
+                  'labels': issue.get('labels', []),
+                  'unresolved_blockers': blockers(issue),
+              }
+
+          key = lambda issue: (issue.get('priority', 99), issue.get('updated_at', ''), issue.get('id', ''))
+          print('SNAPSHOT_COUNTS=' + json.dumps({
+              'total': len(issues),
+              'active': len(active),
+              'ready_unclaimed': len(ready_unclaimed),
+              'ready_any': len(ready_any),
+              'statuses': dict(sorted(status_counts.items())),
+          }, sort_keys=True))
+          print('READY_UNCLAIMED_BEGIN')
+          for issue in sorted(ready_unclaimed, key=key):
+              print(json.dumps(compact(issue), sort_keys=True))
+          print('READY_UNCLAIMED_END')
+          print('READY_ANY_BEGIN')
+          for issue in sorted(ready_any, key=key):
+              print(json.dumps(compact(issue), sort_keys=True))
+          print('READY_ANY_END')
+          print('ACTIVE_BEGIN')
+          for issue in sorted(active, key=key):
+              print(json.dumps(compact(issue), sort_keys=True))
+          print('ACTIVE_END')
+          PY
