@@ -1,26 +1,20 @@
-//! Authority-bound observation and incremental situation deltas.
+//! Authority-bound agent observation and incremental situation deltas.
 //!
-//! `docs/AGENT_CONTROL_PLANE_ARCHITECTURE.md` defines the agent control
-//! plane's first executable slice: a compact receipt over one authenticated
-//! repository position plus explicit observations or omissions for every
-//! derived control-plane component.
+//! This is the first executable slice of
+//! `docs/AGENT_CONTROL_PLANE_ARCHITECTURE.md`. It composes existing authority,
+//! Intent Run, and TreeFS identities into a compact observation receipt. It
+//! owns no repository truth and exposes no task mutation, capability grant,
+//! workspace edit, ranking, or publication operation.
 //!
-//! This module owns no repository truth and performs no task mutation,
-//! ranking, capability grant, workspace edit, or publication. It makes the
-//! inputs to those future operations exact:
+//! The receipt is deliberately closed and bounded: every v1 component class is
+//! represented exactly once as either an observation made against the same
+//! authenticated head or an explicit typed omission. A refresh produces a
+//! deterministic delta and refuses repository changes, time rollback,
+//! authority-generation rollback, and two head identities at one generation.
 //!
-//! * the authority position comes only from [`AuthorityReadReceipt`];
-//! * an attached run must carry that exact receipt;
-//! * an attached workspace comes only from a real [`WorkspaceBinding`];
-//! * every supported component is present exactly once as either observed or
-//!   deliberately omitted;
-//! * an observed component names the authority head against which it was
-//!   sampled, so mixed-generation views fail closed;
-//! * the receipt and its delta have deterministic ordering and identities.
-//!
-//! A higher authority generation in [`SituationDelta`] means only that a later
-//! authenticated generation was observed. Proving predecessor continuity is a
-//! separate authority-history operation and is not claimed here.
+//! Observing a higher generation does not itself prove predecessor continuity.
+//! That stronger claim requires an authenticated authority-history witness and
+//! remains outside this slice.
 
 use core::fmt;
 
@@ -29,21 +23,15 @@ use fgit_crypto::{DigestHasher, GitHashAlgorithm, NativeObjectIdentity, Sha256};
 use fgit_treefs::WorkspaceId;
 use fgit_types::{HeadGeneration, RepositoryAuthorityHeadId, RepositoryId};
 
-use crate::capability::LogicalTime;
-use crate::intent::{IntentRun, RunId};
-use crate::protocol::{AuthorityReadReceipt, WorkspaceBinding};
+use crate::{AuthorityReadReceipt, IntentRun, LogicalTime, RunId, WorkspaceBinding};
 
 /// Number of component classes in the v1 situation profile.
-///
-/// A receipt contains exactly one entry for each class. Missing data is an
-/// explicit omission, never an absent vector element whose meaning a client
-/// must guess.
 pub const SITUATION_COMPONENT_COUNT: usize = 10;
-
+const SITUATION_COMPONENT_COUNT_WIRE: u32 = 10;
 const SITUATION_DOMAIN: &[u8] = b"frankengit.agent.situation/v1\0";
 
-/// Stable SHA-256 commitment to one complete agent situation receipt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+/// Stable SHA-256 commitment to one complete situation receipt.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SituationId([u8; 32]);
 
 impl SituationId {
@@ -64,8 +52,8 @@ impl fmt::Display for SituationId {
     }
 }
 
-/// Closed set of derived control-plane components observed by the v1 profile.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+/// Closed set of derived control-plane components in the v1 profile.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum SituationComponentKind {
     /// Beads/task dependency projection.
     TaskProjection,
@@ -77,7 +65,7 @@ pub enum SituationComponentKind {
     SourceGraph,
     /// Symbol and call graph generation.
     SymbolGraph,
-    /// Ownership/review-history generation.
+    /// Ownership and review-history generation.
     Ownership,
     /// Search/retrieval generation.
     Search,
@@ -144,19 +132,19 @@ impl fmt::Display for SituationComponentKind {
 }
 
 /// Why one component is explicitly absent from a situation receipt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum SituationOmissionReason {
-    /// The deployment profile does not configure this component.
+    /// The deployment profile does not configure the component.
     NotConfigured,
-    /// The component is configured but no generation is currently available.
+    /// The component is configured but no generation is available.
     NotAvailable,
-    /// The active run may not observe this component.
+    /// The active run may not observe the component.
     Unauthorized,
-    /// A declared resource budget prevented the observation.
+    /// The declared resource budget prevented observation.
     BudgetExceeded,
-    /// The available generation is too stale for the requested observation.
+    /// The available generation is too stale for this observation.
     Stale,
-    /// The projection or verification operation failed.
+    /// Projection or verification failed.
     ProjectionFailed,
 }
 
@@ -212,7 +200,7 @@ pub struct SituationComponent {
 }
 
 impl SituationComponent {
-    /// Records one generation sampled against `basis_head_id`.
+    /// Records a generation sampled against an authenticated authority head.
     #[must_use]
     pub const fn observed(
         kind: SituationComponentKind,
@@ -250,7 +238,7 @@ impl SituationComponent {
         self.kind
     }
 
-    /// Authority head against which an observed generation was sampled.
+    /// Authority head used by an observed component.
     #[must_use]
     pub const fn basis_head_id(&self) -> Option<RepositoryAuthorityHeadId> {
         match self.state {
@@ -271,7 +259,7 @@ impl SituationComponent {
         }
     }
 
-    /// Typed reason when omitted.
+    /// Typed omission reason when absent.
     #[must_use]
     pub const fn omission_reason(&self) -> Option<SituationOmissionReason> {
         match self.state {
@@ -280,7 +268,7 @@ impl SituationComponent {
         }
     }
 
-    /// Commitment to detailed omission evidence when omitted.
+    /// Commitment to detailed omission evidence when absent.
     #[must_use]
     pub const fn omission_detail_commitment(&self) -> Option<[u8; 32]> {
         match self.state {
@@ -301,9 +289,9 @@ impl SituationComponent {
 
 /// Authority- and run-bound identity of an attached TreeFS workspace.
 ///
-/// The public constructor accepts only an existing [`WorkspaceBinding`], so a
-/// caller cannot pair a workspace identifier with a chosen manifest, run, or
-/// authority head.
+/// The only public constructor accepts an existing [`WorkspaceBinding`], so a
+/// caller cannot independently pair a workspace ID with a chosen manifest,
+/// run, or authority head.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SituationWorkspace {
     workspace_id: WorkspaceId,
@@ -349,7 +337,7 @@ impl SituationWorkspace {
     }
 }
 
-/// One complete, authority-bound observation of the agent operating state.
+/// One complete, authority-bound observation of agent operating state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentSituationReceipt {
     situation_id: SituationId,
@@ -357,7 +345,7 @@ pub struct AgentSituationReceipt {
     intent_run_id: Option<RunId>,
     workspace: Option<SituationWorkspace>,
     observed_at: LogicalTime,
-    components: Vec<SituationComponent>,
+    components: [SituationComponent; SITUATION_COMPONENT_COUNT],
 }
 
 impl AgentSituationReceipt {
@@ -366,15 +354,15 @@ impl AgentSituationReceipt {
     /// # Errors
     ///
     /// Refuses legacy or mismatched Intent Runs, workspace/run mismatches,
-    /// mixed authority bases, duplicate or missing component classes, an
-    /// observation time before authority authentication, and an unrepresentable
-    /// canonical commitment.
+    /// mixed authority bases, duplicate or incomplete component classes,
+    /// observation before authority authentication, and an unrepresentable
+    /// commitment.
     pub fn build(
         authority_read_receipt: AuthorityReadReceipt,
         intent_run: Option<&IntentRun>,
         workspace: Option<SituationWorkspace>,
         observed_at: LogicalTime,
-        mut components: Vec<SituationComponent>,
+        mut components: [SituationComponent; SITUATION_COMPONENT_COUNT],
     ) -> Result<Self, SituationRefusal> {
         if observed_at < authority_read_receipt.verified_at_logical_time() {
             return Err(SituationRefusal::ObservationBeforeAuthorityVerification {
@@ -409,13 +397,6 @@ impl AgentSituationReceipt {
             }
         }
 
-        if components.len() > SITUATION_COMPONENT_COUNT {
-            return Err(SituationRefusal::TooManyComponents {
-                observed: components.len(),
-                limit: SITUATION_COMPONENT_COUNT,
-            });
-        }
-
         components.sort_unstable_by_key(|component| component.kind.code_point());
         for adjacent in components.windows(2) {
             if adjacent[0].kind == adjacent[1].kind {
@@ -424,15 +405,12 @@ impl AgentSituationReceipt {
                 });
             }
         }
-
-        for expected in SituationComponentKind::ALL {
-            if components
-                .binary_search_by_key(&expected.code_point(), |component| {
-                    component.kind.code_point()
-                })
-                .is_err()
-            {
-                return Err(SituationRefusal::MissingComponent { kind: expected });
+        for (expected, observed) in SituationComponentKind::ALL.iter().zip(&components) {
+            if *expected != observed.kind {
+                return Err(SituationRefusal::InvalidComponentSet {
+                    expected: *expected,
+                    observed: observed.kind,
+                });
             }
         }
 
@@ -476,7 +454,7 @@ impl AgentSituationReceipt {
         &self.authority_read_receipt
     }
 
-    /// Intent Run bound to the receipt, when an active run exists.
+    /// Intent Run bound to the receipt, when one is active.
     #[must_use]
     pub const fn intent_run_id(&self) -> Option<RunId> {
         self.intent_run_id
@@ -488,30 +466,22 @@ impl AgentSituationReceipt {
         self.workspace
     }
 
-    /// Logical time at which all component observations were assembled.
+    /// Logical time at which component observations were assembled.
     #[must_use]
     pub const fn observed_at(&self) -> LogicalTime {
         self.observed_at
     }
 
-    /// All components in canonical [`SituationComponentKind::ALL`] order.
+    /// Components in canonical [`SituationComponentKind::ALL`] order.
     #[must_use]
-    pub fn components(&self) -> &[SituationComponent] {
+    pub const fn components(&self) -> &[SituationComponent; SITUATION_COMPONENT_COUNT] {
         &self.components
     }
 
     /// One component by class.
     #[must_use]
-    pub fn component(
-        &self,
-        kind: SituationComponentKind,
-    ) -> Option<&SituationComponent> {
-        self.components
-            .binary_search_by_key(&kind.code_point(), |component| {
-                component.kind.code_point()
-            })
-            .ok()
-            .map(|index| &self.components[index])
+    pub fn component(&self, kind: SituationComponentKind) -> &SituationComponent {
+        &self.components[usize::from(kind.code_point() - 1)]
     }
 
     /// Number of observed components.
@@ -549,15 +519,15 @@ pub enum SituationAuthorityChange {
 /// Kind of change to one situation component.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SituationComponentTransition {
-    /// The immutable generation commitment changed.
+    /// Immutable generation commitment changed.
     GenerationChanged,
-    /// The same generation commitment was sampled against a different head.
+    /// Same generation was sampled against a different authority head.
     ObservationRebased,
     /// A formerly omitted component became observable.
     BecameObserved,
     /// A formerly observed component became omitted.
     BecameOmitted,
-    /// The omission reason or its detailed evidence changed.
+    /// Omission reason or detailed evidence changed.
     OmissionChanged,
 }
 
@@ -600,10 +570,9 @@ impl SituationDelta {
     ///
     /// # Errors
     ///
-    /// Refuses cross-repository comparisons, authority-generation rollback,
-    /// same-generation forks, a changed generation with an unchanged head
-    /// identity, authority-verification-time rollback, and observation-time
-    /// rollback.
+    /// Refuses cross-repository comparison, authority or logical-time rollback,
+    /// same-generation forks, and a changed generation with an unchanged head
+    /// identity.
     pub fn between(
         from: &AgentSituationReceipt,
         to: &AgentSituationReceipt,
@@ -663,14 +632,12 @@ impl SituationDelta {
 
         let mut component_changes = Vec::with_capacity(SITUATION_COMPONENT_COUNT);
         for (before, after) in from.components.iter().zip(&to.components) {
-            debug_assert_eq!(before.kind, after.kind);
-            if before == after {
-                continue;
+            if before != after {
+                component_changes.push(SituationComponentChange {
+                    kind: before.kind,
+                    transition: classify_component_transition(before, after),
+                });
             }
-            component_changes.push(SituationComponentChange {
-                kind: before.kind,
-                transition: classify_component_transition(before, after),
-            });
         }
 
         Ok(Self {
@@ -704,7 +671,7 @@ impl SituationDelta {
         self.authority_change
     }
 
-    /// Whether any receipt field changed, including verifier/time/backend token.
+    /// Whether any authority receipt field changed.
     #[must_use]
     pub const fn authority_receipt_changed(&self) -> bool {
         self.authority_receipt_changed
@@ -734,8 +701,7 @@ impl SituationDelta {
         &self.component_changes
     }
 
-    /// True when only the observation event changed and no reusable context
-    /// assumption was invalidated.
+    /// True when only the observation instant changed.
     #[must_use]
     pub fn has_no_context_changes(&self) -> bool {
         matches!(self.authority_change, SituationAuthorityChange::Unchanged)
@@ -756,11 +722,11 @@ pub enum SituationRefusal {
         /// Receipt verification time.
         verified: LogicalTime,
     },
-    /// The run used the legacy identifying reference rather than a full receipt.
+    /// The run used a legacy basis reference rather than a complete receipt.
     RunAuthorityReceiptRequired,
-    /// The run's authenticated receipt differs from the situation receipt.
+    /// Run and situation carry different authenticated receipts.
     RunAuthorityMismatch,
-    /// A workspace was supplied without an active run.
+    /// A workspace was supplied without its active run.
     WorkspaceRequiresIntentRun,
     /// Workspace and situation name different runs.
     WorkspaceRunMismatch {
@@ -771,22 +737,17 @@ pub enum SituationRefusal {
     },
     /// Workspace and situation name different authority heads.
     WorkspaceAuthorityMismatch,
-    /// More than the closed v1 component set was supplied.
-    TooManyComponents {
-        /// Entries supplied.
-        observed: usize,
-        /// Closed v1 limit.
-        limit: usize,
-    },
     /// One component class appeared more than once.
     DuplicateComponent {
         /// Repeated class.
         kind: SituationComponentKind,
     },
-    /// One component class was neither observed nor explicitly omitted.
-    MissingComponent {
-        /// Missing class.
-        kind: SituationComponentKind,
+    /// The fixed-size set did not contain the canonical v1 component at one position.
+    InvalidComponentSet {
+        /// Required class at the canonical position.
+        expected: SituationComponentKind,
+        /// Class found at that position.
+        observed: SituationComponentKind,
     },
     /// An observed component was sampled against another authority head.
     ComponentAuthorityMismatch {
@@ -826,7 +787,7 @@ pub enum SituationRefusal {
         /// Conflicting generation.
         generation: HeadGeneration,
     },
-    /// Generation changed but the content identity did not.
+    /// Generation changed but content identity did not.
     AuthorityGenerationChangedWithoutIdentity {
         /// Earlier generation.
         from: HeadGeneration,
@@ -860,16 +821,13 @@ impl fmt::Display for SituationRefusal {
             Self::WorkspaceAuthorityMismatch => formatter.write_str(
                 "workspace authority head differs from the situation receipt",
             ),
-            Self::TooManyComponents { observed, limit } => write!(
-                formatter,
-                "situation has {observed} components, v1 limit is {limit}"
-            ),
             Self::DuplicateComponent { kind } => {
                 write!(formatter, "situation repeats component {kind}")
             }
-            Self::MissingComponent { kind } => {
-                write!(formatter, "situation omits component {kind} without a typed omission")
-            }
+            Self::InvalidComponentSet { expected, observed } => write!(
+                formatter,
+                "situation expected component {expected} but observed {observed}"
+            ),
             Self::ComponentAuthorityMismatch { kind } => write!(
                 formatter,
                 "situation component {kind} was sampled against another authority head"
@@ -954,7 +912,7 @@ fn situation_commitment(
     intent_run_id: Option<RunId>,
     workspace: Option<SituationWorkspace>,
     observed_at: LogicalTime,
-    components: &[SituationComponent],
+    components: &[SituationComponent; SITUATION_COMPONENT_COUNT],
 ) -> Result<[u8; 32], SituationRefusal> {
     let mut encoder = Encoder::with_capacity(768);
     encoder.write_bytes("agent_situation_domain", SITUATION_DOMAIN)?;
@@ -980,7 +938,7 @@ fn situation_commitment(
     }
 
     encoder.write_scalar(observed_at.value());
-    write_count(&mut encoder, "situation_components", components.len())?;
+    encoder.write_scalar(SITUATION_COMPONENT_COUNT_WIRE);
     for component in components {
         encoder.write_raw_byte(component.kind.code_point());
         match component.state {
@@ -1022,20 +980,20 @@ fn write_authority_receipt(
         encoder,
         latest_decision_batch_id
             .as_ref()
-            .map(|identity| identity.as_internal_object_id()),
+            .map(fgit_types::RepositoryDecisionBatchId::as_internal_object_id),
     )?;
     write_optional_scalar(
         encoder,
         receipt
             .latest_repository_sequence()
-            .map(|sequence| sequence.get()),
+            .map(fgit_types::RepositorySequence::get),
     );
     let latest_repository_commit_id = receipt.latest_repository_commit_id();
     write_optional_identity(
         encoder,
         latest_repository_commit_id
             .as_ref()
-            .map(|identity| identity.as_internal_object_id()),
+            .map(fgit_types::RepositoryCommitId::as_internal_object_id),
     )?;
 
     encoder.write_digest(&receipt.ref_root())?;
@@ -1069,471 +1027,5 @@ fn write_optional_scalar(encoder: &mut Encoder, value: Option<u64>) {
             encoder.write_scalar(value);
         }
         None => encoder.write_bool(false),
-    }
-}
-
-fn write_count(
-    encoder: &mut Encoder,
-    field: &'static str,
-    count: usize,
-) -> Result<(), CodecRefusal> {
-    let count = u32::try_from(count).map_err(|_| CodecRefusal::ValueUnrepresentable {
-        field,
-        observed: u64::try_from(count).unwrap_or(u64::MAX),
-        limit: u64::from(u32::MAX),
-    })?;
-    encoder.write_scalar(count);
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use fgit_authority::{
-        AuthorityStore, MemAuthorityStore, RepositoryAuthorityHeadBody,
-        RepositoryIncarnation, RootLayoutVersion, outcome_index_root,
-    };
-    use fgit_resource::{Grade, ResourceVector};
-    use fgit_types::{
-        Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositoryId, TenantId,
-    };
-
-    use super::{
-        AgentSituationReceipt, SituationAuthorityChange, SituationComponent,
-        SituationComponentKind, SituationComponentTransition, SituationDelta,
-        SituationOmissionReason, SituationRefusal, SituationWorkspace,
-    };
-    use crate::{
-        AuthorityBasisRef, AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime,
-        OperationClass, RunId,
-    };
-
-    fn authority_receipt(
-        repository_byte: u8,
-        root_byte: u8,
-        verified_at: u64,
-        verifier_byte: u8,
-    ) -> AuthorityReadReceipt {
-        let tenant_id = TenantId::from_bytes([0x11; 16]);
-        let repository_id = RepositoryId::from_bytes([repository_byte; 16]);
-        let default_root = outcome_index_root(&[]).expect("empty outcome root");
-        let distinct_root = Digest::new(
-            default_root.algorithm(),
-            DigestBytes::try_new(&[root_byte; 32]).expect("32-byte digest"),
-        );
-        let body = RepositoryAuthorityHeadBody {
-            tenant_id,
-            repository_id,
-            repository_incarnation: RepositoryIncarnation::first(),
-            generation: HeadGeneration::FIRST,
-            predecessor_head_id: None,
-            decision_tail_id: None,
-            latest_repository_sequence: None,
-            latest_committed_rcr_id: None,
-            ref_root: default_root,
-            forge_position_root: default_root,
-            outcome_index_root: default_root,
-            object_registry_root: default_root,
-            retention_root: default_root,
-            outbox_root: default_root,
-            policy_epoch: PolicyEpoch::FIRST,
-            format_registry_epoch: RegistryEpoch::FIRST,
-            configuration_root: distinct_root,
-            schema_registry_root: default_root,
-            root_layout_version: RootLayoutVersion::RefStateMerkleV1,
-        };
-        let store = MemAuthorityStore::new();
-        store
-            .initialize_head(body)
-            .expect("initialize authority head");
-        let authenticated = AuthorityStore::read_head(&store, tenant_id, repository_id)
-            .expect("read authority head");
-        AuthorityReadReceipt::from_authenticated_head(
-            &authenticated,
-            LogicalTime::new(verified_at),
-            [verifier_byte; 32],
-        )
-        .expect("authenticated receipt")
-    }
-
-    fn resource_budget() -> ResourceVector {
-        ResourceVector::single(Grade::Bytes, 4_096)
-    }
-
-    fn authenticated_run(receipt: &AuthorityReadReceipt, run: u128) -> IntentRun {
-        IntentRun::new_authenticated(
-            RunId::new(run),
-            receipt.clone(),
-            ClassSet::from_classes(&[OperationClass::TreeFsWorkspace]),
-            resource_budget(),
-            LogicalTime::new(1_000),
-        )
-        .expect("authenticated run")
-    }
-
-    fn components(head_id: fgit_types::RepositoryAuthorityHeadId) -> Vec<SituationComponent> {
-        SituationComponentKind::ALL
-            .into_iter()
-            .enumerate()
-            .map(|(index, kind)| {
-                let byte = u8::try_from(index + 1).expect("ten components");
-                if index % 3 == 0 {
-                    SituationComponent::omitted(
-                        kind,
-                        SituationOmissionReason::NotAvailable,
-                        [byte; 32],
-                    )
-                } else {
-                    SituationComponent::observed(kind, head_id, [byte; 32])
-                }
-            })
-            .collect()
-    }
-
-    #[test]
-    fn receipt_is_order_independent_and_change_sensitive() {
-        let receipt = authority_receipt(0x22, 0x41, 10, 0x51);
-        let head_id = receipt.authority_head_id();
-        let ordered = components(head_id);
-        let mut reversed = ordered.clone();
-        reversed.reverse();
-
-        let first = AgentSituationReceipt::build(
-            receipt.clone(),
-            None,
-            None,
-            LogicalTime::new(20),
-            ordered,
-        )
-        .expect("ordered situation");
-        let second = AgentSituationReceipt::build(
-            receipt.clone(),
-            None,
-            None,
-            LogicalTime::new(20),
-            reversed,
-        )
-        .expect("reordered situation");
-        assert_eq!(first.situation_id(), second.situation_id());
-        let component_order = first
-            .components()
-            .iter()
-            .map(SituationComponent::kind)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            component_order.as_slice(),
-            SituationComponentKind::ALL.as_slice()
-        );
-
-        let mut changed = components(head_id);
-        let search = changed
-            .iter_mut()
-            .find(|component| component.kind() == SituationComponentKind::Search)
-            .expect("search component");
-        *search = SituationComponent::observed(
-            SituationComponentKind::Search,
-            head_id,
-            [0xee; 32],
-        );
-        let third = AgentSituationReceipt::build(
-            receipt,
-            None,
-            None,
-            LogicalTime::new(20),
-            changed,
-        )
-        .expect("changed situation");
-        assert_ne!(first.situation_id(), third.situation_id());
-    }
-
-    #[test]
-    fn every_component_must_be_explicit_and_unique() {
-        let receipt = authority_receipt(0x22, 0x41, 10, 0x51);
-        let head_id = receipt.authority_head_id();
-        let mut missing = components(head_id);
-        missing.retain(|component| component.kind() != SituationComponentKind::Obligations);
-        assert_eq!(
-            AgentSituationReceipt::build(
-                receipt.clone(),
-                None,
-                None,
-                LogicalTime::new(20),
-                missing,
-            )
-            .expect_err("implicit omission must fail"),
-            SituationRefusal::MissingComponent {
-                kind: SituationComponentKind::Obligations,
-            }
-        );
-
-        let mut duplicate = components(head_id);
-        duplicate.retain(|component| component.kind() != SituationComponentKind::Obligations);
-        duplicate.push(SituationComponent::observed(
-            SituationComponentKind::Search,
-            head_id,
-            [0xaa; 32],
-        ));
-        assert_eq!(
-            AgentSituationReceipt::build(
-                receipt,
-                None,
-                None,
-                LogicalTime::new(20),
-                duplicate,
-            )
-            .expect_err("duplicate component must fail"),
-            SituationRefusal::DuplicateComponent {
-                kind: SituationComponentKind::Search,
-            }
-        );
-    }
-
-    #[test]
-    fn mixed_authority_and_preverification_observations_fail_closed() {
-        let receipt = authority_receipt(0x22, 0x41, 10, 0x51);
-        let other = authority_receipt(0x33, 0x42, 10, 0x52);
-        let mut mixed = components(receipt.authority_head_id());
-        let task = mixed
-            .iter_mut()
-            .find(|component| component.kind() == SituationComponentKind::TaskProjection)
-            .expect("task component");
-        *task = SituationComponent::observed(
-            SituationComponentKind::TaskProjection,
-            other.authority_head_id(),
-            [0x91; 32],
-        );
-        assert_eq!(
-            AgentSituationReceipt::build(
-                receipt.clone(),
-                None,
-                None,
-                LogicalTime::new(20),
-                mixed,
-            )
-            .expect_err("mixed authority must fail"),
-            SituationRefusal::ComponentAuthorityMismatch {
-                kind: SituationComponentKind::TaskProjection,
-            }
-        );
-
-        assert_eq!(
-            AgentSituationReceipt::build(
-                receipt.clone(),
-                None,
-                None,
-                LogicalTime::new(9),
-                components(receipt.authority_head_id()),
-            )
-            .expect_err("observation cannot predate verification"),
-            SituationRefusal::ObservationBeforeAuthorityVerification {
-                observed: LogicalTime::new(9),
-                verified: LogicalTime::new(10),
-            }
-        );
-    }
-
-    #[test]
-    fn run_and_workspace_must_share_the_exact_receipt() {
-        let receipt = authority_receipt(0x22, 0x41, 10, 0x51);
-        let other = authority_receipt(0x33, 0x42, 10, 0x52);
-        let run = authenticated_run(&receipt, 7);
-        let other_run = authenticated_run(&other, 8);
-
-        assert_eq!(
-            AgentSituationReceipt::build(
-                receipt.clone(),
-                Some(&other_run),
-                None,
-                LogicalTime::new(20),
-                components(receipt.authority_head_id()),
-            )
-            .expect_err("another run receipt must fail"),
-            SituationRefusal::RunAuthorityMismatch
-        );
-
-        let legacy = IntentRun::new(
-            RunId::new(9),
-            AuthorityBasisRef {
-                repository_id: u128::from_be_bytes(*receipt.repository_id().as_bytes()),
-                authority_head_generation: receipt.authority_head_generation().get(),
-                authority_head_digest: [0x61; 32],
-                verified_at: LogicalTime::new(10),
-            },
-            ClassSet::from_classes(&[OperationClass::TreeFsWorkspace]),
-            resource_budget(),
-            LogicalTime::new(1_000),
-        )
-        .expect("legacy run");
-        assert_eq!(
-            AgentSituationReceipt::build(
-                receipt.clone(),
-                Some(&legacy),
-                None,
-                LogicalTime::new(20),
-                components(receipt.authority_head_id()),
-            )
-            .expect_err("legacy run must fail"),
-            SituationRefusal::RunAuthorityReceiptRequired
-        );
-
-        let workspace = SituationWorkspace {
-            workspace_id: fgit_treefs::WorkspaceId::from_bytes([0x71; 16]),
-            manifest_commitment: [0x72; 32],
-            basis_head_id: receipt.authority_head_id(),
-            run_id: run.run_id(),
-        };
-        AgentSituationReceipt::build(
-            receipt.clone(),
-            Some(&run),
-            Some(workspace),
-            LogicalTime::new(20),
-            components(receipt.authority_head_id()),
-        )
-        .expect("matching workspace situation");
-
-        assert_eq!(
-            AgentSituationReceipt::build(
-                receipt.clone(),
-                None,
-                Some(workspace),
-                LogicalTime::new(20),
-                components(receipt.authority_head_id()),
-            )
-            .expect_err("workspace needs its run"),
-            SituationRefusal::WorkspaceRequiresIntentRun
-        );
-
-        let wrong_run_workspace = SituationWorkspace {
-            run_id: RunId::new(99),
-            ..workspace
-        };
-        assert_eq!(
-            AgentSituationReceipt::build(
-                receipt.clone(),
-                Some(&run),
-                Some(wrong_run_workspace),
-                LogicalTime::new(20),
-                components(receipt.authority_head_id()),
-            )
-            .expect_err("workspace run mismatch must fail"),
-            SituationRefusal::WorkspaceRunMismatch {
-                expected: run.run_id(),
-                observed: RunId::new(99),
-            }
-        );
-
-        let wrong_head_workspace = SituationWorkspace {
-            basis_head_id: other.authority_head_id(),
-            ..workspace
-        };
-        assert_eq!(
-            AgentSituationReceipt::build(
-                receipt.clone(),
-                Some(&run),
-                Some(wrong_head_workspace),
-                LogicalTime::new(20),
-                components(receipt.authority_head_id()),
-            )
-            .expect_err("workspace authority mismatch must fail"),
-            SituationRefusal::WorkspaceAuthorityMismatch
-        );
-    }
-
-    #[test]
-    fn delta_is_minimal_and_same_generation_forks_are_refused() {
-        let receipt = authority_receipt(0x22, 0x41, 10, 0x51);
-        let head_id = receipt.authority_head_id();
-        let before = AgentSituationReceipt::build(
-            receipt.clone(),
-            None,
-            None,
-            LogicalTime::new(20),
-            components(head_id),
-        )
-        .expect("before situation");
-
-        let time_only = AgentSituationReceipt::build(
-            receipt.clone(),
-            None,
-            None,
-            LogicalTime::new(21),
-            components(head_id),
-        )
-        .expect("time-only situation");
-        let time_delta = SituationDelta::between(&before, &time_only).expect("time delta");
-        assert!(time_delta.has_no_context_changes());
-        assert!(time_delta.observation_time_advanced());
-        assert!(time_delta.component_changes().is_empty());
-
-        let mut changed_components = components(head_id);
-        let ownership = changed_components
-            .iter_mut()
-            .find(|component| component.kind() == SituationComponentKind::Ownership)
-            .expect("ownership component");
-        *ownership = SituationComponent::observed(
-            SituationComponentKind::Ownership,
-            head_id,
-            [0xf1; 32],
-        );
-        let after = AgentSituationReceipt::build(
-            receipt.clone(),
-            None,
-            None,
-            LogicalTime::new(22),
-            changed_components,
-        )
-        .expect("after situation");
-        let delta = SituationDelta::between(&before, &after).expect("component delta");
-        assert_eq!(
-            delta.authority_change(),
-            SituationAuthorityChange::Unchanged
-        );
-        assert_eq!(delta.component_changes().len(), 1);
-        assert_eq!(
-            delta.component_changes()[0].kind(),
-            SituationComponentKind::Ownership
-        );
-        assert_eq!(
-            delta.component_changes()[0].transition(),
-            SituationComponentTransition::GenerationChanged
-        );
-
-        let other_repository = authority_receipt(0x33, 0x42, 10, 0x52);
-        let other_situation = AgentSituationReceipt::build(
-            other_repository.clone(),
-            None,
-            None,
-            LogicalTime::new(22),
-            components(other_repository.authority_head_id()),
-        )
-        .expect("other repository situation");
-        assert!(matches!(
-            SituationDelta::between(&before, &other_situation),
-            Err(SituationRefusal::DeltaRepositoryMismatch { .. })
-        ));
-
-        let fork_receipt = authority_receipt(0x22, 0x99, 10, 0x51);
-        let fork = AgentSituationReceipt::build(
-            fork_receipt.clone(),
-            None,
-            None,
-            LogicalTime::new(22),
-            components(fork_receipt.authority_head_id()),
-        )
-        .expect("fork situation");
-        assert_eq!(
-            SituationDelta::between(&before, &fork).expect_err("same-generation fork must fail"),
-            SituationRefusal::AuthorityForkAtSameGeneration {
-                generation: HeadGeneration::FIRST,
-            }
-        );
-
-        assert_eq!(
-            SituationDelta::between(&after, &before)
-                .expect_err("observation time rollback must fail"),
-            SituationRefusal::ObservationTimeRollback {
-                from: LogicalTime::new(22),
-                to: LogicalTime::new(20),
-            }
-        );
     }
 }
