@@ -1,4 +1,6 @@
 # fgit-canonical-body-descriptions-v1
 # family<TAB>canonical payload description
+deliberately-unregistered	Test-only scalar payload used to prove that canonical identity derivation refuses a body whose domain is absent from the cryptographic domain registry.
 deploy-key-binding	Repository and principal identities, signature-scheme tag, fixed public-key bytes, and the granted canonical scope set for one deploy-key binding.
+session	Session handle, principal and repository identities, authentication strength, issuance logical time, and expiry logical time.
 token-grant	Token handle, principal and repository identities, audience bytes, canonical operation set, budget, and expiry logical time.

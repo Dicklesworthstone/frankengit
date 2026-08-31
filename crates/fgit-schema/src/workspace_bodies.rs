@@ -244,23 +244,16 @@ fn rust_sources(directory: &Path, files: &mut Vec<PathBuf>) {
 }
 
 fn source_families_in(source: &str, path: &Path) -> Result<BTreeSet<String>, SchemaRefusal> {
-    let flat = collapse_whitespace(source);
     let mut families = BTreeSet::new();
-    let mut cursor = 0;
-    const IMPLEMENTATION: &str = concat!("impl Canonical", "Body for");
+    let macro_definition = !code_pattern_offsets(source, "macro_rules! bytes_body").is_empty();
 
-    while let Some(offset) = flat[cursor..].find(IMPLEMENTATION) {
-        let start = cursor + offset;
-        cursor = start + IMPLEMENTATION.len();
-        let implementation = &flat[start..];
-        if source.contains("macro_rules! bytes_body")
-            && implementation.trim_start().starts_with("$body")
+    for start in code_pattern_offsets(source, "impl CanonicalBody for") {
+        let implementation = &source[start..];
+        if macro_definition
+            && implementation
+                .split_once('{')
+                .is_some_and(|(header, _)| header.contains("$body"))
         {
-            // The recognized macro definition is not itself a body. Its
-            // concrete `bytes_body!` invocations are scanned below, where
-            // their family literal is available; treating `$body` as an
-            // implementation here would make the coverage gate depend on a
-            // macro placeholder rather than an emitted canonical family.
             continue;
         }
         let Some(end) = implementation.find("fn write_payload") else {
@@ -289,10 +282,10 @@ fn source_families_in(source: &str, path: &Path) -> Result<BTreeSet<String>, Sch
                 found.trim()
             });
 
-        if expression.contains("$family") && source.contains("macro_rules! bytes_body") {
+        if expression.contains("$family") && macro_definition {
             continue;
         }
-        if let Some(family) = resolve_family(expression, &flat) {
+        if let Some(family) = resolve_family(expression, source) {
             families.insert(family);
         } else if !expression.ends_with("::SCHEMA_FAMILY") {
             return Err(SchemaRefusal::CanonicalBodyFamilyUnresolvable {
@@ -302,15 +295,9 @@ fn source_families_in(source: &str, path: &Path) -> Result<BTreeSet<String>, Sch
         }
     }
 
-    // `fgit-admission`'s private `bytes_body!` macro owns four real
-    // implementations.  Its body intentionally contains `$family`, so scan
-    // each literal invocation rather than pretending the macro definition is
-    // a concrete schema family.  A different macro remains unresolvable above
-    // and therefore fails closed.
-    if source.contains("macro_rules! bytes_body") {
-        let mut remaining = source;
-        while let Some(offset) = remaining.find("bytes_body!(") {
-            remaining = &remaining[offset + "bytes_body!(".len()..];
+    if macro_definition {
+        for offset in code_pattern_offsets(source, "bytes_body!(") {
+            let remaining = &source[offset + "bytes_body!(".len()..];
             let Some(end) = remaining.find(");") else {
                 return Err(SchemaRefusal::CanonicalBodyFamilyUnresolvable {
                     source: display_path(path).into(),
@@ -325,11 +312,107 @@ fn source_families_in(source: &str, path: &Path) -> Result<BTreeSet<String>, Sch
                 });
             };
             families.insert(family.clone());
-            remaining = &remaining[end + 2..];
         }
     }
 
     Ok(families)
+}
+
+fn code_pattern_offsets(source: &str, pattern: &str) -> Vec<usize> {
+    let bytes = source.as_bytes();
+    let mut offsets = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"//") {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+        } else if bytes[index..].starts_with(b"/*") {
+            index += 2;
+            let mut depth = 1_usize;
+            while index < bytes.len() && depth != 0 {
+                if bytes[index..].starts_with(b"/*") {
+                    depth += 1;
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    depth -= 1;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+        } else if let Some(end) = char_literal_end(source, index) {
+            index = end;
+        } else if bytes[index] == b'"' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\\' {
+                    index = (index + 2).min(bytes.len());
+                } else if bytes[index] == b'"' {
+                    index += 1;
+                    break;
+                } else {
+                    index += 1;
+                }
+            }
+        } else if let Some((hashes, body_start)) = raw_string_start(bytes, index) {
+            index = body_start;
+            while index < bytes.len() {
+                if bytes[index] == b'"'
+                    && bytes[index + 1..]
+                        .get(..hashes)
+                        .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+                {
+                    index += hashes + 1;
+                    break;
+                }
+                index += 1;
+            }
+        } else if source
+            .get(index..)
+            .is_some_and(|remaining| remaining.starts_with(pattern))
+        {
+            offsets.push(index);
+            index += pattern.len();
+        } else {
+            index += source
+                .get(index..)
+                .and_then(|remaining| remaining.chars().next())
+                .map_or(1, char::len_utf8);
+        }
+    }
+    offsets
+}
+
+fn char_literal_end(source: &str, index: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if bytes.get(index) != Some(&b'\'') {
+        return None;
+    }
+    let mut cursor = index + 1;
+    if bytes.get(cursor) == Some(&b'\\') {
+        cursor += 2;
+    } else {
+        cursor += source.get(cursor..)?.chars().next()?.len_utf8();
+    }
+    (bytes.get(cursor) == Some(&b'\'')).then_some(cursor + 1)
+}
+
+fn raw_string_start(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
+    let mut cursor = index;
+    if bytes.get(cursor) == Some(&b'b') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'r') {
+        return None;
+    }
+    cursor += 1;
+    let hashes_start = cursor;
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor += 1;
+    }
+    (bytes.get(cursor) == Some(&b'"')).then_some((cursor - hashes_start, cursor + 1))
 }
 
 fn resolve_family(expression: &str, flat_source: &str) -> Option<String> {
@@ -377,23 +460,66 @@ fn string_literals(source: &str) -> Vec<String> {
     found
 }
 
-fn collapse_whitespace(source: &str) -> String {
-    let mut collapsed = String::with_capacity(source.len());
-    let mut pending_space = false;
-    for character in source.chars() {
-        if character.is_whitespace() {
-            pending_space = true;
-        } else {
-            if pending_space && !collapsed.is_empty() {
-                collapsed.push(' ');
-            }
-            pending_space = false;
-            collapsed.push(character);
-        }
-    }
-    collapsed
-}
-
 fn display_path(path: &Path) -> String {
     path.display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{code_pattern_offsets, source_families_in};
+
+    #[test]
+    fn scanner_does_not_recognize_its_own_pattern_literals_as_code() {
+        let source = include_str!("workspace_bodies.rs");
+        let offsets = code_pattern_offsets(source, "impl CanonicalBody for");
+        assert!(
+            offsets.is_empty(),
+            "scanner matched lines {:?}",
+            offsets
+                .iter()
+                .map(|offset| source[..*offset].lines().count())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn scanner_ignores_body_syntax_inside_comments_and_strings() {
+        let source = r####"
+            // impl CanonicalBody for LineComment { const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("line"); fn write_payload() {} }
+            /* outer /* impl CanonicalBody for Nested { const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("nested"); fn write_payload() {} } */ */
+            const ORDINARY: &str = "impl CanonicalBody for Ordinary { const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static(\"ordinary\"); fn write_payload() {} }";
+            const RAW: &str = r###"impl CanonicalBody for Raw { const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("raw"); fn write_payload() {} }"###;
+            const CHARACTER: char = 'i';
+        "####;
+        assert!(
+            source_families_in(source, Path::new("non-code.rs"))
+                .expect("source scans")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn scanner_retains_a_real_body_and_macro_invocation() {
+        let source = r#"
+            impl CanonicalBody for Real {
+                const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("real");
+                fn write_payload(&self) {}
+            }
+            macro_rules! bytes_body {
+                ($body:ident, $domain:literal, $family:literal, $field:literal) => {
+                    impl CanonicalBody for $body {
+                        const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static($family);
+                        fn write_payload(&self) {}
+                    }
+                };
+            }
+            bytes_body!(MacroBody, "domain", "macro-real", "field");
+        "#;
+        assert_eq!(
+            source_families_in(source, Path::new("code.rs")).expect("source scans"),
+            ["macro-real".to_owned(), "real".to_owned()].into()
+        );
+    }
 }

@@ -28,6 +28,11 @@ fn check_refuses_a_literal_family_without_an_owning_description() {
     )
     .expect("write detached probe package manifest");
     fs::write(
+        crate_root.join("canonical-bodies.tsv"),
+        "# fgit-canonical-body-descriptions-v1\n# family<TAB>canonical payload description\n",
+    )
+    .expect("write empty description manifest");
+    fs::write(
         crate_root.join("src/lib.rs"),
         concat!(
             "macro_rules! bytes_",

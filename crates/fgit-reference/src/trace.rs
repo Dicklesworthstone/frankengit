@@ -727,7 +727,7 @@ pub struct RootsBody(pub RepositoryRoots);
 
 impl CanonicalBody for RootsBody {
     const DOMAIN: DomainTag = DomainTag::from_static(ROOTS_DOMAIN);
-    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static(ROOTS_SCHEMA_FAMILY);
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("fgit/model-roots");
     const SCHEMA_MAJOR: u16 = 1;
     const SCHEMA_MINOR: u16 = 0;
 
@@ -1412,7 +1412,7 @@ pub struct GoldenTrace {
 
 impl CanonicalBody for GoldenTrace {
     const DOMAIN: DomainTag = DomainTag::from_static(TRACE_DOMAIN);
-    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static(TRACE_SCHEMA_FAMILY);
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("fgit/model-trace");
     const SCHEMA_MAJOR: u16 = 1;
     const SCHEMA_MINOR: u16 = 0;
 
