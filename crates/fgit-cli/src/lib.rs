@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_forge::snapshot::{
     ForgeSnapshot, ForgeSnapshotDiff, PositionTarget, SnapshotDisclosurePolicy, SnapshotLimits,
-    SnapshotRefusal, project_snapshot_from_history,
+    SnapshotRefusal, project_snapshot_from_history, verify_continuous_consistency,
 };
 use fgit_node::{
     DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, NodeConfig,
@@ -1251,23 +1251,35 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
             used_capsule_id: head_body.last_checkpoint_id,
         };
 
-        let mut snapshot = match &position_target {
-            PositionTarget::Latest => live_snapshot.clone(),
-            PositionTarget::Decision(seq) if Some(*seq) == head_body.latest_decision_sequence => {
-                live_snapshot.clone()
+        let project = |target| {
+            match target {
+                PositionTarget::Latest => Ok(live_snapshot.clone()),
+                PositionTarget::Decision(seq) if Some(seq) == head_body.latest_decision_sequence => {
+                    Ok(live_snapshot.clone())
+                }
+                PositionTarget::Head(id) if id == head_id => Ok(live_snapshot.clone()),
+                _ => project_snapshot_from_history(
+                    target,
+                    head_id,
+                    &head_body,
+                    &[],
+                    &[],
+                    &live_refs,
+                    &SnapshotLimits::default(),
+                ),
             }
-            PositionTarget::Head(id) if *id == head_id => live_snapshot.clone(),
-            _ => project_snapshot_from_history(
-                position_target,
+        };
+        let mut snapshot = project(position_target).map_err(CliRefusal::Snapshot)?;
+        if position_target == PositionTarget::Latest {
+            verify_continuous_consistency(
+                &snapshot,
                 head_id,
                 &head_body,
-                &[],
-                &[],
                 &live_refs,
-                &SnapshotLimits::default(),
+                &Default::default(),
             )
-            .map_err(CliRefusal::Snapshot)?,
-        };
+            .map_err(CliRefusal::Snapshot)?;
+        }
 
         if let Some(_actor) = actor_id {
             let policy = SnapshotDisclosurePolicy::Restricted {
@@ -1327,8 +1339,30 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
             }
             Some("diff") => {
                 let other_target = diff_target.ok_or(CliRefusal::Usage)?;
-                let older_snapshot = snapshot;
-                let diff = ForgeSnapshotDiff::diff(&older_snapshot, &live_snapshot);
+                let mut newer_snapshot = project(other_target).map_err(CliRefusal::Snapshot)?;
+                if other_target == PositionTarget::Latest {
+                    verify_continuous_consistency(
+                        &newer_snapshot,
+                        head_id,
+                        &head_body,
+                        &live_refs,
+                        &Default::default(),
+                    )
+                    .map_err(CliRefusal::Snapshot)?;
+                }
+                if actor_id.is_some() {
+                    let policy = SnapshotDisclosurePolicy::Restricted {
+                        allowed_refs: Some(live_refs.keys().cloned().collect()),
+                        revoked_refs: std::collections::BTreeSet::new(),
+                        allowed_prs: None,
+                        revoked_prs: std::collections::BTreeSet::new(),
+                        repository_access_revoked: false,
+                    };
+                    newer_snapshot = policy
+                        .filter_snapshot(newer_snapshot)
+                        .map_err(CliRefusal::Snapshot)?;
+                }
+                let diff = ForgeSnapshotDiff::diff(&snapshot, &newer_snapshot);
                 Ok(CliOutcome::At(AtReport::Diff {
                     older: format!("{position_target}"),
                     newer: format!("{other_target}"),
