@@ -105,22 +105,21 @@ fn fg_at_refs_and_prs_subcommands() {
 }
 
 #[test]
-fn fg_at_diff_subcommand() {
+fn fg_at_diff_projects_both_requested_endpoints() {
     let scratch = Scratch::new();
     let init_args = words(&["init", &scratch.root(), TENANT, REPOSITORY]);
     assert!(matches!(run(&init_args), Ok(CliOutcome::Initialized(_))));
 
-    // Query diff between latest and decision:1
-    let diff_args = words(&[
+    let same_position = words(&[
         "at",
         &scratch.root(),
         TENANT,
         REPOSITORY,
         "latest",
         "diff",
-        "decision:1",
+        "latest",
     ]);
-    let outcome = run(&diff_args).expect("fg at diff succeeds");
+    let outcome = run(&same_position).expect("two existing endpoints can be diffed");
     match outcome {
         CliOutcome::At(AtReport::Diff {
             older,
@@ -129,12 +128,28 @@ fn fg_at_diff_subcommand() {
             pr_changes_count,
         }) => {
             assert_eq!(older, "latest");
-            assert_eq!(newer, "decision:1");
+            assert_eq!(newer, "latest");
             assert_eq!(ref_changes_count, 0);
             assert_eq!(pr_changes_count, 0);
         }
         other => panic!("expected AtReport::Diff, got {other:?}"),
     }
+
+    let missing_endpoint = words(&[
+        "at",
+        &scratch.root(),
+        TENANT,
+        REPOSITORY,
+        "latest",
+        "diff",
+        "decision:1",
+    ]);
+    assert!(matches!(
+        run(&missing_endpoint),
+        Err(CliRefusal::Snapshot(
+            fgit_forge::snapshot::SnapshotRefusal::TargetAheadOfAuthority { .. }
+        ))
+    ));
 }
 
 #[test]
