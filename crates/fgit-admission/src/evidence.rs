@@ -129,6 +129,14 @@ pub struct ForgeEventBatch {
     effect_bytes: Vec<u8>,
 }
 
+impl ForgeEventBatch {
+    /// Reports whether this evidence records the canonical empty forge partition.
+    pub fn is_empty(&self) -> Result<bool, CodecRefusal> {
+        Ok(self.effect_bytes
+            == canonical_forge_effect_bytes(&fgit_reference::effect::NetEffects::default())?)
+    }
+}
+
 /// Outbox evidence for the outbox partition of the target-disjoint normal form.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboxEffectBatch {

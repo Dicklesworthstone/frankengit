@@ -26,9 +26,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use fgit_admission::evidence::{
-    DURABLE_REFUSAL_EVIDENCE_DETAIL, DecisionEvidenceBodies, ForgeEventBatch, InvariantEvidence,
-    OutboxEffectBatch, PolicyDecisionEvidence, PrincipalSnapshot, RefusalEvidenceBodies,
-    RetentionDelta, evidence_root, principal_snapshot_id,
+    DURABLE_REFUSAL_EVIDENCE_DETAIL, DecisionEvidenceBodies,
+    ForgeEventBatch as AdmissionForgeEventEvidence, InvariantEvidence, OutboxEffectBatch,
+    PolicyDecisionEvidence, PrincipalSnapshot, RefusalEvidenceBodies, RetentionDelta,
+    evidence_root, principal_snapshot_id,
 };
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionResult,
@@ -44,7 +45,7 @@ use fgit_admission::{
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, HeadInit, HeadKey,
     HeadRead, IdempotencyKey, ImmutableKey, ImmutableRead, KeyError, OutcomeLookup, PutOutcome,
-    StoreInstanceId, initialize_repository_async, outcome_index_root,
+    StoreInstanceId, initialize_repository_async, next_batch_to_replay, outcome_index_root,
     read_authority_head_body_async, read_decision_batch_body_async, read_hidden_ref_policy_async,
     read_repository_incarnation_configuration_async, record_creation_attempt_async,
     resolve_outcome_async, stage_latest_repository_incarnation_configuration_async,
@@ -61,6 +62,7 @@ use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body,
 };
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
+use fgit_forge::{ForgeEventBatch as CanonicalForgeEventBatch, HistoricalBatch};
 use fgit_git_object::{
     AcceptanceProfile, ObjectError, ObjectType, ParseLimits, ParsedObject, parse_object_body,
 };
@@ -1352,15 +1354,16 @@ impl DurableAdmissionMaterializer {
                 is_cancelled,
             )
             .await?;
-        let forge_event_batch = read_evidence_body_in::<Authority, ForgeEventBatch, IsCancelled>(
-            authority,
-            cx,
-            context.repository_id,
-            ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
-            evidence.forge_event_batch_root,
-            is_cancelled,
-        )
-        .await?;
+        let forge_event_batch =
+            read_evidence_body_in::<Authority, AdmissionForgeEventEvidence, IsCancelled>(
+                authority,
+                cx,
+                context.repository_id,
+                ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
+                evidence.forge_event_batch_root,
+                is_cancelled,
+            )
+            .await?;
         let outbox_effect_batch =
             read_evidence_body_in::<Authority, OutboxEffectBatch, IsCancelled>(
                 authority,
@@ -2419,6 +2422,59 @@ fn authority_head_id(
             RepositoryAuthorityHeadId::from_internal_object_id(identity)
                 .map_err(AdmissionMaterializationRefusal::HeadIdentityDomain)
         })
+}
+
+async fn read_historical_ref_state_in<Authority>(
+    authority: &Authority,
+    cx: &Authority::Context,
+    repository_id: RepositoryId,
+    head: &RepositoryAuthorityHeadBody,
+) -> Result<CanonicalRefState, AdmissionMaterializationRefusal>
+where
+    Authority: AsyncAuthorityStore + ?Sized,
+{
+    let key = admission_immutable_key(ADMISSION_REF_STATE_KEY_PREFIX, repository_id, head.ref_root)
+        .map_err(AdmissionMaterializationRefusal::Key)?;
+    let ImmutableRead::Present(frame) = authority
+        .read_immutable(cx, &key)
+        .await
+        .map_err(AdmissionMaterializationRefusal::Authority)?
+    else {
+        return Err(AdmissionMaterializationRefusal::ImmutableAbsent(
+            head.ref_root,
+        ));
+    };
+    let state = decode_body::<CanonicalRefState>(&frame, fgit_codec::DecodeLimits::DEFAULT)
+        .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+    let root_layout = match fgit_authority::read_repository_configuration_async(
+        authority,
+        cx,
+        &head.configuration_root,
+    )
+    .await
+    {
+        Ok(configuration) => configuration.root_layout,
+        Err(fgit_authority::OutcomeFailure::Codec(_)) => {
+            read_repository_incarnation_configuration_async(authority, cx, &head.configuration_root)
+                .await
+                .map_err(|error| AdmissionMaterializationRefusal::DecisionHistory(Box::new(error)))?
+                .root_layout
+        }
+        Err(error) => {
+            return Err(AdmissionMaterializationRefusal::DecisionHistory(Box::new(
+                error,
+            )));
+        }
+    };
+    if ref_state_root(root_layout, &state)
+        .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
+        != head.ref_root
+    {
+        return Err(AdmissionMaterializationRefusal::CanonicalRoot(
+            RefusalCode::InternalInvariantBreach,
+        ));
+    }
+    Ok(state)
 }
 
 fn repository_commit_id(
@@ -5711,6 +5767,134 @@ impl OneNode {
     ) -> Result<MaterializedAdmission, AdmissionMaterializationRefusal> {
         let request = self.request_context();
         self.materialize_admission_in(&request).await
+    }
+
+    /// Loads the bounded authenticated decision history required by snapshot projection.
+    pub async fn snapshot_history_in(
+        &self,
+        request: &NodeRequestContext,
+    ) -> Result<Vec<HistoricalBatch>, AdmissionMaterializationRefusal> {
+        let HeadRead::Present(receipt) =
+            AsyncAuthorityStore::read_head(&self.authority, request.authority(), &self.head_key)
+                .await
+                .map_err(AdmissionMaterializationRefusal::Authority)?
+        else {
+            return Err(AdmissionMaterializationRefusal::DecisionHistoryUnbound);
+        };
+        let authenticated = AsyncAuthorityStore::authenticate_head_receipt(
+            &self.authority,
+            request.authority(),
+            &receipt,
+        )
+        .await
+        .map_err(AdmissionMaterializationRefusal::Authority)?;
+        let mut successor = authenticated
+            .body()
+            .map_err(AdmissionMaterializationRefusal::HeadBody)?;
+        let mut successor_id = authority_head_id(&successor)?;
+        let mut successor_refs = read_historical_ref_state_in(
+            &self.authority,
+            request.authority(),
+            self.repository_id,
+            &successor,
+        )
+        .await?;
+        let mut walked = 0_usize;
+        let mut history = Vec::new();
+
+        while let Some(batch_id) = next_batch_to_replay(&successor, &mut walked)
+            .map_err(|error| AdmissionMaterializationRefusal::DecisionHistory(Box::new(error)))?
+        {
+            if request.authority().checkpoint().is_err() {
+                return Err(AdmissionMaterializationRefusal::Cancelled);
+            }
+            let predecessor_id = successor
+                .predecessor_head_id
+                .ok_or(AdmissionMaterializationRefusal::DecisionHistoryUnbound)?;
+            let predecessor = read_authority_head_body_async(
+                &self.authority,
+                request.authority(),
+                predecessor_id,
+            )
+            .await
+            .map_err(|error| AdmissionMaterializationRefusal::DecisionHistory(Box::new(error)))?;
+            let batch =
+                read_decision_batch_body_async(&self.authority, request.authority(), batch_id)
+                    .await
+                    .map_err(|error| {
+                        AdmissionMaterializationRefusal::DecisionHistory(Box::new(error))
+                    })?;
+            let basis = PublicationBasis::new(predecessor_id, predecessor.clone());
+            verify_pair(&CryptoBodyIdentity, &basis, &batch, &successor)
+                .map_err(AdmissionMaterializationRefusal::DecisionHistoryVerification)?;
+            let predecessor_refs = read_historical_ref_state_in(
+                &self.authority,
+                request.authority(),
+                self.repository_id,
+                &predecessor,
+            )
+            .await?;
+            let mut ref_updates = Vec::new();
+            for (name, oid) in successor_refs.refs() {
+                if predecessor_refs.refs().get(name) != Some(oid) {
+                    ref_updates.push((name.as_bytes().to_vec(), Some(*oid)));
+                }
+            }
+            for name in predecessor_refs.refs().keys() {
+                if !successor_refs.refs().contains_key(name) {
+                    ref_updates.push((name.as_bytes().to_vec(), None));
+                }
+            }
+            let is_cancelled = || request.authority().checkpoint().is_err();
+            let mut forge_events = Vec::new();
+            for record in &batch.committed_rcrs {
+                match read_evidence_body_in::<_, CanonicalForgeEventBatch, _>(
+                    &self.authority,
+                    request.authority(),
+                    self.repository_id,
+                    ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
+                    record.forge_event_batch_root,
+                    &is_cancelled,
+                )
+                .await
+                {
+                    Ok(events) => forge_events.extend(events.events),
+                    Err(AdmissionMaterializationRefusal::CanonicalFrame(_)) => {
+                        let evidence = read_evidence_body_in::<_, AdmissionForgeEventEvidence, _>(
+                            &self.authority,
+                            request.authority(),
+                            self.repository_id,
+                            ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
+                            record.forge_event_batch_root,
+                            &is_cancelled,
+                        )
+                        .await?;
+                        if !evidence
+                            .is_empty()
+                            .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?
+                        {
+                            return Err(AdmissionMaterializationRefusal::CanonicalRoot(
+                                RefusalCode::EvidenceInvalid,
+                            ));
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            history.push(HistoricalBatch {
+                batch_id,
+                resulting_head_id: successor_id,
+                resulting_head_generation: successor.generation,
+                batch,
+                forge_events,
+                ref_updates,
+            });
+            successor = predecessor;
+            successor_id = predecessor_id;
+            successor_refs = predecessor_refs;
+        }
+        history.reverse();
+        Ok(history)
     }
 
     fn durable_admission_projection(
@@ -10261,6 +10445,11 @@ mod tests {
             .block_on(node.materialize_admission_in(&request));
         assert!(matches!(
             result,
+            Err(AdmissionMaterializationRefusal::ImmutableAbsent(root)) if root == missing_root
+        ));
+        let history = node.runtime().block_on(node.snapshot_history_in(&request));
+        assert!(matches!(
+            history,
             Err(AdmissionMaterializationRefusal::ImmutableAbsent(root)) if root == missing_root
         ));
         assert_eq!(

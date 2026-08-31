@@ -866,6 +866,7 @@ dependencies = [
  "fgit-chronicle",
  "fgit-codec",
  "fgit-crypto",
+ "fgit-forge",
  "fgit-git-object",
  "fgit-object-fabric",
  "fgit-pack",

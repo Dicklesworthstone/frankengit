@@ -1008,6 +1008,16 @@ fn run_doctor(
     }
 }
 
+fn encode_hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
 fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>, CliRefusal> {
     if !hex.len().is_multiple_of(2) {
         return Err(CliRefusal::InvalidPosition(hex.to_string()));
@@ -1250,24 +1260,39 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
             replayed_batches_count: 0,
             used_capsule_id: head_body.last_checkpoint_id,
         };
+        let is_current = |target| match target {
+            PositionTarget::Latest => true,
+            PositionTarget::Decision(seq) => Some(seq) == head_body.latest_decision_sequence,
+            PositionTarget::Head(id) => id == head_id,
+            _ => false,
+        };
+        let historical_batches =
+            if is_current(position_target) && diff_target.is_none_or(is_current) {
+                Vec::new()
+            } else {
+                node.snapshot_history_in(&request).await.map_err(|error| {
+                    CliRefusal::Node(fgit_node::NodeRefusal::AdmissionMaterialization(Box::new(
+                        error,
+                    )))
+                })?
+            };
+        let genesis_refs = std::collections::BTreeMap::new();
 
-        let project = |target| {
-            match target {
-                PositionTarget::Latest => Ok(live_snapshot.clone()),
-                PositionTarget::Decision(seq) if Some(seq) == head_body.latest_decision_sequence => {
-                    Ok(live_snapshot.clone())
-                }
-                PositionTarget::Head(id) if id == head_id => Ok(live_snapshot.clone()),
-                _ => project_snapshot_from_history(
-                    target,
-                    head_id,
-                    &head_body,
-                    &[],
-                    &[],
-                    &live_refs,
-                    &SnapshotLimits::default(),
-                ),
+        let project = |target| match target {
+            PositionTarget::Latest => Ok(live_snapshot.clone()),
+            PositionTarget::Decision(seq) if Some(seq) == head_body.latest_decision_sequence => {
+                Ok(live_snapshot.clone())
             }
+            PositionTarget::Head(id) if id == head_id => Ok(live_snapshot.clone()),
+            _ => project_snapshot_from_history(
+                target,
+                head_id,
+                &head_body,
+                &[],
+                &historical_batches,
+                &genesis_refs,
+                &SnapshotLimits::default(),
+            ),
         };
         let mut snapshot = project(position_target).map_err(CliRefusal::Snapshot)?;
         if position_target == PositionTarget::Latest {
@@ -1300,7 +1325,13 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
                 Ok(CliOutcome::At(AtReport::Summary {
                     snapshot_summary: summary,
                     target: format!("{position_target}"),
-                    head_id: format!("{}", snapshot.effective_head_id),
+                    head_id: encode_hex_bytes(
+                        snapshot
+                            .effective_head_id
+                            .as_internal_object_id()
+                            .digest()
+                            .as_bytes(),
+                    ),
                     decision_sequence: snapshot.effective_decision_sequence.map(|s| s.get()),
                     refs_count: snapshot.refs.len(),
                     prs_count: snapshot.pull_requests.len(),
@@ -1440,7 +1471,7 @@ mod tests {
     use fgit_node::{NodeConfig, NodeRefusal, OneNode};
     use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId, TenantId};
 
-    use super::{CliOutcome, CliRefusal, run};
+    use super::{AtReport, CliOutcome, CliRefusal, encode_hex_bytes, node_config, run};
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -1795,6 +1826,160 @@ mod tests {
         let pack = fs::read(destination).expect("imported pack is visible");
         assert_eq!(pack.len(), bytes);
         assert_eq!(&pack[..4], b"PACK");
+    }
+
+    #[test]
+    fn at_reads_a_non_latest_decision_from_authenticated_durable_history() {
+        let scratch = ScratchDirectory::new();
+        let storage_root = scratch.0.join("node").to_string_lossy().into_owned();
+        let source = scratch.0.join("source.git");
+        let imported_commit = write_loose_commit_repository(&source);
+        let tenant = "11111111111111111111111111111111".to_owned();
+        let repository = "22222222222222222222222222222222".to_owned();
+        let principal = "33333333333333333333333333333333".to_owned();
+        let init = vec![
+            "init".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+        ];
+        assert!(matches!(run(&init), Ok(CliOutcome::Initialized(_))));
+        let first_import = vec![
+            "import".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+            principal.clone(),
+            "historical-import-1".to_owned(),
+            source.to_string_lossy().into_owned(),
+        ];
+        assert!(matches!(
+            run(&first_import),
+            Ok(CliOutcome::Imported { command_count: 1 })
+        ));
+        let second_import = vec![
+            "import".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+            principal,
+            "historical-import-2".to_owned(),
+            source.to_string_lossy().into_owned(),
+        ];
+        assert!(matches!(
+            run(&second_import),
+            Err(CliRefusal::ImportRefused(
+                fgit_types::RefusalCode::ExpectedOldRefMismatch
+            ))
+        ));
+
+        let historical_refs = vec![
+            "at".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+            "decision:1".to_owned(),
+            "refs".to_owned(),
+        ];
+        let CliOutcome::At(AtReport::Refs { position, refs }) =
+            run(&historical_refs).expect("authenticated decision history projects")
+        else {
+            panic!("historical query returns a refs report");
+        };
+        assert_eq!(position, "decision:1");
+        assert_eq!(
+            refs,
+            vec![("refs/heads/main".to_owned(), imported_commit.to_string())]
+        );
+
+        let historical_summary = vec![
+            "at".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+            "decision:1".to_owned(),
+        ];
+        let CliOutcome::At(AtReport::Summary { head_id, .. }) =
+            run(&historical_summary).expect("historical head identity is reported")
+        else {
+            panic!("historical query returns a summary report");
+        };
+        for position in [format!("head:{head_id}"), "sequence:1".to_owned()] {
+            let query = vec![
+                "at".to_owned(),
+                storage_root.clone(),
+                tenant.clone(),
+                repository.clone(),
+                position.clone(),
+                "refs".to_owned(),
+            ];
+            let outcome = run(&query);
+            assert!(
+                matches!(
+                    outcome,
+                    Ok(CliOutcome::At(AtReport::Refs { ref refs, .. })) if refs.len() == 1
+                ),
+                "{position} must resolve through authenticated history: {outcome:?}"
+            );
+        }
+
+        let node = OneNode::open_existing(
+            node_config(&storage_root, &tenant, &repository, None, None)
+                .expect("historical node configuration parses"),
+        )
+        .expect("historical node reopens");
+        let request = node.request_context();
+        let history = node
+            .runtime()
+            .block_on(node.snapshot_history_in(&request))
+            .expect("authenticated history loads");
+        let record = history[0]
+            .batch
+            .committed_rcrs
+            .first()
+            .expect("first decision committed the import");
+        let commit_id = fgit_codec::body_id(&fgit_codec::CryptoBodyIdentity, record)
+            .and_then(|identity| {
+                fgit_types::RepositoryCommitId::from_internal_object_id(identity)
+                    .map_err(fgit_codec::CodecRefusal::from)
+            })
+            .expect("committed record identity derives");
+        node.shutdown().expect("historical node closes");
+        let commit_query = vec![
+            "at".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+            format!(
+                "commit:{}",
+                encode_hex_bytes(commit_id.as_internal_object_id().digest().as_bytes())
+            ),
+            "refs".to_owned(),
+        ];
+        assert!(matches!(
+            run(&commit_query),
+            Ok(CliOutcome::At(AtReport::Refs { ref refs, .. })) if refs.len() == 1
+        ));
+
+        let historical_to_latest = vec![
+            "at".to_owned(),
+            storage_root,
+            tenant,
+            repository,
+            "decision:1".to_owned(),
+            "diff".to_owned(),
+            "latest".to_owned(),
+        ];
+        let CliOutcome::At(AtReport::Diff {
+            ref_changes_count,
+            pr_changes_count,
+            ..
+        }) = run(&historical_to_latest).expect("both diff endpoints project")
+        else {
+            panic!("historical diff returns a diff report");
+        };
+        assert_eq!(ref_changes_count, 0);
+        assert_eq!(pr_changes_count, 0);
     }
 
     #[test]

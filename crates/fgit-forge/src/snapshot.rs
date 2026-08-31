@@ -22,8 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_authority::AuthorityFailure;
 use fgit_chronicle::{ChronicleRefusal, RepositoryCapsuleBody};
-use fgit_codec::CodecRefusal;
 use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody};
+use fgit_codec::{CodecRefusal, CryptoBodyIdentity, body_id};
 use fgit_types::{
     DecisionSequence, Digest, GitOid, HeadGeneration, PolicyEpoch, RepositoryAuthorityHeadId,
     RepositoryCapsuleId, RepositoryCommitId, RepositoryDecisionBatchId, RepositoryId,
@@ -835,8 +835,11 @@ pub fn project_snapshot_from_history(
             let mut found_seq = None;
             for b in batches {
                 for rcr in &b.batch.committed_rcrs {
-                    if rcr.tx_id.as_internal_object_id() == commit_id.as_internal_object_id() {
-                        // Find matching decision
+                    let rcr_id = body_id(&CryptoBodyIdentity, rcr).and_then(|identity| {
+                        RepositoryCommitId::from_internal_object_id(identity)
+                            .map_err(CodecRefusal::from)
+                    })?;
+                    if rcr_id == commit_id {
                         if let Some(d) = b.batch.decisions.iter().find(|d| d.tx_id == rcr.tx_id) {
                             found_seq = Some(d.decision_sequence);
                             break;
@@ -856,10 +859,13 @@ pub fn project_snapshot_from_history(
         PositionTarget::Sequence(req_seq) => {
             let mut found_seq = None;
             for b in batches {
-                for decision in &b.batch.decisions {
-                    if let fgit_types::vocabulary::DecisionOutcome::Committed { .. } =
-                        decision.outcome
-                        && decision.decision_sequence.get() == req_seq.get()
+                for record in &b.batch.committed_rcrs {
+                    if record.repository_sequence == req_seq
+                        && let Some(decision) = b
+                            .batch
+                            .decisions
+                            .iter()
+                            .find(|decision| decision.tx_id == record.tx_id)
                     {
                         found_seq = Some(decision.decision_sequence);
                         break;
@@ -978,6 +984,9 @@ pub fn project_snapshot_from_history(
         }
 
         if first_seq <= target_limit {
+            if last_seq > target_limit {
+                return Err(SnapshotRefusal::TargetNotFound { target });
+            }
             batches_to_replay.push(batch);
         }
     }
