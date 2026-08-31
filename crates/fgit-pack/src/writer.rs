@@ -2430,17 +2430,15 @@ mod tests {
         // current_offset must be large enough that distance <= current_offset
         // (decode_ofs_delta_base refuses otherwise) and that
         // current_offset - distance >= FIRST_ENTRY_OFFSET (12).
-        let current_offset: u64 = u32::MAX as u64;
+        let current_offset = u64::from(u32::MAX);
         let cases: &[u64] = &[
             1, 2, 0x7f, 0x80, 0x81, 0x100, 0x3fff, 0x4000, 0x4001, 0xffff, 0x1_0000, 0x1_ffff,
             0x2_0000, 0xff_ffff, 0x1_000000,
         ];
         for distance in cases {
-            let encoded =
-                encode_ofs_delta_distance(*distance).expect("encoder refuses only d=0");
-            let (decoded, _consumed) =
-                decode_ofs_delta_base(current_offset, &encoded, &mut always)
-                    .expect("encoder/decoder pair must round-trip");
+            let encoded = encode_ofs_delta_distance(*distance).expect("encoder refuses only d=0");
+            let (decoded, _consumed) = decode_ofs_delta_base(current_offset, &encoded, &mut always)
+                .expect("encoder/decoder pair must round-trip");
             assert_eq!(
                 decoded,
                 current_offset - *distance,
@@ -2460,12 +2458,19 @@ mod tests {
         // (`current_offset - distance >= 12`); for d = u64::MAX and
         // d = u64::MAX - 1 the encoder must still not panic.
         use crate::decode_ofs_delta_base;
-        for distance in [u64::MAX, u64::MAX - 1, u64::MAX - 12, u64::MAX / 2, 0x100_0000_0000] {
-            let encoded = encode_ofs_delta_distance(distance)
-                .expect("non-zero distance always encodes");
+        for distance in [
+            u64::MAX,
+            u64::MAX - 1,
+            u64::MAX - 12,
+            u64::MAX / 2,
+            0x100_0000_0000,
+        ] {
+            let encoded =
+                encode_ofs_delta_distance(distance).expect("non-zero distance always encodes");
             if let Some(current_offset) = distance.checked_add(12) {
-                let (decoded, _consumed) = decode_ofs_delta_base(current_offset, &encoded, &mut always)
-                    .expect("encoder/decoder round-trip for large distance");
+                let (decoded, _consumed) =
+                    decode_ofs_delta_base(current_offset, &encoded, &mut always)
+                        .expect("encoder/decoder round-trip for large distance");
                 assert_eq!(decoded, 12, "u64-range distance {distance} must round-trip");
             }
         }

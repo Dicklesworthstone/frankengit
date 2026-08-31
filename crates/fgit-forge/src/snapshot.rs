@@ -839,11 +839,11 @@ pub fn project_snapshot_from_history(
                         RepositoryCommitId::from_internal_object_id(identity)
                             .map_err(CodecRefusal::from)
                     })?;
-                    if rcr_id == commit_id {
-                        if let Some(d) = b.batch.decisions.iter().find(|d| d.tx_id == rcr.tx_id) {
-                            found_seq = Some(d.decision_sequence);
-                            break;
-                        }
+                    if rcr_id == commit_id
+                        && let Some(d) = b.batch.decisions.iter().find(|d| d.tx_id == rcr.tx_id)
+                    {
+                        found_seq = Some(d.decision_sequence);
+                        break;
                     }
                 }
                 if found_seq.is_some() {
