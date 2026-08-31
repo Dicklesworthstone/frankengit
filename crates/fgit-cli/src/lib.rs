@@ -1018,6 +1018,14 @@ fn encode_hex_bytes(bytes: &[u8]) -> String {
     encoded
 }
 
+fn encode_derived_id(id: &fgit_types::InternalObjectId) -> String {
+    format!(
+        "alg:{}:{}",
+        id.algorithm().code_point(),
+        encode_hex_bytes(id.digest().as_bytes())
+    )
+}
+
 fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>, CliRefusal> {
     if !hex.len().is_multiple_of(2) {
         return Err(CliRefusal::InvalidPosition(hex.to_string()));
@@ -1043,15 +1051,26 @@ fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>, CliRefusal> {
 
 fn parse_derived_id_from_hex<T>(
     token: &str,
-    hex_str: &str,
+    encoded: &str,
     ctor: fn(DigestAlgorithmId, CodecVersion, DigestBytes) -> T,
 ) -> Result<T, CliRefusal> {
+    let (algorithm, hex_str) = if let Some(rest) = encoded.strip_prefix("alg:") {
+        let (code_point, digest) = rest
+            .split_once(':')
+            .ok_or_else(|| CliRefusal::InvalidPosition(token.to_string()))?;
+        let code_point = code_point
+            .parse::<u16>()
+            .map_err(|_| CliRefusal::InvalidPosition(token.to_string()))?;
+        (code_point, digest)
+    } else {
+        (1, encoded)
+    };
     let bytes = parse_hex_bytes(hex_str)?;
     let digest =
         DigestBytes::try_new(&bytes).map_err(|_| CliRefusal::InvalidPosition(token.to_string()))?;
-    let alg = DigestAlgorithmId::try_new(1)
+    let algorithm = DigestAlgorithmId::try_new(algorithm)
         .map_err(|_| CliRefusal::InvalidPosition(token.to_string()))?;
-    Ok(ctor(alg, CANONICAL_CODEC_VERSION, digest))
+    Ok(ctor(algorithm, CANONICAL_CODEC_VERSION, digest))
 }
 
 fn parse_position_target(token: &str) -> Result<PositionTarget, CliRefusal> {
@@ -1325,13 +1344,7 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
                 Ok(CliOutcome::At(AtReport::Summary {
                     snapshot_summary: summary,
                     target: format!("{position_target}"),
-                    head_id: encode_hex_bytes(
-                        snapshot
-                            .effective_head_id
-                            .as_internal_object_id()
-                            .digest()
-                            .as_bytes(),
-                    ),
+                    head_id: encode_derived_id(snapshot.effective_head_id.as_internal_object_id()),
                     decision_sequence: snapshot.effective_decision_sequence.map(|s| s.get()),
                     refs_count: snapshot.refs.len(),
                     prs_count: snapshot.pull_requests.len(),
@@ -1471,7 +1484,7 @@ mod tests {
     use fgit_node::{NodeConfig, NodeRefusal, OneNode};
     use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId, TenantId};
 
-    use super::{AtReport, CliOutcome, CliRefusal, encode_hex_bytes, node_config, run};
+    use super::{AtReport, CliOutcome, CliRefusal, encode_derived_id, node_config, run};
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -1952,7 +1965,7 @@ mod tests {
             repository.clone(),
             format!(
                 "commit:{}",
-                encode_hex_bytes(commit_id.as_internal_object_id().digest().as_bytes())
+                encode_derived_id(commit_id.as_internal_object_id())
             ),
             "refs".to_owned(),
         ];
