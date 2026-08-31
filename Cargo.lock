@@ -2325,9 +2325,9 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-core"
-version = "0.4.2"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41fe7ee1ca5c662a202099d1968ed1baee8c0de351618407057ec5d7b13b0c19"
+checksum = "415b7dcff7623ded0b781456f5bdaf26b89d5fdc01fea7f9db150e7d75b1e52c"
 dependencies = [
  "asupersync",
  "regex",
