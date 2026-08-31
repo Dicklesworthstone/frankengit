@@ -127,13 +127,18 @@ most of the product vision remains ahead:
   forge events through the existing outbox — neither code path nor a
   dedicated test exists for that half today, and the bead is in flight
   (`frankengit-asa3`).
-- A position-addressed forge snapshot projector and the `fg at` command
-  (parser, projection, and binary rendering, repaired in `0f6a81b7`) have
-  landed, but the product path is not complete: the CLI supplies no authority
-  history or capsules to non-latest projection, does not project the second
-  endpoint of a requested diff, and does not call the continuous-consistency
-  check. Time travel will remain unshipped until those gaps are repaired in
-  the original FG-038a slice and exercised over non-empty durable history.
+- The position-addressed forge snapshot projector and the `fg at` command
+  have landed: parser, projection, binary rendering, the second-endpoint
+  diff subcommand, the continuous-consistency check on both endpoints
+  (`verify_continuous_consistency` at fgit-cli/src/lib.rs:1299 and 1374),
+  and the authenticated decision-history read for non-current positions
+  (`fgit-node::snapshot_history_in`, 7dc8b4e8). The 6 `fg at` integration
+  tests pass at HEAD `fe3bb04a`, including `fg_at_diff_projects_both_requested_endpoints`
+  and the `TargetAheadOfAuthority` refusal for a decision index the
+  authority has not reached. The remaining gap is an end-to-end test
+  over non-empty durable history: no test today populates a historical
+  decision and then projects across it, so the historical path is
+  code-anchored but not test-anchored for a real batch.
 - The dependency graph tracks these gaps, including external convergence gates
   for fastapi_rust, sqlmodel/FrankenSQLite, and FrankenTUI. The smart-HTTP gap is
   tracked explicitly by FG-105 rather than being hidden inside raw-socket or
