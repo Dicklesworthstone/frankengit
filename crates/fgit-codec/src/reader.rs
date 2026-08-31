@@ -240,6 +240,18 @@ impl<'a> Decoder<'a> {
     ///
     /// Elements must be in strictly ascending encoded-byte order; equal
     /// neighbours are a duplicate and a descent is a non-canonical encoding.
+    ///
+    /// # Closure contract
+    ///
+    /// The `read` closure must advance the decoder offset by **exactly** the
+    /// bytes of one element. The ordering check compares the raw input slice
+    /// `&input[start..self.offset]` (where `start` is the offset at closure
+    /// entry) to the previous element's slice; if the closure reads a wrapper
+    /// around the element (e.g. a length prefix it interprets as part of
+    /// the canonical form) that slice will be wrong, and the ordering check
+    /// will silently accept non-canonical encodings. All current callers in
+    /// this crate use a single primitive reader (e.g. `Decoder::read_git_oid`)
+    /// that does satisfy the contract.
     pub fn read_canonical_set<T, F>(
         &mut self,
         field: &'static str,
