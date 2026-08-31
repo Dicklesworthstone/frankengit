@@ -2404,4 +2404,70 @@ mod tests {
         emit_copy_instruction(0, 0x1_0000, &mut program).expect("64k special copy");
         assert_eq!(program, vec![0x80]);
     }
+    // OFS_DELTA distance encoder: behavioural tests.
+    //
+    // Why this lives here: `encode_ofs_delta_distance` is private, but
+    // `decode_ofs_delta_base` is re-exported at the crate root (lib.rs:53), so
+    // any drift between the encoder and the decoder is visible the moment the
+    // encoder is changed. The whole-pack round-trip in writer_roundtrip.rs
+    // exercises the encoder only via whatever distances the planner
+    // produces; the boundary cases (0x7f->0x80, 0x3fff->0x4000, 0x1ffff->0x20000)
+    // and the d=0 refusal are pinned here. NO claim that the byte format
+    // matches upstream git; that is a separate question answered by the
+    // pinned-oracle lane (pack_writer_roundtrip.sh) once provisioned.
+    #[test]
+    fn ofs_delta_distance_zero_is_refused() {
+        assert_eq!(
+            encode_ofs_delta_distance(0),
+            Err(PackWriteError::Pack(PackError::InvalidOfsDelta)),
+        );
+    }
+
+    #[test]
+    fn ofs_delta_distance_round_trips_across_varint_boundaries() {
+        use crate::decode_ofs_delta_base;
+        // Distances sampled to exercise each continuation-byte boundary.
+        // current_offset must be large enough that distance <= current_offset
+        // (decode_ofs_delta_base refuses otherwise) and that
+        // current_offset - distance >= FIRST_ENTRY_OFFSET (12).
+        let current_offset: u64 = u32::MAX as u64;
+        let cases: &[u64] = &[
+            1, 2, 0x7f, 0x80, 0x81, 0x100, 0x3fff, 0x4000, 0x4001, 0xffff, 0x1_0000, 0x1_ffff,
+            0x2_0000, 0xff_ffff, 0x1_000000,
+        ];
+        for distance in cases {
+            let encoded =
+                encode_ofs_delta_distance(*distance).expect("encoder refuses only d=0");
+            let (decoded, _consumed) =
+                decode_ofs_delta_base(current_offset, &encoded, &mut always)
+                    .expect("encoder/decoder pair must round-trip");
+            assert_eq!(
+                decoded,
+                current_offset - *distance,
+                "encode->decode mismatch for distance {distance}: encoded={encoded:02x?}, \
+                 decoder returned base_offset {decoded}, expected {}",
+                current_offset - *distance,
+            );
+        }
+    }
+
+    #[test]
+    fn ofs_delta_distance_encodes_full_u64_range() {
+        // The encoder's loop uses `value >> 7` (7-bit continuation), so the
+        // emitted length is O(log d) and d=u64::MAX must encode without
+        // panicking.  Round-tripped against our own decoder for values small
+        // enough that the decoder's `base_offset >= 12` constraint holds
+        // (`current_offset - distance >= 12`); for d = u64::MAX and
+        // d = u64::MAX - 1 the encoder must still not panic.
+        use crate::decode_ofs_delta_base;
+        for distance in [u64::MAX, u64::MAX - 1, u64::MAX - 12, u64::MAX / 2, 0x100_0000_0000] {
+            let encoded = encode_ofs_delta_distance(distance)
+                .expect("non-zero distance always encodes");
+            if let Some(current_offset) = distance.checked_add(12) {
+                let (decoded, _consumed) = decode_ofs_delta_base(current_offset, &encoded, &mut always)
+                    .expect("encoder/decoder round-trip for large distance");
+                assert_eq!(decoded, 12, "u64-range distance {distance} must round-trip");
+            }
+        }
+    }
 }
