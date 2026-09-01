@@ -80,15 +80,16 @@
 //! approval state without claiming work or performing an effect.
 //!
 //! [`claim`] validates the task-system mutation that follows planning.
-//! [`task_projection`] supplies the backend-neutral final mutation protocol:
-//! bounded authority-bound snapshots, exact compare-and-mutate requests,
-//! idempotent receipts, typed definite/ambiguous refusals, and one-call adapter
-//! execution. [`task_adapter`] connects those results to the existing pulse,
-//! plan, claim, situation, and cancellation evidence types. A definite mutation
-//! followed by an integration refusal is preserved as committed work requiring
-//! reconciliation, never reported as though no effect happened. These modules
-//! do not make task state repository authority or pretend their conformance
-//! implementations are durable storage.
+//! [`task_projection_read`] evidences one exact-generation task snapshot from a
+//! production reader profile before it feeds frontier selection.
+//! [`task_projection`] supplies the backend-neutral mutation protocol: exact
+//! compare-and-mutate requests, idempotent receipts, typed definite/ambiguous
+//! refusals, and one-call adapter execution. [`task_adapter`] connects those
+//! results to the existing pulse, plan, claim, situation, and cancellation
+//! evidence types. A definite mutation followed by an integration refusal is
+//! preserved as committed work requiring reconciliation, never reported as
+//! though no effect happened. These modules do not make task state repository
+//! authority or pretend their conformance implementations are durable storage.
 //!
 //! [`action_packet`] is the bounded Level-1 bridge from an activated plan
 //! attempt to concrete work. It requires the exact claim-activation situation,
@@ -167,6 +168,7 @@ pub mod run_identity;
 pub mod situation;
 pub mod task_adapter;
 pub mod task_projection;
+pub mod task_projection_read;
 
 pub use action_packet::{
     ActionPacketRefusal, ActionPrecondition, ActionPreconditionSet, ActionStep, ActionStepId,
@@ -275,4 +277,10 @@ pub use task_projection::{
     TaskMutationReplay, TaskMutationRequest, TaskMutationRequestId, TaskProjectionAdapter,
     TaskProjectionGeneration, TaskProjectionRefusal, TaskProjectionRow, TaskProjectionSnapshot,
     TaskProjectionSnapshotId, execute_task_mutation,
+};
+pub use task_projection_read::{
+    TaskProjectionReadAdapterRefusal, TaskProjectionReadExecutionRefusal,
+    TaskProjectionReadObservation, TaskProjectionReadReceipt, TaskProjectionReadReceiptId,
+    TaskProjectionReadRefusal, TaskProjectionReadRequest, TaskProjectionReadRequestId,
+    TaskProjectionReader, read_task_projection,
 };
