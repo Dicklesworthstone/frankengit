@@ -15,12 +15,15 @@
 //! remains the multi-row backend-neutral snapshot/mutation protocol used by the
 //! earlier adapter surface. [`task_projection_adapter`] is the pure single-task
 //! semantic transition kernel for claim, release, and transfer. The latter is
-//! exported under the `CoordinatedTaskProjection*` aliases so both final
-//! abstractions remain explicit rather than silently overloading one type name.
+//! exported under the `CoordinatedTaskProjection*` aliases so both abstractions
+//! remain explicit rather than silently overloading one type name.
 //! [`task_coordination`] attaches exact authority-read provenance and monotone
-//! freshness; [`task_persistence`] freezes exact-predecessor mutation envelopes
-//! and reconciles ambiguous backend rereads. None of those values is durable by
-//! construction or repository authority.
+//! freshness. [`task_persistence`] freezes complete exact-predecessor mutation
+//! envelopes and reconciles authenticated backend rereads. [`task_store`]
+//! defines the one-call read/CAS/flush/reread orchestration a concrete Beads or
+//! scheduler backend must implement, preserving every post-effect uncertainty
+//! as reconciliation debt. None of those values is durable by construction or
+//! repository authority.
 //!
 //! [`claim`] and [`action_packet`] bind an admitted task claim to concrete,
 //! bounded work without performing effects. [`claim_continuity`] permits only
@@ -30,9 +33,10 @@
 //! [`outcome_learning`] records validated retrieval-only learning and grants no
 //! authority.
 //!
-//! ECC assembly, production task storage, task collectors, action execution,
-//! canonical publication, effect-time revocation, later-head ancestry proof,
-//! durable codecs, and robot/API surfaces remain outside the current boundary.
+//! Concrete Beads transport/codec mapping, task collectors, action execution,
+//! ECC assembly, canonical publication, effect-time revocation, later-head
+//! ancestry proof, durable control-object codecs, and robot/API surfaces remain
+//! outside the current boundary.
 
 pub mod action_packet;
 pub mod authority_identity;
@@ -66,6 +70,7 @@ pub mod task_persistence;
 pub mod task_projection;
 pub mod task_projection_adapter;
 pub mod task_projection_read;
+pub mod task_store;
 
 pub use action_packet::{
     ActionPacketRefusal, ActionPrecondition, ActionPreconditionSet, ActionStep, ActionStepId,
@@ -201,4 +206,12 @@ pub use task_projection_read::{
     TaskProjectionReadObservation, TaskProjectionReadReceipt, TaskProjectionReadReceiptId,
     TaskProjectionReadRefusal, TaskProjectionReadRequest, TaskProjectionReadRequestId,
     TaskProjectionReader, read_task_projection,
+};
+pub use task_store::{
+    TaskProjectionStore, TaskProjectionStoreExecution, TaskProjectionStoreExecutionRefusal,
+    TaskProjectionStoreFlushDisposition, TaskProjectionStoreFlushOutcome,
+    TaskProjectionStoreFlushRefusal, TaskProjectionStoreKey, TaskProjectionStoreReadRefusal,
+    TaskProjectionStoreReconciliationCause, TaskProjectionStoreStage,
+    TaskProjectionStoreWriteDisposition, TaskProjectionStoreWriteOutcome,
+    TaskProjectionStoreWriteRefusal, execute_task_projection_store,
 };
