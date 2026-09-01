@@ -80,17 +80,17 @@
 //! approval state without claiming work or performing an effect.
 //!
 //! [`claim`] validates the task-system mutation that follows planning.
-//! [`task_projection`] now supplies the backend-neutral final mutation protocol:
+//! [`task_projection`] supplies the backend-neutral final mutation protocol:
 //! bounded authority-bound snapshots, exact compare-and-mutate requests,
 //! idempotent receipts, typed definite/ambiguous refusals, and one-call adapter
-//! execution. The module does not make task state repository authority or
-//! pretend its conformance implementations are durable storage. A claim must
-//! begin at the pulse's task projection, bind the exact plan/run/conflict
-//! surface, advance to a new task generation, and fit inside the run lifetime.
-//! It becomes active only after a fresh situation observes that post-claim
-//! generation under unchanged repository authority.
+//! execution. [`task_adapter`] connects those results to the existing pulse,
+//! plan, claim, situation, and cancellation evidence types. A definite mutation
+//! followed by an integration refusal is preserved as committed work requiring
+//! reconciliation, never reported as though no effect happened. These modules
+//! do not make task state repository authority or pretend their conformance
+//! implementations are durable storage.
 //!
-//! [`action_packet`] is the bounded Level-1 bridge from that activated plan
+//! [`action_packet`] is the bounded Level-1 bridge from an activated plan
 //! attempt to concrete work. It requires the exact claim-activation situation,
 //! complete plan-approved context, ordered plan-contained targets, typed
 //! evidence obligations, aggregate resource attenuation, and mandatory stop
@@ -165,6 +165,7 @@ pub mod refresh;
 mod run_cancellation;
 pub mod run_identity;
 pub mod situation;
+pub mod task_adapter;
 pub mod task_projection;
 
 pub use action_packet::{
@@ -262,6 +263,10 @@ pub use situation::{
     SituationComponent, SituationComponentChange, SituationComponentKind,
     SituationComponentTransition, SituationDelta, SituationId, SituationOmissionReason,
     SituationRefusal, SituationWorkspace,
+};
+pub use task_adapter::{
+    ClaimIntegrationRefusal, ClaimTaskOutcome, ClaimedTask, ReleasedTask,
+    TaskCoordinatorRefusal, claim_selected_task, release_active_task, task_projection_generation,
 };
 pub use task_projection::{
     MAX_TASK_PROJECTION_ROWS, MAX_TASK_ROW_SURFACES, TaskAdapterRefusal,
