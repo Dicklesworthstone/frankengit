@@ -17,7 +17,8 @@
 //! and complete rows before an Agent Situation exists, while
 //! [`task_projection_read`] re-reads one generation already named by a situation.
 //! [`task_collection_bridge`] converts a collected unassigned row into the exact
-//! authority-bound claim basis without fabricating missing lease history.
+//! authority-bound claim basis and reconstructs claimed rows only from
+//! collection-bound durable lease history.
 //! The crate-private `task_projection_adapter` module is the pure single-task
 //! semantic transition kernel for claim, release, and transfer; downstream
 //! callers reach it only through [`task_coordination`], which attaches exact
@@ -188,7 +189,9 @@ pub use task_collection::{
     collect_task_projection,
 };
 pub use task_collection_bridge::{
-    TaskCollectionBridgeRefusal, collected_unclaimed_task,
+    TaskCollectionBridgeRefusal, TaskLeaseHistoryObservation,
+    TaskLeaseReconstructionReceipt, TaskLeaseReconstructionReceiptId,
+    collected_unclaimed_task, reconstruct_collected_task_lease,
 };
 pub use task_coordination::{
     AuthorityBoundTaskClaimApplication, AuthorityBoundTaskProjectionSnapshot,
