@@ -22,7 +22,6 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutcomeLearningRecordSpec {
     inner: crate::learning::OutcomeLearningRecordSpec,
-    requirement_outcomes: Vec<LearningRequirementOutcome>,
 }
 
 impl OutcomeLearningRecordSpec {
@@ -43,7 +42,6 @@ impl OutcomeLearningRecordSpec {
                 applicability_root,
                 invalidation_conditions,
             ),
-            requirement_outcomes: Vec::new(),
         }
     }
 
@@ -53,7 +51,6 @@ impl OutcomeLearningRecordSpec {
         mut self,
         outcomes: Vec<LearningRequirementOutcome>,
     ) -> Self {
-        self.requirement_outcomes.clone_from(&outcomes);
         self.inner = self.inner.with_requirement_outcomes(outcomes);
         self
     }
@@ -114,17 +111,20 @@ pub struct OutcomeLearningRecord(crate::learning::OutcomeLearningRecord);
 impl OutcomeLearningRecord {
     /// Builds one evidence-grounded retrieval record against the exact plan.
     ///
-    /// In addition to the internal record's bounds, canonicalization,
-    /// independence, ownership, resource, applicability, and invalidation
-    /// checks, this public boundary requires the exact evidence class named by
-    /// every satisfied or partially satisfied plan requirement.
+    /// The internal builder first applies its fixed refusal order and
+    /// canonicalizes the complete requirement matrix. Only then does this
+    /// public boundary require the exact evidence class named by every
+    /// satisfied or partially satisfied plan requirement. Malformed duplicate
+    /// or mismatched input therefore cannot change the first refusal merely by
+    /// changing row order.
     ///
     /// # Errors
     ///
     /// Returns [`OutcomeLearningRefusal::SatisfiedRequirementWithoutEvidence`]
-    /// when the requirement carries no record of its required class, even when
-    /// other supporting evidence records are present. Every other refusal is
-    /// returned by the canonical internal constructor unchanged.
+    /// when a structurally valid requirement carries no record of its required
+    /// class, even when other supporting evidence records are present. Every
+    /// structural refusal is returned by the canonical internal constructor
+    /// unchanged.
     pub fn build(
         situation: &AgentSituationReceipt,
         packet: &AgentActionPacket,
@@ -132,15 +132,15 @@ impl OutcomeLearningRecord {
         run: &IntentRun,
         spec: OutcomeLearningRecordSpec,
     ) -> Result<Self, OutcomeLearningRefusal> {
-        validate_required_evidence_classes(plan, &spec.requirement_outcomes)?;
-        crate::learning::OutcomeLearningRecord::build(
+        let record = crate::learning::OutcomeLearningRecord::build(
             situation,
             packet,
             plan,
             run,
             spec.inner,
-        )
-        .map(Self)
+        )?;
+        validate_required_evidence_classes(plan, record.requirement_outcomes())?;
+        Ok(Self(record))
     }
 
     /// Stable learning identity.
@@ -279,7 +279,8 @@ fn validate_required_evidence_classes(
             .iter()
             .find(|outcome| outcome.requirement_id() == requirement.requirement_id())
         else {
-            // The internal constructor owns count and identity diagnostics.
+            // A canonical internal record already proved count and identity
+            // completeness, so this branch is defensive only.
             continue;
         };
         if matches!(
