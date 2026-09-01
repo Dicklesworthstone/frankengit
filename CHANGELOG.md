@@ -20,8 +20,8 @@ Landed final-abstraction slices include:
 - `AgentActionPacket`: bounded Level-1 ordered steps with complete plan-approved context, plan-contained targets, evidence obligations, aggregate resource attenuation, peer-change commitments, mandatory preconditions, and result/refusal/continuation contracts;
 - `ActiveClaimContinuityReceipt` and `AgentActionPacketContinuation`: proof that only logical time advanced while authority, run, workspace, and every situation component stayed unchanged, without mutating the original packet;
 - `RunReconciliationReport`: complete run-level effect inventory, parent-graph and lifecycle validation, conserved consumable spend, and one typed remaining action per effect;
-- `AgentHandoffCapsule` and receiver-side `AgentHandoffAcceptance`: debt-preserving handoff with attenuation, target-resolution evidence, exact-head validation, and inherited-effect responsibility;
-- `RunCancellationIntent` and `RunCancellationCompletion`: request → drain → finalize over a frozen effect set and active claim, with immutable effect identity, monotone evidence, explicit task release/transfer, escalation transfer, and leak containment;
+- public `AgentHandoffCapsule` and receiver-side `AgentHandoffAcceptance`: debt-preserving handoff with attenuation, target-resolution evidence, exact-head validation, and inherited-effect responsibility; exact-activation construction needs no extra proof, while a later observation requires and commits a specific `ActiveClaimContinuityReceipt`;
+- public `RunCancellationIntent` and `RunCancellationCompletion`: request → drain → finalize over a frozen effect set and active claim, with immutable effect identity, monotone evidence, explicit task release/transfer, escalation transfer, and leak containment; cancellation remains available after context change and may optionally retain a continuity receipt when only time advanced;
 - `OutcomeLearningRecord`: immutable retrieval-only requirement, evidence, verifier-independence, ownership, failed-hypothesis, resource, reusable-pattern, applicability, invalidation, and negative-evidence record.
 
 The exact current implementation boundary and module map are maintained in [`docs/AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md`](docs/AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md).
@@ -41,6 +41,9 @@ The exact current implementation boundary and module map are maintained in [`doc
 - Required completed learning outcomes to retain complete requirement dispositions and refused hidden unsatisfied requirements.
 - Kept learning ownership findings inside the plan surface and measured resource totals inside the plan budget.
 - Preserved every accepted effect through reconciliation, handoff, and cancellation rather than reducing outstanding responsibility to prose or a count.
+- Made the raw handoff capsule engine crate-private. The public facade now refuses a later situation without a full-context continuity receipt and commits either exact activation or the receipt ID into the public capsule identity, which receiver acceptance inherits.
+- Made the raw cancellation engine crate-private behind a public identity-preserving facade. Cancellation completion commits the public request identity, so optional continuity evidence cannot be checked and then lost.
+- Corrected an overstrict provisional cancellation rule during fresh review: handoff continues work and needs continuity, but cancellation is a conservative stop operation and must remain available after context change. Continuity is optional audit evidence for cancellation, never permission to stop.
 
 ### Added — focused source-level tests
 
@@ -54,8 +57,8 @@ Public-path tests now cover:
 - action-packet context completeness, exact activation continuity, same-ID scope revalidation, target containment, and budget bounds;
 - time-only claim continuity, context-change refusal, claim expiry, and packet continuation;
 - complete run-effect reconciliation, terminal markers, parent cycles, authority, and conserved spend;
-- handoff attenuation, receiver verification, target resolution, and inherited effect debt;
-- cancellation effect-set preservation, immutable effect identity, claim release, escalation transfer, and containment;
+- handoff exact-activation refusal, proof-carrying later construction, proof identity retention, attenuation, receiver verification, target resolution, and inherited effect debt;
+- cancellation after changed context, optional continuity evidence, effect-set preservation, immutable effect identity, claim release, escalation transfer, and containment;
 - learning determinism, evidence requirements, ownership containment, resource bounds, completed-outcome completeness, and machine-classified verifier independence.
 
 Source-level test presence is not a test result.
@@ -74,7 +77,7 @@ Required local evidence remains at least:
 
 ```text
 cargo fmt --all --check
-cargo test -p fgit-agent
+cargo test -p fgit-agent --all-targets
 cargo clippy -p fgit-agent --all-targets -- -D warnings
 cargo test -p fgit-registry-check
 ./scripts/verify.sh docs
@@ -92,8 +95,8 @@ This wave does not claim:
 - a production Beads/task claim, release, transfer, or reservation adapter;
 - a scheduler or action-packet executor;
 - effect-time capability revocation against a named canonical position;
-- plan-relative invalidation when any situation component changes;
-- safe arbitrary-later-situation use of handoff or cancellation without a continuity-aware public boundary;
+- plan-relative invalidation when a situation component changes;
+- handoff acceptance at a later authority head without an authenticated ancestry witness;
 - durable codecs, storage, replay, migration, or recovery for the new control-plane objects;
 - an `fg agent` CLI, stable robot API, native API, or MCP surface;
 - automatic ECC assembly, task verification transition, or canonical publication;
