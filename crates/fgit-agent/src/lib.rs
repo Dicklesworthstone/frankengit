@@ -24,8 +24,11 @@
 //! [`protocol`] now binds an Intent Run's base to the full authenticated §4.1
 //! `AuthorityReadReceipt` and constructs bounded, single-generation §7 Context
 //! Packets with structurally separate control and untrusted-source channels.
-//! Revocation interpreted at a canonical position (§6.3) remains outside this
-//! slice: [`Capability::is_valid_at`] checks a window, which is freshness, not
+//! [`authority_identity`] gives each exact authenticated read event a stable
+//! identity that includes the head commitment, backend token, verification
+//! instant, verifier profile, and retained position fields. Revocation
+//! interpreted at a canonical position (§6.3) remains outside this slice:
+//! [`Capability::is_valid_at`] checks a window, which is freshness, not
 //! revocation.
 //!
 //! §4.3's refresh relations ARE here, in [`refresh`] — but only the typed
@@ -131,6 +134,7 @@
 //! this crate holds and which half belongs to the component that performs it.
 
 pub mod action_packet;
+pub mod authority_identity;
 pub mod broker;
 mod cancellation;
 pub mod capability;
@@ -159,6 +163,7 @@ pub use action_packet::{
     AgentActionPacket, AgentActionPacketId, AgentActionPacketSpec, MAX_ACTION_CONTEXT_PACKETS,
     MAX_ACTION_PEER_CHANGES, MAX_ACTION_STEPS,
 };
+pub use authority_identity::{AuthorityReadIdentityRefusal, AuthorityReadReceiptId};
 pub use broker::{
     AgentInstanceId, BrokerRefusal, DeferredOutboxEffect, EffectBroker, EffectClass, EffectGrant,
     EffectId, EffectJournalEntry, EffectJournalEvent, EffectJournalRefusal, EffectJournalReplay,
@@ -200,12 +205,12 @@ pub use handoff::{
     HandoffWorkspaceSnapshot, MAX_HANDOFF_ENTRIES, MAX_HANDOFF_EVIDENCE_RECORDS,
     MAX_HANDOFF_VERIFIER_ATTESTATIONS,
 };
-pub use handoff_control::{
-    AgentHandoffCapsule, AgentHandoffCapsuleId, HandoffConstructionRefusal,
-};
 pub use handoff_acceptance::{
     AgentHandoffAcceptance, AgentHandoffAcceptanceId, HandoffAcceptanceRefusal,
     HandoffAuthorityRelation, HandoffEffectResponsibility, HandoffTargetResolution,
+};
+pub use handoff_control::{
+    AgentHandoffCapsule, AgentHandoffCapsuleId, HandoffConstructionRefusal,
 };
 pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
 pub use learning::{
