@@ -6,9 +6,9 @@ use fgit_agent::{
     AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, ClassSet, EvidenceClass,
     IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
     PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId,
-    PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RecoveredActiveTaskClaim,
-    RecoveredTaskReleasePersistenceOutcome, RejectedShortcutSet, RunId,
-    SituationComponent, SituationComponentKind, SituationOmissionReason,
+    PlanStopConditionSet, PlanSurface, PlanSurfaceKind,
+    RecoveredTaskReleasePersistenceOutcome, RejectedShortcutSet, RunBoundRecoveredTaskClaim,
+    RunId, SituationComponent, SituationComponentKind, SituationOmissionReason,
     TaskClaimCancellationOutcome, TaskClaimProjection, TaskClaimReceipt,
     TaskLeaseHistoryObservation, TaskLeaseReconstructionReceipt, TaskProjectionAssignment,
     TaskProjectionCollectionObservation, TaskProjectionCollectionReceipt,
@@ -19,8 +19,8 @@ use fgit_agent::{
     TaskProjectionStoreWriteOutcome, TaskProjectionStoreWriteRefusal,
     TaskRecoveryPersistenceRefusal, TaskReleaseDisposition, TaskPhase, WorkConflict,
     WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
-    activate_reconstructed_task_claim, collect_task_projection,
-    persist_recovered_task_release, reconstruct_collected_task_lease,
+    collect_task_projection, persist_recovered_task_release,
+    reconstruct_collected_task_lease, recover_task_claim_for_cleanup,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
@@ -37,8 +37,8 @@ use fgit_types::{
 const PREVIOUS_GENERATION: [u8; 32] = [0x43; 32];
 const CLAIMED_GENERATION: [u8; 32] = [0x44; 32];
 const STORE_ID: [u8; 32] = [0x91; 32];
-const RELEASED_AT: LogicalTime = LogicalTime::new(90);
-const STORE_READ_AT: LogicalTime = LogicalTime::new(91);
+const RELEASED_AT: LogicalTime = LogicalTime::new(101);
+const STORE_READ_AT: LogicalTime = LogicalTime::new(102);
 
 fn digest(byte: u8) -> Digest {
     let root = outcome_index_root(&[]).expect("empty outcome-index root is canonical");
@@ -225,7 +225,7 @@ struct RecoveryFixture {
     claim: TaskClaimReceipt,
     collection: TaskProjectionCollectionReceipt,
     reconstruction: TaskLeaseReconstructionReceipt,
-    recovered: RecoveredActiveTaskClaim,
+    recovered: RunBoundRecoveredTaskClaim,
 }
 
 fn recovery_fixture(history_profile: u8, history_evidence: u8) -> RecoveryFixture {
@@ -295,13 +295,13 @@ fn recovery_fixture(history_profile: u8, history_evidence: u8) -> RecoveryFixtur
         CLAIMED_GENERATION,
         LogicalTime::new(21),
     );
-    let recovered = activate_reconstructed_task_claim(
+    let recovered = recover_task_claim_for_cleanup(
         &reconstruction,
         &claim,
         &refreshed,
         &run,
     )
-    .expect("active claim recovery");
+    .expect("run-bound active claim recovery");
     RecoveryFixture {
         run,
         claim,
@@ -418,8 +418,9 @@ impl TaskProjectionStore for RecoveryStore {
 }
 
 #[test]
-fn recovered_claim_releases_after_expiry_with_evidence_retained() {
+fn recovered_claim_releases_after_run_expiry_with_evidence_retained() {
     let fixture = recovery_fixture(0x85, 0x86);
+    assert!(RELEASED_AT >= fixture.run.expiry());
     let mut store = RecoveryStore::new(&fixture.reconstruction, StoreMode::Confirm);
     let outcome = persist_recovered_task_release(
         &mut store,
@@ -436,6 +437,10 @@ fn recovered_claim_releases_after_expiry_with_evidence_retained() {
         panic!("confirming store must persist recovered release")
     };
 
+    assert_eq!(
+        persisted.run_bound_recovery_id(),
+        fixture.recovered.binding_id()
+    );
     assert_eq!(persisted.recovery_id(), fixture.recovered.recovery_id());
     assert_eq!(
         persisted.lease_reconstruction_id(),
@@ -501,7 +506,46 @@ fn another_reconstruction_is_refused_before_store_io() {
 }
 
 #[test]
-fn ambiguous_release_retains_recovery_identity_as_debt() {
+fn same_id_changed_run_is_refused_before_store_io() {
+    let fixture = recovery_fixture(0x85, 0x86);
+    let altered = IntentRun::new_authenticated(
+        RunId::new(7),
+        fixture
+            .reconstruction
+            .snapshot()
+            .authority_read_receipt()
+            .clone(),
+        ClassSet::from_classes(&[OperationClass::TreeFsWorkspace]),
+        ResourceVector::single(Grade::Bytes, 1),
+        LogicalTime::new(200),
+    )
+    .expect("same-ID altered run remains structurally valid");
+    let expected = fixture.recovered.run_commitment();
+    let observed = altered.commitment().expect("altered run commitment");
+    assert_ne!(expected, observed);
+    let mut store = RecoveryStore::new(&fixture.reconstruction, StoreMode::Confirm);
+
+    assert_eq!(
+        persist_recovered_task_release(
+            &mut store,
+            &fixture.reconstruction,
+            fixture.recovered,
+            &fixture.claim,
+            &altered,
+            TaskReleaseDisposition::ReturnToOpen,
+            RELEASED_AT,
+            digest(0x92),
+        )
+        .expect_err("same RunId cannot substitute another machine scope"),
+        TaskRecoveryPersistenceRefusal::RunCommitmentMismatch { expected, observed }
+    );
+    assert_eq!(store.read_calls, 0);
+    assert_eq!(store.write_calls, 0);
+    assert_eq!(store.flush_calls, 0);
+}
+
+#[test]
+fn ambiguous_release_retains_run_bound_recovery_identity_as_debt() {
     let fixture = recovery_fixture(0x85, 0x86);
     let mut store = RecoveryStore::new(
         &fixture.reconstruction,
@@ -521,10 +565,12 @@ fn ambiguous_release_retains_recovery_identity_as_debt() {
 
     match outcome {
         RecoveredTaskReleasePersistenceOutcome::NeedsReconciliation {
+            run_bound_recovery_id,
             recovery_id,
             lease_reconstruction_id,
             ..
         } => {
+            assert_eq!(run_bound_recovery_id, fixture.recovered.binding_id());
             assert_eq!(recovery_id, fixture.recovered.recovery_id());
             assert_eq!(lease_reconstruction_id, fixture.reconstruction.receipt_id());
         }
