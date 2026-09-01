@@ -60,6 +60,11 @@
 //! advisory ordering, and preserves a typed exclusion reason for every row
 //! that cannot be acted on by the receipt's active Intent Run.
 //!
+//! [`pulse`] derives the bounded Level-0 view intended for every agent turn.
+//! It binds an exact situation/frontier pair, re-checks that the complete
+//! Intent Run is still live, and preserves compact counts for every exclusion
+//! class before exposing one advisory next action.
+//!
 //! The obligation lifecycle is not reimplemented either. `fgit-resource` owns
 //! it, and [`broker`] explains exactly which half of an effect's reservation
 //! this crate holds and which half belongs to the component that performs it.
@@ -71,6 +76,7 @@ pub mod ecc;
 pub mod frontier;
 pub mod intent;
 pub mod protocol;
+pub mod pulse;
 pub mod refresh;
 pub mod situation;
 
@@ -101,6 +107,10 @@ pub use protocol::{
     AgentRefTransaction, AuthorityReadReceipt, ContextControl, ContextPacket, ContextPacketId,
     ContextSource, MAX_CONTEXT_SOURCE_BYTES, MAX_CONTEXT_SOURCES, MAX_CONTEXT_TOTAL_BYTES,
     ProtocolRefusal, RetrievalChannel, WorkspaceBinding,
+};
+pub use pulse::{
+    AgentControlPulse, AgentControlPulseId, PulseExclusionCounts, PulseRefusal, PulseSelection,
+    PulseState,
 };
 pub use refresh::{RefreshReceipt, RefreshRelation, RefreshSide};
 pub use situation::{
