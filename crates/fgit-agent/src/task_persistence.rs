@@ -1,21 +1,20 @@
 //! Exact-predecessor persistence and ambiguous-write reconciliation for tasks.
 //!
-//! [`crate::task_coordination`] computes a repository-scoped transition but does
-//! not persist it. This module freezes that transition into a
-//! [`TaskProjectionMutationEnvelope`] suitable for a compare-and-replace backend
-//! and independently reconciles the task row after success, timeout, crash, or
-//! lost response.
+//! [`crate::task_coordination`] computes a complete repository-scoped semantic
+//! transition. This module freezes both predecessor and successor state into a
+//! backend mutation envelope and interprets a later authenticated reread after
+//! success, timeout, crash, or lost response.
 //!
-//! The evidence root in a transition is a predeclared canonical mutation-
-//! evidence contract known before the write. The persistence receipt produced
-//! here is the proof that a backend observation retained that contract beside
-//! the exact successor. This avoids a circular identity in which a successor
-//! generation depends on evidence that can exist only after the successor was
-//! stored.
+//! A backend observation is constructed from a real
+//! [`crate::AuthorityBoundTaskProjectionSnapshot`], not caller-supplied snapshot
+//! identity bytes. Reconciliation therefore compares phase, assignment, lease,
+//! generation, authority position, and task namespace in addition to transition
+//! metadata. Matching an ID string alone is never persistence proof.
 //!
-//! No storage implementation lives here. A production Beads adapter must own
-//! the actual read/CAS/flush/retry boundary and translate its reconciled row into
-//! [`TaskProjectionPersistedState`].
+//! The evidence root remains a predeclared mutation-evidence contract. The
+//! persistence receipt proves that an authenticated reread retained that
+//! contract beside the exact semantic successor. This module defines no storage
+//! implementation and grants no repository authority.
 
 use core::fmt;
 
@@ -24,13 +23,15 @@ use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_types::{Digest, RepositoryId};
 
 use crate::{
-    AuthorityBoundTaskClaimApplication, AuthorityBoundTaskProjectionSnapshotId,
+    AuthorityBoundTaskClaimApplication, AuthorityBoundTaskProjectionSnapshot,
+    AuthorityBoundTaskProjectionSnapshotId, AuthorityBoundTaskProjectionTransition,
     AuthorityBoundTaskProjectionTransitionId, AuthorityBoundTaskResolutionApplication,
-    LogicalTime, TaskProjectionTransitionKind, WorkTaskId,
+    AuthorityReadIdentityRefusal, AuthorityReadReceiptId, LogicalTime, TaskProjectionLease,
+    TaskProjectionTransitionKind, WorkTaskId,
 };
 
-const ENVELOPE_DOMAIN: &[u8] = b"frankengit.agent.task-mutation-envelope/v1\0";
-const RECEIPT_DOMAIN: &[u8] = b"frankengit.agent.task-persistence-receipt/v1\0";
+const ENVELOPE_DOMAIN: &[u8] = b"frankengit.agent.task-mutation-envelope/v2\0";
+const RECEIPT_DOMAIN: &[u8] = b"frankengit.agent.task-persistence-receipt/v2\0";
 
 /// Stable identity of one exact-predecessor task mutation request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -77,15 +78,14 @@ impl fmt::Display for TaskProjectionPersistenceReceiptId {
 }
 
 /// Complete compare-and-replace request for one task transition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskProjectionMutationEnvelope {
     envelope_id: TaskProjectionMutationEnvelopeId,
     repository_id: RepositoryId,
     task_id: WorkTaskId,
-    before_snapshot_id: AuthorityBoundTaskProjectionSnapshotId,
-    after_snapshot_id: AuthorityBoundTaskProjectionSnapshotId,
-    previous_generation: [u8; 32],
-    resulting_generation: [u8; 32],
+    basis_authority_read_receipt_id: AuthorityReadReceiptId,
+    before: AuthorityBoundTaskProjectionSnapshot,
+    after: AuthorityBoundTaskProjectionSnapshot,
     transition_id: AuthorityBoundTaskProjectionTransitionId,
     inner_transition_id: [u8; 32],
     kind: TaskProjectionTransitionKind,
@@ -104,10 +104,8 @@ impl TaskProjectionMutationEnvelope {
         application: &AuthorityBoundTaskClaimApplication,
     ) -> Result<Self, TaskProjectionPersistenceRefusal> {
         Self::from_parts(
-            application.snapshot().repository_id(),
-            application.snapshot().task_id(),
-            application.snapshot().snapshot_id(),
-            *application.snapshot().generation(),
+            application.before_snapshot().clone(),
+            application.snapshot().clone(),
             application.transition(),
         )
     }
@@ -121,42 +119,54 @@ impl TaskProjectionMutationEnvelope {
         application: &AuthorityBoundTaskResolutionApplication,
     ) -> Result<Self, TaskProjectionPersistenceRefusal> {
         Self::from_parts(
-            application.snapshot().repository_id(),
-            application.snapshot().task_id(),
-            application.snapshot().snapshot_id(),
-            *application.snapshot().generation(),
+            application.before_snapshot().clone(),
+            application.snapshot().clone(),
             application.transition(),
         )
     }
 
     fn from_parts(
-        repository_id: RepositoryId,
-        task_id: WorkTaskId,
-        after_snapshot_id: AuthorityBoundTaskProjectionSnapshotId,
-        resulting_generation: [u8; 32],
-        transition: crate::AuthorityBoundTaskProjectionTransition,
+        before: AuthorityBoundTaskProjectionSnapshot,
+        after: AuthorityBoundTaskProjectionSnapshot,
+        transition: AuthorityBoundTaskProjectionTransition,
     ) -> Result<Self, TaskProjectionPersistenceRefusal> {
-        if transition.repository_id() != repository_id {
+        if before.repository_id() != after.repository_id()
+            || transition.repository_id() != after.repository_id()
+        {
             return Err(TaskProjectionPersistenceRefusal::ApplicationRepositoryMismatch);
         }
-        if transition.task_id() != task_id {
+        if before.task_id() != after.task_id() || transition.task_id() != after.task_id() {
             return Err(TaskProjectionPersistenceRefusal::ApplicationTaskMismatch);
         }
-        if transition.after_snapshot_id() != after_snapshot_id {
+        if transition.before_snapshot_id() != before.snapshot_id() {
+            return Err(TaskProjectionPersistenceRefusal::ApplicationPredecessorMismatch);
+        }
+        if transition.after_snapshot_id() != after.snapshot_id() {
             return Err(TaskProjectionPersistenceRefusal::ApplicationSuccessorMismatch);
         }
-        if transition.resulting_generation() != resulting_generation {
+        if transition.previous_generation() != *before.generation()
+            || transition.resulting_generation() != *after.generation()
+        {
             return Err(TaskProjectionPersistenceRefusal::ApplicationGenerationMismatch);
+        }
+        if before.authority_read_receipt_id() != after.authority_read_receipt_id()
+            || transition.authority_read_receipt_id() != before.authority_read_receipt_id()
+        {
+            return Err(TaskProjectionPersistenceRefusal::ApplicationAuthorityMismatch);
+        }
+        if transition.observed_at() < before.observed_at()
+            || after.observed_at() < transition.observed_at()
+        {
+            return Err(TaskProjectionPersistenceRefusal::ApplicationObservationMismatch);
         }
 
         let mut envelope = Self {
             envelope_id: TaskProjectionMutationEnvelopeId([0; 32]),
-            repository_id,
-            task_id,
-            before_snapshot_id: transition.before_snapshot_id(),
-            after_snapshot_id,
-            previous_generation: transition.previous_generation(),
-            resulting_generation,
+            repository_id: after.repository_id(),
+            task_id: after.task_id(),
+            basis_authority_read_receipt_id: before.authority_read_receipt_id(),
+            before,
+            after,
             transition_id: transition.transition_id(),
             inner_transition_id: *transition.inner_transition_id(),
             kind: transition.kind(),
@@ -168,50 +178,59 @@ impl TaskProjectionMutationEnvelope {
         Ok(envelope)
     }
 
-    /// Reconciles one backend read after a CAS attempt or ambiguous response.
+    /// Reconciles one authenticated backend reread.
     ///
     /// # Errors
     ///
-    /// Refuses a missing row, repository/task substitution, observation
-    /// rollback, and a successor whose transition, inner transition, or evidence
-    /// metadata was omitted or changed.
+    /// Refuses missing rows, repository/task/authority substitution,
+    /// observation rollback, a predecessor carrying this attempted transition,
+    /// and an exact successor whose transition or evidence metadata is absent
+    /// or changed.
     pub fn reconcile(
         &self,
         observed: Option<&TaskProjectionPersistedState>,
     ) -> Result<TaskProjectionPersistenceDecision, TaskProjectionPersistenceRefusal> {
         let observed = observed.ok_or(TaskProjectionPersistenceRefusal::ProjectionMissing)?;
-        if observed.repository_id != self.repository_id {
+        let snapshot = observed.snapshot();
+        if snapshot.repository_id() != self.repository_id {
             return Err(TaskProjectionPersistenceRefusal::ObservedRepositoryMismatch {
                 expected: self.repository_id,
-                observed: observed.repository_id,
+                observed: snapshot.repository_id(),
             });
         }
-        if observed.task_id != self.task_id {
+        if snapshot.task_id() != self.task_id {
             return Err(TaskProjectionPersistenceRefusal::ObservedTaskMismatch {
                 expected: self.task_id,
-                observed: observed.task_id,
+                observed: snapshot.task_id(),
             });
         }
-        if observed.observed_at.value() < self.transition_observed_at.value() {
+        if !same_authority_position(&self.before, snapshot) {
+            return Err(TaskProjectionPersistenceRefusal::ObservedAuthorityPositionMismatch);
+        }
+        if snapshot.observed_at() < self.transition_observed_at {
             return Err(TaskProjectionPersistenceRefusal::ObservationRollback {
                 transition_observed_at: self.transition_observed_at,
-                backend_observed_at: observed.observed_at,
+                backend_observed_at: snapshot.observed_at(),
             });
         }
 
-        if observed.snapshot_id == *self.before_snapshot_id.as_bytes()
-            && observed.generation == self.previous_generation
-        {
+        if semantic_snapshot_matches(&self.before, snapshot) {
+            if observed.last_transition_id == Some(*self.transition_id.as_bytes())
+                || observed.last_inner_transition_id == Some(self.inner_transition_id)
+                || observed.evidence_root == Some(self.evidence_root)
+            {
+                return Err(
+                    TaskProjectionPersistenceRefusal::PredecessorCarriesAttemptedMetadata,
+                );
+            }
             return Ok(TaskProjectionPersistenceDecision::RetrySafe {
                 envelope_id: self.envelope_id,
-                current_snapshot_id: observed.snapshot_id,
-                current_generation: observed.generation,
+                current_snapshot_id: snapshot.snapshot_id(),
+                current_generation: *snapshot.generation(),
             });
         }
 
-        if observed.snapshot_id == *self.after_snapshot_id.as_bytes()
-            && observed.generation == self.resulting_generation
-        {
+        if semantic_snapshot_matches(&self.after, snapshot) {
             validate_successor_metadata(self, observed)?;
             let receipt = TaskProjectionPersistenceReceipt::build(self, observed)?;
             return Ok(TaskProjectionPersistenceDecision::Confirmed(receipt));
@@ -219,198 +238,210 @@ impl TaskProjectionMutationEnvelope {
 
         Ok(TaskProjectionPersistenceDecision::Conflict {
             envelope_id: self.envelope_id,
-            current_snapshot_id: observed.snapshot_id,
-            current_generation: observed.generation,
+            current_snapshot_id: snapshot.snapshot_id(),
+            current_generation: *snapshot.generation(),
         })
     }
 
     /// Stable mutation-envelope identity.
     #[must_use]
-    pub const fn envelope_id(self) -> TaskProjectionMutationEnvelopeId {
+    pub const fn envelope_id(&self) -> TaskProjectionMutationEnvelopeId {
         self.envelope_id
     }
 
     /// Repository namespace.
     #[must_use]
-    pub const fn repository_id(self) -> RepositoryId {
+    pub const fn repository_id(&self) -> RepositoryId {
         self.repository_id
     }
 
     /// Task being mutated.
     #[must_use]
-    pub const fn task_id(self) -> WorkTaskId {
+    pub const fn task_id(&self) -> WorkTaskId {
         self.task_id
+    }
+
+    /// Exact authenticated read event that authorized mutation construction.
+    #[must_use]
+    pub const fn basis_authority_read_receipt_id(&self) -> AuthorityReadReceiptId {
+        self.basis_authority_read_receipt_id
+    }
+
+    /// Complete exact predecessor state.
+    #[must_use]
+    pub const fn before_snapshot(&self) -> &AuthorityBoundTaskProjectionSnapshot {
+        &self.before
+    }
+
+    /// Complete desired successor state.
+    #[must_use]
+    pub const fn after_snapshot(&self) -> &AuthorityBoundTaskProjectionSnapshot {
+        &self.after
     }
 
     /// Exact predecessor snapshot identity.
     #[must_use]
-    pub const fn before_snapshot_id(self) -> AuthorityBoundTaskProjectionSnapshotId {
-        self.before_snapshot_id
+    pub const fn before_snapshot_id(&self) -> AuthorityBoundTaskProjectionSnapshotId {
+        self.before.snapshot_id()
     }
 
     /// Exact successor snapshot identity.
     #[must_use]
-    pub const fn after_snapshot_id(self) -> AuthorityBoundTaskProjectionSnapshotId {
-        self.after_snapshot_id
+    pub const fn after_snapshot_id(&self) -> AuthorityBoundTaskProjectionSnapshotId {
+        self.after.snapshot_id()
     }
 
     /// Exact predecessor generation.
     #[must_use]
-    pub const fn previous_generation(self) -> [u8; 32] {
-        self.previous_generation
+    pub const fn previous_generation(&self) -> [u8; 32] {
+        *self.before.generation()
     }
 
     /// Exact successor generation.
     #[must_use]
-    pub const fn resulting_generation(self) -> [u8; 32] {
-        self.resulting_generation
+    pub const fn resulting_generation(&self) -> [u8; 32] {
+        *self.after.generation()
     }
 
     /// Repository-scoped transition identity.
     #[must_use]
-    pub const fn transition_id(self) -> AuthorityBoundTaskProjectionTransitionId {
+    pub const fn transition_id(&self) -> AuthorityBoundTaskProjectionTransitionId {
         self.transition_id
     }
 
     /// Semantic transition-body commitment.
     #[must_use]
-    pub const fn inner_transition_id(self) -> [u8; 32] {
+    pub const fn inner_transition_id(&self) -> [u8; 32] {
         self.inner_transition_id
     }
 
     /// Claim, release, or transfer semantics.
     #[must_use]
-    pub const fn kind(self) -> TaskProjectionTransitionKind {
+    pub const fn kind(&self) -> TaskProjectionTransitionKind {
         self.kind
     }
 
     /// Logical transition instant.
     #[must_use]
-    pub const fn transition_observed_at(self) -> LogicalTime {
+    pub const fn transition_observed_at(&self) -> LogicalTime {
         self.transition_observed_at
     }
 
     /// Backend implementation/profile identity.
     #[must_use]
-    pub const fn adapter_identity(self) -> [u8; 32] {
+    pub const fn adapter_identity(&self) -> [u8; 32] {
         self.adapter_identity
     }
 
     /// Predeclared mutation-evidence contract.
     #[must_use]
-    pub const fn evidence_root(self) -> Digest {
+    pub const fn evidence_root(&self) -> Digest {
         self.evidence_root
     }
 }
 
-/// Reconciled task row read from a backend after an attempted mutation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Authenticated task row read after an attempted mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskProjectionPersistedState {
-    repository_id: RepositoryId,
-    task_id: WorkTaskId,
-    snapshot_id: [u8; 32],
-    generation: [u8; 32],
+    snapshot: AuthorityBoundTaskProjectionSnapshot,
     last_transition_id: Option<[u8; 32]>,
     last_inner_transition_id: Option<[u8; 32]>,
     evidence_root: Option<Digest>,
-    observed_at: LogicalTime,
 }
 
 impl TaskProjectionPersistedState {
-    /// Creates one backend read observation.
+    /// Creates one backend reread observation from a structurally validated
+    /// authority-bound snapshot.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
-        repository_id: RepositoryId,
-        task_id: WorkTaskId,
-        snapshot_id: [u8; 32],
-        generation: [u8; 32],
+        snapshot: AuthorityBoundTaskProjectionSnapshot,
         last_transition_id: Option<[u8; 32]>,
         last_inner_transition_id: Option<[u8; 32]>,
         evidence_root: Option<Digest>,
-        observed_at: LogicalTime,
     ) -> Self {
         Self {
-            repository_id,
-            task_id,
-            snapshot_id,
-            generation,
+            snapshot,
             last_transition_id,
             last_inner_transition_id,
             evidence_root,
-            observed_at,
         }
+    }
+
+    /// Complete authenticated task state.
+    #[must_use]
+    pub const fn snapshot(&self) -> &AuthorityBoundTaskProjectionSnapshot {
+        &self.snapshot
     }
 
     /// Repository namespace read from the backend.
     #[must_use]
-    pub const fn repository_id(self) -> RepositoryId {
-        self.repository_id
+    pub const fn repository_id(&self) -> RepositoryId {
+        self.snapshot.repository_id()
     }
 
     /// Task read from the backend.
     #[must_use]
-    pub const fn task_id(self) -> WorkTaskId {
-        self.task_id
+    pub const fn task_id(&self) -> WorkTaskId {
+        self.snapshot.task_id()
     }
 
-    /// Current scoped snapshot identity bytes.
+    /// Current semantic snapshot identity.
     #[must_use]
-    pub const fn snapshot_id(self) -> [u8; 32] {
-        self.snapshot_id
+    pub const fn snapshot_id(&self) -> AuthorityBoundTaskProjectionSnapshotId {
+        self.snapshot.snapshot_id()
     }
 
     /// Current task-projection generation.
     #[must_use]
-    pub const fn generation(self) -> [u8; 32] {
-        self.generation
+    pub const fn generation(&self) -> [u8; 32] {
+        *self.snapshot.generation()
     }
 
     /// Last repository-scoped transition identity, when retained.
     #[must_use]
-    pub const fn last_transition_id(self) -> Option<[u8; 32]> {
+    pub const fn last_transition_id(&self) -> Option<[u8; 32]> {
         self.last_transition_id
     }
 
-    /// Last semantic inner transition identity, when retained.
+    /// Last inner transition identity, when retained.
     #[must_use]
-    pub const fn last_inner_transition_id(self) -> Option<[u8; 32]> {
+    pub const fn last_inner_transition_id(&self) -> Option<[u8; 32]> {
         self.last_inner_transition_id
     }
 
     /// Retained mutation-evidence contract, when present.
     #[must_use]
-    pub const fn evidence_root(self) -> Option<Digest> {
+    pub const fn evidence_root(&self) -> Option<Digest> {
         self.evidence_root
     }
 
     /// Logical time of the reconciled backend read.
     #[must_use]
-    pub const fn observed_at(self) -> LogicalTime {
-        self.observed_at
+    pub const fn observed_at(&self) -> LogicalTime {
+        self.snapshot.observed_at()
     }
 }
 
 /// Deterministic interpretation of a backend reread.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskProjectionPersistenceDecision {
-    /// The exact successor and all transition metadata were observed.
+    /// The exact semantic successor and all transition metadata were observed.
     Confirmed(TaskProjectionPersistenceReceipt),
-    /// The exact predecessor remains current; retrying the same envelope is safe.
+    /// The exact predecessor remains current; replaying this envelope is safe.
     RetrySafe {
         /// Mutation request being retried.
         envelope_id: TaskProjectionMutationEnvelopeId,
         /// Still-current predecessor snapshot.
-        current_snapshot_id: [u8; 32],
+        current_snapshot_id: AuthorityBoundTaskProjectionSnapshotId,
         /// Still-current predecessor generation.
         current_generation: [u8; 32],
     },
-    /// Another successor won or the backend row changed incompatibly.
+    /// Another successor won or the row changed incompatibly.
     Conflict {
         /// Mutation request that lost or became stale.
         envelope_id: TaskProjectionMutationEnvelopeId,
         /// Current conflicting snapshot identity.
-        current_snapshot_id: [u8; 32],
+        current_snapshot_id: AuthorityBoundTaskProjectionSnapshotId,
         /// Current conflicting generation.
         current_generation: [u8; 32],
     },
@@ -421,9 +452,11 @@ pub enum TaskProjectionPersistenceDecision {
 pub struct TaskProjectionPersistenceReceipt {
     receipt_id: TaskProjectionPersistenceReceiptId,
     envelope_id: TaskProjectionMutationEnvelopeId,
+    basis_authority_read_receipt_id: AuthorityReadReceiptId,
+    confirming_authority_read_receipt_id: AuthorityReadReceiptId,
     repository_id: RepositoryId,
     task_id: WorkTaskId,
-    snapshot_id: [u8; 32],
+    snapshot_id: AuthorityBoundTaskProjectionSnapshotId,
     generation: [u8; 32],
     transition_id: [u8; 32],
     inner_transition_id: [u8; 32],
@@ -436,13 +469,17 @@ impl TaskProjectionPersistenceReceipt {
         envelope: &TaskProjectionMutationEnvelope,
         observed: &TaskProjectionPersistedState,
     ) -> Result<Self, TaskProjectionPersistenceRefusal> {
+        let confirming_authority_read_receipt_id =
+            observed.snapshot.authority_read_receipt().receipt_id()?;
         let mut receipt = Self {
             receipt_id: TaskProjectionPersistenceReceiptId([0; 32]),
             envelope_id: envelope.envelope_id,
+            basis_authority_read_receipt_id: envelope.basis_authority_read_receipt_id,
+            confirming_authority_read_receipt_id,
             repository_id: envelope.repository_id,
             task_id: envelope.task_id,
-            snapshot_id: observed.snapshot_id,
-            generation: observed.generation,
+            snapshot_id: observed.snapshot.snapshot_id(),
+            generation: *observed.snapshot.generation(),
             transition_id: observed
                 .last_transition_id
                 .ok_or(TaskProjectionPersistenceRefusal::SuccessorTransitionMissing)?,
@@ -452,7 +489,7 @@ impl TaskProjectionPersistenceReceipt {
             evidence_root: observed
                 .evidence_root
                 .ok_or(TaskProjectionPersistenceRefusal::SuccessorEvidenceMissing)?,
-            observed_at: observed.observed_at,
+            observed_at: observed.snapshot.observed_at(),
         };
         receipt.receipt_id =
             TaskProjectionPersistenceReceiptId(receipt_commitment(&receipt)?);
@@ -471,6 +508,18 @@ impl TaskProjectionPersistenceReceipt {
         self.envelope_id
     }
 
+    /// Exact read event that authorized the mutation envelope.
+    #[must_use]
+    pub const fn basis_authority_read_receipt_id(self) -> AuthorityReadReceiptId {
+        self.basis_authority_read_receipt_id
+    }
+
+    /// Exact authenticated reread that confirmed the successor.
+    #[must_use]
+    pub const fn confirming_authority_read_receipt_id(self) -> AuthorityReadReceiptId {
+        self.confirming_authority_read_receipt_id
+    }
+
     /// Repository namespace.
     #[must_use]
     pub const fn repository_id(self) -> RepositoryId {
@@ -485,7 +534,7 @@ impl TaskProjectionPersistenceReceipt {
 
     /// Persisted successor snapshot identity.
     #[must_use]
-    pub const fn snapshot_id(self) -> [u8; 32] {
+    pub const fn snapshot_id(self) -> AuthorityBoundTaskProjectionSnapshotId {
         self.snapshot_id
     }
 
@@ -501,7 +550,7 @@ impl TaskProjectionPersistenceReceipt {
         self.transition_id
     }
 
-    /// Persisted semantic transition-body commitment.
+    /// Persisted inner transition identity.
     #[must_use]
     pub const fn inner_transition_id(self) -> [u8; 32] {
         self.inner_transition_id
@@ -523,14 +572,20 @@ impl TaskProjectionPersistenceReceipt {
 /// Why task mutation persistence could not be confirmed safely.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskProjectionPersistenceRefusal {
-    /// Application repository differs from its transition.
+    /// Application repository differs across its state and transition.
     ApplicationRepositoryMismatch,
-    /// Application task differs from its transition.
+    /// Application task differs across its state and transition.
     ApplicationTaskMismatch,
-    /// Application successor snapshot differs from its transition.
+    /// Application predecessor differs from its transition.
+    ApplicationPredecessorMismatch,
+    /// Application successor differs from its transition.
     ApplicationSuccessorMismatch,
-    /// Application successor generation differs from its transition.
+    /// Application predecessor/successor generation differs from its transition.
     ApplicationGenerationMismatch,
+    /// Application changed its exact authenticated read basis.
+    ApplicationAuthorityMismatch,
+    /// Application time ordering is inconsistent.
+    ApplicationObservationMismatch,
     /// Backend reread found no task row.
     ProjectionMissing,
     /// Backend reread belongs to another repository.
@@ -547,6 +602,8 @@ pub enum TaskProjectionPersistenceRefusal {
         /// Backend task.
         observed: WorkTaskId,
     },
+    /// Backend reread uses another authority-head position.
+    ObservedAuthorityPositionMismatch,
     /// Backend reread predates the transition.
     ObservationRollback {
         /// Transition time.
@@ -554,6 +611,9 @@ pub enum TaskProjectionPersistenceRefusal {
         /// Backend reread time.
         backend_observed_at: LogicalTime,
     },
+    /// The predecessor remains current but carries metadata from this attempted
+    /// successor, which is a partial/corrupt write rather than a safe retry.
+    PredecessorCarriesAttemptedMetadata,
     /// Exact successor omitted repository-scoped transition identity.
     SuccessorTransitionMissing,
     /// Exact successor retained another repository-scoped transition identity.
@@ -563,9 +623,9 @@ pub enum TaskProjectionPersistenceRefusal {
         /// Backend transition.
         observed: [u8; 32],
     },
-    /// Exact successor omitted semantic inner transition identity.
+    /// Exact successor omitted inner transition identity.
     SuccessorInnerTransitionMissing,
-    /// Exact successor retained another semantic inner transition identity.
+    /// Exact successor retained another inner transition identity.
     SuccessorInnerTransitionMismatch {
         /// Envelope inner transition.
         expected: [u8; 32],
@@ -581,6 +641,8 @@ pub enum TaskProjectionPersistenceRefusal {
         /// Backend evidence root.
         observed: Digest,
     },
+    /// Exact authenticated-read identity could not be framed.
+    AuthorityIdentity(AuthorityReadIdentityRefusal),
     /// Canonical commitment framing failed.
     Codec(CodecRefusal),
 }
@@ -593,10 +655,45 @@ impl fmt::Display for TaskProjectionPersistenceRefusal {
 
 impl core::error::Error for TaskProjectionPersistenceRefusal {}
 
+impl From<AuthorityReadIdentityRefusal> for TaskProjectionPersistenceRefusal {
+    fn from(value: AuthorityReadIdentityRefusal) -> Self {
+        Self::AuthorityIdentity(value)
+    }
+}
+
 impl From<CodecRefusal> for TaskProjectionPersistenceRefusal {
     fn from(value: CodecRefusal) -> Self {
         Self::Codec(value)
     }
+}
+
+fn same_authority_position(
+    expected: &AuthorityBoundTaskProjectionSnapshot,
+    observed: &AuthorityBoundTaskProjectionSnapshot,
+) -> bool {
+    let expected_receipt = expected.authority_read_receipt();
+    let observed_receipt = observed.authority_read_receipt();
+    expected_receipt.repository_id() == observed_receipt.repository_id()
+        && expected_receipt.authority_head_id() == observed_receipt.authority_head_id()
+        && expected_receipt.authority_head_generation()
+            == observed_receipt.authority_head_generation()
+}
+
+fn semantic_snapshot_matches(
+    expected: &AuthorityBoundTaskProjectionSnapshot,
+    observed: &AuthorityBoundTaskProjectionSnapshot,
+) -> bool {
+    expected.snapshot_id() == observed.snapshot_id()
+        && expected.repository_id() == observed.repository_id()
+        && expected.task_id() == observed.task_id()
+        && expected.generation() == observed.generation()
+        && expected.phase() == observed.phase()
+        && expected.assignment() == observed.assignment()
+        && leases_match(expected.lease(), observed.lease())
+}
+
+fn leases_match(left: Option<&TaskProjectionLease>, right: Option<&TaskProjectionLease>) -> bool {
+    left == right
 }
 
 fn validate_successor_metadata(
@@ -641,14 +738,15 @@ fn validate_successor_metadata(
 fn envelope_commitment(
     envelope: &TaskProjectionMutationEnvelope,
 ) -> Result<[u8; 32], TaskProjectionPersistenceRefusal> {
-    let mut encoder = Encoder::with_capacity(640);
+    let mut encoder = Encoder::with_capacity(704);
     encoder.write_bytes("task_mutation_envelope_domain", ENVELOPE_DOMAIN)?;
     encoder.write_opaque_id(envelope.repository_id.as_bytes());
     encoder.write_raw(envelope.task_id.as_bytes());
-    encoder.write_raw(envelope.before_snapshot_id.as_bytes());
-    encoder.write_raw(envelope.after_snapshot_id.as_bytes());
-    encoder.write_raw(&envelope.previous_generation);
-    encoder.write_raw(&envelope.resulting_generation);
+    encoder.write_raw(envelope.basis_authority_read_receipt_id.as_bytes());
+    encoder.write_raw(envelope.before.snapshot_id().as_bytes());
+    encoder.write_raw(envelope.after.snapshot_id().as_bytes());
+    encoder.write_raw(envelope.before.generation());
+    encoder.write_raw(envelope.after.generation());
     encoder.write_raw(envelope.transition_id.as_bytes());
     encoder.write_raw(&envelope.inner_transition_id);
     write_transition_kind(&mut encoder, envelope.kind);
@@ -661,12 +759,14 @@ fn envelope_commitment(
 fn receipt_commitment(
     receipt: &TaskProjectionPersistenceReceipt,
 ) -> Result<[u8; 32], TaskProjectionPersistenceRefusal> {
-    let mut encoder = Encoder::with_capacity(448);
+    let mut encoder = Encoder::with_capacity(544);
     encoder.write_bytes("task_persistence_receipt_domain", RECEIPT_DOMAIN)?;
     encoder.write_raw(receipt.envelope_id.as_bytes());
+    encoder.write_raw(receipt.basis_authority_read_receipt_id.as_bytes());
+    encoder.write_raw(receipt.confirming_authority_read_receipt_id.as_bytes());
     encoder.write_opaque_id(receipt.repository_id.as_bytes());
     encoder.write_raw(receipt.task_id.as_bytes());
-    encoder.write_raw(&receipt.snapshot_id);
+    encoder.write_raw(receipt.snapshot_id.as_bytes());
     encoder.write_raw(&receipt.generation);
     encoder.write_raw(&receipt.transition_id);
     encoder.write_raw(&receipt.inner_transition_id);

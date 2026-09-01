@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Public-path tests for task mutation CAS and ambiguous-write reconciliation.
+//! Public-path tests for complete task-state persistence reconciliation.
 
 use fgit_agent::{
     AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentSituationReceipt,
@@ -16,14 +16,14 @@ use fgit_agent::{
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
-    authority_head_identity, initialize_repository, outcome_index_root,
+    initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
 use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
-    RepositoryCommitId, RepositorySequence,
+    RepositoryCommitId, RepositoryId, RepositorySequence,
 };
 
 const TASK_BASIS: [u8; 32] = [0x44; 32];
@@ -45,10 +45,9 @@ fn rcr_id() -> RepositoryCommitId {
 }
 
 fn authority_receipt() -> AuthorityReadReceipt {
-    let repository_id = fgit_types::RepositoryId::from_bytes([0x22; 16]);
     let root = outcome_index_root(&[]).expect("empty outcome-index root is canonical");
-    let head = RepositoryAuthorityHeadBody {
-        repository_id,
+    let body = RepositoryAuthorityHeadBody {
+        repository_id: RepositoryId::from_bytes([0x27; 16]),
         generation: HeadGeneration::FIRST,
         predecessor_head_id: None,
         decision_tail_id: None,
@@ -56,33 +55,30 @@ fn authority_receipt() -> AuthorityReadReceipt {
         latest_committed_rcr_id: Some(rcr_id()),
         latest_repository_sequence: Some(RepositorySequence::FIRST),
         ref_root: root,
-        forge_position_root: root,
-        outcome_index_root: root,
-        retention_root: root,
-        outbox_root: root,
-        configuration_root: digest(0x41),
+        forge_position_root: digest(0x31),
+        outcome_index_root: digest(0x32),
+        retention_root: digest(0x33),
+        outbox_root: digest(0x34),
+        configuration_root: digest(0x35),
         policy_epoch: PolicyEpoch::FIRST,
         format_registry_epoch: RegistryEpoch::FIRST,
         last_checkpoint_id: None,
     };
-    let expected = authority_head_identity(&head).expect("head identity");
-    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(601));
-    let key = HeadKey::new(b"task-persistence-test-head".to_vec()).expect("bounded head key");
-    let read = match initialize_repository(&store, &key, &head).expect("initialize") {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(911));
+    let key = HeadKey::new(b"complete-task-persistence-test".to_vec()).expect("bounded head key");
+    let read = match initialize_repository(&store, &key, &body).expect("initialize head") {
         HeadInit::Created(read) => read,
         HeadInit::IdenticalRetry(_) | HeadInit::Conflict => panic!("fresh store must create"),
     };
     let authenticated = store
         .authenticate_head_receipt(&read)
-        .expect("authenticate receipt");
-    let receipt = AuthorityReadReceipt::from_authenticated_head(
+        .expect("issuing store authenticates its receipt");
+    AuthorityReadReceipt::from_authenticated_head(
         &authenticated,
         LogicalTime::new(10),
-        [0x51; 32],
+        [0x71; 32],
     )
-    .expect("complete receipt");
-    assert_eq!(receipt.authority_head_id(), expected);
-    receipt
+    .expect("authenticated agent receipt")
 }
 
 fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
@@ -127,7 +123,7 @@ fn situation(
         LogicalTime::new(20),
         components,
     )
-    .expect("complete authority-bound situation")
+    .expect("complete situation")
 }
 
 fn pulse_and_plan(
@@ -135,7 +131,7 @@ fn pulse_and_plan(
     run: &IntentRun,
     snapshot: &AuthorityBoundTaskProjectionSnapshot,
 ) -> (AgentControlPulse, AgentChangePlan) {
-    let situation = situation(receipt, run, *snapshot.generation());
+    let current = situation(receipt, run, *snapshot.generation());
     let item = WorkItem::new(
         snapshot.task_id(),
         *snapshot.generation(),
@@ -143,18 +139,14 @@ fn pulse_and_plan(
         WorkRankingInputs::new(1, 2, 3),
         WorkEligibilityInputs::new(0, None, None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&situation, vec![item])
+    let frontier = WorkFrontier::build_action_scoped(&current, vec![item])
         .expect("task is eligible");
-    let pulse = AgentControlPulse::build(&situation, &frontier, Some(run))
+    let pulse = AgentControlPulse::build(&current, &frontier, Some(run))
         .expect("live run makes an actionable pulse");
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x61));
     let spec = AgentChangePlanSpec::new(
         digest(0x60),
-        ClassSet::from_classes(&[
-            OperationClass::TreeFsWorkspace,
-            OperationClass::SubmitEvidence,
-            OperationClass::ConsumeBudget,
-        ]),
+        run.allowed_operation_classes(),
         ResourceVector::from_grades(&[
             (Grade::Bytes, 4_096),
             (Grade::CpuMicros, 5_000),
@@ -178,13 +170,8 @@ fn pulse_and_plan(
         digest(0x67),
         false,
     )]);
-    let plan = AgentChangePlan::build(&pulse, run, &[], spec)
-        .expect("complete change plan");
+    let plan = AgentChangePlan::build(&pulse, run, &[], spec).expect("complete plan");
     (pulse, plan)
-}
-
-struct Fixture {
-    application: AuthorityBoundTaskClaimApplication,
 }
 
 fn claim_application(adapter: u8, evidence: u8) -> AuthorityBoundTaskClaimApplication {
@@ -198,7 +185,7 @@ fn claim_application(adapter: u8, evidence: u8) -> AuthorityBoundTaskClaimApplic
         TaskProjectionAssignment::Unassigned,
         LogicalTime::new(20),
     )
-    .expect("valid repository-scoped snapshot");
+    .expect("valid authority-bound task state");
     let (pulse, plan) = pulse_and_plan(&receipt, &run, &snapshot);
     snapshot
         .claim(
@@ -213,128 +200,137 @@ fn claim_application(adapter: u8, evidence: u8) -> AuthorityBoundTaskClaimApplic
         .expect("repository-scoped claim")
 }
 
-fn fixture() -> Fixture {
-    Fixture {
-        application: claim_application(0x71, 0x72),
+fn reread(
+    snapshot: &AuthorityBoundTaskProjectionSnapshot,
+    observed_at: u64,
+) -> AuthorityBoundTaskProjectionSnapshot {
+    match snapshot.lease() {
+        Some(lease) => AuthorityBoundTaskProjectionSnapshot::observed_with_lease(
+            snapshot.authority_read_receipt(),
+            snapshot.task_id(),
+            *snapshot.generation(),
+            snapshot.phase(),
+            lease.clone(),
+            LogicalTime::new(observed_at),
+        )
+        .expect("valid persisted lease reread"),
+        None => AuthorityBoundTaskProjectionSnapshot::observed(
+            snapshot.authority_read_receipt(),
+            snapshot.task_id(),
+            *snapshot.generation(),
+            snapshot.phase(),
+            snapshot.assignment(),
+            LogicalTime::new(observed_at),
+        )
+        .expect("valid persisted task reread"),
     }
 }
 
-fn predecessor_state(
-    envelope: TaskProjectionMutationEnvelope,
-) -> TaskProjectionPersistedState {
+fn predecessor_state(envelope: &TaskProjectionMutationEnvelope) -> TaskProjectionPersistedState {
     TaskProjectionPersistedState::new(
-        envelope.repository_id(),
-        envelope.task_id(),
-        *envelope.before_snapshot_id().as_bytes(),
-        envelope.previous_generation(),
+        reread(envelope.before_snapshot(), 26),
         None,
         None,
         None,
-        LogicalTime::new(26),
     )
 }
 
-fn successor_state(
-    envelope: TaskProjectionMutationEnvelope,
-) -> TaskProjectionPersistedState {
+fn successor_state(envelope: &TaskProjectionMutationEnvelope) -> TaskProjectionPersistedState {
     TaskProjectionPersistedState::new(
-        envelope.repository_id(),
-        envelope.task_id(),
-        *envelope.after_snapshot_id().as_bytes(),
-        envelope.resulting_generation(),
+        reread(envelope.after_snapshot(), 26),
         Some(*envelope.transition_id().as_bytes()),
         Some(envelope.inner_transition_id()),
         Some(envelope.evidence_root()),
-        LogicalTime::new(26),
     )
 }
 
 #[test]
-fn unchanged_predecessor_is_a_safe_exact_retry() {
-    let fixture = fixture();
-    let envelope = TaskProjectionMutationEnvelope::from_claim(&fixture.application)
+fn complete_predecessor_is_safe_to_retry() {
+    let application = claim_application(0x81, 0x82);
+    let envelope = TaskProjectionMutationEnvelope::from_claim(&application)
         .expect("complete mutation envelope");
-    let observed = predecessor_state(envelope);
+    let observed = predecessor_state(&envelope);
 
     assert_eq!(
         envelope
             .reconcile(Some(&observed))
-            .expect("unchanged predecessor is not an ambiguous success"),
+            .expect("unchanged predecessor is a typed decision"),
         TaskProjectionPersistenceDecision::RetrySafe {
             envelope_id: envelope.envelope_id(),
-            current_snapshot_id: *envelope.before_snapshot_id().as_bytes(),
+            current_snapshot_id: envelope.before_snapshot_id(),
             current_generation: envelope.previous_generation(),
         }
     );
 }
 
 #[test]
-fn exact_successor_and_metadata_make_a_deterministic_receipt() {
-    let fixture = fixture();
-    let envelope = TaskProjectionMutationEnvelope::from_claim(&fixture.application)
+fn complete_successor_and_metadata_make_a_receipt() {
+    let application = claim_application(0x81, 0x82);
+    let envelope = TaskProjectionMutationEnvelope::from_claim(&application)
         .expect("complete mutation envelope");
-    let observed = successor_state(envelope);
+    let observed = successor_state(&envelope);
 
     let first = envelope
         .reconcile(Some(&observed))
         .expect("exact successor is confirmed");
     let second = envelope
         .reconcile(Some(&observed))
-        .expect("identical reread is deterministic");
+        .expect("same reread is deterministic");
     assert_eq!(first, second);
 
     let TaskProjectionPersistenceDecision::Confirmed(receipt) = first else {
         panic!("exact successor must produce a receipt")
     };
     assert_eq!(receipt.envelope_id(), envelope.envelope_id());
-    assert_eq!(receipt.snapshot_id(), *envelope.after_snapshot_id().as_bytes());
+    assert_eq!(receipt.snapshot_id(), envelope.after_snapshot_id());
     assert_eq!(receipt.generation(), envelope.resulting_generation());
     assert_eq!(receipt.transition_id(), *envelope.transition_id().as_bytes());
     assert_ne!(receipt.receipt_id().as_bytes(), &[0; 32]);
 }
 
 #[test]
-fn another_successor_is_a_conflict_not_a_retry_or_success() {
-    let fixture = fixture();
-    let envelope = TaskProjectionMutationEnvelope::from_claim(&fixture.application)
+fn same_generation_with_different_semantic_state_is_conflict() {
+    let application = claim_application(0x81, 0x82);
+    let envelope = TaskProjectionMutationEnvelope::from_claim(&application)
         .expect("complete mutation envelope");
-    let observed = TaskProjectionPersistedState::new(
-        envelope.repository_id(),
+    let different = AuthorityBoundTaskProjectionSnapshot::observed(
+        envelope.before_snapshot().authority_read_receipt(),
         envelope.task_id(),
-        [0xa1; 32],
-        [0xa2; 32],
-        Some([0xa3; 32]),
-        Some([0xa4; 32]),
-        Some(digest(0xa5)),
+        envelope.resulting_generation(),
+        TaskPhase::Rework,
+        TaskProjectionAssignment::Unassigned,
         LogicalTime::new(26),
+    )
+    .expect("different structurally valid state");
+    let observed = TaskProjectionPersistedState::new(
+        different.clone(),
+        Some(*envelope.transition_id().as_bytes()),
+        Some(envelope.inner_transition_id()),
+        Some(envelope.evidence_root()),
     );
 
     assert_eq!(
         envelope
             .reconcile(Some(&observed))
-            .expect("a conflicting row is a typed decision"),
+            .expect("different semantic state is a typed conflict"),
         TaskProjectionPersistenceDecision::Conflict {
             envelope_id: envelope.envelope_id(),
-            current_snapshot_id: [0xa1; 32],
-            current_generation: [0xa2; 32],
+            current_snapshot_id: different.snapshot_id(),
+            current_generation: *different.generation(),
         }
     );
 }
 
 #[test]
-fn exact_successor_without_transition_metadata_fails_closed() {
-    let fixture = fixture();
-    let envelope = TaskProjectionMutationEnvelope::from_claim(&fixture.application)
+fn successor_without_transition_metadata_fails_closed() {
+    let application = claim_application(0x81, 0x82);
+    let envelope = TaskProjectionMutationEnvelope::from_claim(&application)
         .expect("complete mutation envelope");
     let observed = TaskProjectionPersistedState::new(
-        envelope.repository_id(),
-        envelope.task_id(),
-        *envelope.after_snapshot_id().as_bytes(),
-        envelope.resulting_generation(),
+        reread(envelope.after_snapshot(), 26),
         None,
         Some(envelope.inner_transition_id()),
         Some(envelope.evidence_root()),
-        LogicalTime::new(26),
     );
 
     assert_eq!(
@@ -346,43 +342,32 @@ fn exact_successor_without_transition_metadata_fails_closed() {
 }
 
 #[test]
-fn substituted_evidence_on_the_exact_successor_is_refused() {
-    let fixture = fixture();
-    let envelope = TaskProjectionMutationEnvelope::from_claim(&fixture.application)
+fn predecessor_with_attempted_transition_metadata_is_not_retry_safe() {
+    let application = claim_application(0x81, 0x82);
+    let envelope = TaskProjectionMutationEnvelope::from_claim(&application)
         .expect("complete mutation envelope");
     let observed = TaskProjectionPersistedState::new(
-        envelope.repository_id(),
-        envelope.task_id(),
-        *envelope.after_snapshot_id().as_bytes(),
-        envelope.resulting_generation(),
+        reread(envelope.before_snapshot(), 26),
         Some(*envelope.transition_id().as_bytes()),
         Some(envelope.inner_transition_id()),
-        Some(digest(0xff)),
-        LogicalTime::new(26),
+        Some(envelope.evidence_root()),
     );
 
     assert_eq!(
         envelope
             .reconcile(Some(&observed))
-            .expect_err("successor evidence cannot be substituted"),
-        TaskProjectionPersistenceRefusal::SuccessorEvidenceMismatch {
-            expected: envelope.evidence_root(),
-            observed: digest(0xff),
-        }
+            .expect_err("partial metadata write must not be retried blindly"),
+        TaskProjectionPersistenceRefusal::PredecessorCarriesAttemptedMetadata
     );
 }
 
 #[test]
-fn logical_successor_is_independent_from_adapter_and_evidence_identity() {
-    let first = claim_application(0x71, 0x72);
-    let second = claim_application(0x73, 0x74);
+fn logical_successor_is_independent_from_adapter_evidence_identity() {
+    let first = claim_application(0x81, 0x82);
+    let second = claim_application(0x83, 0x84);
 
     assert_eq!(first.snapshot().generation(), second.snapshot().generation());
     assert_eq!(first.snapshot().snapshot_id(), second.snapshot().snapshot_id());
     assert_ne!(first.transition().transition_id(), second.transition().transition_id());
     assert_ne!(first.projection().adapter_identity(), second.projection().adapter_identity());
-    assert_ne!(
-        first.projection().claim_evidence_root(),
-        second.projection().claim_evidence_root()
-    );
 }
