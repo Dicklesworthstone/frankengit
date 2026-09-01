@@ -28,6 +28,9 @@ All three remain derived control evidence. None is repository authority, a capab
 | `c3ac9e32` | activate the continuity surfaces |
 | `884e7475` | reconcile the implementation-status ledger |
 | `ec0c74a9` | replace the obsolete architecture-only changelog framing |
+| `4b083d09` | add this revision-linked change record |
+| `63e9489f` | add the non-authoritative Beads verification handoff |
+| `bc5cfc41` | preserve deterministic structural refusals before strict evidence-class enforcement |
 
 The full commit IDs remain in git history. Short IDs above are navigation aids, not verification evidence.
 
@@ -95,6 +98,8 @@ result   = typed refusal
 ```
 
 Other supporting classes may accompany the required record, but cannot replace it. The generic internal constructor is crate-private so callers cannot bypass this plan-relative check through a raw module path.
+
+The public wrapper first runs the internal builder's fixed structural refusal order and canonicalization. Exact-class enforcement runs only on that canonical requirement matrix. Duplicate, mismatched, or incomplete requirement rows therefore retain the same core refusal regardless of caller row order; a structurally valid record still cannot become public with a weaker evidence class.
 
 ### Completed outcomes
 
