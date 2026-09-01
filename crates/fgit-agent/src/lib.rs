@@ -55,6 +55,11 @@
 //! component set, and deterministic anti-rollback deltas. It performs no task
 //! mutation, ranking, capability grant, or publication.
 //!
+//! [`frontier`] consumes one such receipt plus a bounded task projection. It
+//! fails closed on an unavailable projection, separates hard eligibility from
+//! advisory ordering, and preserves a typed exclusion reason for every row
+//! that cannot be acted on by the receipt's active Intent Run.
+//!
 //! The obligation lifecycle is not reimplemented either. `fgit-resource` owns
 //! it, and [`broker`] explains exactly which half of an effect's reservation
 //! this crate holds and which half belongs to the component that performs it.
@@ -63,6 +68,7 @@ pub mod broker;
 pub mod capability;
 pub mod classes;
 pub mod ecc;
+pub mod frontier;
 pub mod intent;
 pub mod protocol;
 pub mod refresh;
@@ -84,6 +90,11 @@ pub use ecc::{
     EccPolicy, EccRefusal, EvidenceCarryingChange, EvidenceClass, EvidenceRecordRef,
     IndependenceClassification, IndependenceDimension, PartyFacts, RequirementDisposition,
     VerifierAttestation, classify_independence,
+};
+pub use frontier::{
+    ExcludedWorkItem, FrontierExclusionReason, FrontierRefusal, MAX_WORK_ITEMS, TaskPhase,
+    WorkAction, WorkCandidate, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkFrontierId,
+    WorkItem, WorkRankingInputs, WorkRankingWitness, WorkTaskId,
 };
 pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
 pub use protocol::{
