@@ -65,6 +65,15 @@ c76916d3bcb3ec28c5a406b6cb4d31db605f32fd
 
 e453dc36e0011267b1e8fc5b0b9744f021946a71
     correct store-reread time ordering in the recovery oracle
+
+cd6d92434e0b4f4e8e8c9c67bedfdfaef857c2f7
+    atomically bind claim recovery to complete Intent Run identity
+
+fa7f09bfe7e08f309d4511642722176a25b61d29
+    expose the run-bound recovery cleanup API
+
+4334255e65320e1f2fb4364941efd02d8bec8860
+    pin cleanup after run expiry and same-ID run substitution refusal
 ```
 
 Documentation-only descendants follow those source commits.
@@ -82,10 +91,10 @@ Documentation-only descendants follow those source commits.
 
 - history binds exact collection receipt, task, and current generation;
 - predecessor generation and original claim instant are supplied explicitly;
-- assignee, plan, expiry, phase, current generation, conflict state, and complete reservation surface are reused from the validated collection;
+- assignee, plan, expiry, phase, conflict state, and complete reservation surface are reused from the validated collection;
 - history replay, temporal inversion, zero adapter identity, invalid generations, and invalid surfaces fail closed;
 - semantic task identity remains independent from history adapter/evidence identity;
-- a stable reconstruction receipt retains both semantic state and audit evidence.
+- a stable reconstruction receipt retains semantic state and audit evidence separately.
 
 ### Restart active-claim recovery
 
@@ -93,25 +102,35 @@ Documentation-only descendants follow those source commits.
 - task, plan, assignee, predecessor/current generations, surface, claim time, and expiry must match the reconstructed lease;
 - reconstruction, refreshed situation, and supplied run must use the same exact authenticated read event;
 - a later same-head read with the same numeric `RunId` is refused;
-- recovery identity commits reconstruction, original claim, and fresh activation.
+- ordinary recovery identity commits reconstruction, original claim, and fresh activation.
+
+### Complete-run recovery binding
+
+- `recover_task_claim_for_cleanup` performs activation and complete-run commitment in one API call;
+- `RunBoundRecoveredTaskClaimId` commits the ordinary recovery identity plus the exact `IntentRunCommitment`;
+- callers cannot attach a different same-ID run after activation;
+- cleanup re-computes the supplied run commitment before semantic mutation or store I/O;
+- changes to exact authority read, operation scope, resource budget, or expiry are refused;
+- release remains possible after the original run expires, but the caller cannot replace it with a same-ID copy carrying a later expiry.
 
 ### Persistence-gated cleanup
 
-- an expired recovered claim may still release its task;
+- an expired run-bound recovered claim may still release its task;
 - the invoked store profile becomes the transition adapter identity;
-- another reconstruction or claim is refused before store I/O;
+- another reconstruction, claim, or complete run is refused before store I/O;
 - the ordinary one-shot read/CAS/flush/reread protocol is reused;
-- confirmed success retains recovery, reconstruction, and persistence identities;
-- conflict and uncertainty retain recovery identity plus the complete mutation envelope;
+- confirmed success retains run-bound recovery, ordinary recovery, reconstruction, and persistence identities;
+- conflict and uncertainty retain the same recovery identities plus the complete mutation envelope;
 - an ambiguous write followed by the predecessor remains reconciliation debt.
 
 ## Fresh-review corrections
 
-The source/test wave corrected three shortcuts before documentation was frozen:
+The source/test wave corrected four shortcuts before the final handoff was frozen:
 
-1. **Opaque identity fabrication:** tests now build a real `AgentChangePlan`; they do not construct arbitrary plan IDs.
+1. **Opaque identity fabrication:** tests build a real `AgentChangePlan`; they do not construct arbitrary plan IDs.
 2. **Impossible history:** the plan is built against the predecessor generation before the recorded claim instant.
 3. **Stale store read:** the scripted store reread is timestamped after the release request, matching anti-rollback semantics.
+4. **Numeric run substitution:** persisted cleanup now consumes an atomic run-bound recovery value rather than trusting `RunId` after recovery.
 
 ## Focused source tests present
 
@@ -126,11 +145,13 @@ The current tree includes public-path source tests for:
 - claim-time rollback refusal;
 - original claim recovery;
 - same-head read substitution refusal during recovery;
-- persisted release after expiry;
+- atomic complete-run binding;
+- durable release after both claim and run expiry;
+- same-ID changed-scope/budget/expiry refusal before store I/O;
 - explicit rework state;
-- reconstruction/recovery identity retention;
+- run-bound recovery/reconstruction identity retention;
 - pre-I/O reconstruction substitution refusal;
-- ambiguous cleanup debt.
+- ambiguous cleanup debt retaining complete recovery identity.
 
 Source presence is not a test result.
 
@@ -145,6 +166,7 @@ This wave does not supply:
 - authenticated tracker reread mapping;
 - an envelope-ID quiescence probe;
 - durable codecs or migrations for the new receipts;
+- complete-run commitments in the older generic task claim/lease vocabulary outside the restart-cleanup facade;
 - multi-task atomicity or distributed reservations;
 - process/workspace/effect cleanup;
 - action-packet execution;
@@ -204,7 +226,7 @@ For the unambiguous owning Bead:
 ## Suggested progress-comment substance
 
 ```text
-Agent Control Plane task recovery advanced from pre-situation collection through exact-read collection bridging, durable active-lease reconstruction, original TaskClaimReceipt revalidation, restart-safe active-claim recovery, and persistence-gated release after expiry. Source revisions are 9f54b2c6, 35870eba, b95cf5b2, 93f7e1f9, 3fe49f29, af9561a2, e2b33a62, 6448d04a, 8aa8e1c1, c76916d3, 5d82bc40, 1402ca76, and e453dc36. Recovery identity is retained through confirmed persistence, conflict, and ambiguous-write debt. Focused public-path test source is present. No formatter/compiler/test/Clippy/repository-lane or independent batch result was observed in the implementation environment. Concrete br/Beads read/history/CAS/flush/reread/probe I/O, durable codecs, process cleanup, action execution, robot surfaces, ECC closure, and canonical publication remain absent. Verification or closure is not requested without the designated revision-bound gate.
+Agent Control Plane task recovery advanced from pre-situation collection through exact-read collection bridging, durable active-lease reconstruction, original TaskClaimReceipt revalidation, restart-safe active-claim recovery, atomic complete-IntentRun binding, and persistence-gated release after both claim and run expiry. Source revisions are 9f54b2c6, 35870eba, b95cf5b2, 93f7e1f9, 3fe49f29, af9561a2, e2b33a62, 6448d04a, 8aa8e1c1, c76916d3, 5d82bc40, 1402ca76, e453dc36, cd6d9243, fa7f09bf, and 4334255e. Same-ID changes to authority read, scope, budget, or expiry now refuse before store I/O. Confirmed, conflicting, and ambiguous outcomes retain the run-bound recovery, ordinary recovery, and lease reconstruction identities. Focused public-path test source is present. No formatter/compiler/test/Clippy/repository-lane or independent batch result was observed in the implementation environment. Concrete br/Beads read/history/CAS/flush/reread/probe I/O, durable codecs, generic claim/lease run commitments, process cleanup, action execution, robot surfaces, ECC closure, and canonical publication remain absent. Verification or closure is not requested without the designated revision-bound gate.
 ```
 
 ## Stop conditions
