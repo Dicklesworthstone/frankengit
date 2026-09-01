@@ -16,17 +16,16 @@
 //! earlier adapter surface. [`task_collection`] discovers its current generation
 //! and complete rows before an Agent Situation exists, while
 //! [`task_projection_read`] re-reads one generation already named by a situation.
-//! [`task_projection_adapter`] is the pure single-task semantic transition
-//! kernel for claim, release, and transfer. The latter is exported under the
-//! `CoordinatedTaskProjection*` aliases so both abstractions remain explicit
-//! rather than silently overloading one type name.
-//! [`task_coordination`] attaches exact authority-read provenance and monotone
-//! freshness. [`task_persistence`] freezes complete exact-predecessor mutation
-//! envelopes and reconciles authenticated backend rereads. [`task_store`]
-//! defines the one-call read/CAS/flush/reread orchestration a concrete Beads or
-//! scheduler backend must implement, preserving every post-effect uncertainty
-//! as reconciliation debt. None of those values is durable by construction or
-//! repository authority.
+//! The crate-private `task_projection_adapter` module is the pure single-task
+//! semantic transition kernel for claim, release, and transfer; downstream
+//! callers reach it only through [`task_coordination`], which attaches exact
+//! repository and authenticated-read provenance plus monotone freshness.
+//! [`task_persistence`] freezes complete exact-predecessor mutation envelopes and
+//! reconciles authenticated backend rereads. [`task_store`] defines the one-call
+//! read/CAS/flush/reread orchestration a concrete Beads or scheduler backend
+//! must implement, preserving every post-effect uncertainty as reconciliation
+//! debt. None of those values is durable by construction or repository
+//! authority.
 //!
 //! [`claim`] and [`action_packet`] bind an admitted task claim to concrete,
 //! bounded work without performing effects. [`claim_continuity`] permits only
@@ -72,7 +71,7 @@ pub mod task_coordination;
 pub mod task_mutation;
 pub mod task_persistence;
 pub mod task_projection;
-pub mod task_projection_adapter;
+mod task_projection_adapter;
 pub mod task_projection_read;
 pub mod task_store;
 
@@ -206,11 +205,8 @@ pub use task_projection::{
     TaskProjectionRefusal, TaskProjectionRow, TaskProjectionSnapshot, TaskProjectionSnapshotId,
 };
 pub use task_projection_adapter::{
-    TaskClaimApplication, TaskProjectionAdapterRefusal, TaskProjectionAssignment,
-    TaskProjectionLease, TaskProjectionSnapshot as CoordinatedTaskProjectionSnapshot,
-    TaskProjectionSnapshotId as CoordinatedTaskProjectionSnapshotId, TaskProjectionTransition,
-    TaskProjectionTransitionId, TaskProjectionTransitionKind, TaskReleaseDisposition,
-    TaskResolutionApplication,
+    TaskProjectionAdapterRefusal, TaskProjectionAssignment, TaskProjectionLease,
+    TaskProjectionTransitionKind, TaskReleaseDisposition,
 };
 pub use task_projection_read::{
     TaskProjectionReadAdapterRefusal, TaskProjectionReadExecutionRefusal,
