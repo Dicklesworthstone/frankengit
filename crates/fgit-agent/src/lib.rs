@@ -99,18 +99,19 @@
 //! escalation, or containment action still required. Escalation is preserved
 //! as debt rather than mislabeled as successful settlement.
 //!
-//! [`handoff`] binds the current situation, plan, activated claim, workspace,
-//! evidence state, unresolved work, proposed receiver attenuation, and the
-//! complete run-reconciliation report into one deterministic capsule. The
-//! capsule grants no authority and cannot summarize outstanding effect debt
-//! away. [`handoff_acceptance`] independently verifies a live receiver against
-//! the same authenticated head and the capsule's attenuation ceiling while
-//! preserving every inherited effect responsibility.
+//! The crate-private `handoff` engine canonicalizes complete debt-preserving
+//! capsule bodies. The public `AgentHandoffCapsule` facade accepts only the
+//! exact claim-activation situation or a validated full-context continuity
+//! receipt and commits that proof choice into the capsule identity.
+//! [`handoff_acceptance`] independently verifies a live receiver against the
+//! same authenticated head and attenuation ceiling while preserving every
+//! inherited effect responsibility.
 //!
-//! [`cancellation`] implements request → drain → finalize for the run-level
-//! control plane. It freezes the complete accepted-effect inventory and active
-//! task claim, refuses new or rewritten effects at completion, preserves prior
-//! evidence monotonically, and distinguishes clean settlement from explicit
+//! The crate-private `cancellation` engine implements request → drain →
+//! finalize over the frozen run effect set. The public `RunCancellationIntent`
+//! facade applies the same exact-activation-or-continuity rule whenever an
+//! active task claim is present and commits the proof into both request and
+//! completion identities. Clean settlement remains distinct from explicit
 //! escalation transfer and leak containment.
 //!
 //! [`outcome_learning`] closes the observe-plan-act-verify-learn loop with
@@ -128,7 +129,7 @@
 
 pub mod action_packet;
 pub mod broker;
-pub mod cancellation;
+mod cancellation;
 pub mod capability;
 pub mod claim;
 pub mod claim_continuity;
@@ -136,7 +137,8 @@ pub mod classes;
 pub mod ecc;
 pub mod frontier;
 mod frontier_policy;
-pub mod handoff;
+mod handoff;
+mod handoff_control;
 pub mod handoff_acceptance;
 pub mod intent;
 mod learning;
@@ -146,6 +148,7 @@ pub mod protocol;
 pub mod pulse;
 pub mod reconcile;
 pub mod refresh;
+mod run_cancellation;
 pub mod situation;
 
 pub use action_packet::{
@@ -162,10 +165,8 @@ pub use broker::{
 };
 pub use cancellation::{
     CancellationContainmentEvidence, CancellationDebtTransfer,
-    MAX_CANCELLATION_EVIDENCE_ENTRIES, RunCancellationCompletion,
-    RunCancellationCompletionId, RunCancellationId, RunCancellationIntent,
-    RunCancellationRefusal, RunCancellationState, TaskClaimCancellationOutcome,
-    TaskClaimCancellationProjection,
+    MAX_CANCELLATION_EVIDENCE_ENTRIES, RunCancellationRefusal, RunCancellationState,
+    TaskClaimCancellationOutcome, TaskClaimCancellationProjection,
 };
 pub use capability::{
     AttenuationRefused, AttenuationRequest, Capability, CapabilityId, ChainRefused, IssueRefused,
@@ -192,9 +193,12 @@ pub use frontier::{
     WorkItem, WorkRankingInputs, WorkRankingWitness, WorkTaskId,
 };
 pub use handoff::{
-    AgentHandoffCapsule, AgentHandoffCapsuleId, AgentHandoffCapsuleSpec,
-    HandoffCapabilityAttenuation, HandoffRefusal, HandoffWorkspaceSnapshot,
-    MAX_HANDOFF_ENTRIES, MAX_HANDOFF_EVIDENCE_RECORDS, MAX_HANDOFF_VERIFIER_ATTESTATIONS,
+    AgentHandoffCapsuleSpec, HandoffCapabilityAttenuation, HandoffRefusal,
+    HandoffWorkspaceSnapshot, MAX_HANDOFF_ENTRIES, MAX_HANDOFF_EVIDENCE_RECORDS,
+    MAX_HANDOFF_VERIFIER_ATTESTATIONS,
+};
+pub use handoff_control::{
+    AgentHandoffCapsule, AgentHandoffCapsuleId, HandoffConstructionRefusal,
 };
 pub use handoff_acceptance::{
     AgentHandoffAcceptance, AgentHandoffAcceptanceId, HandoffAcceptanceRefusal,
@@ -229,6 +233,10 @@ pub use reconcile::{
     RunReconciliationReport, RunReconciliationReportId,
 };
 pub use refresh::{RefreshReceipt, RefreshRelation, RefreshSide};
+pub use run_cancellation::{
+    RunCancellationCompletion, RunCancellationCompletionId, RunCancellationId,
+    RunCancellationIntent, RunCancellationRequestRefusal,
+};
 pub use situation::{
     AgentSituationReceipt, SITUATION_COMPONENT_COUNT, SituationAuthorityChange,
     SituationComponent, SituationComponentChange, SituationComponentKind,
