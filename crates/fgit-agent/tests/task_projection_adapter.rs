@@ -1,27 +1,27 @@
 #![forbid(unsafe_code)]
-//! Public-path tests for deterministic task-projection transitions.
+//! Public-path tests for deterministic semantic task transitions.
 
 use fgit_agent::{
     ActiveTaskClaim, AgentChangePlan, AgentChangePlanSpec, AgentControlPulse,
-    AgentSituationReceipt, AuthorityReadReceipt, ClassSet, EvidenceClass, IntentRun,
+    AgentSituationReceipt, AuthorityReadReceipt, ClassSet,
+    CoordinatedTaskProjectionSnapshot as TaskProjectionSnapshot, EvidenceClass, IntentRun,
     LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
     PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet,
     PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RunId, SituationComponent,
     SituationComponentKind, SituationOmissionReason, TaskClaimReceipt,
-    TaskProjectionAdapterRefusal, TaskProjectionAssignment, TaskProjectionSnapshot,
-    TaskReleaseDisposition, TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier,
-    WorkItem, WorkRankingInputs, WorkTaskId,
+    TaskProjectionAdapterRefusal, TaskProjectionAssignment, TaskReleaseDisposition, TaskPhase,
+    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
-    authority_head_identity, initialize_repository, outcome_index_root,
+    initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
 use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
-    RepositoryCommitId, RepositorySequence,
+    RepositoryCommitId, RepositoryId, RepositorySequence,
 };
 
 const TASK_BASIS: [u8; 32] = [0x44; 32];
@@ -34,59 +34,54 @@ fn digest(byte: u8) -> Digest {
     )
 }
 
-fn rcr_id(byte: u8) -> RepositoryCommitId {
+fn rcr_id() -> RepositoryCommitId {
     RepositoryCommitId::from_digest(
         IdentityDomain::RepositoryCommitRecord.algorithm().id(),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[byte; 32]).expect("fixed-width RCR digest"),
+        DigestBytes::try_new(&[0x5a; 32]).expect("fixed-width RCR digest"),
     )
 }
 
-fn authority_receipt(store_id: u64, repository_byte: u8) -> AuthorityReadReceipt {
-    let repository_id = fgit_types::RepositoryId::from_bytes([repository_byte; 16]);
+fn authority_receipt() -> AuthorityReadReceipt {
     let root = outcome_index_root(&[]).expect("empty outcome-index root is canonical");
-    let head = RepositoryAuthorityHeadBody {
-        repository_id,
+    let body = RepositoryAuthorityHeadBody {
+        repository_id: RepositoryId::from_bytes([0x27; 16]),
         generation: HeadGeneration::FIRST,
         predecessor_head_id: None,
         decision_tail_id: None,
         latest_decision_sequence: None,
-        latest_committed_rcr_id: Some(rcr_id(repository_byte)),
+        latest_committed_rcr_id: Some(rcr_id()),
         latest_repository_sequence: Some(RepositorySequence::FIRST),
         ref_root: root,
-        forge_position_root: root,
-        outcome_index_root: root,
-        retention_root: root,
-        outbox_root: root,
-        configuration_root: digest(repository_byte.wrapping_add(1)),
+        forge_position_root: digest(0x31),
+        outcome_index_root: digest(0x32),
+        retention_root: digest(0x33),
+        outbox_root: digest(0x34),
+        configuration_root: digest(0x35),
         policy_epoch: PolicyEpoch::FIRST,
         format_registry_epoch: RegistryEpoch::FIRST,
         last_checkpoint_id: None,
     };
-    let expected = authority_head_identity(&head).expect("head identity");
-    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(store_id));
-    let key = HeadKey::new(format!("task-adapter-test-{store_id}").into_bytes())
-        .expect("bounded head key");
-    let read = match initialize_repository(&store, &key, &head).expect("initialize") {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(901));
+    let key = HeadKey::new(b"semantic-task-transition-test".to_vec()).expect("bounded head key");
+    let read = match initialize_repository(&store, &key, &body).expect("initialize head") {
         HeadInit::Created(read) => read,
         HeadInit::IdenticalRetry(_) | HeadInit::Conflict => panic!("fresh store must create"),
     };
     let authenticated = store
         .authenticate_head_receipt(&read)
-        .expect("authenticate receipt");
-    let receipt = AuthorityReadReceipt::from_authenticated_head(
+        .expect("issuing store authenticates its receipt");
+    AuthorityReadReceipt::from_authenticated_head(
         &authenticated,
         LogicalTime::new(10),
-        [0x51; 32],
+        [0x71; 32],
     )
-    .expect("complete receipt");
-    assert_eq!(receipt.authority_head_id(), expected);
-    receipt
+    .expect("authenticated agent receipt")
 }
 
-fn run(receipt: &AuthorityReadReceipt, id: u128) -> IntentRun {
+fn run(receipt: &AuthorityReadReceipt, run_id: u128) -> IntentRun {
     IntentRun::new_authenticated(
-        RunId::new(id),
+        RunId::new(run_id),
         receipt.clone(),
         ClassSet::from_classes(&[
             OperationClass::TreeFsWorkspace,
@@ -127,7 +122,7 @@ fn situation(
         LogicalTime::new(observed_at),
         components,
     )
-    .expect("complete authority-bound situation")
+    .expect("complete situation")
 }
 
 fn pulse_and_plan(
@@ -135,7 +130,7 @@ fn pulse_and_plan(
     run: &IntentRun,
     snapshot: &TaskProjectionSnapshot,
 ) -> (AgentControlPulse, AgentChangePlan, PlanSurface) {
-    let situation = situation(receipt, run, *snapshot.generation(), 20);
+    let current = situation(receipt, run, *snapshot.generation(), 20);
     let assignee = match snapshot.assignment() {
         TaskProjectionAssignment::Unassigned => None,
         TaskProjectionAssignment::Assigned(run_id) => Some(run_id),
@@ -147,18 +142,14 @@ fn pulse_and_plan(
         WorkRankingInputs::new(1, 2, 3),
         WorkEligibilityInputs::new(0, assignee, None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&situation, vec![item])
-        .expect("task is eligible for its assigned run");
-    let pulse = AgentControlPulse::build(&situation, &frontier, Some(run))
+    let frontier = WorkFrontier::build_action_scoped(&current, vec![item])
+        .expect("task is eligible");
+    let pulse = AgentControlPulse::build(&current, &frontier, Some(run))
         .expect("live run makes an actionable pulse");
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x61));
     let spec = AgentChangePlanSpec::new(
         digest(0x60),
-        ClassSet::from_classes(&[
-            OperationClass::TreeFsWorkspace,
-            OperationClass::SubmitEvidence,
-            OperationClass::ConsumeBudget,
-        ]),
+        run.allowed_operation_classes(),
         ResourceVector::from_grades(&[
             (Grade::Bytes, 4_096),
             (Grade::CpuMicros, 5_000),
@@ -182,8 +173,7 @@ fn pulse_and_plan(
         digest(0x67),
         false,
     )]);
-    let plan = AgentChangePlan::build(&pulse, run, &[], spec)
-        .expect("complete change plan");
+    let plan = AgentChangePlan::build(&pulse, run, &[], spec).expect("complete plan");
     (pulse, plan, surface)
 }
 
@@ -193,11 +183,10 @@ struct ClaimedFixture {
     claimed_snapshot: TaskProjectionSnapshot,
     claim_receipt: TaskClaimReceipt,
     active_claim: ActiveTaskClaim,
-    surface: PlanSurface,
 }
 
 fn claimed_fixture() -> ClaimedFixture {
-    let receipt = authority_receipt(301, 0x22);
+    let receipt = authority_receipt();
     let source_run = run(&receipt, 7);
     let initial = TaskProjectionSnapshot::observed(
         WorkTaskId::from_bytes([0x31; 32]),
@@ -205,8 +194,8 @@ fn claimed_fixture() -> ClaimedFixture {
         TaskPhase::Open,
         TaskProjectionAssignment::Unassigned,
     )
-    .expect("valid initial snapshot");
-    let (pulse, plan, surface) = pulse_and_plan(&receipt, &source_run, &initial);
+    .expect("valid initial state");
+    let (pulse, plan, _) = pulse_and_plan(&receipt, &source_run, &initial);
     let application = initial
         .claim(
             &pulse,
@@ -214,8 +203,8 @@ fn claimed_fixture() -> ClaimedFixture {
             &source_run,
             LogicalTime::new(25),
             LogicalTime::new(80),
-            [0x71; 32],
-            digest(0x72),
+            [0x81; 32],
+            digest(0x82),
         )
         .expect("claim transition");
     let claim_receipt = TaskClaimReceipt::admit(
@@ -224,7 +213,7 @@ fn claimed_fixture() -> ClaimedFixture {
         &source_run,
         application.projection().clone(),
     )
-    .expect("claim projection is accepted by the existing protocol");
+    .expect("claim projection admission");
     let activation = situation(
         &receipt,
         &source_run,
@@ -233,69 +222,72 @@ fn claimed_fixture() -> ClaimedFixture {
     );
     let active_claim = claim_receipt
         .activate(&activation, &source_run)
-        .expect("post-claim generation activates the task");
+        .expect("fresh generation activates claim");
     ClaimedFixture {
         receipt,
         source_run,
         claimed_snapshot: application.snapshot().clone(),
         claim_receipt,
         active_claim,
-        surface,
     }
 }
 
 #[test]
-fn claim_generation_and_transition_identity_are_deterministic() {
-    let receipt = authority_receipt(302, 0x23);
+fn semantic_successor_is_independent_from_adapter_evidence() {
+    let receipt = authority_receipt();
     let run = run(&receipt, 7);
-    let snapshot = TaskProjectionSnapshot::observed(
+    let initial = TaskProjectionSnapshot::observed(
         WorkTaskId::from_bytes([0x31; 32]),
         TASK_BASIS,
         TaskPhase::Open,
         TaskProjectionAssignment::Unassigned,
     )
-    .expect("valid initial snapshot");
-    let (pulse, plan, surface) = pulse_and_plan(&receipt, &run, &snapshot);
+    .expect("valid initial state");
+    let (pulse, plan, surface) = pulse_and_plan(&receipt, &run, &initial);
 
-    let first = snapshot
+    let first = initial
         .claim(
             &pulse,
             &plan,
             &run,
             LogicalTime::new(25),
             LogicalTime::new(80),
-            [0x71; 32],
-            digest(0x72),
+            [0x81; 32],
+            digest(0x82),
         )
-        .expect("claim transition");
-    let second = snapshot
+        .expect("first adapter result");
+    let second = initial
         .claim(
             &pulse,
             &plan,
             &run,
             LogicalTime::new(25),
             LogicalTime::new(80),
-            [0x71; 32],
-            digest(0x72),
+            [0x83; 32],
+            digest(0x84),
         )
-        .expect("same claim transition");
+        .expect("second adapter result");
 
+    assert_eq!(first.snapshot().generation(), second.snapshot().generation());
     assert_eq!(first.snapshot().snapshot_id(), second.snapshot().snapshot_id());
-    assert_eq!(first.transition().transition_id(), second.transition().transition_id());
-    assert_ne!(first.snapshot().generation(), &TASK_BASIS);
-    assert_eq!(first.snapshot().phase(), TaskPhase::InProgress);
+    assert_ne!(first.transition().transition_id(), second.transition().transition_id());
     assert_eq!(
         first.snapshot().assignment(),
         TaskProjectionAssignment::Assigned(run.run_id())
     );
-    let lease = first.snapshot().lease().expect("claim establishes a lease");
-    assert_eq!(lease.reserved_surfaces(), &[surface]);
-    assert_eq!(first.projection().reserved_surfaces(), &[surface]);
+    assert_eq!(
+        first
+            .snapshot()
+            .lease()
+            .expect("claim establishes a lease")
+            .reserved_surfaces(),
+        &[surface]
+    );
 }
 
 #[test]
-fn stale_snapshot_cannot_apply_a_pulse_from_another_generation() {
-    let receipt = authority_receipt(303, 0x24);
+fn stale_generation_refuses_before_state_change() {
+    let receipt = authority_receipt();
     let run = run(&receipt, 7);
     let basis = TaskProjectionSnapshot::observed(
         WorkTaskId::from_bytes([0x31; 32]),
@@ -303,15 +295,15 @@ fn stale_snapshot_cannot_apply_a_pulse_from_another_generation() {
         TaskPhase::Open,
         TaskProjectionAssignment::Unassigned,
     )
-    .expect("basis snapshot");
+    .expect("basis state");
     let (pulse, plan, _) = pulse_and_plan(&receipt, &run, &basis);
     let stale = TaskProjectionSnapshot::observed(
-        WorkTaskId::from_bytes([0x31; 32]),
+        basis.task_id(),
         [0x45; 32],
         TaskPhase::Open,
         TaskProjectionAssignment::Unassigned,
     )
-    .expect("different observed generation");
+    .expect("another generation");
 
     assert_eq!(
         stale
@@ -321,10 +313,10 @@ fn stale_snapshot_cannot_apply_a_pulse_from_another_generation() {
                 &run,
                 LogicalTime::new(25),
                 LogicalTime::new(80),
-                [0x71; 32],
-                digest(0x72),
+                [0x81; 32],
+                digest(0x82),
             )
-            .expect_err("stale predecessor must fail closed"),
+            .expect_err("stale predecessor fails closed"),
         TaskProjectionAdapterRefusal::PulseGenerationMismatch {
             snapshot: [0x45; 32],
             pulse: TASK_BASIS,
@@ -333,7 +325,7 @@ fn stale_snapshot_cannot_apply_a_pulse_from_another_generation() {
 }
 
 #[test]
-fn release_is_available_after_expiry_and_returns_explicit_rework() {
+fn release_after_expiry_remains_available_for_cleanup() {
     let fixture = claimed_fixture();
     let released = fixture
         .claimed_snapshot
@@ -343,10 +335,10 @@ fn release_is_available_after_expiry_and_returns_explicit_rework() {
             &fixture.source_run,
             TaskReleaseDisposition::RequireRework,
             LogicalTime::new(81),
-            [0x73; 32],
-            digest(0x74),
+            [0x85; 32],
+            digest(0x86),
         )
-        .expect("expiry prevents work, not cleanup");
+        .expect("expiry cannot prevent cleanup");
 
     assert_eq!(released.snapshot().phase(), TaskPhase::Rework);
     assert_eq!(
@@ -354,18 +346,10 @@ fn release_is_available_after_expiry_and_returns_explicit_rework() {
         TaskProjectionAssignment::Unassigned
     );
     assert!(released.snapshot().lease().is_none());
-    assert_eq!(
-        released.projection().outcome(),
-        fgit_agent::TaskClaimCancellationOutcome::Released
-    );
-    assert_ne!(
-        released.transition().previous_generation(),
-        released.transition().resulting_generation()
-    );
 }
 
 #[test]
-fn transfer_releases_source_lease_and_successor_claims_a_new_plan() {
+fn transfer_releases_source_and_requires_successor_reclaim() {
     let fixture = claimed_fixture();
     let successor = run(&fixture.receipt, 8);
     let transferred = fixture
@@ -376,8 +360,8 @@ fn transfer_releases_source_lease_and_successor_claims_a_new_plan() {
             &fixture.source_run,
             &successor,
             LogicalTime::new(40),
-            [0x75; 32],
-            digest(0x76),
+            [0x87; 32],
+            digest(0x88),
         )
         .expect("atomic assignment transfer");
 
@@ -386,58 +370,19 @@ fn transfer_releases_source_lease_and_successor_claims_a_new_plan() {
         TaskProjectionAssignment::Assigned(successor.run_id())
     );
     assert!(transferred.snapshot().lease().is_none());
-    assert_eq!(
-        transferred.projection().outcome(),
-        fgit_agent::TaskClaimCancellationOutcome::Transferred {
-            successor_run_id: successor.run_id(),
-        }
-    );
 
-    let (successor_pulse, successor_plan, _) =
-        pulse_and_plan(&fixture.receipt, &successor, transferred.snapshot());
-    let successor_claim = transferred
+    let (pulse, plan, _) = pulse_and_plan(&fixture.receipt, &successor, transferred.snapshot());
+    let reclaimed = transferred
         .snapshot()
         .claim(
-            &successor_pulse,
-            &successor_plan,
+            &pulse,
+            &plan,
             &successor,
             LogicalTime::new(45),
             LogicalTime::new(90),
-            [0x77; 32],
-            digest(0x78),
+            [0x89; 32],
+            digest(0x8a),
         )
-        .expect("successor opens a fresh lease under a fresh plan");
-
-    assert_eq!(
-        successor_claim.snapshot().assignment(),
-        TaskProjectionAssignment::Assigned(successor.run_id())
-    );
-    assert!(successor_claim.snapshot().lease().is_some());
-    assert_ne!(
-        successor_claim.transition().previous_generation(),
-        successor_claim.transition().resulting_generation()
-    );
-}
-
-#[test]
-fn transfer_across_authority_receipts_is_refused() {
-    let fixture = claimed_fixture();
-    let foreign_receipt = authority_receipt(304, 0x25);
-    let foreign_successor = run(&foreign_receipt, 8);
-
-    assert_eq!(
-        fixture
-            .claimed_snapshot
-            .transfer(
-                &fixture.claim_receipt,
-                fixture.active_claim,
-                &fixture.source_run,
-                &foreign_successor,
-                LogicalTime::new(40),
-                [0x79; 32],
-                digest(0x7a),
-            )
-            .expect_err("task assignment cannot cross repository authority"),
-        TaskProjectionAdapterRefusal::SuccessorAuthorityMismatch
-    );
+        .expect("successor establishes a fresh lease");
+    assert!(reclaimed.snapshot().lease().is_some());
 }

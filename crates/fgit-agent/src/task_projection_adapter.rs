@@ -1,22 +1,18 @@
 //! Deterministic task-projection transitions for claim, release, and transfer.
 //!
-//! [`crate::TaskClaimProjection`] and
-//! [`crate::TaskClaimCancellationProjection`] are adapter observations. This
-//! module supplies the missing transition kernel that a Beads or other task
-//! backend can place behind those observations. It validates one exact
-//! predecessor snapshot, computes one deterministic successor generation, and
-//! returns both the successor snapshot and the projection consumed by the
-//! existing claim/cancellation protocols.
+//! This module is the pure semantic kernel between an authority-bound control
+//! turn and a durable task backend. It validates one exact predecessor state,
+//! computes one deterministic successor state, and emits the existing claim or
+//! cancellation projection consumed by the wider Agent Control Plane.
 //!
-//! The kernel is deliberately storage-agnostic. A production adapter must
-//! persist the transition with exact-predecessor compare-and-replace semantics
-//! and return the persisted evidence root. [`TaskProjectionSnapshot`] is an
-//! immutable value, not a durable database and not repository authority.
+//! The successor generation is a commitment to logical task state only. It does
+//! not depend on which conforming adapter executed the transition or on the
+//! evidence bytes that adapter later retains. Adapter identity and the declared
+//! evidence contract remain committed by [`TaskProjectionTransition`], so audit
+//! identity stays distinct without making backend choice alter task state.
 //!
-//! Transfer is represented as release of the source lease plus an assignment
-//! hint for the successor. The successor still opens its own Intent Run, plan,
-//! pulse, claim receipt, and activation against the new generation; a transfer
-//! never reuses the source plan or mints receiver authority.
+//! Values in this module are immutable derived coordination state. They are not
+//! durable storage and never become repository authority.
 
 use core::fmt;
 
@@ -31,11 +27,11 @@ use crate::{
     WorkAction, WorkTaskId,
 };
 
-const SNAPSHOT_DOMAIN: &[u8] = b"frankengit.agent.task-projection-snapshot/v1\0";
-const GENERATION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-generation/v1\0";
-const TRANSITION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-transition/v1\0";
+const SNAPSHOT_DOMAIN: &[u8] = b"frankengit.agent.task-projection-snapshot/v2\0";
+const GENERATION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-generation/v2\0";
+const TRANSITION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-transition/v2\0";
 
-/// Stable identity of one immutable task-projection snapshot.
+/// Stable identity of one immutable semantic task snapshot.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TaskProjectionSnapshotId([u8; 32]);
 
@@ -57,7 +53,7 @@ impl fmt::Display for TaskProjectionSnapshotId {
     }
 }
 
-/// Stable identity of one task-projection transition.
+/// Stable identity of one evidenced task transition.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TaskProjectionTransitionId([u8; 32]);
 
@@ -88,7 +84,7 @@ pub enum TaskProjectionAssignment {
     Assigned(RunId),
 }
 
-/// Active lease material retained by the projection kernel.
+/// Active lease material retained by a claimed task projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskProjectionLease {
     plan_id: AgentChangePlanId,
@@ -101,6 +97,50 @@ pub struct TaskProjectionLease {
 }
 
 impl TaskProjectionLease {
+    /// Reconstructs one structurally valid persisted lease.
+    ///
+    /// # Errors
+    ///
+    /// Refuses zero or unchanged generations, an empty/inverted interval,
+    /// empty/duplicate/excessive reservation surfaces, and canonical framing
+    /// bounds that cannot be represented.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observed(
+        plan_id: AgentChangePlanId,
+        assignee: RunId,
+        previous_generation: [u8; 32],
+        claimed_generation: [u8; 32],
+        mut reserved_surfaces: Vec<PlanSurface>,
+        claimed_at: LogicalTime,
+        expires_at: LogicalTime,
+    ) -> Result<Self, TaskProjectionAdapterRefusal> {
+        if is_zero(&previous_generation) || is_zero(&claimed_generation) {
+            return Err(TaskProjectionAdapterRefusal::ZeroGeneration);
+        }
+        if previous_generation == claimed_generation {
+            return Err(TaskProjectionAdapterRefusal::LeaseGenerationDidNotAdvance);
+        }
+        if expires_at <= claimed_at {
+            return Err(TaskProjectionAdapterRefusal::InvalidClaimWindow {
+                claimed_at,
+                expires_at,
+            });
+        }
+        canonicalize_surfaces(&mut reserved_surfaces)?;
+        if reserved_surfaces.is_empty() {
+            return Err(TaskProjectionAdapterRefusal::EmptyReservedSurface);
+        }
+        Ok(Self {
+            plan_id,
+            assignee,
+            previous_generation,
+            claimed_generation,
+            reserved_surfaces,
+            claimed_at,
+            expires_at,
+        })
+    }
+
     /// Plan that established this lease.
     #[must_use]
     pub const fn plan_id(&self) -> AgentChangePlanId {
@@ -144,7 +184,7 @@ impl TaskProjectionLease {
     }
 }
 
-/// Immutable task state at one derived projection generation.
+/// Immutable semantic task state at one derived projection generation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskProjectionSnapshot {
     snapshot_id: TaskProjectionSnapshotId,
@@ -160,31 +200,43 @@ impl TaskProjectionSnapshot {
     ///
     /// # Errors
     ///
-    /// Refuses the reserved all-zero generation and an assigned terminal task.
+    /// Refuses zero task/generation identities and an assigned terminal task.
     pub fn observed(
         task_id: WorkTaskId,
         generation: [u8; 32],
         phase: TaskPhase,
         assignment: TaskProjectionAssignment,
     ) -> Result<Self, TaskProjectionAdapterRefusal> {
-        if is_zero(&generation) {
-            return Err(TaskProjectionAdapterRefusal::ZeroGeneration);
+        Self::from_parts(task_id, generation, phase, assignment, None)
+    }
+
+    /// Imports one observed active lease from a durable backend reread.
+    ///
+    /// Assignment is derived from the lease and cannot be supplied separately.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a generation not equal to the lease's claimed generation, a
+    /// terminal leased phase, and every structural snapshot refusal.
+    pub fn observed_with_lease(
+        task_id: WorkTaskId,
+        generation: [u8; 32],
+        phase: TaskPhase,
+        lease: TaskProjectionLease,
+    ) -> Result<Self, TaskProjectionAdapterRefusal> {
+        if generation != lease.claimed_generation {
+            return Err(TaskProjectionAdapterRefusal::LeaseGenerationMismatch {
+                snapshot: generation,
+                lease: lease.claimed_generation,
+            });
         }
-        if phase_is_terminal(phase)
-            && !matches!(assignment, TaskProjectionAssignment::Unassigned)
-        {
-            return Err(TaskProjectionAdapterRefusal::TerminalTaskAssigned { phase });
-        }
-        let mut snapshot = Self {
-            snapshot_id: TaskProjectionSnapshotId([0; 32]),
+        Self::from_parts(
             task_id,
             generation,
             phase,
-            assignment,
-            lease: None,
-        };
-        snapshot.snapshot_id = TaskProjectionSnapshotId(snapshot_commitment(&snapshot)?);
-        Ok(snapshot)
+            TaskProjectionAssignment::Assigned(lease.assignee),
+            Some(lease),
+        )
     }
 
     /// Applies one exact plan claim to this projection snapshot.
@@ -220,7 +272,7 @@ impl TaskProjectionSnapshot {
                 });
             }
         }
-        if claimed_at.value() < pulse.observed_at().value() {
+        if claimed_at < pulse.observed_at() {
             return Err(TaskProjectionAdapterRefusal::ClaimBeforePulse {
                 pulse_observed_at: pulse.observed_at(),
                 claimed_at,
@@ -232,13 +284,13 @@ impl TaskProjectionSnapshot {
                 claimed_at,
             });
         }
-        if expires_at.value() <= claimed_at.value() {
+        if expires_at <= claimed_at {
             return Err(TaskProjectionAdapterRefusal::InvalidClaimWindow {
                 claimed_at,
                 expires_at,
             });
         }
-        if expires_at.value() > run.expiry().value() {
+        if expires_at > run.expiry() {
             return Err(TaskProjectionAdapterRefusal::ClaimOutlivesRun {
                 claim_expires_at: expires_at,
                 run_expires_at: run.expiry(),
@@ -248,7 +300,11 @@ impl TaskProjectionSnapshot {
             return Err(TaskProjectionAdapterRefusal::ZeroAdapterIdentity);
         }
 
-        let reserved_surfaces = plan.conflict_surface().to_vec();
+        let mut reserved_surfaces = plan.conflict_surface().to_vec();
+        canonicalize_surfaces(&mut reserved_surfaces)?;
+        if reserved_surfaces.is_empty() {
+            return Err(TaskProjectionAdapterRefusal::EmptyReservedSurface);
+        }
         let next_generation = derive_claim_generation(
             self,
             plan,
@@ -256,8 +312,6 @@ impl TaskProjectionSnapshot {
             claimed_at,
             expires_at,
             &reserved_surfaces,
-            adapter_identity,
-            evidence_root,
         )?;
         validate_successor_generation(self.generation, next_generation)?;
 
@@ -273,17 +327,17 @@ impl TaskProjectionSnapshot {
             adapter_identity,
             evidence_root,
         );
-        let lease = TaskProjectionLease {
-            plan_id: plan.plan_id(),
-            assignee: run.run_id(),
-            previous_generation: self.generation,
-            claimed_generation: next_generation,
+        let lease = TaskProjectionLease::observed(
+            plan.plan_id(),
+            run.run_id(),
+            self.generation,
+            next_generation,
             reserved_surfaces,
             claimed_at,
             expires_at,
-        };
+        )?;
         let phase = phase_after_claim(plan.action());
-        let after = TaskProjectionSnapshot::from_parts(
+        let after = Self::from_parts(
             self.task_id,
             next_generation,
             phase,
@@ -328,7 +382,7 @@ impl TaskProjectionSnapshot {
         adapter_identity: [u8; 32],
         evidence_root: Digest,
     ) -> Result<TaskResolutionApplication, TaskProjectionAdapterRefusal> {
-        let lease = validate_resolution_basis(
+        validate_resolution_basis(
             self,
             claim_receipt,
             active_claim,
@@ -344,8 +398,6 @@ impl TaskProjectionSnapshot {
             active_claim,
             kind,
             resolved_at,
-            adapter_identity,
-            evidence_root,
         )?;
         validate_successor_generation(self.generation, next_generation)?;
         let projection = TaskClaimCancellationProjection::new(
@@ -361,7 +413,7 @@ impl TaskProjectionSnapshot {
             adapter_identity,
             evidence_root,
         );
-        let after = TaskProjectionSnapshot::from_parts(
+        let after = Self::from_parts(
             self.task_id,
             next_generation,
             next_phase,
@@ -376,7 +428,6 @@ impl TaskProjectionSnapshot {
             adapter_identity,
             evidence_root,
         )?;
-        debug_assert_eq!(lease.claimed_generation, self.generation);
         Ok(TaskResolutionApplication {
             snapshot: after,
             transition,
@@ -443,8 +494,6 @@ impl TaskProjectionSnapshot {
             active_claim,
             kind,
             resolved_at,
-            adapter_identity,
-            evidence_root,
         )?;
         validate_successor_generation(self.generation, next_generation)?;
         let projection = TaskClaimCancellationProjection::new(
@@ -462,7 +511,7 @@ impl TaskProjectionSnapshot {
             adapter_identity,
             evidence_root,
         );
-        let after = TaskProjectionSnapshot::from_parts(
+        let after = Self::from_parts(
             self.task_id,
             next_generation,
             self.phase,
@@ -491,6 +540,28 @@ impl TaskProjectionSnapshot {
         assignment: TaskProjectionAssignment,
         lease: Option<TaskProjectionLease>,
     ) -> Result<Self, TaskProjectionAdapterRefusal> {
+        if is_zero(task_id.as_bytes()) {
+            return Err(TaskProjectionAdapterRefusal::ZeroTaskId);
+        }
+        if is_zero(&generation) {
+            return Err(TaskProjectionAdapterRefusal::ZeroGeneration);
+        }
+        if phase_is_terminal(phase) {
+            if !matches!(assignment, TaskProjectionAssignment::Unassigned) || lease.is_some() {
+                return Err(TaskProjectionAdapterRefusal::TerminalTaskAssigned { phase });
+            }
+        }
+        if let Some(active) = lease.as_ref() {
+            if assignment != TaskProjectionAssignment::Assigned(active.assignee) {
+                return Err(TaskProjectionAdapterRefusal::LeaseAssignmentMismatch);
+            }
+            if generation != active.claimed_generation {
+                return Err(TaskProjectionAdapterRefusal::LeaseGenerationMismatch {
+                    snapshot: generation,
+                    lease: active.claimed_generation,
+                });
+            }
+        }
         let mut snapshot = Self {
             snapshot_id: TaskProjectionSnapshotId([0; 32]),
             task_id,
@@ -503,7 +574,7 @@ impl TaskProjectionSnapshot {
         Ok(snapshot)
     }
 
-    /// Stable snapshot identity.
+    /// Stable semantic snapshot identity.
     #[must_use]
     pub const fn snapshot_id(&self) -> TaskProjectionSnapshotId {
         self.snapshot_id
@@ -556,13 +627,6 @@ impl TaskReleaseDisposition {
             Self::RequireRework => TaskPhase::Rework,
         }
     }
-
-    const fn code_point(self) -> u8 {
-        match self {
-            Self::ReturnToOpen => 1,
-            Self::RequireRework => 2,
-        }
-    }
 }
 
 /// Semantic class of one task-projection transition.
@@ -595,7 +659,7 @@ impl TaskProjectionTransitionKind {
     }
 }
 
-/// Stable receipt for one exact-predecessor task transition.
+/// Stable audit receipt for one exact-predecessor task transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TaskProjectionTransition {
     transition_id: TaskProjectionTransitionId,
@@ -636,7 +700,7 @@ impl TaskProjectionTransition {
         Ok(transition)
     }
 
-    /// Stable transition identity.
+    /// Stable evidenced transition identity.
     #[must_use]
     pub const fn transition_id(self) -> TaskProjectionTransitionId {
         self.transition_id
@@ -666,7 +730,7 @@ impl TaskProjectionTransition {
         self.previous_generation
     }
 
-    /// New generation.
+    /// New semantic generation.
     #[must_use]
     pub const fn resulting_generation(self) -> [u8; 32] {
         self.resulting_generation
@@ -690,7 +754,7 @@ impl TaskProjectionTransition {
         self.adapter_identity
     }
 
-    /// Persistence or external-mutation evidence root.
+    /// Declared persistence/mutation evidence contract.
     #[must_use]
     pub const fn evidence_root(self) -> Digest {
         self.evidence_root
@@ -780,12 +844,39 @@ impl TaskResolutionApplication {
 /// Why the deterministic task-projection kernel refused a transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskProjectionAdapterRefusal {
+    /// Reserved all-zero task identity.
+    ZeroTaskId,
     /// Projection generation used the reserved all-zero value.
     ZeroGeneration,
-    /// A terminal task carried an assignment.
+    /// A terminal task carried an assignment or lease.
     TerminalTaskAssigned {
         /// Terminal phase observed.
         phase: TaskPhase,
+    },
+    /// A lease and explicit assignment disagree.
+    LeaseAssignmentMismatch,
+    /// Snapshot and lease name different claimed generations.
+    LeaseGenerationMismatch {
+        /// Snapshot generation.
+        snapshot: [u8; 32],
+        /// Lease claimed generation.
+        lease: [u8; 32],
+    },
+    /// Lease predecessor and successor generation are identical.
+    LeaseGenerationDidNotAdvance,
+    /// Reservation surface is empty.
+    EmptyReservedSurface,
+    /// Reservation surface exceeded the plan ceiling.
+    TooManyReservedSurfaces {
+        /// Entries supplied.
+        observed: usize,
+        /// Maximum accepted.
+        limit: usize,
+    },
+    /// Reservation surface repeats one selector.
+    DuplicateReservedSurface {
+        /// Repeated surface.
+        surface: PlanSurface,
     },
     /// Pulse carried no selected task.
     PulseNotActionable,
@@ -872,6 +963,8 @@ pub enum TaskProjectionAdapterRefusal {
     GenerationDidNotAdvance,
     /// Release/transfer snapshot has no active lease.
     MissingActiveLease,
+    /// Snapshot assignment differs from its active lease.
+    ActiveLeaseAssignmentMismatch,
     /// Claim receipt names another task.
     ClaimReceiptTaskMismatch,
     /// Claim receipt names another plan.
@@ -993,6 +1086,9 @@ fn validate_resolution_basis<'a>(
         .lease
         .as_ref()
         .ok_or(TaskProjectionAdapterRefusal::MissingActiveLease)?;
+    if snapshot.assignment != TaskProjectionAssignment::Assigned(lease.assignee) {
+        return Err(TaskProjectionAdapterRefusal::ActiveLeaseAssignmentMismatch);
+    }
     if claim_receipt.task_id() != snapshot.task_id {
         return Err(TaskProjectionAdapterRefusal::ClaimReceiptTaskMismatch);
     }
@@ -1022,7 +1118,7 @@ fn validate_resolution_basis<'a>(
     if active_claim.assignee() != lease.assignee {
         return Err(TaskProjectionAdapterRefusal::ActiveClaimRunMismatch);
     }
-    if resolved_at.value() < active_claim.observed_at().value() {
+    if resolved_at < active_claim.observed_at() {
         return Err(TaskProjectionAdapterRefusal::ResolutionBeforeActivation {
             activated_at: active_claim.observed_at(),
             resolved_at,
@@ -1044,8 +1140,6 @@ fn derive_claim_generation(
     claimed_at: LogicalTime,
     expires_at: LogicalTime,
     surfaces: &[PlanSurface],
-    adapter_identity: [u8; 32],
-    evidence_root: Digest,
 ) -> Result<[u8; 32], TaskProjectionAdapterRefusal> {
     let mut encoder = Encoder::with_capacity(512);
     encoder.write_bytes("task_projection_generation_domain", GENERATION_DOMAIN)?;
@@ -1054,11 +1148,10 @@ fn derive_claim_generation(
     encoder.write_raw(snapshot.task_id.as_bytes());
     encoder.write_raw(plan.plan_id().as_bytes());
     encoder.write_raw(&run.run_id().value().to_be_bytes());
+    encoder.write_raw_byte(work_action_code(plan.action()));
     encoder.write_scalar(claimed_at.value());
     encoder.write_scalar(expires_at.value());
     write_surfaces(&mut encoder, surfaces)?;
-    encoder.write_raw(&adapter_identity);
-    encoder.write_digest(&evidence_root)?;
     Ok(hash(&encoder.into_bytes()))
 }
 
@@ -1068,8 +1161,6 @@ fn derive_resolution_generation(
     active_claim: ActiveTaskClaim,
     kind: TaskProjectionTransitionKind,
     resolved_at: LogicalTime,
-    adapter_identity: [u8; 32],
-    evidence_root: Digest,
 ) -> Result<[u8; 32], TaskProjectionAdapterRefusal> {
     let mut encoder = Encoder::with_capacity(512);
     encoder.write_bytes("task_projection_generation_domain", GENERATION_DOMAIN)?;
@@ -1080,8 +1171,6 @@ fn derive_resolution_generation(
     encoder.write_raw(active_claim.activation_id().as_bytes());
     write_transition_kind(&mut encoder, kind)?;
     encoder.write_scalar(resolved_at.value());
-    encoder.write_raw(&adapter_identity);
-    encoder.write_digest(&evidence_root)?;
     Ok(hash(&encoder.into_bytes()))
 }
 
@@ -1147,6 +1236,26 @@ fn write_transition_kind(
         }
         TaskProjectionTransitionKind::Transferred { successor_run_id } => {
             encoder.write_raw(&successor_run_id.value().to_be_bytes());
+        }
+    }
+    Ok(())
+}
+
+fn canonicalize_surfaces(
+    surfaces: &mut Vec<PlanSurface>,
+) -> Result<(), TaskProjectionAdapterRefusal> {
+    if surfaces.len() > crate::MAX_PLAN_ENTRIES {
+        return Err(TaskProjectionAdapterRefusal::TooManyReservedSurfaces {
+            observed: surfaces.len(),
+            limit: crate::MAX_PLAN_ENTRIES,
+        });
+    }
+    surfaces.sort_unstable();
+    for pair in surfaces.windows(2) {
+        if pair[0] == pair[1] {
+            return Err(TaskProjectionAdapterRefusal::DuplicateReservedSurface {
+                surface: pair[0],
+            });
         }
     }
     Ok(())
