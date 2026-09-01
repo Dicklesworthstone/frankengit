@@ -79,8 +79,13 @@
 //! resource ceiling, stop conditions, rejected shortcuts, non-claims, and
 //! approval state without claiming work or performing an effect.
 //!
-//! [`claim`] validates the task-system mutation that follows planning. A claim
-//! must begin at the pulse's task projection, bind the exact plan/run/conflict
+//! [`claim`] validates the task-system mutation that follows planning.
+//! [`task_projection`] now supplies the backend-neutral final mutation protocol:
+//! bounded authority-bound snapshots, exact compare-and-mutate requests,
+//! idempotent receipts, typed definite/ambiguous refusals, and one-call adapter
+//! execution. The module does not make task state repository authority or
+//! pretend its conformance implementations are durable storage. A claim must
+//! begin at the pulse's task projection, bind the exact plan/run/conflict
 //! surface, advance to a new task generation, and fit inside the run lifetime.
 //! It becomes active only after a fresh situation observes that post-claim
 //! generation under unchanged repository authority.
@@ -160,6 +165,7 @@ pub mod refresh;
 mod run_cancellation;
 pub mod run_identity;
 pub mod situation;
+pub mod task_projection;
 
 pub use action_packet::{
     ActionPacketRefusal, ActionPrecondition, ActionPreconditionSet, ActionStep, ActionStepId,
@@ -256,4 +262,12 @@ pub use situation::{
     SituationComponent, SituationComponentChange, SituationComponentKind,
     SituationComponentTransition, SituationDelta, SituationId, SituationOmissionReason,
     SituationRefusal, SituationWorkspace,
+};
+pub use task_projection::{
+    MAX_TASK_PROJECTION_ROWS, MAX_TASK_ROW_SURFACES, TaskAdapterRefusal,
+    TaskAdapterRejection, TaskMutationExecutionRefusal, TaskMutationObservation,
+    TaskMutationOperation, TaskMutationReceipt, TaskMutationReceiptId, TaskMutationRefusal,
+    TaskMutationReplay, TaskMutationRequest, TaskMutationRequestId, TaskProjectionAdapter,
+    TaskProjectionGeneration, TaskProjectionRefusal, TaskProjectionRow, TaskProjectionSnapshot,
+    TaskProjectionSnapshotId, execute_task_mutation,
 };
