@@ -26,8 +26,10 @@
 //! Packets with structurally separate control and untrusted-source channels.
 //! [`authority_identity`] gives each exact authenticated read event a stable
 //! identity that includes the head commitment, backend token, verification
-//! instant, verifier profile, and retained position fields. Revocation
-//! interpreted at a canonical position (§6.3) remains outside this slice:
+//! instant, verifier profile, and retained position fields. [`run_identity`]
+//! commits every machine-enforced Intent Run field and supplies a reusable
+//! equivocation guard for an assigned `RunId`. Revocation interpreted at a
+//! canonical position (§6.3) remains outside this slice:
 //! [`Capability::is_valid_at`] checks a window, which is freshness, not
 //! revocation.
 //!
@@ -156,6 +158,7 @@ pub mod pulse;
 pub mod reconcile;
 pub mod refresh;
 mod run_cancellation;
+pub mod run_identity;
 pub mod situation;
 
 pub use action_packet::{
@@ -244,6 +247,9 @@ pub use refresh::{RefreshReceipt, RefreshRelation, RefreshSide};
 pub use run_cancellation::{
     RunCancellationCompletion, RunCancellationCompletionId, RunCancellationId,
     RunCancellationIntent, RunCancellationRequestRefusal,
+};
+pub use run_identity::{
+    IntentRunBinding, IntentRunCommitment, IntentRunIdentityRefusal, IntentRunRetry,
 };
 pub use situation::{
     AgentSituationReceipt, SITUATION_COMPONENT_COUNT, SituationAuthorityChange,
