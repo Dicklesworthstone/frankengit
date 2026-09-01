@@ -6,12 +6,12 @@ use fgit_agent::{
     AuthorityReadReceipt, ClaimTaskOutcome, ClassSet, EvidenceClass, IntentRun, LogicalTime,
     OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
     PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface,
-    PlanSurfaceKind, RejectedShortcutSet, RunId, SituationComponent, SituationComponentKind,
-    SituationOmissionReason, TaskAdapterRefusal, TaskCoordinatorRefusal,
-    TaskMutationObservation, TaskMutationReplay, TaskMutationRequest, TaskPhase,
-    TaskProjectionAdapter, TaskProjectionGeneration, TaskProjectionRow, TaskProjectionSnapshot,
-    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
-    claim_selected_task, release_active_task,
+    PlanSurfaceKind, RejectedShortcutSet, ReleaseTaskOutcome, RunId, SituationComponent,
+    SituationComponentKind, SituationOmissionReason, TaskAdapterRefusal,
+    TaskCoordinatorRefusal, TaskMutationObservation, TaskMutationReplay, TaskMutationRequest,
+    TaskPhase, TaskProjectionAdapter, TaskProjectionGeneration, TaskProjectionRow,
+    TaskProjectionSnapshot, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
+    WorkRankingInputs, WorkTaskId, claim_selected_task, release_active_task,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
@@ -278,6 +278,9 @@ fn strict_claim_and_release_flow_into_existing_receipt_types() {
     .expect("strict coordinator reaches a definite result");
     let claimed = match claim_outcome {
         ClaimTaskOutcome::Claimed(claimed) => claimed,
+        ClaimTaskOutcome::MutationNeedsReconciliation { refusal, .. } => {
+            panic!("reference adapter returned an invalid observation: {refusal:?}")
+        }
         ClaimTaskOutcome::CommittedNeedsReconciliation { refusal, .. } => {
             panic!("valid integrated claim unexpectedly needs reconciliation: {refusal:?}")
         }
@@ -315,7 +318,7 @@ fn strict_claim_and_release_flow_into_existing_receipt_types() {
         *claimed.mutation_receipt().resulting_generation().as_bytes(),
         100,
     );
-    let released = release_active_task(
+    let release_outcome = release_active_task(
         &mut adapter,
         &claimed_snapshot,
         &latest,
@@ -325,9 +328,18 @@ fn strict_claim_and_release_flow_into_existing_receipt_types() {
         LogicalTime::new(100),
         digest(0xa0),
     )
-    .expect("expired run still releases its exact claim");
+    .expect("expired run still reaches a definite release outcome");
+    let released = match release_outcome {
+        ReleaseTaskOutcome::Released(released) => released,
+        ReleaseTaskOutcome::MutationNeedsReconciliation { refusal, .. } => {
+            panic!("reference adapter returned an invalid release observation: {refusal:?}")
+        }
+    };
 
-    assert_eq!(released.cancellation_projection().active_claim_id(), active.activation_id());
+    assert_eq!(
+        released.cancellation_projection().active_claim_id(),
+        active.activation_id()
+    );
     assert_eq!(
         released.cancellation_projection().outcome(),
         fgit_agent::TaskClaimCancellationOutcome::Released

@@ -83,13 +83,14 @@
 //! [`task_projection_read`] evidences one exact-generation task snapshot from a
 //! production reader profile before it feeds frontier selection.
 //! [`task_projection`] supplies the backend-neutral mutation protocol: exact
-//! compare-and-mutate requests, idempotent receipts, typed definite/ambiguous
-//! refusals, and one-call adapter execution. [`task_adapter`] connects those
-//! results to the existing pulse, plan, claim, situation, and cancellation
-//! evidence types. A definite mutation followed by an integration refusal is
-//! preserved as committed work requiring reconciliation, never reported as
-//! though no effect happened. These modules do not make task state repository
-//! authority or pretend their conformance implementations are durable storage.
+//! compare-and-mutate requests, idempotent receipts, and typed backend
+//! observations. [`task_mutation`] is the public one-call execution boundary;
+//! it distinguishes definite backend refusal, validated application, and a
+//! malformed post-call observation that may represent committed work and must
+//! be reconciled rather than retried. [`task_adapter`] connects those results to
+//! the existing pulse, plan, claim, situation, and cancellation evidence types.
+//! These modules do not make task state repository authority or pretend their
+//! conformance implementations are durable storage.
 //!
 //! [`action_packet`] is the bounded Level-1 bridge from an activated plan
 //! attempt to concrete work. It requires the exact claim-activation situation,
@@ -167,6 +168,7 @@ mod run_cancellation;
 pub mod run_identity;
 pub mod situation;
 pub mod task_adapter;
+pub mod task_mutation;
 pub mod task_projection;
 pub mod task_projection_read;
 
@@ -267,16 +269,18 @@ pub use situation::{
     SituationRefusal, SituationWorkspace,
 };
 pub use task_adapter::{
-    ClaimIntegrationRefusal, ClaimTaskOutcome, ClaimedTask, ReleasedTask,
+    ClaimIntegrationRefusal, ClaimTaskOutcome, ClaimedTask, ReleaseTaskOutcome, ReleasedTask,
     TaskCoordinatorRefusal, claim_selected_task, release_active_task, task_projection_generation,
+};
+pub use task_mutation::{
+    TaskMutationAttempt, TaskMutationAttemptRefusal, apply_task_mutation,
 };
 pub use task_projection::{
     MAX_TASK_PROJECTION_ROWS, MAX_TASK_ROW_SURFACES, TaskAdapterRefusal,
-    TaskAdapterRejection, TaskMutationExecutionRefusal, TaskMutationObservation,
-    TaskMutationOperation, TaskMutationReceipt, TaskMutationReceiptId, TaskMutationRefusal,
-    TaskMutationReplay, TaskMutationRequest, TaskMutationRequestId, TaskProjectionAdapter,
-    TaskProjectionGeneration, TaskProjectionRefusal, TaskProjectionRow, TaskProjectionSnapshot,
-    TaskProjectionSnapshotId, execute_task_mutation,
+    TaskAdapterRejection, TaskMutationObservation, TaskMutationOperation, TaskMutationReceipt,
+    TaskMutationReceiptId, TaskMutationRefusal, TaskMutationReplay, TaskMutationRequest,
+    TaskMutationRequestId, TaskProjectionAdapter, TaskProjectionGeneration,
+    TaskProjectionRefusal, TaskProjectionRow, TaskProjectionSnapshot, TaskProjectionSnapshotId,
 };
 pub use task_projection_read::{
     TaskProjectionReadAdapterRefusal, TaskProjectionReadExecutionRefusal,

@@ -10,11 +10,11 @@ use fgit_agent::{
     PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface,
     PlanSurfaceKind, RejectedShortcutSet, RunId, SituationComponent, SituationComponentKind,
     SituationOmissionReason, TaskAdapterRefusal, TaskClaimProjection, TaskClaimReceipt,
-    TaskMutationExecutionRefusal, TaskMutationObservation, TaskMutationReplay,
-    TaskMutationRequest, TaskMutationRequestId, TaskPhase, TaskProjectionAdapter,
-    TaskProjectionGeneration, TaskProjectionRow, TaskProjectionSnapshot, WorkConflict,
-    WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
-    execute_task_mutation,
+    TaskMutationAttempt, TaskMutationAttemptRefusal, TaskMutationObservation, TaskMutationReplay,
+    TaskMutationRequest, TaskMutationRequestId, TaskMutationReceipt, TaskPhase,
+    TaskProjectionAdapter, TaskProjectionGeneration, TaskProjectionRow, TaskProjectionSnapshot,
+    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    apply_task_mutation,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
@@ -352,6 +352,15 @@ fn claim_request(fixture: &Fixture) -> TaskMutationRequest {
     .expect("exact ready row makes a claim request")
 }
 
+fn applied(attempt: TaskMutationAttempt) -> TaskMutationReceipt {
+    match attempt {
+        TaskMutationAttempt::Applied(receipt) => receipt,
+        TaskMutationAttempt::NeedsReconciliation { refusal, .. } => {
+            panic!("reference adapter returned an invalid observation: {refusal:?}")
+        }
+    }
+}
+
 #[test]
 fn snapshot_feeds_frontier_and_claim_mutation_is_idempotent() {
     let fixture = fixture();
@@ -364,8 +373,10 @@ fn snapshot_feeds_frontier_and_claim_mutation_is_idempotent() {
     let request = claim_request(&fixture);
     let mut adapter =
         ReferenceAdapter::new(fixture.snapshot.generation(), request.before().clone());
-    let applied = execute_task_mutation(&mut adapter, &request).expect("claim applies");
-    let retry = execute_task_mutation(&mut adapter, &request).expect("retry is recognized");
+    let first = apply_task_mutation(&mut adapter, &request).expect("claim applies");
+    let second = apply_task_mutation(&mut adapter, &request).expect("retry is recognized");
+    let applied = applied(first);
+    let retry = applied(second);
 
     assert_eq!(applied.receipt_id(), retry.receipt_id());
     assert_eq!(applied.replay(), TaskMutationReplay::Applied);
@@ -385,8 +396,8 @@ fn stale_generation_is_a_definite_typed_backend_refusal() {
     let mut adapter = ReferenceAdapter::new(current, request.before().clone());
 
     assert_eq!(
-        execute_task_mutation(&mut adapter, &request).expect_err("compare basis is stale"),
-        TaskMutationExecutionRefusal::Adapter(TaskAdapterRefusal::Rejected {
+        apply_task_mutation(&mut adapter, &request).expect_err("compare basis is stale"),
+        TaskMutationAttemptRefusal::Adapter(TaskAdapterRefusal::Rejected {
             request_id: request.request_id(),
             reason: fgit_agent::TaskAdapterRejection::StaleGeneration {
                 expected: fixture.snapshot.generation(),
@@ -403,14 +414,67 @@ fn ambiguous_outcome_is_not_retried_by_the_coordinator() {
     let mut adapter = AmbiguousAdapter { calls: 0 };
 
     assert_eq!(
-        execute_task_mutation(&mut adapter, &request)
+        apply_task_mutation(&mut adapter, &request)
             .expect_err("ambiguous result requires a probe"),
-        TaskMutationExecutionRefusal::Adapter(TaskAdapterRefusal::Ambiguous {
+        TaskMutationAttemptRefusal::Adapter(TaskAdapterRefusal::Ambiguous {
             request_id: request.request_id(),
             probe_root: digest(0xa2),
         })
     );
     assert_eq!(adapter.calls, 1);
+}
+
+#[test]
+fn malformed_observation_is_a_reconciliation_outcome_not_an_error() {
+    struct MalformedAdapter;
+
+    impl TaskProjectionAdapter for MalformedAdapter {
+        fn adapter_identity(&self) -> [u8; 32] {
+            [0xb1; 32]
+        }
+
+        fn mutate(
+            &mut self,
+            request: &TaskMutationRequest,
+        ) -> Result<TaskMutationObservation, TaskAdapterRefusal> {
+            Ok(TaskMutationObservation::new(
+                request.request_id(),
+                request.expected_generation(),
+                request.expected_generation(),
+                request.before().clone(),
+                request.after().clone(),
+                request.requested_at(),
+                [0xb1; 32],
+                digest(0xb2),
+                TaskMutationReplay::Applied,
+            ))
+        }
+    }
+
+    let fixture = fixture();
+    let request = claim_request(&fixture);
+    let mut adapter = MalformedAdapter;
+    let outcome = apply_task_mutation(&mut adapter, &request)
+        .expect("an inspectable malformed observation is not a pre-commit error");
+
+    assert_eq!(
+        outcome,
+        TaskMutationAttempt::NeedsReconciliation {
+            request_id: request.request_id(),
+            observation: TaskMutationObservation::new(
+                request.request_id(),
+                request.expected_generation(),
+                request.expected_generation(),
+                request.before().clone(),
+                request.after().clone(),
+                request.requested_at(),
+                [0xb1; 32],
+                digest(0xb2),
+                TaskMutationReplay::Applied,
+            ),
+            refusal: fgit_agent::TaskMutationRefusal::GenerationUnchanged,
+        }
+    );
 }
 
 #[test]
@@ -421,8 +485,9 @@ fn release_remains_constructible_after_the_source_run_expires() {
         fixture.snapshot.generation(),
         claim_request.before().clone(),
     );
-    let mutation =
-        execute_task_mutation(&mut adapter, &claim_request).expect("claim mutation applies");
+    let mutation = applied(
+        apply_task_mutation(&mut adapter, &claim_request).expect("claim mutation applies"),
+    );
     let projection = TaskClaimProjection::new(
         fixture.plan.task_id(),
         fixture.plan.plan_id(),
@@ -470,7 +535,7 @@ fn release_remains_constructible_after_the_source_run_expires() {
         fixture.plan.plan_id(),
         active.activation_id(),
         LogicalTime::new(100),
-        digest(0xb2),
+        digest(0xc1),
     )
     .expect("run expiry must not disable reservation release");
 

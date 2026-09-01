@@ -5,11 +5,11 @@
 //! plan, claim, situation, and cancellation evidence types so callers do not
 //! hand-assemble a plausible-looking projection after mutating a task system.
 //!
-//! Claiming is potentially effectful. If the task mutation commits but the
-//! derived [`crate::TaskClaimReceipt`] unexpectedly refuses, [`ClaimTaskOutcome`]
-//! preserves the committed mutation and refusal for reconciliation instead of
-//! returning an error that sounds like nothing happened. Releasing a claim is
-//! a conservative cleanup operation and remains available after run or claim
+//! Claiming and releasing are potentially effectful. If the adapter returns an
+//! observation that fails local validation, or a validated mutation later fails
+//! claim-receipt integration, the outcome preserves the exact request and
+//! evidence for reconciliation instead of returning an error that sounds like
+//! nothing happened. Releasing a claim remains available after run or claim
 //! expiry, provided the latest task snapshot still proves exact ownership.
 //!
 //! A production adapter still owns durable task-system I/O. This module grants
@@ -23,9 +23,10 @@ use crate::{
     ActiveTaskClaim, AgentChangePlan, AgentControlPulse, AgentSituationReceipt, IntentRun,
     LogicalTime, RunId, SituationComponentKind, TaskClaimCancellationOutcome,
     TaskClaimCancellationProjection, TaskClaimProjection, TaskClaimReceipt, TaskClaimRefusal,
-    TaskMutationExecutionRefusal, TaskMutationReceipt, TaskMutationRefusal, TaskMutationRequest,
-    TaskProjectionAdapter, TaskProjectionGeneration, TaskProjectionSnapshot, WorkAction,
-    WorkTaskId, execute_task_mutation,
+    TaskMutationAttempt, TaskMutationAttemptRefusal, TaskMutationObservation,
+    TaskMutationReceipt, TaskMutationRefusal, TaskMutationRequest, TaskProjectionAdapter,
+    TaskProjectionGeneration, TaskProjectionSnapshot, WorkAction, WorkTaskId,
+    apply_task_mutation,
 };
 
 /// Complete successful claim transition across task mutation and claim receipt.
@@ -66,15 +67,27 @@ pub enum ClaimIntegrationRefusal {
     MissingClaimExpiry,
 }
 
-/// Result after the adapter has definitely applied or recognized a claim.
+/// Result after the adapter may have applied or recognized a claim.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClaimTaskOutcome {
     /// Mutation and claim-receipt admission both completed.
     Claimed(ClaimedTask),
-    /// The task-system mutation committed, but claim integration found an
-    /// invariant mismatch. The mutation must be reconciled; it must not be
-    /// retried as though nothing happened.
+    /// The adapter returned an observation that failed local validation. The
+    /// task system may have committed; probe by request identity.
+    MutationNeedsReconciliation {
+        /// Exact request issued once.
+        request: TaskMutationRequest,
+        /// Adapter observation retained for probing.
+        observation: TaskMutationObservation,
+        /// Local observation-validation refusal.
+        refusal: TaskMutationRefusal,
+    },
+    /// The task-system mutation was validated, but downstream claim integration
+    /// found an invariant mismatch. The mutation must be reconciled; it must not
+    /// be retried as though nothing happened.
     CommittedNeedsReconciliation {
+        /// Exact request whose result committed.
+        request: TaskMutationRequest,
         /// Committed task-system mutation.
         mutation_receipt: TaskMutationReceipt,
         /// Post-commit integration refusal.
@@ -110,16 +123,34 @@ impl ReleasedTask {
     }
 }
 
+/// Result after the adapter may have applied or recognized a release.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReleaseTaskOutcome {
+    /// Mutation and cancellation projection completed.
+    Released(ReleasedTask),
+    /// The adapter returned an observation that failed local validation. The
+    /// release may have committed; probe by request identity rather than
+    /// replaying a fresh release.
+    MutationNeedsReconciliation {
+        /// Exact request issued once.
+        request: TaskMutationRequest,
+        /// Adapter observation retained for probing.
+        observation: TaskMutationObservation,
+        /// Local observation-validation refusal.
+        refusal: TaskMutationRefusal,
+    },
+}
+
 /// Claims the exact task selected by a pulse and plan.
 ///
-/// The adapter is invoked exactly once. Ambiguous outcomes remain ambiguous and
-/// require an adapter probe by request ID.
+/// The adapter is invoked exactly once. Ambiguous backend outcomes remain typed
+/// errors and require an adapter probe by request ID; malformed observations are
+/// returned as reconciliation outcomes because the backend may have committed.
 ///
 /// # Errors
 ///
 /// Refuses snapshot/pulse/plan/run substitution, task or phase mismatch,
-/// request construction failure, and adapter/observation failure before a
-/// definite mutation result exists.
+/// request construction failure, and definite pre-observation adapter refusal.
 #[allow(clippy::too_many_arguments)]
 pub fn claim_selected_task<A: TaskProjectionAdapter>(
     adapter: &mut A,
@@ -144,9 +175,23 @@ pub fn claim_selected_task<A: TaskProjectionAdapter>(
         plan.conflict_surface().to_vec(),
         evidence_contract_root,
     )?;
-    let mutation_receipt = execute_task_mutation(adapter, &request)?;
+    let mutation_receipt = match apply_task_mutation(adapter, &request)? {
+        TaskMutationAttempt::Applied(receipt) => receipt,
+        TaskMutationAttempt::NeedsReconciliation {
+            observation,
+            refusal,
+            ..
+        } => {
+            return Ok(ClaimTaskOutcome::MutationNeedsReconciliation {
+                request,
+                observation,
+                refusal,
+            });
+        }
+    };
     let Some(claim_expiry) = mutation_receipt.after().claim_expiry() else {
         return Ok(ClaimTaskOutcome::CommittedNeedsReconciliation {
+            request,
             mutation_receipt,
             refusal: ClaimIntegrationRefusal::MissingClaimExpiry,
         });
@@ -170,6 +215,7 @@ pub fn claim_selected_task<A: TaskProjectionAdapter>(
             claim_receipt,
         })),
         Err(refusal) => Ok(ClaimTaskOutcome::CommittedNeedsReconciliation {
+            request,
             mutation_receipt,
             refusal: ClaimIntegrationRefusal::Claim(refusal),
         }),
@@ -184,7 +230,8 @@ pub fn claim_selected_task<A: TaskProjectionAdapter>(
 /// # Errors
 ///
 /// Refuses situation/snapshot/plan/claim/run substitution, unavailable task
-/// projection, request construction failure, and adapter/observation failure.
+/// projection, request construction failure, and definite pre-observation
+/// adapter refusal.
 #[allow(clippy::too_many_arguments)]
 pub fn release_active_task<A: TaskProjectionAdapter>(
     adapter: &mut A,
@@ -195,7 +242,7 @@ pub fn release_active_task<A: TaskProjectionAdapter>(
     run: &IntentRun,
     requested_at: LogicalTime,
     evidence_contract_root: Digest,
-) -> Result<ReleasedTask, TaskCoordinatorRefusal> {
+) -> Result<ReleaseTaskOutcome, TaskCoordinatorRefusal> {
     validate_release_basis(snapshot, latest_situation, plan, active_claim, run)?;
     let authority = latest_situation.authority_read_receipt();
     let request = TaskMutationRequest::release(
@@ -208,7 +255,20 @@ pub fn release_active_task<A: TaskProjectionAdapter>(
         requested_at,
         evidence_contract_root,
     )?;
-    let mutation_receipt = execute_task_mutation(adapter, &request)?;
+    let mutation_receipt = match apply_task_mutation(adapter, &request)? {
+        TaskMutationAttempt::Applied(receipt) => receipt,
+        TaskMutationAttempt::NeedsReconciliation {
+            observation,
+            refusal,
+            ..
+        } => {
+            return Ok(ReleaseTaskOutcome::MutationNeedsReconciliation {
+                request,
+                observation,
+                refusal,
+            });
+        }
+    };
     let cancellation_projection = TaskClaimCancellationProjection::new(
         active_claim.activation_id(),
         active_claim.claim_id(),
@@ -222,11 +282,11 @@ pub fn release_active_task<A: TaskProjectionAdapter>(
         mutation_receipt.adapter_identity(),
         mutation_receipt.evidence_root(),
     );
-    Ok(ReleasedTask {
+    Ok(ReleaseTaskOutcome::Released(ReleasedTask {
         request,
         mutation_receipt,
         cancellation_projection,
-    })
+    }))
 }
 
 /// Pre-commit refusal from the strict task coordination layer.
@@ -293,9 +353,8 @@ pub enum TaskCoordinatorRefusal {
     ClaimRunMismatch,
     /// Task mutation request construction refused the exact inputs.
     Mutation(TaskMutationRefusal),
-    /// Adapter execution or observation validation refused before a definite
-    /// integrated result existed.
-    Execution(TaskMutationExecutionRefusal),
+    /// Definite pre-observation adapter refusal.
+    Attempt(TaskMutationAttemptRefusal),
 }
 
 impl fmt::Display for TaskCoordinatorRefusal {
@@ -312,9 +371,9 @@ impl From<TaskMutationRefusal> for TaskCoordinatorRefusal {
     }
 }
 
-impl From<TaskMutationExecutionRefusal> for TaskCoordinatorRefusal {
-    fn from(value: TaskMutationExecutionRefusal) -> Self {
-        Self::Execution(value)
+impl From<TaskMutationAttemptRefusal> for TaskCoordinatorRefusal {
+    fn from(value: TaskMutationAttemptRefusal) -> Self {
+        Self::Attempt(value)
     }
 }
 
