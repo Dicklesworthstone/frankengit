@@ -10,10 +10,10 @@ use fgit_agent::{
     PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface,
     PlanSurfaceKind, RejectedShortcutSet, RequirementDisposition, RunCancellationIntent,
     RunCancellationRequestRefusal, RunCancellationState, RunId, RunReconciliationReport,
-    SITUATION_COMPONENT_COUNT, SituationComponent, SituationComponentKind,
-    SituationOmissionReason, TaskClaimCancellationOutcome, TaskClaimCancellationProjection,
-    TaskClaimProjection, TaskClaimReceipt, TaskPhase, WorkConflict, WorkEligibilityInputs,
-    WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    SituationComponent, SituationComponentKind, SituationOmissionReason,
+    TaskClaimCancellationOutcome, TaskClaimCancellationProjection, TaskClaimProjection,
+    TaskClaimReceipt, TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
+    WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
