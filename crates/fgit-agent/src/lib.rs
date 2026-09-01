@@ -80,6 +80,12 @@
 //! It becomes active only after a fresh situation observes that post-claim
 //! generation under unchanged repository authority.
 //!
+//! [`action_packet`] is the bounded Level-1 bridge from that activated plan
+//! attempt to concrete work. It requires the exact claim-activation situation,
+//! complete plan-approved context, ordered plan-contained targets, typed
+//! evidence obligations, aggregate resource attenuation, and mandatory stop
+//! preconditions. It performs no effect and grants no authority.
+//!
 //! [`reconcile`] inventories every effect owned by the Intent Run, including
 //! effects accepted before the current task or by another agent instance. It
 //! validates authority, lifecycle, parent graph, bounds, and conserved
@@ -105,6 +111,7 @@
 //! it, and [`broker`] explains exactly which half of an effect's reservation
 //! this crate holds and which half belongs to the component that performs it.
 
+pub mod action_packet;
 pub mod broker;
 pub mod cancellation;
 pub mod capability;
@@ -123,6 +130,11 @@ pub mod reconcile;
 pub mod refresh;
 pub mod situation;
 
+pub use action_packet::{
+    ActionPacketRefusal, ActionPrecondition, ActionPreconditionSet, ActionStep, ActionStepId,
+    AgentActionPacket, AgentActionPacketId, AgentActionPacketSpec, MAX_ACTION_CONTEXT_PACKETS,
+    MAX_ACTION_PEER_CHANGES, MAX_ACTION_STEPS,
+};
 pub use broker::{
     AgentInstanceId, BrokerRefusal, DeferredOutboxEffect, EffectBroker, EffectClass, EffectGrant,
     EffectId, EffectJournalEntry, EffectJournalEvent, EffectJournalRefusal, EffectJournalReplay,
