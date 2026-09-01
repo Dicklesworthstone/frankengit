@@ -58,7 +58,10 @@
 //! [`frontier`] consumes one such receipt plus a bounded task projection. It
 //! fails closed on an unavailable projection, separates hard eligibility from
 //! advisory ordering, and preserves a typed exclusion reason for every row
-//! that cannot be acted on by the receipt's active Intent Run.
+//! that cannot be acted on by the receipt's active Intent Run. The
+//! action-scoped builder preserves verifier independence only for verification
+//! phases, so a future independent gate cannot prevent implementation or
+//! rework by the run that owns the task.
 //!
 //! [`pulse`] derives the bounded Level-0 view intended for every agent turn.
 //! It binds an exact situation/frontier pair, re-checks that the complete
@@ -74,6 +77,7 @@ pub mod capability;
 pub mod classes;
 pub mod ecc;
 pub mod frontier;
+mod frontier_policy;
 pub mod intent;
 pub mod protocol;
 pub mod pulse;
