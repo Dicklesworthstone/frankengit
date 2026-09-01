@@ -107,13 +107,14 @@
 //! evidence monotonically, and distinguishes clean settlement from explicit
 //! escalation transfer and leak containment.
 //!
-//! [`learning`] closes the observe-plan-act-verify-learn loop with immutable,
-//! retrieval-only `OutcomeLearningRecord`s. A record binds the exact action
-//! packet and plan, complete requirement dispositions, claim-supporting
-//! evidence, machine-classified verifier independence, plan-contained ownership
-//! findings, measured resource use, failed hypotheses, reusable patterns,
-//! applicability, invalidation conditions, and negative evidence. It cannot
-//! authorize, publish, close a task, or suppress a mandatory check.
+//! [`outcome_learning`] closes the observe-plan-act-verify-learn loop with
+//! immutable, retrieval-only `OutcomeLearningRecord`s. The public builder binds
+//! the exact action packet and plan, requires the exact evidence class named by
+//! every satisfied plan line, and retains machine-classified verifier
+//! independence, plan-contained ownership findings, measured resource use,
+//! failed hypotheses, reusable patterns, applicability, invalidation
+//! conditions, and negative evidence. It cannot authorize, publish, close a
+//! task, or suppress a mandatory check.
 //!
 //! The obligation lifecycle is not reimplemented either. `fgit-resource` owns
 //! it, and [`broker`] explains exactly which half of an effect's reservation
@@ -131,7 +132,8 @@ mod frontier_policy;
 pub mod handoff;
 pub mod handoff_acceptance;
 pub mod intent;
-pub mod learning;
+mod learning;
+pub mod outcome_learning;
 pub mod plan;
 pub mod protocol;
 pub mod pulse;
@@ -190,9 +192,9 @@ pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
 pub use learning::{
     ConfirmedOwnership, FailedHypothesis, LearningPhase, LearningRequirementOutcome,
     LearningResourceObservation, LearningTerminalOutcome, MAX_LEARNING_ENTRIES,
-    MAX_LEARNING_EVIDENCE, OutcomeLearningRecord, OutcomeLearningRecordId,
-    OutcomeLearningRecordSpec, OutcomeLearningRefusal, ReusablePattern,
+    MAX_LEARNING_EVIDENCE, OutcomeLearningRecordId, OutcomeLearningRefusal, ReusablePattern,
 };
+pub use outcome_learning::{OutcomeLearningRecord, OutcomeLearningRecordSpec};
 pub use plan::{
     AgentChangePlan, AgentChangePlanId, AgentChangePlanSpec, MAX_PLAN_CHECKPOINTS,
     MAX_PLAN_ENTRIES, PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
