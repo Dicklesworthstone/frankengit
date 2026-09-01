@@ -13,10 +13,13 @@
 //!
 //! Task coordination has two deliberately separate vocabularies. [`task_projection`]
 //! remains the multi-row backend-neutral snapshot/mutation protocol used by the
-//! earlier adapter surface. [`task_projection_adapter`] is the pure single-task
-//! semantic transition kernel for claim, release, and transfer. The latter is
-//! exported under the `CoordinatedTaskProjection*` aliases so both abstractions
-//! remain explicit rather than silently overloading one type name.
+//! earlier adapter surface. [`task_collection`] discovers its current generation
+//! and complete rows before an Agent Situation exists, while
+//! [`task_projection_read`] re-reads one generation already named by a situation.
+//! [`task_projection_adapter`] is the pure single-task semantic transition
+//! kernel for claim, release, and transfer. The latter is exported under the
+//! `CoordinatedTaskProjection*` aliases so both abstractions remain explicit
+//! rather than silently overloading one type name.
 //! [`task_coordination`] attaches exact authority-read provenance and monotone
 //! freshness. [`task_persistence`] freezes complete exact-predecessor mutation
 //! envelopes and reconciles authenticated backend rereads. [`task_store`]
@@ -33,10 +36,10 @@
 //! [`outcome_learning`] records validated retrieval-only learning and grants no
 //! authority.
 //!
-//! Concrete Beads transport/codec mapping, task collectors, action execution,
-//! ECC assembly, canonical publication, effect-time revocation, later-head
-//! ancestry proof, durable control-object codecs, and robot/API surfaces remain
-//! outside the current boundary.
+//! Concrete Beads transport/codec mapping, action execution, ECC assembly,
+//! canonical publication, effect-time revocation, later-head ancestry proof,
+//! durable control-object codecs, and robot/API surfaces remain outside the
+//! current boundary.
 
 pub mod action_packet;
 pub mod authority_identity;
@@ -64,6 +67,7 @@ mod run_cancellation;
 pub mod run_identity;
 pub mod situation;
 pub mod task_adapter;
+pub mod task_collection;
 pub mod task_coordination;
 pub mod task_mutation;
 pub mod task_persistence;
@@ -171,6 +175,13 @@ pub use situation::{
 pub use task_adapter::{
     ClaimIntegrationRefusal, ClaimTaskOutcome, ClaimedTask, ReleaseTaskOutcome, ReleasedTask,
     TaskCoordinatorRefusal, claim_selected_task, release_active_task, task_projection_generation,
+};
+pub use task_collection::{
+    TaskProjectionCollectionAdapterRefusal, TaskProjectionCollectionExecutionRefusal,
+    TaskProjectionCollectionObservation, TaskProjectionCollectionReceipt,
+    TaskProjectionCollectionReceiptId, TaskProjectionCollectionRefusal,
+    TaskProjectionCollectionRequest, TaskProjectionCollectionRequestId, TaskProjectionCollector,
+    collect_task_projection,
 };
 pub use task_coordination::{
     AuthorityBoundTaskClaimApplication, AuthorityBoundTaskProjectionSnapshot,
