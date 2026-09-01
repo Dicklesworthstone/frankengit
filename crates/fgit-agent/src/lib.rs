@@ -93,11 +93,18 @@
 //! capsule grants no authority and cannot summarize outstanding effect debt
 //! away.
 //!
+//! [`cancellation`] implements request → drain → finalize for the run-level
+//! control plane. It freezes the complete accepted-effect inventory and active
+//! task claim, refuses new or rewritten effects at completion, preserves prior
+//! evidence monotonically, and distinguishes clean settlement from explicit
+//! escalation transfer and leak containment.
+//!
 //! The obligation lifecycle is not reimplemented either. `fgit-resource` owns
 //! it, and [`broker`] explains exactly which half of an effect's reservation
 //! this crate holds and which half belongs to the component that performs it.
 
 pub mod broker;
+pub mod cancellation;
 pub mod capability;
 pub mod claim;
 pub mod classes;
@@ -119,6 +126,13 @@ pub use broker::{
     EffectRecord, EffectRequest, EffectTerminalOutcome, EscalatedOutboxEffect,
     ExternalEffectOutcome, OutboxCommitRefused, OutboxReservationRefused, ReconciliationEvidence,
     ReconciliationRefused, ReservedOutboxEffect,
+};
+pub use cancellation::{
+    CancellationContainmentEvidence, CancellationDebtTransfer,
+    MAX_CANCELLATION_EVIDENCE_ENTRIES, RunCancellationCompletion,
+    RunCancellationCompletionId, RunCancellationId, RunCancellationIntent,
+    RunCancellationRefusal, RunCancellationState, TaskClaimCancellationOutcome,
+    TaskClaimCancellationProjection,
 };
 pub use capability::{
     AttenuationRefused, AttenuationRequest, Capability, CapabilityId, ChainRefused, IssueRefused,
