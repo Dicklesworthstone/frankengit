@@ -286,10 +286,7 @@ fn validate_required_evidence_classes(
             outcome.disposition(),
             crate::RequirementDisposition::SatisfiedWithEvidence
                 | crate::RequirementDisposition::PartiallySatisfied
-        ) && !outcome
-            .evidence()
-            .iter()
-            .any(|record| record.class == requirement.evidence_class())
+        ) && !carries_required_evidence_class(requirement.evidence_class(), outcome)
         {
             return Err(OutcomeLearningRefusal::SatisfiedRequirementWithoutEvidence {
                 requirement_id: requirement.requirement_id(),
@@ -299,25 +296,28 @@ fn validate_required_evidence_classes(
     Ok(())
 }
 
+fn carries_required_evidence_class(
+    required: crate::EvidenceClass,
+    outcome: &LearningRequirementOutcome,
+) -> bool {
+    outcome
+        .evidence()
+        .iter()
+        .any(|record| record.class == required)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate_required_evidence_classes;
+    use super::carries_required_evidence_class;
     use crate::{
-        AgentChangePlanSpec, ClassSet, EvidenceClass, EvidenceRecordRef,
-        LearningRequirementOutcome, OperationClass, PlanApproval, PlanCheckpoint,
-        PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId,
-        PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet,
+        EvidenceClass, EvidenceRecordRef, LearningRequirementOutcome, PlanRequirementId,
         RequirementDisposition,
     };
-    use fgit_resource::{Grade, ResourceVector};
 
-    // Public-path integration covers the full builder. This unit pins the
-    // exact-class predicate without needing to duplicate its authenticated
-    // situation fixture here.
     #[test]
     fn weaker_supporting_class_does_not_replace_required_executed_evidence() {
-        let _ = validate_required_evidence_classes;
-        let required = EvidenceClass::Executed;
+        let reason_root =
+            fgit_authority::outcome_index_root(&[]).expect("empty outcome root is canonical");
         let outcome = LearningRequirementOutcome::new(
             PlanRequirementId::from_bytes([1; 32]),
             RequirementDisposition::SatisfiedWithEvidence,
@@ -327,31 +327,16 @@ mod tests {
                 refresh_side: None,
             }],
             Vec::new(),
-            fgit_types::Digest::new(
-                fgit_crypto::GitObjectFormat::Sha256.algorithm(),
-                fgit_types::DigestBytes::try_new(&[2; 32]).expect("fixed digest"),
-            ),
+            reason_root,
         );
-        assert!(!outcome
-            .evidence()
-            .iter()
-            .any(|record| record.class == required));
 
-        // Keep imports exercised against the public final-abstraction types so
-        // accidental API removal is caught when the crate is compiled.
-        let _ = (
-            AgentChangePlanSpec::new,
-            ClassSet::from_classes(&[OperationClass::SubmitEvidence]),
-            PlanApproval::NotRequired,
-            PlanCheckpoint::new,
-            PlanCheckpointId::from_bytes([3; 32]),
-            PlanCheckpointPurpose::VerifySlice,
-            PlanEvidenceRequirement::new,
-            PlanStopConditionSet::MANDATORY,
-            PlanSurface::new,
-            PlanSurfaceKind::EvidenceTarget,
-            RejectedShortcutSet::BASELINE,
-            ResourceVector::single(Grade::Bytes, 1),
-        );
+        assert!(!carries_required_evidence_class(
+            EvidenceClass::Executed,
+            &outcome
+        ));
+        assert!(carries_required_evidence_class(
+            EvidenceClass::Observed,
+            &outcome
+        ));
     }
 }
