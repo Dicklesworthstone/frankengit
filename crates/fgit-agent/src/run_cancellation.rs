@@ -1,16 +1,21 @@
-//! Public, continuity-bound cancellation of one complete Intent Run.
+//! Public, evidence-bound cancellation of one complete Intent Run.
 //!
 //! The internal [`crate::cancellation`] module owns the request → drain →
-//! finalize state machine. This module owns the public construction boundary.
-//! An active task claim may be cancelled only at its exact activation situation
-//! or at a later situation justified by a specific
-//! [`crate::ActiveClaimContinuityReceipt`]. The proof choice is committed into
-//! both the public cancellation and completion identities.
+//! finalize state machine. This module owns the public construction boundary
+//! and commits any optional [`crate::ActiveClaimContinuityReceipt`] into the
+//! request and completion identities.
 //!
-//! A cancellation without an active task claim still uses the exact supplied
-//! authority-bound situation and complete run reconciliation report. This
-//! facade performs no task mutation, process reap, workspace cleanup, effect
-//! transition, downstream probe, or canonical publication.
+//! Cancellation is intentionally asymmetric with handoff. Handoff continues a
+//! plan and therefore needs proof that its context stayed applicable.
+//! Cancellation is a conservative stop operation and must remain available
+//! precisely when authority-adjacent context, conflicts, evidence, peers, or
+//! obligations changed. [`RunCancellationIntent::request`] therefore binds the
+//! exact latest situation and complete reconciliation report without requiring
+//! context equivalence. [`RunCancellationIntent::request_with_continuity`] may
+//! additionally retain a continuity proof when only logical time advanced.
+//!
+//! This facade performs no task mutation, process reap, workspace cleanup,
+//! effect transition, downstream probe, or canonical publication.
 
 use core::fmt;
 
@@ -22,8 +27,8 @@ use crate::{
     ActiveClaimContinuityReceipt, ActiveClaimContinuityReceiptId,
     ActiveClaimContinuityRefusal, ActiveTaskClaim, AgentInstanceId, AgentSituationReceipt,
     CancellationContainmentEvidence, CancellationDebtTransfer, IntentRun, LogicalTime, RunId,
-    RunReconciliationReport, RunReconciliationReportId, RunCancellationRefusal,
-    RunCancellationState, SituationId, TaskClaimCancellationProjection,
+    RunCancellationRefusal, RunCancellationState, RunReconciliationReport,
+    RunReconciliationReportId, SituationId, TaskClaimCancellationProjection,
 };
 
 const PUBLIC_CANCELLATION_DOMAIN: &[u8] =
@@ -84,17 +89,18 @@ pub struct RunCancellationIntent {
 }
 
 impl RunCancellationIntent {
-    /// Requests cancellation at the exact active-claim situation.
+    /// Requests cancellation from one exact latest situation and effect inventory.
     ///
-    /// When `active_claim` is present, `situation` must be the situation
-    /// retained by that activation. A later situation requires
-    /// [`Self::request_with_continuity`]. When no active claim exists, no claim
-    /// continuity proof is applicable.
+    /// An active claim does not make continuity a prerequisite. Context change
+    /// may itself be the reason cancellation is necessary. The request freezes
+    /// the supplied situation, claim, task generation, and complete run effect
+    /// inventory; completion still requires explicit task release or transfer
+    /// and terminal settlement, debt transfer, or containment.
     ///
     /// # Errors
     ///
-    /// Refuses claim-situation substitution and preserves every typed refusal
-    /// of the internal cancellation engine.
+    /// Preserves every typed run, authority, report, claim, task-generation,
+    /// requester, bound, and canonical-framing refusal of the internal engine.
     pub fn request(
         situation: &AgentSituationReceipt,
         run: &IntentRun,
@@ -103,16 +109,6 @@ impl RunCancellationIntent {
         requested_by: AgentInstanceId,
         reason_root: Digest,
     ) -> Result<Self, RunCancellationRequestRefusal> {
-        if let Some(claim) = active_claim {
-            let observed = *situation.situation_id().as_bytes();
-            let expected = claim.situation_id();
-            if observed != expected {
-                return Err(RunCancellationRequestRefusal::ClaimSituationMismatch {
-                    expected,
-                    observed,
-                });
-            }
-        }
         let inner = crate::cancellation::RunCancellationIntent::request(
             situation,
             run,
@@ -125,11 +121,13 @@ impl RunCancellationIntent {
         Self::finish(inner, None)
     }
 
-    /// Requests cancellation at a later, context-equivalent claim observation.
+    /// Requests cancellation while additionally retaining a full-context
+    /// continuity proof.
     ///
-    /// The continuity receipt is revalidated against the active claim, later
-    /// situation, and complete run. Its source must be the claim-activation
-    /// situation, and its identity is committed into the public request.
+    /// This stronger evidence is useful when only logical time advanced. It is
+    /// never required to stop a run. The receipt is revalidated against the
+    /// active claim, later situation, and complete run, then committed into the
+    /// public request identity.
     ///
     /// # Errors
     ///
@@ -214,7 +212,7 @@ impl RunCancellationIntent {
         self.cancellation_id
     }
 
-    /// Full-context continuity proof used for a later observation, if any.
+    /// Optional full-context continuity evidence retained by the request.
     #[must_use]
     pub const fn claim_continuity_id(&self) -> Option<ActiveClaimContinuityReceiptId> {
         self.claim_continuity_id
@@ -342,27 +340,17 @@ impl RunCancellationCompletion {
 /// Why public cancellation request construction failed closed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunCancellationRequestRefusal {
-    /// Exact-activation construction received another situation.
-    ClaimSituationMismatch {
-        /// Situation retained by the activated claim.
-        expected: [u8; 32],
-        /// Situation supplied to the request.
-        observed: [u8; 32],
-    },
-    /// Full-context continuity proof was missing, substituted, or stale.
+    /// Optional full-context continuity evidence was substituted or stale.
     Continuity(ActiveClaimContinuityRefusal),
     /// Internal cancellation request validation refused the inputs.
     Cancellation(RunCancellationRefusal),
-    /// Public proof-carrying identity framing failed.
+    /// Public evidence-carrying identity framing failed.
     Codec(CodecRefusal),
 }
 
 impl fmt::Display for RunCancellationRequestRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ClaimSituationMismatch { .. } => formatter.write_str(
-                "cancellation with an active claim requires the activation situation or an explicit continuity receipt",
-            ),
             Self::Continuity(refusal) => {
                 write!(formatter, "cancellation continuity refused: {refusal}")
             }
@@ -437,7 +425,10 @@ fn public_completion_commitment(
     inner_completion_id: &[u8; 32],
 ) -> Result<[u8; 32], RunCancellationRefusal> {
     let mut encoder = Encoder::with_capacity(160);
-    encoder.write_bytes("public_run_cancellation_completion_domain", PUBLIC_COMPLETION_DOMAIN)?;
+    encoder.write_bytes(
+        "public_run_cancellation_completion_domain",
+        PUBLIC_COMPLETION_DOMAIN,
+    )?;
     encoder.write_raw(cancellation_id.as_bytes());
     encoder.write_raw(inner_completion_id);
     let mut hasher = <Sha256 as GitHashAlgorithm>::Hasher::new();
