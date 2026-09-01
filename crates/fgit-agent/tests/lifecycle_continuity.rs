@@ -2,17 +2,18 @@
 //! Public-path tests for continuity-bound handoff and cancellation safety.
 
 use fgit_agent::{
-    ActiveClaimContinuityReceipt, ActiveTaskClaim, AgentChangePlan, AgentChangePlanSpec,
-    AgentControlPulse, AgentHandoffCapsule, AgentHandoffCapsuleSpec, AgentInstanceId,
-    AgentSituationReceipt, AuthorityReadReceipt, ClassSet, EvidenceClass,
-    HandoffCapabilityAttenuation, HandoffConstructionRefusal, IntentRun, LogicalTime,
-    OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
-    PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface,
-    PlanSurfaceKind, RejectedShortcutSet, RequirementDisposition, RunCancellationIntent,
-    RunCancellationState, RunId, RunReconciliationReport, SituationComponent,
-    SituationComponentKind, SituationOmissionReason, TaskClaimCancellationOutcome,
-    TaskClaimCancellationProjection, TaskClaimProjection, TaskClaimReceipt, TaskPhase,
-    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    ActiveClaimContinuityReceipt, ActiveClaimContinuityRefusal, ActiveTaskClaim,
+    AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentHandoffCapsule,
+    AgentHandoffCapsuleSpec, AgentInstanceId, AgentSituationReceipt, AuthorityReadReceipt,
+    ClassSet, EvidenceClass, HandoffCapabilityAttenuation, HandoffConstructionRefusal,
+    IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
+    PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet,
+    PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RequirementDisposition,
+    RunCancellationIntent, RunCancellationState, RunId, RunReconciliationReport,
+    SituationComponent, SituationComponentKind, SituationOmissionReason,
+    TaskClaimCancellationOutcome, TaskClaimCancellationProjection, TaskClaimProjection,
+    TaskClaimReceipt, TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
+    WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
@@ -352,13 +353,18 @@ fn changed_context_does_not_block_cancellation() {
         0x75,
         40,
     );
-    assert!(ActiveClaimContinuityReceipt::establish(
-        fixture.active_claim,
-        &fixture.activation,
-        &changed,
-        &fixture.run,
-    )
-    .is_err());
+    assert_eq!(
+        ActiveClaimContinuityReceipt::establish(
+            fixture.active_claim,
+            &fixture.activation,
+            &changed,
+            &fixture.run,
+        )
+        .expect_err("changed Search context is not a continuation"),
+        ActiveClaimContinuityRefusal::ComponentChanged {
+            kind: SituationComponentKind::Search,
+        }
+    );
 
     let initial = RunReconciliationReport::build(
         &fixture.run,
