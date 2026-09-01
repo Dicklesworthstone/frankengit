@@ -87,6 +87,12 @@
 //! escalation, or containment action still required. Escalation is preserved
 //! as debt rather than mislabeled as successful settlement.
 //!
+//! [`handoff`] binds the current situation, plan, activated claim, workspace,
+//! evidence state, unresolved work, proposed receiver attenuation, and the
+//! complete run-reconciliation report into one deterministic capsule. The
+//! capsule grants no authority and cannot summarize outstanding effect debt
+//! away.
+//!
 //! The obligation lifecycle is not reimplemented either. `fgit-resource` owns
 //! it, and [`broker`] explains exactly which half of an effect's reservation
 //! this crate holds and which half belongs to the component that performs it.
@@ -98,6 +104,7 @@ pub mod classes;
 pub mod ecc;
 pub mod frontier;
 mod frontier_policy;
+pub mod handoff;
 pub mod intent;
 pub mod plan;
 pub mod protocol;
@@ -131,6 +138,11 @@ pub use frontier::{
     ExcludedWorkItem, FrontierExclusionReason, FrontierRefusal, MAX_WORK_ITEMS, TaskPhase,
     WorkAction, WorkCandidate, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkFrontierId,
     WorkItem, WorkRankingInputs, WorkRankingWitness, WorkTaskId,
+};
+pub use handoff::{
+    AgentHandoffCapsule, AgentHandoffCapsuleId, AgentHandoffCapsuleSpec,
+    HandoffCapabilityAttenuation, HandoffRefusal, HandoffWorkspaceSnapshot,
+    MAX_HANDOFF_ENTRIES, MAX_HANDOFF_EVIDENCE_RECORDS, MAX_HANDOFF_VERIFIER_ATTESTATIONS,
 };
 pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
 pub use plan::{
