@@ -156,7 +156,11 @@ fn real_plan_id(
     let components = std::array::from_fn(|index| {
         let kind = SituationComponentKind::ALL[index];
         if kind == SituationComponentKind::TaskProjection {
-            SituationComponent::observed(kind, receipt.authority_head_id(), GENERATION)
+            SituationComponent::observed(
+                kind,
+                receipt.authority_head_id(),
+                PREVIOUS_GENERATION,
+            )
         } else {
             SituationComponent::omitted(
                 kind,
@@ -169,13 +173,13 @@ fn real_plan_id(
         receipt.clone(),
         Some(run),
         None,
-        LogicalTime::new(20),
+        LogicalTime::new(14),
         components,
     )
-    .expect("planning situation");
+    .expect("pre-claim planning situation");
     let item = WorkItem::new(
         task_id,
-        GENERATION,
+        PREVIOUS_GENERATION,
         TaskPhase::Open,
         WorkRankingInputs::new(1, 2, 3),
         WorkEligibilityInputs::new(0, None, None, true, WorkConflict::Clear),
@@ -215,7 +219,7 @@ fn real_plan_id(
         false,
     )]);
     AgentChangePlan::build(&pulse, run, &[], spec)
-        .expect("complete change plan")
+        .expect("complete pre-claim change plan")
         .plan_id()
 }
 
