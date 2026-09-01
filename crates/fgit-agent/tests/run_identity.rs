@@ -158,13 +158,15 @@ fn same_run_id_cannot_change_scope_budget_or_expiry() {
             101,
         ),
     ] {
-        assert!(matches!(
-            binding.revalidate(&changed),
-            Err(IntentRunIdentityRefusal::RunIdEquivocation {
-                run_id: RunId::new(7),
-                ..
-            })
-        ));
+        let refusal = binding
+            .revalidate(&changed)
+            .expect_err("same run ID with changed machine fields must fail closed");
+        match refusal {
+            IntentRunIdentityRefusal::RunIdEquivocation { run_id, .. } => {
+                assert_eq!(run_id, RunId::new(7));
+            }
+            other => panic!("unexpected refusal: {other:?}"),
+        }
     }
 }
 
