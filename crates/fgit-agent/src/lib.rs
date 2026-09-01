@@ -74,12 +74,19 @@
 //! resource ceiling, stop conditions, rejected shortcuts, non-claims, and
 //! approval state without claiming work or performing an effect.
 //!
+//! [`claim`] validates the task-system mutation that follows planning. A claim
+//! must begin at the pulse's task projection, bind the exact plan/run/conflict
+//! surface, advance to a new task generation, and fit inside the run lifetime.
+//! It becomes active only after a fresh situation observes that post-claim
+//! generation under unchanged repository authority.
+//!
 //! The obligation lifecycle is not reimplemented either. `fgit-resource` owns
 //! it, and [`broker`] explains exactly which half of an effect's reservation
 //! this crate holds and which half belongs to the component that performs it.
 
 pub mod broker;
 pub mod capability;
+pub mod claim;
 pub mod classes;
 pub mod ecc;
 pub mod frontier;
@@ -101,6 +108,10 @@ pub use broker::{
 pub use capability::{
     AttenuationRefused, AttenuationRequest, Capability, CapabilityId, ChainRefused, IssueRefused,
     LogicalTime, SealRefused, SealedCapability, verify_chain,
+};
+pub use claim::{
+    ActiveTaskClaim, ActiveTaskClaimId, MAX_CLAIM_SURFACES, TaskClaimProjection,
+    TaskClaimReceipt, TaskClaimReceiptId, TaskClaimRefusal,
 };
 pub use classes::{CLASS_COUNT, ClassSet, OperationClass, UnknownClassBits};
 pub use ecc::{
