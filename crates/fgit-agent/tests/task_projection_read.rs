@@ -5,9 +5,9 @@ use fgit_agent::{
     AgentSituationReceipt, AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime,
     OperationClass, RunId, SituationComponent, SituationComponentKind,
     SituationOmissionReason, TaskProjectionGeneration, TaskProjectionReadAdapterRefusal,
-    TaskProjectionReadExecutionRefusal, TaskProjectionReadObservation, TaskProjectionReadReceipt,
-    TaskProjectionReadRequest, TaskProjectionReader, TaskProjectionRow, TaskPhase, WorkConflict,
-    WorkRankingInputs, WorkTaskId, read_task_projection,
+    TaskProjectionReadExecutionRefusal, TaskProjectionReadObservation, TaskProjectionReadRequest,
+    TaskProjectionReader, TaskProjectionRow, TaskPhase, WorkConflict, WorkRankingInputs,
+    WorkTaskId, read_task_projection,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
