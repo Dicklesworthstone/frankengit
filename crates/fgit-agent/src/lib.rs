@@ -86,6 +86,12 @@
 //! evidence obligations, aggregate resource attenuation, and mandatory stop
 //! preconditions. It performs no effect and grants no authority.
 //!
+//! [`claim_continuity`] supports a later observation without weakening that
+//! boundary. `ActiveClaimContinuityReceipt` proves only logical time advanced:
+//! exact authority, run, workspace, and every situation component stayed
+//! identical. `AgentActionPacketContinuation` binds that proof and a fresh
+//! precondition-recheck commitment to the immutable original packet.
+//!
 //! [`reconcile`] inventories every effect owned by the Intent Run, including
 //! effects accepted before the current task or by another agent instance. It
 //! validates authority, lifecycle, parent graph, bounds, and conserved
@@ -125,6 +131,7 @@ pub mod broker;
 pub mod cancellation;
 pub mod capability;
 pub mod claim;
+pub mod claim_continuity;
 pub mod classes;
 pub mod ecc;
 pub mod frontier;
@@ -167,6 +174,11 @@ pub use capability::{
 pub use claim::{
     ActiveTaskClaim, ActiveTaskClaimId, MAX_CLAIM_SURFACES, TaskClaimProjection,
     TaskClaimReceipt, TaskClaimReceiptId, TaskClaimRefusal,
+};
+pub use claim_continuity::{
+    ActionPacketContinuationRefusal, ActiveClaimContinuityReceipt,
+    ActiveClaimContinuityReceiptId, ActiveClaimContinuityRefusal, AgentActionPacketContinuation,
+    AgentActionPacketContinuationId,
 };
 pub use classes::{CLASS_COUNT, ClassSet, OperationClass, UnknownClassBits};
 pub use ecc::{
