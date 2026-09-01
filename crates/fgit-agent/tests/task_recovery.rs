@@ -37,6 +37,8 @@ use fgit_types::{
 const PREVIOUS_GENERATION: [u8; 32] = [0x43; 32];
 const CLAIMED_GENERATION: [u8; 32] = [0x44; 32];
 const STORE_ID: [u8; 32] = [0x91; 32];
+const RELEASED_AT: LogicalTime = LogicalTime::new(90);
+const STORE_READ_AT: LogicalTime = LogicalTime::new(91);
 
 fn digest(byte: u8) -> Digest {
     let root = outcome_index_root(&[]).expect("empty outcome-index root is canonical");
@@ -353,7 +355,7 @@ impl RecoveryStore {
     fn new(reconstruction: &TaskLeaseReconstructionReceipt, mode: StoreMode) -> Self {
         Self {
             current: Some(TaskProjectionPersistedState::new(
-                reconstruction.snapshot().clone(),
+                reread(reconstruction.snapshot(), STORE_READ_AT),
                 None,
                 None,
                 None,
@@ -426,7 +428,7 @@ fn recovered_claim_releases_after_expiry_with_evidence_retained() {
         &fixture.claim,
         &fixture.run,
         TaskReleaseDisposition::RequireRework,
-        LogicalTime::new(90),
+        RELEASED_AT,
         digest(0x92),
     )
     .expect("expired work authority must not block durable cleanup");
@@ -484,7 +486,7 @@ fn another_reconstruction_is_refused_before_store_io() {
             &first.claim,
             &first.run,
             TaskReleaseDisposition::ReturnToOpen,
-            LogicalTime::new(90),
+            RELEASED_AT,
             digest(0x92),
         )
         .expect_err("recovery evidence cannot be substituted"),
@@ -512,7 +514,7 @@ fn ambiguous_release_retains_recovery_identity_as_debt() {
         &fixture.claim,
         &fixture.run,
         TaskReleaseDisposition::ReturnToOpen,
-        LogicalTime::new(90),
+        RELEASED_AT,
         digest(0x92),
     )
     .expect("ambiguous write becomes typed reconciliation debt");
