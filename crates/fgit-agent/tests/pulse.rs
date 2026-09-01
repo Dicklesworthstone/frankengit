@@ -2,10 +2,11 @@
 //! Public-path tests for the compact Agent Control Plane pulse.
 
 use fgit_agent::{
-    AgentControlPulse, AgentSituationReceipt, AuthorityReadReceipt, ClassSet, IntentRun,
-    LogicalTime, OperationClass, PulseRefusal, PulseState, RunId, SITUATION_COMPONENT_COUNT,
-    SituationComponent, SituationComponentKind, SituationOmissionReason, TaskPhase, WorkAction,
-    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    AgentControlPulse, AgentSituationReceipt, AuthorityReadReceipt, ClassSet,
+    FrontierExclusionReason, IntentRun, LogicalTime, OperationClass, PulseRefusal, PulseState,
+    RunId, SITUATION_COMPONENT_COUNT, SituationComponent, SituationComponentKind,
+    SituationOmissionReason, TaskPhase, WorkAction, WorkConflict, WorkEligibilityInputs,
+    WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId, authority_head_identity,
@@ -210,6 +211,56 @@ fn pulse_binds_the_exact_turn_and_preserves_compact_exclusion_accounting() {
     assert_eq!(selected.action(), WorkAction::Implement);
     assert_eq!(selected.rank(), 0);
     assert_ne!(pulse.pulse_id().as_bytes(), &[0; 32]);
+}
+
+#[test]
+fn action_scoped_frontier_allows_implementation_but_not_self_verification() {
+    let receipt = authority_receipt();
+    let active_run = run(&receipt, 7, 100);
+    let situation = situation(&receipt, Some(&active_run), 20, 0x71);
+    let frontier = WorkFrontier::build_action_scoped(
+        &situation,
+        vec![
+            item(
+                1,
+                TaskPhase::Open,
+                WorkEligibilityInputs::new(
+                    0,
+                    Some(active_run.run_id()),
+                    Some(active_run.run_id()),
+                    true,
+                    WorkConflict::Clear,
+                ),
+                2,
+            ),
+            item(
+                2,
+                TaskPhase::VerificationPending,
+                WorkEligibilityInputs::new(
+                    0,
+                    Some(active_run.run_id()),
+                    Some(active_run.run_id()),
+                    true,
+                    WorkConflict::Clear,
+                ),
+                1,
+            ),
+        ],
+    )
+    .expect("action-scoped frontier");
+
+    assert_eq!(frontier.candidates().len(), 1);
+    assert_eq!(
+        frontier.selected().expect("implementation remains eligible").item().task_id(),
+        WorkTaskId::from_bytes([1; 32])
+    );
+    assert_eq!(frontier.excluded().len(), 1);
+    assert_eq!(
+        frontier.excluded()[0].reason(),
+        FrontierExclusionReason::IndependenceRequired {
+            implementation_run: active_run.run_id(),
+        }
+    );
 }
 
 #[test]
