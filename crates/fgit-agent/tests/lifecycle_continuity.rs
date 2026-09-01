@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Public-path tests for continuity-bound handoff and cancellation.
+//! Public-path tests for continuity-bound handoff and cancellation safety.
 
 use fgit_agent::{
     ActiveClaimContinuityReceipt, ActiveTaskClaim, AgentChangePlan, AgentChangePlanSpec,
@@ -9,11 +9,10 @@ use fgit_agent::{
     OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
     PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface,
     PlanSurfaceKind, RejectedShortcutSet, RequirementDisposition, RunCancellationIntent,
-    RunCancellationRequestRefusal, RunCancellationState, RunId, RunReconciliationReport,
-    SituationComponent, SituationComponentKind, SituationOmissionReason,
-    TaskClaimCancellationOutcome, TaskClaimCancellationProjection, TaskClaimProjection,
-    TaskClaimReceipt, TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
-    WorkRankingInputs, WorkTaskId,
+    RunCancellationState, RunId, RunReconciliationReport, SituationComponent,
+    SituationComponentKind, SituationOmissionReason, TaskClaimCancellationOutcome,
+    TaskClaimCancellationProjection, TaskClaimProjection, TaskClaimReceipt, TaskPhase,
+    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
@@ -112,10 +111,11 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
     .expect("authenticated run opens")
 }
 
-fn situation(
+fn situation_with_search(
     receipt: &AuthorityReadReceipt,
     run: &IntentRun,
     task_generation: [u8; 32],
+    search_generation: u8,
     observed_at: u64,
 ) -> AgentSituationReceipt {
     let components = std::array::from_fn(|index| {
@@ -123,7 +123,11 @@ fn situation(
         if kind == SituationComponentKind::TaskProjection {
             SituationComponent::observed(kind, receipt.authority_head_id(), task_generation)
         } else if kind == SituationComponentKind::Search {
-            SituationComponent::observed(kind, receipt.authority_head_id(), [0x74; 32])
+            SituationComponent::observed(
+                kind,
+                receipt.authority_head_id(),
+                [search_generation; 32],
+            )
         } else {
             SituationComponent::omitted(
                 kind,
@@ -140,6 +144,15 @@ fn situation(
         components,
     )
     .expect("complete authority-bound situation")
+}
+
+fn situation(
+    receipt: &AuthorityReadReceipt,
+    run: &IntentRun,
+    task_generation: [u8; 32],
+    observed_at: u64,
+) -> AgentSituationReceipt {
+    situation_with_search(receipt, run, task_generation, 0x74, observed_at)
 }
 
 struct Fixture {
@@ -252,6 +265,22 @@ fn handoff_spec() -> AgentHandoffCapsuleSpec {
     .with_requested_next_actions(vec![digest(0x93)])
 }
 
+fn task_release(active_claim: ActiveTaskClaim, resolved_at: u64) -> TaskClaimCancellationProjection {
+    TaskClaimCancellationProjection::new(
+        active_claim.activation_id(),
+        active_claim.claim_id(),
+        active_claim.plan_id(),
+        active_claim.task_id(),
+        active_claim.assignee(),
+        CLAIMED_GENERATION,
+        RELEASED_GENERATION,
+        LogicalTime::new(resolved_at),
+        TaskClaimCancellationOutcome::Released,
+        [0xa1; 32],
+        digest(0xa2),
+    )
+}
+
 #[test]
 fn later_handoff_requires_and_commits_full_context_continuity() {
     let fixture = fixture();
@@ -314,7 +343,63 @@ fn later_handoff_requires_and_commits_full_context_continuity() {
 }
 
 #[test]
-fn later_cancellation_requires_continuity_and_preserves_it_through_completion() {
+fn changed_context_does_not_block_cancellation() {
+    let fixture = fixture();
+    let changed = situation_with_search(
+        &fixture.receipt,
+        &fixture.run,
+        CLAIMED_GENERATION,
+        0x75,
+        40,
+    );
+    assert!(ActiveClaimContinuityReceipt::establish(
+        fixture.active_claim,
+        &fixture.activation,
+        &changed,
+        &fixture.run,
+    )
+    .is_err());
+
+    let initial = RunReconciliationReport::build(
+        &fixture.run,
+        Vec::new(),
+        changed.observed_at(),
+    )
+    .expect("complete changed-context effect inventory");
+    let intent = RunCancellationIntent::request(
+        &changed,
+        &fixture.run,
+        initial,
+        Some(fixture.active_claim),
+        AgentInstanceId::new(9),
+        digest(0xa0),
+    )
+    .expect("a conservative stop remains available after context change");
+    assert_eq!(intent.claim_continuity_id(), None);
+    assert_eq!(intent.source_situation_id(), changed.situation_id());
+
+    let final_report = RunReconciliationReport::build(
+        &fixture.run,
+        Vec::new(),
+        LogicalTime::new(50),
+    )
+    .expect("complete final effect inventory");
+    let completion = intent
+        .complete(
+            final_report,
+            Some(task_release(fixture.active_claim, 45)),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("empty effect set and explicit task release complete cleanly");
+
+    assert_eq!(completion.cancellation_id(), intent.cancellation_id());
+    assert_eq!(completion.state(), RunCancellationState::Clean);
+    assert_ne!(completion.completion_id().as_bytes(), &[0; 32]);
+}
+
+#[test]
+fn unchanged_cancellation_can_retain_optional_continuity_evidence() {
     let fixture = fixture();
     let later = situation(&fixture.receipt, &fixture.run, CLAIMED_GENERATION, 40);
     let initial = RunReconciliationReport::build(
@@ -323,22 +408,15 @@ fn later_cancellation_requires_continuity_and_preserves_it_through_completion() 
         later.observed_at(),
     )
     .expect("complete later effect inventory");
-
-    assert_eq!(
-        RunCancellationIntent::request(
-            &later,
-            &fixture.run,
-            initial.clone(),
-            Some(fixture.active_claim),
-            AgentInstanceId::new(9),
-            digest(0xa0),
-        )
-        .expect_err("later active-claim cancellation needs continuity"),
-        RunCancellationRequestRefusal::ClaimSituationMismatch {
-            expected: fixture.active_claim.situation_id(),
-            observed: *later.situation_id().as_bytes(),
-        }
-    );
+    let direct = RunCancellationIntent::request(
+        &later,
+        &fixture.run,
+        initial.clone(),
+        Some(fixture.active_claim),
+        AgentInstanceId::new(9),
+        digest(0xa0),
+    )
+    .expect("cancellation does not require continuity");
 
     let continuity = ActiveClaimContinuityReceipt::establish(
         fixture.active_claim,
@@ -347,7 +425,7 @@ fn later_cancellation_requires_continuity_and_preserves_it_through_completion() 
         &fixture.run,
     )
     .expect("only logical time advanced");
-    let intent = RunCancellationIntent::request_with_continuity(
+    let proven = RunCancellationIntent::request_with_continuity(
         &later,
         &fixture.run,
         initial,
@@ -356,39 +434,11 @@ fn later_cancellation_requires_continuity_and_preserves_it_through_completion() 
         AgentInstanceId::new(9),
         digest(0xa0),
     )
-    .expect("continuity-bound cancellation request");
-    assert_eq!(intent.claim_continuity_id(), Some(continuity.receipt_id()));
+    .expect("optional continuity evidence is retained");
 
-    let final_report = RunReconciliationReport::build(
-        &fixture.run,
-        Vec::new(),
-        LogicalTime::new(50),
-    )
-    .expect("complete final effect inventory");
-    let task_resolution = TaskClaimCancellationProjection::new(
-        fixture.active_claim.activation_id(),
-        fixture.active_claim.claim_id(),
-        fixture.active_claim.plan_id(),
-        fixture.active_claim.task_id(),
-        fixture.active_claim.assignee(),
-        CLAIMED_GENERATION,
-        RELEASED_GENERATION,
-        LogicalTime::new(45),
-        TaskClaimCancellationOutcome::Released,
-        [0xa1; 32],
-        digest(0xa2),
-    );
-    let completion = intent
-        .complete(
-            final_report,
-            Some(task_resolution),
-            Vec::new(),
-            Vec::new(),
-        )
-        .expect("empty effect set and explicit task release complete cleanly");
-
-    assert_eq!(completion.cancellation_id(), intent.cancellation_id());
-    assert_eq!(completion.state(), RunCancellationState::Clean);
-    assert_ne!(intent.cancellation_id().as_bytes(), &[0; 32]);
-    assert_ne!(completion.completion_id().as_bytes(), &[0; 32]);
+    assert_eq!(direct.claim_continuity_id(), None);
+    assert_eq!(proven.claim_continuity_id(), Some(continuity.receipt_id()));
+    assert_ne!(direct.cancellation_id(), proven.cancellation_id());
+    assert_ne!(direct.cancellation_id().as_bytes(), &[0; 32]);
+    assert_ne!(proven.cancellation_id().as_bytes(), &[0; 32]);
 }
