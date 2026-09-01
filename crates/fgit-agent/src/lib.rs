@@ -109,10 +109,13 @@
 //!
 //! The crate-private `cancellation` engine implements request → drain →
 //! finalize over the frozen run effect set. The public `RunCancellationIntent`
-//! facade applies the same exact-activation-or-continuity rule whenever an
-//! active task claim is present and commits the proof into both request and
-//! completion identities. Clean settlement remains distinct from explicit
-//! escalation transfer and leak containment.
+//! facade deliberately remains available at the exact latest authority-bound
+//! situation even when context changed, because cancellation is a conservative
+//! stop operation rather than plan continuation. When only time advanced, a
+//! caller may additionally attach a validated continuity receipt; that stronger
+//! evidence is committed into both request and completion identities. Clean
+//! settlement remains distinct from explicit escalation transfer and leak
+//! containment.
 //!
 //! [`outcome_learning`] closes the observe-plan-act-verify-learn loop with
 //! immutable, retrieval-only `OutcomeLearningRecord`s. The public builder binds
