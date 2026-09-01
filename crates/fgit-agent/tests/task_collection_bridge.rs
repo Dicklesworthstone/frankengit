@@ -2,13 +2,18 @@
 //! Public-path tests for collection-to-single-task conversion.
 
 use fgit_agent::{
-    AgentChangePlanId, AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime,
-    OperationClass, PlanSurface, PlanSurfaceKind, RunId, TaskCollectionBridgeRefusal,
-    TaskLeaseHistoryObservation, TaskProjectionAssignment,
+    AgentChangePlan, AgentChangePlanId, AgentChangePlanSpec, AgentControlPulse,
+    AgentSituationReceipt, AuthorityReadReceipt, ClassSet, EvidenceClass, IntentRun,
+    LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
+    PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId,
+    PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RunId,
+    SituationComponent, SituationComponentKind, SituationOmissionReason,
+    TaskCollectionBridgeRefusal, TaskLeaseHistoryObservation, TaskProjectionAssignment,
     TaskProjectionCollectionObservation, TaskProjectionCollectionRequest,
     TaskProjectionCollector, TaskProjectionGeneration, TaskProjectionRow, TaskPhase,
-    WorkConflict, WorkRankingInputs, WorkTaskId, collect_task_projection,
-    collected_unclaimed_task, reconstruct_collected_task_lease,
+    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs,
+    WorkTaskId, collect_task_projection, collected_unclaimed_task,
+    reconstruct_collected_task_lease,
 };
 use fgit_authority::{
     AuthenticatedHead, AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore,
@@ -76,8 +81,15 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
     IntentRun::new_authenticated(
         RunId::new(7),
         receipt.clone(),
-        ClassSet::from_classes(&[OperationClass::TreeFsWorkspace]),
-        ResourceVector::single(Grade::Bytes, 16_384),
+        ClassSet::from_classes(&[
+            OperationClass::TreeFsWorkspace,
+            OperationClass::SubmitEvidence,
+            OperationClass::ConsumeBudget,
+        ]),
+        ResourceVector::from_grades(&[
+            (Grade::Bytes, 16_384),
+            (Grade::CpuMicros, 20_000),
+        ]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -133,6 +145,78 @@ fn collect_row(
         LogicalTime::new(20),
     )
     .expect("current task collection")
+}
+
+fn real_plan_id(
+    receipt: &AuthorityReadReceipt,
+    run: &IntentRun,
+    task_id: WorkTaskId,
+    surface: PlanSurface,
+) -> AgentChangePlanId {
+    let components = std::array::from_fn(|index| {
+        let kind = SituationComponentKind::ALL[index];
+        if kind == SituationComponentKind::TaskProjection {
+            SituationComponent::observed(kind, receipt.authority_head_id(), GENERATION)
+        } else {
+            SituationComponent::omitted(
+                kind,
+                SituationOmissionReason::NotAvailable,
+                [u8::try_from(index + 1).expect("component index fits u8"); 32],
+            )
+        }
+    });
+    let situation = AgentSituationReceipt::build(
+        receipt.clone(),
+        Some(run),
+        None,
+        LogicalTime::new(20),
+        components,
+    )
+    .expect("planning situation");
+    let item = WorkItem::new(
+        task_id,
+        GENERATION,
+        TaskPhase::Open,
+        WorkRankingInputs::new(1, 2, 3),
+        WorkEligibilityInputs::new(0, None, None, true, WorkConflict::Clear),
+    );
+    let frontier = WorkFrontier::build_action_scoped(&situation, vec![item])
+        .expect("task is eligible");
+    let pulse = AgentControlPulse::build(&situation, &frontier, Some(run))
+        .expect("live run makes an actionable pulse");
+    let spec = AgentChangePlanSpec::new(
+        digest(0x60),
+        ClassSet::from_classes(&[
+            OperationClass::TreeFsWorkspace,
+            OperationClass::SubmitEvidence,
+            OperationClass::ConsumeBudget,
+        ]),
+        ResourceVector::from_grades(&[
+            (Grade::Bytes, 4_096),
+            (Grade::CpuMicros, 5_000),
+        ]),
+        PlanStopConditionSet::MANDATORY,
+        RejectedShortcutSet::BASELINE,
+        PlanApproval::NotRequired {
+            policy_root: digest(0x61),
+        },
+    )
+    .with_surfaces(vec![surface], vec![surface])
+    .with_checkpoints(vec![PlanCheckpoint::new(
+        PlanCheckpointId::from_bytes([0x62; 32]),
+        PlanCheckpointPurpose::ImplementSlice,
+        digest(0x63),
+        digest(0x64),
+    )])
+    .with_evidence_plan(vec![PlanEvidenceRequirement::new(
+        PlanRequirementId::from_bytes([0x65; 32]),
+        EvidenceClass::Executed,
+        digest(0x66),
+        false,
+    )]);
+    AgentChangePlan::build(&pulse, run, &[], spec)
+        .expect("complete change plan")
+        .plan_id()
 }
 
 #[test]
@@ -227,8 +311,8 @@ fn collected_claimed_row_reconstructs_exact_lease_deterministically() {
     let receipt = exact_read();
     let run = run(&receipt);
     let task_id = WorkTaskId::from_bytes([0x41; 32]);
-    let plan_id = AgentChangePlanId::from_bytes([0x61; 32]);
-    let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x62));
+    let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x72));
+    let plan_id = real_plan_id(&receipt, &run, task_id, surface);
     let row = TaskProjectionRow::claimed(
         task_id,
         TaskPhase::InProgress,
@@ -293,7 +377,8 @@ fn lease_history_cannot_be_replayed_across_generation() {
     let receipt = exact_read();
     let run = run(&receipt);
     let task_id = WorkTaskId::from_bytes([0x41; 32]);
-    let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x62));
+    let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x72));
+    let plan_id = real_plan_id(&receipt, &run, task_id, surface);
     let row = TaskProjectionRow::claimed(
         task_id,
         TaskPhase::InProgress,
@@ -302,7 +387,7 @@ fn lease_history_cannot_be_replayed_across_generation() {
         run.run_id(),
         None,
         true,
-        AgentChangePlanId::from_bytes([0x61; 32]),
+        plan_id,
         LogicalTime::new(15),
         LogicalTime::new(80),
         vec![surface],
@@ -336,7 +421,8 @@ fn lease_history_cannot_postdate_the_collection_that_already_reflects_it() {
     let receipt = exact_read();
     let run = run(&receipt);
     let task_id = WorkTaskId::from_bytes([0x41; 32]);
-    let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x62));
+    let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x72));
+    let plan_id = real_plan_id(&receipt, &run, task_id, surface);
     let row = TaskProjectionRow::claimed(
         task_id,
         TaskPhase::InProgress,
@@ -345,7 +431,7 @@ fn lease_history_cannot_postdate_the_collection_that_already_reflects_it() {
         run.run_id(),
         None,
         true,
-        AgentChangePlanId::from_bytes([0x61; 32]),
+        plan_id,
         LogicalTime::new(15),
         LogicalTime::new(80),
         vec![surface],
