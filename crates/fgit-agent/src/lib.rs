@@ -80,6 +80,13 @@
 //! It becomes active only after a fresh situation observes that post-claim
 //! generation under unchanged repository authority.
 //!
+//! [`reconcile`] inventories every effect owned by the Intent Run, including
+//! effects accepted before the current task or by another agent instance. It
+//! validates authority, lifecycle, parent graph, bounds, and conserved
+//! consumable spend, then exposes the exact reservation, reconciliation,
+//! escalation, or containment action still required. Escalation is preserved
+//! as debt rather than mislabeled as successful settlement.
+//!
 //! The obligation lifecycle is not reimplemented either. `fgit-resource` owns
 //! it, and [`broker`] explains exactly which half of an effect's reservation
 //! this crate holds and which half belongs to the component that performs it.
@@ -95,6 +102,7 @@ pub mod intent;
 pub mod plan;
 pub mod protocol;
 pub mod pulse;
+pub mod reconcile;
 pub mod refresh;
 pub mod situation;
 
@@ -139,6 +147,12 @@ pub use protocol::{
 pub use pulse::{
     AgentControlPulse, AgentControlPulseId, PulseExclusionCounts, PulseRefusal, PulseSelection,
     PulseState,
+};
+pub use reconcile::{
+    EffectResolutionAction, MAX_EFFECT_OUTPUT_COMMITMENTS,
+    MAX_EFFECT_RECONCILIATION_TRANSITIONS, MAX_RECONCILIATION_EFFECTS, ReconciledEffect,
+    RunReconciliationCounts, RunReconciliationReadiness, RunReconciliationRefusal,
+    RunReconciliationReport, RunReconciliationReportId,
 };
 pub use refresh::{RefreshReceipt, RefreshRelation, RefreshSide};
 pub use situation::{
