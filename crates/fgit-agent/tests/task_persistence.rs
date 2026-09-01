@@ -264,6 +264,26 @@ fn complete_predecessor_is_safe_to_retry() {
 }
 
 #[test]
+fn predecessor_may_reuse_the_evidence_contract_without_becoming_partial_write() {
+    let application = claim_application(0x81, 0x82);
+    let envelope = TaskProjectionMutationEnvelope::from_claim(&application)
+        .expect("complete mutation envelope");
+    let observed = TaskProjectionPersistedState::new(
+        reread(envelope.before_snapshot(), 26),
+        None,
+        None,
+        Some(envelope.evidence_root()),
+    );
+
+    assert!(matches!(
+        envelope
+            .reconcile(Some(&observed))
+            .expect("evidence contract reuse alone does not identify this transition"),
+        TaskProjectionPersistenceDecision::RetrySafe { .. }
+    ));
+}
+
+#[test]
 fn complete_successor_and_metadata_make_a_receipt() {
     let application = claim_application(0x81, 0x82);
     let envelope = TaskProjectionMutationEnvelope::from_claim(&application)

@@ -13,8 +13,12 @@
 //!
 //! The evidence root remains a predeclared mutation-evidence contract. The
 //! persistence receipt proves that an authenticated reread retained that
-//! contract beside the exact semantic successor. This module defines no storage
-//! implementation and grants no repository authority.
+//! contract beside the exact semantic successor. Reusing the same evidence
+//! contract on an unchanged predecessor is not itself a partial write; only
+//! attempted transition identities can establish that contradiction.
+//!
+//! This module defines no storage implementation and grants no repository
+//! authority.
 
 use core::fmt;
 
@@ -217,7 +221,6 @@ impl TaskProjectionMutationEnvelope {
         if semantic_snapshot_matches(&self.before, snapshot) {
             if observed.last_transition_id == Some(*self.transition_id.as_bytes())
                 || observed.last_inner_transition_id == Some(self.inner_transition_id)
-                || observed.evidence_root == Some(self.evidence_root)
             {
                 return Err(
                     TaskProjectionPersistenceRefusal::PredecessorCarriesAttemptedMetadata,
@@ -611,8 +614,9 @@ pub enum TaskProjectionPersistenceRefusal {
         /// Backend reread time.
         backend_observed_at: LogicalTime,
     },
-    /// The predecessor remains current but carries metadata from this attempted
-    /// successor, which is a partial/corrupt write rather than a safe retry.
+    /// The predecessor remains current but carries transition identity from
+    /// this attempted successor, which is a partial/corrupt write rather than a
+    /// safe retry.
     PredecessorCarriesAttemptedMetadata,
     /// Exact successor omitted repository-scoped transition identity.
     SuccessorTransitionMissing,

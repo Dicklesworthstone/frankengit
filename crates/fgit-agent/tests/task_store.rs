@@ -363,6 +363,50 @@ fn initial_exact_successor_is_identical_retry_without_cas() {
 }
 
 #[test]
+fn already_applied_then_replaced_requires_history_not_simple_conflict() {
+    let envelope = envelope();
+    let mut store = ScriptedStore::new(
+        vec![Ok(Some(successor(&envelope))), Ok(Some(conflict(&envelope)))],
+        Ok(TaskProjectionStoreWriteOutcome::Applied),
+        Ok(TaskProjectionStoreFlushOutcome::NotRequired),
+    );
+
+    assert!(matches!(
+        execute_task_projection_store(&mut store, &envelope)
+            .expect("replacement after observed success is reconciliation debt"),
+        TaskProjectionStoreExecution::NeedsReconciliation {
+            stage: TaskProjectionStoreStage::Reconcile,
+            write: TaskProjectionStoreWriteDisposition::NotAttempted,
+            cause: TaskProjectionStoreReconciliationCause::HistoryRequired,
+            ..
+        }
+    ));
+    assert_eq!(store.write_calls, 0);
+}
+
+#[test]
+fn initial_conflicting_state_returns_without_write_or_flush() {
+    let envelope = envelope();
+    let current = conflict(&envelope);
+    let mut store = ScriptedStore::new(
+        vec![Ok(Some(current))],
+        Ok(TaskProjectionStoreWriteOutcome::Applied),
+        Ok(TaskProjectionStoreFlushOutcome::Flushed),
+    );
+
+    assert!(matches!(
+        execute_task_projection_store(&mut store, &envelope)
+            .expect("initial conflict is definite before mutation"),
+        TaskProjectionStoreExecution::Conflict {
+            write: TaskProjectionStoreWriteDisposition::NotAttempted,
+            ..
+        }
+    ));
+    assert_eq!(store.write_calls, 0);
+    assert_eq!(store.flush_calls, 0);
+}
+
+#[test]
 fn ambiguous_write_is_resolved_by_exact_successor() {
     let envelope = envelope();
     let mut store = ScriptedStore::new(

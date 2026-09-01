@@ -184,7 +184,7 @@ pub enum TaskProjectionStoreFlushDisposition {
 }
 
 impl TaskProjectionStoreFlushDisposition {
-    fn is_definite_success(self) -> bool {
+    const fn is_definite_success(self) -> bool {
         matches!(self, Self::Flushed | Self::NotRequired)
     }
 }
@@ -201,12 +201,11 @@ pub enum TaskProjectionStoreExecution {
         /// Flush disposition.
         flush: TaskProjectionStoreFlushDisposition,
     },
-    /// No mutation was attempted and another state was already current.
+    /// No mutation committed and another state is current.
     Conflict {
         /// Exact envelope that was not applied.
         envelope_id: TaskProjectionMutationEnvelopeId,
-        /// Compare-and-replace disposition, normally `NotAttempted` or
-        /// `PreconditionFailed`.
+        /// Compare-and-replace disposition, normally `PreconditionFailed`.
         write: TaskProjectionStoreWriteDisposition,
         /// Current conflicting snapshot.
         current_snapshot_id: crate::AuthorityBoundTaskProjectionSnapshotId,
@@ -270,8 +269,8 @@ pub enum TaskProjectionStoreReconciliationCause {
     AmbiguousWriteUnresolved,
     /// A definite write result contradicted the confirming row.
     BackendContradiction,
-    /// A possible committed result was later replaced; current-row state alone
-    /// cannot prove whether this envelope briefly committed.
+    /// A possible or previously confirmed result was later replaced; current
+    /// row state alone cannot prove this envelope's history.
     HistoryRequired,
 }
 
@@ -518,11 +517,7 @@ fn finish_attempt<S: TaskProjectionStore>(
             current_generation,
             ..
         } => {
-            if matches!(
-                write,
-                TaskProjectionStoreWriteDisposition::NotAttempted
-                    | TaskProjectionStoreWriteDisposition::PreconditionFailed
-            ) {
+            if matches!(write, TaskProjectionStoreWriteDisposition::PreconditionFailed) {
                 Ok(TaskProjectionStoreExecution::Conflict {
                     envelope_id: envelope.envelope_id(),
                     write,

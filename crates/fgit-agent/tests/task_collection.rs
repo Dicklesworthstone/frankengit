@@ -167,13 +167,19 @@ fn current_generation_collection_builds_situation_and_frontier_without_cycle() {
     .expect("current generation is collected");
     assert_eq!(collection.snapshot().rows().len(), 2);
     assert_eq!(collection.snapshot().generation().as_bytes(), &GENERATION);
+    assert_eq!(collection.repository_id(), receipt.repository_id());
+    assert_eq!(collection.authority_head_id(), receipt.authority_head_id());
+    assert_eq!(
+        collection.authority_head_generation(),
+        receipt.authority_head_generation()
+    );
     assert_eq!(collection.adapter_identity(), [0x81; 32]);
     assert_ne!(collection.receipt_id().as_bytes(), &[0; 32]);
 
     let components = std::array::from_fn(|index| {
         let kind = SituationComponentKind::ALL[index];
         if kind == SituationComponentKind::TaskProjection {
-            collection.situation_component(&receipt)
+            collection.situation_component()
         } else {
             SituationComponent::omitted(
                 kind,

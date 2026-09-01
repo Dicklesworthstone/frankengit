@@ -11,7 +11,8 @@
 //! [`crate::TaskProjectionRow`] values and a collection-evidence root. The
 //! resulting receipt supplies both the canonical multi-row snapshot consumed by
 //! [`crate::WorkFrontier`] and the task-projection [`crate::SituationComponent`]
-//! inserted into the control turn.
+//! inserted into the control turn. The receipt retains its own authority-head
+//! position, so callers cannot render the same collection under another head.
 //!
 //! The collector is invoked exactly once. It does not mutate the task backend,
 //! infer persistence, grant authority, or make task state repository authority.
@@ -285,6 +286,9 @@ pub trait TaskProjectionCollector {
 pub struct TaskProjectionCollectionReceipt {
     receipt_id: TaskProjectionCollectionReceiptId,
     request_id: TaskProjectionCollectionRequestId,
+    repository_id: RepositoryId,
+    authority_head_id: RepositoryAuthorityHeadId,
+    authority_head_generation: HeadGeneration,
     authority_read_receipt_id: AuthorityReadReceiptId,
     run_id: RunId,
     adapter_identity: [u8; 32],
@@ -303,6 +307,24 @@ impl TaskProjectionCollectionReceipt {
     #[must_use]
     pub const fn request_id(&self) -> TaskProjectionCollectionRequestId {
         self.request_id
+    }
+
+    /// Repository whose tasks were collected.
+    #[must_use]
+    pub const fn repository_id(&self) -> RepositoryId {
+        self.repository_id
+    }
+
+    /// Authority head against which the collection was made.
+    #[must_use]
+    pub const fn authority_head_id(&self) -> RepositoryAuthorityHeadId {
+        self.authority_head_id
+    }
+
+    /// Authority-head generation against which the collection was made.
+    #[must_use]
+    pub const fn authority_head_generation(&self) -> HeadGeneration {
+        self.authority_head_generation
     }
 
     /// Exact authenticated read event used for collection.
@@ -337,10 +359,10 @@ impl TaskProjectionCollectionReceipt {
 
     /// Task-projection component inserted into the Agent Situation.
     #[must_use]
-    pub fn situation_component(&self, authority: &AuthorityReadReceipt) -> SituationComponent {
+    pub fn situation_component(&self) -> SituationComponent {
         SituationComponent::observed(
             SituationComponentKind::TaskProjection,
-            authority.authority_head_id(),
+            self.authority_head_id,
             *self.snapshot.generation().as_bytes(),
         )
     }
@@ -572,6 +594,9 @@ fn validate_observation(
     let mut receipt = TaskProjectionCollectionReceipt {
         receipt_id: TaskProjectionCollectionReceiptId([0; 32]),
         request_id: request.request_id,
+        repository_id: request.repository_id,
+        authority_head_id: request.authority_head_id,
+        authority_head_generation: request.authority_head_generation,
         authority_read_receipt_id: request.authority_read_receipt_id,
         run_id: request.run_id,
         adapter_identity: observation.adapter_identity,
@@ -601,9 +626,12 @@ fn request_commitment(
 fn receipt_commitment(
     receipt: &TaskProjectionCollectionReceipt,
 ) -> Result<[u8; 32], TaskProjectionCollectionRefusal> {
-    let mut encoder = Encoder::with_capacity(320);
+    let mut encoder = Encoder::with_capacity(384);
     encoder.write_bytes("task_projection_collection_receipt_domain", RECEIPT_DOMAIN)?;
     encoder.write_raw(receipt.request_id.as_bytes());
+    encoder.write_opaque_id(receipt.repository_id.as_bytes());
+    encoder.write_internal_object_id(receipt.authority_head_id.as_internal_object_id())?;
+    encoder.write_scalar(receipt.authority_head_generation.get());
     encoder.write_raw(receipt.authority_read_receipt_id.as_bytes());
     encoder.write_raw(&receipt.run_id.value().to_be_bytes());
     encoder.write_raw(&receipt.adapter_identity);
