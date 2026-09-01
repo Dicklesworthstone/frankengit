@@ -1,21 +1,15 @@
 //! Debt-preserving cancellation of one complete Intent Run.
 //!
-//! Cancellation is a protocol, not a dropped connection and not a status bit.
+//! Cancellation is a protocol, not a dropped connection or status bit.
 //! [`RunCancellationIntent`] freezes one authority-bound situation, the active
 //! task claim when present, and the complete [`crate::RunReconciliationReport`]
-//! at the instant cancellation is requested. [`RunCancellationCompletion`]
-//! accepts only the same effect set after legal lifecycle progress.
-//!
-//! The frozen inventory is load-bearing. Without it, a completion report could
-//! make cancellation look clean by omitting an older reservation, inventing a
-//! replacement effect, or rewriting the immutable identity of an accepted
-//! operation. This module therefore compares every effect by identity and
-//! preserves prior output and reconciliation evidence monotonically.
+//! at the request instant. [`RunCancellationCompletion`] accepts only the same
+//! effect set after legal lifecycle progress.
 //!
 //! Escalation and leak containment are not mislabeled as settlement. A run may
-//! complete cancellation with debt only when every escalation has an explicit
-//! transfer receipt and every leak has explicit containment evidence. Reserved
-//! or committed effects still requiring automation keep cancellation open.
+//! complete with debt only when every escalation has explicit transfer
+//! evidence and every leak has explicit containment evidence. Reserved or
+//! committed effects still requiring automation keep cancellation open.
 //!
 //! This module performs no task-system mutation, obligation transition,
 //! downstream probe, process kill, workspace cleanup, or canonical publication.
@@ -189,14 +183,14 @@ impl TaskClaimCancellationProjection {
 
     /// Task generation observed by the cancellation request.
     #[must_use]
-    pub const fn previous_task_projection_generation(self) -> &[u8; 32] {
-        &self.previous_task_projection_generation
+    pub const fn previous_task_projection_generation(self) -> [u8; 32] {
+        self.previous_task_projection_generation
     }
 
     /// Task generation after release or transfer.
     #[must_use]
-    pub const fn resulting_task_projection_generation(self) -> &[u8; 32] {
-        &self.resulting_task_projection_generation
+    pub const fn resulting_task_projection_generation(self) -> [u8; 32] {
+        self.resulting_task_projection_generation
     }
 
     /// Logical resolution instant.
@@ -213,8 +207,8 @@ impl TaskClaimCancellationProjection {
 
     /// Adapter implementation/profile identity.
     #[must_use]
-    pub const fn adapter_identity(self) -> &[u8; 32] {
-        &self.adapter_identity
+    pub const fn adapter_identity(self) -> [u8; 32] {
+        self.adapter_identity
     }
 
     /// Evidence supporting the task-system mutation.
@@ -340,7 +334,7 @@ impl RunCancellationIntent {
     ///
     /// The run may already be expired; expiry stops new effects but does not
     /// discharge existing obligations. The supplied reconciliation report must
-    /// nevertheless have been assembled at the exact situation observation.
+    /// have been assembled at the exact situation observation.
     ///
     /// # Errors
     ///
@@ -820,190 +814,7 @@ pub enum RunCancellationRefusal {
 
 impl fmt::Display for RunCancellationRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ZeroRequesterIdentity => {
-                formatter.write_str("cancellation requester identity may not be zero")
-            }
-            Self::SituationRunMismatch => {
-                formatter.write_str("cancellation situation names another active run")
-            }
-            Self::RunAuthorityReceiptRequired => formatter.write_str(
-                "run cancellation requires a complete authenticated authority receipt",
-            ),
-            Self::RunAuthorityMismatch => {
-                formatter.write_str("run authority differs from the cancellation situation")
-            }
-            Self::InitialReportRunMismatch => {
-                formatter.write_str("initial reconciliation belongs to another run")
-            }
-            Self::InitialReportAuthorityMismatch => {
-                formatter.write_str("initial reconciliation uses another authority position")
-            }
-            Self::InitialReportObservationMismatch { situation, report } => write!(
-                formatter,
-                "cancellation situation observed at {situation}, initial report at {report}"
-            ),
-            Self::ActiveClaimRunMismatch => {
-                formatter.write_str("active task claim belongs to another run")
-            }
-            Self::ActiveClaimExpired {
-                expires_at,
-                observed_at,
-            } => write!(
-                formatter,
-                "active task claim expired at {expires_at} before cancellation at {observed_at}"
-            ),
-            Self::TaskProjectionUnavailable => formatter.write_str(
-                "cancellation with an active task claim requires an observed task projection",
-            ),
-            Self::FinalReportRunMismatch => {
-                formatter.write_str("final reconciliation belongs to another run")
-            }
-            Self::FinalReportAuthorityMismatch => {
-                formatter.write_str("final reconciliation uses another authority position")
-            }
-            Self::FinalObservationRollback {
-                requested_at,
-                observed_at,
-            } => write!(
-                formatter,
-                "final reconciliation at {observed_at} predates cancellation at {requested_at}"
-            ),
-            Self::EffectSetSizeChanged { expected, observed } => write!(
-                formatter,
-                "cancellation froze {expected} effects but final report carries {observed}"
-            ),
-            Self::EffectSetChanged { expected, observed } => write!(
-                formatter,
-                "cancellation expected effect {expected} but final report carries {observed}"
-            ),
-            Self::EffectIdentityChanged { effect_id, field } => write!(
-                formatter,
-                "effect {effect_id} changed immutable field {field} during cancellation"
-            ),
-            Self::IllegalEffectProgress {
-                effect_id,
-                from,
-                to,
-            } => write!(
-                formatter,
-                "effect {effect_id} moved illegally from {from:?} to {to:?} during cancellation"
-            ),
-            Self::TerminalOutcomeChanged { effect_id } => write!(
-                formatter,
-                "effect {effect_id} changed a previously recorded terminal outcome"
-            ),
-            Self::EffectBudgetRegressed { effect_id, deficit } => write!(
-                formatter,
-                "effect {effect_id} consumed-budget accounting regressed: {deficit}"
-            ),
-            Self::EffectOutputRemoved {
-                effect_id,
-                commitment,
-            } => write!(
-                formatter,
-                "effect {effect_id} removed prior output {}",
-                hex32(commitment)
-            ),
-            Self::ReconciliationEvidenceRegressed { effect_id } => write!(
-                formatter,
-                "effect {effect_id} removed or rewrote prior reconciliation evidence"
-            ),
-            Self::UnexpectedTaskClaimResolution => formatter.write_str(
-                "task-claim resolution supplied but cancellation froze no active claim",
-            ),
-            Self::MissingTaskClaimResolution => formatter.write_str(
-                "active task claim was not explicitly released or transferred",
-            ),
-            Self::TaskClaimIdentityMismatch => {
-                formatter.write_str("task resolution names another active claim")
-            }
-            Self::TaskClaimReceiptMismatch => {
-                formatter.write_str("task resolution names another claim receipt")
-            }
-            Self::TaskClaimPlanMismatch => {
-                formatter.write_str("task resolution names another plan")
-            }
-            Self::TaskClaimTaskMismatch => {
-                formatter.write_str("task resolution names another task")
-            }
-            Self::TaskClaimAssigneeMismatch => {
-                formatter.write_str("task resolution names another assignee")
-            }
-            Self::TaskClaimGenerationMismatch { .. } => formatter.write_str(
-                "task resolution predecessor differs from the frozen task generation",
-            ),
-            Self::ZeroResultingTaskGeneration => {
-                formatter.write_str("resulting task generation may not be all zero")
-            }
-            Self::TaskGenerationUnchanged => {
-                formatter.write_str("task claim resolution did not advance the task projection")
-            }
-            Self::TaskClaimResolvedBeforeRequest {
-                requested_at,
-                resolved_at,
-            } => write!(
-                formatter,
-                "task claim resolved at {resolved_at} before cancellation at {requested_at}"
-            ),
-            Self::TaskClaimResolvedAfterCompletion {
-                resolved_at,
-                completed_at,
-            } => write!(
-                formatter,
-                "task claim resolved at {resolved_at} after final report at {completed_at}"
-            ),
-            Self::ZeroTaskAdapterIdentity => {
-                formatter.write_str("task cancellation adapter identity may not be all zero")
-            }
-            Self::TaskTransferredToCancelledRun => formatter
-                .write_str("task cancellation cannot transfer back to the cancelled run"),
-            Self::TooManyEvidenceEntries {
-                field,
-                observed,
-                limit,
-            } => write!(formatter, "{field} has {observed} entries, limit {limit}"),
-            Self::DuplicateDebtTransfer { effect_id } => {
-                write!(formatter, "cancellation repeats debt transfer for {effect_id}")
-            }
-            Self::DuplicateContainmentEvidence { effect_id } => write!(
-                formatter,
-                "cancellation repeats containment evidence for {effect_id}"
-            ),
-            Self::CancellationStillInProgress { effect_id, action } => write!(
-                formatter,
-                "cancellation still requires {action:?} for {effect_id}"
-            ),
-            Self::MissingDebtTransfer { effect_id } => {
-                write!(formatter, "escalated effect {effect_id} has no transfer receipt")
-            }
-            Self::DebtTransferOwnerMismatch {
-                effect_id,
-                expected,
-                observed,
-            } => write!(
-                formatter,
-                "effect {effect_id} transfer owner {observed} differs from escalation owner {expected}"
-            ),
-            Self::UnexpectedDebtTransfer { effect_id } => write!(
-                formatter,
-                "debt transfer names non-escalated effect {effect_id}"
-            ),
-            Self::MissingContainmentEvidence { effect_id } => write!(
-                formatter,
-                "leaked effect {effect_id} has no containment evidence"
-            ),
-            Self::UnexpectedContainmentEvidence { effect_id } => write!(
-                formatter,
-                "containment evidence names non-leaked effect {effect_id}"
-            ),
-            Self::CountUnrepresentable { field, observed } => {
-                write!(formatter, "{field} count {observed} is not representable as u32")
-            }
-            Self::Codec(refusal) => {
-                write!(formatter, "run cancellation framing refused: {refusal}")
-            }
-        }
+        write!(formatter, "run cancellation refused: {self:?}")
     }
 }
 
@@ -1352,22 +1163,20 @@ fn validate_terminal_debt(
         }
     }
     for transfer in transfers {
-        let matching = report.effects().iter().any(|effect| {
+        if !report.effects().iter().any(|effect| {
             effect.record().effect_id == transfer.effect_id
                 && effect.required_action() == EffectResolutionAction::ResolveEscalation
-        });
-        if !matching {
+        }) {
             return Err(RunCancellationRefusal::UnexpectedDebtTransfer {
                 effect_id: transfer.effect_id,
             });
         }
     }
     for evidence in containment {
-        let matching = report.effects().iter().any(|effect| {
+        if !report.effects().iter().any(|effect| {
             effect.record().effect_id == evidence.effect_id
                 && effect.required_action() == EffectResolutionAction::ContainLeak
-        });
-        if !matching {
+        }) {
             return Err(RunCancellationRefusal::UnexpectedContainmentEvidence {
                 effect_id: evidence.effect_id,
             });
@@ -1405,7 +1214,7 @@ fn intent_commitment(intent: &RunCancellationIntent) -> Result<[u8; 32], RunCanc
     encoder.write_scalar(intent.requested_at.value());
     encoder.write_digest(&intent.reason_root)?;
     encoder.write_raw(intent.initial_reconciliation.report_id().as_bytes());
-    hash(encoder.into_bytes())
+    Ok(hash(encoder.into_bytes()))
 }
 
 fn completion_commitment(
@@ -1456,7 +1265,7 @@ fn completion_commitment(
             encoder.write_scalar(contained_leaks);
         }
     }
-    hash(encoder.into_bytes())
+    Ok(hash(encoder.into_bytes()))
 }
 
 fn write_task_claim_resolution(
@@ -1494,27 +1303,12 @@ fn write_count(
     Ok(())
 }
 
-fn hash(bytes: Vec<u8>) -> Result<[u8; 32], RunCancellationRefusal> {
+fn hash(bytes: Vec<u8>) -> [u8; 32] {
     let mut hasher = <Sha256 as GitHashAlgorithm>::Hasher::new();
     hasher.update(&bytes);
-    Ok(hasher.finish())
+    hasher.finish()
 }
 
 fn is_zero(bytes: &[u8; 32]) -> bool {
     bytes.iter().all(|byte| *byte == 0)
-}
-
-fn hex32(bytes: &[u8; 32]) -> Hex32<'_> {
-    Hex32(bytes)
-}
-
-struct Hex32<'a>(&'a [u8; 32]);
-
-impl fmt::Display for Hex32<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
-    }
 }
