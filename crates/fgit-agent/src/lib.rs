@@ -91,7 +91,9 @@
 //! evidence state, unresolved work, proposed receiver attenuation, and the
 //! complete run-reconciliation report into one deterministic capsule. The
 //! capsule grants no authority and cannot summarize outstanding effect debt
-//! away.
+//! away. [`handoff_acceptance`] independently verifies a live receiver against
+//! the same authenticated head and the capsule's attenuation ceiling while
+//! preserving every inherited effect responsibility.
 //!
 //! [`cancellation`] implements request → drain → finalize for the run-level
 //! control plane. It freezes the complete accepted-effect inventory and active
@@ -112,6 +114,7 @@ pub mod ecc;
 pub mod frontier;
 mod frontier_policy;
 pub mod handoff;
+pub mod handoff_acceptance;
 pub mod intent;
 pub mod plan;
 pub mod protocol;
@@ -157,6 +160,10 @@ pub use handoff::{
     AgentHandoffCapsule, AgentHandoffCapsuleId, AgentHandoffCapsuleSpec,
     HandoffCapabilityAttenuation, HandoffRefusal, HandoffWorkspaceSnapshot,
     MAX_HANDOFF_ENTRIES, MAX_HANDOFF_EVIDENCE_RECORDS, MAX_HANDOFF_VERIFIER_ATTESTATIONS,
+};
+pub use handoff_acceptance::{
+    AgentHandoffAcceptance, AgentHandoffAcceptanceId, HandoffAcceptanceRefusal,
+    HandoffAuthorityRelation, HandoffEffectResponsibility, HandoffTargetResolution,
 };
 pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
 pub use plan::{
