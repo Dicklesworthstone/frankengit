@@ -24,8 +24,9 @@
 //! reconciles authenticated backend rereads. [`task_store`] defines the one-call
 //! read/CAS/flush/reread orchestration a concrete Beads or scheduler backend
 //! must implement, preserving every post-effect uncertainty as reconciliation
-//! debt. None of those values is durable by construction or repository
-//! authority.
+//! debt. [`task_persistence_gate`] validates claim control before I/O and exposes
+//! claim or cancellation projections only after the exact durable successor is
+//! confirmed. None of those values is repository authority.
 //!
 //! [`claim`] and [`action_packet`] bind an admitted task claim to concrete,
 //! bounded work without performing effects. [`claim_continuity`] permits only
@@ -70,6 +71,7 @@ pub mod task_collection;
 pub mod task_coordination;
 pub mod task_mutation;
 pub mod task_persistence;
+pub mod task_persistence_gate;
 pub mod task_projection;
 mod task_projection_adapter;
 pub mod task_projection_read;
@@ -196,6 +198,11 @@ pub use task_persistence::{
     TaskProjectionPersistedState, TaskProjectionPersistenceDecision,
     TaskProjectionPersistenceReceipt, TaskProjectionPersistenceReceiptId,
     TaskProjectionPersistenceRefusal,
+};
+pub use task_persistence_gate::{
+    PersistedTaskClaim, PersistedTaskResolution, TaskClaimPersistenceOutcome,
+    TaskPersistenceGateRefusal, TaskResolutionPersistenceOutcome, persist_task_claim,
+    persist_task_resolution,
 };
 pub use task_projection::{
     MAX_TASK_PROJECTION_ROWS, MAX_TASK_ROW_SURFACES, TaskAdapterRefusal,
