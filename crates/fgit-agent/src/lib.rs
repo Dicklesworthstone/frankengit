@@ -29,9 +29,9 @@
 //! must implement, preserving every post-effect uncertainty as reconciliation
 //! debt. [`task_persistence_gate`] validates claim control before I/O and exposes
 //! claim or cancellation projections only after the exact durable successor is
-//! confirmed. [`task_recovery`] carries restart reconstruction evidence through
-//! that same persistence gate during conservative release. None of those values
-//! is repository authority.
+//! confirmed. [`task_recovery`] atomically binds restart recovery to the complete
+//! run and carries that evidence through conservative persisted release. None of
+//! those values is repository authority.
 //!
 //! [`claim`] and [`action_packet`] bind an admitted task claim to concrete,
 //! bounded work without performing effects. [`claim_continuity`] permits only
@@ -237,8 +237,10 @@ pub use task_projection_read::{
 };
 pub use task_recovery::{
     PersistedRecoveredTaskRelease, PersistedRecoveredTaskReleaseId,
-    RecoveredTaskReleasePersistenceOutcome, TaskRecoveryPersistenceRefusal,
-    persist_recovered_task_release,
+    RecoveredTaskReleasePersistenceOutcome, RunBoundRecoveredTaskClaim,
+    RunBoundRecoveredTaskClaimId, TaskRecoveryBindingRefusal,
+    TaskRecoveryPersistenceRefusal, persist_recovered_task_release,
+    recover_task_claim_for_cleanup,
 };
 pub use task_store::{
     TaskProjectionStore, TaskProjectionStoreExecution, TaskProjectionStoreExecutionRefusal,
