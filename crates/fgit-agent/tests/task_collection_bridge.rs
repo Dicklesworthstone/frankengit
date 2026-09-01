@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
-//! Public-path tests for collection-to-claim-basis conversion.
+//! Public-path tests for collection-to-single-task conversion.
 
 use fgit_agent::{
-    AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime, OperationClass, RunId,
-    TaskCollectionBridgeRefusal, TaskProjectionCollectionObservation,
-    TaskProjectionCollectionRequest, TaskProjectionCollector, TaskProjectionGeneration,
-    TaskProjectionRow, TaskPhase, WorkConflict, WorkRankingInputs, WorkTaskId,
-    collect_task_projection, collected_unclaimed_task,
+    AgentChangePlanId, AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime,
+    OperationClass, PlanSurface, PlanSurfaceKind, RunId, TaskCollectionBridgeRefusal,
+    TaskLeaseHistoryObservation, TaskProjectionAssignment,
+    TaskProjectionCollectionObservation, TaskProjectionCollectionRequest,
+    TaskProjectionCollector, TaskProjectionGeneration, TaskProjectionRow, TaskPhase,
+    WorkConflict, WorkRankingInputs, WorkTaskId, collect_task_projection,
+    collected_unclaimed_task, reconstruct_collected_task_lease,
 };
 use fgit_authority::{
     AuthenticatedHead, AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore,
@@ -21,6 +23,7 @@ use fgit_types::{
 };
 
 const GENERATION: [u8; 32] = [0x44; 32];
+const PREVIOUS_GENERATION: [u8; 32] = [0x43; 32];
 
 fn digest(byte: u8) -> Digest {
     let root = outcome_index_root(&[]).expect("empty outcome-index root is canonical");
@@ -108,15 +111,33 @@ impl TaskProjectionCollector for Collector {
     }
 }
 
-#[test]
-fn collected_unassigned_row_becomes_exact_claim_basis() {
-    let authenticated = authenticated_head();
-    let receipt = AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
+fn exact_read() -> AuthorityReadReceipt {
+    AuthorityReadReceipt::from_authenticated_head(
+        &authenticated_head(),
         LogicalTime::new(10),
         [0x71; 32],
     )
-    .expect("first exact read");
+    .expect("exact authenticated read")
+}
+
+fn collect_row(
+    receipt: &AuthorityReadReceipt,
+    run: &IntentRun,
+    row: TaskProjectionRow,
+) -> fgit_agent::TaskProjectionCollectionReceipt {
+    let mut collector = Collector { row };
+    collect_task_projection(
+        &mut collector,
+        receipt,
+        run,
+        LogicalTime::new(20),
+    )
+    .expect("current task collection")
+}
+
+#[test]
+fn collected_unassigned_row_becomes_exact_claim_basis() {
+    let receipt = exact_read();
     let run = run(&receipt);
     let task_id = WorkTaskId::from_bytes([0x41; 32]);
     let row = TaskProjectionRow::unclaimed(
@@ -129,24 +150,14 @@ fn collected_unassigned_row_becomes_exact_claim_basis() {
         WorkConflict::Clear,
     )
     .expect("unassigned row");
-    let mut collector = Collector { row };
-    let collection = collect_task_projection(
-        &mut collector,
-        &receipt,
-        &run,
-        LogicalTime::new(20),
-    )
-    .expect("current task collection");
+    let collection = collect_row(&receipt, &run, row);
 
     let claim_basis = collected_unclaimed_task(&collection, &receipt, task_id)
         .expect("exact read and unclaimed row make a claim basis");
     assert_eq!(claim_basis.repository_id(), receipt.repository_id());
     assert_eq!(claim_basis.task_id(), task_id);
     assert_eq!(claim_basis.generation(), &GENERATION);
-    assert_eq!(
-        claim_basis.assignment(),
-        fgit_agent::TaskProjectionAssignment::Unassigned
-    );
+    assert_eq!(claim_basis.assignment(), TaskProjectionAssignment::Unassigned);
     assert_eq!(claim_basis.observed_at(), LogicalTime::new(21));
 }
 
@@ -177,14 +188,7 @@ fn same_head_later_read_is_not_interchangeable_for_mutation() {
         WorkConflict::Clear,
     )
     .expect("unassigned row");
-    let mut collector = Collector { row };
-    let collection = collect_task_projection(
-        &mut collector,
-        &first,
-        &run,
-        LogicalTime::new(20),
-    )
-    .expect("current task collection");
+    let collection = collect_row(&first, &run, row);
 
     assert_eq!(
         collected_unclaimed_task(&collection, &later, task_id)
@@ -195,13 +199,7 @@ fn same_head_later_read_is_not_interchangeable_for_mutation() {
 
 #[test]
 fn missing_task_fails_without_inventing_state() {
-    let authenticated = authenticated_head();
-    let receipt = AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("exact read");
+    let receipt = exact_read();
     let run = run(&receipt);
     let present = WorkTaskId::from_bytes([0x41; 32]);
     let missing = WorkTaskId::from_bytes([0x42; 32]);
@@ -215,18 +213,161 @@ fn missing_task_fails_without_inventing_state() {
         WorkConflict::Clear,
     )
     .expect("unassigned row");
-    let mut collector = Collector { row };
-    let collection = collect_task_projection(
-        &mut collector,
-        &receipt,
-        &run,
-        LogicalTime::new(20),
-    )
-    .expect("current task collection");
+    let collection = collect_row(&receipt, &run, row);
 
     assert_eq!(
         collected_unclaimed_task(&collection, &receipt, missing)
             .expect_err("missing task cannot become a single-task snapshot"),
         TaskCollectionBridgeRefusal::TaskMissing { task_id: missing }
+    );
+}
+
+#[test]
+fn collected_claimed_row_reconstructs_exact_lease_deterministically() {
+    let receipt = exact_read();
+    let run = run(&receipt);
+    let task_id = WorkTaskId::from_bytes([0x41; 32]);
+    let plan_id = AgentChangePlanId::from_bytes([0x61; 32]);
+    let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x62));
+    let row = TaskProjectionRow::claimed(
+        task_id,
+        TaskPhase::InProgress,
+        WorkRankingInputs::new(1, 2, 3),
+        0,
+        run.run_id(),
+        None,
+        true,
+        plan_id,
+        LogicalTime::new(15),
+        LogicalTime::new(80),
+        vec![surface],
+    )
+    .expect("claimed collection row");
+    let collection = collect_row(&receipt, &run, row);
+    let history = TaskLeaseHistoryObservation::new(
+        collection.receipt_id(),
+        task_id,
+        collection.snapshot().generation(),
+        PREVIOUS_GENERATION,
+        LogicalTime::new(15),
+        [0x82; 32],
+        digest(0x92),
+    );
+
+    assert_eq!(
+        collected_unclaimed_task(&collection, &receipt, task_id)
+            .expect_err("claimed row cannot silently become an unclaimed basis"),
+        TaskCollectionBridgeRefusal::LeaseReconstructionRequired { task_id }
+    );
+
+    let first = reconstruct_collected_task_lease(
+        &collection,
+        &receipt,
+        task_id,
+        history.clone(),
+    )
+    .expect("complete durable history reconstructs the lease");
+    let second = reconstruct_collected_task_lease(&collection, &receipt, task_id, history)
+        .expect("identical history reconstruction is deterministic");
+    assert_eq!(first.receipt_id(), second.receipt_id());
+    assert_eq!(first.snapshot().task_id(), task_id);
+    assert_eq!(
+        first.snapshot().assignment(),
+        TaskProjectionAssignment::Assigned(run.run_id())
+    );
+    let lease = first.snapshot().lease().expect("active lease reconstructed");
+    assert_eq!(lease.plan_id(), plan_id);
+    assert_eq!(lease.assignee(), run.run_id());
+    assert_eq!(lease.previous_generation(), &PREVIOUS_GENERATION);
+    assert_eq!(lease.claimed_generation(), &GENERATION);
+    assert_eq!(lease.reserved_surfaces(), &[surface]);
+    assert_eq!(lease.claimed_at(), LogicalTime::new(15));
+    assert_eq!(lease.expires_at(), LogicalTime::new(80));
+    assert_eq!(first.adapter_identity(), [0x82; 32]);
+    assert_eq!(first.evidence_root(), digest(0x92));
+    assert_ne!(first.receipt_id().as_bytes(), &[0; 32]);
+}
+
+#[test]
+fn lease_history_cannot_be_replayed_across_generation() {
+    let receipt = exact_read();
+    let run = run(&receipt);
+    let task_id = WorkTaskId::from_bytes([0x41; 32]);
+    let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x62));
+    let row = TaskProjectionRow::claimed(
+        task_id,
+        TaskPhase::InProgress,
+        WorkRankingInputs::new(1, 2, 3),
+        0,
+        run.run_id(),
+        None,
+        true,
+        AgentChangePlanId::from_bytes([0x61; 32]),
+        LogicalTime::new(15),
+        LogicalTime::new(80),
+        vec![surface],
+    )
+    .expect("claimed collection row");
+    let collection = collect_row(&receipt, &run, row);
+    let observed = TaskProjectionGeneration::try_from_bytes([0x45; 32])
+        .expect("different nonzero generation");
+    let history = TaskLeaseHistoryObservation::new(
+        collection.receipt_id(),
+        task_id,
+        observed,
+        PREVIOUS_GENERATION,
+        LogicalTime::new(15),
+        [0x82; 32],
+        digest(0x92),
+    );
+
+    assert_eq!(
+        reconstruct_collected_task_lease(&collection, &receipt, task_id, history)
+            .expect_err("history from another generation must fail closed"),
+        TaskCollectionBridgeRefusal::HistoryGenerationMismatch {
+            expected: collection.snapshot().generation(),
+            observed,
+        }
+    );
+}
+
+#[test]
+fn lease_history_cannot_postdate_the_collection_that_already_reflects_it() {
+    let receipt = exact_read();
+    let run = run(&receipt);
+    let task_id = WorkTaskId::from_bytes([0x41; 32]);
+    let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x62));
+    let row = TaskProjectionRow::claimed(
+        task_id,
+        TaskPhase::InProgress,
+        WorkRankingInputs::new(1, 2, 3),
+        0,
+        run.run_id(),
+        None,
+        true,
+        AgentChangePlanId::from_bytes([0x61; 32]),
+        LogicalTime::new(15),
+        LogicalTime::new(80),
+        vec![surface],
+    )
+    .expect("claimed collection row");
+    let collection = collect_row(&receipt, &run, row);
+    let history = TaskLeaseHistoryObservation::new(
+        collection.receipt_id(),
+        task_id,
+        collection.snapshot().generation(),
+        PREVIOUS_GENERATION,
+        LogicalTime::new(22),
+        [0x82; 32],
+        digest(0x92),
+    );
+
+    assert_eq!(
+        reconstruct_collected_task_lease(&collection, &receipt, task_id, history)
+            .expect_err("claim history cannot begin after the observed claimed row"),
+        TaskCollectionBridgeRefusal::ObservationBeforeClaim {
+            claimed_at: LogicalTime::new(22),
+            observed_at: LogicalTime::new(21),
+        }
     );
 }
