@@ -6,6 +6,43 @@ FrankenGit has moved beyond its original architecture-only phase into active imp
 
 ## [Unreleased] — 2026-09-01
 
+### Added — task collection, persistence, and restart recovery
+
+The `fgit-agent` task coordination tower now includes:
+
+- `TaskProjectionCollectionRequest` and `TaskProjectionCollectionReceipt`: one bounded pre-situation read binding the exact authenticated authority event, complete Intent Run, current immutable task generation, canonical rows, adapter profile, and collection evidence;
+- a task-projection `SituationComponent` produced from the same validated collection used by `WorkFrontier`, removing the former first-generation bootstrap circularity;
+- `TaskProjectionMutationEnvelope`, complete semantic predecessor/successor reread reconciliation, and `TaskProjectionPersistenceReceipt`;
+- the storage-neutral one-shot task-store protocol: authenticated read, at most one exact-predecessor CAS, explicit flush/no-op, authenticated reread, and typed success/conflict/reconciliation debt;
+- persistence gates that validate the pulse/plan/run/task basis before store I/O and expose claim or cancellation projections only after the exact durable successor is confirmed;
+- the compiled `task_collection_bridge` public surface for exact collected unassigned-row claim bases;
+- `TaskLeaseHistoryObservation` and `TaskLeaseReconstructionReceipt` for reconstructing a claimed row only from collection-bound durable predecessor history;
+- `RecoveredActiveTaskClaim`, which binds the reconstruction, original task claim receipt, and fresh activation under the same exact authenticated read event;
+- `PersistedRecoveredTaskRelease`, which releases a recovered claim through the ordinary one-shot store protocol while retaining recovery and reconstruction identities through success, conflict, or ambiguity.
+
+Claim and run expiry continue to prevent new work but do not prevent conservative responsibility cleanup. Recovered releases may return the task explicitly to `Open` or `Rework`.
+
+The focused contracts are maintained in:
+
+- [`docs/AGENT_CONTROL_PLANE_TASK_COORDINATION.md`](docs/AGENT_CONTROL_PLANE_TASK_COORDINATION.md);
+- [`docs/AGENT_CONTROL_PLANE_TASK_RECOVERY.md`](docs/AGENT_CONTROL_PLANE_TASK_RECOVERY.md).
+
+### Fixed — task recovery correctness and API boundaries
+
+- Activated the already-landed collection bridge in `fgit-agent::lib`; its source and public-path test no longer sit outside the crate's compiled module graph.
+- Refused conversion of a claimed collected row through the unassigned path instead of silently discarding assignment, plan, expiry, or reservation state.
+- Required lease history to bind the exact collection receipt, task, and current generation before supplying the predecessor generation and original claim time omitted from the collected row.
+- Revalidated collected assignee, plan, expiry, complete reservation surface, and `ReservedBy(assignee)` conflict state before reconstructing an active lease.
+- Kept semantic task state independent from lease-history adapter/evidence identity while giving each evidenced reconstruction a distinct stable receipt.
+- Required the original `TaskClaimReceipt` to match the reconstructed lease across task, plan, assignee, predecessor/current generations, reservation surface, claim time, and expiry.
+- Required the reconstruction, refreshed situation, and supplied run to use the same exact authenticated read event; a later read of the same head and same numeric `RunId` is not interchangeable.
+- Committed reconstruction and claim identities into restart-recovered active-claim identity rather than validating recovery evidence and then dropping it.
+- Used the invoked task-store profile as the recovered release's adapter identity so the transition cannot be prepared under one backend profile and executed under another.
+- Retained recovery identity in conflict and uncertain store outcomes instead of collapsing restart cleanup into an ordinary anonymous mutation envelope.
+- Corrected a test-only attempt to forge `AgentChangePlanId` bytes; recovery fixtures now build a real situation, frontier, pulse, and plan.
+- Corrected the recovery fixture's history so the plan is built against the predecessor generation before the claim, not against the already-claimed generation.
+- Corrected the scripted store's initial reread time to occur after the cleanup request, matching the store protocol's anti-rollback rule.
+
 ### Added — authority-bound Agent Control Plane
 
 The `fgit-agent` crate now contains a linked observe → plan → claim → act → reconcile → hand off/cancel → learn tower over the existing repository authority, capability, TreeFS, obligation, and evidence contracts.
@@ -50,10 +87,14 @@ The exact current implementation boundary and module map are maintained in [`doc
 Public-path tests now cover:
 
 - situation identity, omissions, forks, rollback, and deltas;
+- pre-situation task collection and exact-generation reread;
 - frontier eligibility, exclusions, deterministic ordering, and action-scoped independence;
 - pulse determinism, exclusion accounting, expiry, and substitution refusal;
 - plan canonicalization, conflict coverage, budget attenuation, evidence, and authority boundaries;
 - task-claim admission, activation, stale basis, conflict surface, lifetime, and overlap;
+- deterministic task claim/release/transfer transitions and exact-read scope;
+- complete-state mutation envelopes, store reconciliation, one-shot persistence, and post-effect debt;
+- task collection bridging, lease-history reconstruction, claim recovery, and persisted restart cleanup;
 - action-packet context completeness, exact activation continuity, same-ID scope revalidation, target containment, and budget bounds;
 - time-only claim continuity, context-change refusal, claim expiry, and packet continuation;
 - complete run-effect reconciliation, terminal markers, parent cycles, authority, and conserved spend;
@@ -66,12 +107,14 @@ Source-level test presence is not a test result.
 ### Documentation
 
 - Reconciled [`docs/AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md`](docs/AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md) with the actual owning modules and current non-claims.
+- Reconciled [`docs/AGENT_CONTROL_PLANE_TASK_COORDINATION.md`](docs/AGENT_CONTROL_PLANE_TASK_COORDINATION.md) through collection, persistence, and restart recovery.
+- Added [`docs/AGENT_CONTROL_PLANE_TASK_RECOVERY.md`](docs/AGENT_CONTROL_PLANE_TASK_RECOVERY.md).
 - Added dated change records under `docs/changes/` for the Agent Control Plane evolution.
 - Retained an explicit Beads reconciliation handoff instead of hand-editing the multi-megabyte `.beads/issues.jsonl` ledger from an environment without `br`.
 
 ### Verification state
 
-The environment used for the latest Agent Control Plane commits did not contain a Rust toolchain or a locally accessible repository clone. No `cargo fmt`, build, test, clippy, repository verification, or independent batch result is claimed for these revisions.
+The environment used for the latest task-recovery commits did not contain a local FrankenGit checkout, Cargo, rustc, or rustfmt. A public archive fetch was unavailable through that execution environment. No formatter, compiler, test, Clippy, repository verification, or independent batch result is claimed for these revisions.
 
 Required local evidence remains at least:
 
@@ -91,15 +134,17 @@ GitHub-hosted Actions availability or status is neither required nor used as evi
 
 This wave does not claim:
 
-- production collectors for every situation component;
-- a production Beads/task claim, release, transfer, or reservation adapter;
-- a scheduler or action-packet executor;
+- concrete `br`/Beads collection, lease-history, mutation, flush, reread, or envelope-probe I/O;
+- production collectors for the nine non-task situation components;
+- multi-task transactions or distributed reservations;
+- a production action-packet executor;
+- automatic process, workspace, credential, or external-effect cleanup;
 - effect-time capability revocation against a named canonical position;
 - plan-relative invalidation when a situation component changes;
 - handoff acceptance at a later authority head without an authenticated ancestry witness;
-- durable codecs, storage, replay, migration, or recovery for the new control-plane objects;
+- durable codecs, migrations, storage, or replay for the new task-control receipts;
 - an `fg agent` CLI, stable robot API, native API, or MCP surface;
-- automatic ECC assembly, task verification transition, or canonical publication;
+- automatic ECC assembly, task verification/closure transition, or canonical publication;
 - a durable authorization-filtered learning index;
 - independent batch verification or Bead closure.
 
