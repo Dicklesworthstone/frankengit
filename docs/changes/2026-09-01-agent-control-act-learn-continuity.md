@@ -1,14 +1,16 @@
-# 2026-09-01: Agent Control Plane act, learn, and continuity slices
+# 2026-09-01: Agent Control Plane act, learn, and lifecycle continuity
 
 ## Scope
 
-This change wave extends the authority-bound Agent Control Plane from observation, selection, planning, and task activation into three additional final-abstraction slices:
+This change wave extends the authority-bound Agent Control Plane from observation, selection, planning, and task activation into five linked final-abstraction slices:
 
 1. a bounded Level-1 action packet;
 2. evidence-grounded outcome learning;
-3. explicit time-only active-claim and packet continuity.
+3. explicit time-only active-claim and packet continuity;
+4. proof-carrying handoff construction;
+5. cancellation that remains available after context invalidation while retaining optional continuity evidence.
 
-All three remain derived control evidence. None is repository authority, a capability grant, a task-system mutation, an effect executor, or canonical publication.
+All five remain derived control evidence. None is repository authority, a capability grant, a task-system mutation, an effect executor, or canonical publication.
 
 ## Revision sequence
 
@@ -28,15 +30,27 @@ All three remain derived control evidence. None is repository authority, a capab
 | `c3ac9e32` | activate the continuity surfaces |
 | `884e7475` | reconcile the implementation-status ledger |
 | `ec0c74a9` | replace the obsolete architecture-only changelog framing |
-| `4b083d09` | add this revision-linked change record |
+| `4b083d09` | add the first revision-linked change record |
 | `63e9489f` | add the non-authoritative Beads verification handoff |
 | `bc5cfc41` | preserve deterministic structural refusals before strict evidence-class enforcement |
+| `36e64f71` | add the proof-carrying public handoff facade |
+| `990016ce` | add the first proof-carrying public cancellation facade |
+| `5ac024eb` | make raw handoff/cancellation engines crate-private and expose only strict facades |
+| `65a69399` | add public lifecycle-continuity integration tests |
+| `b9ffc200` | remove an unused integration-test import under warnings-as-errors policy |
+| `82fd0c9d` | correct cancellation so changed context never blocks a conservative stop |
+| `a91ab980` | update lifecycle tests for changed-context cancellation and optional continuity |
+| `9d5ab061` | reconcile crate-level continuation-versus-cancellation semantics |
+| `d6b8cdc6` | pin the exact changed-component refusal in tests |
+| `f6c8e2c7` | reconcile the implementation-status ledger through lifecycle continuity |
+| `a5f56a48` | reconcile the changelog through lifecycle continuity |
+| `cf9ad1f5` | add the focused lifecycle-continuity design contract |
 
 The full commit IDs remain in git history. Short IDs above are navigation aids, not verification evidence.
 
 ## Level-1 action packet
 
-`crates/fgit-agent/src/action_packet.rs` now binds one concrete action sequence to:
+`crates/fgit-agent/src/action_packet.rs` binds one concrete action sequence to:
 
 - the exact situation that activated the task claim;
 - the exact task-projection generation and task ID;
@@ -62,7 +76,7 @@ The public packet therefore accepts only the exact claim-activation situation. L
 
 ### Rejected shortcut: partial planned context
 
-The packet now refuses omission of any `ContextPacketId` admitted by the plan. A plan cannot be justified using one context set and executed using a quietly smaller one.
+The packet refuses omission of any `ContextPacketId` admitted by the plan. A plan cannot be justified using one context set and executed using a quietly smaller one.
 
 ### Rejected shortcut: Run ID as scope
 
@@ -89,8 +103,6 @@ A record binds:
 
 A satisfied or partially satisfied requirement must carry at least one evidence record of the exact class named by `PlanEvidenceRequirement`.
 
-For example:
-
 ```text
 required = Executed
 supplied = Observed
@@ -111,14 +123,7 @@ No self-declared independence field exists. Independence is recomputed from reco
 
 ### Retrieval-only boundary
 
-A learning record may improve retrieval or planning only when its applicability and invalidation conditions match. It cannot:
-
-- grant capability;
-- change task status;
-- suppress a required check;
-- authorize publication;
-- become repository truth;
-- prove that a referenced artifact exists without the future evidence resolver.
+A learning record may improve retrieval or planning only when its applicability and invalidation conditions match. It cannot grant capability, change task status, suppress a required check, authorize publication, become repository truth, or prove that a referenced artifact exists without the future evidence resolver.
 
 ## Active-claim continuity
 
@@ -137,23 +142,48 @@ The receipt requires:
 
 Any component change is a typed refusal. The receipt deliberately does not attempt plan-relative invalidation analysis.
 
-`AgentActionPacketContinuation` binds this proof to the immutable original packet and carries:
+`AgentActionPacketContinuation` binds this proof to the immutable original packet and carries the original packet identity, continuity identity, source/later situations, plan, claim, task, run, task generation, original continuation contract, and a fresh commitment proving mandatory packet preconditions were rechecked. It does not rewrite or clone the packet body.
 
-- original packet identity;
-- continuity receipt identity;
-- source and later situation identities;
-- plan, claim, task, run, and task-generation identities;
-- original continuation-contract root;
-- a fresh commitment proving mandatory packet preconditions were rechecked.
+## Proof-carrying handoff
 
-It does not rewrite or clone the packet body.
+Handoff continues the plan attempt. The public API therefore exposes:
+
+```text
+AgentHandoffCapsule::build(activation_situation, ...)
+AgentHandoffCapsule::build_with_continuity(later_situation, continuity, ...)
+```
+
+The first constructor refuses a situation other than the one retained by `ActiveTaskClaim`. The second revalidates the full-context receipt against the claim, later situation, and complete run.
+
+The public capsule identity commits the crate-private canonical capsule identity plus the exact-activation/continuity choice and continuity receipt ID when present. Receiver acceptance binds this public identity, so source continuity evidence cannot be checked and then discarded before transfer.
+
+The raw capsule engine is crate-private. A caller cannot bypass the strict facade through a parallel public constructor.
+
+## Cancellation remains a stop path
+
+The first provisional facade copied handoff's exact-activation-or-continuity rule onto cancellation. Fresh review rejected that model.
+
+Handoff and action execution continue work, so changed context invalidates permission to proceed. Cancellation reduces work and must remain available precisely when peer, conflict, capability, obligation, evidence, registry, graph, search, or other context changed.
+
+The final public API therefore exposes:
+
+```text
+RunCancellationIntent::request(latest_situation, ...)
+RunCancellationIntent::request_with_continuity(later_situation, continuity, ...)
+```
+
+`request` binds the exact latest situation, active claim when present, and complete reconciliation report observed at the same logical time. It does not require context equivalence.
+
+`request_with_continuity` optionally retains stronger evidence when only logical time advanced. The public request identity commits the continuity receipt ID. Completion commits the public request ID, so optional evidence survives into terminal identity.
+
+The crate-private engine continues to enforce frozen effect membership, immutable accepted-effect identity, legal lifecycle progress, monotone evidence and charged resources, explicit task release/transfer, no unresolved automatic work at completion, named escalation transfer, and explicit leak containment.
 
 ## Focused test source added
 
-New public-path test targets cover:
+Public-path tests cover:
 
 - deterministic action-packet identity and complete bindings;
-- later-situation refusal without continuity evidence;
+- later action use refusal without continuity;
 - missing planned context;
 - same-ID run-scope substitution;
 - operation and budget amplification;
@@ -164,9 +194,13 @@ New public-path test targets cover:
 - computed verifier independence;
 - deterministic time-only claim continuity;
 - non-task component-change refusal;
-- non-advancing time;
-- claim expiry;
-- packet-continuation binding.
+- non-advancing time and claim expiry;
+- packet-continuation binding;
+- later handoff refusal without continuity;
+- deterministic proof-carrying handoff identity;
+- changed-context cancellation remaining available;
+- optional cancellation continuity producing a distinct proof-bearing identity;
+- clean completion with explicit task release.
 
 ## Verification state
 
@@ -176,7 +210,7 @@ Source and tests require revision-bound execution of at least:
 
 ```text
 cargo fmt --all --check
-cargo test -p fgit-agent
+cargo test -p fgit-agent --all-targets
 cargo clippy -p fgit-agent --all-targets -- -D warnings
 cargo test -p fgit-registry-check
 ./scripts/verify.sh docs
@@ -186,17 +220,6 @@ cargo test -p fgit-registry-check
 
 GitHub-hosted Actions status is not required and was not used.
 
-## Known follow-up boundary
-
-The handoff and cancellation constructors predate `ActiveClaimContinuityReceipt`. They validate live claim/run/authority state, but do not yet consume the complete-context continuity proof for arbitrary later situations.
-
-Before those APIs are described as safe across a later observation, implementation must either:
-
-1. restrict them to the exact claim-activation situation; or
-2. expose continuity-aware wrappers and make the raw constructors crate-private.
-
-Comparing only task generation is explicitly rejected.
-
 ## Additional non-claims
 
 This wave does not implement:
@@ -205,8 +228,8 @@ This wave does not implement:
 - a Beads claim/release/transfer/reservation adapter;
 - a scheduler or executor;
 - effect-time revocation;
-- authority-history proofs for a later head;
-- plan-relative invalidation across component changes;
+- authority-history proofs for handoff acceptance at a later head;
+- plan-relative invalidation across selected component changes;
 - durable codecs, storage, replay, or migration;
 - stable robot JSON/NDJSON, CLI, native API, or MCP transport;
 - automatic ECC assembly or canonical publication;
