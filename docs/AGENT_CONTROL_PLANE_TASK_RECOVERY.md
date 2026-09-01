@@ -29,9 +29,11 @@ predecessor projection generation
 original claim instant
 ```
 
-Inventing either value would make a plausible local object that never existed in the durable task system. Ignoring them would let a current assignment impersonate the original claim transition.
+Inventing either value would create a plausible local object that never existed in the durable task system. Ignoring them would let a current assignment impersonate the original claim transition.
 
-The recovery slice therefore treats restart as an evidence-reconstruction problem, not as permission to mint a new claim from current state.
+A second gap appears after reconstruction. [`crate::RunId`] is only a coordination identifier; it does not commit the authority read, operation scope, resource budget, or expiry that recovery validated. A cleanup API accepting only a numeric run ID could therefore validate one run during recovery and execute under a different same-ID run later.
+
+The recovery slice treats both problems as evidence-binding problems. It neither mints missing history nor allows a complete run identity to be detached from recovery before a durable cleanup effect.
 
 ## 2. Recovery tower
 
@@ -45,7 +47,8 @@ AuthorityReadReceipt + IntentRun
     -> TaskLeaseReconstructionReceipt
     + original TaskClaimReceipt
     + fresh AgentSituationReceipt
-    -> RecoveredActiveTaskClaim
+    + complete IntentRun
+    -> RunBoundRecoveredTaskClaim
     -> semantic release application
     -> TaskProjectionMutationEnvelope
     -> one-shot read / CAS / flush / reread
@@ -53,6 +56,8 @@ AuthorityReadReceipt + IntentRun
        | Conflict
        | NeedsReconciliation
 ```
+
+`RunBoundRecoveredTaskClaim` contains the ordinary `RecoveredActiveTaskClaim` plus the exact `IntentRunCommitment` captured by the same constructor that performs activation. There is no public constructor that can attach a different commitment afterward.
 
 Each arrow validates an exact predecessor. No stage infers that an earlier stage succeeded merely because a later-looking object exists.
 
@@ -147,7 +152,7 @@ A reconstructed lease is not yet an active claim.
 
 - task;
 - plan;
-- assignee and supplied run;
+- assignee and supplied run ID;
 - predecessor generation;
 - current claimed generation;
 - reservation surface;
@@ -168,18 +173,54 @@ fresh active-claim activation ID
 
 Recovery evidence therefore cannot be validated and then omitted from the recovery identity.
 
-## 7. Cleanup after expiry
+## 7. Complete-run binding
+
+Ordinary active-claim recovery still carries a numeric assignee because the older claim vocabulary predates complete-run commitments. Persisted restart cleanup adds the missing stronger boundary.
+
+`recover_task_claim_for_cleanup` performs these operations in one API call:
+
+1. validates and activates the reconstructed claim;
+2. computes the complete `IntentRunCommitment` from the same supplied run;
+3. produces `RunBoundRecoveredTaskClaim`;
+4. commits ordinary recovery identity and complete run commitment into `RunBoundRecoveredTaskClaimId`.
+
+The complete commitment binds:
+
+```text
+RunId
+exact AuthorityReadReceiptId
+allowed operation classes
+resource budget
+expiry
+```
+
+`RunBoundRecoveredTaskClaim` has no public field constructor. A caller cannot activate under one run, then attach a same-ID run commitment with different bytes.
+
+`persist_recovered_task_release` re-computes the supplied run commitment before semantic mutation or store I/O. Any difference returns:
+
+```text
+RunCommitmentMismatch { expected, observed }
+```
+
+This refusal occurs even when repository, authority head, exact read event, and numeric `RunId` all match.
+
+## 8. Cleanup after expiry
 
 Expiry prevents additional work. It does not erase durable ownership or make cleanup impossible.
 
-`persist_recovered_task_release` permits an expired recovered claim to release its exact lease. It still refuses:
+`persist_recovered_task_release` permits an expired run-bound recovered claim to release its exact lease. The original run may be past its exclusive expiry at `resolved_at`; cleanup does not require widening or renewing it.
+
+The function still refuses:
 
 - another lease reconstruction;
 - another original claim receipt;
-- another task, plan, assignee, run, generation, surface, or exact read;
+- another complete run commitment;
+- another task, plan, assignee, generation, surface, or exact read;
 - observation-time rollback;
 - an invalid store profile;
 - every ordinary semantic release refusal.
+
+Expiry is part of the captured run commitment. A caller cannot replace the expired run with a same-ID copy carrying a later expiry to obtain the cleanup path.
 
 The invoked store profile becomes the transition adapter identity. The caller cannot prepare the release under one adapter identity and execute it under another.
 
@@ -190,7 +231,7 @@ ReturnToOpen
 RequireRework
 ```
 
-## 8. Durable execution and uncertainty
+## 9. Durable execution and uncertainty
 
 Recovered cleanup reuses the ordinary task-store protocol:
 
@@ -204,15 +245,16 @@ authenticated initial read
 
 A successful result becomes `PersistedRecoveredTaskRelease`, whose identity commits:
 
-- the recovered active-claim identity;
+- the complete-run-bound recovery identity;
+- the underlying recovery identity;
 - the lease-reconstruction identity;
 - the ordinary confirmed task-persistence receipt.
 
-Conflict and uncertain outcomes also retain the recovery and reconstruction identities alongside the complete mutation envelope and store execution record.
+Conflict and uncertain outcomes also retain all three recovery identities alongside the complete mutation envelope and store execution record.
 
 A timed-out write followed by the predecessor is **not** labelled retry-safe. The operation may still be in flight. The outcome remains `NeedsReconciliation` until a backend-specific request-ID or envelope-ID probe proves quiescence or the exact successor is observed.
 
-## 9. Authority boundary
+## 10. Authority boundary
 
 Every object in this document is derived task-coordination evidence.
 
@@ -228,7 +270,7 @@ It does not:
 
 Only the concrete backend effect plus authenticated reread can produce a task-persistence receipt. Repository publication remains a separate authority path.
 
-## 10. Concrete Beads adapter obligations
+## 11. Concrete Beads adapter obligations
 
 A production Beads adapter must provide, without hand-editing `issues.jsonl`:
 
@@ -245,7 +287,7 @@ A production Beads adapter must provide, without hand-editing `issues.jsonl`:
 
 A human-readable command response or zero exit code is evidence input, not proof of persistence.
 
-## 11. Refused shortcuts
+## 12. Refused shortcuts
 
 The implementation explicitly rejects:
 
@@ -256,13 +298,16 @@ The implementation explicitly rejects:
 - using a plan built against the already-claimed generation as the historical claim plan;
 - accepting another collection or generation's lease history;
 - accepting a later same-head read as the same authenticated event;
-- preventing release because the claim expired;
+- treating numeric `RunId` as complete run identity;
+- validating one run during recovery and supplying another same-ID run during persistence;
+- renewing or changing run expiry to perform cleanup;
+- preventing release because the claim or run expired;
 - retrying an ambiguous write because the predecessor was seen once;
 - exposing a cancellation projection before the release successor is confirmed;
-- dropping recovery evidence after validation;
+- dropping recovery or complete-run evidence after validation;
 - treating task persistence as repository publication.
 
-## 12. Focused source tests
+## 13. Focused source tests
 
 The public-path source tests cover:
 
@@ -270,26 +315,29 @@ The public-path source tests cover:
 - refusal of same-head authenticated-read substitution;
 - missing-task refusal;
 - deterministic active-lease reconstruction from a real predecessor-bound plan;
-- plan, assignee, generation, surface, claim-time, and expiry retention;
+- plan, assignee, predecessor/current generations, reservation surface, claim time, and expiry retention;
 - history-generation replay refusal;
 - claim-time rollback refusal;
 - recovery of the original active claim;
 - same-head read substitution refusal during recovery;
-- durable release after claim expiry;
+- atomic complete-run capture during recovery;
+- durable release after both claim and run expiry;
+- refusal of a same-ID run with changed scope, budget, or expiry before store I/O;
 - explicit rework successor state;
-- recovery/reconstruction identity retention on success;
+- run-bound recovery, ordinary recovery, and reconstruction identity retention on success;
 - reconstruction substitution refusal before store I/O;
-- ambiguous release preserving recovery identity as reconciliation debt.
+- ambiguous release preserving run-bound recovery identity as reconciliation debt.
 
 Test source is not a revision-bound test result.
 
-## 13. Remaining boundary
+## 14. Remaining boundary
 
 This slice still does not provide:
 
 - concrete `br`/Beads transport or database integration;
-- durable codecs and migrations for collection, reconstruction, recovery, or persisted-release receipts;
+- durable codecs and migrations for collection, reconstruction, run-bound recovery, or persisted-release receipts;
 - a backend envelope-ID probe that proves an ambiguous write is quiescent;
+- complete-run commitment fields in the older general-purpose task lease/claim vocabulary outside this restart-cleanup facade;
 - multi-task atomic task transactions;
 - distributed reservation arbitration;
 - automatic process, workspace, credential, or external-effect cleanup;
@@ -299,4 +347,4 @@ This slice still does not provide:
 - later-head authority ancestry witnesses;
 - independent batch verification or Bead closure.
 
-The next production step is the concrete Beads transport implementing the read/history/CAS/flush/reread/probe contract above, followed by durable codecs and process-restart replay.
+The next production step is the concrete Beads transport implementing the read/history/CAS/flush/reread/probe contract above, followed by durable codecs and process-restart replay. A later hardening wave should propagate complete `IntentRunCommitment` into the older generic claim and lease objects so the same protection applies outside restart cleanup.
