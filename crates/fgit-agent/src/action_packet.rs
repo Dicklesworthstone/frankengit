@@ -10,6 +10,16 @@
 //! run object with the same [`crate::RunId`] cannot widen or silently narrow
 //! the plan. Consequential execution still goes through the effect broker and
 //! the owning obligation protocol.
+//!
+//! # Claim continuity boundary
+//!
+//! [`crate::ActiveTaskClaim`] currently commits the situation that first
+//! observed its post-claim task generation, but does not carry a later
+//! generation-continuity witness. This slice therefore accepts only that exact
+//! activation situation. A later situation may be equally valid, but proving
+//! the task projection remained the same requires a separate typed continuity
+//! receipt; treating a merely non-omitted projection as proof would let a stale
+//! or reassigned task look executable.
 
 use core::fmt;
 
@@ -304,8 +314,10 @@ impl AgentActionPacketSpec {
 pub struct AgentActionPacket {
     packet_id: AgentActionPacketId,
     situation_id: SituationId,
+    task_projection_generation: [u8; 32],
     plan_id: AgentChangePlanId,
     active_claim_id: ActiveTaskClaimId,
+    task_id: WorkTaskId,
     run_id: RunId,
     observed_at: LogicalTime,
     context_packet_ids: Vec<ContextPacketId>,
@@ -324,11 +336,12 @@ impl AgentActionPacket {
     ///
     /// # Errors
     ///
-    /// Refuses mismatched or expired run/claim/situation inputs, reconstructed
-    /// run scope that no longer covers the plan, unapproved or mixed-authority
-    /// context, empty/duplicate/excessive steps, operations or targets outside
-    /// the plan, missing evidence requirements, zero or amplified budgets,
-    /// absent mandatory preconditions, duplicate peer changes, a zero executor
+    /// Refuses mismatched or expired run/claim/situation inputs, a situation
+    /// other than the claim-activation receipt, reconstructed run scope that no
+    /// longer covers the plan, missing/unapproved/mixed-authority context,
+    /// empty/duplicate/excessive steps, operations or targets outside the plan,
+    /// missing evidence requirements, zero or amplified budgets, absent
+    /// mandatory preconditions, duplicate peer changes, a zero executor
     /// profile, and unrepresentable canonical framing.
     pub fn build(
         situation: &AgentSituationReceipt,
@@ -338,14 +351,11 @@ impl AgentActionPacket {
         context_packets: &[ContextPacket],
         mut spec: AgentActionPacketSpec,
     ) -> Result<Self, ActionPacketRefusal> {
-        validate_control_basis(situation, plan, active_claim, run)?;
+        let task_projection_generation =
+            validate_control_basis(situation, plan, active_claim, run)?;
         let context_packet_ids = validate_context(plan, run, context_packets)?;
         let aggregate_budget = validate_steps(plan, run, &spec.steps)?;
-        canonicalize_digests(
-            "peer_change_roots",
-            &mut spec.peer_change_roots,
-            MAX_ACTION_PEER_CHANGES,
-        )?;
+        canonicalize_peer_changes(&mut spec.peer_change_roots)?;
         if !spec
             .preconditions
             .contains_all(ActionPreconditionSet::MANDATORY)
@@ -361,8 +371,10 @@ impl AgentActionPacket {
         let mut packet = Self {
             packet_id: AgentActionPacketId([0; 32]),
             situation_id: situation.situation_id(),
+            task_projection_generation,
             plan_id: plan.plan_id(),
             active_claim_id: active_claim.activation_id(),
+            task_id: active_claim.task_id(),
             run_id: run.run_id(),
             observed_at: situation.observed_at(),
             context_packet_ids,
@@ -391,6 +403,12 @@ impl AgentActionPacket {
         self.situation_id
     }
 
+    /// Exact observed task-projection generation.
+    #[must_use]
+    pub const fn task_projection_generation(&self) -> &[u8; 32] {
+        &self.task_projection_generation
+    }
+
     /// Exact plan narrowed by this packet.
     #[must_use]
     pub const fn plan_id(&self) -> AgentChangePlanId {
@@ -401,6 +419,12 @@ impl AgentActionPacket {
     #[must_use]
     pub const fn active_claim_id(&self) -> ActiveTaskClaimId {
         self.active_claim_id
+    }
+
+    /// Exact task selected by the plan and activated claim.
+    #[must_use]
+    pub const fn task_id(&self) -> WorkTaskId {
+        self.task_id
     }
 
     /// Intent Run whose scope was revalidated.
@@ -415,7 +439,7 @@ impl AgentActionPacket {
         self.observed_at
     }
 
-    /// Approved context packet identities.
+    /// Complete plan-approved context packet identities.
     #[must_use]
     pub fn context_packet_ids(&self) -> &[ContextPacketId] {
         &self.context_packet_ids
@@ -487,6 +511,13 @@ pub enum ActionPacketRefusal {
     ClaimTaskMismatch,
     /// Activated claim names another run.
     ClaimRunMismatch,
+    /// Situation is not the exact receipt that activated the claim.
+    ClaimSituationMismatch {
+        /// Situation committed by the activated claim.
+        expected: [u8; 32],
+        /// Situation supplied to the packet builder.
+        observed: [u8; 32],
+    },
     /// Activated claim is expired at packet construction.
     ClaimExpired {
         /// Exclusive claim expiry.
@@ -528,6 +559,11 @@ pub enum ActionPacketRefusal {
     /// Context packet was not admitted by the plan.
     ContextNotInPlan {
         /// Unapproved packet.
+        packet_id: ContextPacketId,
+    },
+    /// A context packet admitted by the plan was omitted from the action.
+    MissingContextPacket {
+        /// Required packet.
         packet_id: ContextPacketId,
     },
     /// Context packet authorizes operations outside the plan.
@@ -643,7 +679,7 @@ fn validate_control_basis(
     plan: &AgentChangePlan,
     claim: ActiveTaskClaim,
     run: &IntentRun,
-) -> Result<(), ActionPacketRefusal> {
+) -> Result<[u8; 32], ActionPacketRefusal> {
     if situation.intent_run_id() != Some(run.run_id()) {
         return Err(ActionPacketRefusal::SituationRunMismatch);
     }
@@ -665,6 +701,13 @@ fn validate_control_basis(
     if claim.assignee() != run.run_id() {
         return Err(ActionPacketRefusal::ClaimRunMismatch);
     }
+    let observed_situation = *situation.situation_id().as_bytes();
+    if claim.situation_id() != observed_situation {
+        return Err(ActionPacketRefusal::ClaimSituationMismatch {
+            expected: claim.situation_id(),
+            observed: observed_situation,
+        });
+    }
     if !claim.is_live_at(situation.observed_at()) {
         return Err(ActionPacketRefusal::ClaimExpired {
             expires_at: claim.expires_at(),
@@ -677,13 +720,10 @@ fn validate_control_basis(
             observed_at: situation.observed_at(),
         });
     }
-    if situation
+    let generation = situation
         .component(SituationComponentKind::TaskProjection)
         .generation_commitment()
-        .is_none()
-    {
-        return Err(ActionPacketRefusal::TaskProjectionUnavailable);
-    }
+        .ok_or(ActionPacketRefusal::TaskProjectionUnavailable)?;
     if !plan
         .effect_plan()
         .is_subset_of(run.allowed_operation_classes())
@@ -697,7 +737,7 @@ fn validate_control_basis(
     if let Some(deficit) = run.resource_budget().first_deficit(&plan.resource_budget()) {
         return Err(ActionPacketRefusal::PlanBudgetOutsideRun { deficit });
     }
-    Ok(())
+    Ok(generation)
 }
 
 fn validate_context(
@@ -744,6 +784,13 @@ fn validate_context(
         if adjacent[0] == adjacent[1] {
             return Err(ActionPacketRefusal::DuplicateContextPacket {
                 packet_id: adjacent[0],
+            });
+        }
+    }
+    for required in plan.input_context_packets() {
+        if ids.binary_search(required).is_err() {
+            return Err(ActionPacketRefusal::MissingContextPacket {
+                packet_id: *required,
             });
         }
     }
@@ -831,15 +878,11 @@ fn validate_steps(
     Ok(aggregate)
 }
 
-fn canonicalize_digests(
-    field: &'static str,
-    values: &mut Vec<Digest>,
-    limit: usize,
-) -> Result<(), ActionPacketRefusal> {
-    if values.len() > limit {
+fn canonicalize_peer_changes(values: &mut Vec<Digest>) -> Result<(), ActionPacketRefusal> {
+    if values.len() > MAX_ACTION_PEER_CHANGES {
         return Err(ActionPacketRefusal::TooManyPeerChanges {
             observed: values.len(),
-            limit,
+            limit: MAX_ACTION_PEER_CHANGES,
         });
     }
     values.sort_unstable();
@@ -848,7 +891,6 @@ fn canonicalize_digests(
             return Err(ActionPacketRefusal::DuplicatePeerChange { root: adjacent[0] });
         }
     }
-    let _ = field;
     Ok(())
 }
 
@@ -856,8 +898,10 @@ fn packet_commitment(packet: &AgentActionPacket) -> Result<[u8; 32], ActionPacke
     let mut encoder = Encoder::with_capacity(1_024);
     encoder.write_bytes("agent_action_packet_domain", ACTION_PACKET_DOMAIN)?;
     encoder.write_raw(packet.situation_id.as_bytes());
+    encoder.write_raw(&packet.task_projection_generation);
     encoder.write_raw(packet.plan_id.as_bytes());
     encoder.write_raw(packet.active_claim_id.as_bytes());
+    encoder.write_raw(packet.task_id.as_bytes());
     encoder.write_raw(&packet.run_id.value().to_be_bytes());
     encoder.write_scalar(packet.observed_at.value());
     write_count(
