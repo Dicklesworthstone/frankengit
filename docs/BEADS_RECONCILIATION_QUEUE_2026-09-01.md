@@ -56,13 +56,15 @@ Revisions:
 - `5997e8d2389d85098e18a96a5bb3372da0587e75` — initial activation;
 - `4dc1d58d064329323e52e61959a65d1d3723ef8a` — add plan-strict public wrapper;
 - `477408afdfe9004c20de7c0ab671860f8dc30e71` — simplify and pin the exact-class guard;
-- `16b51ce3fbfaf1c80ce29967be63f3d93f4593cb` — make the strict wrapper the only public construction API.
+- `16b51ce3fbfaf1c80ce29967be63f3d93f4593cb` — make the strict wrapper the only public construction API;
+- `bc5cfc41d10c03068f0972185ffafd7e8fb5e9ea` — run canonical structural validation before exact-class enforcement so malformed row order cannot change the first refusal.
 
 Implemented boundary:
 
 - exact situation/action-packet/plan/run/task binding;
 - complete requirement outcome matrix;
 - exact plan-required evidence class for satisfied/partial lines;
+- deterministic structural refusal precedence before the strict plan-relative class check;
 - artifact-linked supporting evidence;
 - machine-classified verifier independence;
 - plan-contained ownership findings;
@@ -114,7 +116,8 @@ Not implemented:
 
 - `884e7475b5a579ad8c30fcda3166f88e4d3d1b40` — implementation-status ledger reconciled to the source tower;
 - `ec0c74a917367b7048df0a39c118aa12ae7e8bbe` — changelog updated from architecture-only to active implementation;
-- `4b083d09efe2990d12a6e946a29990fa4222378f` — dated change record for action, learning, and continuity.
+- `4b083d09efe2990d12a6e946a29990fa4222378f` — dated change record for action, learning, and continuity;
+- `0434581dc1756cb4728f8143e5615211a3b3da88` — dated record extended through the deterministic learning-refusal correction.
 
 ## Verification state
 
@@ -131,6 +134,8 @@ cargo test -p fgit-registry-check
 ```
 
 Source-level tests and commit messages are not substitutes for those results.
+
+The designated verifier must test `bc5cfc41d10c03068f0972185ffafd7e8fb5e9ea` or a descendant containing the documentation-only commits. A result against an earlier wrapper revision does not cover deterministic strict-learning refusal precedence.
 
 ## Recommended operator procedure
 
@@ -158,7 +163,7 @@ Move the Bead to an implementation-complete or `batch_pending`-equivalent state 
 ## Suggested progress-comment substance
 
 ```text
-Agent Control Plane implementation advanced through bounded Level-1 action packets, plan-strict evidence-grounded outcome learning, and explicit time-only active-claim/action-packet continuity. Relevant revisions: 72a9160d, 2378bb34, b5933a65, a23125a0, 78ac0bc9, 4dc1d58d, 477408af, 16b51ce3, c8a29a12, 207bbb67, c3ac9e32. Source-level tests are present. No formatter/compiler/test/clippy/fast-lane or independent batch result was observed in the implementation environment. Handoff/cancellation still require continuity-aware public construction, and production task/executor/storage/robot/ECC/learning-index surfaces remain absent. Verification or closure is not requested without the designated gate.
+Agent Control Plane implementation advanced through bounded Level-1 action packets, plan-strict evidence-grounded outcome learning, and explicit time-only active-claim/action-packet continuity. Relevant revisions: 72a9160d, 2378bb34, b5933a65, a23125a0, 78ac0bc9, 4dc1d58d, 477408af, 16b51ce3, c8a29a12, 207bbb67, c3ac9e32, bc5cfc41. Source-level tests are present. No formatter/compiler/test/clippy/fast-lane or independent batch result was observed in the implementation environment. Handoff/cancellation still require continuity-aware public construction, and production task/executor/storage/robot/ECC/learning-index surfaces remain absent. Verification or closure is not requested without the designated gate.
 ```
 
 ## Stop conditions for reconciliation
