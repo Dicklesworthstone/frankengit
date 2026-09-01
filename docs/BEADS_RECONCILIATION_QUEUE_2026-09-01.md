@@ -109,15 +109,60 @@ Not implemented:
 
 - plan-relative invalidation when a component changes;
 - authority-history proof for a later head;
-- continuity-aware public handoff/cancellation construction;
 - executor consumption of the continuation receipt.
+
+### Proof-carrying handoff and safe cancellation
+
+Revisions:
+
+- `36e64f71d5d17c6d8553339e14c52a6a0bdb1592` — add the public proof-carrying handoff facade;
+- `990016ce756cc41fe7c2216d1364f1034a32924c` — add the first public proof-carrying cancellation facade;
+- `5ac024eba6a28b1334306a1a6c520eef412a5d46` — make raw handoff/cancellation engines crate-private and expose only the facades;
+- `65a69399f9f11a4b36d51033a9a47126b7f4e665` — add public-path lifecycle-continuity integration tests;
+- `b9ffc200b03c6e77ff4235211de6d31ba29cf4bb` — remove an unused test import under the warnings-as-errors policy;
+- `82fd0c9df4f9930349133bb5631c595fe8ef7977` — correct cancellation so context change never blocks a conservative stop;
+- `a91ab9808e9c8bf4849b87208207cffac7dc172b` — update integration tests for changed-context cancellation and optional continuity evidence;
+- `9d5ab0616dcb41becd7cb0a323e0863ccb10d635` — reconcile crate-level continuation-versus-cancellation semantics;
+- `d6b8cdc6ff996d208822338f06c34001ba125352` — pin the exact changed-component continuity refusal.
+
+Implemented boundary:
+
+- raw capsule and cancellation state-machine engines are crate-private;
+- public handoff construction accepts the exact claim-activation situation or a validated `ActiveClaimContinuityReceipt`;
+- public handoff identity commits the private canonical capsule plus the continuity proof choice and receipt ID when present;
+- receiver acceptance binds the proof-carrying public capsule identity;
+- public cancellation binds the exact latest situation, active claim when present, and complete reconciliation report;
+- cancellation remains available after peer/search/conflict/evidence/capability/obligation/registry/graph or other context change;
+- optional cancellation continuity evidence is revalidated and committed into the public request identity;
+- public cancellation completion commits the public request identity, preserving optional proof evidence through terminal state;
+- frozen effect membership, immutable effect identity, monotone evidence and charged resources, explicit task release/transfer, named escalation transfer, and leak containment remain enforced by the private engine.
+
+Fresh-review correction:
+
+- the first provisional cancellation facade copied handoff's exact-activation-or-continuity prerequisite;
+- that was rejected because handoff continues work while cancellation reduces work;
+- the final API never requires continuity to request cancellation.
+
+Not implemented:
+
+- production task claim/release/transfer mutation;
+- process reaping or workspace cleanup;
+- effect-time capability revocation;
+- a later-head ancestry witness for receiver acceptance;
+- durable public/private ID codecs and migration;
+- a production cancellation orchestrator or action executor;
+- canonical publication.
 
 ### Documentation revisions
 
 - `884e7475b5a579ad8c30fcda3166f88e4d3d1b40` — implementation-status ledger reconciled to the source tower;
 - `ec0c74a917367b7048df0a39c118aa12ae7e8bbe` — changelog updated from architecture-only to active implementation;
 - `4b083d09efe2990d12a6e946a29990fa4222378f` — dated change record for action, learning, and continuity;
-- `0434581dc1756cb4728f8143e5615211a3b3da88` — dated record extended through the deterministic learning-refusal correction.
+- `0434581dc1756cb4728f8143e5615211a3b3da88` — dated record extended through the deterministic learning-refusal correction;
+- `f6c8e2c72b3f7b51b0dda2b957c422dcd3d8eb84` — implementation status reconciled through proof-carrying lifecycle semantics;
+- `a5f56a48d35355fbb138ec623738a745f446abb3` — changelog reconciled through the lifecycle wave;
+- `cf9ad1f596373719def5be295927f76865cb424a` — focused lifecycle-continuity design contract;
+- `5dfae3590f70ed33120112c1ae6b181b92b8d5d8` — dated implementation record extended through the lifecycle closure.
 
 ## Verification state
 
@@ -125,7 +170,7 @@ No Rust or repository-owned verification command was executed in the implementat
 
 ```text
 cargo fmt --all --check
-cargo test -p fgit-agent
+cargo test -p fgit-agent --all-targets
 cargo clippy -p fgit-agent --all-targets -- -D warnings
 cargo test -p fgit-registry-check
 ./scripts/verify.sh docs
@@ -135,7 +180,7 @@ cargo test -p fgit-registry-check
 
 Source-level tests and commit messages are not substitutes for those results.
 
-The designated verifier must test `bc5cfc41d10c03068f0972185ffafd7e8fb5e9ea` or a descendant containing the documentation-only commits. A result against an earlier wrapper revision does not cover deterministic strict-learning refusal precedence.
+The designated verifier must test `d6b8cdc6ff996d208822338f06c34001ba125352` or a descendant containing the documentation-only commits. A result against an earlier facade revision does not cover the corrected cancellation semantics or exact typed-refusal oracle.
 
 ## Recommended operator procedure
 
@@ -155,15 +200,15 @@ For the unambiguously owning Bead, attach a progress comment that:
 - names the exact implementation revisions above;
 - states that source and focused test cases are present;
 - states that no Rust command result was observed;
-- states that handoff/cancellation still need continuity-aware public boundaries;
-- states that product adapters, durable codecs/storage, robot/API surfaces, ECC assembly, and independent verification remain absent.
+- states that the former handoff/cancellation continuity gap is closed with a proof-carrying handoff facade and a changed-context-safe cancellation facade;
+- states that production task/executor/storage/robot/ECC/learning-index surfaces remain absent.
 
 Move the Bead to an implementation-complete or `batch_pending`-equivalent state only when the current Bead policy and acceptance contract support that transition. Do not mark it `verified` or `closed` without the designated revision-bound independent gate.
 
 ## Suggested progress-comment substance
 
 ```text
-Agent Control Plane implementation advanced through bounded Level-1 action packets, plan-strict evidence-grounded outcome learning, and explicit time-only active-claim/action-packet continuity. Relevant revisions: 72a9160d, 2378bb34, b5933a65, a23125a0, 78ac0bc9, 4dc1d58d, 477408af, 16b51ce3, c8a29a12, 207bbb67, c3ac9e32, bc5cfc41. Source-level tests are present. No formatter/compiler/test/clippy/fast-lane or independent batch result was observed in the implementation environment. Handoff/cancellation still require continuity-aware public construction, and production task/executor/storage/robot/ECC/learning-index surfaces remain absent. Verification or closure is not requested without the designated gate.
+Agent Control Plane implementation advanced through bounded Level-1 action packets, plan-strict evidence-grounded outcome learning, time-only active-claim/action-packet continuity, proof-carrying handoff, and changed-context-safe cancellation. Relevant final source revisions include 72a9160d, b5933a65, bc5cfc41, c8a29a12, c3ac9e32, 36e64f71, 5ac024eb, 82fd0c9d, a91ab980, 9d5ab061, and d6b8cdc6. Raw handoff/cancellation engines are crate-private. Later handoff requires and commits full-context continuity; cancellation never requires continuity to stop but optionally retains it in public request/completion identity. Focused public-path test source is present. No formatter/compiler/test/clippy/fast-lane or independent batch result was observed in the implementation environment. Production task/executor/storage/robot/ECC/learning-index surfaces remain absent. Verification or closure is not requested without the designated gate.
 ```
 
 ## Stop conditions for reconciliation
