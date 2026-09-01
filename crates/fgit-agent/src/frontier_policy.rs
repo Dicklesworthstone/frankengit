@@ -38,7 +38,7 @@ impl WorkFrontier {
     }
 }
 
-fn scope_independence(item: WorkItem) -> WorkItem {
+const fn scope_independence(item: WorkItem) -> WorkItem {
     let eligibility = item.eligibility();
     let independent_from = match item.phase() {
         TaskPhase::ImplementationReady | TaskPhase::VerificationPending => {

@@ -68,6 +68,12 @@
 //! Intent Run is still live, and preserves compact counts for every exclusion
 //! class before exposing one advisory next action.
 //!
+//! [`plan`] turns that selected action into an inert execution contract. It
+//! binds the acceptance root, authority-matched context, intended and conflict
+//! surfaces, coherent checkpoints, evidence obligations, effect classes,
+//! resource ceiling, stop conditions, rejected shortcuts, non-claims, and
+//! approval state without claiming work or performing an effect.
+//!
 //! The obligation lifecycle is not reimplemented either. `fgit-resource` owns
 //! it, and [`broker`] explains exactly which half of an effect's reservation
 //! this crate holds and which half belongs to the component that performs it.
@@ -79,6 +85,7 @@ pub mod ecc;
 pub mod frontier;
 mod frontier_policy;
 pub mod intent;
+pub mod plan;
 pub mod protocol;
 pub mod pulse;
 pub mod refresh;
@@ -107,6 +114,12 @@ pub use frontier::{
     WorkItem, WorkRankingInputs, WorkRankingWitness, WorkTaskId,
 };
 pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
+pub use plan::{
+    AgentChangePlan, AgentChangePlanId, AgentChangePlanSpec, MAX_PLAN_CHECKPOINTS,
+    MAX_PLAN_ENTRIES, PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
+    PlanEvidenceRequirement, PlanRefusal, PlanRequirementId, PlanStopCondition,
+    PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcut, RejectedShortcutSet,
+};
 pub use protocol::{
     AgentRefTransaction, AuthorityReadReceipt, ContextControl, ContextPacket, ContextPacketId,
     ContextSource, MAX_CONTEXT_SOURCE_BYTES, MAX_CONTEXT_SOURCES, MAX_CONTEXT_TOTAL_BYTES,
