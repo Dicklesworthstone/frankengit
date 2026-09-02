@@ -66,6 +66,7 @@ mod async_contract;
 mod capability_revocation;
 mod contract;
 pub mod history;
+mod head_ancestry;
 mod identity;
 mod injection;
 mod keys;
@@ -112,6 +113,11 @@ pub use crate::contract::{
     AuthorityLimits, AuthorityStore, CasResolution, FaultableAuthorityStore, PutResolution,
     ambiguity_of, refusal_of, resolve_ambiguous_cas, resolve_ambiguous_cas_async,
     resolve_ambiguous_put, resolve_ambiguous_put_async,
+};
+pub use crate::head_ancestry::{
+    MAX_AUTHORITY_HEAD_ANCESTRY_HOPS, AuthorityHeadAncestryReceipt,
+    AuthorityHeadAncestryReceiptId, AuthorityHeadAncestryRefusal, CurrentAuthorityHead,
+    read_current_authority_head_descendant, read_current_authority_head_descendant_async,
 };
 pub use crate::identity::{
     IdempotencyKey, IdentityRefusal, MAX_IDEMPOTENCY_KEY_BYTES, TxIdPreimage, canonical_body_id,
