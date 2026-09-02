@@ -9,8 +9,8 @@
 //! The plan does not claim work, reserve files, execute tools, mutate a
 //! workspace, or publish repository state. It is a deterministic commitment
 //! over an already validated [`crate::AgentControlPulse`], the exact live
-//! [`crate::IntentRun`], authority-matched context packets, and bounded typed
-//! planning inputs.
+//! [`crate::IntentRun`] including its complete machine commitment,
+//! authority-matched context packets, and bounded typed planning inputs.
 
 use core::fmt;
 
@@ -21,14 +21,15 @@ use fgit_types::Digest;
 
 use crate::{
     AgentControlPulse, ClassSet, ContextPacket, ContextPacketId, EvidenceClass, IntentRun,
-    PulseSelection, PulseState, RunId, TaskPhase, WorkAction, WorkFrontierId, WorkTaskId,
+    IntentRunCommitment, IntentRunIdentityRefusal, PulseSelection, PulseState, RunId,
+    TaskPhase, WorkAction, WorkFrontierId, WorkTaskId,
 };
 
 /// Largest collection accepted in one plan field.
 pub const MAX_PLAN_ENTRIES: usize = 256;
 /// Largest ordered checkpoint sequence in one plan.
 pub const MAX_PLAN_CHECKPOINTS: usize = 64;
-const PLAN_DOMAIN: &[u8] = b"frankengit.agent.change-plan/v1\0";
+const PLAN_DOMAIN: &[u8] = b"frankengit.agent.change-plan/v2\0";
 
 /// Stable SHA-256 identity of a complete change plan.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -619,6 +620,7 @@ pub struct AgentChangePlan {
     situation_id: [u8; 32],
     frontier_id: WorkFrontierId,
     intent_run_id: RunId,
+    intent_run_commitment: IntentRunCommitment,
     task_id: WorkTaskId,
     task_phase: TaskPhase,
     action: WorkAction,
@@ -642,18 +644,19 @@ impl AgentChangePlan {
     ///
     /// # Errors
     ///
-    /// Refuses a non-actionable pulse, missing or substituted run, stale run,
-    /// authority-mismatched context, excessive/duplicate inputs, incomplete
-    /// conflict coverage, incoherent checkpoints/evidence, operation or budget
-    /// amplification, missing mandatory stop conditions, missing baseline
-    /// shortcut refusals, and unrepresentable canonical framing.
+    /// Refuses a non-actionable pulse, missing or substituted complete run,
+    /// stale run, authority-mismatched context, excessive/duplicate inputs,
+    /// incomplete conflict coverage, incoherent checkpoints/evidence,
+    /// operation or budget amplification, missing mandatory stop conditions,
+    /// missing baseline shortcut refusals, and unrepresentable canonical
+    /// framing.
     pub fn build(
         pulse: &AgentControlPulse,
         run: &IntentRun,
         context_packets: &[ContextPacket],
         mut spec: AgentChangePlanSpec,
     ) -> Result<Self, PlanRefusal> {
-        let selected = validate_plan_run(pulse, run)?;
+        let (selected, run_commitment) = validate_plan_run(pulse, run)?;
         validate_plan_scope(run, &spec)?;
 
         let run_receipt = run
@@ -675,6 +678,7 @@ impl AgentChangePlan {
             situation_id: *pulse.situation_id(),
             frontier_id: pulse.frontier_id(),
             intent_run_id: run.run_id(),
+            intent_run_commitment: run_commitment,
             task_id: selected.task_id(),
             task_phase: selected.phase(),
             action: selected.action(),
@@ -720,10 +724,16 @@ impl AgentChangePlan {
         self.frontier_id
     }
 
-    /// Exact run authorized to execute the plan.
+    /// Coordination ID of the run authorized to execute the plan.
     #[must_use]
     pub const fn intent_run_id(&self) -> RunId {
         self.intent_run_id
+    }
+
+    /// Complete machine-enforced run identity authorized to execute the plan.
+    #[must_use]
+    pub const fn intent_run_commitment(&self) -> IntentRunCommitment {
+        self.intent_run_commitment
     }
 
     /// Selected task.
@@ -833,6 +843,8 @@ pub enum PlanRefusal {
     },
     /// Actionable pulse carried no run identity.
     ActiveRunMissing,
+    /// Actionable pulse carried no complete run commitment.
+    ActiveRunCommitmentMissing,
     /// Supplied run differs from the pulse.
     ActiveRunMismatch {
         /// Run selected by the pulse.
@@ -840,10 +852,19 @@ pub enum PlanRefusal {
         /// Run supplied to planning.
         observed: RunId,
     },
+    /// Same coordination ID carries another complete run commitment.
+    ActiveRunCommitmentMismatch {
+        /// Commitment selected by the pulse.
+        expected: IntentRunCommitment,
+        /// Commitment computed from the supplied run.
+        observed: IntentRunCommitment,
+    },
     /// Supplied run has no complete authenticated authority receipt.
     ActiveRunAuthorityReceiptRequired,
     /// Supplied run is based on another authority position.
     ActiveRunAuthorityMismatch,
+    /// Complete run identity could not be produced.
+    RunIdentity(IntentRunIdentityRefusal),
     /// Supplied run expired at or before the pulse observation.
     ActiveRunExpired {
         /// Expired run.
@@ -954,15 +975,23 @@ impl fmt::Display for PlanRefusal {
                 write!(formatter, "agent control pulse is not actionable: {state:?}")
             }
             Self::ActiveRunMissing => formatter.write_str("actionable pulse has no active run"),
+            Self::ActiveRunCommitmentMissing => {
+                formatter.write_str("actionable pulse has no complete active-run commitment")
+            }
             Self::ActiveRunMismatch { expected, observed } => {
                 write!(formatter, "supplied run {observed} differs from pulse run {expected}")
             }
+            Self::ActiveRunCommitmentMismatch { expected, observed } => write!(
+                formatter,
+                "supplied run commitment {observed} differs from pulse run {expected}"
+            ),
             Self::ActiveRunAuthorityReceiptRequired => formatter.write_str(
                 "change planning requires a run with a complete authenticated authority receipt",
             ),
             Self::ActiveRunAuthorityMismatch => {
                 formatter.write_str("active run authority differs from the pulse")
             }
+            Self::RunIdentity(refusal) => write!(formatter, "active run identity refused: {refusal}"),
             Self::ActiveRunExpired { run_id } => {
                 write!(formatter, "active run {run_id} expired before planning")
             }
@@ -1051,6 +1080,12 @@ impl fmt::Display for PlanRefusal {
 
 impl core::error::Error for PlanRefusal {}
 
+impl From<IntentRunIdentityRefusal> for PlanRefusal {
+    fn from(value: IntentRunIdentityRefusal) -> Self {
+        Self::RunIdentity(value)
+    }
+}
+
 impl From<CodecRefusal> for PlanRefusal {
     fn from(value: CodecRefusal) -> Self {
         Self::Codec(value)
@@ -1060,7 +1095,7 @@ impl From<CodecRefusal> for PlanRefusal {
 fn validate_plan_run(
     pulse: &AgentControlPulse,
     run: &IntentRun,
-) -> Result<PulseSelection, PlanRefusal> {
+) -> Result<(PulseSelection, IntentRunCommitment), PlanRefusal> {
     if pulse.state() != PulseState::Actionable {
         return Err(PlanRefusal::PulseNotActionable {
             state: pulse.state(),
@@ -1070,10 +1105,20 @@ fn validate_plan_run(
         state: pulse.state(),
     })?;
     let expected_run = pulse.active_run().ok_or(PlanRefusal::ActiveRunMissing)?;
+    let expected_commitment = pulse
+        .active_run_commitment()
+        .ok_or(PlanRefusal::ActiveRunCommitmentMissing)?;
     if run.run_id() != expected_run {
         return Err(PlanRefusal::ActiveRunMismatch {
             expected: expected_run,
             observed: run.run_id(),
+        });
+    }
+    let observed_commitment = run.commitment()?;
+    if observed_commitment != expected_commitment {
+        return Err(PlanRefusal::ActiveRunCommitmentMismatch {
+            expected: expected_commitment,
+            observed: observed_commitment,
         });
     }
     let run_receipt = run
@@ -1090,7 +1135,7 @@ fn validate_plan_run(
             run_id: run.run_id(),
         });
     }
-    Ok(selected)
+    Ok((selected, observed_commitment))
 }
 
 fn validate_plan_scope(
@@ -1293,12 +1338,13 @@ fn check_len(field: &'static str, observed: usize, limit: usize) -> Result<(), P
 }
 
 fn plan_commitment(plan: &AgentChangePlan) -> Result<[u8; 32], PlanRefusal> {
-    let mut encoder = Encoder::with_capacity(1_024);
+    let mut encoder = Encoder::with_capacity(1_088);
     encoder.write_bytes("agent_change_plan_domain", PLAN_DOMAIN)?;
     encoder.write_raw(&plan.pulse_id);
     encoder.write_raw(&plan.situation_id);
     encoder.write_raw(plan.frontier_id.as_bytes());
     encoder.write_raw(&plan.intent_run_id.value().to_be_bytes());
+    encoder.write_raw(plan.intent_run_commitment.as_bytes());
     encoder.write_raw(plan.task_id.as_bytes());
     encoder.write_raw_byte(task_phase_code(plan.task_phase));
     encoder.write_raw_byte(work_action_code(plan.action));
