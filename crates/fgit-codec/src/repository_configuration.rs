@@ -11,8 +11,7 @@
 //! cannot be filled in later through a side database or mutable cache.
 
 use fgit_types::{
-    Digest, DomainTag, GitHashAlgorithm, RepositoryIncarnationId, RootLayoutVersion,
-    SchemaFamily,
+    Digest, DomainTag, GitHashAlgorithm, RepositoryIncarnationId, RootLayoutVersion, SchemaFamily,
 };
 
 use crate::{CanonicalBody, CodecRefusal, Decoder, Encoder};
@@ -62,9 +61,8 @@ impl CanonicalBody for RepositoryIncarnationConfigurationBodyV2_2 {
             RootLayoutVersion::from_code_point(input.read_scalar::<u16>("root_layout")?)?;
         let object_format =
             GitHashAlgorithm::from_code_point(input.read_scalar::<u16>("object_format")?)?;
-        let repository_incarnation_id = RepositoryIncarnationId::from_bytes(
-            input.read_opaque_id("repository_incarnation_id")?,
-        );
+        let repository_incarnation_id =
+            RepositoryIncarnationId::from_bytes(input.read_opaque_id("repository_incarnation_id")?);
         let policy_root = input.read_option("policy_root", Decoder::read_digest)?;
         let capability_revocation_root =
             input.read_option("capability_revocation_root", Decoder::read_digest)?;

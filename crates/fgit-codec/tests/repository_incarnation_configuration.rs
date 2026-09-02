@@ -219,14 +219,14 @@ fn schema_two_two_roots_are_independent_identity_fields() {
 
     let encoded = encode_body(&both).expect("the v2.2 body encodes");
     assert_eq!(
-        decode_body::<RepositoryIncarnationConfigurationBodyV2_2>(
-            &encoded,
-            DecodeLimits::DEFAULT,
-        )
-        .expect("the v2.2 body decodes"),
+        decode_body::<RepositoryIncarnationConfigurationBodyV2_2>(&encoded, DecodeLimits::DEFAULT,)
+            .expect("the v2.2 body decodes"),
         both,
     );
-    assert_ne!(encoded, encode_body(&policy_only).expect("policy-only body"));
+    assert_ne!(
+        encoded,
+        encode_body(&policy_only).expect("policy-only body")
+    );
     assert_ne!(
         encoded,
         encode_body(&revocation_only).expect("revocation-only body")
