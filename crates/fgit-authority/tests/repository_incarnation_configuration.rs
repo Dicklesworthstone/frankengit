@@ -4,12 +4,13 @@
 use fgit_authority::{
     MemoryAuthorityStore, OutcomeFailure, RepositoryIncarnationConfiguration, StoreInstanceId,
     read_hidden_ref_policy, read_repository_incarnation_configuration, stage_hidden_ref_policy,
-    stage_latest_repository_incarnation_configuration, stage_repository_configuration,
-    stage_repository_incarnation_configuration,
+    stage_latest_repository_incarnation_configuration,
+    stage_repository_configuration, stage_repository_incarnation_configuration,
+    stage_revocation_aware_repository_incarnation_configuration,
 };
 use fgit_codec::{
     HiddenRefPolicyBody, RepositoryConfigurationBody, RepositoryIncarnationConfigurationBody,
-    RepositoryIncarnationConfigurationBodyV2_1,
+    RepositoryIncarnationConfigurationBodyV2_1, RepositoryIncarnationConfigurationBodyV2_2,
 };
 use fgit_crypto::IdentityDomain;
 use fgit_types::hash::{Digest, DigestBytes};
@@ -34,12 +35,19 @@ const fn v2_configuration(value: u8) -> RepositoryIncarnationConfigurationBodyV2
     }
 }
 
+fn digest(value: u8) -> Digest {
+    Digest::new(
+        IdentityDomain::Generation.algorithm().id(),
+        DigestBytes::try_new(&[value; 32]).expect("fixed digest length"),
+    )
+}
+
 #[test]
 fn exact_v2_configuration_resolves_with_its_minted_incarnation() {
     let backing = store();
     let expected = v2_configuration(0x59);
     let root = stage_latest_repository_incarnation_configuration(&backing, &expected)
-        .expect("the newest v2.1 configuration stages in the head-selected slot");
+        .expect("the v2.1 configuration stages in the head-selected slot");
 
     assert_eq!(
         read_repository_incarnation_configuration(&backing, &root)
@@ -49,13 +57,14 @@ fn exact_v2_configuration_resolves_with_its_minted_incarnation() {
             object_format: expected.object_format,
             repository_incarnation_id: expected.repository_incarnation_id,
             policy_root: None,
+            capability_revocation_root: None,
         },
-        "a permitted current incarnation must preserve all permanent facts"
+        "a permitted historical incarnation must preserve all permanent facts"
     );
 }
 
 #[test]
-fn legacy_v2_zero_normalizes_to_an_absent_policy_root() {
+fn legacy_v2_zero_normalizes_to_absent_later_minor_roots() {
     let backing = store();
     let legacy = RepositoryIncarnationConfigurationBody {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
@@ -73,13 +82,14 @@ fn legacy_v2_zero_normalizes_to_an_absent_policy_root() {
             object_format: legacy.object_format,
             repository_incarnation_id: legacy.repository_incarnation_id,
             policy_root: None,
+            capability_revocation_root: None,
         },
-        "v2.0 has no policy field and must never be retroactively reinterpreted"
+        "v2.0 must never be retroactively reinterpreted as carrying later roots"
     );
 }
 
 #[test]
-fn current_v2_one_preserves_the_shared_policy_root() {
+fn current_v2_one_preserves_policy_and_explicitly_lacks_revocation() {
     let backing = store();
     let policy = HiddenRefPolicyBody {
         rules: vec![
@@ -96,7 +106,7 @@ fn current_v2_one_preserves_the_shared_policy_root() {
         policy_root: Some(policy_root),
     };
     let root = stage_latest_repository_incarnation_configuration(&backing, &current)
-        .expect("the newest carrier stages the policy pointer");
+        .expect("the v2.1 carrier stages the policy pointer");
 
     assert_eq!(
         read_repository_incarnation_configuration(&backing, &root)
@@ -106,6 +116,7 @@ fn current_v2_one_preserves_the_shared_policy_root() {
             object_format: current.object_format,
             repository_incarnation_id: current.repository_incarnation_id,
             policy_root: Some(policy_root),
+            capability_revocation_root: None,
         }
     );
     assert_eq!(
@@ -113,6 +124,34 @@ fn current_v2_one_preserves_the_shared_policy_root() {
             .expect("the selected policy root resolves in the shared vocabulary"),
         policy,
         "the carrier cannot point at a different policy body"
+    );
+}
+
+#[test]
+fn v2_two_preserves_hidden_ref_and_capability_revocation_roots() {
+    let backing = store();
+    let policy_root = digest(0x71);
+    let capability_revocation_root = digest(0x72);
+    let current = RepositoryIncarnationConfigurationBodyV2_2 {
+        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        object_format: GitHashAlgorithm::Sha256,
+        repository_incarnation_id: incarnation(0x5C),
+        policy_root: Some(policy_root),
+        capability_revocation_root: Some(capability_revocation_root),
+    };
+    let root = stage_revocation_aware_repository_incarnation_configuration(&backing, &current)
+        .expect("the v2.2 carrier stages both exact roots");
+
+    assert_eq!(
+        read_repository_incarnation_configuration(&backing, &root)
+            .expect("the union reader resolves exact v2.2"),
+        RepositoryIncarnationConfiguration {
+            root_layout: current.root_layout,
+            object_format: current.object_format,
+            repository_incarnation_id: current.repository_incarnation_id,
+            policy_root: Some(policy_root),
+            capability_revocation_root: Some(capability_revocation_root),
+        }
     );
 }
 
