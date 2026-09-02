@@ -1,24 +1,26 @@
 #![forbid(unsafe_code)]
-//! The production incarnation-configuration reader refuses an unknown format.
+//! The production incarnation-configuration reader refuses unknown formats.
 //!
-//! The reader is the surface `OneNode::open_existing` uses after authenticating
-//! the head. This test stores a deliberately malformed *current-v2* body at
-//! its canonical selected root, rather than relying on a legacy-v1 mismatch.
+//! The reader is the surface a repository opener uses after authenticating the
+//! head. These tests store deliberately malformed or future bodies at exact
+//! selected roots rather than relying on a legacy-v1 mismatch.
 
 use fgit_authority::{
     AuthorityStore, MemoryAuthorityStore, OutcomeFailure, RepositoryIncarnationConfiguration,
     RepositoryIncarnationConfigurationEvidence, StoreInstanceId, body_key, canonical_body_id,
     read_repository_incarnation_configuration, read_repository_incarnation_configuration_evidence,
     stage_latest_repository_incarnation_configuration, stage_repository_incarnation_configuration,
+    stage_revocation_aware_repository_incarnation_configuration,
 };
 use fgit_codec::{
     CanonicalBody, CodecRefusal, Decoder, Encoder, RepositoryIncarnationConfigurationBody,
-    RepositoryIncarnationConfigurationBodyV2_1, encode_body,
+    RepositoryIncarnationConfigurationBodyV2_1, RepositoryIncarnationConfigurationBodyV2_2,
+    encode_body,
 };
 use fgit_crypto::IdentityDomain;
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::error::TypeRefusal;
-use fgit_types::hash::Digest;
+use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::RepositoryIncarnationId;
 use fgit_types::label::{DomainTag, SchemaFamily};
 use fgit_types::layout::RootLayoutVersion;
@@ -36,7 +38,7 @@ const fn known_configuration() -> RepositoryIncarnationConfigurationBody {
     }
 }
 
-const fn current_configuration() -> RepositoryIncarnationConfigurationBodyV2_1 {
+const fn v2_one_configuration() -> RepositoryIncarnationConfigurationBodyV2_1 {
     RepositoryIncarnationConfigurationBodyV2_1 {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: GitHashAlgorithm::Sha256,
@@ -45,10 +47,25 @@ const fn current_configuration() -> RepositoryIncarnationConfigurationBodyV2_1 {
     }
 }
 
-/// An encoder-only adversarial body with the precise domain and schema the
-/// production reader selects, but an unallocated object-format code point.
-/// It permits testing the real immutable-slot lookup without accepting the
-/// malformed value into the typed configuration vocabulary.
+fn digest(byte: u8) -> Digest {
+    Digest::new(
+        IdentityDomain::Generation.algorithm().id(),
+        DigestBytes::try_new(&[byte; 32]).expect("fixed digest"),
+    )
+}
+
+fn v2_two_configuration() -> RepositoryIncarnationConfigurationBodyV2_2 {
+    RepositoryIncarnationConfigurationBodyV2_2 {
+        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        object_format: GitHashAlgorithm::Sha256,
+        repository_incarnation_id: RepositoryIncarnationId::from_bytes([0x62; 16]),
+        policy_root: Some(digest(0x71)),
+        capability_revocation_root: Some(digest(0x72)),
+    }
+}
+
+/// Encoder-only adversarial body with the exact domain and major the production
+/// reader selects, but an unallocated object-format code point.
 struct UnknownV2ObjectFormatConfiguration;
 
 impl CanonicalBody for UnknownV2ObjectFormatConfiguration {
@@ -72,22 +89,22 @@ impl CanonicalBody for UnknownV2ObjectFormatConfiguration {
     }
 }
 
-/// A framed schema-2.2 body is deliberately not a compatibility fallback. The
-/// production union implements exactly 2.0 and 2.1, so this encoder-only
-/// future minor must be refused before its payload can acquire a local meaning.
+/// A framed schema-2.3 body is deliberately not a compatibility fallback. The
+/// production union implements exactly 2.0, 2.1, and 2.2.
 struct FutureV2Configuration;
 
 impl CanonicalBody for FutureV2Configuration {
     const DOMAIN: DomainTag = DomainTag::from_static("frankengit/repository-configuration/v1");
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("repository-configuration");
     const SCHEMA_MAJOR: u16 = 2;
-    const SCHEMA_MINOR: u16 = 2;
+    const SCHEMA_MINOR: u16 = 3;
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         out.write_scalar(RootLayoutVersion::RefStateMerkleV1.code_point());
         out.write_scalar(GitHashAlgorithm::Sha256.code_point());
-        out.write_opaque_id(&[0xE2; 16]);
-        out.write_option(None::<&fgit_types::hash::Digest>, Encoder::write_digest)
+        out.write_opaque_id(&[0xE3; 16]);
+        out.write_option(None::<&Digest>, Encoder::write_digest)?;
+        out.write_option(None::<&Digest>, Encoder::write_digest)
     }
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
@@ -95,6 +112,7 @@ impl CanonicalBody for FutureV2Configuration {
         let _ = input.read_scalar::<u16>("object_format")?;
         let _ = input.read_opaque_id("repository_incarnation_id")?;
         let _ = input.read_option("policy_root", Decoder::read_digest)?;
+        let _ = input.read_option("capability_revocation_root", Decoder::read_digest)?;
         Ok(Self)
     }
 }
@@ -113,8 +131,9 @@ fn production_reader_refuses_unknown_v2_object_format_with_a_known_twin() {
             object_format: known.object_format,
             repository_incarnation_id: known.repository_incarnation_id,
             policy_root: None,
+            capability_revocation_root: None,
         },
-        "the permitted twin proves the selected-slot reader works for current v2 bodies"
+        "the permitted twin proves the selected-slot reader works for v2 bodies"
     );
 
     let malformed = UnknownV2ObjectFormatConfiguration;
@@ -146,7 +165,7 @@ fn production_reader_refuses_unknown_v2_object_format_with_a_known_twin() {
 }
 
 #[test]
-fn production_reader_refuses_an_unknown_v2_minor_without_a_legacy_fallback() {
+fn production_reader_refuses_an_unknown_v2_minor_without_fallback() {
     let backing = store();
     let future = FutureV2Configuration;
     let key = body_key(IdentityDomain::RepositoryConfiguration, &future)
@@ -169,8 +188,8 @@ fn production_reader_refuses_an_unknown_v2_minor_without_a_legacy_fallback() {
         read_repository_incarnation_configuration(&backing, &future_root),
         Err(OutcomeFailure::Codec(
             CodecRefusal::SchemaMinorUnsupported {
-                observed: 2,
-                supported: 1,
+                observed: 3,
+                supported: 2,
                 ..
             }
         ))
@@ -178,7 +197,7 @@ fn production_reader_refuses_an_unknown_v2_minor_without_a_legacy_fallback() {
 }
 
 #[test]
-fn exact_evidence_reader_preserves_the_selected_v2_minor() {
+fn exact_evidence_reader_preserves_every_supported_v2_minor() {
     let backing = store();
     let historical = known_configuration();
     let historical_root = stage_repository_incarnation_configuration(&backing, &historical)
@@ -187,23 +206,38 @@ fn exact_evidence_reader_preserves_the_selected_v2_minor() {
         read_repository_incarnation_configuration_evidence(&backing, &historical_root)
             .expect("the exact evidence reader retains v2.0"),
         RepositoryIncarnationConfigurationEvidence::V2_0(historical),
-        "v2.0 evidence remains distinguishable from a later no-policy body"
     );
 
-    let current = current_configuration();
-    let current_root = stage_latest_repository_incarnation_configuration(&backing, &current)
-        .expect("the current v2.1 configuration stages");
-    let evidence = read_repository_incarnation_configuration_evidence(&backing, &current_root)
-        .expect("the exact evidence reader retains v2.1");
+    let v2_one = v2_one_configuration();
+    let v2_one_root = stage_latest_repository_incarnation_configuration(&backing, &v2_one)
+        .expect("the v2.1 configuration stages");
+    let v2_one_evidence =
+        read_repository_incarnation_configuration_evidence(&backing, &v2_one_root)
+            .expect("the exact evidence reader retains v2.1");
     assert_eq!(
-        evidence,
-        RepositoryIncarnationConfigurationEvidence::V2_1(current),
-        "v2.1 evidence preserves its exact canonical schema"
+        v2_one_evidence,
+        RepositoryIncarnationConfigurationEvidence::V2_1(v2_one),
     );
     assert_eq!(
-        evidence.normalized(),
-        read_repository_incarnation_configuration(&backing, &current_root)
-            .expect("the normalized reader remains the policy-resolution surface"),
-        "the exact and normalized readers agree on permanent configuration facts"
+        v2_one_evidence.normalized(),
+        read_repository_incarnation_configuration(&backing, &v2_one_root)
+            .expect("the normalized reader agrees"),
+    );
+
+    let v2_two = v2_two_configuration();
+    let v2_two_root =
+        stage_revocation_aware_repository_incarnation_configuration(&backing, &v2_two)
+            .expect("the v2.2 configuration stages");
+    let v2_two_evidence =
+        read_repository_incarnation_configuration_evidence(&backing, &v2_two_root)
+            .expect("the exact evidence reader retains v2.2");
+    assert_eq!(
+        v2_two_evidence,
+        RepositoryIncarnationConfigurationEvidence::V2_2(v2_two),
+    );
+    assert_eq!(
+        v2_two_evidence.normalized(),
+        read_repository_incarnation_configuration(&backing, &v2_two_root)
+            .expect("the normalized reader agrees"),
     );
 }
