@@ -37,6 +37,7 @@ use crate::{
     classes::{ClassSet, OperationClass},
     intent::{IntentRun, RunId},
     protocol::AuthorityReadReceipt,
+    run_identity::{IntentRunCommitment, IntentRunIdentityRefusal},
 };
 
 /// Opaque effect identity (`AGENT_PROTOCOL.md` §9, `effect_id`).
@@ -200,8 +201,10 @@ pub struct ReconciliationEvidence {
 pub struct EffectRecord {
     /// Stable effect identity.
     pub effect_id: EffectId,
-    /// The run that authorized it.
+    /// Coordination identity of the run that authorized it.
     pub run_id: RunId,
+    /// Complete machine-enforced run identity that authorized it.
+    pub run_commitment: IntentRunCommitment,
     /// The concrete agent executor that performed it.
     pub agent_instance_id: AgentInstanceId,
     /// The parent effect, if this operation is a child of another effect.
@@ -298,6 +301,24 @@ pub enum EffectJournalRefusal {
         /// The malformed effect identity.
         effect_id: EffectId,
     },
+    /// One journal mixed numeric run identities.
+    MixedRun {
+        /// Effect that crossed the journal's run boundary.
+        effect_id: EffectId,
+        /// Run established by the first accepted effect.
+        expected: RunId,
+        /// Run carried by this effect.
+        observed: RunId,
+    },
+    /// One journal mixed complete run identities under the same numeric ID.
+    MixedRunCommitment {
+        /// Effect that crossed the journal's machine-run boundary.
+        effect_id: EffectId,
+        /// Commitment established by the first accepted effect.
+        expected: IntentRunCommitment,
+        /// Commitment carried by this effect.
+        observed: IntentRunCommitment,
+    },
     /// The identity had already been accepted.
     DuplicateEffectId {
         /// The repeated stable identity.
@@ -343,6 +364,22 @@ impl fmt::Display for EffectJournalRefusal {
                     "effect journal acceptance for {effect_id} is malformed"
                 )
             }
+            Self::MixedRun {
+                effect_id,
+                expected,
+                observed,
+            } => write!(
+                formatter,
+                "effect journal expected run {expected}, but {effect_id} belongs to {observed}"
+            ),
+            Self::MixedRunCommitment {
+                effect_id,
+                expected,
+                observed,
+            } => write!(
+                formatter,
+                "effect journal expected run commitment {expected}, but {effect_id} carries {observed}"
+            ),
             Self::DuplicateEffectId { effect_id } => {
                 write!(formatter, "effect journal already contains {effect_id}")
             }
@@ -379,6 +416,8 @@ impl core::error::Error for EffectJournalRefusal {}
 
 #[derive(Debug, Default)]
 struct EffectJournal {
+    run_id: Option<RunId>,
+    run_commitment: Option<IntentRunCommitment>,
     records: Vec<EffectRecord>,
     positions: BTreeMap<EffectId, usize>,
     entries: Vec<EffectJournalEntry>,
@@ -416,10 +455,32 @@ impl EffectJournal {
                 effect_id: record.effect_id,
             });
         }
+        if let Some(expected) = self.run_id {
+            if record.run_id != expected {
+                return Err(EffectJournalRefusal::MixedRun {
+                    effect_id: record.effect_id,
+                    expected,
+                    observed: record.run_id,
+                });
+            }
+        }
+        if let Some(expected) = self.run_commitment {
+            if record.run_commitment != expected {
+                return Err(EffectJournalRefusal::MixedRunCommitment {
+                    effect_id: record.effect_id,
+                    expected,
+                    observed: record.run_commitment,
+                });
+            }
+        }
         if self.contains(record.effect_id) {
             return Err(EffectJournalRefusal::DuplicateEffectId {
                 effect_id: record.effect_id,
             });
+        }
+        if self.run_id.is_none() {
+            self.run_id = Some(record.run_id);
+            self.run_commitment = Some(record.run_commitment);
         }
         let position = self.records.len();
         self.positions.insert(record.effect_id, position);
@@ -1123,6 +1184,7 @@ impl EffectBroker {
                 effect_id: request.effect_id,
             });
         }
+        let run_commitment = self.run.commitment()?;
         if !self.run.is_open_at(now) {
             return Err(BrokerRefusal::RunExpired {
                 now,
@@ -1161,6 +1223,7 @@ impl EffectBroker {
         let record = EffectRecord {
             effect_id: request.effect_id,
             run_id: self.run.run_id(),
+            run_commitment,
             agent_instance_id: self.agent_instance_id,
             parent_effect_id: request.parent_effect_id,
             capability_id: capability.id(),
@@ -1274,6 +1337,8 @@ pub enum BrokerRefusal {
         /// The repeated effect identity.
         effect_id: EffectId,
     },
+    /// The complete run identity could not be produced.
+    RunIdentity(IntentRunIdentityRefusal),
     /// The run's expiry has passed.
     RunExpired {
         /// The instant checked.
@@ -1328,6 +1393,9 @@ impl fmt::Display for BrokerRefusal {
                 formatter,
                 "effect {effect_id} is already registered and cannot reserve again"
             ),
+            Self::RunIdentity(source) => {
+                write!(formatter, "effect broker could not identify its run: {source}")
+            }
             Self::RunExpired { now, expiry } => {
                 write!(
                     formatter,
@@ -1367,3 +1435,9 @@ impl fmt::Display for BrokerRefusal {
 }
 
 impl core::error::Error for BrokerRefusal {}
+
+impl From<IntentRunIdentityRefusal> for BrokerRefusal {
+    fn from(value: IntentRunIdentityRefusal) -> Self {
+        Self::RunIdentity(value)
+    }
+}
