@@ -4,7 +4,7 @@
 **Status:** non-authoritative operator handoff; not Beads state  
 **Repository:** `Dicklesworthstone/frankengit`  
 **Starting revision:** `d6ca39a68cd1845053669ec5546e7b7cb36e6fa7`  
-**Implementation and documentation boundary before this handoff:** `3f50179062e6c8e68d372a737bef40107947c0e2`
+**Implementation and documentation boundary before the tracker handoff:** `3f50179062e6c8e68d372a737bef40107947c0e2`
 
 ## Why this file exists
 
@@ -83,14 +83,15 @@ No cross-head task mutation, receiver plan adoption, capability issuance, or can
 4. `69706cb956c250d6c3cee416ef99639872ca51d2` — expose current-authority handoff driver
 5. `80b9805c6a8dc9122296faa5b0d417393069ee95` — pin atomic current-authority handoff
 6. `71637ff0ec2a3cd68a4353280a7e9a6e2e375f41` — keep handoff drivers lint-clean
-7. `b7c2ba738ef86b1da082b3d9b9c294319b12a8f2` — define descendant-head handoff acceptance
-8. `bcb6ad5b58c242494aaa75a54daee9a4ef535fbd` — reconcile descendant handoff continuity
-9. `098eae83ff9d558692249dd26cb343bbea98c0a7` — reconcile descendant handoff status
-10. `a5a49dc5544190220584666e92638e324322802f` — record descendant-head handoff acceptance
-11. `212359a193fa4d88c74caa84c17b5413323d298e` — record descendant-head handoff acceptance in changelog
+7. `358ef1990369d7c7ea795e708f6b986649577d4c` — define descendant-head handoff acceptance
+8. `2248d8fc14cbdaee4591fb2be8b472c9e3754b8a` — reconcile descendant handoff continuity
+9. `7a2a6d6123eb5fd5c6d0bf606542c91bd167bcc9` — reconcile descendant handoff status
+10. `2aa545cf46d3a59416166bd3e6f648129205f6ee` — record the dated descendant-head handoff change
+11. `704c9b449b935cc06d04075ad21df1344cd9e9c0` — record descendant-head handoff acceptance in the changelog
 12. `3f50179062e6c8e68d372a737bef40107947c0e2` — integrate descendant handoff architecture
+13. `503236b4828a9c75b3806ed46c3a9c91b05ac034` — initial non-authoritative Beads verification handoff
 
-The operator must refresh `main` before verification and use the final descendant of these revisions, including this handoff commit.
+This evidence list intentionally stops before the commit that corrects this list: a document cannot include its own content-addressed commit identity without changing it. The operator must refresh `main` and verify the live first-parent descendant of all revisions above.
 
 ## Required live-graph procedure
 
