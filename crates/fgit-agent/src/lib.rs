@@ -47,9 +47,10 @@
 //! and retains that current-head authorization through request acceptance,
 //! outbox reservation, dispatch, reconciliation, escalation, and terminal
 //! settlement without exposing a raw-obligation escape hatch.
-//! [`effect_dispatch`] remains the storage-neutral exact-position checked
-//! lifecycle. Abort and reconciliation remain available after revocation because
-//! they reduce outstanding responsibility.
+//! [`effect_dispatch`] provides the storage-neutral exact-position checked
+//! lifecycle and likewise keeps request and dispatch proofs attached through
+//! reconciliation. Abort and reconciliation remain available after revocation
+//! because they reduce outstanding responsibility.
 //! [`reconcile`], the crate-private handoff/cancellation engines and their public
 //! facades preserve responsibility through handoff or conservative stop.
 //! [`outcome_learning`] records validated retrieval-only learning and grants no
@@ -179,7 +180,11 @@ pub use effect_authorization::{
 };
 pub use effect_dispatch::{
     AuthorizedOutboxDispatchRefused, RevocationAuthorizedDeferredOutboxEffect,
-    RevocationAuthorizedOutboxEffect, RevocationCheckedEffectBroker,
+    RevocationAuthorizedEscalatedOutboxEffect,
+    RevocationAuthorizedEscalationResolutionRefused,
+    RevocationAuthorizedExternalEffectOutcome, RevocationAuthorizedOutboxEffect,
+    RevocationAuthorizedReconciliationRefused, RevocationAuthorizedSettledOutboxEffect,
+    RevocationCheckedEffectBroker,
 };
 pub use frontier::{
     ExcludedWorkItem, FrontierExclusionReason, FrontierRefusal, MAX_WORK_ITEMS, TaskPhase,
