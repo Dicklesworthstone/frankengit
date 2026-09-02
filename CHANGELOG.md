@@ -4,7 +4,73 @@ All notable FrankenGit changes are recorded here. This file is a summary, not a 
 
 FrankenGit has moved beyond its original architecture-only phase into active implementation and pre-release integration. It is still not a general-purpose Git server, production-ready forge, or GitHub replacement.
 
-## [Unreleased] — 2026-09-01
+## [Unreleased] — 2026-09-02
+
+### Added — effect-time capability revocation and irreversible-dispatch gating
+
+The `fgit-agent` effect boundary now includes:
+
+- `CapabilityRevocationReadRequest` and `CapabilityRevocationReceipt`: bounded revocation evidence tied to one exact authenticated authority read, complete `IntentRunCommitment`, explicit maximum age, hard row limit, reader profile, generation commitment, and evidence root;
+- `VerifiedCapabilityChain`: complete root-first capability ancestry authenticated through the existing MAC and attenuation verifier, with hard depth bounds and duplicate-identity refusal;
+- `CapabilityEffectAuthorization`: one exact high-value effect authorization binding the run, authority read, chain, leaf, revocation receipt and generation, effect/parent IDs, operation, full resource cost, canonical input, authorization time, and exclusive deadline;
+- `RevocationCheckedEffectBroker`: a public checked surface separating low-risk effects from operations that require current revocation evidence;
+- `RevocationAuthorizedOutboxEffect`: a proof-carrying external-effect reservation that permits abort but exposes no raw dispatch method;
+- `dispatch_authorized_outbox`: a second fresh authorization at the actual downstream-visible dispatch boundary, requiring the same verified chain and leaf used at request acceptance;
+- `RevocationAuthorizedDeferredOutboxEffect`: a committed external obligation retaining both request-time and dispatch-time authorizations before ordinary reconciliation.
+
+Revocation freshness uses the half-open interval:
+
+```text
+revocation_observed_at <= effect_time < valid_until
+```
+
+Use exactly at `valid_until` is stale. Revocation of any ancestor invalidates the leaf for a new high-value effect.
+
+The checked external-effect path deliberately distinguishes request acceptance, typed outbox reservation, irreversible dispatch, and reconciliation. Every pre-dispatch refusal returns the live reservation; a post-commit journal failure retains the deferred obligation. Abort and reconciliation remain available after later revocation because they reduce outstanding responsibility.
+
+The focused contract is [`docs/AGENT_CONTROL_PLANE_EFFECT_AUTHORIZATION.md`](docs/AGENT_CONTROL_PLANE_EFFECT_AUTHORIZATION.md).
+
+### Fixed — complete-run effect identity
+
+- Added `IntentRunCommitment` to every `EffectRecord`; the broker computes it before budget movement.
+- Made effect-journal replay establish both numeric `RunId` and complete run commitment from its first accepted row, refusing mixed numeric or same-ID/different-commitment effects.
+- Versioned `RunReconciliationReport` to v2 and committed the complete run in both the report header and every effect row.
+- Refused same-ID effects from another authority read, operation scope, budget, or expiry before authority, lifecycle, operation, or resource interpretation.
+- Versioned the public cancellation request/completion identities to v2 and required latest situation, active claim, initial report, final report, and supplied run to agree on one complete run commitment.
+- Migrated handoff, receiver-acceptance, cancellation, and reconciliation fixtures to complete-run effect records.
+
+### Added — effect-authorization source tests
+
+Focused public-path source tests now cover:
+
+- deterministic revocation receipt, chain, and exact-effect authorization identity;
+- malformed reader profiles, row limits, duplicate revocations, and empty issuer keys;
+- stale receipt use at the exclusive freshness deadline;
+- revoked root or intermediate ancestry;
+- same numeric run ID with changed machine scope;
+- low-risk/high-value checked-broker separation;
+- request-time proof expiry before external dispatch;
+- revocation between reservation and dispatch;
+- reservation recovery and abort after a dispatch refusal;
+- successful fresh dispatch followed by stable-key acknowledgement reconciliation;
+- complete-run identity in effect records;
+- journal replay refusal across same-ID/different-commitment runs;
+- complete-run reconciliation refusal;
+- cancellation request and final-report substitution refusal.
+
+Source-level test presence is not a test result.
+
+### Identity revisions — effect authorization
+
+The following identities changed deliberately rather than silently reinterpreting old bytes:
+
+```text
+RunReconciliationReport          v1 -> v2
+public RunCancellationIntent     v1 -> v2
+public RunCancellationCompletion v1 -> v2
+```
+
+New v1 identities were added for revocation read requests/receipts, verified capability chains, and exact effect authorizations. Registered durable codecs and migrations remain future work.
 
 ### Added — task collection, persistence, and restart recovery
 
@@ -109,20 +175,21 @@ Source-level test presence is not a test result.
 - Reconciled [`docs/AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md`](docs/AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md) with the actual owning modules and current non-claims.
 - Reconciled [`docs/AGENT_CONTROL_PLANE_TASK_COORDINATION.md`](docs/AGENT_CONTROL_PLANE_TASK_COORDINATION.md) through collection, persistence, and restart recovery.
 - Added [`docs/AGENT_CONTROL_PLANE_TASK_RECOVERY.md`](docs/AGENT_CONTROL_PLANE_TASK_RECOVERY.md).
+- Added [`docs/AGENT_CONTROL_PLANE_EFFECT_AUTHORIZATION.md`](docs/AGENT_CONTROL_PLANE_EFFECT_AUTHORIZATION.md).
 - Added dated change records under `docs/changes/` for the Agent Control Plane evolution.
-- Retained an explicit Beads reconciliation handoff instead of hand-editing the multi-megabyte `.beads/issues.jsonl` ledger from an environment without `br`.
+- Retained explicit Beads reconciliation handoffs instead of hand-editing the multi-megabyte `.beads/issues.jsonl` ledger from an environment without `br`.
 
 ### Verification state
 
-The environment used for the latest task-recovery commits did not contain a local FrankenGit checkout, Cargo, rustc, or rustfmt. A public archive fetch was unavailable through that execution environment. No formatter, compiler, test, Clippy, repository verification, or independent batch result is claimed for these revisions.
+The environment used for the latest effect-authorization commits did not contain a local FrankenGit checkout, Cargo, rustc, rustfmt, Clippy, `br`, or `bv`. No formatter, compiler, test, Clippy, repository verification, or independent batch result is claimed for these revisions.
 
 Required local evidence remains at least:
 
 ```text
 cargo fmt --all --check
-cargo test -p fgit-agent --all-targets
+cargo test -p fgit-agent --all-targets --no-fail-fast
 cargo clippy -p fgit-agent --all-targets -- -D warnings
-cargo test -p fgit-registry-check
+cargo test -p fgit-registry-check --no-fail-fast
 ./scripts/verify.sh docs
 ./scripts/verify.sh constitution
 ./scripts/verify.sh fast
@@ -134,15 +201,17 @@ GitHub-hosted Actions availability or status is neither required nor used as evi
 
 This wave does not claim:
 
+- a canonical capability-revocation event/body schema or authority-selected revocation root;
+- a concrete revocation reader, durable cache, invalidation stream, or backend adapter;
+- mandatory checked-broker adoption by every network, secret, runner, forge, publication, or external-integration host;
 - concrete `br`/Beads collection, lease-history, mutation, flush, reread, or envelope-probe I/O;
 - production collectors for the nine non-task situation components;
 - multi-task transactions or distributed reservations;
 - a production action-packet executor;
-- automatic process, workspace, credential, or external-effect cleanup;
-- effect-time capability revocation against a named canonical position;
+- automatic process, workspace, credential, secret, tunnel, upload, VM, or external-resource cleanup;
 - plan-relative invalidation when a situation component changes;
 - handoff acceptance at a later authority head without an authenticated ancestry witness;
-- durable codecs, migrations, storage, or replay for the new task-control receipts;
+- durable codecs, migrations, storage, or replay for the new control-plane and revocation objects;
 - an `fg agent` CLI, stable robot API, native API, or MCP surface;
 - automatic ECC assembly, task verification/closure transition, or canonical publication;
 - a durable authorization-filtered learning index;
