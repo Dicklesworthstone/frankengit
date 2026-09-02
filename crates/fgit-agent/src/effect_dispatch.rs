@@ -174,31 +174,31 @@ impl RevocationCheckedEffectBroker {
                 });
             }
         };
-        if dispatch_authorization.verified_chain_id()
-            != effect.initial_authorization.verified_chain_id()
-        {
+        let expected_chain = effect.initial_authorization.verified_chain_id();
+        let observed_chain = dispatch_authorization.verified_chain_id();
+        if observed_chain != expected_chain {
             return Err(AuthorizedOutboxDispatchRefused::CapabilityChainChanged {
                 effect: Box::new(effect),
-                expected: effect.initial_authorization.verified_chain_id(),
-                observed: dispatch_authorization.verified_chain_id(),
+                expected: expected_chain,
+                observed: observed_chain,
             });
         }
-        if dispatch_authorization.capability_id()
-            != effect.initial_authorization.capability_id()
-        {
+        let expected_leaf = effect.initial_authorization.capability_id();
+        let observed_leaf = dispatch_authorization.capability_id();
+        if observed_leaf != expected_leaf {
             return Err(AuthorizedOutboxDispatchRefused::LeafCapabilityChanged {
                 effect: Box::new(effect),
-                expected: effect.initial_authorization.capability_id(),
-                observed: dispatch_authorization.capability_id(),
+                expected: expected_leaf,
+                observed: observed_leaf,
             });
         }
-        if now < dispatch_authorization.authorized_at()
-            || now >= dispatch_authorization.valid_until()
-        {
+        let authorized_at = dispatch_authorization.authorized_at();
+        let valid_until = dispatch_authorization.valid_until();
+        if now < authorized_at || now >= valid_until {
             return Err(AuthorizedOutboxDispatchRefused::AuthorizationWindowInvalid {
                 effect: Box::new(effect),
-                authorized_at: dispatch_authorization.authorized_at(),
-                valid_until: dispatch_authorization.valid_until(),
+                authorized_at,
+                valid_until,
                 dispatched_at: now,
             });
         }
