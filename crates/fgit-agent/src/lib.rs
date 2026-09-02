@@ -53,6 +53,11 @@
 //! because they reduce outstanding responsibility.
 //! [`reconcile`], the crate-private handoff/cancellation engines and their public
 //! facades preserve responsibility through handoff or conservative stop.
+//! [`handoff_acceptance`] accepts either the same authenticated head or an exact
+//! bounded descendant proof while binding the receiver's complete run identity.
+//! [`handoff_ancestry`] provides the sync/async host driver that authenticates
+//! the current authority slot and immediately consumes that proof, preventing a
+//! proof from one slot or store being paired with a receiver from another.
 //! [`outcome_learning`] records validated retrieval-only learning and grants no
 //! authority.
 //!
@@ -79,6 +84,7 @@ mod frontier_policy;
 mod handoff;
 mod handoff_control;
 pub mod handoff_acceptance;
+pub mod handoff_ancestry;
 pub mod intent;
 mod learning;
 pub mod outcome_learning;
@@ -199,6 +205,10 @@ pub use handoff::{
 pub use handoff_acceptance::{
     AgentHandoffAcceptance, AgentHandoffAcceptanceId, HandoffAcceptanceRefusal,
     HandoffAuthorityRelation, HandoffEffectResponsibility, HandoffTargetResolution,
+};
+pub use handoff_ancestry::{
+    CurrentAuthorityHandoffRefusal, accept_handoff_at_current_authority,
+    accept_handoff_at_current_authority_async,
 };
 pub use handoff_control::{
     AgentHandoffCapsule, AgentHandoffCapsuleId, HandoffConstructionRefusal,
