@@ -1,4 +1,4 @@
-//! Deterministic reconciliation of every effect owned by one Intent Run.
+//! Deterministic reconciliation of every effect owned by one complete Intent Run.
 //!
 //! A task plan is not the ownership boundary for effects: one run may have
 //! accepted work before the current task, delegated work to several agent
@@ -12,12 +12,17 @@
 //! typed next action, and commits to the canonical result. Handoff and
 //! cancellation can then preserve debt by identity rather than summarize it
 //! away in prose.
+//!
+//! [`crate::RunId`] is only a coordination handle. Every record and report also
+//! carries [`crate::IntentRunCommitment`], so a same-ID run with another exact
+//! authority read, operation scope, resource budget, or expiry cannot be
+//! mistaken for the run that accepted the effect.
 
 use core::fmt;
 use std::collections::BTreeMap;
 
 use fgit_codec::{CodecRefusal, Encoder};
-use fgit_crypto::{DigestHasher, GitHashAlgorithm, NativeObjectIdentity, Sha256};
+use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_resource::settlement::{
     DeliveryVerdict, Observation, ProbeVerdict, ReconcileState, ReconcileTransition,
 };
@@ -28,7 +33,7 @@ use fgit_resource::{
 
 use crate::{
     AuthorityReadReceipt, EffectClass, EffectId, EffectRecord, EffectTerminalOutcome, IntentRun,
-    LogicalTime, OperationClass, RunId,
+    IntentRunCommitment, IntentRunIdentityRefusal, LogicalTime, OperationClass, RunId,
 };
 
 /// Maximum effects accepted by one run-reconciliation report.
@@ -37,7 +42,7 @@ pub const MAX_RECONCILIATION_EFFECTS: usize = 4_096;
 pub const MAX_EFFECT_OUTPUT_COMMITMENTS: usize = 1_024;
 /// Maximum reconciliation transitions retained for one effect.
 pub const MAX_EFFECT_RECONCILIATION_TRANSITIONS: usize = 2_048;
-const REPORT_DOMAIN: &[u8] = b"frankengit.agent.run-reconciliation/v1\0";
+const REPORT_DOMAIN: &[u8] = b"frankengit.agent.run-reconciliation/v2\0";
 
 /// Stable SHA-256 identity of one complete run-reconciliation report.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -54,10 +59,7 @@ impl RunReconciliationReportId {
 impl fmt::Display for RunReconciliationReportId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("run-reconciliation:")?;
-        for byte in &self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        write_hex(formatter, &self.0)
     }
 }
 
@@ -209,11 +211,12 @@ impl ReconciledEffect {
     }
 }
 
-/// Deterministic, authority-bound inventory of one run's complete effect set.
+/// Deterministic, authority-bound inventory of one complete run's effect set.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunReconciliationReport {
     report_id: RunReconciliationReportId,
     run_id: RunId,
+    run_commitment: IntentRunCommitment,
     authority_read_receipt: AuthorityReadReceipt,
     observed_at: LogicalTime,
     run_open_at_observation: bool,
@@ -234,12 +237,12 @@ impl RunReconciliationReport {
     ///
     /// # Errors
     ///
-    /// Refuses legacy authority, mixed runs or authority positions, future or
-    /// out-of-window acceptances, duplicate identities, malformed lifecycle
-    /// terminal markers, operation/effect-class disagreement, invalid resource
-    /// accounting, unbounded output/reconciliation evidence, missing or cyclic
-    /// parent effects, cumulative consumable spend beyond the run, and
-    /// unrepresentable canonical framing.
+    /// Refuses legacy authority, complete-run substitution, mixed authority
+    /// positions, future or out-of-window acceptances, duplicate identities,
+    /// malformed lifecycle terminal markers, operation/effect-class
+    /// disagreement, invalid resource accounting, unbounded output or
+    /// reconciliation evidence, missing or cyclic parent effects, cumulative
+    /// consumable spend beyond the run, and unrepresentable canonical framing.
     pub fn build(
         run: &IntentRun,
         mut records: Vec<EffectRecord>,
@@ -249,6 +252,7 @@ impl RunReconciliationReport {
             .authority_read_receipt()
             .ok_or(RunReconciliationRefusal::RunAuthorityReceiptRequired)?
             .clone();
+        let run_commitment = run.commitment()?;
         if observed_at < authority_read_receipt.verified_at_logical_time() {
             return Err(
                 RunReconciliationRefusal::ObservationBeforeAuthorityVerification {
@@ -287,10 +291,10 @@ impl RunReconciliationReport {
         for record in records {
             validate_record(
                 run,
+                run_commitment,
                 &authority_read_receipt,
                 observed_at,
                 &index_by_id,
-                &effects,
                 &record,
             )?;
             let required_action = classify_record(&record)?;
@@ -330,6 +334,7 @@ impl RunReconciliationReport {
         let mut report = Self {
             report_id: RunReconciliationReportId([0; 32]),
             run_id: run.run_id(),
+            run_commitment,
             authority_read_receipt,
             observed_at,
             run_open_at_observation,
@@ -349,10 +354,16 @@ impl RunReconciliationReport {
         self.report_id
     }
 
-    /// Run whose complete effect inventory is represented.
+    /// Coordination identity of the represented run.
     #[must_use]
     pub const fn run_id(&self) -> RunId {
         self.run_id
+    }
+
+    /// Complete machine-enforced identity of the represented run.
+    #[must_use]
+    pub const fn run_commitment(&self) -> IntentRunCommitment {
+        self.run_commitment
     }
 
     /// Exact authenticated repository position shared by every effect record.
@@ -418,6 +429,8 @@ impl RunReconciliationReport {
 pub enum RunReconciliationRefusal {
     /// The run uses only a legacy identifying basis.
     RunAuthorityReceiptRequired,
+    /// Complete run identity could not be produced.
+    RunIdentity(IntentRunIdentityRefusal),
     /// Observation predates authentication of the run's authority receipt.
     ObservationBeforeAuthorityVerification {
         /// Proposed observation time.
@@ -437,7 +450,7 @@ pub enum RunReconciliationRefusal {
         /// Repeated effect.
         effect_id: EffectId,
     },
-    /// Effect belongs to another run.
+    /// Effect belongs to another numeric run.
     EffectRunMismatch {
         /// Effect being checked.
         effect_id: EffectId,
@@ -445,6 +458,15 @@ pub enum RunReconciliationRefusal {
         expected: RunId,
         /// Recorded run.
         observed: RunId,
+    },
+    /// Effect belongs to another complete run under the same or another ID.
+    EffectRunCommitmentMismatch {
+        /// Effect being checked.
+        effect_id: EffectId,
+        /// Complete run being reconciled.
+        expected: IntentRunCommitment,
+        /// Complete run that accepted the effect.
+        observed: IntentRunCommitment,
     },
     /// Effect omitted its complete authority receipt.
     EffectAuthorityReceiptRequired {
@@ -587,6 +609,9 @@ impl fmt::Display for RunReconciliationRefusal {
             Self::RunAuthorityReceiptRequired => formatter.write_str(
                 "run reconciliation requires a complete authenticated authority receipt",
             ),
+            Self::RunIdentity(source) => {
+                write!(formatter, "run reconciliation could not identify its run: {source}")
+            }
             Self::ObservationBeforeAuthorityVerification { observed, verified } => write!(
                 formatter,
                 "reconciliation observed at {observed} before authority verification at {verified}"
@@ -604,6 +629,14 @@ impl fmt::Display for RunReconciliationRefusal {
             } => write!(
                 formatter,
                 "effect {effect_id} belongs to run {observed}, expected {expected}"
+            ),
+            Self::EffectRunCommitmentMismatch {
+                effect_id,
+                expected,
+                observed,
+            } => write!(
+                formatter,
+                "effect {effect_id} belongs to complete run {observed}, expected {expected}"
             ),
             Self::EffectAuthorityReceiptRequired { effect_id } => write!(
                 formatter,
@@ -719,6 +752,12 @@ impl fmt::Display for RunReconciliationRefusal {
 
 impl core::error::Error for RunReconciliationRefusal {}
 
+impl From<IntentRunIdentityRefusal> for RunReconciliationRefusal {
+    fn from(value: IntentRunIdentityRefusal) -> Self {
+        Self::RunIdentity(value)
+    }
+}
+
 impl From<CodecRefusal> for RunReconciliationRefusal {
     fn from(value: CodecRefusal) -> Self {
         Self::Codec(value)
@@ -727,10 +766,10 @@ impl From<CodecRefusal> for RunReconciliationRefusal {
 
 fn validate_record(
     run: &IntentRun,
+    run_commitment: IntentRunCommitment,
     authority: &AuthorityReadReceipt,
     observed_at: LogicalTime,
     index_by_id: &BTreeMap<EffectId, usize>,
-    prior_effects: &[ReconciledEffect],
     record: &EffectRecord,
 ) -> Result<(), RunReconciliationRefusal> {
     if record.run_id != run.run_id() {
@@ -738,6 +777,13 @@ fn validate_record(
             effect_id: record.effect_id,
             expected: run.run_id(),
             observed: record.run_id,
+        });
+    }
+    if record.run_commitment != run_commitment {
+        return Err(RunReconciliationRefusal::EffectRunCommitmentMismatch {
+            effect_id: record.effect_id,
+            expected: run_commitment,
+            observed: record.run_commitment,
         });
     }
     match record.source_authority_receipt.as_ref() {
@@ -838,19 +884,8 @@ fn validate_record(
                 effect_id: record.effect_id,
             });
         }
-        let parent_index = index_by_id.get(&parent_effect_id).copied().ok_or(
-            RunReconciliationRefusal::MissingParentEffect {
-                effect_id: record.effect_id,
-                parent_effect_id,
-            },
-        )?;
-        let parent = prior_effects
-            .get(parent_index)
-            .map(ReconciledEffect::record);
-        if let Some(parent) = parent
-            && parent.accepted_at > record.accepted_at
-        {
-            return Err(RunReconciliationRefusal::ParentAcceptedAfterChild {
+        if !index_by_id.contains_key(&parent_effect_id) {
+            return Err(RunReconciliationRefusal::MissingParentEffect {
                 effect_id: record.effect_id,
                 parent_effect_id,
             });
@@ -998,7 +1033,7 @@ fn report_commitment(
     let mut encoder = Encoder::with_capacity(1_024 + report.effects.len() * 512);
     encoder.write_bytes("run_reconciliation_domain", REPORT_DOMAIN)?;
     encoder.write_raw(&report.run_id.value().to_be_bytes());
-    write_authority_receipt(&mut encoder, &report.authority_read_receipt)?;
+    encoder.write_raw(report.run_commitment.as_bytes());
     encoder.write_scalar(report.observed_at.value());
     encoder.write_bool(report.run_open_at_observation);
     encoder.write_raw_byte(report.readiness.code_point());
@@ -1009,9 +1044,7 @@ fn report_commitment(
     for effect in &report.effects {
         write_effect(&mut encoder, effect)?;
     }
-    let mut hasher = <Sha256 as GitHashAlgorithm>::Hasher::new();
-    hasher.update(&encoder.into_bytes());
-    Ok(hasher.finish())
+    Ok(hash(&encoder.into_bytes()))
 }
 
 fn write_effect(
@@ -1021,6 +1054,7 @@ fn write_effect(
     let record = &effect.record;
     encoder.write_raw(&record.effect_id.value().to_be_bytes());
     encoder.write_raw(&record.run_id.value().to_be_bytes());
+    encoder.write_raw(record.run_commitment.as_bytes());
     encoder.write_raw(&record.agent_instance_id.value().to_be_bytes());
     match record.parent_effect_id {
         Some(parent) => {
@@ -1081,10 +1115,7 @@ fn write_effect(
     Ok(())
 }
 
-fn write_terminal_outcome(
-    encoder: &mut Encoder,
-    outcome: Option<EffectTerminalOutcome>,
-) {
+fn write_terminal_outcome(encoder: &mut Encoder, outcome: Option<EffectTerminalOutcome>) {
     match outcome {
         None => encoder.write_bool(false),
         Some(EffectTerminalOutcome::Acknowledged) => {
@@ -1166,70 +1197,6 @@ fn write_counts(encoder: &mut Encoder, counts: RunReconciliationCounts) {
 fn write_resource_vector(encoder: &mut Encoder, vector: ResourceVector) {
     for (_grade, amount) in vector.pairs() {
         encoder.write_scalar(amount);
-    }
-}
-
-fn write_authority_receipt(
-    encoder: &mut Encoder,
-    receipt: &AuthorityReadReceipt,
-) -> Result<(), CodecRefusal> {
-    encoder.write_opaque_id(receipt.repository_id().as_bytes());
-    encoder.write_internal_object_id(receipt.authority_head_id().as_internal_object_id())?;
-    encoder.write_scalar(receipt.authority_head_generation().get());
-    encoder.write_raw(&receipt.backend_version_token().to_opaque_bytes());
-
-    let latest_decision_batch_id = receipt.latest_decision_batch_id();
-    write_optional_identity(
-        encoder,
-        latest_decision_batch_id
-            .as_ref()
-            .map(fgit_types::RepositoryDecisionBatchId::as_internal_object_id),
-    )?;
-    write_optional_scalar(
-        encoder,
-        receipt
-            .latest_repository_sequence()
-            .map(fgit_types::RepositorySequence::get),
-    );
-    let latest_repository_commit_id = receipt.latest_repository_commit_id();
-    write_optional_identity(
-        encoder,
-        latest_repository_commit_id
-            .as_ref()
-            .map(fgit_types::RepositoryCommitId::as_internal_object_id),
-    )?;
-
-    encoder.write_digest(&receipt.ref_root())?;
-    encoder.write_digest(&receipt.forge_position_root())?;
-    encoder.write_digest(&receipt.retention_root())?;
-    encoder.write_scalar(receipt.policy_epoch().get());
-    encoder.write_scalar(receipt.format_epoch().get());
-    encoder.write_scalar(receipt.verified_at_logical_time().value());
-    encoder.write_raw(&receipt.verifier_profile());
-    Ok(())
-}
-
-fn write_optional_identity(
-    encoder: &mut Encoder,
-    value: Option<&fgit_types::InternalObjectId>,
-) -> Result<(), CodecRefusal> {
-    match value {
-        Some(identity) => {
-            encoder.write_bool(true);
-            encoder.write_internal_object_id(identity)?;
-        }
-        None => encoder.write_bool(false),
-    }
-    Ok(())
-}
-
-fn write_optional_scalar(encoder: &mut Encoder, value: Option<u64>) {
-    match value {
-        Some(value) => {
-            encoder.write_bool(true);
-            encoder.write_scalar(value);
-        }
-        None => encoder.write_bool(false),
     }
 }
 
@@ -1345,4 +1312,17 @@ const fn probe_verdict_code(verdict: ProbeVerdict) -> u8 {
         ProbeVerdict::NotDelivered => 2,
         ProbeVerdict::Unknown => 3,
     }
+}
+
+fn hash(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = <Sha256 as GitHashAlgorithm>::Hasher::new();
+    hasher.update(bytes);
+    hasher.finish()
+}
+
+fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8; 32]) -> fmt::Result {
+    for byte in bytes {
+        write!(formatter, "{byte:02x}")?;
+    }
+    Ok(())
 }
