@@ -1,16 +1,23 @@
 //! Receiver-side verification of an [`crate::AgentHandoffCapsule`].
 //!
 //! Constructing a capsule proves only what the source committed to. Acceptance
-//! independently validates the receiver's authenticated situation and Intent
-//! Run, applies the capsule's attenuation ceiling, and preserves every carried
-//! effect responsibility. The capsule grants no authority; the receiver acts
-//! only through its ordinary, already-issued run and capabilities.
+//! independently validates the receiver's authenticated situation and complete
+//! Intent Run, applies the capsule's attenuation ceiling, and preserves every
+//! carried effect responsibility. The capsule grants no authority; the receiver
+//! acts only through its ordinary, already-issued run and capabilities.
 //!
-//! This slice accepts only the same authenticated authority-head identity and
-//! generation as the source capsule. A later head may be valid, but proving its
-//! ancestry needs an authenticated authority-history witness that this crate
-//! does not yet carry. Failing closed is preferable to treating a larger
-//! generation number as proof of descent.
+//! Two authority relationships are accepted and remain distinguishable in the
+//! resulting identity:
+//!
+//! - source and receiver independently authenticated the same head; or
+//! - an [`fgit_authority::AuthorityHeadAncestryReceipt`] proves the receiver's
+//!   exact current slot head descends from the source head.
+//!
+//! A larger generation number is never treated as ancestry. The descendant
+//! receipt must match the source repository/head/generation, the receiver
+//! repository/head/generation, the exact receiver backend token, and the full
+//! generation distance. The receipt is retained by the acceptance rather than
+//! checked and discarded.
 //!
 //! Task-claim transfer is deliberately not inferred here. The capsule commits
 //! the source activation identity, but a receiver becomes task owner only after
@@ -18,18 +25,21 @@
 
 use core::fmt;
 
+use fgit_authority::{AuthorityHeadAncestryReceipt, AuthorityVersionToken};
 use fgit_codec::{CodecRefusal, Encoder};
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_resource::{ResourceError, ResourceVector};
-use fgit_types::Digest;
+use fgit_types::{
+    Digest, HeadGeneration, RepositoryAuthorityHeadId, RepositoryId,
+};
 
 use crate::{
     AgentHandoffCapsule, AgentHandoffCapsuleId, AgentInstanceId, AgentSituationReceipt,
-    ClassSet, EffectId, EffectResolutionAction, IntentRun, LogicalTime, OperationClass, RunId,
-    SituationId,
+    ClassSet, EffectId, EffectResolutionAction, IntentRun, IntentRunCommitment,
+    IntentRunIdentityRefusal, LogicalTime, OperationClass, RunId, SituationId,
 };
 
-const ACCEPTANCE_DOMAIN: &[u8] = b"frankengit.agent.handoff-acceptance/v1\0";
+const ACCEPTANCE_DOMAIN: &[u8] = b"frankengit.agent.handoff-acceptance/v2\0";
 
 /// Stable identity of one verified handoff acceptance.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -53,18 +63,22 @@ impl fmt::Display for AgentHandoffAcceptanceId {
     }
 }
 
-/// Authority relation currently supported by receiver acceptance.
+/// Proven authority relationship between the source capsule and receiver.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum HandoffAuthorityRelation {
     /// Source and receiver independently authenticated the same head identity
     /// at the same generation.
     SameAuthenticatedHead,
+    /// The receiver authenticated a strictly later head and supplied a bounded
+    /// exact predecessor-path proof to the source head.
+    DescendantAuthenticatedHead,
 }
 
 impl HandoffAuthorityRelation {
     const fn code_point(self) -> u8 {
         match self {
             Self::SameAuthenticatedHead => 1,
+            Self::DescendantAuthenticatedHead => 2,
         }
     }
 }
@@ -168,9 +182,11 @@ pub struct AgentHandoffAcceptance {
     capsule_id: AgentHandoffCapsuleId,
     receiver_situation_id: SituationId,
     receiver_run_id: RunId,
+    receiver_run_commitment: IntentRunCommitment,
     receiver_instance_id: AgentInstanceId,
     accepted_at: LogicalTime,
     authority_relation: HandoffAuthorityRelation,
+    authority_ancestry: Option<AuthorityHeadAncestryReceipt>,
     receiver_operations: ClassSet,
     receiver_budget: ResourceVector,
     receiver_expiry: LogicalTime,
@@ -178,22 +194,78 @@ pub struct AgentHandoffAcceptance {
     effect_responsibilities: Vec<HandoffEffectResponsibility>,
 }
 
+enum AcceptanceAuthorityProof {
+    SameHead,
+    Descendant(AuthorityHeadAncestryReceipt),
+}
+
 impl AgentHandoffCapsule {
-    /// Verifies one receiver against this capsule.
+    /// Verifies a receiver that independently authenticated the same authority
+    /// head as the source capsule.
+    ///
+    /// Use [`Self::accept_at_descendant_head`] when the receiver observes a
+    /// strictly later head.
     ///
     /// # Errors
     ///
-    /// Refuses source-run reuse, missing or mismatched authority, a receiver
-    /// situation from another run, stale observation, expired receiver scope,
-    /// operation/budget/expiry amplification, a receiver unable to resolve
-    /// carried effect debt, invalid selector-resolution evidence, and
-    /// unrepresentable canonical framing.
+    /// Refuses source-run reuse, complete-run substitution, missing or
+    /// mismatched authority, a different receiver head, stale observation,
+    /// expired receiver scope, operation/budget/expiry amplification, a
+    /// receiver unable to resolve carried effect debt, invalid target evidence,
+    /// and unrepresentable canonical framing.
     pub fn accept(
         &self,
         receiver_situation: &AgentSituationReceipt,
         receiver_run: &IntentRun,
         receiver_instance_id: AgentInstanceId,
         target_resolution: HandoffTargetResolution,
+    ) -> Result<AgentHandoffAcceptance, HandoffAcceptanceRefusal> {
+        self.accept_with_authority_proof(
+            receiver_situation,
+            receiver_run,
+            receiver_instance_id,
+            target_resolution,
+            AcceptanceAuthorityProof::SameHead,
+        )
+    }
+
+    /// Verifies a receiver at a strictly later authenticated authority head.
+    ///
+    /// The supplied ancestry receipt must have been produced by the authority
+    /// layer's bounded exact predecessor walk. Its ancestor must be the source
+    /// capsule's head and its descendant must be the receiver's exact current
+    /// head, including the backend version token carried by the receiver's
+    /// authenticated read.
+    ///
+    /// # Errors
+    ///
+    /// Preserves every refusal of [`Self::accept`] and additionally refuses a
+    /// non-advancing receiver head, repository/head/generation/token mismatch,
+    /// or a path whose hop count differs from the complete generation distance.
+    pub fn accept_at_descendant_head(
+        &self,
+        receiver_situation: &AgentSituationReceipt,
+        receiver_run: &IntentRun,
+        receiver_instance_id: AgentInstanceId,
+        target_resolution: HandoffTargetResolution,
+        ancestry: AuthorityHeadAncestryReceipt,
+    ) -> Result<AgentHandoffAcceptance, HandoffAcceptanceRefusal> {
+        self.accept_with_authority_proof(
+            receiver_situation,
+            receiver_run,
+            receiver_instance_id,
+            target_resolution,
+            AcceptanceAuthorityProof::Descendant(ancestry),
+        )
+    }
+
+    fn accept_with_authority_proof(
+        &self,
+        receiver_situation: &AgentSituationReceipt,
+        receiver_run: &IntentRun,
+        receiver_instance_id: AgentInstanceId,
+        target_resolution: HandoffTargetResolution,
+        authority_proof: AcceptanceAuthorityProof,
     ) -> Result<AgentHandoffAcceptance, HandoffAcceptanceRefusal> {
         if receiver_run.run_id() == self.source_run_id() {
             return Err(HandoffAcceptanceRefusal::SourceRunReuse);
@@ -203,6 +275,14 @@ impl AgentHandoffCapsule {
         }
         if receiver_situation.intent_run_id() != Some(receiver_run.run_id()) {
             return Err(HandoffAcceptanceRefusal::ReceiverSituationRunMismatch);
+        }
+        let receiver_run_commitment = receiver_run.commitment()?;
+        let situation_commitment = receiver_situation.intent_run_commitment();
+        if situation_commitment != Some(receiver_run_commitment) {
+            return Err(HandoffAcceptanceRefusal::ReceiverRunCommitmentMismatch {
+                situation: situation_commitment,
+                run: receiver_run_commitment,
+            });
         }
         let receiver_authority = receiver_run
             .authority_read_receipt()
@@ -214,12 +294,11 @@ impl AgentHandoffCapsule {
         if source_authority.repository_id() != receiver_authority.repository_id() {
             return Err(HandoffAcceptanceRefusal::RepositoryMismatch);
         }
-        if source_authority.authority_head_generation()
-            != receiver_authority.authority_head_generation()
-            || source_authority.authority_head_id() != receiver_authority.authority_head_id()
-        {
-            return Err(HandoffAcceptanceRefusal::AuthorityHistoryWitnessRequired);
-        }
+        let (authority_relation, authority_ancestry) = validate_authority_proof(
+            source_authority,
+            receiver_authority,
+            authority_proof,
+        )?;
         if receiver_situation.observed_at() < self.reconciliation().observed_at() {
             return Err(HandoffAcceptanceRefusal::ReceiverObservationRollback {
                 source_observed_at: self.reconciliation().observed_at(),
@@ -250,9 +329,11 @@ impl AgentHandoffCapsule {
             capsule_id: self.capsule_id(),
             receiver_situation_id: receiver_situation.situation_id(),
             receiver_run_id: receiver_run.run_id(),
+            receiver_run_commitment,
             receiver_instance_id,
             accepted_at: receiver_situation.observed_at(),
-            authority_relation: HandoffAuthorityRelation::SameAuthenticatedHead,
+            authority_relation,
+            authority_ancestry,
             receiver_operations: receiver_run.allowed_operation_classes(),
             receiver_budget: receiver_run.resource_budget(),
             receiver_expiry: receiver_run.expiry(),
@@ -284,10 +365,16 @@ impl AgentHandoffAcceptance {
         self.receiver_situation_id
     }
 
-    /// Receiver Intent Run.
+    /// Receiver Intent Run coordination identity.
     #[must_use]
     pub const fn receiver_run_id(&self) -> RunId {
         self.receiver_run_id
+    }
+
+    /// Complete machine-enforced receiver run identity.
+    #[must_use]
+    pub const fn receiver_run_commitment(&self) -> IntentRunCommitment {
+        self.receiver_run_commitment
     }
 
     /// Receiver executor.
@@ -306,6 +393,12 @@ impl AgentHandoffAcceptance {
     #[must_use]
     pub const fn authority_relation(&self) -> HandoffAuthorityRelation {
         self.authority_relation
+    }
+
+    /// Exact bounded ancestry proof for descendant-head acceptance, if used.
+    #[must_use]
+    pub const fn authority_ancestry(&self) -> Option<AuthorityHeadAncestryReceipt> {
+        self.authority_ancestry
     }
 
     /// Receiver operation scope committed into the acceptance.
@@ -348,14 +441,75 @@ pub enum HandoffAcceptanceRefusal {
     ZeroReceiverInstance,
     /// Receiver situation names another run.
     ReceiverSituationRunMismatch,
+    /// Complete receiver run identity could not be produced.
+    ReceiverRunIdentity(IntentRunIdentityRefusal),
+    /// Receiver situation and supplied same-ID run have different machine
+    /// commitments.
+    ReceiverRunCommitmentMismatch {
+        /// Commitment retained by the situation, when one was present.
+        situation: Option<IntentRunCommitment>,
+        /// Commitment recomputed from the supplied run.
+        run: IntentRunCommitment,
+    },
     /// Receiver run lacks a complete authenticated authority receipt.
     ReceiverAuthorityReceiptRequired,
     /// Receiver situation and run use different authority receipts.
     ReceiverAuthorityMismatch,
     /// Source and receiver belong to different repositories.
     RepositoryMismatch,
-    /// Receiver observed another head and supplied no ancestry witness.
+    /// Same-head acceptance was attempted with another head and no ancestry
+    /// proof.
     AuthorityHistoryWitnessRequired,
+    /// Descendant acceptance did not name a strictly later receiver head.
+    ReceiverAuthorityNotLater {
+        /// Source generation.
+        source: HeadGeneration,
+        /// Receiver generation.
+        receiver: HeadGeneration,
+    },
+    /// Ancestry receipt belongs to another repository.
+    AncestryRepositoryMismatch {
+        /// Capsule and receiver repository.
+        expected: RepositoryId,
+        /// Repository in the ancestry receipt.
+        observed: RepositoryId,
+    },
+    /// Ancestry receipt starts from another head or generation.
+    AncestryAncestorMismatch {
+        /// Source head required by the capsule.
+        expected_head: RepositoryAuthorityHeadId,
+        /// Ancestor head in the receipt.
+        observed_head: RepositoryAuthorityHeadId,
+        /// Source generation required by the capsule.
+        expected_generation: HeadGeneration,
+        /// Ancestor generation in the receipt.
+        observed_generation: HeadGeneration,
+    },
+    /// Ancestry receipt ends at another head or generation.
+    AncestryDescendantMismatch {
+        /// Receiver head required by the supplied run.
+        expected_head: RepositoryAuthorityHeadId,
+        /// Descendant head in the receipt.
+        observed_head: RepositoryAuthorityHeadId,
+        /// Receiver generation required by the supplied run.
+        expected_generation: HeadGeneration,
+        /// Descendant generation in the receipt.
+        observed_generation: HeadGeneration,
+    },
+    /// Ancestry receipt was minted against another current slot version.
+    AncestryDescendantTokenMismatch {
+        /// Receiver's exact authenticated version token.
+        expected: AuthorityVersionToken,
+        /// Token retained by the ancestry receipt.
+        observed: AuthorityVersionToken,
+    },
+    /// Ancestry hop count differs from the full generation distance.
+    AncestryHopMismatch {
+        /// Generation distance between source and receiver.
+        expected: u64,
+        /// Hops retained by the receipt.
+        observed: u32,
+    },
     /// Receiver observation predates the source capsule observation.
     ReceiverObservationRollback {
         /// Source observation.
@@ -414,9 +568,88 @@ impl fmt::Display for HandoffAcceptanceRefusal {
 
 impl core::error::Error for HandoffAcceptanceRefusal {}
 
+impl From<IntentRunIdentityRefusal> for HandoffAcceptanceRefusal {
+    fn from(value: IntentRunIdentityRefusal) -> Self {
+        Self::ReceiverRunIdentity(value)
+    }
+}
+
 impl From<CodecRefusal> for HandoffAcceptanceRefusal {
     fn from(value: CodecRefusal) -> Self {
         Self::Codec(value)
+    }
+}
+
+fn validate_authority_proof(
+    source: &crate::AuthorityReadReceipt,
+    receiver: &crate::AuthorityReadReceipt,
+    proof: AcceptanceAuthorityProof,
+) -> Result<
+    (HandoffAuthorityRelation, Option<AuthorityHeadAncestryReceipt>),
+    HandoffAcceptanceRefusal,
+> {
+    let same_head = source.authority_head_id() == receiver.authority_head_id()
+        && source.authority_head_generation() == receiver.authority_head_generation();
+
+    match proof {
+        AcceptanceAuthorityProof::SameHead => {
+            if !same_head {
+                return Err(HandoffAcceptanceRefusal::AuthorityHistoryWitnessRequired);
+            }
+            Ok((HandoffAuthorityRelation::SameAuthenticatedHead, None))
+        }
+        AcceptanceAuthorityProof::Descendant(ancestry) => {
+            if receiver.authority_head_generation() <= source.authority_head_generation() {
+                return Err(HandoffAcceptanceRefusal::ReceiverAuthorityNotLater {
+                    source: source.authority_head_generation(),
+                    receiver: receiver.authority_head_generation(),
+                });
+            }
+            if ancestry.repository_id() != source.repository_id() {
+                return Err(HandoffAcceptanceRefusal::AncestryRepositoryMismatch {
+                    expected: source.repository_id(),
+                    observed: ancestry.repository_id(),
+                });
+            }
+            if ancestry.ancestor_head_id() != source.authority_head_id()
+                || ancestry.ancestor_generation() != source.authority_head_generation()
+            {
+                return Err(HandoffAcceptanceRefusal::AncestryAncestorMismatch {
+                    expected_head: source.authority_head_id(),
+                    observed_head: ancestry.ancestor_head_id(),
+                    expected_generation: source.authority_head_generation(),
+                    observed_generation: ancestry.ancestor_generation(),
+                });
+            }
+            if ancestry.descendant_head_id() != receiver.authority_head_id()
+                || ancestry.descendant_generation() != receiver.authority_head_generation()
+            {
+                return Err(HandoffAcceptanceRefusal::AncestryDescendantMismatch {
+                    expected_head: receiver.authority_head_id(),
+                    observed_head: ancestry.descendant_head_id(),
+                    expected_generation: receiver.authority_head_generation(),
+                    observed_generation: ancestry.descendant_generation(),
+                });
+            }
+            if ancestry.descendant_version_token() != receiver.backend_version_token() {
+                return Err(HandoffAcceptanceRefusal::AncestryDescendantTokenMismatch {
+                    expected: receiver.backend_version_token(),
+                    observed: ancestry.descendant_version_token(),
+                });
+            }
+            let expected_hops = receiver.authority_head_generation().get()
+                - source.authority_head_generation().get();
+            if u64::from(ancestry.hops()) != expected_hops {
+                return Err(HandoffAcceptanceRefusal::AncestryHopMismatch {
+                    expected: expected_hops,
+                    observed: ancestry.hops(),
+                });
+            }
+            Ok((
+                HandoffAuthorityRelation::DescendantAuthenticatedHead,
+                Some(ancestry),
+            ))
+        }
     }
 }
 
@@ -478,14 +711,22 @@ fn validate_receiver_scope(
 fn acceptance_commitment(
     acceptance: &AgentHandoffAcceptance,
 ) -> Result<[u8; 32], HandoffAcceptanceRefusal> {
-    let mut encoder = Encoder::with_capacity(512);
+    let mut encoder = Encoder::with_capacity(640);
     encoder.write_bytes("handoff_acceptance_domain", ACCEPTANCE_DOMAIN)?;
     encoder.write_raw(acceptance.capsule_id.as_bytes());
     encoder.write_raw(acceptance.receiver_situation_id.as_bytes());
     encoder.write_raw(&acceptance.receiver_run_id.value().to_be_bytes());
+    encoder.write_raw(acceptance.receiver_run_commitment.as_bytes());
     encoder.write_raw(&acceptance.receiver_instance_id.value().to_be_bytes());
     encoder.write_scalar(acceptance.accepted_at.value());
     encoder.write_raw_byte(acceptance.authority_relation.code_point());
+    match acceptance.authority_ancestry {
+        Some(ancestry) => {
+            encoder.write_bool(true);
+            encoder.write_raw(ancestry.receipt_id().as_bytes());
+        }
+        None => encoder.write_bool(false),
+    }
     encoder.write_scalar(acceptance.receiver_operations.bits());
     for (_grade, amount) in acceptance.receiver_budget.pairs() {
         encoder.write_scalar(amount);
