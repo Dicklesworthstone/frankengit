@@ -531,14 +531,15 @@ fn validate_request_basis(
         );
     }
     if let Some(claim) = active_claim
-        && claim.run_commitment() != run_commitment {
-            return Err(
-                RunCancellationRequestRefusal::ActiveClaimRunCommitmentMismatch {
-                    expected: run_commitment,
-                    observed: claim.run_commitment(),
-                },
-            );
-        }
+        && claim.run_commitment() != run_commitment
+    {
+        return Err(
+            RunCancellationRequestRefusal::ActiveClaimRunCommitmentMismatch {
+                expected: run_commitment,
+                observed: claim.run_commitment(),
+            },
+        );
+    }
     if initial_reconciliation.run_commitment() != run_commitment {
         return Err(
             RunCancellationRequestRefusal::InitialReportRunCommitmentMismatch {

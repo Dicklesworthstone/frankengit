@@ -605,9 +605,10 @@ impl TaskProjectionSnapshot {
             return Err(TaskProjectionAdapterRefusal::ZeroGeneration);
         }
         if phase_is_terminal(phase)
-            && (!matches!(assignment, TaskProjectionAssignment::Unassigned) || lease.is_some()) {
-                return Err(TaskProjectionAdapterRefusal::TerminalTaskAssigned { phase });
-            }
+            && (!matches!(assignment, TaskProjectionAssignment::Unassigned) || lease.is_some())
+        {
+            return Err(TaskProjectionAdapterRefusal::TerminalTaskAssigned { phase });
+        }
         if let Some(active) = lease.as_ref() {
             let expected =
                 TaskProjectionAssignment::assigned(active.assignee, active.run_commitment);

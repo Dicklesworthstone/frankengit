@@ -445,11 +445,12 @@ impl AgentSituationReceipt {
 
         for component in &components {
             if let Some(observed) = component.basis_head_id()
-                && observed != authority_read_receipt.authority_head_id() {
-                    return Err(SituationRefusal::ComponentAuthorityMismatch {
-                        kind: component.kind,
-                    });
-                }
+                && observed != authority_read_receipt.authority_head_id()
+            {
+                return Err(SituationRefusal::ComponentAuthorityMismatch {
+                    kind: component.kind,
+                });
+            }
         }
 
         let situation_id = SituationId(situation_commitment(

@@ -264,9 +264,8 @@ fn situation_delta_is_minimal_and_refuses_forks_and_rollbacks() {
         receipt.authority_head_id(),
         [0xf1; 32],
     );
-    let after =
-        AgentSituationReceipt::build(receipt, None, None, LogicalTime::new(22), changed)
-            .expect("after situation");
+    let after = AgentSituationReceipt::build(receipt, None, None, LogicalTime::new(22), changed)
+        .expect("after situation");
     let delta = SituationDelta::between(&before, &after).expect("component delta");
     assert_eq!(
         delta.authority_change(),

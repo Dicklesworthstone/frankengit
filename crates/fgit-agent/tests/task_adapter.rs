@@ -143,13 +143,9 @@ fn fixture() -> Fixture {
         WorkConflict::Clear,
     )
     .expect("valid unclaimed row");
-    let snapshot = TaskProjectionSnapshot::build(
-        &receipt,
-        BASIS_GENERATION,
-        LogicalTime::new(20),
-        vec![row],
-    )
-    .expect("complete task projection");
+    let snapshot =
+        TaskProjectionSnapshot::build(&receipt, BASIS_GENERATION, LogicalTime::new(20), vec![row])
+            .expect("complete task projection");
     let frontier = WorkFrontier::build_action_scoped(&planning, snapshot.work_items())
         .expect("snapshot feeds the frontier");
     let pulse = AgentControlPulse::build(&planning, &frontier, Some(&run))

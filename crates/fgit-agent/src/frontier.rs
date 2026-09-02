@@ -773,9 +773,10 @@ fn exclusion_reason(basis: &FrontierBasis, item: WorkItem) -> Option<FrontierExc
     };
 
     if let Some(assignee) = item.eligibility.assignee
-        && assignee != active_run {
-            return Some(FrontierExclusionReason::AssignedElsewhere { assignee });
-        }
+        && assignee != active_run
+    {
+        return Some(FrontierExclusionReason::AssignedElsewhere { assignee });
+    }
     if item.eligibility.independent_from == Some(active_run) {
         return Some(FrontierExclusionReason::IndependenceRequired {
             implementation_run: active_run,
