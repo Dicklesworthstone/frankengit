@@ -259,7 +259,7 @@ fn inflate_one_member(
     })
 }
 
-fn inflate_limits(limits: &PackLimits, declared_size: usize) -> InflateLimits {
+pub fn inflate_limits(limits: &PackLimits, declared_size: usize) -> InflateLimits {
     InflateLimits {
         max_input_bytes: limits.max_input_bytes,
         // `inflate_one_member` supplies one byte at a time so it can return the

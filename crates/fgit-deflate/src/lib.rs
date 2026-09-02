@@ -761,6 +761,7 @@ pub struct Inflater {
     window: VecDeque<u8>,
     pending_output: Vec<u8>,
     adler32: Adler32,
+    allow_framing_suffix: bool,
 }
 
 impl Inflater {
@@ -778,7 +779,23 @@ impl Inflater {
             window: VecDeque::new(),
             pending_output: Vec::new(),
             adler32: Adler32::new(),
+            allow_framing_suffix: false,
         })
+    }
+
+    /// Creates a decoder for one zlib member embedded in outer framing.
+    ///
+    /// [`Self::new`] refuses bytes after the member because a loose object is
+    /// exactly one member and a suffix is corruption. A pack stream instead
+    /// carries members back to back, so the framing consumer must be allowed
+    /// to overshoot: a member that finishes inside a pushed buffer reports
+    /// [`StreamProgress::Finished`] and leaves the excess unconsumed, with
+    /// [`Self::consumed_input_bytes`] naming the exact boundary. A push after
+    /// the member has finished is still refused in both modes.
+    pub fn new_framed(limits: InflateLimits) -> Result<Self, InflateRefusal> {
+        let mut inflater = Self::new(limits)?;
+        inflater.allow_framing_suffix = true;
+        Ok(inflater)
     }
 
     /// Supplies compressed bytes using a control that never cancels.
@@ -842,6 +859,19 @@ impl Inflater {
     #[must_use]
     pub const fn is_finished(&self) -> bool {
         matches!(self.state, State::Finished)
+    }
+
+    /// Compressed input bytes the decoder has actually consumed.
+    ///
+    /// A zlib member is self-delimiting, so a caller that streams a larger
+    /// buffer through [`Self::push`] cannot otherwise learn where the member
+    /// ended. After [`StreamProgress::Finished`], the difference between the
+    /// bytes it supplied and this count is exactly the suffix that belongs to
+    /// whatever framing follows the member — the fact a pack-stream consumer
+    /// needs to resume at the next entry header.
+    #[must_use]
+    pub fn consumed_input_bytes(&self) -> usize {
+        self.reader.consumed_bytes()
     }
 
     fn drive(
@@ -1009,7 +1039,7 @@ impl Inflater {
                     if expected != actual {
                         return Err(InflateRefusal::Adler32Mismatch { expected, actual });
                     }
-                    if self.reader.has_remaining_bytes() {
+                    if !self.allow_framing_suffix && self.reader.has_remaining_bytes() {
                         return Err(InflateRefusal::TrailingGarbage);
                     }
                     self.state = State::Finished;
