@@ -2,8 +2,9 @@
 //!
 //! The internal [`crate::cancellation`] module owns the request → drain →
 //! finalize state machine. This module owns the public construction boundary
-//! and commits any optional [`crate::ActiveClaimContinuityReceipt`] into the
-//! request and completion identities.
+//! and commits the exact [`crate::IntentRunCommitment`] plus any optional
+//! [`crate::ActiveClaimContinuityReceipt`] into the request and completion
+//! identities.
 //!
 //! Cancellation is intentionally asymmetric with handoff. Handoff continues a
 //! plan and therefore needs proof that its context stayed applicable.
@@ -26,15 +27,16 @@ use fgit_types::Digest;
 use crate::{
     ActiveClaimContinuityReceipt, ActiveClaimContinuityReceiptId,
     ActiveClaimContinuityRefusal, ActiveTaskClaim, AgentInstanceId, AgentSituationReceipt,
-    CancellationContainmentEvidence, CancellationDebtTransfer, IntentRun, LogicalTime, RunId,
-    RunCancellationRefusal, RunCancellationState, RunReconciliationReport,
-    RunReconciliationReportId, SituationId, TaskClaimCancellationProjection,
+    CancellationContainmentEvidence, CancellationDebtTransfer, IntentRun, IntentRunCommitment,
+    IntentRunIdentityRefusal, LogicalTime, RunId, RunCancellationRefusal,
+    RunCancellationState, RunReconciliationReport, RunReconciliationReportId, SituationId,
+    TaskClaimCancellationProjection,
 };
 
 const PUBLIC_CANCELLATION_DOMAIN: &[u8] =
-    b"frankengit.agent.public-run-cancellation/v1\0";
+    b"frankengit.agent.public-run-cancellation/v2\0";
 const PUBLIC_COMPLETION_DOMAIN: &[u8] =
-    b"frankengit.agent.public-run-cancellation-completion/v1\0";
+    b"frankengit.agent.public-run-cancellation-completion/v2\0";
 
 /// Stable identity of one publicly constructible cancellation request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -84,6 +86,7 @@ impl fmt::Display for RunCancellationCompletionId {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunCancellationIntent {
     cancellation_id: RunCancellationId,
+    run_commitment: IntentRunCommitment,
     claim_continuity_id: Option<ActiveClaimContinuityReceiptId>,
     inner: crate::cancellation::RunCancellationIntent,
 }
@@ -93,14 +96,16 @@ impl RunCancellationIntent {
     ///
     /// An active claim does not make continuity a prerequisite. Context change
     /// may itself be the reason cancellation is necessary. The request freezes
-    /// the supplied situation, claim, task generation, and complete run effect
-    /// inventory; completion still requires explicit task release or transfer
-    /// and terminal settlement, debt transfer, or containment.
+    /// the supplied situation, claim, task generation, complete run identity,
+    /// and complete run effect inventory; completion still requires explicit
+    /// task release or transfer and terminal settlement, debt transfer, or
+    /// containment.
     ///
     /// # Errors
     ///
-    /// Preserves every typed run, authority, report, claim, task-generation,
-    /// requester, bound, and canonical-framing refusal of the internal engine.
+    /// Refuses complete-run substitution before invoking the internal engine,
+    /// then preserves every typed run, authority, report, claim,
+    /// task-generation, requester, bound, and canonical-framing refusal.
     pub fn request(
         situation: &AgentSituationReceipt,
         run: &IntentRun,
@@ -109,6 +114,12 @@ impl RunCancellationIntent {
         requested_by: AgentInstanceId,
         reason_root: Digest,
     ) -> Result<Self, RunCancellationRequestRefusal> {
+        let run_commitment = validate_request_basis(
+            situation,
+            run,
+            &initial_reconciliation,
+            active_claim,
+        )?;
         let inner = crate::cancellation::RunCancellationIntent::request(
             situation,
             run,
@@ -118,7 +129,7 @@ impl RunCancellationIntent {
             reason_root,
         )
         .map_err(RunCancellationRequestRefusal::Cancellation)?;
-        Self::finish(inner, None)
+        Self::finish(inner, run_commitment, None)
     }
 
     /// Requests cancellation while additionally retaining a full-context
@@ -131,8 +142,8 @@ impl RunCancellationIntent {
     ///
     /// # Errors
     ///
-    /// Refuses continuity or cancellation-state substitutions and
-    /// unrepresentable public framing.
+    /// Refuses complete-run, continuity, or cancellation-state substitutions
+    /// and unrepresentable public framing.
     pub fn request_with_continuity(
         later_situation: &AgentSituationReceipt,
         run: &IntentRun,
@@ -142,6 +153,12 @@ impl RunCancellationIntent {
         requested_by: AgentInstanceId,
         reason_root: Digest,
     ) -> Result<Self, RunCancellationRequestRefusal> {
+        let run_commitment = validate_request_basis(
+            later_situation,
+            run,
+            &initial_reconciliation,
+            Some(active_claim),
+        )?;
         validate_continuity_source(active_claim, continuity)?;
         continuity
             .validate_for(active_claim, later_situation, run)
@@ -155,19 +172,22 @@ impl RunCancellationIntent {
             reason_root,
         )
         .map_err(RunCancellationRequestRefusal::Cancellation)?;
-        Self::finish(inner, Some(continuity.receipt_id()))
+        Self::finish(inner, run_commitment, Some(continuity.receipt_id()))
     }
 
     fn finish(
         inner: crate::cancellation::RunCancellationIntent,
+        run_commitment: IntentRunCommitment,
         claim_continuity_id: Option<ActiveClaimContinuityReceiptId>,
     ) -> Result<Self, RunCancellationRequestRefusal> {
         let cancellation_id = RunCancellationId(public_cancellation_commitment(
             inner.cancellation_id().as_bytes(),
+            run_commitment,
             claim_continuity_id,
         )?);
         Ok(Self {
             cancellation_id,
+            run_commitment,
             claim_continuity_id,
             inner,
         })
@@ -175,26 +195,38 @@ impl RunCancellationIntent {
 
     /// Completes cancellation from a later complete effect inventory.
     ///
-    /// The internal engine preserves exact effect membership, immutable effect
-    /// identity, monotone evidence and consumed budget, explicit task release or
-    /// transfer, and named transfer/containment evidence for unresolved debt.
+    /// The final report must retain the exact complete run frozen by the
+    /// request. The internal engine then preserves exact effect membership,
+    /// immutable effect identity, monotone evidence and consumed budget,
+    /// explicit task release or transfer, and named transfer/containment
+    /// evidence for unresolved debt.
     ///
     /// # Errors
     ///
-    /// Returns the internal typed cancellation refusal unchanged.
+    /// Refuses complete-run substitution before preserving every inner typed
+    /// cancellation refusal.
     pub fn complete(
         &self,
         final_reconciliation: RunReconciliationReport,
         task_claim_resolution: Option<TaskClaimCancellationProjection>,
         debt_transfers: Vec<CancellationDebtTransfer>,
         containment_evidence: Vec<CancellationContainmentEvidence>,
-    ) -> Result<RunCancellationCompletion, RunCancellationRefusal> {
-        let inner = self.inner.complete(
-            final_reconciliation,
-            task_claim_resolution,
-            debt_transfers,
-            containment_evidence,
-        )?;
+    ) -> Result<RunCancellationCompletion, RunCancellationCompletionRefusal> {
+        if final_reconciliation.run_commitment() != self.run_commitment {
+            return Err(RunCancellationCompletionRefusal::RunCommitmentMismatch {
+                expected: self.run_commitment,
+                observed: final_reconciliation.run_commitment(),
+            });
+        }
+        let inner = self
+            .inner
+            .complete(
+                final_reconciliation,
+                task_claim_resolution,
+                debt_transfers,
+                containment_evidence,
+            )
+            .map_err(RunCancellationCompletionRefusal::Cancellation)?;
         let completion_id = RunCancellationCompletionId(public_completion_commitment(
             self.cancellation_id,
             inner.completion_id().as_bytes(),
@@ -202,6 +234,7 @@ impl RunCancellationIntent {
         Ok(RunCancellationCompletion {
             completion_id,
             cancellation_id: self.cancellation_id,
+            run_commitment: self.run_commitment,
             inner,
         })
     }
@@ -210,6 +243,12 @@ impl RunCancellationIntent {
     #[must_use]
     pub const fn cancellation_id(&self) -> RunCancellationId {
         self.cancellation_id
+    }
+
+    /// Complete machine-enforced run being cancelled.
+    #[must_use]
+    pub const fn run_commitment(&self) -> IntentRunCommitment {
+        self.run_commitment
     }
 
     /// Optional full-context continuity evidence retained by the request.
@@ -272,6 +311,7 @@ impl RunCancellationIntent {
 pub struct RunCancellationCompletion {
     completion_id: RunCancellationCompletionId,
     cancellation_id: RunCancellationId,
+    run_commitment: IntentRunCommitment,
     inner: crate::cancellation::RunCancellationCompletion,
 }
 
@@ -286,6 +326,12 @@ impl RunCancellationCompletion {
     #[must_use]
     pub const fn cancellation_id(&self) -> RunCancellationId {
         self.cancellation_id
+    }
+
+    /// Complete machine-enforced run that was cancelled.
+    #[must_use]
+    pub const fn run_commitment(&self) -> IntentRunCommitment {
+        self.run_commitment
     }
 
     /// Cancelled run.
@@ -340,6 +386,29 @@ impl RunCancellationCompletion {
 /// Why public cancellation request construction failed closed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunCancellationRequestRefusal {
+    /// Complete run identity could not be produced.
+    RunIdentity(IntentRunIdentityRefusal),
+    /// Situation carries another complete run under the same or another ID.
+    SituationRunCommitmentMismatch {
+        /// Commitment computed from the supplied run.
+        expected: IntentRunCommitment,
+        /// Commitment retained by the latest situation.
+        observed: Option<IntentRunCommitment>,
+    },
+    /// Active claim belongs to another complete run.
+    ActiveClaimRunCommitmentMismatch {
+        /// Commitment computed from the supplied run.
+        expected: IntentRunCommitment,
+        /// Commitment retained by the active claim.
+        observed: IntentRunCommitment,
+    },
+    /// Initial effect inventory belongs to another complete run.
+    InitialReportRunCommitmentMismatch {
+        /// Commitment computed from the supplied run.
+        expected: IntentRunCommitment,
+        /// Commitment retained by the report.
+        observed: IntentRunCommitment,
+    },
     /// Optional full-context continuity evidence was substituted or stale.
     Continuity(ActiveClaimContinuityRefusal),
     /// Internal cancellation request validation refused the inputs.
@@ -351,6 +420,21 @@ pub enum RunCancellationRequestRefusal {
 impl fmt::Display for RunCancellationRequestRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RunIdentity(refusal) => {
+                write!(formatter, "cancellation run identity refused: {refusal}")
+            }
+            Self::SituationRunCommitmentMismatch { expected, observed } => write!(
+                formatter,
+                "cancellation situation run commitment {observed:?} differs from {expected}"
+            ),
+            Self::ActiveClaimRunCommitmentMismatch { expected, observed } => write!(
+                formatter,
+                "cancellation active-claim run commitment {observed} differs from {expected}"
+            ),
+            Self::InitialReportRunCommitmentMismatch { expected, observed } => write!(
+                formatter,
+                "cancellation report run commitment {observed} differs from {expected}"
+            ),
             Self::Continuity(refusal) => {
                 write!(formatter, "cancellation continuity refused: {refusal}")
             }
@@ -365,6 +449,12 @@ impl fmt::Display for RunCancellationRequestRefusal {
 }
 
 impl core::error::Error for RunCancellationRequestRefusal {}
+
+impl From<IntentRunIdentityRefusal> for RunCancellationRequestRefusal {
+    fn from(value: IntentRunIdentityRefusal) -> Self {
+        Self::RunIdentity(value)
+    }
+}
 
 impl From<CodecRefusal> for RunCancellationRequestRefusal {
     fn from(value: CodecRefusal) -> Self {
@@ -382,6 +472,90 @@ impl PartialEq<RunCancellationRequestRefusal> for RunCancellationRefusal {
     fn eq(&self, other: &RunCancellationRequestRefusal) -> bool {
         other == self
     }
+}
+
+/// Why public cancellation completion failed closed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunCancellationCompletionRefusal {
+    /// Final effect inventory belongs to another complete run.
+    RunCommitmentMismatch {
+        /// Complete run frozen by the request.
+        expected: IntentRunCommitment,
+        /// Complete run retained by the final report.
+        observed: IntentRunCommitment,
+    },
+    /// Internal cancellation completion refused the lifecycle evidence.
+    Cancellation(RunCancellationRefusal),
+}
+
+impl fmt::Display for RunCancellationCompletionRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RunCommitmentMismatch { expected, observed } => write!(
+                formatter,
+                "final cancellation report run commitment {observed} differs from {expected}"
+            ),
+            Self::Cancellation(refusal) => {
+                write!(formatter, "cancellation completion refused: {refusal}")
+            }
+        }
+    }
+}
+
+impl core::error::Error for RunCancellationCompletionRefusal {}
+
+impl From<RunCancellationRefusal> for RunCancellationCompletionRefusal {
+    fn from(value: RunCancellationRefusal) -> Self {
+        Self::Cancellation(value)
+    }
+}
+
+impl PartialEq<RunCancellationRefusal> for RunCancellationCompletionRefusal {
+    fn eq(&self, other: &RunCancellationRefusal) -> bool {
+        matches!(self, Self::Cancellation(refusal) if refusal == other)
+    }
+}
+
+impl PartialEq<RunCancellationCompletionRefusal> for RunCancellationRefusal {
+    fn eq(&self, other: &RunCancellationCompletionRefusal) -> bool {
+        other == self
+    }
+}
+
+fn validate_request_basis(
+    situation: &AgentSituationReceipt,
+    run: &IntentRun,
+    initial_reconciliation: &RunReconciliationReport,
+    active_claim: Option<ActiveTaskClaim>,
+) -> Result<IntentRunCommitment, RunCancellationRequestRefusal> {
+    let run_commitment = run.commitment()?;
+    if situation.intent_run_commitment() != Some(run_commitment) {
+        return Err(
+            RunCancellationRequestRefusal::SituationRunCommitmentMismatch {
+                expected: run_commitment,
+                observed: situation.intent_run_commitment(),
+            },
+        );
+    }
+    if let Some(claim) = active_claim {
+        if claim.run_commitment() != run_commitment {
+            return Err(
+                RunCancellationRequestRefusal::ActiveClaimRunCommitmentMismatch {
+                    expected: run_commitment,
+                    observed: claim.run_commitment(),
+                },
+            );
+        }
+    }
+    if initial_reconciliation.run_commitment() != run_commitment {
+        return Err(
+            RunCancellationRequestRefusal::InitialReportRunCommitmentMismatch {
+                expected: run_commitment,
+                observed: initial_reconciliation.run_commitment(),
+            },
+        );
+    }
+    Ok(run_commitment)
 }
 
 fn validate_continuity_source(
@@ -403,11 +577,13 @@ fn validate_continuity_source(
 
 fn public_cancellation_commitment(
     inner_cancellation_id: &[u8; 32],
+    run_commitment: IntentRunCommitment,
     claim_continuity_id: Option<ActiveClaimContinuityReceiptId>,
 ) -> Result<[u8; 32], RunCancellationRequestRefusal> {
-    let mut encoder = Encoder::with_capacity(160);
+    let mut encoder = Encoder::with_capacity(192);
     encoder.write_bytes("public_run_cancellation_domain", PUBLIC_CANCELLATION_DOMAIN)?;
     encoder.write_raw(inner_cancellation_id);
+    encoder.write_raw(run_commitment.as_bytes());
     match claim_continuity_id {
         Some(receipt_id) => {
             encoder.write_bool(true);
@@ -423,7 +599,7 @@ fn public_cancellation_commitment(
 fn public_completion_commitment(
     cancellation_id: RunCancellationId,
     inner_completion_id: &[u8; 32],
-) -> Result<[u8; 32], RunCancellationRefusal> {
+) -> Result<[u8; 32], RunCancellationCompletionRefusal> {
     let mut encoder = Encoder::with_capacity(160);
     encoder.write_bytes(
         "public_run_cancellation_completion_domain",
@@ -434,4 +610,10 @@ fn public_completion_commitment(
     let mut hasher = <Sha256 as GitHashAlgorithm>::Hasher::new();
     hasher.update(&encoder.into_bytes());
     Ok(hasher.finish())
+}
+
+impl From<CodecRefusal> for RunCancellationCompletionRefusal {
+    fn from(value: CodecRefusal) -> Self {
+        Self::Cancellation(RunCancellationRefusal::Codec(value))
+    }
 }
