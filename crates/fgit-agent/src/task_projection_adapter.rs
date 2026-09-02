@@ -6,11 +6,12 @@
 //! cancellation projection consumed by the wider Agent Control Plane.
 //!
 //! The successor generation is a commitment to logical task state, including
-//! the complete machine identity of an active lease holder. It does not depend
-//! on which conforming adapter executed the transition or on the evidence bytes
-//! that adapter later retains. Adapter identity and the declared evidence
-//! contract remain committed by [`TaskProjectionTransition`], so audit identity
-//! stays distinct without making backend choice alter task state.
+//! the complete machine identity of an active lease holder or transferred
+//! assignment preference. It does not depend on which conforming adapter
+//! executed the transition or on the evidence bytes that adapter later retains.
+//! Adapter identity and the declared evidence contract remain committed by
+//! [`TaskProjectionTransition`], so audit identity stays distinct without
+//! making backend choice alter task state.
 //!
 //! Values in this module are immutable derived coordination state. They are not
 //! durable storage and never become repository authority.
@@ -28,9 +29,9 @@ use crate::{
     TaskClaimReceipt, TaskPhase, WorkAction, WorkTaskId,
 };
 
-const SNAPSHOT_DOMAIN: &[u8] = b"frankengit.agent.task-projection-snapshot/v3\0";
-const GENERATION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-generation/v3\0";
-const TRANSITION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-transition/v3\0";
+const SNAPSHOT_DOMAIN: &[u8] = b"frankengit.agent.task-projection-snapshot/v4\0";
+const GENERATION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-generation/v4\0";
+const TRANSITION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-transition/v4\0";
 
 /// Stable identity of one immutable semantic task snapshot.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -81,11 +82,48 @@ impl fmt::Display for TaskProjectionTransitionId {
 pub enum TaskProjectionAssignment {
     /// No run is currently preferred or assigned.
     Unassigned,
-    /// The task is assigned to one Intent Run coordination identity.
+    /// The task is assigned to one complete Intent Run.
     ///
-    /// Without a lease this is only a preference. A successor must still
-    /// construct a complete-run-bound plan and claim.
-    Assigned(RunId),
+    /// Without a lease this is a transfer preference rather than active work
+    /// authority. The named run must still construct a fresh plan and claim.
+    Assigned {
+        /// Coordination identity.
+        run_id: RunId,
+        /// Complete machine-enforced identity.
+        run_commitment: IntentRunCommitment,
+    },
+}
+
+impl TaskProjectionAssignment {
+    /// Builds one complete assignment or transfer preference.
+    #[must_use]
+    pub const fn assigned(
+        run_id: RunId,
+        run_commitment: IntentRunCommitment,
+    ) -> Self {
+        Self::Assigned {
+            run_id,
+            run_commitment,
+        }
+    }
+
+    /// Assigned coordination identity, when present.
+    #[must_use]
+    pub const fn run_id(self) -> Option<RunId> {
+        match self {
+            Self::Unassigned => None,
+            Self::Assigned { run_id, .. } => Some(run_id),
+        }
+    }
+
+    /// Assigned complete run identity, when present.
+    #[must_use]
+    pub const fn run_commitment(self) -> Option<IntentRunCommitment> {
+        match self {
+            Self::Unassigned => None,
+            Self::Assigned { run_commitment, .. } => Some(run_commitment),
+        }
+    }
 }
 
 /// Active lease material retained by a claimed task projection.
@@ -247,7 +285,7 @@ impl TaskProjectionSnapshot {
             task_id,
             generation,
             phase,
-            TaskProjectionAssignment::Assigned(lease.assignee),
+            TaskProjectionAssignment::assigned(lease.assignee, lease.run_commitment),
             Some(lease),
         )
     }
@@ -277,11 +315,24 @@ impl TaskProjectionSnapshot {
         }
         match self.assignment {
             TaskProjectionAssignment::Unassigned => {}
-            TaskProjectionAssignment::Assigned(assigned) if assigned == run.run_id() => {}
-            TaskProjectionAssignment::Assigned(assigned) => {
+            TaskProjectionAssignment::Assigned {
+                run_id,
+                run_commitment: assigned_commitment,
+            } if run_id == run.run_id() && assigned_commitment == run_commitment => {}
+            TaskProjectionAssignment::Assigned { run_id, .. } if run_id != run.run_id() => {
                 return Err(TaskProjectionAdapterRefusal::AssignedToOther {
-                    assigned,
+                    assigned: run_id,
                     requested: run.run_id(),
+                });
+            }
+            TaskProjectionAssignment::Assigned {
+                run_id,
+                run_commitment: assigned_commitment,
+            } => {
+                return Err(TaskProjectionAdapterRefusal::AssignedRunCommitmentMismatch {
+                    run_id,
+                    expected: assigned_commitment,
+                    observed: run_commitment,
                 });
             }
         }
@@ -356,7 +407,7 @@ impl TaskProjectionSnapshot {
             self.task_id,
             next_generation,
             phase,
-            TaskProjectionAssignment::Assigned(run.run_id()),
+            TaskProjectionAssignment::assigned(run.run_id(), run_commitment),
             Some(lease),
         )?;
         let transition = TaskProjectionTransition::build(
@@ -454,9 +505,9 @@ impl TaskProjectionSnapshot {
     /// lease atomically at one projection generation.
     ///
     /// The successor receives no plan, capability, or active claim. Its complete
-    /// run commitment is retained in transition audit identity, and it must
-    /// build a new pulse and plan, claim the new generation, and activate that
-    /// claim before continuing work.
+    /// run commitment is retained in both the semantic assignment and
+    /// transition audit identity. It must build a new pulse and plan, claim the
+    /// new generation, and activate that claim before continuing work.
     ///
     /// # Errors
     ///
@@ -533,7 +584,10 @@ impl TaskProjectionSnapshot {
             self.task_id,
             next_generation,
             self.phase,
-            TaskProjectionAssignment::Assigned(successor_run.run_id()),
+            TaskProjectionAssignment::assigned(
+                successor_run.run_id(),
+                successor_run_commitment,
+            ),
             None,
         )?;
         let transition = TaskProjectionTransition::build(
@@ -570,7 +624,11 @@ impl TaskProjectionSnapshot {
             }
         }
         if let Some(active) = lease.as_ref() {
-            if assignment != TaskProjectionAssignment::Assigned(active.assignee) {
+            let expected = TaskProjectionAssignment::assigned(
+                active.assignee,
+                active.run_commitment,
+            );
+            if assignment != expected {
                 return Err(TaskProjectionAdapterRefusal::LeaseAssignmentMismatch);
             }
             if generation != active.claimed_generation {
@@ -664,7 +722,7 @@ pub enum TaskProjectionTransitionKind {
     Transferred {
         /// Successor coordination preference; not an active claim.
         successor_run_id: RunId,
-        /// Complete successor run committed by the transfer audit record.
+        /// Complete successor run committed by task state and audit record.
         successor_run_commitment: IntentRunCommitment,
     },
 }
@@ -963,6 +1021,16 @@ pub enum TaskProjectionAdapterRefusal {
         /// Requested claimant.
         requested: RunId,
     },
+    /// Snapshot is assigned to the same numeric run ID but another complete
+    /// machine identity.
+    AssignedRunCommitmentMismatch {
+        /// Reused coordination ID.
+        run_id: RunId,
+        /// Complete run selected by the assignment.
+        expected: IntentRunCommitment,
+        /// Complete run attempting the claim.
+        observed: IntentRunCommitment,
+    },
     /// Snapshot already carries an active lease.
     ActiveLeaseExists,
     /// Claim mutation predates the pulse observation.
@@ -1152,7 +1220,9 @@ fn validate_resolution_basis<'a>(
         .lease
         .as_ref()
         .ok_or(TaskProjectionAdapterRefusal::MissingActiveLease)?;
-    if snapshot.assignment != TaskProjectionAssignment::Assigned(lease.assignee) {
+    let expected_assignment =
+        TaskProjectionAssignment::assigned(lease.assignee, lease.run_commitment);
+    if snapshot.assignment != expected_assignment {
         return Err(TaskProjectionAdapterRefusal::ActiveLeaseAssignmentMismatch);
     }
     let source_run_commitment = source_run.commitment()?;
@@ -1259,16 +1329,20 @@ fn derive_resolution_generation(
 fn snapshot_commitment(
     snapshot: &TaskProjectionSnapshot,
 ) -> Result<[u8; 32], TaskProjectionAdapterRefusal> {
-    let mut encoder = Encoder::with_capacity(576);
+    let mut encoder = Encoder::with_capacity(608);
     encoder.write_bytes("task_projection_snapshot_domain", SNAPSHOT_DOMAIN)?;
     encoder.write_raw(snapshot.task_id.as_bytes());
     encoder.write_raw(&snapshot.generation);
     encoder.write_raw_byte(task_phase_code(snapshot.phase));
     match snapshot.assignment {
         TaskProjectionAssignment::Unassigned => encoder.write_bool(false),
-        TaskProjectionAssignment::Assigned(run_id) => {
+        TaskProjectionAssignment::Assigned {
+            run_id,
+            run_commitment,
+        } => {
             encoder.write_bool(true);
             encoder.write_raw(&run_id.value().to_be_bytes());
+            encoder.write_raw(run_commitment.as_bytes());
         }
     }
     match &snapshot.lease {
