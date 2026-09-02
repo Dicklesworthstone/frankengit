@@ -38,21 +38,23 @@
 //! time-only continuation. [`broker`] owns typed effect reservations and the
 //! replayable journal. The crate-private `effect_authorization` module
 //! authenticates bounded capability ancestry and exact-position revocation
-//! receipts. [`authority_revocation`] resolves those receipts from the canonical
-//! generation selected by repository configuration and the exact authenticated
-//! head. [`effect_dispatch`] exposes the production-facing broker, which
-//! requires that proof both at high-value request acceptance and again at an
-//! irreversible external dispatch. Abort and reconciliation remain available
-//! after revocation because they reduce outstanding responsibility.
+//! receipts. [`authority_revocation`] resolves exact-head receipts from the
+//! canonical generation selected by repository configuration.
+//! [`descendant_revocation`] authenticates the run's historical receipt against
+//! the same store, proves the current head is an exact bounded descendant, and
+//! binds that path to current policy and effect authorization. [`effect_dispatch`]
+//! exposes the production-facing broker, which requires revocation proof both
+//! at high-value request acceptance and again at an irreversible external
+//! dispatch. Abort and reconciliation remain available after revocation because
+//! they reduce outstanding responsibility.
 //! [`reconcile`], the crate-private handoff/cancellation engines and their public
 //! facades preserve responsibility through handoff or conservative stop.
 //! [`outcome_learning`] records validated retrieval-only learning and grants no
 //! authority.
 //!
 //! Concrete product-host adoption, action execution, ECC assembly, canonical
-//! publication orchestration, later-head ancestry proof, durable codecs for the
-//! agent control objects, and robot/API surfaces remain outside the current
-//! boundary.
+//! publication orchestration, durable codecs for the agent control objects, and
+//! robot/API surfaces remain outside the current boundary.
 
 pub mod action_packet;
 pub mod authority_identity;
@@ -63,6 +65,7 @@ pub mod capability;
 pub mod claim;
 pub mod claim_continuity;
 pub mod classes;
+pub mod descendant_revocation;
 pub mod ecc;
 mod effect_authorization;
 pub mod effect_dispatch;
@@ -132,6 +135,16 @@ pub use claim_continuity::{
     AgentActionPacketContinuationId,
 };
 pub use classes::{CLASS_COUNT, ClassSet, OperationClass, UnknownClassBits};
+pub use descendant_revocation::{
+    DESCENDANT_AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE,
+    CurrentAuthorityCapabilityEffectAuthorization,
+    CurrentAuthorityCapabilityEffectAuthorizationId,
+    CurrentAuthorityCapabilityRevocationReadRefusal,
+    CurrentAuthorityCapabilityRevocationReceipt,
+    CurrentAuthorityCapabilityRevocationReceiptId,
+    read_current_authority_capability_revocations,
+    read_current_authority_capability_revocations_async,
+};
 pub use ecc::{
     EccPolicy, EccRefusal, EvidenceCarryingChange, EvidenceClass, EvidenceRecordRef,
     IndependenceClassification, IndependenceDimension, PartyFacts, RequirementDisposition,
