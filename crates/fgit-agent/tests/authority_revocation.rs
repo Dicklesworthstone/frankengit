@@ -2,8 +2,8 @@
 //! Public-path tests for the canonical authority-to-agent revocation adapter.
 
 use core::future::Future;
-use core::task::{Context, Poll, Wake, Waker};
 use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 
 use fgit_agent::{
     AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE, AttenuationRequest,
