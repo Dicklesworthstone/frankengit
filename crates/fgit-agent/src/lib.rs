@@ -184,8 +184,8 @@ pub use reconcile::{
 };
 pub use refresh::{RefreshReceipt, RefreshRelation, RefreshSide};
 pub use run_cancellation::{
-    RunCancellationCompletion, RunCancellationCompletionId, RunCancellationId,
-    RunCancellationIntent, RunCancellationRequestRefusal,
+    RunCancellationCompletion, RunCancellationCompletionId, RunCancellationCompletionRefusal,
+    RunCancellationId, RunCancellationIntent, RunCancellationRequestRefusal,
 };
 pub use run_identity::{
     IntentRunBinding, IntentRunCommitment, IntentRunIdentityRefusal, IntentRunRetry,
