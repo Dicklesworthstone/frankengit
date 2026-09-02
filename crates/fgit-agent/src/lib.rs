@@ -30,7 +30,11 @@
 //! debt. [`task_persistence_gate`] validates claim control before I/O and exposes
 //! claim or cancellation projections only after the exact durable successor is
 //! confirmed. [`task_recovery`] atomically binds restart recovery to the complete
-//! run and carries that evidence through conservative persisted release. None of
+//! run and carries that evidence through conservative persisted release.
+//! [`cross_head_task_transfer`] keeps a historical source lease separate from a
+//! proven-descendant receiver-basis compare-and-replace target, retains both
+//! complete runs and the accepted authority ancestry, and requires the receiver
+//! to acquire a fresh ordinary persisted claim before work resumes. None of
 //! those values is repository authority.
 //!
 //! [`claim`] and [`action_packet`] bind an admitted task claim to concrete,
@@ -75,6 +79,7 @@ pub mod claim;
 pub mod claim_continuity;
 pub mod classes;
 pub mod current_effect_dispatch;
+pub mod cross_head_task_transfer;
 pub mod descendant_revocation;
 pub mod ecc;
 mod effect_authorization;
@@ -146,6 +151,17 @@ pub use claim_continuity::{
     AgentActionPacketContinuationId,
 };
 pub use classes::{CLASS_COUNT, ClassSet, OperationClass, UnknownClassBits};
+pub use cross_head_task_transfer::{
+    CrossHeadTaskTransferActivationReceipt, CrossHeadTaskTransferActivationReceiptId,
+    CrossHeadTaskTransferActivationRefusal, CrossHeadTaskTransferDecision,
+    CrossHeadTaskTransferEnvelope, CrossHeadTaskTransferEnvelopeId,
+    CrossHeadTaskTransferExecution, CrossHeadTaskTransferExecutionRefusal,
+    CrossHeadTaskTransferPersistedState, CrossHeadTaskTransferPersistenceOutcome,
+    CrossHeadTaskTransferReceipt, CrossHeadTaskTransferReceiptId,
+    CrossHeadTaskTransferReconciliationCause, CrossHeadTaskTransferRefusal,
+    CrossHeadTaskTransferStore, PersistedCrossHeadTaskTransfer,
+    execute_cross_head_task_transfer_store, persist_cross_head_task_transfer,
+};
 pub use current_effect_dispatch::{
     CurrentAuthorityEscalatedOutboxEffect, CurrentAuthorityEscalationResolutionRefused,
     CurrentAuthorityExternalEffectOutcome, CurrentAuthorityOutboxDispatchRefused,
