@@ -39,10 +39,12 @@ use crate::{
     AgentInstanceId, AuthorizedOutboxDispatchRefused, AuthorizedOutboxReservationRefused,
     Capability, CapabilityEffectAuthorization, CapabilityEffectAuthorizationRefusal,
     CurrentAuthorityCapabilityEffectAuthorization, CurrentAuthorityCapabilityRevocationReceipt,
-    DeferredOutboxEffect, EffectGrant, EffectId, EffectJournalEntry, EffectJournalRefusal,
-    EffectRecord, EffectRequest, EscalatedOutboxEffect, ExternalEffectOutcome, IntentRun,
-    IntentRunCommitment, LogicalTime, ReconciliationRefused,
-    RevocationAuthorizedEffectGrant, RevocationAuthorizedOutboxEffect,
+    EffectGrant, EffectId, EffectJournalEntry, EffectRecord, EffectRequest, IntentRun,
+    IntentRunCommitment, LogicalTime, RevocationAuthorizedDeferredOutboxEffect,
+    RevocationAuthorizedEffectGrant, RevocationAuthorizedEscalatedOutboxEffect,
+    RevocationAuthorizedEscalationResolutionRefused,
+    RevocationAuthorizedExternalEffectOutcome, RevocationAuthorizedOutboxEffect,
+    RevocationAuthorizedReconciliationRefused, RevocationAuthorizedSettledOutboxEffect,
     RevocationCheckedEffectBroker, RevocationCheckedEffectRefusal, RunId,
     VerifiedCapabilityChain,
 };
@@ -220,8 +222,8 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
     ///
     /// The same exact request, chain, and inner receipt are passed to the
     /// ordinary dispatch core after the ancestry-bound authorization succeeds.
-    /// The resulting deferred effect is immediately re-wrapped around the two
-    /// current-authority proofs; no raw deferred obligation is exposed.
+    /// The resulting generic proof-carrying deferred effect remains intact
+    /// beneath the current-head proof; no raw deferred obligation is exposed.
     ///
     /// The current-head dispatch proof is appended exactly when the inner
     /// broker appends its generic proof: on success and on the commit-refusal
@@ -273,7 +275,7 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
                     initial_authorization,
                     dispatch_authorization,
                     request,
-                    deferred: deferred.into_deferred(),
+                    deferred,
                 })
             }
             Err(source) => {
@@ -453,7 +455,7 @@ impl CurrentAuthorityRevocationAuthorizedOutboxEffect {
     pub fn abort_unused(
         self,
         reason: DispatchAbortReason,
-    ) -> Result<SettledObligation<OutboxEffectPermit>, EffectJournalRefusal> {
+    ) -> Result<SettledObligation<OutboxEffectPermit>, crate::EffectJournalRefusal> {
         self.outbox.abort_unused(reason)
     }
 }
@@ -501,8 +503,8 @@ impl CurrentAuthorityOutboxDispatchRefused {
         }
     }
 
-    /// Recovers a committed deferred effect when dispatch occurred before the
-    /// ordinary journal mirror refused.
+    /// Recovers a committed proof-carrying effect when dispatch occurred before
+    /// the ordinary journal mirror refused.
     #[must_use]
     pub fn into_deferred(
         self,
@@ -518,7 +520,7 @@ impl CurrentAuthorityOutboxDispatchRefused {
                     initial_authorization,
                     dispatch_authorization,
                     request,
-                    deferred: deferred.into_deferred(),
+                    deferred,
                 }
             }),
             Self::Authorization { .. } => None,
@@ -544,14 +546,14 @@ impl fmt::Display for CurrentAuthorityOutboxDispatchRefused {
 impl core::error::Error for CurrentAuthorityOutboxDispatchRefused {}
 
 /// Committed external effect retaining both ancestry-bound authorizations and
-/// exposing reconciliation without a raw-deferred escape hatch.
+/// the complete generic proof-carrying committed effect beneath them.
 #[must_use = "a current-authority deferred effect must be reconciled or escalated"]
 #[derive(Debug)]
 pub struct CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect {
     initial_authorization: CurrentAuthorityCapabilityEffectAuthorization,
     dispatch_authorization: CurrentAuthorityCapabilityEffectAuthorization,
     request: EffectRequest,
-    deferred: DeferredOutboxEffect,
+    deferred: RevocationAuthorizedDeferredOutboxEffect,
 }
 
 impl CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect {
@@ -573,8 +575,15 @@ impl CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect {
         self.request
     }
 
-    /// Reconciles the committed effect while retaining both authorization
-    /// identities in every resulting terminal or escalated value.
+    /// Generic request-time and dispatch-time proof layer retained beneath the
+    /// current-head ancestry proof.
+    #[must_use]
+    pub const fn generic(&self) -> &RevocationAuthorizedDeferredOutboxEffect {
+        &self.deferred
+    }
+
+    /// Reconciles the committed effect while retaining current-head and generic
+    /// authorization identities in every result.
     pub fn reconcile<C, E>(
         self,
         plan: &mut ReconcilePlan,
@@ -600,7 +609,7 @@ impl CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect {
             acknowledgement,
             output_commitments,
         ) {
-            Ok(ExternalEffectOutcome::Acknowledged(settled)) => {
+            Ok(RevocationAuthorizedExternalEffectOutcome::Acknowledged(settled)) => {
                 Ok(CurrentAuthorityExternalEffectOutcome::Acknowledged(
                     CurrentAuthoritySettledOutboxEffect {
                         initial_authorization,
@@ -610,7 +619,7 @@ impl CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect {
                     },
                 ))
             }
-            Ok(ExternalEffectOutcome::TerminallyFailed(settled)) => {
+            Ok(RevocationAuthorizedExternalEffectOutcome::TerminallyFailed(settled)) => {
                 Ok(CurrentAuthorityExternalEffectOutcome::TerminallyFailed(
                     CurrentAuthoritySettledOutboxEffect {
                         initial_authorization,
@@ -620,7 +629,7 @@ impl CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect {
                     },
                 ))
             }
-            Ok(ExternalEffectOutcome::Escalated(effect)) => {
+            Ok(RevocationAuthorizedExternalEffectOutcome::Escalated(effect)) => {
                 Ok(CurrentAuthorityExternalEffectOutcome::Escalated(
                     CurrentAuthorityEscalatedOutboxEffect {
                         initial_authorization,
@@ -630,7 +639,7 @@ impl CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect {
                     },
                 ))
             }
-            Err(ReconciliationRefused::WrongPlan { effect }) => {
+            Err(RevocationAuthorizedReconciliationRefused::WrongPlan { effect }) => {
                 Err(CurrentAuthorityReconciliationRefused::WrongPlan {
                     effect: Box::new(Self {
                         initial_authorization,
@@ -640,7 +649,7 @@ impl CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect {
                     }),
                 })
             }
-            Err(ReconciliationRefused::AfterSettlement(source)) => {
+            Err(source @ RevocationAuthorizedReconciliationRefused::AfterSettlement { .. }) => {
                 Err(CurrentAuthorityReconciliationRefused::AfterSettlement {
                     initial_authorization,
                     dispatch_authorization,
@@ -652,8 +661,8 @@ impl CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect {
     }
 }
 
-/// Reconciliation refusal preserving the live proof-carrying effect whenever
-/// the obligation remains outstanding.
+/// Reconciliation refusal preserving both proof layers and the live effect
+/// whenever the obligation remains outstanding.
 #[must_use]
 #[derive(Debug)]
 pub enum CurrentAuthorityReconciliationRefused {
@@ -662,18 +671,17 @@ pub enum CurrentAuthorityReconciliationRefused {
         /// Still-owned proof-carrying deferred effect.
         effect: Box<CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect>,
     },
-    /// The resource obligation settled, but the ordinary journal mirror refused.
-    /// The proof lineage is retained even though there is no live obligation to
-    /// retry.
+    /// The resource obligation settled, but the generic broker journal could
+    /// not mirror the terminal transition.
     AfterSettlement {
-        /// Request-time authorization.
+        /// Request-time current-head authorization.
         initial_authorization: CurrentAuthorityCapabilityEffectAuthorization,
-        /// Dispatch-time authorization.
+        /// Dispatch-time current-head authorization.
         dispatch_authorization: CurrentAuthorityCapabilityEffectAuthorization,
         /// Exact reconciled request.
         request: EffectRequest,
-        /// Journal refusal after the resource settlement.
-        source: EffectJournalRefusal,
+        /// Complete generic proof-preserving refusal evidence.
+        source: RevocationAuthorizedReconciliationRefused,
     },
 }
 
@@ -706,8 +714,8 @@ impl fmt::Display for CurrentAuthorityReconciliationRefused {
 
 impl core::error::Error for CurrentAuthorityReconciliationRefused {}
 
-/// Terminal or escalated external-effect outcome retaining both current-head
-/// authorization identities.
+/// Terminal or escalated external-effect outcome retaining current-head and
+/// generic authorization identities.
 #[must_use]
 #[derive(Debug)]
 pub enum CurrentAuthorityExternalEffectOutcome {
@@ -719,24 +727,24 @@ pub enum CurrentAuthorityExternalEffectOutcome {
     Escalated(CurrentAuthorityEscalatedOutboxEffect),
 }
 
-/// Settled external effect retaining complete current-head authorization
-/// lineage.
+/// Settled external effect retaining both current-head authorizations and the
+/// complete generic proof-preserving terminal value.
 #[derive(Debug)]
 pub struct CurrentAuthoritySettledOutboxEffect {
     initial_authorization: CurrentAuthorityCapabilityEffectAuthorization,
     dispatch_authorization: CurrentAuthorityCapabilityEffectAuthorization,
     request: EffectRequest,
-    settled: SettledObligation<OutboxEffectPermit>,
+    settled: RevocationAuthorizedSettledOutboxEffect,
 }
 
 impl CurrentAuthoritySettledOutboxEffect {
-    /// Request-time authorization.
+    /// Request-time current-head authorization.
     #[must_use]
     pub const fn initial_authorization(&self) -> CurrentAuthorityCapabilityEffectAuthorization {
         self.initial_authorization
     }
 
-    /// Dispatch-time authorization.
+    /// Dispatch-time current-head authorization.
     #[must_use]
     pub const fn dispatch_authorization(&self) -> CurrentAuthorityCapabilityEffectAuthorization {
         self.dispatch_authorization
@@ -748,32 +756,38 @@ impl CurrentAuthoritySettledOutboxEffect {
         self.request
     }
 
+    /// Generic proof-preserving terminal value.
+    #[must_use]
+    pub const fn generic(&self) -> &RevocationAuthorizedSettledOutboxEffect {
+        &self.settled
+    }
+
     /// Shared terminal obligation evidence.
     #[must_use]
     pub fn settled(&self) -> &SettledObligation<OutboxEffectPermit> {
-        &self.settled
+        self.settled.settled()
     }
 }
 
-/// Escalated external effect retaining proof lineage while a named owner holds
-/// responsibility.
+/// Escalated external effect retaining both proof layers while a named owner
+/// holds responsibility.
 #[must_use = "an escalated current-authority effect must be resolved or reported at close"]
 #[derive(Debug)]
 pub struct CurrentAuthorityEscalatedOutboxEffect {
     initial_authorization: CurrentAuthorityCapabilityEffectAuthorization,
     dispatch_authorization: CurrentAuthorityCapabilityEffectAuthorization,
     request: EffectRequest,
-    effect: EscalatedOutboxEffect,
+    effect: RevocationAuthorizedEscalatedOutboxEffect,
 }
 
 impl CurrentAuthorityEscalatedOutboxEffect {
-    /// Request-time authorization.
+    /// Request-time current-head authorization.
     #[must_use]
     pub const fn initial_authorization(&self) -> CurrentAuthorityCapabilityEffectAuthorization {
         self.initial_authorization
     }
 
-    /// Dispatch-time authorization.
+    /// Dispatch-time current-head authorization.
     #[must_use]
     pub const fn dispatch_authorization(&self) -> CurrentAuthorityCapabilityEffectAuthorization {
         self.dispatch_authorization
@@ -785,8 +799,13 @@ impl CurrentAuthorityEscalatedOutboxEffect {
         self.request
     }
 
-    /// Records a late acknowledgement while retaining authorization lineage in
-    /// the returned terminal value or refusal evidence.
+    /// Generic proof-preserving escalated value.
+    #[must_use]
+    pub const fn generic(&self) -> &RevocationAuthorizedEscalatedOutboxEffect {
+        &self.effect
+    }
+
+    /// Records a late acknowledgement while retaining both proof layers.
     pub fn resolve_acknowledged(
         self,
         acknowledgement: DownstreamAck,
@@ -815,8 +834,8 @@ impl CurrentAuthorityEscalatedOutboxEffect {
         }
     }
 
-    /// Records a named owner's permanent-failure decision while retaining proof
-    /// lineage.
+    /// Records a named owner's permanent-failure decision while retaining both
+    /// proof layers.
     pub fn resolve_failed(
         self,
         reason: TerminalFailureReason,
@@ -846,25 +865,25 @@ impl CurrentAuthorityEscalatedOutboxEffect {
     }
 }
 
-/// Journal-mirror failure after an escalated obligation has already settled,
-/// retaining both authorization identities for audit and repair.
+/// Post-settlement generic journal refusal retaining both current-head
+/// authorization identities for audit and repair.
 #[must_use]
 #[derive(Debug)]
 pub struct CurrentAuthorityEscalationResolutionRefused {
     initial_authorization: CurrentAuthorityCapabilityEffectAuthorization,
     dispatch_authorization: CurrentAuthorityCapabilityEffectAuthorization,
     request: EffectRequest,
-    source: EffectJournalRefusal,
+    source: RevocationAuthorizedEscalationResolutionRefused,
 }
 
 impl CurrentAuthorityEscalationResolutionRefused {
-    /// Request-time authorization.
+    /// Request-time current-head authorization.
     #[must_use]
     pub const fn initial_authorization(&self) -> CurrentAuthorityCapabilityEffectAuthorization {
         self.initial_authorization
     }
 
-    /// Dispatch-time authorization.
+    /// Dispatch-time current-head authorization.
     #[must_use]
     pub const fn dispatch_authorization(&self) -> CurrentAuthorityCapabilityEffectAuthorization {
         self.dispatch_authorization
@@ -876,10 +895,10 @@ impl CurrentAuthorityEscalationResolutionRefused {
         self.request
     }
 
-    /// Journal refusal observed after settlement.
+    /// Generic proof-preserving refusal evidence.
     #[must_use]
-    pub const fn source(&self) -> EffectJournalRefusal {
-        self.source
+    pub const fn source(&self) -> &RevocationAuthorizedEscalationResolutionRefused {
+        &self.source
     }
 }
 
