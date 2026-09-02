@@ -15,23 +15,28 @@
 //! inputs, and cost are re-bound before the obligation can commit.
 //!
 //! Once dispatch commits, later reconciliation remains cleanup rather than a
-//! new external effect. [`RevocationAuthorizedDeferredOutboxEffect`] therefore
-//! exposes the ordinary deferred obligation together with both authorizations.
+//! new external effect. The committed wrapper nevertheless retains both
+//! authorizations through reconciliation, escalation, and terminal settlement;
+//! no public conversion exposes the raw deferred obligation and drops that
+//! evidence.
 
 use core::fmt;
 
 use fgit_resource::{
-    RegionCloseOutcome, RegionId, ReleaseReceipt, ResourceVector, SettledObligation,
-    kinds::{DispatchAbortReason, OutboxDispatch, OutboxEffectPermit},
+    DownstreamChannel, ReconcilePlan, RegionCloseOutcome, RegionId, ReleaseReceipt,
+    ResourceVector, SettledObligation, TerminalFailureReason,
+    kinds::{DispatchAbortReason, DownstreamAck, OutboxDispatch, OutboxEffectPermit},
 };
+use fgit_types::PrincipalId;
 
 use crate::{
     AgentInstanceId, AuthorizedOutboxReservationRefused, Capability,
     CapabilityEffectAuthorization, CapabilityEffectAuthorizationRefusal,
     CapabilityRevocationReceipt, DeferredOutboxEffect, EffectGrant, EffectId,
-    EffectJournalEntry, EffectJournalRefusal, EffectRecord, EffectRequest, IntentRun,
-    IntentRunCommitment, LogicalTime, OutboxCommitRefused, RevocationAuthorizedEffectGrant,
-    RevocationCheckedEffectRefusal, RunId, VerifiedCapabilityChain, VerifiedCapabilityChainId,
+    EffectJournalEntry, EffectJournalRefusal, EffectRecord, EffectRequest, EscalatedOutboxEffect,
+    ExternalEffectOutcome, IntentRun, IntentRunCommitment, LogicalTime, OutboxCommitRefused,
+    ReconciliationRefused, RevocationAuthorizedEffectGrant, RevocationCheckedEffectRefusal,
+    RunId, VerifiedCapabilityChain, VerifiedCapabilityChainId,
 };
 
 /// Production-facing broker whose external dispatch path rechecks revocation.
@@ -333,15 +338,338 @@ impl RevocationAuthorizedDeferredOutboxEffect {
         self.request
     }
 
-    /// Transfers the committed obligation into ordinary reconciliation.
+    /// Reconciles the committed effect while retaining both authorizations in
+    /// every terminal, escalated, and recoverable-refusal value.
     ///
     /// Reconciliation reduces outstanding responsibility and therefore remains
-    /// available after later revocation.
-    #[must_use]
-    pub fn into_deferred(self) -> DeferredOutboxEffect {
-        self.deferred
+    /// available after later revocation. It does not require a new capability
+    /// proof, but it also does not discard the proofs that authorized the
+    /// irreversible dispatch.
+    pub fn reconcile<C, E>(
+        self,
+        plan: &mut ReconcilePlan,
+        channel: &mut C,
+        owner: PrincipalId,
+        acknowledgement: E,
+        output_commitments: Vec<[u8; 32]>,
+    ) -> Result<RevocationAuthorizedExternalEffectOutcome, RevocationAuthorizedReconciliationRefused>
+    where
+        C: DownstreamChannel,
+        E: FnOnce(u32) -> DownstreamAck,
+    {
+        let Self {
+            initial_authorization,
+            dispatch_authorization,
+            request,
+            deferred,
+        } = self;
+        match deferred.reconcile(
+            plan,
+            channel,
+            owner,
+            acknowledgement,
+            output_commitments,
+        ) {
+            Ok(ExternalEffectOutcome::Acknowledged(settled)) => {
+                Ok(RevocationAuthorizedExternalEffectOutcome::Acknowledged(
+                    RevocationAuthorizedSettledOutboxEffect {
+                        initial_authorization,
+                        dispatch_authorization,
+                        request,
+                        settled,
+                    },
+                ))
+            }
+            Ok(ExternalEffectOutcome::TerminallyFailed(settled)) => {
+                Ok(RevocationAuthorizedExternalEffectOutcome::TerminallyFailed(
+                    RevocationAuthorizedSettledOutboxEffect {
+                        initial_authorization,
+                        dispatch_authorization,
+                        request,
+                        settled,
+                    },
+                ))
+            }
+            Ok(ExternalEffectOutcome::Escalated(effect)) => {
+                Ok(RevocationAuthorizedExternalEffectOutcome::Escalated(
+                    RevocationAuthorizedEscalatedOutboxEffect {
+                        initial_authorization,
+                        dispatch_authorization,
+                        request,
+                        effect,
+                    },
+                ))
+            }
+            Err(ReconciliationRefused::WrongPlan { effect }) => {
+                Err(RevocationAuthorizedReconciliationRefused::WrongPlan {
+                    effect: Box::new(Self {
+                        initial_authorization,
+                        dispatch_authorization,
+                        request,
+                        deferred: *effect,
+                    }),
+                })
+            }
+            Err(ReconciliationRefused::AfterSettlement(source)) => {
+                Err(RevocationAuthorizedReconciliationRefused::AfterSettlement {
+                    initial_authorization,
+                    dispatch_authorization,
+                    request,
+                    source,
+                })
+            }
+        }
     }
 }
+
+/// Reconciliation refusal preserving the proof-carrying effect whenever the
+/// obligation remains outstanding.
+#[must_use]
+#[derive(Debug)]
+pub enum RevocationAuthorizedReconciliationRefused {
+    /// The plan names another downstream key or idempotency contract.
+    WrongPlan {
+        /// Still-owned proof-carrying deferred effect.
+        effect: Box<RevocationAuthorizedDeferredOutboxEffect>,
+    },
+    /// The resource obligation settled, but the broker journal could not mirror
+    /// the terminal transition. Both authorizations remain attached to the
+    /// refusal evidence even though there is no live obligation to retry.
+    AfterSettlement {
+        /// Request-time authorization.
+        initial_authorization: CapabilityEffectAuthorization,
+        /// Dispatch-time authorization.
+        dispatch_authorization: CapabilityEffectAuthorization,
+        /// Exact reconciled request.
+        request: EffectRequest,
+        /// Journal refusal after settlement.
+        source: EffectJournalRefusal,
+    },
+}
+
+impl RevocationAuthorizedReconciliationRefused {
+    /// Recovers the live deferred effect on the wrong-plan path.
+    #[must_use]
+    pub fn into_effect(self) -> Option<RevocationAuthorizedDeferredOutboxEffect> {
+        match self {
+            Self::WrongPlan { effect } => Some(*effect),
+            Self::AfterSettlement { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for RevocationAuthorizedReconciliationRefused {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongPlan { .. } => formatter.write_str(
+                "authorized reconciliation plan does not match the deferred effect",
+            ),
+            Self::AfterSettlement { source, .. } => write!(
+                formatter,
+                "authorized effect settled but journal mirroring failed: {source}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for RevocationAuthorizedReconciliationRefused {}
+
+/// Terminal or escalated external-effect outcome retaining both authorization
+/// identities.
+#[must_use]
+#[derive(Debug)]
+pub enum RevocationAuthorizedExternalEffectOutcome {
+    /// Downstream acknowledgement settled the effect.
+    Acknowledged(RevocationAuthorizedSettledOutboxEffect),
+    /// The downstream proved permanent failure.
+    TerminallyFailed(RevocationAuthorizedSettledOutboxEffect),
+    /// Automation stopped with a named owner and live escalated obligation.
+    Escalated(RevocationAuthorizedEscalatedOutboxEffect),
+}
+
+/// Settled external effect retaining both request-time and dispatch-time
+/// authorization evidence.
+#[derive(Debug)]
+pub struct RevocationAuthorizedSettledOutboxEffect {
+    initial_authorization: CapabilityEffectAuthorization,
+    dispatch_authorization: CapabilityEffectAuthorization,
+    request: EffectRequest,
+    settled: SettledObligation<OutboxEffectPermit>,
+}
+
+impl RevocationAuthorizedSettledOutboxEffect {
+    /// Request-time authorization.
+    #[must_use]
+    pub const fn initial_authorization(&self) -> CapabilityEffectAuthorization {
+        self.initial_authorization
+    }
+
+    /// Dispatch-time authorization.
+    #[must_use]
+    pub const fn dispatch_authorization(&self) -> CapabilityEffectAuthorization {
+        self.dispatch_authorization
+    }
+
+    /// Exact terminal request.
+    #[must_use]
+    pub const fn request(&self) -> EffectRequest {
+        self.request
+    }
+
+    /// Shared terminal obligation evidence.
+    #[must_use]
+    pub fn settled(&self) -> &SettledObligation<OutboxEffectPermit> {
+        &self.settled
+    }
+
+    pub(crate) fn into_settled(self) -> SettledObligation<OutboxEffectPermit> {
+        self.settled
+    }
+}
+
+/// Escalated external effect retaining both authorizations while a named owner
+/// carries responsibility.
+#[must_use = "an authorized escalated effect must be resolved or reported at close"]
+#[derive(Debug)]
+pub struct RevocationAuthorizedEscalatedOutboxEffect {
+    initial_authorization: CapabilityEffectAuthorization,
+    dispatch_authorization: CapabilityEffectAuthorization,
+    request: EffectRequest,
+    effect: EscalatedOutboxEffect,
+}
+
+impl RevocationAuthorizedEscalatedOutboxEffect {
+    /// Request-time authorization.
+    #[must_use]
+    pub const fn initial_authorization(&self) -> CapabilityEffectAuthorization {
+        self.initial_authorization
+    }
+
+    /// Dispatch-time authorization.
+    #[must_use]
+    pub const fn dispatch_authorization(&self) -> CapabilityEffectAuthorization {
+        self.dispatch_authorization
+    }
+
+    /// Exact escalated request.
+    #[must_use]
+    pub const fn request(&self) -> EffectRequest {
+        self.request
+    }
+
+    /// Records a late acknowledgement while retaining both authorizations in
+    /// the returned terminal value or post-settlement refusal.
+    pub fn resolve_acknowledged(
+        self,
+        acknowledgement: DownstreamAck,
+        output_commitments: Vec<[u8; 32]>,
+    ) -> Result<RevocationAuthorizedSettledOutboxEffect, RevocationAuthorizedEscalationResolutionRefused>
+    {
+        let Self {
+            initial_authorization,
+            dispatch_authorization,
+            request,
+            effect,
+        } = self;
+        match effect.resolve_acknowledged(acknowledgement, output_commitments) {
+            Ok(settled) => Ok(RevocationAuthorizedSettledOutboxEffect {
+                initial_authorization,
+                dispatch_authorization,
+                request,
+                settled,
+            }),
+            Err(source) => Err(RevocationAuthorizedEscalationResolutionRefused {
+                initial_authorization,
+                dispatch_authorization,
+                request,
+                source,
+            }),
+        }
+    }
+
+    /// Records a named owner's permanent-failure decision while retaining both
+    /// authorizations.
+    pub fn resolve_failed(
+        self,
+        reason: TerminalFailureReason,
+        output_commitments: Vec<[u8; 32]>,
+    ) -> Result<RevocationAuthorizedSettledOutboxEffect, RevocationAuthorizedEscalationResolutionRefused>
+    {
+        let Self {
+            initial_authorization,
+            dispatch_authorization,
+            request,
+            effect,
+        } = self;
+        match effect.resolve_failed(reason, output_commitments) {
+            Ok(settled) => Ok(RevocationAuthorizedSettledOutboxEffect {
+                initial_authorization,
+                dispatch_authorization,
+                request,
+                settled,
+            }),
+            Err(source) => Err(RevocationAuthorizedEscalationResolutionRefused {
+                initial_authorization,
+                dispatch_authorization,
+                request,
+                source,
+            }),
+        }
+    }
+
+    pub(crate) fn into_effect(self) -> EscalatedOutboxEffect {
+        self.effect
+    }
+}
+
+/// Journal-mirror failure after an escalated obligation has already settled,
+/// retaining both authorization identities for audit and repair.
+#[must_use]
+#[derive(Debug)]
+pub struct RevocationAuthorizedEscalationResolutionRefused {
+    initial_authorization: CapabilityEffectAuthorization,
+    dispatch_authorization: CapabilityEffectAuthorization,
+    request: EffectRequest,
+    source: EffectJournalRefusal,
+}
+
+impl RevocationAuthorizedEscalationResolutionRefused {
+    /// Request-time authorization.
+    #[must_use]
+    pub const fn initial_authorization(&self) -> CapabilityEffectAuthorization {
+        self.initial_authorization
+    }
+
+    /// Dispatch-time authorization.
+    #[must_use]
+    pub const fn dispatch_authorization(&self) -> CapabilityEffectAuthorization {
+        self.dispatch_authorization
+    }
+
+    /// Exact settled request.
+    #[must_use]
+    pub const fn request(&self) -> EffectRequest {
+        self.request
+    }
+
+    /// Journal refusal observed after settlement.
+    #[must_use]
+    pub const fn source(&self) -> EffectJournalRefusal {
+        self.source
+    }
+}
+
+impl fmt::Display for RevocationAuthorizedEscalationResolutionRefused {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "authorized escalated effect settled but journal mirroring failed: {}",
+            self.source
+        )
+    }
+}
+
+impl core::error::Error for RevocationAuthorizedEscalationResolutionRefused {}
 
 /// Why an authorized outbox reservation could not dispatch.
 #[must_use]
@@ -391,7 +719,8 @@ pub enum AuthorizedOutboxDispatchRefused {
         limit: usize,
     },
     /// Ordinary resource or journal commit refusal. The embedded obligation can
-    /// be recovered as a reservation or deferred effect through the accessors.
+    /// be recovered as a reservation or proof-carrying deferred effect through
+    /// the accessors.
     Commit {
         /// Request-time authorization.
         initial_authorization: CapabilityEffectAuthorization,
@@ -429,7 +758,8 @@ impl AuthorizedOutboxDispatchRefused {
         }
     }
 
-    /// Recovers a committed effect when journal mirroring failed after dispatch.
+    /// Recovers a proof-carrying committed effect when journal mirroring failed
+    /// after dispatch.
     #[must_use]
     pub fn into_deferred(self) -> Option<RevocationAuthorizedDeferredOutboxEffect> {
         match self {
