@@ -43,6 +43,7 @@ use crate::{
 ///
 /// Separates authority-history refusal, receiver/current-slot substitution,
 /// and ordinary handoff-acceptance refusal.
+#[allow(clippy::too_many_arguments)]
 pub fn accept_handoff_at_current_authority<S>(
     store: &S,
     head_key: &HeadKey,
@@ -101,6 +102,7 @@ where
 /// # Errors
 ///
 /// The same typed refusals as [`accept_handoff_at_current_authority`].
+#[allow(clippy::too_many_arguments)]
 pub async fn accept_handoff_at_current_authority_async<S>(
     store: &S,
     cx: &S::Context,
