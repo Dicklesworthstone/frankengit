@@ -17,6 +17,10 @@
 //! contract on an unchanged predecessor is not itself a partial write; only
 //! attempted transition identities can establish that contradiction.
 //!
+//! Transfer envelopes retain the successor's complete Intent Run commitment in
+//! addition to its coordination ID. The resulting assignment is still only a
+//! preference until the successor constructs and persists its own claim.
+//!
 //! This module defines no storage implementation and grants no repository
 //! authority.
 
@@ -34,8 +38,8 @@ use crate::{
     TaskProjectionTransitionKind, WorkTaskId,
 };
 
-const ENVELOPE_DOMAIN: &[u8] = b"frankengit.agent.task-mutation-envelope/v2\0";
-const RECEIPT_DOMAIN: &[u8] = b"frankengit.agent.task-persistence-receipt/v2\0";
+const ENVELOPE_DOMAIN: &[u8] = b"frankengit.agent.task-mutation-envelope/v3\0";
+const RECEIPT_DOMAIN: &[u8] = b"frankengit.agent.task-persistence-receipt/v3\0";
 
 /// Stable identity of one exact-predecessor task mutation request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -742,7 +746,7 @@ fn validate_successor_metadata(
 fn envelope_commitment(
     envelope: &TaskProjectionMutationEnvelope,
 ) -> Result<[u8; 32], TaskProjectionPersistenceRefusal> {
-    let mut encoder = Encoder::with_capacity(704);
+    let mut encoder = Encoder::with_capacity(736);
     encoder.write_bytes("task_mutation_envelope_domain", ENVELOPE_DOMAIN)?;
     encoder.write_opaque_id(envelope.repository_id.as_bytes());
     encoder.write_raw(envelope.task_id.as_bytes());
@@ -802,9 +806,13 @@ fn write_transition_kind(encoder: &mut Encoder, kind: TaskProjectionTransitionKi
                 crate::TaskPhase::Superseded => 8,
             });
         }
-        TaskProjectionTransitionKind::Transferred { successor_run_id } => {
+        TaskProjectionTransitionKind::Transferred {
+            successor_run_id,
+            successor_run_commitment,
+        } => {
             encoder.write_raw_byte(3);
             encoder.write_raw(&successor_run_id.value().to_be_bytes());
+            encoder.write_raw(successor_run_commitment.as_bytes());
         }
     }
 }
