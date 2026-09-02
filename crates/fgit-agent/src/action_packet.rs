@@ -6,20 +6,19 @@
 //! evidence obligations, peer-change commitments, and stop preconditions.
 //!
 //! The packet grants no authority and performs no effect. Every step must fit
-//! both the plan and the complete live [`crate::IntentRun`]; supplying another
-//! run object with the same [`crate::RunId`] cannot widen or silently narrow
-//! the plan. Consequential execution still goes through the effect broker and
-//! the owning obligation protocol.
+//! both the plan and the complete live [`crate::IntentRun`]. The situation,
+//! plan, activated claim, and supplied run must carry the same
+//! [`crate::IntentRunCommitment`]; reusing a numeric [`crate::RunId`] cannot
+//! widen or silently narrow the executor. Consequential execution still goes
+//! through the effect broker and the owning obligation protocol.
 //!
 //! # Claim continuity boundary
 //!
-//! [`crate::ActiveTaskClaim`] currently commits the situation that first
-//! observed its post-claim task generation, but does not carry a later
-//! generation-continuity witness. This slice therefore accepts only that exact
-//! activation situation. A later situation may be equally valid, but proving
-//! the task projection remained the same requires a separate typed continuity
-//! receipt; treating a merely non-omitted projection as proof would let a stale
-//! or reassigned task look executable.
+//! [`crate::ActiveTaskClaim`] commits the situation that first observed its
+//! post-claim task generation and complete run. This slice therefore accepts
+//! only that exact activation situation. A later situation may be equally
+//! valid, but proving the task projection and surrounding context remained the
+//! same requires a separate typed continuity receipt.
 
 use core::fmt;
 
@@ -30,9 +29,9 @@ use fgit_types::Digest;
 
 use crate::{
     ActiveTaskClaim, ActiveTaskClaimId, AgentChangePlan, AgentChangePlanId,
-    AgentSituationReceipt, ClassSet, ContextPacket, ContextPacketId, IntentRun, LogicalTime,
-    OperationClass, PlanRequirementId, PlanSurface, RunId, SituationComponentKind, SituationId,
-    WorkTaskId,
+    AgentSituationReceipt, ClassSet, ContextPacket, ContextPacketId, IntentRun,
+    IntentRunCommitment, IntentRunIdentityRefusal, LogicalTime, OperationClass,
+    PlanRequirementId, PlanSurface, RunId, SituationComponentKind, SituationId, WorkTaskId,
 };
 
 /// Maximum ordered steps in one action packet.
@@ -41,7 +40,7 @@ pub const MAX_ACTION_STEPS: usize = 64;
 pub const MAX_ACTION_CONTEXT_PACKETS: usize = crate::MAX_PLAN_ENTRIES;
 /// Maximum peer-change commitments in one action packet.
 pub const MAX_ACTION_PEER_CHANGES: usize = crate::MAX_PLAN_ENTRIES;
-const ACTION_PACKET_DOMAIN: &[u8] = b"frankengit.agent.action-packet/v1\0";
+const ACTION_PACKET_DOMAIN: &[u8] = b"frankengit.agent.action-packet/v2\0";
 
 /// Stable identity of one action packet.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -319,6 +318,7 @@ pub struct AgentActionPacket {
     active_claim_id: ActiveTaskClaimId,
     task_id: WorkTaskId,
     run_id: RunId,
+    run_commitment: IntentRunCommitment,
     observed_at: LogicalTime,
     context_packet_ids: Vec<ContextPacketId>,
     steps: Vec<ActionStep>,
@@ -336,13 +336,13 @@ impl AgentActionPacket {
     ///
     /// # Errors
     ///
-    /// Refuses mismatched or expired run/claim/situation inputs, a situation
-    /// other than the claim-activation receipt, reconstructed run scope that no
-    /// longer covers the plan, missing/unapproved/mixed-authority context,
-    /// empty/duplicate/excessive steps, operations or targets outside the plan,
-    /// missing evidence requirements, zero or amplified budgets, absent
-    /// mandatory preconditions, duplicate peer changes, a zero executor
-    /// profile, and unrepresentable canonical framing.
+    /// Refuses mismatched or expired run/claim/situation inputs, any complete
+    /// run substitution, a situation other than the claim-activation receipt,
+    /// missing/unapproved/mixed-authority context, empty/duplicate/excessive
+    /// steps, operations or targets outside the plan, missing evidence
+    /// requirements, zero or amplified budgets, absent mandatory preconditions,
+    /// duplicate peer changes, a zero executor profile, and unrepresentable
+    /// canonical framing.
     pub fn build(
         situation: &AgentSituationReceipt,
         plan: &AgentChangePlan,
@@ -351,7 +351,7 @@ impl AgentActionPacket {
         context_packets: &[ContextPacket],
         mut spec: AgentActionPacketSpec,
     ) -> Result<Self, ActionPacketRefusal> {
-        let task_projection_generation =
+        let (task_projection_generation, run_commitment) =
             validate_control_basis(situation, plan, active_claim, run)?;
         let context_packet_ids = validate_context(plan, run, context_packets)?;
         let aggregate_budget = validate_steps(plan, run, &spec.steps)?;
@@ -376,6 +376,7 @@ impl AgentActionPacket {
             active_claim_id: active_claim.activation_id(),
             task_id: active_claim.task_id(),
             run_id: run.run_id(),
+            run_commitment,
             observed_at: situation.observed_at(),
             context_packet_ids,
             steps: spec.steps,
@@ -427,10 +428,16 @@ impl AgentActionPacket {
         self.task_id
     }
 
-    /// Intent Run whose scope was revalidated.
+    /// Intent Run coordination identity whose scope was revalidated.
     #[must_use]
     pub const fn run_id(&self) -> RunId {
         self.run_id
+    }
+
+    /// Complete machine-enforced run identity whose scope was revalidated.
+    #[must_use]
+    pub const fn run_commitment(&self) -> IntentRunCommitment {
+        self.run_commitment
     }
 
     /// Logical packet observation time.
@@ -499,18 +506,39 @@ impl AgentActionPacket {
 pub enum ActionPacketRefusal {
     /// Situation names another run.
     SituationRunMismatch,
+    /// Situation carries another complete run commitment.
+    SituationRunCommitmentMismatch {
+        /// Commitment computed from the supplied run.
+        expected: IntentRunCommitment,
+        /// Commitment retained by the situation, when present.
+        observed: Option<IntentRunCommitment>,
+    },
     /// Run lacks a complete authenticated authority receipt.
     RunAuthorityReceiptRequired,
     /// Situation and run use different authority positions.
     RunAuthorityMismatch,
     /// Plan names another run.
     PlanRunMismatch,
+    /// Plan carries another complete run commitment.
+    PlanRunCommitmentMismatch {
+        /// Commitment computed from the supplied run.
+        expected: IntentRunCommitment,
+        /// Commitment retained by the plan.
+        observed: IntentRunCommitment,
+    },
     /// Activated claim names another plan.
     ClaimPlanMismatch,
     /// Activated claim names another task.
     ClaimTaskMismatch,
     /// Activated claim names another run.
     ClaimRunMismatch,
+    /// Activated claim carries another complete run commitment.
+    ClaimRunCommitmentMismatch {
+        /// Commitment computed from the supplied run.
+        expected: IntentRunCommitment,
+        /// Commitment retained by the claim.
+        observed: IntentRunCommitment,
+    },
     /// Situation is not the exact receipt that activated the claim.
     ClaimSituationMismatch {
         /// Situation committed by the activated claim.
@@ -518,6 +546,8 @@ pub enum ActionPacketRefusal {
         /// Situation supplied to the packet builder.
         observed: [u8; 32],
     },
+    /// Complete run identity could not be produced.
+    RunIdentity(IntentRunIdentityRefusal),
     /// Activated claim is expired at packet construction.
     ClaimExpired {
         /// Exclusive claim expiry.
@@ -534,12 +564,12 @@ pub enum ActionPacketRefusal {
     },
     /// Current situation omitted the task projection.
     TaskProjectionUnavailable,
-    /// Supplied same-ID run no longer covers all plan effects.
+    /// Supplied run no longer covers all plan effects.
     PlanOperationsOutsideRun {
         /// Plan operations missing from the supplied run.
         missing: ClassSet,
     },
-    /// Plan budget exceeds the supplied same-ID run.
+    /// Plan budget exceeds the supplied run.
     PlanBudgetOutsideRun {
         /// First deficient resource grade.
         deficit: ResourceError,
@@ -668,6 +698,12 @@ impl fmt::Display for ActionPacketRefusal {
 
 impl core::error::Error for ActionPacketRefusal {}
 
+impl From<IntentRunIdentityRefusal> for ActionPacketRefusal {
+    fn from(value: IntentRunIdentityRefusal) -> Self {
+        Self::RunIdentity(value)
+    }
+}
+
 impl From<CodecRefusal> for ActionPacketRefusal {
     fn from(value: CodecRefusal) -> Self {
         Self::Codec(value)
@@ -679,9 +715,16 @@ fn validate_control_basis(
     plan: &AgentChangePlan,
     claim: ActiveTaskClaim,
     run: &IntentRun,
-) -> Result<[u8; 32], ActionPacketRefusal> {
+) -> Result<([u8; 32], IntentRunCommitment), ActionPacketRefusal> {
     if situation.intent_run_id() != Some(run.run_id()) {
         return Err(ActionPacketRefusal::SituationRunMismatch);
+    }
+    let run_commitment = run.commitment()?;
+    if situation.intent_run_commitment() != Some(run_commitment) {
+        return Err(ActionPacketRefusal::SituationRunCommitmentMismatch {
+            expected: run_commitment,
+            observed: situation.intent_run_commitment(),
+        });
     }
     let authority = run
         .authority_read_receipt()
@@ -692,6 +735,12 @@ fn validate_control_basis(
     if plan.intent_run_id() != run.run_id() {
         return Err(ActionPacketRefusal::PlanRunMismatch);
     }
+    if plan.intent_run_commitment() != run_commitment {
+        return Err(ActionPacketRefusal::PlanRunCommitmentMismatch {
+            expected: run_commitment,
+            observed: plan.intent_run_commitment(),
+        });
+    }
     if claim.plan_id() != plan.plan_id() {
         return Err(ActionPacketRefusal::ClaimPlanMismatch);
     }
@@ -700,6 +749,12 @@ fn validate_control_basis(
     }
     if claim.assignee() != run.run_id() {
         return Err(ActionPacketRefusal::ClaimRunMismatch);
+    }
+    if claim.run_commitment() != run_commitment {
+        return Err(ActionPacketRefusal::ClaimRunCommitmentMismatch {
+            expected: run_commitment,
+            observed: claim.run_commitment(),
+        });
     }
     let observed_situation = *situation.situation_id().as_bytes();
     if claim.situation_id() != observed_situation {
@@ -737,7 +792,7 @@ fn validate_control_basis(
     if let Some(deficit) = run.resource_budget().first_deficit(&plan.resource_budget()) {
         return Err(ActionPacketRefusal::PlanBudgetOutsideRun { deficit });
     }
-    Ok(generation)
+    Ok((generation, run_commitment))
 }
 
 fn validate_context(
@@ -895,7 +950,7 @@ fn canonicalize_peer_changes(values: &mut Vec<Digest>) -> Result<(), ActionPacke
 }
 
 fn packet_commitment(packet: &AgentActionPacket) -> Result<[u8; 32], ActionPacketRefusal> {
-    let mut encoder = Encoder::with_capacity(1_024);
+    let mut encoder = Encoder::with_capacity(1_088);
     encoder.write_bytes("agent_action_packet_domain", ACTION_PACKET_DOMAIN)?;
     encoder.write_raw(packet.situation_id.as_bytes());
     encoder.write_raw(&packet.task_projection_generation);
@@ -903,6 +958,7 @@ fn packet_commitment(packet: &AgentActionPacket) -> Result<[u8; 32], ActionPacke
     encoder.write_raw(packet.active_claim_id.as_bytes());
     encoder.write_raw(packet.task_id.as_bytes());
     encoder.write_raw(&packet.run_id.value().to_be_bytes());
+    encoder.write_raw(packet.run_commitment.as_bytes());
     encoder.write_scalar(packet.observed_at.value());
     write_count(
         &mut encoder,
