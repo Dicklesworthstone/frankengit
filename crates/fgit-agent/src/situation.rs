@@ -11,6 +11,9 @@
 //! authenticated head or an explicit typed omission. A refresh produces a
 //! deterministic delta and refuses repository changes, time rollback,
 //! authority-generation rollback, and two head identities at one generation.
+//! The v2 receipt identity also commits the complete machine-enforced Intent
+//! Run, so a reused numeric [`crate::RunId`] cannot substitute another scope,
+//! budget, expiry, or authenticated read.
 //!
 //! Observing a higher generation does not itself prove predecessor continuity.
 //! That stronger claim requires an authenticated authority-history witness and
@@ -23,12 +26,15 @@ use fgit_crypto::{DigestHasher, GitHashAlgorithm, NativeObjectIdentity, Sha256};
 use fgit_treefs::WorkspaceId;
 use fgit_types::{HeadGeneration, RepositoryAuthorityHeadId, RepositoryId};
 
-use crate::{AuthorityReadReceipt, IntentRun, LogicalTime, RunId, WorkspaceBinding};
+use crate::{
+    AuthorityReadReceipt, IntentRun, IntentRunCommitment, IntentRunIdentityRefusal,
+    LogicalTime, RunId, WorkspaceBinding,
+};
 
 /// Number of component classes in the v1 situation profile.
 pub const SITUATION_COMPONENT_COUNT: usize = 10;
 const SITUATION_COMPONENT_COUNT_WIRE: u32 = 10;
-const SITUATION_DOMAIN: &[u8] = b"frankengit.agent.situation/v1\0";
+const SITUATION_DOMAIN: &[u8] = b"frankengit.agent.situation/v2\0";
 
 /// Stable SHA-256 commitment to one complete situation receipt.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -291,25 +297,34 @@ impl SituationComponent {
 ///
 /// The only public constructor accepts an existing [`WorkspaceBinding`], so a
 /// caller cannot independently pair a workspace ID with a chosen manifest,
-/// run, or authority head.
+/// run, or authority head. The summary commits the complete run as well as its
+/// coordination ID.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SituationWorkspace {
     workspace_id: WorkspaceId,
     manifest_commitment: [u8; 32],
     basis_head_id: RepositoryAuthorityHeadId,
     run_id: RunId,
+    run_commitment: IntentRunCommitment,
 }
 
 impl SituationWorkspace {
     /// Summarizes a real workspace binding without retaining its tree body.
-    #[must_use]
-    pub fn from_binding<A: GitHashAlgorithm>(binding: &WorkspaceBinding<A>) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed refusal when the binding's complete Intent Run identity
+    /// cannot be committed.
+    pub fn from_binding<A: GitHashAlgorithm>(
+        binding: &WorkspaceBinding<A>,
+    ) -> Result<Self, SituationRefusal> {
+        Ok(Self {
             workspace_id: binding.workspace_id(),
             manifest_commitment: binding.manifest_commitment(),
             basis_head_id: binding.authority_read_receipt().authority_head_id(),
             run_id: binding.run().run_id(),
-        }
+            run_commitment: binding.run().commitment()?,
+        })
     }
 
     /// TreeFS workspace identity.
@@ -330,10 +345,16 @@ impl SituationWorkspace {
         self.basis_head_id
     }
 
-    /// Intent Run that authorized the workspace.
+    /// Intent Run coordination identity that authorized the workspace.
     #[must_use]
     pub const fn run_id(&self) -> RunId {
         self.run_id
+    }
+
+    /// Complete machine-enforced run identity that authorized the workspace.
+    #[must_use]
+    pub const fn run_commitment(&self) -> IntentRunCommitment {
+        self.run_commitment
     }
 }
 
@@ -343,13 +364,14 @@ pub struct AgentSituationReceipt {
     situation_id: SituationId,
     authority_read_receipt: AuthorityReadReceipt,
     intent_run_id: Option<RunId>,
+    intent_run_commitment: Option<IntentRunCommitment>,
     workspace: Option<SituationWorkspace>,
     observed_at: LogicalTime,
     components: [SituationComponent; SITUATION_COMPONENT_COUNT],
 }
 
 impl AgentSituationReceipt {
-    /// Builds a complete v1 situation receipt.
+    /// Builds a complete v2 situation receipt.
     ///
     /// # Errors
     ///
@@ -371,7 +393,7 @@ impl AgentSituationReceipt {
             });
         }
 
-        let intent_run_id = match intent_run {
+        let (intent_run_id, intent_run_commitment) = match intent_run {
             Some(run) => {
                 let run_receipt = run
                     .authority_read_receipt()
@@ -379,17 +401,25 @@ impl AgentSituationReceipt {
                 if run_receipt != &authority_read_receipt {
                     return Err(SituationRefusal::RunAuthorityMismatch);
                 }
-                Some(run.run_id())
+                (Some(run.run_id()), Some(run.commitment()?))
             }
-            None => None,
+            None => (None, None),
         };
 
         if let Some(workspace) = workspace {
             let run_id = intent_run_id.ok_or(SituationRefusal::WorkspaceRequiresIntentRun)?;
+            let run_commitment = intent_run_commitment
+                .ok_or(SituationRefusal::WorkspaceRequiresIntentRun)?;
             if workspace.run_id != run_id {
                 return Err(SituationRefusal::WorkspaceRunMismatch {
                     expected: run_id,
                     observed: workspace.run_id,
+                });
+            }
+            if workspace.run_commitment != run_commitment {
+                return Err(SituationRefusal::WorkspaceRunCommitmentMismatch {
+                    expected: run_commitment,
+                    observed: workspace.run_commitment,
                 });
             }
             if workspace.basis_head_id != authority_read_receipt.authority_head_id() {
@@ -427,6 +457,7 @@ impl AgentSituationReceipt {
         let situation_id = SituationId(situation_commitment(
             &authority_read_receipt,
             intent_run_id,
+            intent_run_commitment,
             workspace,
             observed_at,
             &components,
@@ -436,6 +467,7 @@ impl AgentSituationReceipt {
             situation_id,
             authority_read_receipt,
             intent_run_id,
+            intent_run_commitment,
             workspace,
             observed_at,
             components,
@@ -454,10 +486,16 @@ impl AgentSituationReceipt {
         &self.authority_read_receipt
     }
 
-    /// Intent Run bound to the receipt, when one is active.
+    /// Intent Run coordination identity bound to the receipt, when active.
     #[must_use]
     pub const fn intent_run_id(&self) -> Option<RunId> {
         self.intent_run_id
+    }
+
+    /// Complete machine-enforced Intent Run identity, when active.
+    #[must_use]
+    pub const fn intent_run_commitment(&self) -> Option<IntentRunCommitment> {
+        self.intent_run_commitment
     }
 
     /// Bound TreeFS workspace summary, when one exists.
@@ -646,7 +684,8 @@ impl SituationDelta {
             authority_change,
             authority_receipt_changed: from.authority_read_receipt
                 != to.authority_read_receipt,
-            intent_run_changed: from.intent_run_id != to.intent_run_id,
+            intent_run_changed: from.intent_run_id != to.intent_run_id
+                || from.intent_run_commitment != to.intent_run_commitment,
             workspace_changed: from.workspace != to.workspace,
             observation_time_advanced: from.observed_at != to.observed_at,
             component_changes,
@@ -677,13 +716,13 @@ impl SituationDelta {
         self.authority_receipt_changed
     }
 
-    /// Whether the bound Intent Run changed.
+    /// Whether the bound Intent Run identity or complete commitment changed.
     #[must_use]
     pub const fn intent_run_changed(&self) -> bool {
         self.intent_run_changed
     }
 
-    /// Whether the bound workspace identity or manifest changed.
+    /// Whether the bound workspace identity, manifest, or run changed.
     #[must_use]
     pub const fn workspace_changed(&self) -> bool {
         self.workspace_changed
@@ -726,6 +765,8 @@ pub enum SituationRefusal {
     RunAuthorityReceiptRequired,
     /// Run and situation carry different authenticated receipts.
     RunAuthorityMismatch,
+    /// Complete run identity could not be produced.
+    RunIdentity(IntentRunIdentityRefusal),
     /// A workspace was supplied without its active run.
     WorkspaceRequiresIntentRun,
     /// Workspace and situation name different runs.
@@ -734,6 +775,13 @@ pub enum SituationRefusal {
         expected: RunId,
         /// Run bound to the workspace.
         observed: RunId,
+    },
+    /// Workspace and situation carry different complete run commitments.
+    WorkspaceRunCommitmentMismatch {
+        /// Situation run commitment.
+        expected: IntentRunCommitment,
+        /// Workspace run commitment.
+        observed: IntentRunCommitment,
     },
     /// Workspace and situation name different authority heads.
     WorkspaceAuthorityMismatch,
@@ -811,12 +859,19 @@ impl fmt::Display for SituationRefusal {
             Self::RunAuthorityMismatch => formatter.write_str(
                 "Intent Run authority receipt differs from the situation receipt",
             ),
+            Self::RunIdentity(refusal) => {
+                write!(formatter, "Intent Run identity refused: {refusal}")
+            }
             Self::WorkspaceRequiresIntentRun => formatter.write_str(
                 "a workspace situation requires the Intent Run that authorized it",
             ),
             Self::WorkspaceRunMismatch { expected, observed } => write!(
                 formatter,
                 "workspace run {observed} differs from situation run {expected}"
+            ),
+            Self::WorkspaceRunCommitmentMismatch { expected, observed } => write!(
+                formatter,
+                "workspace run commitment {observed} differs from situation run {expected}"
             ),
             Self::WorkspaceAuthorityMismatch => formatter.write_str(
                 "workspace authority head differs from the situation receipt",
@@ -865,6 +920,12 @@ impl fmt::Display for SituationRefusal {
 
 impl core::error::Error for SituationRefusal {}
 
+impl From<IntentRunIdentityRefusal> for SituationRefusal {
+    fn from(value: IntentRunIdentityRefusal) -> Self {
+        Self::RunIdentity(value)
+    }
+}
+
 impl From<CodecRefusal> for SituationRefusal {
     fn from(value: CodecRefusal) -> Self {
         Self::Codec(value)
@@ -910,20 +971,23 @@ fn classify_component_transition(
 fn situation_commitment(
     receipt: &AuthorityReadReceipt,
     intent_run_id: Option<RunId>,
+    intent_run_commitment: Option<IntentRunCommitment>,
     workspace: Option<SituationWorkspace>,
     observed_at: LogicalTime,
     components: &[SituationComponent; SITUATION_COMPONENT_COUNT],
 ) -> Result<[u8; 32], SituationRefusal> {
-    let mut encoder = Encoder::with_capacity(768);
+    let mut encoder = Encoder::with_capacity(832);
     encoder.write_bytes("agent_situation_domain", SITUATION_DOMAIN)?;
     write_authority_receipt(&mut encoder, receipt)?;
 
-    match intent_run_id {
-        Some(run_id) => {
+    match (intent_run_id, intent_run_commitment) {
+        (Some(run_id), Some(run_commitment)) => {
             encoder.write_bool(true);
             encoder.write_raw(&run_id.value().to_be_bytes());
+            encoder.write_raw(run_commitment.as_bytes());
         }
-        None => encoder.write_bool(false),
+        (None, None) => encoder.write_bool(false),
+        _ => unreachable!("situation builder preserves the run identity pair"),
     }
 
     match workspace {
@@ -933,6 +997,7 @@ fn situation_commitment(
             encoder.write_raw(&workspace.manifest_commitment);
             encoder.write_internal_object_id(workspace.basis_head_id.as_internal_object_id())?;
             encoder.write_raw(&workspace.run_id.value().to_be_bytes());
+            encoder.write_raw(workspace.run_commitment.as_bytes());
         }
         None => encoder.write_bool(false),
     }
