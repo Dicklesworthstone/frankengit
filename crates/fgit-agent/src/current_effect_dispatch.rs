@@ -15,6 +15,12 @@
 //!     -> terminal settlement
 //! ```
 //!
+//! The broker owns the complete [`crate::IntentRun`] beside the ordinary
+//! revocation-checked broker.  That ownership is load-bearing: an
+//! ancestry-bound authorization must be evaluated against the exact run the
+//! budget and journal serve, not against a run a caller resupplies after the
+//! broker opens.
+//!
 //! Cleanup operations remain available without a fresh authorization because
 //! they reduce outstanding responsibility.  Every pre-terminal refusal either
 //! retains the live typed obligation or states that the resource transition
@@ -23,21 +29,22 @@
 use core::fmt;
 
 use fgit_resource::{
-    DownstreamChannel, ReconcilePlan, ReleaseReceipt, ResourceVector, SettledObligation,
-    TerminalFailureReason,
+    DownstreamChannel, ReconcilePlan, RegionCloseOutcome, RegionId, ReleaseReceipt,
+    ResourceVector, SettledObligation, TerminalFailureReason,
     kinds::{DispatchAbortReason, DownstreamAck, OutboxDispatch, OutboxEffectPermit},
 };
 use fgit_types::PrincipalId;
 
 use crate::{
-    AuthorizedOutboxDispatchRefused, AuthorizedOutboxReservationRefused,
-    CapabilityEffectAuthorizationRefusal, CurrentAuthorityCapabilityEffectAuthorization,
-    CurrentAuthorityCapabilityRevocationReceipt, DeferredOutboxEffect, EffectId,
-    EffectJournalRefusal, EffectRecord, EffectRequest, EscalatedOutboxEffect,
-    ExternalEffectOutcome, LogicalTime, ReconciliationRefused,
-    RevocationAuthorizedDeferredOutboxEffect, RevocationAuthorizedEffectGrant,
-    RevocationAuthorizedOutboxEffect, RevocationCheckedEffectBroker,
-    RevocationCheckedEffectRefusal, VerifiedCapabilityChain,
+    AgentInstanceId, AuthorizedOutboxDispatchRefused, AuthorizedOutboxReservationRefused,
+    Capability, CapabilityEffectAuthorization, CapabilityEffectAuthorizationRefusal,
+    CurrentAuthorityCapabilityEffectAuthorization, CurrentAuthorityCapabilityRevocationReceipt,
+    DeferredOutboxEffect, EffectGrant, EffectId, EffectJournalEntry, EffectJournalRefusal,
+    EffectRecord, EffectRequest, EscalatedOutboxEffect, ExternalEffectOutcome, IntentRun,
+    IntentRunCommitment, LogicalTime, ReconciliationRefused,
+    RevocationAuthorizedEffectGrant, RevocationAuthorizedOutboxEffect,
+    RevocationCheckedEffectBroker, RevocationCheckedEffectRefusal, RunId,
+    VerifiedCapabilityChain,
 };
 
 /// Why a current-authority high-value request could not become a live grant.
@@ -78,38 +85,58 @@ impl From<RevocationCheckedEffectRefusal> for CurrentAuthorityRevocationCheckedE
     }
 }
 
-/// A live high-value grant carrying the current-head authorization that admitted
-/// it.
-#[must_use = "a current-authority effect grant still owns a broker budget reservation"]
+/// Production-facing broker whose high-value path retains exact current-head
+/// ancestry evidence through the complete external-effect lifecycle.
 #[derive(Debug)]
-pub struct CurrentAuthorityRevocationAuthorizedEffectGrant {
-    authorization: CurrentAuthorityCapabilityEffectAuthorization,
-    grant: RevocationAuthorizedEffectGrant,
+pub struct CurrentAuthorityRevocationCheckedEffectBroker {
+    run: IntentRun,
+    run_commitment: IntentRunCommitment,
+    inner: RevocationCheckedEffectBroker,
 }
 
-impl CurrentAuthorityRevocationAuthorizedEffectGrant {
-    /// Ancestry-bound request-time authorization.
-    #[must_use]
-    pub const fn authorization(&self) -> CurrentAuthorityCapabilityEffectAuthorization {
-        self.authorization
+impl CurrentAuthorityRevocationCheckedEffectBroker {
+    /// Opens one broker over an exact complete Intent Run.
+    ///
+    /// The run is retained beside the ordinary checked broker so every later
+    /// ancestry-bound authorization uses the same machine-enforced scope,
+    /// expiry, authority receipt, and budget identity that admission and the
+    /// journal use.
+    pub fn open(
+        run: IntentRun,
+        region: RegionId,
+        agent_instance_id: AgentInstanceId,
+    ) -> Result<Self, RevocationCheckedEffectRefusal> {
+        let run_commitment = run.commitment()?;
+        let inner = RevocationCheckedEffectBroker::open(
+            run.clone(),
+            region,
+            agent_instance_id,
+        )?;
+        Ok(Self {
+            run,
+            run_commitment,
+            inner,
+        })
     }
 
-    /// Exact broker record created by the same request.
-    #[must_use]
-    pub const fn record(&self) -> &EffectRecord {
-        self.grant.record()
+    /// Requests an operation outside the revocation-gated set.
+    pub fn request_low_risk(
+        &mut self,
+        capability: &Capability,
+        now: LogicalTime,
+        request: &EffectRequest,
+    ) -> Result<EffectGrant, RevocationCheckedEffectRefusal> {
+        self.inner.request_low_risk(capability, now, request)
     }
-}
 
-impl RevocationCheckedEffectBroker {
     /// Requests one high-value effect while retaining current-head ancestry
     /// evidence in the returned grant.
     ///
     /// The outer authorization runs first, so a stale or newly revoked
-    /// capability cannot move broker budget.  The ordinary broker is then called
-    /// with the exact inner receipt and therefore reaches the same pure
+    /// capability cannot move broker budget.  The ordinary broker is then
+    /// called with the exact inner receipt and reaches the same pure
     /// [`crate::CapabilityEffectAuthorization`] decision core.
-    pub fn request_current_authority_high_value(
+    pub fn request_high_value(
         &mut self,
         chain: &VerifiedCapabilityChain,
         revocations: &CurrentAuthorityCapabilityRevocationReceipt,
@@ -120,13 +147,13 @@ impl RevocationCheckedEffectBroker {
         CurrentAuthorityRevocationCheckedEffectRefusal,
     > {
         let authorization = CurrentAuthorityCapabilityEffectAuthorization::authorize(
-            self_run(self),
+            &self.run,
             chain,
             revocations,
             now,
             request,
         )?;
-        let grant = self.request_high_value(
+        let grant = self.inner.request_high_value(
             chain,
             revocations.admitted(),
             now,
@@ -138,19 +165,27 @@ impl RevocationCheckedEffectBroker {
         })
     }
 
+    /// Aborts a low-risk grant before it becomes a typed obligation.
+    pub fn abort_low_risk(
+        &mut self,
+        grant: EffectGrant,
+    ) -> Result<ReleaseReceipt, RevocationCheckedEffectRefusal> {
+        self.inner.abort_low_risk(grant)
+    }
+
     /// Aborts a current-authority grant before it becomes a typed obligation.
     ///
     /// No new revocation read is required: abort only releases responsibility.
-    pub fn abort_current_authority_high_value(
+    pub fn abort_high_value(
         &mut self,
         grant: CurrentAuthorityRevocationAuthorizedEffectGrant,
     ) -> Result<ReleaseReceipt, RevocationCheckedEffectRefusal> {
-        self.abort_high_value(grant.grant)
+        self.inner.abort_high_value(grant.grant)
     }
 
     /// Converts a current-authority external grant into a proof-carrying outbox
     /// reservation.
-    pub fn reserve_current_authority_outbox(
+    pub fn reserve_authorized_outbox(
         &mut self,
         grant: CurrentAuthorityRevocationAuthorizedEffectGrant,
         dispatch: OutboxDispatch,
@@ -162,7 +197,7 @@ impl RevocationCheckedEffectBroker {
             authorization,
             grant,
         } = grant;
-        match self.reserve_authorized_outbox(grant, dispatch) {
+        match self.inner.reserve_authorized_outbox(grant, dispatch) {
             Ok(outbox) => Ok(CurrentAuthorityRevocationAuthorizedOutboxEffect {
                 initial_authorization: authorization,
                 outbox,
@@ -181,7 +216,7 @@ impl RevocationCheckedEffectBroker {
     /// ordinary dispatch core after the ancestry-bound authorization succeeds.
     /// The resulting deferred effect is immediately re-wrapped around the two
     /// current-authority proofs; no raw deferred obligation is exposed.
-    pub fn dispatch_current_authority_outbox(
+    pub fn dispatch_authorized_outbox(
         &mut self,
         effect: CurrentAuthorityRevocationAuthorizedOutboxEffect,
         chain: &VerifiedCapabilityChain,
@@ -195,7 +230,7 @@ impl RevocationCheckedEffectBroker {
     > {
         let request = effect.request();
         let dispatch_authorization = match CurrentAuthorityCapabilityEffectAuthorization::authorize(
-            self_run(self),
+            &self.run,
             chain,
             revocations,
             now,
@@ -213,7 +248,7 @@ impl RevocationCheckedEffectBroker {
             initial_authorization,
             outbox,
         } = effect;
-        match self.dispatch_authorized_outbox(
+        match self.inner.dispatch_authorized_outbox(
             outbox,
             chain,
             revocations.admitted(),
@@ -237,18 +272,73 @@ impl RevocationCheckedEffectBroker {
             }),
         }
     }
+
+    /// Complete machine identity of the retained run.
+    #[must_use]
+    pub const fn run_commitment(&self) -> IntentRunCommitment {
+        self.run_commitment
+    }
+
+    /// Coordination identity of the retained run.
+    #[must_use]
+    pub const fn run_id(&self) -> RunId {
+        self.run.run_id()
+    }
+
+    /// Accepted records in request order.
+    #[must_use]
+    pub fn records(&self) -> Vec<EffectRecord> {
+        self.inner.records()
+    }
+
+    /// Ordinary request-time authorization records retained by the inner
+    /// broker.  Current-head authorization identities remain on the typed values
+    /// returned by this facade.
+    #[must_use]
+    pub fn authorizations(&self) -> &[CapabilityEffectAuthorization] {
+        self.inner.authorizations()
+    }
+
+    /// Ordinary fresh dispatch authorization records retained by the inner
+    /// broker.
+    #[must_use]
+    pub fn dispatch_authorizations(&self) -> &[CapabilityEffectAuthorization] {
+        self.inner.dispatch_authorizations()
+    }
+
+    /// Append-only broker journal without a mutable raw broker handle.
+    #[must_use]
+    pub fn journal(&self) -> Vec<EffectJournalEntry> {
+        self.inner.journal()
+    }
+
+    /// Closes the owned region and reports quiescence or containment failure.
+    pub fn close(self) -> RegionCloseOutcome {
+        self.inner.close()
+    }
 }
 
-/// Reads the exact run through a stable public broker fact rather than reaching
-/// into either of the broker's private layers.
-fn self_run(broker: &RevocationCheckedEffectBroker) -> &crate::IntentRun {
-    // `run_id` and `run_commitment` are intentionally insufficient here: the
-    // pure authorization core needs the complete machine-enforced run.  The
-    // broker does not expose it directly, but every accepted record retains its
-    // source receipt only after admission; using a record would therefore be a
-    // circular precondition.  This helper is implemented by the crate-private
-    // accessor below.
-    broker.current_run()
+/// A live high-value grant carrying the current-head authorization that admitted
+/// it.
+#[must_use = "a current-authority effect grant still owns a broker budget reservation"]
+#[derive(Debug)]
+pub struct CurrentAuthorityRevocationAuthorizedEffectGrant {
+    authorization: CurrentAuthorityCapabilityEffectAuthorization,
+    grant: RevocationAuthorizedEffectGrant,
+}
+
+impl CurrentAuthorityRevocationAuthorizedEffectGrant {
+    /// Ancestry-bound request-time authorization.
+    #[must_use]
+    pub const fn authorization(&self) -> CurrentAuthorityCapabilityEffectAuthorization {
+        self.authorization
+    }
+
+    /// Exact broker record created by the same request.
+    #[must_use]
+    pub const fn record(&self) -> &EffectRecord {
+        self.grant.record()
+    }
 }
 
 /// Reservation failure retaining the ancestry-bound request authorization and,
@@ -629,7 +719,7 @@ impl CurrentAuthoritySettledOutboxEffect {
 
     /// Shared terminal obligation evidence.
     #[must_use]
-    pub const fn settled(&self) -> &SettledObligation<OutboxEffectPermit> {
+    pub fn settled(&self) -> &SettledObligation<OutboxEffectPermit> {
         &self.settled
     }
 }
