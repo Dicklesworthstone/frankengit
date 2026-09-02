@@ -1,10 +1,10 @@
 //! Canonical capability-revocation generations selected by repository authority.
 //!
-//! Capability revocation is policy state, not a mutable local deny list.  One
+//! Capability revocation is policy state, not a mutable local deny list. One
 //! immutable full snapshot is stored under the registered
-//! `frankengit/generation/v1` identity domain.  Repository configuration schema
+//! `frankengit/generation/v1` identity domain. Repository configuration schema
 //! 2.2 carries that generation's exact digest, and the authority head carries
-//! the configuration digest.  Selection therefore follows one ordinary chain:
+//! the configuration digest. Selection therefore follows one ordinary chain:
 //!
 //! ```text
 //! authenticated RepositoryAuthorityHead
@@ -14,23 +14,23 @@
 //!     -> CapabilityRevocationGenerationBody
 //! ```
 //!
-//! There is deliberately no side selector or mutable cache in this module.  A
-//! selector populated after a head was published would let new bytes acquire
-//! authority retroactively without a head transition.  Here, changing the
+//! There is deliberately no side selector or mutable cache here. Changing the
 //! revoked set requires staging a new generation, staging a new configuration
 //! that names it, and publishing that configuration through the ordinary
 //! authority-head compare-and-swap.
 //!
-//! The selected body is a bounded full snapshot.  A reader never walks an
-//! unbounded revocation event history and never interprets an absent root as an
-//! empty set.  Repositories on configuration schema 2.0 or 2.1 therefore fail
-//! closed for high-value effect authorization until an explicit schema-2.2
-//! configuration names an explicit generation, including an explicit empty
-//! generation when no capability is revoked.
+//! The selected body is a bounded full snapshot. A reader never walks an
+//! unbounded event history and never interprets an absent root as an empty set.
+//! Repositories on configuration schema 2.0 or 2.1 therefore fail closed for
+//! high-value authorization until schema 2.2 names an explicit generation,
+//! including an explicit empty generation when nothing is revoked.
 
 use core::fmt;
 
-use fgit_codec::{CanonicalBody, CodecRefusal, DecodeLimits, Decoder, Encoder, decode_body, encode_body};
+use fgit_codec::{
+    CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder, body_id,
+    decode_body, encode_body,
+};
 use fgit_crypto::IdentityDomain;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GenerationId, PolicyEpoch, RepositoryId,
@@ -40,22 +40,20 @@ use fgit_types::{
 use crate::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, HeadBodyRefusal,
     ImmutableRead, OutcomeFailure, PutOutcome, SealFailure, body_key, body_key_for_id,
-    canonical_body_id, read_repository_incarnation_configuration,
+    read_repository_incarnation_configuration,
     read_repository_incarnation_configuration_async,
 };
 
 /// Maximum revoked capability identities retained in one canonical generation.
-///
-/// The decoder applies this as its collection bound before allocating the
-/// vector.  It is also the effect-time receipt ceiling in `fgit-agent`.
 pub const MAX_CAPABILITY_REVOCATION_ENTRIES: usize = 4_096;
 
+/// Authoritative readers apply this bound before collection allocation.
 const REVOCATION_DECODE_LIMITS: DecodeLimits = DecodeLimits {
-    elements: MAX_CAPABILITY_REVOCATION_ENTRIES as u64,
+    elements: 4_096,
     ..DecodeLimits::DEFAULT
 };
 
-/// The registered identity of one immutable capability-revocation generation.
+/// Registered identity of one immutable capability-revocation generation.
 pub type CapabilityRevocationGenerationId = GenerationId;
 
 /// Why an in-memory candidate could not become a canonical generation body.
@@ -94,11 +92,10 @@ impl core::error::Error for CapabilityRevocationBodyRefusal {}
 
 /// Complete immutable revocation state selected at one repository policy epoch.
 ///
-/// This is a full snapshot rather than a delta.  `predecessor_generation_id`
-/// preserves lineage for audit and migration, but the current decision needs
-/// only the selected body.  Tenant, repository, and incarnation are all
-/// retained because a [`RepositoryId`] is scoped by tenant and can survive a
-/// human-readable rename while an incarnation deliberately does not survive
+/// This is a full snapshot rather than a delta. The optional predecessor keeps
+/// lineage for audit and migration, but current authorization needs only the
+/// selected body. Tenant, repository, and incarnation are all retained because
+/// repository IDs are tenant-scoped and an incarnation must not survive
 /// delete/recreate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityRevocationGenerationBody {
@@ -114,9 +111,8 @@ pub struct CapabilityRevocationGenerationBody {
 impl CapabilityRevocationGenerationBody {
     /// Builds one bounded, canonical full snapshot.
     ///
-    /// Input order is not semantic.  Identities are sorted and duplicates are
-    /// refused rather than silently collapsed, so two producers cannot hide a
-    /// disagreement behind set normalization.
+    /// Input order is not semantic. Identities are sorted and duplicates are
+    /// refused rather than silently collapsed.
     pub fn try_new(
         tenant_id: TenantId,
         repository_id: RepositoryId,
@@ -126,20 +122,7 @@ impl CapabilityRevocationGenerationBody {
         mut revoked_capability_ids: Vec<[u8; 16]>,
         evidence_root: Digest,
     ) -> Result<Self, CapabilityRevocationBodyRefusal> {
-        if revoked_capability_ids.len() > MAX_CAPABILITY_REVOCATION_ENTRIES {
-            return Err(CapabilityRevocationBodyRefusal::TooManyRevocations {
-                observed: revoked_capability_ids.len(),
-                limit: MAX_CAPABILITY_REVOCATION_ENTRIES,
-            });
-        }
-        revoked_capability_ids.sort_unstable();
-        for adjacent in revoked_capability_ids.windows(2) {
-            if adjacent[0] == adjacent[1] {
-                return Err(CapabilityRevocationBodyRefusal::DuplicateCapabilityId {
-                    capability_id: adjacent[0],
-                });
-            }
-        }
+        validate_revoked_ids(&mut revoked_capability_ids)?;
         Ok(Self {
             tenant_id,
             repository_id,
@@ -175,7 +158,7 @@ impl CapabilityRevocationGenerationBody {
         self.policy_epoch
     }
 
-    /// Previous revocation generation, when the producer retained lineage.
+    /// Previous revocation generation, when lineage was retained.
     #[must_use]
     pub const fn predecessor_generation_id(
         &self,
@@ -195,19 +178,21 @@ impl CapabilityRevocationGenerationBody {
         self.evidence_root
     }
 
-    /// Re-identifies this complete canonical body in the registered generation
-    /// domain.
+    /// Re-identifies this complete canonical body in the generation domain.
     pub fn generation_id(
         &self,
     ) -> Result<CapabilityRevocationGenerationId, CapabilityRevocationAuthorityFailure> {
-        let identity = canonical_body_id(
-            IdentityDomain::Generation,
-            CANONICAL_CODEC_VERSION,
-            self,
-        )?;
+        let identity = body_id(&CryptoBodyIdentity, self)?;
         Ok(CapabilityRevocationGenerationId::from_internal_object_id(
             identity,
         )?)
+    }
+
+    /// Digest carried by repository configuration schema 2.2.
+    pub fn generation_root(
+        &self,
+    ) -> Result<Digest, CapabilityRevocationAuthorityFailure> {
+        Ok(capability_revocation_generation_root(self.generation_id()?))
     }
 }
 
@@ -220,11 +205,7 @@ impl CanonicalBody for CapabilityRevocationGenerationBody {
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         if self.revoked_capability_ids.len() > MAX_CAPABILITY_REVOCATION_ENTRIES {
-            return Err(CodecRefusal::ValueUnrepresentable {
-                field: "capability_revocation.revoked_capability_ids",
-                observed: u64::try_from(self.revoked_capability_ids.len()).unwrap_or(u64::MAX),
-                limit: MAX_CAPABILITY_REVOCATION_ENTRIES as u64,
-            });
+            return Err(too_many_codec_refusal(self.revoked_capability_ids.len()));
         }
         out.write_opaque_id(self.tenant_id.as_bytes());
         out.write_opaque_id(self.repository_id.as_bytes());
@@ -272,6 +253,9 @@ impl CanonicalBody for CapabilityRevocationGenerationBody {
             "capability_revocation.revoked_capability_ids",
             |decoder| decoder.read_opaque_id("capability_revocation.capability_id"),
         )?;
+        if revoked_capability_ids.len() > MAX_CAPABILITY_REVOCATION_ENTRIES {
+            return Err(too_many_codec_refusal(revoked_capability_ids.len()));
+        }
         let evidence_root = input.read_digest()?;
         Ok(Self {
             tenant_id,
@@ -299,7 +283,13 @@ impl CapabilityRevocationGenerationStage {
         self.generation_id
     }
 
-    /// Outcome of writing the ordinary content-addressed body slot.
+    /// Digest a schema-2.2 configuration carries.
+    #[must_use]
+    pub fn generation_root(self) -> Digest {
+        capability_revocation_generation_root(self.generation_id)
+    }
+
+    /// Outcome of writing the content-addressed body slot.
     #[must_use]
     pub const fn outcome(self) -> PutOutcome {
         self.outcome
@@ -318,6 +308,12 @@ impl CapabilityRevocationGenerationRead {
     #[must_use]
     pub const fn generation_id(&self) -> CapabilityRevocationGenerationId {
         self.generation_id
+    }
+
+    /// Digest selected by repository configuration.
+    #[must_use]
+    pub fn generation_root(&self) -> Digest {
+        capability_revocation_generation_root(self.generation_id)
     }
 
     /// Complete selected snapshot.
@@ -488,8 +484,17 @@ impl From<SealFailure> for CapabilityRevocationAuthorityFailure {
     }
 }
 
-/// Converts the digest carried by configuration schema 2.2 into its typed
-/// generation identity.
+/// Converts a generation identity into the digest carried by configuration 2.2.
+#[must_use]
+pub fn capability_revocation_generation_root(
+    generation_id: CapabilityRevocationGenerationId,
+) -> Digest {
+    let identity = generation_id.as_internal_object_id();
+    Digest::new(identity.algorithm(), *identity.digest())
+}
+
+/// Converts the digest carried by configuration 2.2 into its typed generation
+/// identity.
 #[must_use]
 pub fn capability_revocation_generation_id_from_root(
     root: &Digest,
@@ -503,7 +508,7 @@ pub fn capability_revocation_generation_id_from_root(
 
 /// Stages one immutable full snapshot under its ordinary content identity.
 ///
-/// Staging alone grants no authority.  A caller must next stage configuration
+/// Staging alone grants no authority. A caller must next stage configuration
 /// schema 2.2 with this generation's digest and publish that configuration root
 /// through an ordinary authority-head transition.
 pub fn stage_capability_revocation_generation<S>(
@@ -550,7 +555,7 @@ where
     })
 }
 
-/// Reads one generation by its exact content identity and requires canonical
+/// Reads one generation by exact content identity and requires canonical
 /// re-identification.
 pub fn read_capability_revocation_generation_by_id<S>(
     store: &S,
@@ -591,9 +596,8 @@ where
 ///
 /// The receipt is reauthenticated against `store` before any immutable read, so
 /// an [`AuthenticatedHead`] minted by another backend cannot route this lookup.
-/// The tenant remains an explicit request-bound input because repository IDs
-/// are tenant-scoped and the authority head intentionally does not duplicate
-/// tenant identity.
+/// Tenant remains explicit because repository IDs are tenant-scoped and the
+/// authority head intentionally does not duplicate tenant identity.
 pub fn read_head_selected_capability_revocation_generation<S>(
     store: &S,
     tenant_id: TenantId,
@@ -710,6 +714,34 @@ fn validate_selected_generation(
         });
     }
     Ok(())
+}
+
+fn validate_revoked_ids(
+    revoked_capability_ids: &mut Vec<[u8; 16]>,
+) -> Result<(), CapabilityRevocationBodyRefusal> {
+    if revoked_capability_ids.len() > MAX_CAPABILITY_REVOCATION_ENTRIES {
+        return Err(CapabilityRevocationBodyRefusal::TooManyRevocations {
+            observed: revoked_capability_ids.len(),
+            limit: MAX_CAPABILITY_REVOCATION_ENTRIES,
+        });
+    }
+    revoked_capability_ids.sort_unstable();
+    for adjacent in revoked_capability_ids.windows(2) {
+        if adjacent[0] == adjacent[1] {
+            return Err(CapabilityRevocationBodyRefusal::DuplicateCapabilityId {
+                capability_id: adjacent[0],
+            });
+        }
+    }
+    Ok(())
+}
+
+fn too_many_codec_refusal(observed: usize) -> CodecRefusal {
+    CodecRefusal::ValueUnrepresentable {
+        field: "capability_revocation.revoked_capability_ids",
+        observed: u64::try_from(observed).unwrap_or(u64::MAX),
+        limit: u64::try_from(MAX_CAPABILITY_REVOCATION_ENTRIES).unwrap_or(u64::MAX),
+    }
 }
 
 fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
