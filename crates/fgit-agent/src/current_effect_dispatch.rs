@@ -92,6 +92,8 @@ pub struct CurrentAuthorityRevocationCheckedEffectBroker {
     run: IntentRun,
     run_commitment: IntentRunCommitment,
     inner: RevocationCheckedEffectBroker,
+    authorizations: Vec<CurrentAuthorityCapabilityEffectAuthorization>,
+    dispatch_authorizations: Vec<CurrentAuthorityCapabilityEffectAuthorization>,
 }
 
 impl CurrentAuthorityRevocationCheckedEffectBroker {
@@ -116,6 +118,8 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
             run,
             run_commitment,
             inner,
+            authorizations: Vec::new(),
+            dispatch_authorizations: Vec::new(),
         })
     }
 
@@ -130,12 +134,13 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
     }
 
     /// Requests one high-value effect while retaining current-head ancestry
-    /// evidence in the returned grant.
+    /// evidence in the returned grant and append-only evidence ledger.
     ///
     /// The outer authorization runs first, so a stale or newly revoked
     /// capability cannot move broker budget.  The ordinary broker is then
     /// called with the exact inner receipt and reaches the same pure
-    /// [`crate::CapabilityEffectAuthorization`] decision core.
+    /// [`crate::CapabilityEffectAuthorization`] decision core.  The
+    /// ancestry-bound proof is appended only after that broker accepts.
     pub fn request_high_value(
         &mut self,
         chain: &VerifiedCapabilityChain,
@@ -159,6 +164,7 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
             now,
             request,
         )?;
+        self.authorizations.push(authorization);
         Ok(CurrentAuthorityRevocationAuthorizedEffectGrant {
             authorization,
             grant,
@@ -216,6 +222,10 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
     /// ordinary dispatch core after the ancestry-bound authorization succeeds.
     /// The resulting deferred effect is immediately re-wrapped around the two
     /// current-authority proofs; no raw deferred obligation is exposed.
+    ///
+    /// The current-head dispatch proof is appended exactly when the inner
+    /// broker appends its generic proof: on success and on the commit-refusal
+    /// branch, but not on pre-dispatch authorization or relationship refusals.
     pub fn dispatch_authorized_outbox(
         &mut self,
         effect: CurrentAuthorityRevocationAuthorizedOutboxEffect,
@@ -257,6 +267,7 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
             actual,
         ) {
             Ok(deferred) => {
+                self.dispatch_authorizations.push(dispatch_authorization);
                 let request = deferred.request();
                 Ok(CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect {
                     initial_authorization,
@@ -265,11 +276,16 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
                     deferred: deferred.into_deferred(),
                 })
             }
-            Err(source) => Err(CurrentAuthorityOutboxDispatchRefused::Dispatch {
-                initial_authorization,
-                dispatch_authorization,
-                source,
-            }),
+            Err(source) => {
+                if matches!(&source, AuthorizedOutboxDispatchRefused::Commit { .. }) {
+                    self.dispatch_authorizations.push(dispatch_authorization);
+                }
+                Err(CurrentAuthorityOutboxDispatchRefused::Dispatch {
+                    initial_authorization,
+                    dispatch_authorization,
+                    source,
+                })
+            }
         }
     }
 
@@ -285,24 +301,39 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
         self.run.run_id()
     }
 
-    /// Accepted records in request order.
+    /// Accepted effect records in request order.
     #[must_use]
     pub fn records(&self) -> Vec<EffectRecord> {
         self.inner.records()
     }
 
-    /// Ordinary request-time authorization records retained by the inner
-    /// broker.  Current-head authorization identities remain on the typed values
-    /// returned by this facade.
+    /// Accepted ancestry-bound request authorizations in acceptance order.
     #[must_use]
-    pub fn authorizations(&self) -> &[CapabilityEffectAuthorization] {
+    pub fn authorizations(&self) -> &[CurrentAuthorityCapabilityEffectAuthorization] {
+        &self.authorizations
+    }
+
+    /// Accepted ancestry-bound dispatch authorizations in attempt order.
+    #[must_use]
+    pub fn dispatch_authorizations(
+        &self,
+    ) -> &[CurrentAuthorityCapabilityEffectAuthorization] {
+        &self.dispatch_authorizations
+    }
+
+    /// Generic request authorizations retained by the ordinary checked broker.
+    ///
+    /// Exposed separately so an audit cannot accidentally compare an
+    /// ancestry-bound identity to its inner exact-position authorization as
+    /// though they were the same evidence type.
+    #[must_use]
+    pub fn generic_authorizations(&self) -> &[CapabilityEffectAuthorization] {
         self.inner.authorizations()
     }
 
-    /// Ordinary fresh dispatch authorization records retained by the inner
-    /// broker.
+    /// Generic dispatch authorizations retained by the ordinary checked broker.
     #[must_use]
-    pub fn dispatch_authorizations(&self) -> &[CapabilityEffectAuthorization] {
+    pub fn generic_dispatch_authorizations(&self) -> &[CapabilityEffectAuthorization] {
         self.inner.dispatch_authorizations()
     }
 
