@@ -63,6 +63,7 @@
 
 mod admission;
 mod async_contract;
+mod capability_revocation;
 mod contract;
 pub mod history;
 mod identity;
@@ -95,6 +96,18 @@ pub use crate::admission::{
     read_admission, read_admission_async, record_admission, record_admission_async,
 };
 pub use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
+pub use crate::capability_revocation::{
+    CAPABILITY_REVOCATION_SELECTOR_KEY_PREFIX, MAX_CAPABILITY_REVOCATION_ENTRIES,
+    CapabilityRevocationAuthorityFailure, CapabilityRevocationBodyRefusal,
+    CapabilityRevocationGenerationBody, CapabilityRevocationGenerationId,
+    CapabilityRevocationGenerationRead, CapabilityRevocationGenerationStage,
+    capability_revocation_selector_key, read_capability_revocation_generation,
+    read_capability_revocation_generation_async, read_capability_revocation_generation_by_id,
+    read_capability_revocation_generation_by_id_async,
+    read_head_selected_capability_revocation_generation,
+    read_head_selected_capability_revocation_generation_async,
+    stage_capability_revocation_generation, stage_capability_revocation_generation_async,
+};
 pub use crate::contract::{
     AuthorityLimits, AuthorityStore, CasResolution, FaultableAuthorityStore, PutResolution,
     ambiguity_of, refusal_of, resolve_ambiguous_cas, resolve_ambiguous_cas_async,
