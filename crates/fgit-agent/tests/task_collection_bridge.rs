@@ -334,6 +334,7 @@ fn missing_task_fails_without_inventing_state() {
 fn collected_claimed_row_reconstructs_exact_lease_deterministically() {
     let receipt = exact_read();
     let run = run(&receipt);
+    let run_commitment = run.commitment().expect("complete claimant identity");
     let task_id = WorkTaskId::from_bytes([0x41; 32]);
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x72));
     let plan_id = real_plan_id(&receipt, &run, task_id, surface);
@@ -356,6 +357,7 @@ fn collected_claimed_row_reconstructs_exact_lease_deterministically() {
         collection.receipt_id(),
         task_id,
         collection.snapshot().generation(),
+        run_commitment,
         PREVIOUS_GENERATION,
         LogicalTime::new(15),
         [0x82; 32],
@@ -379,6 +381,7 @@ fn collected_claimed_row_reconstructs_exact_lease_deterministically() {
         .expect("identical history reconstruction is deterministic");
     assert_eq!(first.receipt_id(), second.receipt_id());
     assert_eq!(first.snapshot().task_id(), task_id);
+    assert_eq!(first.run_commitment(), run_commitment);
     assert_eq!(
         first.snapshot().assignment(),
         TaskProjectionAssignment::Assigned(run.run_id())
@@ -386,6 +389,7 @@ fn collected_claimed_row_reconstructs_exact_lease_deterministically() {
     let lease = first.snapshot().lease().expect("active lease reconstructed");
     assert_eq!(lease.plan_id(), plan_id);
     assert_eq!(lease.assignee(), run.run_id());
+    assert_eq!(lease.run_commitment(), run_commitment);
     assert_eq!(lease.previous_generation(), &PREVIOUS_GENERATION);
     assert_eq!(lease.claimed_generation(), &GENERATION);
     assert_eq!(lease.reserved_surfaces(), &[surface]);
@@ -424,6 +428,7 @@ fn lease_history_cannot_be_replayed_across_generation() {
         collection.receipt_id(),
         task_id,
         observed,
+        run.commitment().expect("complete claimant identity"),
         PREVIOUS_GENERATION,
         LogicalTime::new(15),
         [0x82; 32],
@@ -466,6 +471,7 @@ fn lease_history_cannot_postdate_the_collection_that_already_reflects_it() {
         collection.receipt_id(),
         task_id,
         collection.snapshot().generation(),
+        run.commitment().expect("complete claimant identity"),
         PREVIOUS_GENERATION,
         LogicalTime::new(22),
         [0x82; 32],
@@ -498,6 +504,7 @@ fn reconstructed_lease_recovers_active_claim_only_on_the_exact_read_event() {
     )
     .expect("later read of the same authority head");
     let run = run(&receipt);
+    let run_commitment = run.commitment().expect("complete claimant identity");
     let task_id = WorkTaskId::from_bytes([0x41; 32]);
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x72));
     let (pulse, plan) = real_plan(&receipt, &run, task_id, surface);
@@ -524,6 +531,7 @@ fn reconstructed_lease_recovers_active_claim_only_on_the_exact_read_event() {
             collection.receipt_id(),
             task_id,
             collection.snapshot().generation(),
+            run_commitment,
             PREVIOUS_GENERATION,
             LogicalTime::new(15),
             [0x82; 32],
@@ -557,12 +565,13 @@ fn reconstructed_lease_recovers_active_claim_only_on_the_exact_read_event() {
         &refreshed,
         &run,
     )
-    .expect("lease, claim, refresh, and exact read all agree");
+    .expect("lease, claim, refresh, complete run, and exact read all agree");
     assert_eq!(recovered.lease_reconstruction_id(), reconstruction.receipt_id());
     assert_eq!(recovered.claim_id(), claim.claim_id());
     assert_eq!(recovered.active_claim().task_id(), task_id);
     assert_eq!(recovered.active_claim().plan_id(), plan.plan_id());
     assert_eq!(recovered.active_claim().assignee(), run.run_id());
+    assert_eq!(recovered.active_claim().run_commitment(), run_commitment);
     assert_ne!(recovered.recovery_id().as_bytes(), &[0; 32]);
 
     let later_run = run(&later);
@@ -580,6 +589,98 @@ fn reconstructed_lease_recovers_active_claim_only_on_the_exact_read_event() {
             &later_run,
         )
         .expect_err("same head and RunId cannot substitute another exact read"),
-        TaskClaimRecoveryRefusal::AuthorityMismatch
+        TaskClaimRecoveryRefusal::RunCommitmentMismatch {
+            expected: run_commitment,
+            claim: run_commitment,
+            supplied: later_run.commitment().expect("later complete run identity"),
+            refreshed: later_refreshed.intent_run_commitment(),
+        }
+    );
+}
+
+#[test]
+fn same_id_changed_run_history_cannot_recover_the_original_claim() {
+    let receipt = exact_read();
+    let run = run(&receipt);
+    let altered = IntentRun::new_authenticated(
+        run.run_id(),
+        receipt.clone(),
+        ClassSet::from_classes(&[OperationClass::TreeFsWorkspace]),
+        ResourceVector::single(Grade::Bytes, 1),
+        LogicalTime::new(90),
+    )
+    .expect("same-ID altered run remains structurally valid");
+    let original_commitment = run.commitment().expect("original complete run identity");
+    let altered_commitment = altered.commitment().expect("altered complete run identity");
+    assert_ne!(original_commitment, altered_commitment);
+
+    let task_id = WorkTaskId::from_bytes([0x41; 32]);
+    let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x72));
+    let (pulse, plan) = real_plan(&receipt, &run, task_id, surface);
+    let row = TaskProjectionRow::claimed(
+        task_id,
+        TaskPhase::InProgress,
+        WorkRankingInputs::new(1, 2, 3),
+        0,
+        run.run_id(),
+        None,
+        true,
+        plan.plan_id(),
+        LogicalTime::new(15),
+        LogicalTime::new(80),
+        vec![surface],
+    )
+    .expect("claimed collection row");
+    let collection = collect_row(&receipt, &run, row);
+    let reconstruction = reconstruct_collected_task_lease(
+        &collection,
+        &receipt,
+        task_id,
+        TaskLeaseHistoryObservation::new(
+            collection.receipt_id(),
+            task_id,
+            collection.snapshot().generation(),
+            altered_commitment,
+            PREVIOUS_GENERATION,
+            LogicalTime::new(15),
+            [0x82; 32],
+            digest(0x92),
+        ),
+    )
+    .expect("row alone cannot disprove the same-ID history response");
+    let claim = TaskClaimReceipt::admit(
+        &pulse,
+        &plan,
+        &run,
+        TaskClaimProjection::new(
+            task_id,
+            plan.plan_id(),
+            run.run_id(),
+            PREVIOUS_GENERATION,
+            GENERATION,
+            vec![surface],
+            LogicalTime::new(15),
+            LogicalTime::new(80),
+            [0x83; 32],
+            digest(0x93),
+        ),
+    )
+    .expect("original validated claim receipt");
+    let refreshed = situation(&receipt, &run, GENERATION, LogicalTime::new(21));
+
+    assert_eq!(
+        activate_reconstructed_task_claim(
+            &reconstruction,
+            &claim,
+            &refreshed,
+            &run,
+        )
+        .expect_err("same-ID history cannot substitute another complete claimant"),
+        TaskClaimRecoveryRefusal::RunCommitmentMismatch {
+            expected: altered_commitment,
+            claim: original_commitment,
+            supplied: original_commitment,
+            refreshed: Some(original_commitment),
+        }
     );
 }
