@@ -231,6 +231,7 @@ struct RecoveryFixture {
 fn recovery_fixture(history_profile: u8, history_evidence: u8) -> RecoveryFixture {
     let receipt = authority_receipt();
     let run = run(&receipt);
+    let run_commitment = run.commitment().expect("complete claimant identity");
     let task_id = WorkTaskId::from_bytes([0x41; 32]);
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x72));
     let (pulse, plan) = pulse_and_plan(&receipt, &run, task_id, surface);
@@ -282,6 +283,7 @@ fn recovery_fixture(history_profile: u8, history_evidence: u8) -> RecoveryFixtur
             collection.receipt_id(),
             task_id,
             collection.snapshot().generation(),
+            run_commitment,
             PREVIOUS_GENERATION,
             LogicalTime::new(15),
             [history_profile; 32],
@@ -289,6 +291,15 @@ fn recovery_fixture(history_profile: u8, history_evidence: u8) -> RecoveryFixtur
         ),
     )
     .expect("lease reconstruction");
+    assert_eq!(reconstruction.run_commitment(), run_commitment);
+    assert_eq!(
+        reconstruction
+            .snapshot()
+            .lease()
+            .expect("claimed reconstruction carries a lease")
+            .run_commitment(),
+        run_commitment
+    );
     let refreshed = situation(
         &receipt,
         &run,
@@ -473,6 +484,7 @@ fn another_reconstruction_is_refused_before_store_io() {
             first.collection.receipt_id(),
             first.reconstruction.task_id(),
             first.collection.snapshot().generation(),
+            first.run.commitment().expect("complete claimant identity"),
             PREVIOUS_GENERATION,
             LogicalTime::new(15),
             [0x87; 32],
