@@ -7,21 +7,24 @@
 //! preserve.
 //!
 //! An unassigned row is complete by construction and can become a claim basis
-//! directly through [`collected_unclaimed_task`]. A claimed row needs two pieces
-//! of durable history not retained by the v1 multi-row projection: the
-//! predecessor generation and claim instant. [`reconstruct_collected_task_lease`]
-//! accepts those facts only in a collection/task/generation-bound observation,
-//! revalidates every claim field still present in the row, and emits a separate
-//! evidence receipt around the reconstructed semantic snapshot.
+//! directly through [`collected_unclaimed_task`]. A claimed row needs durable
+//! history not retained by the v1 multi-row projection: predecessor generation,
+//! claim instant, and the complete machine-enforced identity of its assignee.
+//! [`reconstruct_collected_task_lease`] accepts those facts only in a
+//! collection/task/generation-bound observation, revalidates every claim field
+//! still present in the row, and emits a separate evidence receipt around the
+//! reconstructed semantic snapshot.
 //!
 //! [`activate_reconstructed_task_claim`] then compares that exact reconstructed
 //! lease with the original [`crate::TaskClaimReceipt`] before ordinary fresh-
 //! situation activation. This prevents restart recovery from treating a global
-//! generation match, or a later read of the same authority head, as sufficient
-//! proof of the task's plan, assignee, reservation surface, and lifetime.
+//! generation match, a numeric [`crate::RunId`], or a later read of the same
+//! authority head as sufficient proof of the task's complete claimant, plan,
+//! reservation surface, and lifetime.
 //!
-//! Adapter identity and history evidence never perturb semantic task-state
-//! identity. They remain committed by [`TaskLeaseReconstructionReceipt`].
+//! History adapter identity and evidence never perturb semantic task-state
+//! identity. They remain committed by [`TaskLeaseReconstructionReceipt`]. The
+//! claimant's [`crate::IntentRunCommitment`] is semantic lease state and does.
 
 use core::fmt;
 
@@ -32,15 +35,16 @@ use fgit_types::Digest;
 use crate::{
     ActiveTaskClaim, AgentSituationReceipt, AuthorityBoundTaskProjectionSnapshot,
     AuthorityReadIdentityRefusal, AuthorityReadReceipt, AuthorityReadReceiptId, IntentRun,
-    LogicalTime, RunId, TaskClaimReceipt, TaskClaimReceiptId, TaskClaimRefusal,
-    TaskCoordinationRefusal, TaskProjectionAdapterRefusal, TaskProjectionAssignment,
-    TaskProjectionCollectionReceipt, TaskProjectionCollectionReceiptId,
-    TaskProjectionGeneration, TaskProjectionLease, WorkConflict, WorkTaskId,
+    IntentRunCommitment, IntentRunIdentityRefusal, LogicalTime, RunId, TaskClaimReceipt,
+    TaskClaimReceiptId, TaskClaimRefusal, TaskCoordinationRefusal,
+    TaskProjectionAdapterRefusal, TaskProjectionAssignment, TaskProjectionCollectionReceipt,
+    TaskProjectionCollectionReceiptId, TaskProjectionGeneration, TaskProjectionLease,
+    WorkConflict, WorkTaskId,
 };
 
 const LEASE_RECONSTRUCTION_DOMAIN: &[u8] =
-    b"frankengit.agent.task-lease-reconstruction/v1\0";
-const CLAIM_RECOVERY_DOMAIN: &[u8] = b"frankengit.agent.task-claim-recovery/v1\0";
+    b"frankengit.agent.task-lease-reconstruction/v2\0";
+const CLAIM_RECOVERY_DOMAIN: &[u8] = b"frankengit.agent.task-claim-recovery/v2\0";
 
 /// Stable identity of one evidenced active-lease reconstruction.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -88,14 +92,15 @@ impl fmt::Display for RecoveredActiveTaskClaimId {
 
 /// Durable history absent from one collected claimed task row.
 ///
-/// The collection receipt, task, and current generation are repeated here so a
-/// history response cannot be replayed across another collection while still
-/// looking structurally plausible.
+/// The collection receipt, task, current generation, and complete assignee are
+/// repeated here so a history response cannot be replayed across another
+/// collection or same-ID run while still looking structurally plausible.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskLeaseHistoryObservation {
     collection_receipt_id: TaskProjectionCollectionReceiptId,
     task_id: WorkTaskId,
     claimed_generation: TaskProjectionGeneration,
+    run_commitment: IntentRunCommitment,
     previous_generation: [u8; 32],
     claimed_at: LogicalTime,
     adapter_identity: [u8; 32],
@@ -105,10 +110,12 @@ pub struct TaskLeaseHistoryObservation {
 impl TaskLeaseHistoryObservation {
     /// Creates one backend-provided lease-history observation.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         collection_receipt_id: TaskProjectionCollectionReceiptId,
         task_id: WorkTaskId,
         claimed_generation: TaskProjectionGeneration,
+        run_commitment: IntentRunCommitment,
         previous_generation: [u8; 32],
         claimed_at: LogicalTime,
         adapter_identity: [u8; 32],
@@ -118,6 +125,7 @@ impl TaskLeaseHistoryObservation {
             collection_receipt_id,
             task_id,
             claimed_generation,
+            run_commitment,
             previous_generation,
             claimed_at,
             adapter_identity,
@@ -141,6 +149,12 @@ impl TaskLeaseHistoryObservation {
     #[must_use]
     pub const fn claimed_generation(&self) -> TaskProjectionGeneration {
         self.claimed_generation
+    }
+
+    /// Complete machine-enforced claimant identity retained by the backend.
+    #[must_use]
+    pub const fn run_commitment(&self) -> IntentRunCommitment {
+        self.run_commitment
     }
 
     /// Task generation replaced by the claim.
@@ -176,6 +190,7 @@ pub struct TaskLeaseReconstructionReceipt {
     collection_receipt_id: TaskProjectionCollectionReceiptId,
     authority_read_receipt_id: AuthorityReadReceiptId,
     task_id: WorkTaskId,
+    run_commitment: IntentRunCommitment,
     previous_generation: [u8; 32],
     claimed_at: LogicalTime,
     adapter_identity: [u8; 32],
@@ -206,6 +221,12 @@ impl TaskLeaseReconstructionReceipt {
     #[must_use]
     pub const fn task_id(&self) -> WorkTaskId {
         self.task_id
+    }
+
+    /// Complete machine-enforced claimant identity reconstructed from history.
+    #[must_use]
+    pub const fn run_commitment(&self) -> IntentRunCommitment {
+        self.run_commitment
     }
 
     /// Generation replaced by the original claim.
@@ -316,10 +337,11 @@ pub fn collected_unclaimed_task(
 
 /// Reconstructs one collected claimed row using exact durable lease history.
 ///
-/// Only the predecessor generation and original claim instant come from the
-/// history observation. Assignee, plan, expiry, reservation surface, phase, and
-/// current generation come from the validated collection and must be internally
-/// complete. Expired leases are accepted because cleanup must remain possible.
+/// The predecessor generation, original claim instant, and complete claimant
+/// commitment come from the history observation. Assignee ID, plan, expiry,
+/// reservation surface, phase, and current generation come from the validated
+/// collection and must be internally complete. Expired leases are accepted
+/// because cleanup must remain possible.
 ///
 /// # Errors
 ///
@@ -390,6 +412,7 @@ pub fn reconstruct_collected_task_lease(
     let lease = TaskProjectionLease::observed(
         plan_id,
         assignee,
+        history.run_commitment,
         history.previous_generation,
         *current_generation.as_bytes(),
         row.reserved_surfaces().to_vec(),
@@ -412,6 +435,7 @@ pub fn reconstruct_collected_task_lease(
         collection_receipt_id: collection.receipt_id(),
         authority_read_receipt_id,
         task_id,
+        run_commitment: history.run_commitment,
         previous_generation: history.previous_generation,
         claimed_at: history.claimed_at,
         adapter_identity: history.adapter_identity,
@@ -424,18 +448,18 @@ pub fn reconstruct_collected_task_lease(
 }
 
 /// Recovers an active claim only when the reconstructed durable lease and the
-/// original claim receipt describe the same task transition exactly.
+/// original claim receipt describe the same task transition and complete run.
 ///
 /// The refreshed situation and supplied run must use the same exact
-/// authenticated read event as the lease reconstruction. The ordinary claim
-/// activation protocol is then applied and its result is committed together
-/// with both recovery inputs.
+/// authenticated read event and run commitment as the lease reconstruction.
+/// The ordinary claim activation protocol is then applied and its result is
+/// committed together with both recovery inputs.
 ///
 /// # Errors
 ///
 /// Refuses missing/inconsistent lease material, any task/plan/run/generation/
-/// surface/time/lifetime mismatch, exact-read substitution, ordinary activation
-/// failure, and canonical recovery framing failure.
+/// surface/time/lifetime mismatch, complete-run or exact-read substitution,
+/// ordinary activation failure, and canonical recovery framing failure.
 pub fn activate_reconstructed_task_claim(
     reconstruction: &TaskLeaseReconstructionReceipt,
     claim: &TaskClaimReceipt,
@@ -460,6 +484,19 @@ pub fn activate_reconstructed_task_claim(
             expected: lease.assignee(),
             observed: claim.assignee(),
             supplied_run: run.run_id(),
+        });
+    }
+    let supplied_run_commitment = run.commitment()?;
+    if reconstruction.run_commitment != lease.run_commitment()
+        || claim.run_commitment() != lease.run_commitment()
+        || supplied_run_commitment != lease.run_commitment()
+        || refreshed.intent_run_commitment() != Some(lease.run_commitment())
+    {
+        return Err(TaskClaimRecoveryRefusal::RunCommitmentMismatch {
+            expected: lease.run_commitment(),
+            claim: claim.run_commitment(),
+            supplied: supplied_run_commitment,
+            refreshed: refreshed.intent_run_commitment(),
         });
     }
     if claim.previous_task_projection_generation() != lease.previous_generation() {
@@ -508,6 +545,14 @@ pub fn activate_reconstructed_task_claim(
     let active_claim = claim
         .activate(refreshed, run)
         .map_err(TaskClaimRecoveryRefusal::Claim)?;
+    if active_claim.run_commitment() != lease.run_commitment() {
+        return Err(TaskClaimRecoveryRefusal::RunCommitmentMismatch {
+            expected: lease.run_commitment(),
+            claim: claim.run_commitment(),
+            supplied: supplied_run_commitment,
+            refreshed: refreshed.intent_run_commitment(),
+        });
+    }
     let mut recovered = RecoveredActiveTaskClaim {
         recovery_id: RecoveredActiveTaskClaimId([0; 32]),
         lease_reconstruction_id: reconstruction.receipt_id,
@@ -617,6 +662,18 @@ pub enum TaskClaimRecoveryRefusal {
         /// Supplied run.
         supplied_run: RunId,
     },
+    /// Claim, supplied run, refreshed situation, or history carries another
+    /// complete claimant identity.
+    RunCommitmentMismatch {
+        /// Commitment reconstructed from durable history.
+        expected: IntentRunCommitment,
+        /// Commitment retained by the original claim receipt.
+        claim: IntentRunCommitment,
+        /// Commitment computed from the supplied run.
+        supplied: IntentRunCommitment,
+        /// Commitment retained by the refreshed situation, when present.
+        refreshed: Option<IntentRunCommitment>,
+    },
     /// Claim names another predecessor generation.
     PreviousGenerationMismatch {
         /// Reconstructed predecessor.
@@ -649,6 +706,8 @@ pub enum TaskClaimRecoveryRefusal {
     },
     /// Supplied run lacks a complete authenticated read receipt.
     RunAuthorityReceiptRequired,
+    /// Complete run identity could not be produced.
+    RunIdentity(IntentRunIdentityRefusal),
     /// Refresh or run substituted another exact authenticated read event.
     AuthorityMismatch,
     /// Exact authenticated-read identity failed.
@@ -687,6 +746,12 @@ impl From<CodecRefusal> for TaskCollectionBridgeRefusal {
     }
 }
 
+impl From<IntentRunIdentityRefusal> for TaskClaimRecoveryRefusal {
+    fn from(value: IntentRunIdentityRefusal) -> Self {
+        Self::RunIdentity(value)
+    }
+}
+
 impl From<AuthorityReadIdentityRefusal> for TaskClaimRecoveryRefusal {
     fn from(value: AuthorityReadIdentityRefusal) -> Self {
         Self::AuthorityIdentity(value)
@@ -717,7 +782,7 @@ fn validate_authority(
 fn reconstruction_commitment(
     receipt: &TaskLeaseReconstructionReceipt,
 ) -> Result<[u8; 32], TaskCollectionBridgeRefusal> {
-    let mut encoder = Encoder::with_capacity(320);
+    let mut encoder = Encoder::with_capacity(352);
     encoder.write_bytes(
         "task_lease_reconstruction_domain",
         LEASE_RECONSTRUCTION_DOMAIN,
@@ -725,6 +790,7 @@ fn reconstruction_commitment(
     encoder.write_raw(receipt.collection_receipt_id.as_bytes());
     encoder.write_raw(receipt.authority_read_receipt_id.as_bytes());
     encoder.write_raw(receipt.task_id.as_bytes());
+    encoder.write_raw(receipt.run_commitment.as_bytes());
     encoder.write_raw(&receipt.previous_generation);
     encoder.write_scalar(receipt.claimed_at.value());
     encoder.write_raw(&receipt.adapter_identity);
@@ -736,11 +802,12 @@ fn reconstruction_commitment(
 fn claim_recovery_commitment(
     recovered: &RecoveredActiveTaskClaim,
 ) -> Result<[u8; 32], TaskClaimRecoveryRefusal> {
-    let mut encoder = Encoder::with_capacity(192);
+    let mut encoder = Encoder::with_capacity(224);
     encoder.write_bytes("task_claim_recovery_domain", CLAIM_RECOVERY_DOMAIN)?;
     encoder.write_raw(recovered.lease_reconstruction_id.as_bytes());
     encoder.write_raw(recovered.claim_id.as_bytes());
     encoder.write_raw(recovered.active_claim.activation_id().as_bytes());
+    encoder.write_raw(recovered.active_claim.run_commitment().as_bytes());
     Ok(hash(&encoder.into_bytes()))
 }
 
