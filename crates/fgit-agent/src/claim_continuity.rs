@@ -26,15 +26,13 @@ use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_types::Digest;
 
 use crate::{
-    ActiveTaskClaim, ActiveTaskClaimId, AgentActionPacket, AgentActionPacketId,
-    AgentChangePlanId, AgentSituationReceipt, IntentRun, LogicalTime, RunId,
-    SituationAuthorityChange, SituationComponentKind, SituationDelta, SituationId,
-    SituationRefusal, WorkTaskId,
+    ActiveTaskClaim, ActiveTaskClaimId, AgentActionPacket, AgentActionPacketId, AgentChangePlanId,
+    AgentSituationReceipt, IntentRun, LogicalTime, RunId, SituationAuthorityChange,
+    SituationComponentKind, SituationDelta, SituationId, SituationRefusal, WorkTaskId,
 };
 
 const CLAIM_CONTINUITY_DOMAIN: &[u8] = b"frankengit.agent.claim-continuity/v1\0";
-const PACKET_CONTINUATION_DOMAIN: &[u8] =
-    b"frankengit.agent.action-packet-continuation/v1\0";
+const PACKET_CONTINUATION_DOMAIN: &[u8] = b"frankengit.agent.action-packet-continuation/v1\0";
 
 /// Stable identity of one active-claim continuity proof.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -180,8 +178,7 @@ impl ActiveClaimContinuityReceipt {
             from_observed_at: activation_situation.observed_at(),
             to_observed_at: later_situation.observed_at(),
         };
-        receipt.receipt_id =
-            ActiveClaimContinuityReceiptId(claim_continuity_commitment(&receipt)?);
+        receipt.receipt_id = ActiveClaimContinuityReceiptId(claim_continuity_commitment(&receipt)?);
         Ok(receipt)
     }
 

@@ -6,8 +6,8 @@ use fgit_authority::{
     CapabilityRevocationBodyRefusal, CapabilityRevocationGenerationBody, HeadInit, HeadKey,
     MemoryAuthorityStore, StoreInstanceId, body_key_for_id, initialize_repository,
     outcome_index_root, read_capability_revocation_generation_by_id,
-    read_head_selected_capability_revocation_generation,
-    stage_capability_revocation_generation, stage_latest_repository_incarnation_configuration,
+    read_head_selected_capability_revocation_generation, stage_capability_revocation_generation,
+    stage_latest_repository_incarnation_configuration,
     stage_revocation_aware_repository_incarnation_configuration,
 };
 use fgit_codec::{
@@ -91,14 +91,13 @@ fn authenticated_head(
 ) -> fgit_authority::AuthenticatedHead {
     let key = HeadKey::new(format!("capability-revocation-head-{store_id}").into_bytes())
         .expect("bounded head key");
-    let receipt = match initialize_repository(store, &key, body)
-        .expect("repository head initializes")
-    {
-        HeadInit::Created(receipt) => receipt,
-        HeadInit::IdenticalRetry(_) | HeadInit::Conflict => {
-            panic!("fresh store must create the head")
-        }
-    };
+    let receipt =
+        match initialize_repository(store, &key, body).expect("repository head initializes") {
+            HeadInit::Created(receipt) => receipt,
+            HeadInit::IdenticalRetry(_) | HeadInit::Conflict => {
+                panic!("fresh store must create the head")
+            }
+        };
     store
         .authenticate_head_receipt(&receipt)
         .expect("the issuing store authenticates its head")
@@ -112,8 +111,8 @@ fn selected_fixture(
     head_policy_epoch: PolicyEpoch,
 ) -> (MemoryAuthorityStore, fgit_authority::AuthenticatedHead) {
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(store_id));
-    let stage = stage_capability_revocation_generation(&store, body)
-        .expect("revocation generation stages");
+    let stage =
+        stage_capability_revocation_generation(&store, body).expect("revocation generation stages");
     let configuration = RepositoryIncarnationConfigurationBodyV2_2 {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: fgit_types::GitHashAlgorithm::Sha256,
@@ -228,12 +227,9 @@ fn explicit_empty_generation_is_authority_selected() {
         PolicyEpoch::FIRST,
     );
 
-    let selected = read_head_selected_capability_revocation_generation(
-        &store,
-        tenant(0x11),
-        &authenticated,
-    )
-    .expect("an explicit empty generation is a real canonical decision");
+    let selected =
+        read_head_selected_capability_revocation_generation(&store, tenant(0x11), &authenticated)
+            .expect("an explicit empty generation is a real canonical decision");
     assert!(selected.body().revoked_capability_ids().is_empty());
     assert_eq!(selected.body(), &body);
 }
@@ -256,12 +252,8 @@ fn configuration_without_revocation_root_fails_closed() {
     );
 
     assert_eq!(
-        read_head_selected_capability_revocation_generation(
-            &store,
-            tenant(0x11),
-            &authenticated,
-        )
-        .expect_err("absence is not an empty allow-all set"),
+        read_head_selected_capability_revocation_generation(&store, tenant(0x11), &authenticated,)
+            .expect_err("absence is not an empty allow-all set"),
         CapabilityRevocationAuthorityFailure::ConfigurationHasNoRevocationRoot
     );
 }
@@ -285,12 +277,11 @@ fn missing_or_misfiled_generation_is_refused() {
         policy_root: None,
         capability_revocation_root: Some(expected.generation_root().expect("expected root")),
     };
-    let missing_configuration_root =
-        stage_revocation_aware_repository_incarnation_configuration(
-            &missing_store,
-            &missing_configuration,
-        )
-        .expect("configuration stages without fabricating its target");
+    let missing_configuration_root = stage_revocation_aware_repository_incarnation_configuration(
+        &missing_store,
+        &missing_configuration,
+    )
+    .expect("configuration stages without fabricating its target");
     let missing_head = authenticated_head(
         &missing_store,
         204,
@@ -332,12 +323,11 @@ fn missing_or_misfiled_generation_is_refused() {
             .expect("adversarial bytes are planted under the wrong key"),
         fgit_authority::PutOutcome::Created,
     );
-    let misfiled_configuration_root =
-        stage_revocation_aware_repository_incarnation_configuration(
-            &misfiled_store,
-            &missing_configuration,
-        )
-        .expect("configuration stages");
+    let misfiled_configuration_root = stage_revocation_aware_repository_incarnation_configuration(
+        &misfiled_store,
+        &missing_configuration,
+    )
+    .expect("configuration stages");
     let misfiled_head = authenticated_head(
         &misfiled_store,
         205,

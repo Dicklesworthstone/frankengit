@@ -30,10 +30,10 @@
 use crate::vocabulary::AuthenticatedHead;
 use fgit_codec::wire::encode_body;
 use fgit_codec::{
-    CODEC_MINOR, CanonicalBody, CodecRefusal, CreationAttemptBody, DecodeLimits, Decoder, Encoder,
-    HiddenRefPolicyBody, RepositoryAuthorityHeadBody, RepositoryConfigurationBody,
-    RepositoryDecision, RepositoryDecisionBatchBody, RepositoryIncarnationConfigurationBody,
-    RepositoryIncarnationConfigurationBodyV2_1, decode_body, read_frame_header,
+    CodecRefusal, CreationAttemptBody, DecodeLimits, Decoder, Encoder, HiddenRefPolicyBody,
+    RepositoryAuthorityHeadBody, RepositoryConfigurationBody, RepositoryDecision,
+    RepositoryDecisionBatchBody, RepositoryIncarnationConfigurationBody,
+    RepositoryIncarnationConfigurationBodyV2_1, decode_body,
 };
 use fgit_crypto::{
     IdentityDomain, MerkleProof, MerkleRefusal, RefStateNonMembershipProof, merkle_leaf,
@@ -106,63 +106,6 @@ pub enum CreationAttemptOutcome {
     Created(CreationAttemptBody),
     /// A prior writer occupied the slot with the same fixed request fields.
     Recovered(CreationAttemptBody),
-}
-
-/// The incarnation configuration selected by an authenticated head.
-///
-/// This is a projection, not another canonical body: the reader recognizes
-/// the exact stored 2.0 or 2.1 body and normalizes its permanent facts here.
-/// A 2.0 body correctly has no policy-root field, while 2.1 carries the
-/// optional pointer.  Consumers therefore never need a schema-minor fallback
-/// of their own.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RepositoryIncarnationConfiguration {
-    /// How this repository's authenticated roots are laid out.
-    pub root_layout: RootLayoutVersion,
-    /// The permanent native Git object identity domain for this repository.
-    pub object_format: fgit_types::native::GitHashAlgorithm,
-    /// The minted incarnation this configuration binds the repository to.
-    pub repository_incarnation_id: fgit_types::identity::RepositoryIncarnationId,
-    /// The immutable hidden-ref policy selected by schema 2.1, if any.
-    pub policy_root: Option<Digest>,
-}
-
-/// The exact supported incarnation-configuration body selected by an
-/// authenticated head.
-///
-/// This evidence union deliberately preserves the schema minor as well as the
-/// canonical body. [`RepositoryIncarnationConfiguration`] is the normalized
-/// policy-resolution projection; callers that must re-identify the selected
-/// configuration (for example a verified-read envelope) use this union
-/// instead. A v2.0 body and a v2.1 body with `policy_root: None` have the same
-/// normalized policy facts but different canonical identities.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RepositoryIncarnationConfigurationEvidence {
-    /// The byte-stable incarnation configuration schema 2.0.
-    V2_0(RepositoryIncarnationConfigurationBody),
-    /// The policy-root-aware incarnation configuration schema 2.1.
-    V2_1(RepositoryIncarnationConfigurationBodyV2_1),
-}
-
-impl RepositoryIncarnationConfigurationEvidence {
-    /// Returns the normalized permanent facts for this exact body.
-    #[must_use]
-    pub const fn normalized(self) -> RepositoryIncarnationConfiguration {
-        match self {
-            Self::V2_0(body) => RepositoryIncarnationConfiguration {
-                root_layout: body.root_layout,
-                object_format: body.object_format,
-                repository_incarnation_id: body.repository_incarnation_id,
-                policy_root: None,
-            },
-            Self::V2_1(body) => RepositoryIncarnationConfiguration {
-                root_layout: body.root_layout,
-                object_format: body.object_format,
-                repository_incarnation_id: body.repository_incarnation_id,
-                policy_root: body.policy_root,
-            },
-        }
-    }
 }
 
 impl CreationAttemptOutcome {
@@ -1195,58 +1138,6 @@ fn hidden_ref_policy_key(root: &Digest) -> Result<ImmutableKey, OutcomeFailure> 
     Ok(body_key_for_id(&identity)?)
 }
 
-/// Decodes the exact supported incarnation-configuration body selected by an
-/// authority head.
-///
-/// A schema-2.0 body is byte-stable and therefore has an absent policy root;
-/// schema 2.1 explicitly carries the optional pointer.  Nothing else is a
-/// legacy fallback: the header identifies the exact minor before a typed body
-/// decoder accepts it, and an unknown minor is refused.
-fn decode_repository_incarnation_configuration_evidence(
-    bytes: &[u8],
-) -> Result<RepositoryIncarnationConfigurationEvidence, OutcomeFailure> {
-    let (header, _) = read_frame_header(bytes, DecodeLimits::DEFAULT)?;
-
-    // Let the typed body decoder preserve the existing precise refusal for a
-    // different domain, family, major, or codec minor.  Only a genuine v2
-    // schema-minor choice is dispatched by this union reader.
-    if header.codec_minor != CODEC_MINOR
-        || header.domain != RepositoryIncarnationConfigurationBodyV2_1::DOMAIN
-        || header.schema.family() != RepositoryIncarnationConfigurationBodyV2_1::SCHEMA_FAMILY
-        || header.schema.major() != RepositoryIncarnationConfigurationBodyV2_1::SCHEMA_MAJOR
-    {
-        let body: RepositoryIncarnationConfigurationBodyV2_1 =
-            decode_body(bytes, DecodeLimits::DEFAULT)?;
-        return Ok(RepositoryIncarnationConfigurationEvidence::V2_1(body));
-    }
-
-    match header.schema.minor() {
-        RepositoryIncarnationConfigurationBody::SCHEMA_MINOR => {
-            let body: RepositoryIncarnationConfigurationBody =
-                decode_body(bytes, DecodeLimits::DEFAULT)?;
-            Ok(RepositoryIncarnationConfigurationEvidence::V2_0(body))
-        }
-        RepositoryIncarnationConfigurationBodyV2_1::SCHEMA_MINOR => {
-            let body: RepositoryIncarnationConfigurationBodyV2_1 =
-                decode_body(bytes, DecodeLimits::DEFAULT)?;
-            Ok(RepositoryIncarnationConfigurationEvidence::V2_1(body))
-        }
-        observed => Err(CodecRefusal::schema_minor_unsupported(
-            RepositoryIncarnationConfigurationBodyV2_1::DOMAIN,
-            observed,
-            RepositoryIncarnationConfigurationBodyV2_1::SCHEMA_MINOR,
-        )
-        .into()),
-    }
-}
-
-/// Normalizes the exact supported incarnation-configuration minors.
-fn decode_repository_incarnation_configuration(
-    bytes: &[u8],
-) -> Result<RepositoryIncarnationConfiguration, OutcomeFailure> {
-    Ok(decode_repository_incarnation_configuration_evidence(bytes)?.normalized())
-}
-
 /// Stage the shared hidden-ref policy body and return the root a configuration
 /// carrier names.
 ///
@@ -1448,63 +1339,6 @@ where
         return Err(OutcomeFailure::ConfigurationUnresolvable);
     };
     Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
-}
-
-/// Reads the exact supported incarnation-aware configuration selected by an
-/// authority head.
-///
-/// This is a strict resolver, deliberately matching
-/// [`root_layout_for_proof`] rather than the verification resolver. An absent
-/// root, a selected v1 body, or malformed v2 bytes is a refusal: none may be
-/// interpreted as a legacy configuration because each lacks the binding that
-/// keeps a stale repository incarnation from resolving as current.
-///
-/// # Errors
-///
-/// [`OutcomeFailure::ConfigurationUnresolvable`] when no body is stored at the
-/// selected root, and [`OutcomeFailure::Codec`] when a present body is not the
-/// exact 2.0 or 2.1 incarnation-aware schema. A stored 2.0 body returns a
-/// policy-root-absent normalized projection; 2.1 returns its explicit pointer.
-/// Every other minor remains a typed refusal.
-pub fn read_repository_incarnation_configuration<S>(
-    store: &S,
-    configuration_root: &Digest,
-) -> Result<RepositoryIncarnationConfiguration, OutcomeFailure>
-where
-    S: AuthorityStore + ?Sized,
-{
-    let key = configuration_key(configuration_root)?;
-    let ImmutableRead::Present(bytes) = store.read_immutable(&key)? else {
-        return Err(OutcomeFailure::ConfigurationUnresolvable);
-    };
-    decode_repository_incarnation_configuration(&bytes)
-}
-
-/// Reads the exact supported incarnation-configuration body selected by an
-/// authority head.
-///
-/// Unlike [`read_repository_incarnation_configuration`], this retains the
-/// accepted schema minor so an evidence-carrying consumer can recompute the
-/// exact canonical configuration identity. It still refuses absent, v1,
-/// malformed, and unknown-minor bodies without a compatibility fallback.
-///
-/// # Errors
-///
-/// [`OutcomeFailure::ConfigurationUnresolvable`] when no body is stored at
-/// the selected root, and [`OutcomeFailure::Codec`] when the selected bytes
-/// are not an exact supported incarnation configuration.
-pub fn read_repository_incarnation_configuration_evidence<S>(
-    store: &S,
-    configuration_root: &Digest,
-) -> Result<RepositoryIncarnationConfigurationEvidence, OutcomeFailure>
-where
-    S: AuthorityStore + ?Sized,
-{
-    let key = configuration_key(configuration_root)?;
-    let ImmutableRead::Present(bytes) = store.read_immutable(&key)? else {
-        return Err(OutcomeFailure::ConfigurationUnresolvable);
-    };
-    decode_repository_incarnation_configuration_evidence(&bytes)
 }
 
 // --- the production surface for the carrier (frankengit-m01t) -----------------
@@ -1715,62 +1549,6 @@ where
         return Err(OutcomeFailure::ConfigurationUnresolvable);
     };
     Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
-}
-
-/// Reads the exact supported incarnation-aware configuration selected by an
-/// authority head on the production surface.
-///
-/// The asynchronous twin of [`read_repository_incarnation_configuration`]. It
-/// retains that resolver's no-fallback rule for absent, v1, and malformed
-/// bodies.
-///
-/// # Errors
-///
-/// [`OutcomeFailure::ConfigurationUnresolvable`] when no body is stored at the
-/// selected root, and [`OutcomeFailure::Codec`] when a present body is not the
-/// exact 2.0 or 2.1 incarnation-aware schema. Other minors remain typed
-/// refusals rather than legacy fallbacks.
-pub async fn read_repository_incarnation_configuration_async<S>(
-    store: &S,
-    cx: &S::Context,
-    configuration_root: &Digest,
-) -> Result<RepositoryIncarnationConfiguration, OutcomeFailure>
-where
-    S: AsyncAuthorityStore + ?Sized,
-{
-    let key = configuration_key(configuration_root)?;
-    let ImmutableRead::Present(bytes) = store.read_immutable(cx, &key).await? else {
-        return Err(OutcomeFailure::ConfigurationUnresolvable);
-    };
-    decode_repository_incarnation_configuration(&bytes)
-}
-
-/// Reads exact incarnation-configuration evidence on the production surface.
-///
-/// The asynchronous twin of
-/// [`read_repository_incarnation_configuration_evidence`]. It preserves the
-/// selected 2.0 or 2.1 canonical body for a consumer that verifies
-/// `configuration_root`, while the normalized reader remains available for
-/// policy resolution.
-///
-/// # Errors
-///
-/// [`OutcomeFailure::ConfigurationUnresolvable`] when no body is stored at
-/// the selected root, and [`OutcomeFailure::Codec`] for any unsupported or
-/// malformed exact configuration body.
-pub async fn read_repository_incarnation_configuration_evidence_async<S>(
-    store: &S,
-    cx: &S::Context,
-    configuration_root: &Digest,
-) -> Result<RepositoryIncarnationConfigurationEvidence, OutcomeFailure>
-where
-    S: AsyncAuthorityStore + ?Sized,
-{
-    let key = configuration_key(configuration_root)?;
-    let ImmutableRead::Present(bytes) = store.read_immutable(cx, &key).await? else {
-        return Err(OutcomeFailure::ConfigurationUnresolvable);
-    };
-    decode_repository_incarnation_configuration_evidence(&bytes)
 }
 
 /// One outcome-index leaf.

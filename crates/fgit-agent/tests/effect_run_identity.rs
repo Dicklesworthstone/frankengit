@@ -2,8 +2,8 @@
 //! Public-path tests for complete-run identity in effect records and replay.
 
 use fgit_agent::{
-    AgentInstanceId, AuthorityBasisRef, Capability, CapabilityId, ClassSet, EffectBroker,
-    EffectId, EffectJournalRefusal, EffectRequest, IntentRun, LogicalTime, OperationClass, RunId,
+    AgentInstanceId, AuthorityBasisRef, Capability, CapabilityId, ClassSet, EffectBroker, EffectId,
+    EffectJournalRefusal, EffectRequest, IntentRun, LogicalTime, OperationClass, RunId,
 };
 use fgit_resource::{Grade, RegionId, ResourceVector};
 
@@ -56,16 +56,8 @@ fn journal_replay_cannot_merge_same_id_runs_with_different_machine_scope() {
     let second_commitment = second_run.commitment().expect("second run commitment");
     assert_ne!(first_commitment, second_commitment);
 
-    let mut first = EffectBroker::open(
-        first_run,
-        RegionId::new(1),
-        AgentInstanceId::new(1),
-    );
-    let mut second = EffectBroker::open(
-        second_run,
-        RegionId::new(2),
-        AgentInstanceId::new(2),
-    );
+    let mut first = EffectBroker::open(first_run, RegionId::new(1), AgentInstanceId::new(1));
+    let mut second = EffectBroker::open(second_run, RegionId::new(2), AgentInstanceId::new(2));
     let first_grant = first
         .request(&capability(), LogicalTime::new(10), &request(1))
         .expect("first effect accepted");

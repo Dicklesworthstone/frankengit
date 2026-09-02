@@ -16,7 +16,7 @@
 use core::fmt;
 
 use fgit_codec::{CodecRefusal, Encoder};
-use fgit_crypto::{DigestHasher, GitHashAlgorithm, NativeObjectIdentity, Sha256};
+use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 
 use crate::AuthorityReadReceipt;
 
@@ -75,7 +75,10 @@ impl fmt::Display for AuthorityReadIdentityRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Codec(refusal) => {
-                write!(formatter, "authority-read identity framing refused: {refusal}")
+                write!(
+                    formatter,
+                    "authority-read identity framing refused: {refusal}"
+                )
             }
         }
     }

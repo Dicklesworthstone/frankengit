@@ -201,10 +201,12 @@ impl TaskProjectionMutationEnvelope {
         let observed = observed.ok_or(TaskProjectionPersistenceRefusal::ProjectionMissing)?;
         let snapshot = observed.snapshot();
         if snapshot.repository_id() != self.repository_id {
-            return Err(TaskProjectionPersistenceRefusal::ObservedRepositoryMismatch {
-                expected: self.repository_id,
-                observed: snapshot.repository_id(),
-            });
+            return Err(
+                TaskProjectionPersistenceRefusal::ObservedRepositoryMismatch {
+                    expected: self.repository_id,
+                    observed: snapshot.repository_id(),
+                },
+            );
         }
         if snapshot.task_id() != self.task_id {
             return Err(TaskProjectionPersistenceRefusal::ObservedTaskMismatch {
@@ -226,9 +228,7 @@ impl TaskProjectionMutationEnvelope {
             if observed.last_transition_id == Some(*self.transition_id.as_bytes())
                 || observed.last_inner_transition_id == Some(self.inner_transition_id)
             {
-                return Err(
-                    TaskProjectionPersistenceRefusal::PredecessorCarriesAttemptedMetadata,
-                );
+                return Err(TaskProjectionPersistenceRefusal::PredecessorCarriesAttemptedMetadata);
             }
             return Ok(TaskProjectionPersistenceDecision::RetrySafe {
                 envelope_id: self.envelope_id,
@@ -498,8 +498,7 @@ impl TaskProjectionPersistenceReceipt {
                 .ok_or(TaskProjectionPersistenceRefusal::SuccessorEvidenceMissing)?,
             observed_at: observed.snapshot.observed_at(),
         };
-        receipt.receipt_id =
-            TaskProjectionPersistenceReceiptId(receipt_commitment(&receipt)?);
+        receipt.receipt_id = TaskProjectionPersistenceReceiptId(receipt_commitment(&receipt)?);
         Ok(receipt)
     }
 
@@ -713,10 +712,12 @@ fn validate_successor_metadata(
         .ok_or(TaskProjectionPersistenceRefusal::SuccessorTransitionMissing)?;
     let expected_transition = *envelope.transition_id.as_bytes();
     if transition_id != expected_transition {
-        return Err(TaskProjectionPersistenceRefusal::SuccessorTransitionMismatch {
-            expected: expected_transition,
-            observed: transition_id,
-        });
+        return Err(
+            TaskProjectionPersistenceRefusal::SuccessorTransitionMismatch {
+                expected: expected_transition,
+                observed: transition_id,
+            },
+        );
     }
 
     let inner_transition_id = observed
@@ -735,10 +736,12 @@ fn validate_successor_metadata(
         .evidence_root
         .ok_or(TaskProjectionPersistenceRefusal::SuccessorEvidenceMissing)?;
     if evidence_root != envelope.evidence_root {
-        return Err(TaskProjectionPersistenceRefusal::SuccessorEvidenceMismatch {
-            expected: envelope.evidence_root,
-            observed: evidence_root,
-        });
+        return Err(
+            TaskProjectionPersistenceRefusal::SuccessorEvidenceMismatch {
+                expected: envelope.evidence_root,
+                observed: evidence_root,
+            },
+        );
     }
     Ok(())
 }

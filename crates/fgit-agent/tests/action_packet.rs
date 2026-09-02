@@ -7,18 +7,17 @@ use fgit_agent::{
     AgentControlPulse, AgentSituationReceipt, AuthorityReadReceipt, ClassSet, ContextControl,
     ContextPacket, EvidenceClass, IntentRun, LogicalTime, OperationClass, PlanApproval,
     PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement,
-    PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind,
-    RejectedShortcutSet, RunId, SITUATION_COMPONENT_COUNT, SituationComponent,
-    SituationComponentKind, SituationOmissionReason, TaskClaimProjection, TaskClaimReceipt,
-    TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs,
-    WorkTaskId,
+    PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet,
+    RunId, SituationComponent, SituationComponentKind, SituationOmissionReason,
+    TaskClaimProjection, TaskClaimReceipt, TaskPhase, WorkConflict, WorkEligibilityInputs,
+    WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -97,10 +96,7 @@ fn run(receipt: &AuthorityReadReceipt, classes: &[OperationClass], bytes: u64) -
         RunId::new(7),
         receipt.clone(),
         ClassSet::from_classes(classes),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, bytes),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, bytes), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -118,11 +114,7 @@ fn situation(
         if kind == SituationComponentKind::TaskProjection {
             SituationComponent::observed(kind, receipt.authority_head_id(), task_generation)
         } else if kind == SituationComponentKind::Search {
-            SituationComponent::observed(
-                kind,
-                receipt.authority_head_id(),
-                [search_generation; 32],
-            )
+            SituationComponent::observed(kind, receipt.authority_head_id(), [search_generation; 32])
         } else {
             SituationComponent::omitted(
                 kind,
@@ -160,7 +152,12 @@ fn activated_plan(
     receipt: &AuthorityReadReceipt,
     run: &IntentRun,
     context: &ContextPacket,
-) -> (AgentChangePlan, ActiveTaskClaim, AgentSituationReceipt, PlanSurface) {
+) -> (
+    AgentChangePlan,
+    ActiveTaskClaim,
+    AgentSituationReceipt,
+    PlanSurface,
+) {
     let planning_situation = situation(receipt, run, TASK_BASIS, 20, 0x71);
     let task_id = WorkTaskId::from_bytes([0x31; 32]);
     let item = WorkItem::new(
@@ -168,13 +165,7 @@ fn activated_plan(
         TASK_BASIS,
         TaskPhase::Open,
         WorkRankingInputs::new(1, 2, 3),
-        WorkEligibilityInputs::new(
-            0,
-            Some(run.run_id()),
-            None,
-            true,
-            WorkConflict::Clear,
-        ),
+        WorkEligibilityInputs::new(0, Some(run.run_id()), None, true, WorkConflict::Clear),
     );
     let frontier = WorkFrontier::build_action_scoped(&planning_situation, vec![item])
         .expect("task is eligible");
@@ -188,10 +179,7 @@ fn activated_plan(
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -211,7 +199,7 @@ fn activated_plan(
         digest(0x67),
         false,
     )]);
-    let plan = AgentChangePlan::build(&pulse, run, &[context.clone()], spec)
+    let plan = AgentChangePlan::build(&pulse, run, std::slice::from_ref(context), spec)
         .expect("complete change plan");
     let projection = TaskClaimProjection::new(
         plan.task_id(),
@@ -274,7 +262,7 @@ fn packet_is_deterministic_and_binds_complete_execution_inputs() {
         &plan,
         active_claim,
         &run,
-        &[context.clone()],
+        std::slice::from_ref(&context),
         packet_spec(surface, 512),
     )
     .expect("complete action packet");
@@ -283,7 +271,7 @@ fn packet_is_deterministic_and_binds_complete_execution_inputs() {
         &plan,
         active_claim,
         &run,
-        &[context.clone()],
+        std::slice::from_ref(&context),
         packet_spec(surface, 512),
     )
     .expect("identical inputs make an identical packet");
@@ -385,8 +373,7 @@ fn same_id_run_is_revalidated_instead_of_trusted_by_name() {
         16_384,
     );
     let context = context(&receipt);
-    let (plan, active_claim, activation, surface) =
-        activated_plan(&receipt, &original, &context);
+    let (plan, active_claim, activation, surface) = activated_plan(&receipt, &original, &context);
     let narrowed = run(&receipt, &[OperationClass::SubmitEvidence], 16_384);
     let narrowed_commitment = narrowed.commitment().expect("narrowed run identity");
     let original_commitment = original.commitment().expect("original run identity");
@@ -445,7 +432,7 @@ fn step_operation_and_aggregate_budget_remain_inside_the_plan() {
             &plan,
             active_claim,
             &run,
-            &[context.clone()],
+            std::slice::from_ref(&context),
             outside,
         )
         .expect_err("run authority cannot widen the narrower plan"),

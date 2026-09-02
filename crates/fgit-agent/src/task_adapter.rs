@@ -23,10 +23,9 @@ use crate::{
     ActiveTaskClaim, AgentChangePlan, AgentControlPulse, AgentSituationReceipt, IntentRun,
     LogicalTime, RunId, SituationComponentKind, TaskClaimCancellationOutcome,
     TaskClaimCancellationProjection, TaskClaimProjection, TaskClaimReceipt, TaskClaimRefusal,
-    TaskMutationAttempt, TaskMutationAttemptRefusal, TaskMutationObservation,
-    TaskMutationReceipt, TaskMutationRefusal, TaskMutationRequest, TaskProjectionAdapter,
-    TaskProjectionGeneration, TaskProjectionSnapshot, WorkAction, WorkTaskId,
-    apply_task_mutation,
+    TaskMutationAttempt, TaskMutationAttemptRefusal, TaskMutationObservation, TaskMutationReceipt,
+    TaskMutationRefusal, TaskMutationRequest, TaskProjectionAdapter, TaskProjectionGeneration,
+    TaskProjectionSnapshot, WorkAction, WorkTaskId, apply_task_mutation,
 };
 
 /// Complete successful claim transition across task mutation and claim receipt.
@@ -491,7 +490,9 @@ const fn required_action(phase: crate::TaskPhase) -> Option<WorkAction> {
             Some(WorkAction::Verify)
         }
         crate::TaskPhase::Rework => Some(WorkAction::Rework),
-        crate::TaskPhase::Verified | crate::TaskPhase::Closed | crate::TaskPhase::Superseded => None,
+        crate::TaskPhase::Verified | crate::TaskPhase::Closed | crate::TaskPhase::Superseded => {
+            None
+        }
     }
 }
 

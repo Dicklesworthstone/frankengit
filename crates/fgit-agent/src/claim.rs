@@ -242,8 +242,7 @@ impl TaskClaimReceipt {
             action: plan.action(),
             assignee: run.run_id(),
             run_commitment,
-            previous_task_projection_generation: projection
-                .previous_task_projection_generation,
+            previous_task_projection_generation: projection.previous_task_projection_generation,
             claimed_task_projection_generation: projection.claimed_task_projection_generation,
             reserved_surfaces: projection.reserved_surfaces,
             claimed_at: projection.claimed_at,
@@ -404,8 +403,7 @@ impl TaskClaimReceipt {
     #[must_use]
     pub fn conflicts_with(&self, other: &Self, at: LogicalTime) -> bool {
         self.repository_id == other.repository_id
-            && (self.assignee != other.assignee
-                || self.run_commitment != other.run_commitment)
+            && (self.assignee != other.assignee || self.run_commitment != other.run_commitment)
             && self.is_live_at(at)
             && other.is_live_at(at)
             && surfaces_overlap(&self.reserved_surfaces, &other.reserved_surfaces)
@@ -658,7 +656,10 @@ impl fmt::Display for TaskClaimRefusal {
                 formatter.write_str("plan selection differs from the pulse")
             }
             Self::PlanRunMismatch { expected, observed } => {
-                write!(formatter, "plan run {expected} differs from supplied run {observed}")
+                write!(
+                    formatter,
+                    "plan run {expected} differs from supplied run {observed}"
+                )
             }
             Self::PlanRunCommitmentMismatch { expected, observed } => write!(
                 formatter,
@@ -674,7 +675,9 @@ impl fmt::Display for TaskClaimRefusal {
             Self::RunAuthorityMismatch => {
                 formatter.write_str("run authority differs from the claim control turn")
             }
-            Self::RunIdentity(refusal) => write!(formatter, "task claim run identity refused: {refusal}"),
+            Self::RunIdentity(refusal) => {
+                write!(formatter, "task claim run identity refused: {refusal}")
+            }
             Self::RunExpired { run_id, observed } => {
                 write!(formatter, "run {run_id} is expired at {observed}")
             }
@@ -690,9 +693,8 @@ impl fmt::Display for TaskClaimRefusal {
                 formatter,
                 "claim projection assignee {observed} differs from run {expected}"
             ),
-            Self::PreviousTaskGenerationMismatch { .. } => formatter.write_str(
-                "claim projection predecessor differs from the pulse task generation",
-            ),
+            Self::PreviousTaskGenerationMismatch { .. } => formatter
+                .write_str("claim projection predecessor differs from the pulse task generation"),
             Self::ZeroClaimedTaskGeneration => {
                 formatter.write_str("claimed task generation may not be all zero")
             }
@@ -746,12 +748,10 @@ impl fmt::Display for TaskClaimRefusal {
                 formatter,
                 "post-claim run commitment {observed:?} differs from claim run {expected}"
             ),
-            Self::RefreshedTaskProjectionUnavailable => formatter.write_str(
-                "post-claim situation has no observed task projection generation",
-            ),
-            Self::ClaimGenerationNotObserved { .. } => formatter.write_str(
-                "post-claim situation does not observe the claimed task generation",
-            ),
+            Self::RefreshedTaskProjectionUnavailable => formatter
+                .write_str("post-claim situation has no observed task projection generation"),
+            Self::ClaimGenerationNotObserved { .. } => formatter
+                .write_str("post-claim situation does not observe the claimed task generation"),
             Self::RefreshedTimeRollback {
                 claimed_at,
                 observed,
@@ -1026,16 +1026,11 @@ fn activation_commitment(active: &ActiveTaskClaim) -> Result<[u8; 32], TaskClaim
     hash(encoder.into_bytes())
 }
 
-fn write_surfaces(
-    encoder: &mut Encoder,
-    surfaces: &[PlanSurface],
-) -> Result<(), TaskClaimRefusal> {
-    let count = u32::try_from(surfaces.len()).map_err(|_| {
-        CodecRefusal::ValueUnrepresentable {
-            field: "task_claim.reserved_surfaces",
-            observed: u64::try_from(surfaces.len()).unwrap_or(u64::MAX),
-            limit: u64::from(u32::MAX),
-        }
+fn write_surfaces(encoder: &mut Encoder, surfaces: &[PlanSurface]) -> Result<(), TaskClaimRefusal> {
+    let count = u32::try_from(surfaces.len()).map_err(|_| CodecRefusal::ValueUnrepresentable {
+        field: "task_claim.reserved_surfaces",
+        observed: u64::try_from(surfaces.len()).unwrap_or(u64::MAX),
+        limit: u64::from(u32::MAX),
     })?;
     encoder.write_scalar(count);
     for surface in surfaces {

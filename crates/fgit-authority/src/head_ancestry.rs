@@ -23,9 +23,7 @@ use core::fmt;
 
 use fgit_codec::{CodecRefusal, Encoder};
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
-use fgit_types::{
-    HeadGeneration, RepositoryAuthorityHeadId, RepositoryId,
-};
+use fgit_types::{HeadGeneration, RepositoryAuthorityHeadId, RepositoryId};
 
 use crate::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore,
@@ -211,7 +209,7 @@ pub enum AuthorityHeadAncestryRefusal {
     /// A non-genesis head omitted its predecessor identity.
     MissingPredecessor {
         /// Body whose predecessor was required.
-        head_id: RepositoryAuthorityHeadId,
+        head_id: Box<RepositoryAuthorityHeadId>,
         /// Generation carried by that body.
         generation: HeadGeneration,
     },
@@ -226,9 +224,9 @@ pub enum AuthorityHeadAncestryRefusal {
     /// ancestor.
     NotDescendant {
         /// Requested ancestor identity.
-        expected: RepositoryAuthorityHeadId,
+        expected: Box<RepositoryAuthorityHeadId>,
         /// Identity reached at the requested generation.
-        observed: RepositoryAuthorityHeadId,
+        observed: Box<RepositoryAuthorityHeadId>,
     },
     /// Hop count did not fit the stable receipt profile.
     HopCountUnrepresentable {
@@ -240,7 +238,10 @@ pub enum AuthorityHeadAncestryRefusal {
 impl fmt::Display for AuthorityHeadAncestryRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidHopLimit { observed, hard_limit } => write!(
+            Self::InvalidHopLimit {
+                observed,
+                hard_limit,
+            } => write!(
                 formatter,
                 "authority-head ancestry limit {observed} exceeds hard limit {hard_limit}"
             ),
@@ -248,13 +249,18 @@ impl fmt::Display for AuthorityHeadAncestryRefusal {
             Self::Authority(refusal) => write!(formatter, "authority-head read failed: {refusal}"),
             Self::HeadBody(refusal) => write!(formatter, "current head body refused: {refusal}"),
             Self::History(refusal) => write!(formatter, "head ancestry history refused: {refusal}"),
-            Self::Identity(refusal) => write!(formatter, "current head identity refused: {refusal}"),
+            Self::Identity(refusal) => {
+                write!(formatter, "current head identity refused: {refusal}")
+            }
             Self::Codec(refusal) => write!(formatter, "head ancestry framing refused: {refusal}"),
             Self::RepositoryMismatch { expected, observed } => write!(
                 formatter,
                 "authority-head path moved from repository {expected} to {observed}"
             ),
-            Self::DescendantOlderThanAncestor { ancestor, descendant } => write!(
+            Self::DescendantOlderThanAncestor {
+                ancestor,
+                descendant,
+            } => write!(
                 formatter,
                 "current head generation {} is older than requested ancestor generation {}",
                 descendant.get(),
@@ -264,12 +270,18 @@ impl fmt::Display for AuthorityHeadAncestryRefusal {
                 formatter,
                 "authority-head ancestry requires {required} hops, limit {limit}"
             ),
-            Self::MissingPredecessor { head_id, generation } => write!(
+            Self::MissingPredecessor {
+                head_id,
+                generation,
+            } => write!(
                 formatter,
                 "head {head_id} at generation {} has no required predecessor",
                 generation.get()
             ),
-            Self::GenerationDiscontinuity { descendant, predecessor } => write!(
+            Self::GenerationDiscontinuity {
+                descendant,
+                predecessor,
+            } => write!(
                 formatter,
                 "head generation {} names predecessor generation {}; expected exactly one less",
                 descendant.get(),
@@ -328,16 +340,17 @@ where
     let body = authenticated.body()?;
     let head_id = authority_head_identity(&body)
         .map_err(|failure| AuthorityHeadAncestryRefusal::Identity(Box::new(failure)))?;
-    let ancestry = walk_sync(
-        store,
+    let query = AncestryQuery {
         repository_id,
         ancestor_head_id,
         ancestor_generation,
+    };
+    let endpoint = DescendantEndpoint {
         head_id,
-        &body,
-        receipt.token(),
-        max_hops,
-    )?;
+        body: &body,
+        version_token: receipt.token(),
+    };
+    let ancestry = walk_sync(store, &query, &endpoint, max_hops)?;
     Ok(CurrentAuthorityHead {
         authenticated,
         head_id,
@@ -368,18 +381,17 @@ where
     let body = authenticated.body()?;
     let head_id = authority_head_identity(&body)
         .map_err(|failure| AuthorityHeadAncestryRefusal::Identity(Box::new(failure)))?;
-    let ancestry = walk_async(
-        store,
-        cx,
+    let query = AncestryQuery {
         repository_id,
         ancestor_head_id,
         ancestor_generation,
+    };
+    let endpoint = DescendantEndpoint {
         head_id,
-        &body,
-        receipt.token(),
-        max_hops,
-    )
-    .await?;
+        body: &body,
+        version_token: receipt.token(),
+    };
+    let ancestry = walk_async(store, cx, &query, &endpoint, max_hops).await?;
     Ok(CurrentAuthorityHead {
         authenticated,
         head_id,
@@ -388,7 +400,23 @@ where
     })
 }
 
-fn validate_hop_limit(max_hops: usize) -> Result<(), AuthorityHeadAncestryRefusal> {
+/// The exact ancestry question one walk answers: does the current head of
+/// `repository_id` descend from this ancestor identity at this generation?
+#[derive(Clone, Copy)]
+struct AncestryQuery {
+    repository_id: RepositoryId,
+    ancestor_head_id: RepositoryAuthorityHeadId,
+    ancestor_generation: HeadGeneration,
+}
+
+/// The authenticated current-slot endpoint one walk starts from.
+struct DescendantEndpoint<'a> {
+    head_id: RepositoryAuthorityHeadId,
+    body: &'a fgit_codec::RepositoryAuthorityHeadBody,
+    version_token: AuthorityVersionToken,
+}
+
+const fn validate_hop_limit(max_hops: usize) -> Result<(), AuthorityHeadAncestryRefusal> {
     if max_hops > MAX_AUTHORITY_HEAD_ANCESTRY_HOPS {
         return Err(AuthorityHeadAncestryRefusal::InvalidHopLimit {
             observed: max_hops,
@@ -398,95 +426,91 @@ fn validate_hop_limit(max_hops: usize) -> Result<(), AuthorityHeadAncestryRefusa
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn walk_sync<S>(
     store: &S,
-    repository_id: RepositoryId,
-    ancestor_head_id: RepositoryAuthorityHeadId,
-    ancestor_generation: HeadGeneration,
-    descendant_head_id: RepositoryAuthorityHeadId,
-    descendant_body: &fgit_codec::RepositoryAuthorityHeadBody,
-    descendant_version_token: AuthorityVersionToken,
+    query: &AncestryQuery,
+    endpoint: &DescendantEndpoint<'_>,
     max_hops: usize,
 ) -> Result<AuthorityHeadAncestryReceipt, AuthorityHeadAncestryRefusal>
 where
     S: AuthorityStore + ?Sized,
 {
-    validate_start(repository_id, ancestor_generation, descendant_body, max_hops)?;
-    let required = descendant_body.generation.get() - ancestor_generation.get();
+    validate_start(
+        query.repository_id,
+        query.ancestor_generation,
+        endpoint.body,
+        max_hops,
+    )?;
+    let required = endpoint.body.generation.get() - query.ancestor_generation.get();
     let mut path = Vec::with_capacity(usize::try_from(required).unwrap_or(max_hops) + 1);
-    path.push(descendant_head_id);
-    let mut cursor_id = descendant_head_id;
-    let mut cursor = descendant_body.clone();
+    path.push(endpoint.head_id);
+    let mut cursor_id = endpoint.head_id;
+    let mut cursor = endpoint.body.clone();
     for _ in 0..required {
-        let predecessor_id = cursor.predecessor_head_id.ok_or(
-            AuthorityHeadAncestryRefusal::MissingPredecessor {
-                head_id: cursor_id,
-                generation: cursor.generation,
-            },
-        )?;
+        let predecessor_id =
+            cursor
+                .predecessor_head_id
+                .ok_or(AuthorityHeadAncestryRefusal::MissingPredecessor {
+                    head_id: Box::new(cursor_id),
+                    generation: cursor.generation,
+                })?;
         let predecessor = read_authority_head_body(store, predecessor_id)
             .map_err(|failure| AuthorityHeadAncestryRefusal::History(Box::new(failure)))?;
-        validate_edge(repository_id, &cursor, &predecessor)?;
+        validate_edge(query.repository_id, &cursor, &predecessor)?;
         path.push(predecessor_id);
         cursor_id = predecessor_id;
         cursor = predecessor;
     }
     finish_receipt(
-        repository_id,
-        ancestor_head_id,
-        ancestor_generation,
-        descendant_head_id,
-        descendant_body.generation,
-        descendant_version_token,
+        query,
+        endpoint.body.generation,
+        endpoint.version_token,
         cursor_id,
         &path,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn walk_async<S>(
     store: &S,
     cx: &S::Context,
-    repository_id: RepositoryId,
-    ancestor_head_id: RepositoryAuthorityHeadId,
-    ancestor_generation: HeadGeneration,
-    descendant_head_id: RepositoryAuthorityHeadId,
-    descendant_body: &fgit_codec::RepositoryAuthorityHeadBody,
-    descendant_version_token: AuthorityVersionToken,
+    query: &AncestryQuery,
+    endpoint: &DescendantEndpoint<'_>,
     max_hops: usize,
 ) -> Result<AuthorityHeadAncestryReceipt, AuthorityHeadAncestryRefusal>
 where
     S: AsyncAuthorityStore + ?Sized,
 {
-    validate_start(repository_id, ancestor_generation, descendant_body, max_hops)?;
-    let required = descendant_body.generation.get() - ancestor_generation.get();
+    validate_start(
+        query.repository_id,
+        query.ancestor_generation,
+        endpoint.body,
+        max_hops,
+    )?;
+    let required = endpoint.body.generation.get() - query.ancestor_generation.get();
     let mut path = Vec::with_capacity(usize::try_from(required).unwrap_or(max_hops) + 1);
-    path.push(descendant_head_id);
-    let mut cursor_id = descendant_head_id;
-    let mut cursor = descendant_body.clone();
+    path.push(endpoint.head_id);
+    let mut cursor_id = endpoint.head_id;
+    let mut cursor = endpoint.body.clone();
     for _ in 0..required {
-        let predecessor_id = cursor.predecessor_head_id.ok_or(
-            AuthorityHeadAncestryRefusal::MissingPredecessor {
-                head_id: cursor_id,
-                generation: cursor.generation,
-            },
-        )?;
+        let predecessor_id =
+            cursor
+                .predecessor_head_id
+                .ok_or(AuthorityHeadAncestryRefusal::MissingPredecessor {
+                    head_id: Box::new(cursor_id),
+                    generation: cursor.generation,
+                })?;
         let predecessor = read_authority_head_body_async(store, cx, predecessor_id)
             .await
             .map_err(|failure| AuthorityHeadAncestryRefusal::History(Box::new(failure)))?;
-        validate_edge(repository_id, &cursor, &predecessor)?;
+        validate_edge(query.repository_id, &cursor, &predecessor)?;
         path.push(predecessor_id);
         cursor_id = predecessor_id;
         cursor = predecessor;
     }
     finish_receipt(
-        repository_id,
-        ancestor_head_id,
-        ancestor_generation,
-        descendant_head_id,
-        descendant_body.generation,
-        descendant_version_token,
+        query,
+        endpoint.body.generation,
+        endpoint.version_token,
         cursor_id,
         &path,
     )
@@ -540,21 +564,17 @@ fn validate_edge(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn finish_receipt(
-    repository_id: RepositoryId,
-    ancestor_head_id: RepositoryAuthorityHeadId,
-    ancestor_generation: HeadGeneration,
-    descendant_head_id: RepositoryAuthorityHeadId,
+    query: &AncestryQuery,
     descendant_generation: HeadGeneration,
     descendant_version_token: AuthorityVersionToken,
     reached_ancestor_id: RepositoryAuthorityHeadId,
     path: &[RepositoryAuthorityHeadId],
 ) -> Result<AuthorityHeadAncestryReceipt, AuthorityHeadAncestryRefusal> {
-    if reached_ancestor_id != ancestor_head_id {
+    if reached_ancestor_id != query.ancestor_head_id {
         return Err(AuthorityHeadAncestryRefusal::NotDescendant {
-            expected: ancestor_head_id,
-            observed: reached_ancestor_id,
+            expected: Box::new(query.ancestor_head_id),
+            observed: Box::new(reached_ancestor_id),
         });
     }
     let hop_count = path.len().saturating_sub(1);
@@ -563,12 +583,13 @@ fn finish_receipt(
             observed: hop_count,
         }
     })?;
-    let path_root = path_commitment(repository_id, path)?;
+    let path_root = path_commitment(query.repository_id, path)?;
+    let descendant_head_id = *path.first().unwrap_or(&reached_ancestor_id);
     let mut receipt = AuthorityHeadAncestryReceipt {
         receipt_id: AuthorityHeadAncestryReceiptId([0; 32]),
-        repository_id,
-        ancestor_head_id,
-        ancestor_generation,
+        repository_id: query.repository_id,
+        ancestor_head_id: query.ancestor_head_id,
+        ancestor_generation: query.ancestor_generation,
         descendant_head_id,
         descendant_generation,
         descendant_version_token,
@@ -598,9 +619,7 @@ fn path_commitment(
     Ok(hash(&encoder.into_bytes()))
 }
 
-fn receipt_commitment(
-    receipt: &AuthorityHeadAncestryReceipt,
-) -> Result<[u8; 32], CodecRefusal> {
+fn receipt_commitment(receipt: &AuthorityHeadAncestryReceipt) -> Result<[u8; 32], CodecRefusal> {
     let mut encoder = Encoder::with_capacity(384);
     encoder.write_bytes("authority_head_ancestry_receipt_domain", RECEIPT_DOMAIN)?;
     encoder.write_opaque_id(receipt.repository_id.as_bytes());

@@ -3,14 +3,13 @@
 
 use fgit_agent::{
     ActiveTaskClaim, AgentChangePlan, AgentChangePlanSpec, AgentControlPulse,
-    AgentSituationReceipt, AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt,
-    ClassSet, EvidenceClass, IntentRun, LogicalTime, OperationClass, PlanApproval,
-    PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement,
-    PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind,
-    RejectedShortcutSet, RunId, SituationComponent, SituationComponentKind,
-    SituationOmissionReason, TaskClaimReceipt, TaskCoordinationRefusal,
-    TaskProjectionAdapterRefusal, TaskProjectionAssignment, TaskReleaseDisposition,
-    TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
+    AgentSituationReceipt, AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, ClassSet,
+    EvidenceClass, IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint,
+    PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId,
+    PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RunId,
+    SituationComponent, SituationComponentKind, SituationOmissionReason, TaskClaimReceipt,
+    TaskCoordinationRefusal, TaskPhase, TaskProjectionAdapterRefusal, TaskProjectionAssignment,
+    TaskReleaseDisposition, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
     WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
@@ -18,7 +17,7 @@ use fgit_authority::{
     authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -103,10 +102,7 @@ fn run_with_profile(
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, bytes),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, bytes), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(expiry),
     )
     .expect("authenticated run opens")
@@ -167,10 +163,7 @@ fn pulse_and_plan(
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -190,8 +183,7 @@ fn pulse_and_plan(
         digest(0x67),
         false,
     )]);
-    let plan = AgentChangePlan::build(&pulse, run, &[], spec)
-        .expect("complete change plan");
+    let plan = AgentChangePlan::build(&pulse, run, &[], spec).expect("complete change plan");
     (pulse, plan, surface)
 }
 
@@ -227,13 +219,9 @@ fn claimed_fixture() -> ClaimedFixture {
             digest(0x72),
         )
         .expect("repository-scoped claim");
-    let claim_receipt = TaskClaimReceipt::admit(
-        &pulse,
-        &plan,
-        &source_run,
-        application.projection().clone(),
-    )
-    .expect("existing claim protocol accepts the scoped projection");
+    let claim_receipt =
+        TaskClaimReceipt::admit(&pulse, &plan, &source_run, application.projection().clone())
+            .expect("existing claim protocol accepts the scoped projection");
     let activation = situation(
         &receipt,
         &source_run,
@@ -290,8 +278,14 @@ fn scoped_claim_identity_is_deterministic_and_protocol_compatible() {
         )
         .expect("identical scoped claim");
 
-    assert_eq!(first.snapshot().snapshot_id(), second.snapshot().snapshot_id());
-    assert_eq!(first.transition().transition_id(), second.transition().transition_id());
+    assert_eq!(
+        first.snapshot().snapshot_id(),
+        second.snapshot().snapshot_id()
+    );
+    assert_eq!(
+        first.transition().transition_id(),
+        second.transition().transition_id()
+    );
     assert_eq!(first.snapshot().repository_id(), receipt.repository_id());
     assert_eq!(first.snapshot().observed_at(), LogicalTime::new(25));
     assert_eq!(
@@ -394,7 +388,10 @@ fn scoped_release_advances_time_and_repository_identity() {
         )
         .expect("repository-scoped release");
 
-    assert_eq!(released.snapshot().repository_id(), fixture.receipt.repository_id());
+    assert_eq!(
+        released.snapshot().repository_id(),
+        fixture.receipt.repository_id()
+    );
     assert_eq!(released.snapshot().observed_at(), LogicalTime::new(40));
     assert_eq!(released.snapshot().phase(), TaskPhase::Open);
     assert_eq!(
@@ -457,12 +454,8 @@ fn transferred_assignment_requires_the_exact_successor_run() {
         TaskProjectionAssignment::assigned(successor.run_id(), successor_commitment)
     );
 
-    let (successor_pulse, successor_plan, _) = pulse_and_plan(
-        &fixture.receipt,
-        &successor,
-        transferred.snapshot(),
-        41,
-    );
+    let (successor_pulse, successor_plan, _) =
+        pulse_and_plan(&fixture.receipt, &successor, transferred.snapshot(), 41);
     transferred
         .snapshot()
         .claim(
@@ -481,12 +474,8 @@ fn transferred_assignment_requires_the_exact_successor_run() {
         .commitment()
         .expect("same-ID altered successor identity");
     assert_ne!(successor_commitment, altered_commitment);
-    let (altered_pulse, altered_plan, _) = pulse_and_plan(
-        &fixture.receipt,
-        &altered,
-        transferred.snapshot(),
-        41,
-    );
+    let (altered_pulse, altered_plan, _) =
+        pulse_and_plan(&fixture.receipt, &altered, transferred.snapshot(), 41);
 
     assert_eq!(
         transferred

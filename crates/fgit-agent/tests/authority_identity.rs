@@ -7,7 +7,7 @@ use fgit_authority::{
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
     RepositoryCommitId, RepositoryId, RepositorySequence,
@@ -77,7 +77,10 @@ fn identical_authenticated_read_event_has_one_deterministic_identity() {
     )
     .expect("identical authenticated receipt");
 
-    assert_eq!(first.receipt_id().expect("identity"), second.receipt_id().expect("identity"));
+    assert_eq!(
+        first.receipt_id().expect("identity"),
+        second.receipt_id().expect("identity")
+    );
     assert_ne!(first.receipt_id().expect("identity").as_bytes(), &[0; 32]);
 }
 
@@ -103,7 +106,10 @@ fn verifier_time_and_profile_are_part_of_the_read_event() {
     )
     .expect("other verifier profile");
 
-    assert_ne!(basis.receipt_id().expect("basis identity"), later.receipt_id().expect("later identity"));
+    assert_ne!(
+        basis.receipt_id().expect("basis identity"),
+        later.receipt_id().expect("later identity")
+    );
     assert_ne!(
         basis.receipt_id().expect("basis identity"),
         other_profile.receipt_id().expect("profile identity")
@@ -128,6 +134,12 @@ fn same_head_from_another_store_token_is_another_read_event() {
     .expect("second store receipt");
 
     assert_eq!(first.authority_head_id(), second.authority_head_id());
-    assert_ne!(first.backend_version_token(), second.backend_version_token());
-    assert_ne!(first.receipt_id().expect("first identity"), second.receipt_id().expect("second identity"));
+    assert_ne!(
+        first.backend_version_token(),
+        second.backend_version_token()
+    );
+    assert_ne!(
+        first.receipt_id().expect("first identity"),
+        second.receipt_id().expect("second identity")
+    );
 }

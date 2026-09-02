@@ -25,18 +25,15 @@ use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_types::Digest;
 
 use crate::{
-    ActiveClaimContinuityReceipt, ActiveClaimContinuityReceiptId,
-    ActiveClaimContinuityRefusal, ActiveTaskClaim, AgentInstanceId, AgentSituationReceipt,
-    CancellationContainmentEvidence, CancellationDebtTransfer, IntentRun, IntentRunCommitment,
-    IntentRunIdentityRefusal, LogicalTime, RunId, RunCancellationRefusal,
-    RunCancellationState, RunReconciliationReport, RunReconciliationReportId, SituationId,
-    TaskClaimCancellationProjection,
+    ActiveClaimContinuityReceipt, ActiveClaimContinuityReceiptId, ActiveClaimContinuityRefusal,
+    ActiveTaskClaim, AgentInstanceId, AgentSituationReceipt, CancellationContainmentEvidence,
+    CancellationDebtTransfer, IntentRun, IntentRunCommitment, IntentRunIdentityRefusal,
+    LogicalTime, RunCancellationRefusal, RunCancellationState, RunId, RunReconciliationReport,
+    RunReconciliationReportId, SituationId, TaskClaimCancellationProjection,
 };
 
-const PUBLIC_CANCELLATION_DOMAIN: &[u8] =
-    b"frankengit.agent.public-run-cancellation/v2\0";
-const PUBLIC_COMPLETION_DOMAIN: &[u8] =
-    b"frankengit.agent.public-run-cancellation-completion/v2\0";
+const PUBLIC_CANCELLATION_DOMAIN: &[u8] = b"frankengit.agent.public-run-cancellation/v2\0";
+const PUBLIC_COMPLETION_DOMAIN: &[u8] = b"frankengit.agent.public-run-cancellation-completion/v2\0";
 
 /// Stable identity of one publicly constructible cancellation request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -114,12 +111,8 @@ impl RunCancellationIntent {
         requested_by: AgentInstanceId,
         reason_root: Digest,
     ) -> Result<Self, RunCancellationRequestRefusal> {
-        let run_commitment = validate_request_basis(
-            situation,
-            run,
-            &initial_reconciliation,
-            active_claim,
-        )?;
+        let run_commitment =
+            validate_request_basis(situation, run, &initial_reconciliation, active_claim)?;
         let inner = crate::cancellation::RunCancellationIntent::request(
             situation,
             run,
@@ -537,8 +530,8 @@ fn validate_request_basis(
             },
         );
     }
-    if let Some(claim) = active_claim {
-        if claim.run_commitment() != run_commitment {
+    if let Some(claim) = active_claim
+        && claim.run_commitment() != run_commitment {
             return Err(
                 RunCancellationRequestRefusal::ActiveClaimRunCommitmentMismatch {
                     expected: run_commitment,
@@ -546,7 +539,6 @@ fn validate_request_basis(
                 },
             );
         }
-    }
     if initial_reconciliation.run_commitment() != run_commitment {
         return Err(
             RunCancellationRequestRefusal::InitialReportRunCommitmentMismatch {
@@ -566,10 +558,7 @@ fn validate_continuity_source(
     let observed = *continuity.from_situation_id().as_bytes();
     if expected != observed {
         return Err(RunCancellationRequestRefusal::Continuity(
-            ActiveClaimContinuityRefusal::ActivationSituationMismatch {
-                expected,
-                observed,
-            },
+            ActiveClaimContinuityRefusal::ActivationSituationMismatch { expected, observed },
         ));
     }
     Ok(())

@@ -13,31 +13,30 @@ use fgit_agent::{
     CrossHeadTaskTransferPersistedState, CrossHeadTaskTransferPersistenceOutcome,
     CrossHeadTaskTransferReconciliationCause, CrossHeadTaskTransferRefusal,
     CrossHeadTaskTransferStore, EvidenceClass, HandoffCapabilityAttenuation,
-    HandoffTargetResolution, IntentRun, LogicalTime, OperationClass, PersistedCrossHeadTaskTransfer,
-    PersistedTaskClaim, PlanApproval, PlanCheckpoint, PlanCheckpointId,
-    PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId,
+    HandoffTargetResolution, IntentRun, LogicalTime, OperationClass,
+    PersistedCrossHeadTaskTransfer, PersistedTaskClaim, PlanApproval, PlanCheckpoint,
+    PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId,
     PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet,
     RequirementDisposition, RunId, RunReconciliationReport, SituationComponent,
-    SituationComponentKind, SituationOmissionReason, TaskClaimPersistenceOutcome,
-    TaskClaimReceipt, TaskPhase, TaskProjectionAssignment, TaskProjectionMutationEnvelope,
+    SituationComponentKind, SituationOmissionReason, TaskClaimPersistenceOutcome, TaskClaimReceipt,
+    TaskPhase, TaskProjectionAssignment, TaskProjectionMutationEnvelope,
     TaskProjectionPersistedState, TaskProjectionStore, TaskProjectionStoreFlushOutcome,
     TaskProjectionStoreFlushRefusal, TaskProjectionStoreReadRefusal, TaskProjectionStoreStage,
     TaskProjectionStoreWriteDisposition, TaskProjectionStoreWriteOutcome,
-    TaskProjectionStoreWriteRefusal, WorkConflict, WorkEligibilityInputs, WorkFrontier,
-    WorkItem, WorkRankingInputs, WorkTaskId, accept_handoff_at_current_authority,
+    TaskProjectionStoreWriteRefusal, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
+    WorkRankingInputs, WorkTaskId, accept_handoff_at_current_authority,
     persist_cross_head_task_transfer, persist_task_claim,
 };
 use fgit_authority::{
     AuthorityStore, CasOutcome, HeadInit, HeadKey, HeadRead, MemoryAuthorityStore, PutOutcome,
-    StoreInstanceId, authority_head_identity, body_key, initialize_repository,
-    outcome_index_root,
+    StoreInstanceId, authority_head_identity, body_key, initialize_repository, outcome_index_root,
 };
 use fgit_codec::{RepositoryAuthorityHeadBody, encode_body};
 use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
-    Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
-    RepositoryAuthorityHeadId, RepositoryId,
+    Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositoryAuthorityHeadId,
+    RepositoryId,
 };
 
 const TASK_BASIS: [u8; 32] = [0x44; 32];
@@ -102,8 +101,8 @@ fn advance(
         marker,
     );
     let bytes = encode_body(&next).expect("successor head encodes");
-    let immutable_key = body_key(IdentityDomain::RepositoryAuthorityHead, &next)
-        .expect("successor head key");
+    let immutable_key =
+        body_key(IdentityDomain::RepositoryAuthorityHead, &next).expect("successor head key");
     assert!(matches!(
         store
             .put_if_absent(&immutable_key, &bytes)
@@ -204,10 +203,11 @@ fn pulse_and_plan(
     );
     let frontier =
         WorkFrontier::build_action_scoped(&current, vec![item]).expect("task is eligible");
-    let pulse =
-        AgentControlPulse::build(&current, &frontier, Some(run)).expect("actionable pulse");
-    let surface =
-        PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(marker.wrapping_add(1)));
+    let pulse = AgentControlPulse::build(&current, &frontier, Some(run)).expect("actionable pulse");
+    let surface = PlanSurface::new(
+        PlanSurfaceKind::RepositoryPath,
+        digest(marker.wrapping_add(1)),
+    );
     let plan = AgentChangePlan::build(
         &pulse,
         run,
@@ -457,9 +457,7 @@ fn cross_successor(
     )
 }
 
-fn cross_conflict(
-    envelope: &CrossHeadTaskTransferEnvelope,
-) -> CrossHeadTaskTransferPersistedState {
+fn cross_conflict(envelope: &CrossHeadTaskTransferEnvelope) -> CrossHeadTaskTransferPersistedState {
     let snapshot = AuthorityBoundTaskProjectionSnapshot::observed(
         envelope.receiver_successor().authority_read_receipt(),
         envelope.task_id(),
@@ -885,12 +883,7 @@ fn store_profile_substitution_refuses_before_any_io() {
 fn claim_predecessor(
     application: &AuthorityBoundTaskClaimApplication,
 ) -> TaskProjectionPersistedState {
-    TaskProjectionPersistedState::new(
-        reread(application.before_snapshot(), 57),
-        None,
-        None,
-        None,
-    )
+    TaskProjectionPersistedState::new(reread(application.before_snapshot(), 57), None, None, None)
 }
 
 fn claim_successor(
@@ -1004,7 +997,10 @@ fn receiver_must_acquire_a_new_persisted_claim_before_activation() {
     let fixture = fixture(1_211);
     let transfer = persisted_transfer(&fixture);
     let (receiver_plan, persisted_claim) = persisted_receiver_claim(&fixture, &transfer);
-    assert_ne!(receiver_plan.plan_id(), transfer.envelope().source_plan_id());
+    assert_ne!(
+        receiver_plan.plan_id(),
+        transfer.envelope().source_plan_id()
+    );
 
     let activation_situation = situation(
         &fixture.receiver_receipt,
@@ -1027,7 +1023,10 @@ fn receiver_must_acquire_a_new_persisted_claim_before_activation() {
     )
     .expect("activation chain retains transfer and ordinary claim evidence");
 
-    assert_eq!(receipt.transfer_receipt_id(), transfer.receipt().receipt_id());
+    assert_eq!(
+        receipt.transfer_receipt_id(),
+        transfer.receipt().receipt_id()
+    );
     assert_eq!(
         receipt.persisted_claim_receipt_id(),
         persisted_claim.persistence_receipt().receipt_id()

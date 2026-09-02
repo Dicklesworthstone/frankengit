@@ -19,8 +19,7 @@ use fgit_codec::{
 };
 use fgit_crypto::IdentityDomain;
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, Digest, InternalObjectId, RepositoryIncarnationId,
-    RootLayoutVersion,
+    CANONICAL_CODEC_VERSION, Digest, InternalObjectId, RepositoryIncarnationId, RootLayoutVersion,
 };
 
 use crate::{
@@ -157,10 +156,7 @@ pub fn read_repository_incarnation_configuration<S>(
 where
     S: AuthorityStore + ?Sized,
 {
-    Ok(
-        read_repository_incarnation_configuration_evidence(store, configuration_root)?
-            .normalized(),
-    )
+    Ok(read_repository_incarnation_configuration_evidence(store, configuration_root)?.normalized())
 }
 
 /// Production asynchronous twin of
@@ -174,13 +170,9 @@ where
     S: AsyncAuthorityStore + ?Sized,
 {
     Ok(
-        read_repository_incarnation_configuration_evidence_async(
-            store,
-            cx,
-            configuration_root,
-        )
-        .await?
-        .normalized(),
+        read_repository_incarnation_configuration_evidence_async(store, cx, configuration_root)
+            .await?
+            .normalized(),
     )
 }
 
@@ -266,10 +258,8 @@ fn decode_repository_incarnation_configuration_evidence(
 
     if header.codec_minor != CODEC_MINOR
         || header.domain != RepositoryIncarnationConfigurationBodyV2_2::DOMAIN
-        || header.schema.family()
-            != RepositoryIncarnationConfigurationBodyV2_2::SCHEMA_FAMILY
-        || header.schema.major()
-            != RepositoryIncarnationConfigurationBodyV2_2::SCHEMA_MAJOR
+        || header.schema.family() != RepositoryIncarnationConfigurationBodyV2_2::SCHEMA_FAMILY
+        || header.schema.major() != RepositoryIncarnationConfigurationBodyV2_2::SCHEMA_MAJOR
     {
         let body: RepositoryIncarnationConfigurationBodyV2_2 =
             decode_body(bytes, DecodeLimits::DEFAULT)?;

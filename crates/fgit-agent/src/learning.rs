@@ -25,9 +25,9 @@ use fgit_types::Digest;
 use crate::{
     AgentActionPacket, AgentActionPacketId, AgentChangePlan, AgentChangePlanId,
     AgentHandoffAcceptanceId, AgentSituationReceipt, EvidenceClass, EvidenceRecordRef,
-    IndependenceClassification, IntentRun, LogicalTime, PartyFacts, PlanRequirementId,
-    PlanSurface, RequirementDisposition, RunCancellationCompletionId, RunId, SituationId,
-    VerifierAttestation, WorkTaskId, classify_independence,
+    IndependenceClassification, IntentRun, LogicalTime, PartyFacts, PlanRequirementId, PlanSurface,
+    RequirementDisposition, RunCancellationCompletionId, RunId, SituationId, VerifierAttestation,
+    WorkTaskId, classify_independence,
 };
 
 /// Maximum entries accepted in one general learning collection.
@@ -431,10 +431,7 @@ impl OutcomeLearningRecordSpec {
 
     /// Sets complete plan-requirement outcomes.
     #[must_use]
-    pub fn with_requirement_outcomes(
-        mut self,
-        outcomes: Vec<LearningRequirementOutcome>,
-    ) -> Self {
+    pub fn with_requirement_outcomes(mut self, outcomes: Vec<LearningRequirementOutcome>) -> Self {
         self.requirement_outcomes = outcomes;
         self
     }
@@ -479,10 +476,7 @@ impl OutcomeLearningRecordSpec {
 
     /// Sets verifier attestations whose independence is machine-classified.
     #[must_use]
-    pub fn with_verifier_attestations(
-        mut self,
-        attestations: Vec<VerifierAttestation>,
-    ) -> Self {
+    pub fn with_verifier_attestations(mut self, attestations: Vec<VerifierAttestation>) -> Self {
         self.verifier_attestations = attestations;
         self
     }
@@ -551,8 +545,7 @@ impl OutcomeLearningRecord {
             &spec.verifier_attestations,
             &mut spec.requirement_outcomes,
         )?;
-        let discriminating_evidence =
-            collect_discriminating_evidence(&spec.requirement_outcomes)?;
+        let discriminating_evidence = collect_discriminating_evidence(&spec.requirement_outcomes)?;
         canonicalize_ownership(plan, &mut spec.confirmed_ownership)?;
         canonicalize_failed_hypotheses(&mut spec.failed_hypotheses)?;
         let total_resources_observed =
@@ -1046,9 +1039,11 @@ fn canonicalize_requirement_evidence(
         RequirementDisposition::SatisfiedWithEvidence | RequirementDisposition::PartiallySatisfied
     ) && outcome.evidence.is_empty()
     {
-        return Err(OutcomeLearningRefusal::SatisfiedRequirementWithoutEvidence {
-            requirement_id: outcome.requirement_id,
-        });
+        return Err(
+            OutcomeLearningRefusal::SatisfiedRequirementWithoutEvidence {
+                requirement_id: outcome.requirement_id,
+            },
+        );
     }
     outcome.evidence.sort_unstable_by_key(evidence_sort_key);
     for evidence in &outcome.evidence {
@@ -1074,13 +1069,13 @@ fn collect_discriminating_evidence(
     outcomes: &[LearningRequirementOutcome],
 ) -> Result<Vec<EvidenceRecordRef>, OutcomeLearningRefusal> {
     let total = outcomes.iter().try_fold(0_usize, |total, outcome| {
-        total.checked_add(outcome.evidence.len()).ok_or(
-            OutcomeLearningRefusal::TooManyEntries {
+        total
+            .checked_add(outcome.evidence.len())
+            .ok_or(OutcomeLearningRefusal::TooManyEntries {
                 field: "discriminating_evidence",
                 observed: usize::MAX,
                 limit: MAX_LEARNING_EVIDENCE,
-            },
-        )
+            })
     })?;
     if total > MAX_LEARNING_EVIDENCE {
         return Err(OutcomeLearningRefusal::TooManyEntries {
@@ -1177,9 +1172,11 @@ fn canonicalize_failed_hypotheses(
             MAX_LEARNING_ENTRIES,
         )?;
         if hypothesis.invalidation_conditions.is_empty() {
-            return Err(OutcomeLearningRefusal::FailedHypothesisMissingInvalidation {
-                hypothesis_root: hypothesis.hypothesis_root,
-            });
+            return Err(
+                OutcomeLearningRefusal::FailedHypothesisMissingInvalidation {
+                    hypothesis_root: hypothesis.hypothesis_root,
+                },
+            );
         }
     }
     hypotheses.sort_unstable_by_key(|hypothesis| hypothesis.hypothesis_root);
@@ -1212,9 +1209,9 @@ fn canonicalize_resource_observations(
                 observation_root: observation.observation_root,
             });
         }
-        total = total.combine(&observation.consumed).map_err(|source| {
-            OutcomeLearningRefusal::ResourceTotalOverflow { source }
-        })?;
+        total = total
+            .combine(&observation.consumed)
+            .map_err(|source| OutcomeLearningRefusal::ResourceTotalOverflow { source })?;
     }
     for adjacent in observations.windows(2) {
         if adjacent[0].observation_root == adjacent[1].observation_root {
@@ -1291,9 +1288,7 @@ fn canonicalize_digests(
     Ok(())
 }
 
-fn learning_commitment(
-    record: &OutcomeLearningRecord,
-) -> Result<[u8; 32], OutcomeLearningRefusal> {
+fn learning_commitment(record: &OutcomeLearningRecord) -> Result<[u8; 32], OutcomeLearningRefusal> {
     let mut encoder = Encoder::with_capacity(2_048);
     encoder.write_bytes("outcome_learning_domain", LEARNING_DOMAIN)?;
     encoder.write_raw(record.situation_id.as_bytes());

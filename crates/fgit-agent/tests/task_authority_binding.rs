@@ -3,20 +3,20 @@
 
 use fgit_agent::{
     AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentSituationReceipt,
-    AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, ClassSet, EvidenceClass,
-    IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
+    AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, ClassSet, EvidenceClass, IntentRun,
+    LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
     PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet,
     PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RunId, SituationComponent,
-    SituationComponentKind, SituationOmissionReason, TaskCoordinationRefusal,
-    TaskProjectionAssignment, TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier,
-    WorkItem, WorkRankingInputs, WorkTaskId,
+    SituationComponentKind, SituationOmissionReason, TaskCoordinationRefusal, TaskPhase,
+    TaskProjectionAssignment, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
+    WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -95,10 +95,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -140,8 +137,8 @@ fn pulse_and_plan(
         WorkRankingInputs::new(1, 2, 3),
         WorkEligibilityInputs::new(0, None, None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&situation, vec![item])
-        .expect("task is eligible");
+    let frontier =
+        WorkFrontier::build_action_scoped(&situation, vec![item]).expect("task is eligible");
     let pulse = AgentControlPulse::build(&situation, &frontier, Some(run))
         .expect("live run makes an actionable pulse");
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x61));
@@ -152,10 +149,7 @@ fn pulse_and_plan(
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -175,15 +169,17 @@ fn pulse_and_plan(
         digest(0x67),
         false,
     )]);
-    let plan = AgentChangePlan::build(&pulse, run, &[], spec)
-        .expect("complete change plan");
+    let plan = AgentChangePlan::build(&pulse, run, &[], spec).expect("complete change plan");
     (pulse, plan)
 }
 
 #[test]
 fn same_task_state_does_not_make_authority_reads_interchangeable() {
     let (first_receipt, second_receipt) = authority_receipts();
-    assert_eq!(first_receipt.repository_id(), second_receipt.repository_id());
+    assert_eq!(
+        first_receipt.repository_id(),
+        second_receipt.repository_id()
+    );
     assert_eq!(
         first_receipt.authority_head_id(),
         second_receipt.authority_head_id()

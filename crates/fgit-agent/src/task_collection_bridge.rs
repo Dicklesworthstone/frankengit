@@ -36,14 +36,12 @@ use crate::{
     ActiveTaskClaim, AgentSituationReceipt, AuthorityBoundTaskProjectionSnapshot,
     AuthorityReadIdentityRefusal, AuthorityReadReceipt, AuthorityReadReceiptId, IntentRun,
     IntentRunCommitment, IntentRunIdentityRefusal, LogicalTime, RunId, TaskClaimReceipt,
-    TaskClaimReceiptId, TaskClaimRefusal, TaskCoordinationRefusal,
-    TaskProjectionAdapterRefusal, TaskProjectionAssignment, TaskProjectionCollectionReceipt,
-    TaskProjectionCollectionReceiptId, TaskProjectionGeneration, TaskProjectionLease,
-    WorkConflict, WorkTaskId,
+    TaskClaimReceiptId, TaskClaimRefusal, TaskCoordinationRefusal, TaskProjectionAdapterRefusal,
+    TaskProjectionAssignment, TaskProjectionCollectionReceipt, TaskProjectionCollectionReceiptId,
+    TaskProjectionGeneration, TaskProjectionLease, WorkConflict, WorkTaskId,
 };
 
-const LEASE_RECONSTRUCTION_DOMAIN: &[u8] =
-    b"frankengit.agent.task-lease-reconstruction/v2\0";
+const LEASE_RECONSTRUCTION_DOMAIN: &[u8] = b"frankengit.agent.task-lease-reconstruction/v2\0";
 const CLAIM_RECOVERY_DOMAIN: &[u8] = b"frankengit.agent.task-claim-recovery/v2\0";
 
 /// Stable identity of one evidenced active-lease reconstruction.
@@ -319,9 +317,7 @@ pub fn collected_unclaimed_task(
         || row.claim_expiry().is_some()
         || !row.reserved_surfaces().is_empty()
     {
-        return Err(TaskCollectionBridgeRefusal::LeaseReconstructionRequired {
-            task_id,
-        });
+        return Err(TaskCollectionBridgeRefusal::LeaseReconstructionRequired { task_id });
     }
 
     AuthorityBoundTaskProjectionSnapshot::observed(
@@ -442,8 +438,7 @@ pub fn reconstruct_collected_task_lease(
         evidence_root: history.evidence_root,
         snapshot,
     };
-    receipt.receipt_id =
-        TaskLeaseReconstructionReceiptId(reconstruction_commitment(&receipt)?);
+    receipt.receipt_id = TaskLeaseReconstructionReceiptId(reconstruction_commitment(&receipt)?);
     Ok(receipt)
 }
 
@@ -559,8 +554,7 @@ pub fn activate_reconstructed_task_claim(
         claim_id: claim.claim_id(),
         active_claim,
     };
-    recovered.recovery_id =
-        RecoveredActiveTaskClaimId(claim_recovery_commitment(&recovered)?);
+    recovered.recovery_id = RecoveredActiveTaskClaimId(claim_recovery_commitment(&recovered)?);
     Ok(recovered)
 }
 

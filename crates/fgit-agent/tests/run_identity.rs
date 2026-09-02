@@ -10,7 +10,7 @@ use fgit_authority::{
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,

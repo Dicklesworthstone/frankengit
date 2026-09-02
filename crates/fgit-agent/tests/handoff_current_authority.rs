@@ -9,14 +9,13 @@ use fgit_agent::{
     AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentHandoffCapsule,
     AgentHandoffCapsuleSpec, AgentInstanceId, AgentSituationReceipt, AuthorityReadReceipt,
     ClassSet, CurrentAuthorityHandoffRefusal, EvidenceClass, HandoffAuthorityRelation,
-    HandoffCapabilityAttenuation, HandoffTargetResolution, IntentRun, LogicalTime,
-    OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
-    PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface,
-    PlanSurfaceKind, RejectedShortcutSet, RequirementDisposition, RunId,
-    RunReconciliationReport, SituationComponent, SituationComponentKind,
-    SituationOmissionReason, TaskClaimProjection, TaskClaimReceipt, TaskPhase, WorkConflict,
-    WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
-    accept_handoff_at_current_authority, accept_handoff_at_current_authority_async,
+    HandoffCapabilityAttenuation, HandoffTargetResolution, IntentRun, LogicalTime, OperationClass,
+    PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement,
+    PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet,
+    RequirementDisposition, RunId, RunReconciliationReport, SituationComponent,
+    SituationComponentKind, SituationOmissionReason, TaskClaimProjection, TaskClaimReceipt,
+    TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs,
+    WorkTaskId, accept_handoff_at_current_authority, accept_handoff_at_current_authority_async,
 };
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityStore,
@@ -28,8 +27,8 @@ use fgit_codec::{RepositoryAuthorityHeadBody, encode_body};
 use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
-    Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
-    RepositoryAuthorityHeadId, RepositoryId,
+    Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositoryAuthorityHeadId,
+    RepositoryId,
 };
 
 const TASK_BASIS: [u8; 32] = [0x44; 32];
@@ -92,8 +91,8 @@ fn advance(
         0x21,
     );
     let bytes = encode_body(&next).expect("successor encodes");
-    let immutable_key = body_key(IdentityDomain::RepositoryAuthorityHead, &next)
-        .expect("successor immutable key");
+    let immutable_key =
+        body_key(IdentityDomain::RepositoryAuthorityHead, &next).expect("successor immutable key");
     assert!(matches!(
         store
             .put_if_absent(&immutable_key, &bytes)
@@ -181,13 +180,7 @@ fn source_capsule(receipt: &AuthorityReadReceipt, source: &IntentRun) -> AgentHa
             TASK_BASIS,
             TaskPhase::Open,
             WorkRankingInputs::new(1, 2, 3),
-            WorkEligibilityInputs::new(
-                0,
-                Some(source.run_id()),
-                None,
-                true,
-                WorkConflict::Clear,
-            ),
+            WorkEligibilityInputs::new(0, Some(source.run_id()), None, true, WorkConflict::Clear),
         )],
     )
     .expect("eligible frontier");
@@ -245,12 +238,9 @@ fn source_capsule(receipt: &AuthorityReadReceipt, source: &IntentRun) -> AgentHa
     let active = claim
         .activate(&activation, source)
         .expect("source claim activation");
-    let reconciliation = RunReconciliationReport::build(
-        source,
-        Vec::new(),
-        activation.observed_at(),
-    )
-    .expect("complete empty reconciliation");
+    let reconciliation =
+        RunReconciliationReport::build(source, Vec::new(), activation.observed_at())
+            .expect("complete empty reconciliation");
     AgentHandoffCapsule::build(
         &activation,
         &plan,
@@ -309,12 +299,7 @@ fn fixture(store_id: u64) -> Fixture {
     let descendant = advance(&store, &key, &genesis);
     let receiver_receipt = authority_receipt(&store, &key, 40, 0x52);
     let receiver = run(&receiver_receipt, 8, 512, 65);
-    let receiver_situation = situation(
-        &receiver_receipt,
-        &receiver,
-        CLAIMED_GENERATION,
-        45,
-    );
+    let receiver_situation = situation(&receiver_receipt, &receiver, CLAIMED_GENERATION, 45);
     Fixture {
         store,
         key,
@@ -357,9 +342,14 @@ fn synchronous_driver_consumes_the_exact_current_head_proof() {
         first.authority_relation(),
         HandoffAuthorityRelation::DescendantAuthenticatedHead
     );
-    let ancestry = first.authority_ancestry().expect("descendant proof is retained");
+    let ancestry = first
+        .authority_ancestry()
+        .expect("descendant proof is retained");
     assert_eq!(ancestry.descendant_head_id(), head_id(&fixture.descendant));
-    assert_eq!(ancestry.descendant_version_token(), fixture.receiver_receipt.backend_version_token());
+    assert_eq!(
+        ancestry.descendant_version_token(),
+        fixture.receiver_receipt.backend_version_token()
+    );
 }
 
 #[test]
@@ -369,12 +359,7 @@ fn receiver_from_another_store_is_refused_before_acceptance() {
     initialize(&other_store, &fixture.key, &fixture.descendant);
     let other_receipt = authority_receipt(&other_store, &fixture.key, 40, 0x52);
     let other_receiver = run(&other_receipt, 8, 512, 65);
-    let other_situation = situation(
-        &other_receipt,
-        &other_receiver,
-        CLAIMED_GENERATION,
-        45,
-    );
+    let other_situation = situation(&other_receipt, &other_receiver, CLAIMED_GENERATION, 45);
 
     assert_eq!(
         accept_handoff_at_current_authority(
@@ -433,10 +418,7 @@ impl AsyncAuthorityStore for AsyncMirror<'_> {
         body: &[u8],
     ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
         core::future::ready(AuthorityStore::initialize_head(
-            self.0,
-            key,
-            generation,
-            body,
+            self.0, key, generation, body,
         ))
     }
 

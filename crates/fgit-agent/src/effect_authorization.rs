@@ -31,11 +31,11 @@ use fgit_resource::{
 use fgit_types::{Digest, HeadGeneration, RepositoryAuthorityHeadId, RepositoryId};
 
 use crate::{
-    AgentInstanceId, AuthorityReadIdentityRefusal, AuthorityReadReceipt,
-    AuthorityReadReceiptId, BrokerRefusal, Capability, CapabilityId, ChainRefused,
-    EffectBroker, EffectGrant, EffectId, EffectJournalEntry, EffectRecord, EffectRequest,
-    IntentRun, IntentRunCommitment, IntentRunIdentityRefusal, LogicalTime, OperationClass,
-    OutboxReservationRefused, ReservedOutboxEffect, RunId, SealedCapability, verify_chain,
+    AgentInstanceId, AuthorityReadIdentityRefusal, AuthorityReadReceipt, AuthorityReadReceiptId,
+    BrokerRefusal, Capability, CapabilityId, ChainRefused, EffectBroker, EffectGrant, EffectId,
+    EffectJournalEntry, EffectRecord, EffectRequest, IntentRun, IntentRunCommitment,
+    IntentRunIdentityRefusal, LogicalTime, OperationClass, OutboxReservationRefused,
+    ReservedOutboxEffect, RunId, SealedCapability, verify_chain,
 };
 
 /// Maximum revocation rows accepted in one authenticated-position read.
@@ -45,14 +45,10 @@ pub const MAX_EFFECT_CAPABILITY_CHAIN: usize = 64;
 /// Maximum high-value authorizations retained by one checked broker.
 pub const MAX_EFFECT_AUTHORIZATIONS: usize = 4_096;
 
-const REVOCATION_REQUEST_DOMAIN: &[u8] =
-    b"frankengit.agent.capability-revocation-request/v1\0";
-const REVOCATION_RECEIPT_DOMAIN: &[u8] =
-    b"frankengit.agent.capability-revocation-receipt/v1\0";
-const VERIFIED_CHAIN_DOMAIN: &[u8] =
-    b"frankengit.agent.verified-capability-chain/v1\0";
-const EFFECT_AUTHORIZATION_DOMAIN: &[u8] =
-    b"frankengit.agent.capability-effect-authorization/v1\0";
+const REVOCATION_REQUEST_DOMAIN: &[u8] = b"frankengit.agent.capability-revocation-request/v1\0";
+const REVOCATION_RECEIPT_DOMAIN: &[u8] = b"frankengit.agent.capability-revocation-receipt/v1\0";
+const VERIFIED_CHAIN_DOMAIN: &[u8] = b"frankengit.agent.verified-capability-chain/v1\0";
+const EFFECT_AUTHORIZATION_DOMAIN: &[u8] = b"frankengit.agent.capability-effect-authorization/v1\0";
 
 /// Stable identity of one bounded revocation read request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -209,9 +205,8 @@ impl CapabilityRevocationReadRequest {
             max_age,
             max_entries,
         };
-        request.request_id = CapabilityRevocationReadRequestId(revocation_request_commitment(
-            &request,
-        )?);
+        request.request_id =
+            CapabilityRevocationReadRequestId(revocation_request_commitment(&request)?);
         Ok(request)
     }
 
@@ -468,23 +463,20 @@ pub fn read_capability_revocations<R: CapabilityRevocationReader>(
     max_age: u64,
     max_entries: usize,
 ) -> Result<CapabilityRevocationReceipt, CapabilityRevocationReadRefusal> {
-    let request = CapabilityRevocationReadRequest::build(
-        authority,
-        run,
-        requested_at,
-        max_age,
-        max_entries,
-    )?;
+    let request =
+        CapabilityRevocationReadRequest::build(authority, run, requested_at, max_age, max_entries)?;
     let reader_profile = reader.reader_profile();
     if is_zero(&reader_profile) {
         return Err(CapabilityRevocationReadRefusal::ZeroReaderProfile);
     }
     let mut observation = reader.read(&request)?;
     if observation.request_id != request.request_id {
-        return Err(CapabilityRevocationReadRefusal::ObservationRequestMismatch {
-            expected: request.request_id,
-            observed: observation.request_id,
-        });
+        return Err(
+            CapabilityRevocationReadRefusal::ObservationRequestMismatch {
+                expected: request.request_id,
+                observed: observation.request_id,
+            },
+        );
     }
     if is_zero(&observation.revocation_generation) {
         return Err(CapabilityRevocationReadRefusal::ZeroRevocationGeneration);
@@ -502,9 +494,7 @@ pub fn read_capability_revocations<R: CapabilityRevocationReader>(
         });
     }
     let observed_rows = observation.revoked_capability_ids.len();
-    if observed_rows > request.max_entries as usize
-        || observed_rows > MAX_CAPABILITY_REVOCATIONS
-    {
+    if observed_rows > request.max_entries as usize || observed_rows > MAX_CAPABILITY_REVOCATIONS {
         return Err(CapabilityRevocationReadRefusal::TooManyRevocations {
             observed: observed_rows,
             request_limit: request.max_entries,
@@ -672,10 +662,12 @@ impl CapabilityEffectAuthorization {
             });
         }
         if run_commitment != revocations.run_commitment {
-            return Err(CapabilityEffectAuthorizationRefusal::RunCommitmentMismatch {
-                expected: revocations.run_commitment,
-                observed: run_commitment,
-            });
+            return Err(
+                CapabilityEffectAuthorizationRefusal::RunCommitmentMismatch {
+                    expected: revocations.run_commitment,
+                    observed: run_commitment,
+                },
+            );
         }
         if run_authority != &revocations.authority_read_receipt
             || run_authority.receipt_id()? != revocations.authority_read_receipt_id
@@ -683,10 +675,12 @@ impl CapabilityEffectAuthorization {
             return Err(CapabilityEffectAuthorizationRefusal::AuthorityMismatch);
         }
         if now < revocations.observed_at {
-            return Err(CapabilityEffectAuthorizationRefusal::AuthorizationTimeRollback {
-                revocations_observed_at: revocations.observed_at,
-                authorized_at: now,
-            });
+            return Err(
+                CapabilityEffectAuthorizationRefusal::AuthorizationTimeRollback {
+                    revocations_observed_at: revocations.observed_at,
+                    authorized_at: now,
+                },
+            );
         }
         if !revocations.is_fresh_at(now) {
             return Err(CapabilityEffectAuthorizationRefusal::RevocationReadStale {
@@ -726,14 +720,14 @@ impl CapabilityEffectAuthorization {
         }
         let capability_operations = leaf.operations();
         if !capability_operations.contains(request.operation) {
-            return Err(CapabilityEffectAuthorizationRefusal::OperationOutsideCapability {
-                operation: request.operation,
-            });
+            return Err(
+                CapabilityEffectAuthorizationRefusal::OperationOutsideCapability {
+                    operation: request.operation,
+                },
+            );
         }
         if let Some(deficit) = leaf.quota().first_deficit(&request.cost) {
-            return Err(CapabilityEffectAuthorizationRefusal::CapabilityQuotaExceeded {
-                deficit,
-            });
+            return Err(CapabilityEffectAuthorizationRefusal::CapabilityQuotaExceeded { deficit });
         }
 
         let valid_until = LogicalTime::new(
@@ -744,10 +738,12 @@ impl CapabilityEffectAuthorization {
                 .min(leaf.expires_at().value()),
         );
         if valid_until <= now {
-            return Err(CapabilityEffectAuthorizationRefusal::AuthorizationWindowEmpty {
-                authorized_at: now,
-                valid_until,
-            });
+            return Err(
+                CapabilityEffectAuthorizationRefusal::AuthorizationWindowEmpty {
+                    authorized_at: now,
+                    valid_until,
+                },
+            );
         }
         let mut authorization = Self {
             authorization_id: CapabilityEffectAuthorizationId([0; 32]),
@@ -764,9 +760,8 @@ impl CapabilityEffectAuthorization {
             authorized_at: now,
             valid_until,
         };
-        authorization.authorization_id = CapabilityEffectAuthorizationId(
-            effect_authorization_commitment(&authorization)?,
-        );
+        authorization.authorization_id =
+            CapabilityEffectAuthorizationId(effect_authorization_commitment(&authorization)?);
         Ok(authorization)
     }
 
@@ -911,29 +906,24 @@ impl RevocationCheckedEffectBroker {
         request: &EffectRequest,
     ) -> Result<RevocationAuthorizedEffectGrant, RevocationCheckedEffectRefusal> {
         if !requires_effect_time_revocation(request.operation) {
-            return Err(
-                RevocationCheckedEffectRefusal::HighValueOperationRequired {
-                    operation: request.operation,
-                },
-            );
+            return Err(RevocationCheckedEffectRefusal::HighValueOperationRequired {
+                operation: request.operation,
+            });
         }
         if self.authorizations.len() >= MAX_EFFECT_AUTHORIZATIONS {
             return Err(RevocationCheckedEffectRefusal::AuthorizationLimitExceeded {
                 limit: MAX_EFFECT_AUTHORIZATIONS,
             });
         }
-        let authorization = CapabilityEffectAuthorization::authorize(
-            &self.run,
-            chain,
-            revocations,
-            now,
-            request,
-        )?;
+        let authorization =
+            CapabilityEffectAuthorization::authorize(&self.run, chain, revocations, now, request)?;
         if authorization.run_commitment != self.run_commitment {
-            return Err(RevocationCheckedEffectRefusal::BrokerRunCommitmentMismatch {
-                expected: self.run_commitment,
-                observed: authorization.run_commitment,
-            });
+            return Err(
+                RevocationCheckedEffectRefusal::BrokerRunCommitmentMismatch {
+                    expected: self.run_commitment,
+                    observed: authorization.run_commitment,
+                },
+            );
         }
         let grant = self
             .broker
@@ -981,12 +971,6 @@ impl RevocationCheckedEffectBroker {
                 authorization,
                 source,
             })
-    }
-
-    /// Exact complete run served by this facade.
-    #[must_use]
-    pub const fn run_commitment(&self) -> IntentRunCommitment {
-        self.run_commitment
     }
 
     /// Accepted broker records in acceptance order.
@@ -1049,7 +1033,11 @@ impl AuthorizedOutboxReservationRefused {
 
 impl fmt::Display for AuthorizedOutboxReservationRefused {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "authorized outbox reservation refused: {}", self.source)
+        write!(
+            formatter,
+            "authorized outbox reservation refused: {}",
+            self.source
+        )
     }
 }
 
@@ -1347,7 +1335,10 @@ pub enum CapabilityEffectAuthorizationRefusal {
 
 impl fmt::Display for CapabilityEffectAuthorizationRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "capability effect authorization refused: {self:?}")
+        write!(
+            formatter,
+            "capability effect authorization refused: {self:?}"
+        )
     }
 }
 
@@ -1408,7 +1399,10 @@ pub enum RevocationCheckedEffectRefusal {
 
 impl fmt::Display for RevocationCheckedEffectRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "revocation-checked effect broker refused: {self:?}")
+        write!(
+            formatter,
+            "revocation-checked effect broker refused: {self:?}"
+        )
     }
 }
 

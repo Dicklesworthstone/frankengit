@@ -8,17 +8,17 @@ use fgit_agent::{
     AgentControlPulse, AgentSituationReceipt, AuthorityReadReceipt, ClassSet, EvidenceClass,
     IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
     PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet,
-    PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RunId, SITUATION_COMPONENT_COUNT,
-    SituationComponent, SituationComponentKind, SituationOmissionReason, TaskClaimProjection,
-    TaskClaimReceipt, TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
-    WorkRankingInputs, WorkTaskId,
+    PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RunId, SituationComponent,
+    SituationComponentKind, SituationOmissionReason, TaskClaimProjection, TaskClaimReceipt,
+    TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs,
+    WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -100,10 +100,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -121,11 +118,7 @@ fn situation(
         if kind == SituationComponentKind::TaskProjection {
             SituationComponent::observed(kind, receipt.authority_head_id(), task_generation)
         } else if kind == SituationComponentKind::Search {
-            SituationComponent::observed(
-                kind,
-                receipt.authority_head_id(),
-                [search_generation; 32],
-            )
+            SituationComponent::observed(kind, receipt.authority_head_id(), [search_generation; 32])
         } else {
             SituationComponent::omitted(
                 kind,
@@ -162,16 +155,10 @@ fn fixture() -> Fixture {
         TASK_BASIS,
         TaskPhase::Open,
         WorkRankingInputs::new(1, 2, 3),
-        WorkEligibilityInputs::new(
-            0,
-            Some(run.run_id()),
-            None,
-            true,
-            WorkConflict::Clear,
-        ),
+        WorkEligibilityInputs::new(0, Some(run.run_id()), None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&planning, vec![item])
-        .expect("task is eligible");
+    let frontier =
+        WorkFrontier::build_action_scoped(&planning, vec![item]).expect("task is eligible");
     let pulse = AgentControlPulse::build(&planning, &frontier, Some(&run))
         .expect("live run makes an actionable pulse");
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x61));
@@ -183,10 +170,7 @@ fn fixture() -> Fixture {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -206,8 +190,7 @@ fn fixture() -> Fixture {
         digest(0x67),
         false,
     )]);
-    let plan = AgentChangePlan::build(&pulse, &run, &[], plan_spec)
-        .expect("complete change plan");
+    let plan = AgentChangePlan::build(&pulse, &run, &[], plan_spec).expect("complete change plan");
     let claim_projection = TaskClaimProjection::new(
         plan.task_id(),
         plan.plan_id(),
@@ -242,15 +225,8 @@ fn fixture() -> Fixture {
         digest(0x86),
         [0x87; 32],
     );
-    let packet = AgentActionPacket::build(
-        &activation,
-        &plan,
-        active_claim,
-        &run,
-        &[],
-        packet_spec,
-    )
-    .expect("bounded Level-1 action packet");
+    let packet = AgentActionPacket::build(&activation, &plan, active_claim, &run, &[], packet_spec)
+        .expect("bounded Level-1 action packet");
     Fixture {
         receipt,
         run,
@@ -263,13 +239,7 @@ fn fixture() -> Fixture {
 #[test]
 fn time_only_continuity_and_packet_binding_are_deterministic() {
     let fixture = fixture();
-    let later = situation(
-        &fixture.receipt,
-        &fixture.run,
-        CLAIMED_GENERATION,
-        0x74,
-        40,
-    );
+    let later = situation(&fixture.receipt, &fixture.run, CLAIMED_GENERATION, 0x74, 40);
     let first = ActiveClaimContinuityReceipt::establish(
         fixture.active_claim,
         &fixture.activation,
@@ -317,13 +287,7 @@ fn time_only_continuity_and_packet_binding_are_deterministic() {
 #[test]
 fn any_context_generation_change_invalidates_continuity() {
     let fixture = fixture();
-    let changed_search = situation(
-        &fixture.receipt,
-        &fixture.run,
-        CLAIMED_GENERATION,
-        0x75,
-        40,
-    );
+    let changed_search = situation(&fixture.receipt, &fixture.run, CLAIMED_GENERATION, 0x75, 40);
 
     assert_eq!(
         ActiveClaimContinuityReceipt::establish(
@@ -342,13 +306,7 @@ fn any_context_generation_change_invalidates_continuity() {
 #[test]
 fn observation_must_advance_strictly() {
     let fixture = fixture();
-    let same_time = situation(
-        &fixture.receipt,
-        &fixture.run,
-        CLAIMED_GENERATION,
-        0x74,
-        30,
-    );
+    let same_time = situation(&fixture.receipt, &fixture.run, CLAIMED_GENERATION, 0x74, 30);
 
     assert_eq!(
         ActiveClaimContinuityReceipt::establish(
@@ -368,13 +326,7 @@ fn observation_must_advance_strictly() {
 #[test]
 fn expired_claim_cannot_be_revived_by_an_unchanged_snapshot() {
     let fixture = fixture();
-    let after_expiry = situation(
-        &fixture.receipt,
-        &fixture.run,
-        CLAIMED_GENERATION,
-        0x74,
-        80,
-    );
+    let after_expiry = situation(&fixture.receipt, &fixture.run, CLAIMED_GENERATION, 0x74, 80);
 
     assert_eq!(
         ActiveClaimContinuityReceipt::establish(

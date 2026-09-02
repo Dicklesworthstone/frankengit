@@ -44,8 +44,9 @@ use crate::{
     CapabilityId, CapabilityRevocationReadAdapterRefusal, CapabilityRevocationReadObservation,
     CapabilityRevocationReadRefusal, CapabilityRevocationReadRequest,
     CapabilityRevocationReadRequestId, CapabilityRevocationReader, CapabilityRevocationReceipt,
-    CapabilityRevocationReceiptId, EffectRequest, IntentRun, LogicalTime, ProtocolRefusal,
-    VerifiedCapabilityChain, MAX_CAPABILITY_REVOCATIONS, read_capability_revocations,
+    CapabilityRevocationReceiptId, EffectRequest, IntentRun, LogicalTime,
+    MAX_CAPABILITY_REVOCATIONS, ProtocolRefusal, VerifiedCapabilityChain,
+    read_capability_revocations,
 };
 
 /// Stable profile identity for the descendant-aware canonical reader.
@@ -56,8 +57,7 @@ use crate::{
 pub const DESCENDANT_AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE: [u8; 32] =
     *b"fgit.authority.revocations/v1.1\0";
 
-const RECEIPT_DOMAIN: &[u8] =
-    b"frankengit.agent.current-authority-capability-revocations/v1\0";
+const RECEIPT_DOMAIN: &[u8] = b"frankengit.agent.current-authority-capability-revocations/v1\0";
 const AUTHORIZATION_DOMAIN: &[u8] =
     b"frankengit.agent.current-authority-capability-authorization/v1\0";
 
@@ -251,9 +251,7 @@ impl CurrentAuthorityCapabilityEffectAuthorization {
 
     /// Current-head revocation proof used for this authorization.
     #[must_use]
-    pub const fn revocation_receipt_id(
-        self,
-    ) -> CurrentAuthorityCapabilityRevocationReceiptId {
+    pub const fn revocation_receipt_id(self) -> CurrentAuthorityCapabilityRevocationReceiptId {
         self.revocation_receipt_id
     }
 }
@@ -310,13 +308,18 @@ impl fmt::Display for CurrentAuthorityCapabilityRevocationReadRefusal {
                 write!(formatter, "current authority ancestry refused: {refusal}")
             }
             Self::Authority(refusal) => {
-                write!(formatter, "current canonical revocation state refused: {refusal}")
+                write!(
+                    formatter,
+                    "current canonical revocation state refused: {refusal}"
+                )
             }
             Self::GenerationDigestWidth { observed, expected } => write!(
                 formatter,
                 "current revocation generation digest has {observed} bytes, expected {expected}"
             ),
-            Self::Codec(refusal) => write!(formatter, "current revocation framing refused: {refusal}"),
+            Self::Codec(refusal) => {
+                write!(formatter, "current revocation framing refused: {refusal}")
+            }
         }
     }
 }
@@ -372,20 +375,18 @@ pub fn read_current_authority_capability_revocations<S>(
     max_age: u64,
     max_entries: usize,
     max_ancestry_hops: usize,
-) -> Result<CurrentAuthorityCapabilityRevocationReceipt, CurrentAuthorityCapabilityRevocationReadRefusal>
+) -> Result<
+    CurrentAuthorityCapabilityRevocationReceipt,
+    CurrentAuthorityCapabilityRevocationReadRefusal,
+>
 where
     S: AuthorityStore + ?Sized,
 {
     let authority = run
         .authority_read_receipt()
         .ok_or(CapabilityRevocationReadRefusal::RunAuthorityReceiptRequired)?;
-    let request = CapabilityRevocationReadRequest::build(
-        authority,
-        run,
-        requested_at,
-        max_age,
-        max_entries,
-    )?;
+    let request =
+        CapabilityRevocationReadRequest::build(authority, run, requested_at, max_age, max_entries)?;
 
     let historical = authenticate_historical_sync(store, head_key, authority)?;
     validate_historical_receipt(authority, &historical)?;
@@ -434,20 +435,18 @@ pub async fn read_current_authority_capability_revocations_async<S>(
     max_age: u64,
     max_entries: usize,
     max_ancestry_hops: usize,
-) -> Result<CurrentAuthorityCapabilityRevocationReceipt, CurrentAuthorityCapabilityRevocationReadRefusal>
+) -> Result<
+    CurrentAuthorityCapabilityRevocationReceipt,
+    CurrentAuthorityCapabilityRevocationReadRefusal,
+>
 where
     S: AsyncAuthorityStore + ?Sized,
 {
     let authority = run
         .authority_read_receipt()
         .ok_or(CapabilityRevocationReadRefusal::RunAuthorityReceiptRequired)?;
-    let request = CapabilityRevocationReadRequest::build(
-        authority,
-        run,
-        requested_at,
-        max_age,
-        max_entries,
-    )?;
+    let request =
+        CapabilityRevocationReadRequest::build(authority, run, requested_at, max_age, max_entries)?;
 
     let historical = authenticate_historical_async(store, cx, head_key, authority).await?;
     validate_historical_receipt(authority, &historical)?;
@@ -492,8 +491,8 @@ fn authenticate_historical_sync<S>(
 where
     S: AuthorityStore + ?Sized,
 {
-    let body = read_authority_head_body(store, authority.authority_head_id())
-        .map_err(|failure| {
+    let body =
+        read_authority_head_body(store, authority.authority_head_id()).map_err(|failure| {
             CurrentAuthorityCapabilityRevocationReadRefusal::HistoricalHead(Box::new(failure))
         })?;
     let receipt = HeadReadReceipt::new(
@@ -569,8 +568,7 @@ fn admit_generation(
     generation: &CapabilityRevocationGenerationRead,
 ) -> Result<CapabilityRevocationReceipt, CurrentAuthorityCapabilityRevocationReadRefusal> {
     let observed_rows = generation.body().revoked_capability_ids().len();
-    if observed_rows > request.max_entries() as usize
-        || observed_rows > MAX_CAPABILITY_REVOCATIONS
+    if observed_rows > request.max_entries() as usize || observed_rows > MAX_CAPABILITY_REVOCATIONS
     {
         return Err(CapabilityRevocationReadRefusal::TooManyRevocations {
             observed: observed_rows,
@@ -645,7 +643,10 @@ fn current_revocation_receipt_commitment(
     ancestry_receipt_id: fgit_authority::AuthorityHeadAncestryReceiptId,
 ) -> Result<[u8; 32], CodecRefusal> {
     let mut encoder = Encoder::with_capacity(160);
-    encoder.write_bytes("current_authority_revocation_receipt_domain", RECEIPT_DOMAIN)?;
+    encoder.write_bytes(
+        "current_authority_revocation_receipt_domain",
+        RECEIPT_DOMAIN,
+    )?;
     encoder.write_raw(admitted_receipt_id.as_bytes());
     encoder.write_raw(ancestry_receipt_id.as_bytes());
     Ok(hash(&encoder.into_bytes()))
@@ -656,7 +657,10 @@ fn current_effect_authorization_commitment(
     revocation_receipt_id: &[u8; 32],
 ) -> Result<[u8; 32], CodecRefusal> {
     let mut encoder = Encoder::with_capacity(160);
-    encoder.write_bytes("current_authority_effect_authorization_domain", AUTHORIZATION_DOMAIN)?;
+    encoder.write_bytes(
+        "current_authority_effect_authorization_domain",
+        AUTHORIZATION_DOMAIN,
+    )?;
     encoder.write_raw(authorization_id);
     encoder.write_raw(revocation_receipt_id);
     Ok(hash(&encoder.into_bytes()))

@@ -29,14 +29,12 @@ use fgit_authority::{AuthorityHeadAncestryReceipt, AuthorityVersionToken};
 use fgit_codec::{CodecRefusal, Encoder};
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_resource::{ResourceError, ResourceVector};
-use fgit_types::{
-    Digest, HeadGeneration, RepositoryAuthorityHeadId, RepositoryId,
-};
+use fgit_types::{Digest, HeadGeneration, RepositoryAuthorityHeadId, RepositoryId};
 
 use crate::{
-    AgentHandoffCapsule, AgentHandoffCapsuleId, AgentInstanceId, AgentSituationReceipt,
-    ClassSet, EffectId, EffectResolutionAction, IntentRun, IntentRunCommitment,
-    IntentRunIdentityRefusal, LogicalTime, OperationClass, RunId, SituationId,
+    AgentHandoffCapsule, AgentHandoffCapsuleId, AgentInstanceId, AgentSituationReceipt, ClassSet,
+    EffectId, EffectResolutionAction, IntentRun, IntentRunCommitment, IntentRunIdentityRefusal,
+    LogicalTime, OperationClass, RunId, SituationId,
 };
 
 const ACCEPTANCE_DOMAIN: &[u8] = b"frankengit.agent.handoff-acceptance/v2\0";
@@ -294,11 +292,8 @@ impl AgentHandoffCapsule {
         if source_authority.repository_id() != receiver_authority.repository_id() {
             return Err(HandoffAcceptanceRefusal::RepositoryMismatch);
         }
-        let (authority_relation, authority_ancestry) = validate_authority_proof(
-            source_authority,
-            receiver_authority,
-            authority_proof,
-        )?;
+        let (authority_relation, authority_ancestry) =
+            validate_authority_proof(source_authority, receiver_authority, authority_proof)?;
         if receiver_situation.observed_at() < self.reconciliation().observed_at() {
             return Err(HandoffAcceptanceRefusal::ReceiverObservationRollback {
                 source_observed_at: self.reconciliation().observed_at(),
@@ -340,8 +335,7 @@ impl AgentHandoffCapsule {
             target_resolution,
             effect_responsibilities,
         };
-        acceptance.acceptance_id =
-            AgentHandoffAcceptanceId(acceptance_commitment(&acceptance)?);
+        acceptance.acceptance_id = AgentHandoffAcceptanceId(acceptance_commitment(&acceptance)?);
         Ok(acceptance)
     }
 }
@@ -585,7 +579,10 @@ fn validate_authority_proof(
     receiver: &crate::AuthorityReadReceipt,
     proof: AcceptanceAuthorityProof,
 ) -> Result<
-    (HandoffAuthorityRelation, Option<AuthorityHeadAncestryReceipt>),
+    (
+        HandoffAuthorityRelation,
+        Option<AuthorityHeadAncestryReceipt>,
+    ),
     HandoffAcceptanceRefusal,
 > {
     let same_head = source.authority_head_id() == receiver.authority_head_id()
@@ -733,7 +730,13 @@ fn acceptance_commitment(
     }
     encoder.write_scalar(acceptance.receiver_expiry.value());
     encoder.write_raw(&acceptance.target_resolution.target_selector);
-    encoder.write_raw(&acceptance.target_resolution.receiver_run_id.value().to_be_bytes());
+    encoder.write_raw(
+        &acceptance
+            .target_resolution
+            .receiver_run_id
+            .value()
+            .to_be_bytes(),
+    );
     encoder.write_raw(
         &acceptance
             .target_resolution

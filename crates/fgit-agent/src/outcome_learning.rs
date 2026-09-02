@@ -27,7 +27,7 @@ pub struct OutcomeLearningRecordSpec {
 impl OutcomeLearningRecordSpec {
     /// Creates the required learning frame; typed collections start empty.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         terminal_outcome: LearningTerminalOutcome,
         created_at: LogicalTime,
         producer_facts: PartyFacts,
@@ -47,10 +47,7 @@ impl OutcomeLearningRecordSpec {
 
     /// Sets complete plan-requirement outcomes.
     #[must_use]
-    pub fn with_requirement_outcomes(
-        mut self,
-        outcomes: Vec<LearningRequirementOutcome>,
-    ) -> Self {
+    pub fn with_requirement_outcomes(mut self, outcomes: Vec<LearningRequirementOutcome>) -> Self {
         self.inner = self.inner.with_requirement_outcomes(outcomes);
         self
     }
@@ -95,10 +92,7 @@ impl OutcomeLearningRecordSpec {
 
     /// Sets verifier attestations whose independence is machine-classified.
     #[must_use]
-    pub fn with_verifier_attestations(
-        mut self,
-        attestations: Vec<VerifierAttestation>,
-    ) -> Self {
+    pub fn with_verifier_attestations(mut self, attestations: Vec<VerifierAttestation>) -> Self {
         self.inner = self.inner.with_verifier_attestations(attestations);
         self
     }
@@ -133,11 +127,7 @@ impl OutcomeLearningRecord {
         spec: OutcomeLearningRecordSpec,
     ) -> Result<Self, OutcomeLearningRefusal> {
         let record = crate::learning::OutcomeLearningRecord::build(
-            situation,
-            packet,
-            plan,
-            run,
-            spec.inner,
+            situation, packet, plan, run, spec.inner,
         )?;
         validate_required_evidence_classes(plan, record.requirement_outcomes())?;
         Ok(Self(record))
@@ -289,9 +279,11 @@ fn validate_required_evidence_classes(
                 | crate::RequirementDisposition::PartiallySatisfied
         ) && !carries_required_evidence_class(requirement.evidence_class(), outcome)
         {
-            return Err(OutcomeLearningRefusal::SatisfiedRequirementWithoutEvidence {
-                requirement_id: requirement.requirement_id(),
-            });
+            return Err(
+                OutcomeLearningRefusal::SatisfiedRequirementWithoutEvidence {
+                    requirement_id: requirement.requirement_id(),
+                },
+            );
         }
     }
     Ok(())

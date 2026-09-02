@@ -8,10 +8,9 @@ use std::task::{Context, Poll, Wake, Waker};
 use fgit_agent::{
     AttenuationRequest, AuthorityReadReceipt, Capability, CapabilityEffectAuthorizationRefusal,
     CapabilityId, CapabilityRevocationReadRefusal, ClassSet,
-    CurrentAuthorityCapabilityEffectAuthorization,
-    CurrentAuthorityCapabilityRevocationReadRefusal,
-    DESCENDANT_AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE, EffectId, EffectRequest,
-    IntentRun, LogicalTime, OperationClass, RunId, VerifiedCapabilityChain,
+    CurrentAuthorityCapabilityEffectAuthorization, CurrentAuthorityCapabilityRevocationReadRefusal,
+    DESCENDANT_AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE, EffectId, EffectRequest, IntentRun,
+    LogicalTime, OperationClass, RunId, VerifiedCapabilityChain,
     read_current_authority_capability_revocations,
     read_current_authority_capability_revocations_async,
 };
@@ -172,7 +171,6 @@ struct Fixture {
     store: MemoryAuthorityStore,
     head_key: HeadKey,
     genesis: RepositoryAuthorityHeadBody,
-    authority: AuthorityReadReceipt,
     run: IntentRun,
 }
 
@@ -211,7 +209,7 @@ fn fixture(store_id: u64) -> Fixture {
     .expect("genesis becomes the run authority receipt");
     let run = IntentRun::new_authenticated(
         RunId::new(7),
-        authority.clone(),
+        authority,
         ClassSet::from_classes(&[OperationClass::ExternalIntegration]),
         ResourceVector::single(Grade::EgressBytes, 1_000),
         LogicalTime::new(100),
@@ -224,7 +222,6 @@ fn fixture(store_id: u64) -> Fixture {
         store,
         head_key,
         genesis,
-        authority,
         run,
     }
 }
@@ -308,7 +305,10 @@ fn a_run_opened_at_genesis_observes_a_later_revoked_ancestor() {
 
     assert_eq!(first, second);
     assert_eq!(first.ancestry().hops(), 1);
-    assert_eq!(first.ancestry().ancestor_head_id(), head_id(&fixture.genesis));
+    assert_eq!(
+        first.ancestry().ancestor_head_id(),
+        head_id(&fixture.genesis)
+    );
     assert_eq!(first.current_authority_head_id(), head_id(&current));
     assert_eq!(first.revoked_capability_ids(), &[CapabilityId::new(1)]);
     assert_eq!(
@@ -456,8 +456,8 @@ fn a_canonical_head_pointing_to_a_same_generation_fork_is_rejected() {
         refusal,
         CurrentAuthorityCapabilityRevocationReadRefusal::Ancestry(Box::new(
             AuthorityHeadAncestryRefusal::NotDescendant {
-                expected: head_id(&fixture.genesis),
-                observed: head_id(&alternate_genesis),
+                expected: Box::new(head_id(&fixture.genesis)),
+                observed: Box::new(head_id(&alternate_genesis)),
             },
         ))
     );
@@ -466,8 +466,8 @@ fn a_canonical_head_pointing_to_a_same_generation_fork_is_rejected() {
 #[test]
 fn a_historical_token_cannot_cross_head_slots() {
     let fixture = fixture(404);
-    let wrong_key = HeadKey::new(b"descendant-revocation-wrong-slot".to_vec())
-        .expect("a bounded wrong key");
+    let wrong_key =
+        HeadKey::new(b"descendant-revocation-wrong-slot".to_vec()).expect("a bounded wrong key");
 
     assert!(matches!(
         read_current_authority_capability_revocations(
@@ -587,7 +587,7 @@ impl AsyncAuthorityStore for AsyncMirror<'_> {
 
     fn put_if_absent(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
@@ -596,7 +596,7 @@ impl AsyncAuthorityStore for AsyncMirror<'_> {
 
     fn read_immutable(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         core::future::ready(AuthorityStore::read_immutable(self.0, key))
@@ -604,22 +604,19 @@ impl AsyncAuthorityStore for AsyncMirror<'_> {
 
     fn initialize_head(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
     ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
         core::future::ready(AuthorityStore::initialize_head(
-            self.0,
-            key,
-            generation,
-            body,
+            self.0, key, generation, body,
         ))
     }
 
     fn read_head(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         core::future::ready(AuthorityStore::read_head(self.0, key))
@@ -627,7 +624,7 @@ impl AsyncAuthorityStore for AsyncMirror<'_> {
 
     fn compare_exchange_head(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         key: &HeadKey,
         expected: AuthorityVersionToken,
         new_generation: HeadGeneration,
@@ -644,7 +641,7 @@ impl AsyncAuthorityStore for AsyncMirror<'_> {
 
     fn authenticate_head_receipt(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         receipt: &HeadReadReceipt,
     ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
         core::future::ready(AuthorityStore::authenticate_head_receipt(self.0, receipt))

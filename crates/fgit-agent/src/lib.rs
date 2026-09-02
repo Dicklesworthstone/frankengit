@@ -78,8 +78,8 @@ pub mod capability;
 pub mod claim;
 pub mod claim_continuity;
 pub mod classes;
-pub mod current_effect_dispatch;
 pub mod cross_head_task_transfer;
+pub mod current_effect_dispatch;
 pub mod descendant_revocation;
 pub mod ecc;
 mod effect_authorization;
@@ -87,9 +87,9 @@ pub mod effect_dispatch;
 pub mod frontier;
 mod frontier_policy;
 mod handoff;
-mod handoff_control;
 pub mod handoff_acceptance;
 pub mod handoff_ancestry;
+mod handoff_control;
 pub mod intent;
 mod learning;
 pub mod outcome_learning;
@@ -121,9 +121,8 @@ pub use action_packet::{
 };
 pub use authority_identity::{AuthorityReadIdentityRefusal, AuthorityReadReceiptId};
 pub use authority_revocation::{
-    AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE,
-    AuthorityCapabilityRevocationReadRefusal, read_authority_capability_revocations,
-    read_authority_capability_revocations_async,
+    AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE, AuthorityCapabilityRevocationReadRefusal,
+    read_authority_capability_revocations, read_authority_capability_revocations_async,
 };
 pub use broker::{
     AgentInstanceId, BrokerRefusal, DeferredOutboxEffect, EffectBroker, EffectClass, EffectGrant,
@@ -133,33 +132,31 @@ pub use broker::{
     ReconciliationRefused, ReservedOutboxEffect,
 };
 pub use cancellation::{
-    CancellationContainmentEvidence, CancellationDebtTransfer,
-    MAX_CANCELLATION_EVIDENCE_ENTRIES, RunCancellationRefusal, RunCancellationState,
-    TaskClaimCancellationOutcome, TaskClaimCancellationProjection,
+    CancellationContainmentEvidence, CancellationDebtTransfer, MAX_CANCELLATION_EVIDENCE_ENTRIES,
+    RunCancellationRefusal, RunCancellationState, TaskClaimCancellationOutcome,
+    TaskClaimCancellationProjection,
 };
 pub use capability::{
     AttenuationRefused, AttenuationRequest, Capability, CapabilityId, ChainRefused, IssueRefused,
     LogicalTime, SealRefused, SealedCapability, verify_chain,
 };
 pub use claim::{
-    ActiveTaskClaim, ActiveTaskClaimId, MAX_CLAIM_SURFACES, TaskClaimProjection,
-    TaskClaimReceipt, TaskClaimReceiptId, TaskClaimRefusal,
+    ActiveTaskClaim, ActiveTaskClaimId, MAX_CLAIM_SURFACES, TaskClaimProjection, TaskClaimReceipt,
+    TaskClaimReceiptId, TaskClaimRefusal,
 };
 pub use claim_continuity::{
-    ActionPacketContinuationRefusal, ActiveClaimContinuityReceipt,
-    ActiveClaimContinuityReceiptId, ActiveClaimContinuityRefusal, AgentActionPacketContinuation,
-    AgentActionPacketContinuationId,
+    ActionPacketContinuationRefusal, ActiveClaimContinuityReceipt, ActiveClaimContinuityReceiptId,
+    ActiveClaimContinuityRefusal, AgentActionPacketContinuation, AgentActionPacketContinuationId,
 };
 pub use classes::{CLASS_COUNT, ClassSet, OperationClass, UnknownClassBits};
 pub use cross_head_task_transfer::{
     CrossHeadTaskTransferActivationReceipt, CrossHeadTaskTransferActivationReceiptId,
     CrossHeadTaskTransferActivationRefusal, CrossHeadTaskTransferDecision,
-    CrossHeadTaskTransferEnvelope, CrossHeadTaskTransferEnvelopeId,
-    CrossHeadTaskTransferExecution, CrossHeadTaskTransferExecutionRefusal,
-    CrossHeadTaskTransferPersistedState, CrossHeadTaskTransferPersistenceOutcome,
-    CrossHeadTaskTransferReceipt, CrossHeadTaskTransferReceiptId,
-    CrossHeadTaskTransferReconciliationCause, CrossHeadTaskTransferRefusal,
-    CrossHeadTaskTransferStore, PersistedCrossHeadTaskTransfer,
+    CrossHeadTaskTransferEnvelope, CrossHeadTaskTransferEnvelopeId, CrossHeadTaskTransferExecution,
+    CrossHeadTaskTransferExecutionRefusal, CrossHeadTaskTransferPersistedState,
+    CrossHeadTaskTransferPersistenceOutcome, CrossHeadTaskTransferReceipt,
+    CrossHeadTaskTransferReceiptId, CrossHeadTaskTransferReconciliationCause,
+    CrossHeadTaskTransferRefusal, CrossHeadTaskTransferStore, PersistedCrossHeadTaskTransfer,
     execute_cross_head_task_transfer_store, persist_cross_head_task_transfer,
 };
 pub use current_effect_dispatch::{
@@ -169,17 +166,14 @@ pub use current_effect_dispatch::{
     CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect,
     CurrentAuthorityRevocationAuthorizedEffectGrant,
     CurrentAuthorityRevocationAuthorizedOutboxEffect,
-    CurrentAuthorityRevocationCheckedEffectBroker,
-    CurrentAuthorityRevocationCheckedEffectRefusal,
+    CurrentAuthorityRevocationCheckedEffectBroker, CurrentAuthorityRevocationCheckedEffectRefusal,
     CurrentAuthoritySettledOutboxEffect,
 };
 pub use descendant_revocation::{
-    DESCENDANT_AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE,
-    CurrentAuthorityCapabilityEffectAuthorization,
-    CurrentAuthorityCapabilityEffectAuthorizationId,
-    CurrentAuthorityCapabilityRevocationReadRefusal,
-    CurrentAuthorityCapabilityRevocationReceipt,
+    CurrentAuthorityCapabilityEffectAuthorization, CurrentAuthorityCapabilityEffectAuthorizationId,
+    CurrentAuthorityCapabilityRevocationReadRefusal, CurrentAuthorityCapabilityRevocationReceipt,
     CurrentAuthorityCapabilityRevocationReceiptId,
+    DESCENDANT_AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE,
     read_current_authority_capability_revocations,
     read_current_authority_capability_revocations_async,
 };
@@ -193,17 +187,15 @@ pub use effect_authorization::{
     CapabilityEffectAuthorizationId, CapabilityEffectAuthorizationRefusal,
     CapabilityRevocationReadAdapterRefusal, CapabilityRevocationReadObservation,
     CapabilityRevocationReadRefusal, CapabilityRevocationReadRequest,
-    CapabilityRevocationReadRequestId, CapabilityRevocationReader,
-    CapabilityRevocationReceipt, CapabilityRevocationReceiptId, MAX_CAPABILITY_REVOCATIONS,
-    MAX_EFFECT_AUTHORIZATIONS, MAX_EFFECT_CAPABILITY_CHAIN, RevocationAuthorizedEffectGrant,
-    RevocationCheckedEffectRefusal, VerifiedCapabilityChain, VerifiedCapabilityChainId,
-    VerifiedCapabilityChainRefusal, read_capability_revocations,
-    requires_effect_time_revocation,
+    CapabilityRevocationReadRequestId, CapabilityRevocationReader, CapabilityRevocationReceipt,
+    CapabilityRevocationReceiptId, MAX_CAPABILITY_REVOCATIONS, MAX_EFFECT_AUTHORIZATIONS,
+    MAX_EFFECT_CAPABILITY_CHAIN, RevocationAuthorizedEffectGrant, RevocationCheckedEffectRefusal,
+    VerifiedCapabilityChain, VerifiedCapabilityChainId, VerifiedCapabilityChainRefusal,
+    read_capability_revocations, requires_effect_time_revocation,
 };
 pub use effect_dispatch::{
     AuthorizedOutboxDispatchRefused, RevocationAuthorizedDeferredOutboxEffect,
-    RevocationAuthorizedEscalatedOutboxEffect,
-    RevocationAuthorizedEscalationResolutionRefused,
+    RevocationAuthorizedEscalatedOutboxEffect, RevocationAuthorizedEscalationResolutionRefused,
     RevocationAuthorizedExternalEffectOutcome, RevocationAuthorizedOutboxEffect,
     RevocationAuthorizedReconciliationRefused, RevocationAuthorizedSettledOutboxEffect,
     RevocationCheckedEffectBroker,
@@ -226,9 +218,7 @@ pub use handoff_ancestry::{
     CurrentAuthorityHandoffRefusal, accept_handoff_at_current_authority,
     accept_handoff_at_current_authority_async,
 };
-pub use handoff_control::{
-    AgentHandoffCapsule, AgentHandoffCapsuleId, HandoffConstructionRefusal,
-};
+pub use handoff_control::{AgentHandoffCapsule, AgentHandoffCapsuleId, HandoffConstructionRefusal};
 pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
 pub use learning::{
     ConfirmedOwnership, FailedHypothesis, LearningPhase, LearningRequirementOutcome,
@@ -252,10 +242,10 @@ pub use pulse::{
     PulseState,
 };
 pub use reconcile::{
-    EffectResolutionAction, MAX_EFFECT_OUTPUT_COMMITMENTS,
-    MAX_EFFECT_RECONCILIATION_TRANSITIONS, MAX_RECONCILIATION_EFFECTS, ReconciledEffect,
-    RunReconciliationCounts, RunReconciliationReadiness, RunReconciliationRefusal,
-    RunReconciliationReport, RunReconciliationReportId,
+    EffectResolutionAction, MAX_EFFECT_OUTPUT_COMMITMENTS, MAX_EFFECT_RECONCILIATION_TRANSITIONS,
+    MAX_RECONCILIATION_EFFECTS, ReconciledEffect, RunReconciliationCounts,
+    RunReconciliationReadiness, RunReconciliationRefusal, RunReconciliationReport,
+    RunReconciliationReportId,
 };
 pub use refresh::{RefreshReceipt, RefreshRelation, RefreshSide};
 pub use run_cancellation::{
@@ -266,10 +256,9 @@ pub use run_identity::{
     IntentRunBinding, IntentRunCommitment, IntentRunIdentityRefusal, IntentRunRetry,
 };
 pub use situation::{
-    AgentSituationReceipt, SITUATION_COMPONENT_COUNT, SituationAuthorityChange,
-    SituationComponent, SituationComponentChange, SituationComponentKind,
-    SituationComponentTransition, SituationDelta, SituationId, SituationOmissionReason,
-    SituationRefusal, SituationWorkspace,
+    AgentSituationReceipt, SITUATION_COMPONENT_COUNT, SituationAuthorityChange, SituationComponent,
+    SituationComponentChange, SituationComponentKind, SituationComponentTransition, SituationDelta,
+    SituationId, SituationOmissionReason, SituationRefusal, SituationWorkspace,
 };
 pub use task_adapter::{
     ClaimIntegrationRefusal, ClaimTaskOutcome, ClaimedTask, ReleaseTaskOutcome, ReleasedTask,
@@ -284,9 +273,8 @@ pub use task_collection::{
 };
 pub use task_collection_bridge::{
     RecoveredActiveTaskClaim, RecoveredActiveTaskClaimId, TaskClaimRecoveryRefusal,
-    TaskCollectionBridgeRefusal, TaskLeaseHistoryObservation,
-    TaskLeaseReconstructionReceipt, TaskLeaseReconstructionReceiptId,
-    activate_reconstructed_task_claim, collected_unclaimed_task,
+    TaskCollectionBridgeRefusal, TaskLeaseHistoryObservation, TaskLeaseReconstructionReceipt,
+    TaskLeaseReconstructionReceiptId, activate_reconstructed_task_claim, collected_unclaimed_task,
     reconstruct_collected_task_lease,
 };
 pub use task_coordination::{
@@ -295,14 +283,11 @@ pub use task_coordination::{
     AuthorityBoundTaskProjectionTransitionId, AuthorityBoundTaskResolutionApplication,
     TaskCoordinationRefusal,
 };
-pub use task_mutation::{
-    TaskMutationAttempt, TaskMutationAttemptRefusal, apply_task_mutation,
-};
+pub use task_mutation::{TaskMutationAttempt, TaskMutationAttemptRefusal, apply_task_mutation};
 pub use task_persistence::{
-    TaskProjectionMutationEnvelope, TaskProjectionMutationEnvelopeId,
-    TaskProjectionPersistedState, TaskProjectionPersistenceDecision,
-    TaskProjectionPersistenceReceipt, TaskProjectionPersistenceReceiptId,
-    TaskProjectionPersistenceRefusal,
+    TaskProjectionMutationEnvelope, TaskProjectionMutationEnvelopeId, TaskProjectionPersistedState,
+    TaskProjectionPersistenceDecision, TaskProjectionPersistenceReceipt,
+    TaskProjectionPersistenceReceiptId, TaskProjectionPersistenceRefusal,
 };
 pub use task_persistence_gate::{
     PersistedTaskClaim, PersistedTaskResolution, TaskClaimPersistenceOutcome,
@@ -310,11 +295,11 @@ pub use task_persistence_gate::{
     persist_task_resolution,
 };
 pub use task_projection::{
-    MAX_TASK_PROJECTION_ROWS, MAX_TASK_ROW_SURFACES, TaskAdapterRefusal,
-    TaskAdapterRejection, TaskMutationObservation, TaskMutationOperation, TaskMutationReceipt,
-    TaskMutationReceiptId, TaskMutationRefusal, TaskMutationReplay, TaskMutationRequest,
-    TaskMutationRequestId, TaskProjectionAdapter, TaskProjectionGeneration,
-    TaskProjectionRefusal, TaskProjectionRow, TaskProjectionSnapshot, TaskProjectionSnapshotId,
+    MAX_TASK_PROJECTION_ROWS, MAX_TASK_ROW_SURFACES, TaskAdapterRefusal, TaskAdapterRejection,
+    TaskMutationObservation, TaskMutationOperation, TaskMutationReceipt, TaskMutationReceiptId,
+    TaskMutationRefusal, TaskMutationReplay, TaskMutationRequest, TaskMutationRequestId,
+    TaskProjectionAdapter, TaskProjectionGeneration, TaskProjectionRefusal, TaskProjectionRow,
+    TaskProjectionSnapshot, TaskProjectionSnapshotId,
 };
 pub use task_projection_adapter::{
     TaskProjectionAdapterRefusal, TaskProjectionAssignment, TaskProjectionLease,
@@ -329,9 +314,8 @@ pub use task_projection_read::{
 pub use task_recovery::{
     PersistedRecoveredTaskRelease, PersistedRecoveredTaskReleaseId,
     RecoveredTaskReleasePersistenceOutcome, RunBoundRecoveredTaskClaim,
-    RunBoundRecoveredTaskClaimId, TaskRecoveryBindingRefusal,
-    TaskRecoveryPersistenceRefusal, persist_recovered_task_release,
-    recover_task_claim_for_cleanup,
+    RunBoundRecoveredTaskClaimId, TaskRecoveryBindingRefusal, TaskRecoveryPersistenceRefusal,
+    persist_recovered_task_release, recover_task_claim_for_cleanup,
 };
 pub use task_store::{
     TaskProjectionStore, TaskProjectionStoreExecution, TaskProjectionStoreExecutionRefusal,

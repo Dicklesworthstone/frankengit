@@ -2,24 +2,23 @@
 //! Public-path tests for debt-preserving Agent Control Plane handoffs.
 
 use fgit_agent::{
-    ActiveTaskClaim, AgentChangePlan, AgentChangePlanSpec, AgentControlPulse,
-    AgentHandoffCapsule, AgentHandoffCapsuleSpec, AgentInstanceId, AgentSituationReceipt,
-    AuthorityReadReceipt, CapabilityId, ClassSet, EffectClass, EffectId, EffectRecord,
-    EffectResolutionAction, EvidenceClass, HandoffCapabilityAttenuation, HandoffRefusal,
-    IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
-    PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet,
-    PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RequirementDisposition, RunId,
-    RunReconciliationReadiness, RunReconciliationReport, SITUATION_COMPONENT_COUNT,
-    SituationComponent, SituationComponentKind, SituationOmissionReason, TaskClaimProjection,
-    TaskClaimReceipt, TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
-    WorkRankingInputs, WorkTaskId,
+    ActiveTaskClaim, AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentHandoffCapsule,
+    AgentHandoffCapsuleSpec, AgentInstanceId, AgentSituationReceipt, AuthorityReadReceipt,
+    CapabilityId, ClassSet, EffectClass, EffectId, EffectRecord, EffectResolutionAction,
+    EvidenceClass, HandoffCapabilityAttenuation, HandoffRefusal, IntentRun, LogicalTime,
+    OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
+    PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind,
+    RejectedShortcutSet, RequirementDisposition, RunId, RunReconciliationReadiness,
+    RunReconciliationReport, SituationComponent, SituationComponentKind, SituationOmissionReason,
+    TaskClaimProjection, TaskClaimReceipt, TaskPhase, WorkConflict, WorkEligibilityInputs,
+    WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ObligationState, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -96,10 +95,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("run opens")
@@ -143,16 +139,10 @@ fn plan(
         TASK_BASIS,
         TaskPhase::Open,
         WorkRankingInputs::new(1, 2, 3),
-        WorkEligibilityInputs::new(
-            0,
-            Some(run.run_id()),
-            None,
-            true,
-            WorkConflict::Clear,
-        ),
+        WorkEligibilityInputs::new(0, Some(run.run_id()), None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&situation, vec![item])
-        .expect("eligible frontier");
+    let frontier =
+        WorkFrontier::build_action_scoped(&situation, vec![item]).expect("eligible frontier");
     let pulse = AgentControlPulse::build(&situation, &frontier, Some(run)).expect("pulse");
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x61));
     let spec = AgentChangePlanSpec::new(
@@ -163,10 +153,7 @@ fn plan(
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -288,15 +275,8 @@ fn handoff_identity_is_deterministic_and_preserves_complete_effect_debt() {
         spec.clone(),
     )
     .expect("complete handoff capsule");
-    let second = AgentHandoffCapsule::build(
-        &latest,
-        &plan,
-        active,
-        &run,
-        reconciliation,
-        spec,
-    )
-    .expect("identical inputs produce an identical capsule");
+    let second = AgentHandoffCapsule::build(&latest, &plan, active, &run, reconciliation, spec)
+        .expect("identical inputs produce an identical capsule");
 
     assert_eq!(first.capsule_id(), second.capsule_id());
     assert_eq!(first.source_run_id(), run.run_id());
@@ -353,9 +333,8 @@ fn receiver_scope_cannot_outlive_the_source_claim() {
     let run = run(&receipt);
     let (pulse, plan, surface) = plan(&receipt, &run);
     let (active, latest) = active_claim(&receipt, &run, &pulse, &plan, surface);
-    let reconciliation =
-        RunReconciliationReport::build(&run, Vec::new(), latest.observed_at())
-            .expect("empty complete effect inventory");
+    let reconciliation = RunReconciliationReport::build(&run, Vec::new(), latest.observed_at())
+        .expect("empty complete effect inventory");
     let spec = handoff_spec(
         ClassSet::from_classes(&[OperationClass::TreeFsWorkspace]),
         LogicalTime::new(81),
@@ -378,9 +357,8 @@ fn all_zero_target_selector_is_refused() {
     let run = run(&receipt);
     let (pulse, plan, surface) = plan(&receipt, &run);
     let (active, latest) = active_claim(&receipt, &run, &pulse, &plan, surface);
-    let reconciliation =
-        RunReconciliationReport::build(&run, Vec::new(), latest.observed_at())
-            .expect("empty complete effect inventory");
+    let reconciliation = RunReconciliationReport::build(&run, Vec::new(), latest.observed_at())
+        .expect("empty complete effect inventory");
     let spec = handoff_spec(
         ClassSet::from_classes(&[OperationClass::TreeFsWorkspace]),
         LogicalTime::new(70),

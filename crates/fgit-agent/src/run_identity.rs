@@ -107,10 +107,7 @@ impl IntentRunBinding {
     ///
     /// Refuses another run ID and refuses reuse of the same ID with a different
     /// machine commitment.
-    pub fn revalidate(
-        &self,
-        run: &IntentRun,
-    ) -> Result<IntentRunRetry, IntentRunIdentityRefusal> {
+    pub fn revalidate(&self, run: &IntentRun) -> Result<IntentRunRetry, IntentRunIdentityRefusal> {
         if run.run_id() != self.run_id {
             return Err(IntentRunIdentityRefusal::RunIdMismatch {
                 expected: self.run_id,
@@ -181,7 +178,10 @@ impl fmt::Display for IntentRunIdentityRefusal {
             }
             Self::Codec(refusal) => write!(formatter, "Intent Run framing refused: {refusal}"),
             Self::RunIdMismatch { expected, observed } => {
-                write!(formatter, "run binding for {expected} cannot admit {observed}")
+                write!(
+                    formatter,
+                    "run binding for {expected} cannot admit {observed}"
+                )
             }
             Self::RunIdEquivocation {
                 run_id,

@@ -19,12 +19,11 @@ use fgit_resource::ResourceVector;
 use fgit_types::Digest;
 
 use crate::{
-    ActiveClaimContinuityReceipt, ActiveClaimContinuityReceiptId,
-    ActiveClaimContinuityRefusal, ActiveTaskClaim, ActiveTaskClaimId, AgentChangePlan,
-    AgentChangePlanId, AgentHandoffCapsuleSpec, AgentInstanceId, AgentSituationReceipt,
-    HandoffCapabilityAttenuation, HandoffWorkspaceSnapshot, IntentRun, ReconciledEffect,
-    RequirementDisposition, RunId, RunReconciliationReadiness, RunReconciliationReport,
-    SituationId, VerifierAttestation,
+    ActiveClaimContinuityReceipt, ActiveClaimContinuityReceiptId, ActiveClaimContinuityRefusal,
+    ActiveTaskClaim, ActiveTaskClaimId, AgentChangePlan, AgentChangePlanId,
+    AgentHandoffCapsuleSpec, AgentInstanceId, AgentSituationReceipt, HandoffCapabilityAttenuation,
+    HandoffWorkspaceSnapshot, IntentRun, ReconciledEffect, RequirementDisposition, RunId,
+    RunReconciliationReadiness, RunReconciliationReport, SituationId, VerifierAttestation,
 };
 
 const PUBLIC_HANDOFF_DOMAIN: &[u8] = b"frankengit.agent.public-handoff-capsule/v1\0";
@@ -81,10 +80,7 @@ impl AgentHandoffCapsule {
         let observed = *activation_situation.situation_id().as_bytes();
         let expected = active_claim.situation_id();
         if observed != expected {
-            return Err(HandoffConstructionRefusal::ClaimSituationMismatch {
-                expected,
-                observed,
-            });
+            return Err(HandoffConstructionRefusal::ClaimSituationMismatch { expected, observed });
         }
         let inner = crate::handoff::AgentHandoffCapsule::build(
             activation_situation,
@@ -353,10 +349,7 @@ fn validate_continuity_source(
     let observed = *continuity.from_situation_id().as_bytes();
     if expected != observed {
         return Err(HandoffConstructionRefusal::Continuity(
-            ActiveClaimContinuityRefusal::ActivationSituationMismatch {
-                expected,
-                observed,
-            },
+            ActiveClaimContinuityRefusal::ActivationSituationMismatch { expected, observed },
         ));
     }
     Ok(())

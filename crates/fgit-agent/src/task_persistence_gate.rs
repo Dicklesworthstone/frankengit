@@ -199,7 +199,10 @@ pub enum TaskPersistenceGateRefusal {
 
 impl fmt::Display for TaskPersistenceGateRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "persistence-gated task application refused: {self:?}")
+        write!(
+            formatter,
+            "persistence-gated task application refused: {self:?}"
+        )
     }
 }
 
@@ -288,7 +291,7 @@ pub fn persist_task_resolution<S: TaskProjectionStore>(
     let envelope = TaskProjectionMutationEnvelope::from_resolution(&application)?;
     let snapshot = application.snapshot().clone();
     let transition = application.transition();
-    let cancellation_projection = application.projection().clone();
+    let cancellation_projection = *application.projection();
 
     match execute_task_projection_store(store, &envelope)? {
         TaskProjectionStoreExecution::Confirmed {

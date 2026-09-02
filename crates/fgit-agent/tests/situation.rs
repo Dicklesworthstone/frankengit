@@ -8,11 +8,11 @@ use fgit_agent::{
     SituationOmissionReason, SituationRefusal,
 };
 use fgit_authority::{
-    HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId, authority_head_identity,
-    initialize_repository, outcome_index_root,
+    AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
+    authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{ResourceVector, algebra::Grade};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -83,18 +83,12 @@ fn authority_receipt(
     receipt
 }
 
-fn components(
-    receipt: &AuthorityReadReceipt,
-) -> [SituationComponent; SITUATION_COMPONENT_COUNT] {
+fn components(receipt: &AuthorityReadReceipt) -> [SituationComponent; SITUATION_COMPONENT_COUNT] {
     std::array::from_fn(|index| {
         let kind = SituationComponentKind::ALL[index];
         let byte = u8::try_from(index + 1).expect("the v1 component count fits u8");
         if index % 3 == 0 {
-            SituationComponent::omitted(
-                kind,
-                SituationOmissionReason::NotAvailable,
-                [byte; 32],
-            )
+            SituationComponent::omitted(kind, SituationOmissionReason::NotAvailable, [byte; 32])
         } else {
             SituationComponent::observed(kind, receipt.authority_head_id(), [byte; 32])
         }
@@ -119,25 +113,14 @@ fn situation_identity_is_order_independent_and_change_sensitive() {
     let mut reversed = ordered;
     reversed.reverse();
 
-    let first = AgentSituationReceipt::build(
-        receipt.clone(),
-        None,
-        None,
-        LogicalTime::new(20),
-        ordered,
-    )
-    .expect("ordered situation");
-    let second = AgentSituationReceipt::build(
-        receipt.clone(),
-        None,
-        None,
-        LogicalTime::new(20),
-        reversed,
-    )
-    .expect("reordered situation");
+    let first =
+        AgentSituationReceipt::build(receipt.clone(), None, None, LogicalTime::new(20), ordered)
+            .expect("ordered situation");
+    let second =
+        AgentSituationReceipt::build(receipt.clone(), None, None, LogicalTime::new(20), reversed)
+            .expect("reordered situation");
     assert_eq!(first.situation_id(), second.situation_id());
-    let canonical_kinds =
-        std::array::from_fn(|index| first.components()[index].kind());
+    let canonical_kinds = std::array::from_fn(|index| first.components()[index].kind());
     assert_eq!(canonical_kinds, SituationComponentKind::ALL);
     assert_eq!(
         first.observed_component_count() + first.omitted_component_count(),
@@ -154,14 +137,8 @@ fn situation_identity_is_order_independent_and_change_sensitive() {
         receipt.authority_head_id(),
         [0xee; 32],
     );
-    let third = AgentSituationReceipt::build(
-        receipt,
-        None,
-        None,
-        LogicalTime::new(20),
-        changed,
-    )
-    .expect("changed situation");
+    let third = AgentSituationReceipt::build(receipt, None, None, LogicalTime::new(20), changed)
+        .expect("changed situation");
     assert_ne!(first.situation_id(), third.situation_id());
 }
 
@@ -177,14 +154,8 @@ fn situation_refuses_duplicates_mixed_authority_and_legacy_runs() {
         [0xaa; 32],
     );
     assert_eq!(
-        AgentSituationReceipt::build(
-            receipt.clone(),
-            None,
-            None,
-            LogicalTime::new(20),
-            duplicate,
-        )
-        .expect_err("duplicate component must fail"),
+        AgentSituationReceipt::build(receipt.clone(), None, None, LogicalTime::new(20), duplicate,)
+            .expect_err("duplicate component must fail"),
         SituationRefusal::DuplicateComponent {
             kind: SituationComponentKind::Search,
         }
@@ -197,14 +168,8 @@ fn situation_refuses_duplicates_mixed_authority_and_legacy_runs() {
         [0x91; 32],
     );
     assert_eq!(
-        AgentSituationReceipt::build(
-            receipt.clone(),
-            None,
-            None,
-            LogicalTime::new(20),
-            mixed,
-        )
-        .expect_err("mixed authority must fail"),
+        AgentSituationReceipt::build(receipt.clone(), None, None, LogicalTime::new(20), mixed,)
+            .expect_err("mixed authority must fail"),
         SituationRefusal::ComponentAuthorityMismatch {
             kind: SituationComponentKind::TaskProjection,
         }
@@ -299,16 +264,14 @@ fn situation_delta_is_minimal_and_refuses_forks_and_rollbacks() {
         receipt.authority_head_id(),
         [0xf1; 32],
     );
-    let after = AgentSituationReceipt::build(
-        receipt.clone(),
-        None,
-        None,
-        LogicalTime::new(22),
-        changed,
-    )
-    .expect("after situation");
+    let after =
+        AgentSituationReceipt::build(receipt, None, None, LogicalTime::new(22), changed)
+            .expect("after situation");
     let delta = SituationDelta::between(&before, &after).expect("component delta");
-    assert_eq!(delta.authority_change(), SituationAuthorityChange::Unchanged);
+    assert_eq!(
+        delta.authority_change(),
+        SituationAuthorityChange::Unchanged
+    );
     assert_eq!(delta.component_changes().len(), 1);
     assert_eq!(
         delta.component_changes()[0].kind(),
@@ -350,8 +313,7 @@ fn situation_delta_is_minimal_and_refuses_forks_and_rollbacks() {
     );
 
     assert_eq!(
-        SituationDelta::between(&after, &before)
-            .expect_err("observation-time rollback must fail"),
+        SituationDelta::between(&after, &before).expect_err("observation-time rollback must fail"),
         SituationRefusal::ObservationTimeRollback {
             from: LogicalTime::new(22),
             to: LogicalTime::new(20),

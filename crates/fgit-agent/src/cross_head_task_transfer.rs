@@ -41,29 +41,23 @@ use fgit_types::{Digest, RepositoryId};
 
 use crate::{
     ActiveTaskClaim, ActiveTaskClaimId, AgentChangePlanId, AgentHandoffAcceptance,
-    AgentHandoffAcceptanceId, AgentHandoffCapsule, AgentHandoffCapsuleId,
-    AgentSituationReceipt, AuthorityBoundTaskProjectionSnapshot,
-    AuthorityBoundTaskProjectionSnapshotId, AuthorityReadIdentityRefusal,
-    AuthorityReadReceipt, AuthorityReadReceiptId, HandoffAuthorityRelation, IntentRun,
-    IntentRunCommitment, IntentRunIdentityRefusal, LogicalTime, PersistedTaskClaim,
-    SituationComponentKind, SituationId, TaskClaimCancellationOutcome,
-    TaskClaimCancellationProjection, TaskClaimReceipt, TaskClaimReceiptId,
-    TaskCoordinationRefusal, TaskProjectionAssignment, TaskProjectionLease,
+    AgentHandoffAcceptanceId, AgentHandoffCapsule, AgentHandoffCapsuleId, AgentSituationReceipt,
+    AuthorityBoundTaskProjectionSnapshot, AuthorityBoundTaskProjectionSnapshotId,
+    AuthorityReadIdentityRefusal, AuthorityReadReceipt, AuthorityReadReceiptId,
+    HandoffAuthorityRelation, IntentRun, IntentRunCommitment, IntentRunIdentityRefusal,
+    LogicalTime, PersistedTaskClaim, SituationComponentKind, SituationId,
+    TaskClaimCancellationOutcome, TaskClaimCancellationProjection, TaskClaimReceipt,
+    TaskClaimReceiptId, TaskCoordinationRefusal, TaskProjectionAssignment, TaskProjectionLease,
     TaskProjectionPersistenceReceiptId, TaskProjectionStoreFlushDisposition,
-    TaskProjectionStoreFlushOutcome, TaskProjectionStoreFlushRefusal,
-    TaskProjectionStoreKey, TaskProjectionStoreReadRefusal, TaskProjectionStoreStage,
-    TaskProjectionStoreWriteDisposition, TaskProjectionStoreWriteOutcome,
-    TaskProjectionStoreWriteRefusal, WorkTaskId,
+    TaskProjectionStoreFlushOutcome, TaskProjectionStoreFlushRefusal, TaskProjectionStoreKey,
+    TaskProjectionStoreReadRefusal, TaskProjectionStoreStage, TaskProjectionStoreWriteDisposition,
+    TaskProjectionStoreWriteOutcome, TaskProjectionStoreWriteRefusal, WorkTaskId,
 };
 
-const GENERATION_DOMAIN: &[u8] =
-    b"frankengit.agent.cross-head-task-transfer-generation/v1\0";
-const ENVELOPE_DOMAIN: &[u8] =
-    b"frankengit.agent.cross-head-task-transfer-envelope/v1\0";
-const RECEIPT_DOMAIN: &[u8] =
-    b"frankengit.agent.cross-head-task-transfer-receipt/v1\0";
-const ACTIVATION_DOMAIN: &[u8] =
-    b"frankengit.agent.cross-head-task-transfer-activation/v1\0";
+const GENERATION_DOMAIN: &[u8] = b"frankengit.agent.cross-head-task-transfer-generation/v1\0";
+const ENVELOPE_DOMAIN: &[u8] = b"frankengit.agent.cross-head-task-transfer-envelope/v1\0";
+const RECEIPT_DOMAIN: &[u8] = b"frankengit.agent.cross-head-task-transfer-receipt/v1\0";
+const ACTIVATION_DOMAIN: &[u8] = b"frankengit.agent.cross-head-task-transfer-activation/v1\0";
 
 /// Stable identity of one two-authority-basis transfer envelope.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -294,10 +288,7 @@ impl CrossHeadTaskTransferEnvelope {
             source_snapshot.task_id(),
             next_generation,
             source_snapshot.phase(),
-            TaskProjectionAssignment::assigned(
-                receiver_run.run_id(),
-                receiver_run_commitment,
-            ),
+            TaskProjectionAssignment::assigned(receiver_run.run_id(), receiver_run_commitment),
             transferred_at,
         )?;
 
@@ -341,8 +332,7 @@ impl CrossHeadTaskTransferEnvelope {
             evidence_root,
             cancellation_projection,
         };
-        envelope.envelope_id =
-            CrossHeadTaskTransferEnvelopeId(envelope_commitment(&envelope)?);
+        envelope.envelope_id = CrossHeadTaskTransferEnvelopeId(envelope_commitment(&envelope)?);
         Ok(envelope)
     }
 
@@ -500,8 +490,7 @@ impl CrossHeadTaskTransferEnvelope {
         &self,
         observed: Option<&CrossHeadTaskTransferPersistedState>,
     ) -> Result<CrossHeadTaskTransferDecision, CrossHeadTaskTransferRefusal> {
-        let observed =
-            observed.ok_or(CrossHeadTaskTransferRefusal::ProjectionMissing)?;
+        let observed = observed.ok_or(CrossHeadTaskTransferRefusal::ProjectionMissing)?;
         let snapshot = observed.snapshot();
         if snapshot.repository_id() != self.repository_id {
             return Err(CrossHeadTaskTransferRefusal::ObservedRepositoryMismatch {
@@ -533,9 +522,7 @@ impl CrossHeadTaskTransferEnvelope {
                 || observed.acceptance_id.is_some()
                 || observed.ancestry_receipt_id.is_some()
             {
-                return Err(
-                    CrossHeadTaskTransferRefusal::PredecessorCarriesTransferMetadata,
-                );
+                return Err(CrossHeadTaskTransferRefusal::PredecessorCarriesTransferMetadata);
             }
             return Ok(CrossHeadTaskTransferDecision::RetrySafe {
                 envelope_id: self.envelope_id,
@@ -693,8 +680,7 @@ impl CrossHeadTaskTransferReceipt {
             evidence_root: envelope.evidence_root,
             observed_at: observed.snapshot.observed_at(),
         };
-        receipt.receipt_id =
-            CrossHeadTaskTransferReceiptId(receipt_commitment(&receipt)?);
+        receipt.receipt_id = CrossHeadTaskTransferReceiptId(receipt_commitment(&receipt)?);
         Ok(receipt)
     }
 
@@ -917,7 +903,10 @@ pub enum CrossHeadTaskTransferExecutionRefusal {
 
 impl fmt::Display for CrossHeadTaskTransferExecutionRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "cross-head task-transfer execution refused: {self:?}")
+        write!(
+            formatter,
+            "cross-head task-transfer execution refused: {self:?}"
+        )
     }
 }
 
@@ -1084,10 +1073,7 @@ fn finish_store_attempt<S: CrossHeadTaskTransferStore>(
             })
         }
         CrossHeadTaskTransferDecision::RetrySafe { .. } => {
-            let cause = if matches!(
-                write,
-                TaskProjectionStoreWriteDisposition::Ambiguous { .. }
-            ) {
+            let cause = if matches!(write, TaskProjectionStoreWriteDisposition::Ambiguous { .. }) {
                 CrossHeadTaskTransferReconciliationCause::AmbiguousWriteUnresolved
             } else {
                 CrossHeadTaskTransferReconciliationCause::BackendContradiction
@@ -1206,10 +1192,7 @@ pub enum CrossHeadTaskTransferPersistenceOutcome {
 pub fn persist_cross_head_task_transfer<S: CrossHeadTaskTransferStore>(
     store: &mut S,
     envelope: CrossHeadTaskTransferEnvelope,
-) -> Result<
-    CrossHeadTaskTransferPersistenceOutcome,
-    CrossHeadTaskTransferExecutionRefusal,
-> {
+) -> Result<CrossHeadTaskTransferPersistenceOutcome, CrossHeadTaskTransferExecutionRefusal> {
     match execute_cross_head_task_transfer_store(store, &envelope)? {
         CrossHeadTaskTransferExecution::Confirmed {
             receipt,
@@ -1229,12 +1212,12 @@ pub fn persist_cross_head_task_transfer<S: CrossHeadTaskTransferStore>(
                 execution,
             })
         }
-        execution @ CrossHeadTaskTransferExecution::NeedsReconciliation { .. } => {
-            Ok(CrossHeadTaskTransferPersistenceOutcome::NeedsReconciliation {
+        execution @ CrossHeadTaskTransferExecution::NeedsReconciliation { .. } => Ok(
+            CrossHeadTaskTransferPersistenceOutcome::NeedsReconciliation {
                 envelope,
                 execution,
-            })
-        }
+            },
+        ),
     }
 }
 
@@ -1275,9 +1258,7 @@ impl CrossHeadTaskTransferActivationReceipt {
         let envelope = transfer.envelope();
         let receiver_authority = receiver_run
             .authority_read_receipt()
-            .ok_or(
-                CrossHeadTaskTransferActivationRefusal::ReceiverAuthorityReceiptRequired,
-            )?;
+            .ok_or(CrossHeadTaskTransferActivationRefusal::ReceiverAuthorityReceiptRequired)?;
         let receiver_run_commitment = receiver_run
             .commitment()
             .map_err(CrossHeadTaskTransferActivationRefusal::ReceiverRunIdentity)?;
@@ -1288,18 +1269,13 @@ impl CrossHeadTaskTransferActivationReceipt {
             return Err(CrossHeadTaskTransferActivationRefusal::ReceiverRunMismatch);
         }
         if receiver_authority != envelope.receiver_successor.authority_read_receipt() {
-            return Err(
-                CrossHeadTaskTransferActivationRefusal::ReceiverAuthorityMismatch,
-            );
+            return Err(CrossHeadTaskTransferActivationRefusal::ReceiverAuthorityMismatch);
         }
         if receiver_situation.authority_read_receipt() != receiver_authority
             || receiver_situation.intent_run_id() != Some(receiver_run.run_id())
-            || receiver_situation.intent_run_commitment()
-                != Some(receiver_run_commitment)
+            || receiver_situation.intent_run_commitment() != Some(receiver_run_commitment)
         {
-            return Err(
-                CrossHeadTaskTransferActivationRefusal::ReceiverSituationMismatch,
-            );
+            return Err(CrossHeadTaskTransferActivationRefusal::ReceiverSituationMismatch);
         }
 
         let claim_envelope = persisted_claim.envelope();
@@ -1307,18 +1283,12 @@ impl CrossHeadTaskTransferActivationReceipt {
             envelope.receiver_successor(),
             claim_envelope.before_snapshot(),
         ) {
-            return Err(
-                CrossHeadTaskTransferActivationRefusal::ClaimPredecessorMismatch,
-            );
+            return Err(CrossHeadTaskTransferActivationRefusal::ClaimPredecessorMismatch);
         }
-        if claim_envelope.before_snapshot().authority_read_receipt()
-            != receiver_authority
-            || persisted_claim.snapshot().authority_read_receipt()
-                != receiver_authority
+        if claim_envelope.before_snapshot().authority_read_receipt() != receiver_authority
+            || persisted_claim.snapshot().authority_read_receipt() != receiver_authority
         {
-            return Err(
-                CrossHeadTaskTransferActivationRefusal::ClaimAuthorityMismatch,
-            );
+            return Err(CrossHeadTaskTransferActivationRefusal::ClaimAuthorityMismatch);
         }
         if claim_envelope.adapter_identity() != envelope.adapter_identity {
             return Err(CrossHeadTaskTransferActivationRefusal::AdapterMismatch {
@@ -1343,9 +1313,7 @@ impl CrossHeadTaskTransferActivationReceipt {
         if claim.plan_id() == envelope.source_plan_id {
             return Err(CrossHeadTaskTransferActivationRefusal::SourcePlanReused);
         }
-        if *claim.previous_task_projection_generation()
-            != envelope.resulting_generation()
-        {
+        if *claim.previous_task_projection_generation() != envelope.resulting_generation() {
             return Err(
                 CrossHeadTaskTransferActivationRefusal::ClaimGenerationMismatch {
                     expected: envelope.resulting_generation(),
@@ -1369,32 +1337,22 @@ impl CrossHeadTaskTransferActivationReceipt {
             || active_claim.run_commitment() != claim.run_commitment()
             || active_claim.expires_at() != claim.expires_at()
         {
-            return Err(
-                CrossHeadTaskTransferActivationRefusal::ActiveClaimMismatch,
-            );
+            return Err(CrossHeadTaskTransferActivationRefusal::ActiveClaimMismatch);
         }
-        if active_claim.situation_id()
-            != *receiver_situation.situation_id().as_bytes()
+        if active_claim.situation_id() != *receiver_situation.situation_id().as_bytes()
             || active_claim.observed_at() != receiver_situation.observed_at()
         {
-            return Err(
-                CrossHeadTaskTransferActivationRefusal::ActivationSituationMismatch,
-            );
+            return Err(CrossHeadTaskTransferActivationRefusal::ActivationSituationMismatch);
         }
-        let task_component =
-            receiver_situation.component(SituationComponentKind::TaskProjection);
-        if task_component.basis_head_id()
-            != Some(receiver_authority.authority_head_id())
+        let task_component = receiver_situation.component(SituationComponentKind::TaskProjection);
+        if task_component.basis_head_id() != Some(receiver_authority.authority_head_id())
             || task_component.generation_commitment()
                 != Some(*claim.claimed_task_projection_generation())
         {
-            return Err(
-                CrossHeadTaskTransferActivationRefusal::ActivationGenerationMismatch,
-            );
+            return Err(CrossHeadTaskTransferActivationRefusal::ActivationGenerationMismatch);
         }
 
-        let persisted_claim_receipt_id =
-            persisted_claim.persistence_receipt().receipt_id();
+        let persisted_claim_receipt_id = persisted_claim.persistence_receipt().receipt_id();
         let mut receipt = Self {
             receipt_id: CrossHeadTaskTransferActivationReceiptId([0; 32]),
             transfer_receipt_id: transfer.receipt.receipt_id(),
@@ -1407,9 +1365,8 @@ impl CrossHeadTaskTransferActivationReceipt {
             claimed_generation: *claim.claimed_task_projection_generation(),
             observed_at: receiver_situation.observed_at(),
         };
-        receipt.receipt_id = CrossHeadTaskTransferActivationReceiptId(
-            activation_commitment(&receipt)?,
-        );
+        receipt.receipt_id =
+            CrossHeadTaskTransferActivationReceiptId(activation_commitment(&receipt)?);
         Ok(receipt)
     }
 
@@ -1692,24 +1649,18 @@ fn validate_source_lease(
         .lease()
         .ok_or(CrossHeadTaskTransferRefusal::SourceLeaseMissing)?;
     if snapshot.assignment()
-        != TaskProjectionAssignment::assigned(
-            source_run.run_id(),
-            source_run_commitment,
-        )
+        != TaskProjectionAssignment::assigned(source_run.run_id(), source_run_commitment)
         || lease.plan_id() != claim.plan_id()
         || lease.assignee() != source_run.run_id()
         || lease.run_commitment() != source_run_commitment
-        || lease.previous_generation()
-            != claim.previous_task_projection_generation()
+        || lease.previous_generation() != claim.previous_task_projection_generation()
         || lease.claimed_generation() != snapshot.generation()
-        || lease.claimed_generation()
-            != claim.claimed_task_projection_generation()
+        || lease.claimed_generation() != claim.claimed_task_projection_generation()
         || lease.reserved_surfaces() != claim.reserved_surfaces()
         || lease.claimed_at() != claim.claimed_at()
         || lease.expires_at() != claim.expires_at()
         || claim.repository_id() != snapshot.repository_id()
-        || claim.authority_head_id()
-            != snapshot.authority_read_receipt().authority_head_id()
+        || claim.authority_head_id() != snapshot.authority_read_receipt().authority_head_id()
         || claim.authority_head_generation()
             != snapshot
                 .authority_read_receipt()
@@ -1764,9 +1715,7 @@ fn validate_handoff(
     {
         return Err(CrossHeadTaskTransferRefusal::AcceptanceMismatch);
     }
-    if acceptance.authority_relation()
-        != HandoffAuthorityRelation::DescendantAuthenticatedHead
-    {
+    if acceptance.authority_relation() != HandoffAuthorityRelation::DescendantAuthenticatedHead {
         return Err(CrossHeadTaskTransferRefusal::DescendantAcceptanceRequired);
     }
 
@@ -1775,19 +1724,14 @@ fn validate_handoff(
         .ok_or(CrossHeadTaskTransferRefusal::ReceiverAuthorityReceiptRequired)?;
     if receiver_situation.authority_read_receipt() != receiver_authority
         || receiver_situation.intent_run_id() != Some(receiver_run.run_id())
-        || receiver_situation.intent_run_commitment()
-            != Some(receiver_run_commitment)
+        || receiver_situation.intent_run_commitment() != Some(receiver_run_commitment)
     {
         return Err(CrossHeadTaskTransferRefusal::ReceiverSituationMismatch);
     }
-    let task_component =
-        receiver_situation.component(SituationComponentKind::TaskProjection);
-    if task_component.basis_head_id()
-        != Some(receiver_authority.authority_head_id())
-        || task_component.generation_commitment()
-            != Some(*receiver_predecessor.generation())
-        || receiver_predecessor.observed_at()
-            < receiver_situation.observed_at()
+    let task_component = receiver_situation.component(SituationComponentKind::TaskProjection);
+    if task_component.basis_head_id() != Some(receiver_authority.authority_head_id())
+        || task_component.generation_commitment() != Some(*receiver_predecessor.generation())
+        || receiver_predecessor.observed_at() < receiver_situation.observed_at()
     {
         return Err(CrossHeadTaskTransferRefusal::ReceiverSituationTaskMismatch);
     }
@@ -1806,14 +1750,10 @@ fn validate_handoff(
     if expected_hops == 0
         || ancestry.repository_id() != source_authority.repository_id()
         || ancestry.ancestor_head_id() != source_authority.authority_head_id()
-        || ancestry.ancestor_generation()
-            != source_authority.authority_head_generation()
-        || ancestry.descendant_head_id()
-            != receiver_authority.authority_head_id()
-        || ancestry.descendant_generation()
-            != receiver_authority.authority_head_generation()
-        || ancestry.descendant_version_token()
-            != receiver_authority.backend_version_token()
+        || ancestry.ancestor_generation() != source_authority.authority_head_generation()
+        || ancestry.descendant_head_id() != receiver_authority.authority_head_id()
+        || ancestry.descendant_generation() != receiver_authority.authority_head_generation()
+        || ancestry.descendant_version_token() != receiver_authority.backend_version_token()
         || u64::from(ancestry.hops()) != expected_hops
     {
         return Err(CrossHeadTaskTransferRefusal::AncestryMismatch);
@@ -1831,9 +1771,7 @@ fn validate_semantic_predecessor(
         || source.assignment() != receiver.assignment()
         || !leases_match(source.lease(), receiver.lease())
     {
-        return Err(
-            CrossHeadTaskTransferRefusal::ReceiverPredecessorSemanticMismatch,
-        );
+        return Err(CrossHeadTaskTransferRefusal::ReceiverPredecessorSemanticMismatch);
     }
     Ok(())
 }
@@ -1844,8 +1782,7 @@ fn same_receiver_authority_position(
 ) -> bool {
     expected.repository_id() == observed.repository_id()
         && expected.authority_head_id() == observed.authority_head_id()
-        && expected.authority_head_generation()
-            == observed.authority_head_generation()
+        && expected.authority_head_generation() == observed.authority_head_generation()
         && expected.backend_version_token() == observed.backend_version_token()
 }
 
@@ -1997,9 +1934,7 @@ fn activation_commitment(
     Ok(hash(&encoder.into_bytes()))
 }
 
-const fn flush_is_definite_success(
-    disposition: TaskProjectionStoreFlushDisposition,
-) -> bool {
+const fn flush_is_definite_success(disposition: TaskProjectionStoreFlushDisposition) -> bool {
     matches!(
         disposition,
         TaskProjectionStoreFlushDisposition::Flushed

@@ -6,18 +6,17 @@ use std::collections::VecDeque;
 use fgit_agent::{
     ActiveTaskClaim, AgentChangePlan, AgentChangePlanSpec, AgentControlPulse,
     AgentSituationReceipt, AuthorityBoundTaskClaimApplication,
-    AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, ClassSet, EvidenceClass,
-    IntentRun, LogicalTime, OperationClass, PersistedTaskClaim, PlanApproval, PlanCheckpoint,
+    AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, ClassSet, EvidenceClass, IntentRun,
+    LogicalTime, OperationClass, PersistedTaskClaim, PlanApproval, PlanCheckpoint,
     PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId,
     PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RunId,
     SituationComponent, SituationComponentKind, SituationOmissionReason,
-    TaskClaimPersistenceOutcome, TaskClaimRefusal, TaskPersistenceGateRefusal,
+    TaskClaimPersistenceOutcome, TaskClaimRefusal, TaskPersistenceGateRefusal, TaskPhase,
     TaskProjectionAssignment, TaskProjectionMutationEnvelope, TaskProjectionPersistedState,
     TaskProjectionStore, TaskProjectionStoreFlushOutcome, TaskProjectionStoreFlushRefusal,
-    TaskProjectionStoreKey, TaskProjectionStoreReadRefusal,
-    TaskProjectionStoreWriteOutcome, TaskProjectionStoreWriteRefusal,
-    TaskReleaseDisposition, TaskResolutionPersistenceOutcome, TaskPhase, WorkConflict,
-    WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    TaskProjectionStoreKey, TaskProjectionStoreReadRefusal, TaskProjectionStoreWriteOutcome,
+    TaskProjectionStoreWriteRefusal, TaskReleaseDisposition, TaskResolutionPersistenceOutcome,
+    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
     persist_task_claim, persist_task_resolution,
 };
 use fgit_authority::{
@@ -25,7 +24,7 @@ use fgit_authority::{
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -80,12 +79,8 @@ fn authority_receipt() -> AuthorityReadReceipt {
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("authenticated agent receipt")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("authenticated agent receipt")
 }
 
 fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
@@ -97,10 +92,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -134,19 +126,12 @@ fn situation(
     .expect("complete situation")
 }
 
-fn plan(
-    pulse: &AgentControlPulse,
-    run: &IntentRun,
-    contract_byte: u8,
-) -> AgentChangePlan {
+fn plan(pulse: &AgentControlPulse, run: &IntentRun, contract_byte: u8) -> AgentChangePlan {
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x61));
     let spec = AgentChangePlanSpec::new(
         digest(contract_byte),
         run.allowed_operation_classes(),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -197,10 +182,10 @@ fn prepared_claim() -> PreparedClaim {
         WorkRankingInputs::new(1, 2, 3),
         WorkEligibilityInputs::new(0, None, None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&current, vec![item])
-        .expect("task is eligible");
-    let pulse = AgentControlPulse::build(&current, &frontier, Some(&run))
-        .expect("actionable pulse");
+    let frontier =
+        WorkFrontier::build_action_scoped(&current, vec![item]).expect("task is eligible");
+    let pulse =
+        AgentControlPulse::build(&current, &frontier, Some(&run)).expect("actionable pulse");
     let plan = plan(&pulse, &run, 0x60);
     let application = snapshot
         .claim(
@@ -250,7 +235,10 @@ fn reread(
 
 fn predecessor(envelope: &TaskProjectionMutationEnvelope) -> TaskProjectionPersistedState {
     TaskProjectionPersistedState::new(
-        reread(envelope.before_snapshot(), envelope.transition_observed_at().value() + 1),
+        reread(
+            envelope.before_snapshot(),
+            envelope.transition_observed_at().value() + 1,
+        ),
         None,
         None,
         None,
@@ -259,7 +247,10 @@ fn predecessor(envelope: &TaskProjectionMutationEnvelope) -> TaskProjectionPersi
 
 fn successor(envelope: &TaskProjectionMutationEnvelope) -> TaskProjectionPersistedState {
     TaskProjectionPersistedState::new(
-        reread(envelope.after_snapshot(), envelope.transition_observed_at().value() + 1),
+        reread(
+            envelope.after_snapshot(),
+            envelope.transition_observed_at().value() + 1,
+        ),
         Some(*envelope.transition_id().as_bytes()),
         Some(envelope.inner_transition_id()),
         Some(envelope.evidence_root()),
@@ -280,7 +271,11 @@ impl ScriptedStore {
     fn confirmed(envelope: &TaskProjectionMutationEnvelope) -> Self {
         Self {
             identity: ADAPTER_ID,
-            reads: vec![Ok(Some(predecessor(envelope))), Ok(Some(successor(envelope)))].into(),
+            reads: vec![
+                Ok(Some(predecessor(envelope))),
+                Ok(Some(successor(envelope))),
+            ]
+            .into(),
             write: Ok(TaskProjectionStoreWriteOutcome::Applied),
             flush: Ok(TaskProjectionStoreFlushOutcome::Flushed),
             read_calls: 0,
@@ -292,7 +287,11 @@ impl ScriptedStore {
     fn ambiguous_predecessor(envelope: &TaskProjectionMutationEnvelope) -> Self {
         Self {
             identity: ADAPTER_ID,
-            reads: vec![Ok(Some(predecessor(envelope))), Ok(Some(predecessor(envelope)))].into(),
+            reads: vec![
+                Ok(Some(predecessor(envelope))),
+                Ok(Some(predecessor(envelope))),
+            ]
+            .into(),
             write: Ok(TaskProjectionStoreWriteOutcome::Ambiguous {
                 probe_root: digest(0x91),
             }),
@@ -303,7 +302,7 @@ impl ScriptedStore {
         }
     }
 
-    fn untouched() -> Self {
+    const fn untouched() -> Self {
         Self {
             identity: ADAPTER_ID,
             reads: VecDeque::new(),
@@ -381,12 +380,7 @@ fn confirmed_persistence_is_the_claim_activation_boundary() {
         persisted.snapshot().snapshot_id()
     );
 
-    let refreshed = situation(
-        &receipt,
-        &run,
-        *persisted.snapshot().generation(),
-        30,
-    );
+    let refreshed = situation(&receipt, &run, *persisted.snapshot().generation(), 30);
     let active = persisted
         .claim_receipt()
         .activate(&refreshed, &run)
@@ -445,12 +439,7 @@ fn release_projection_is_exposed_only_after_release_persistence() {
     let receipt = prepared.receipt.clone();
     let run = prepared.run.clone();
     let (persisted_claim, _) = persist_confirmed_claim(prepared);
-    let activation = situation(
-        &receipt,
-        &run,
-        *persisted_claim.snapshot().generation(),
-        30,
-    );
+    let activation = situation(&receipt, &run, *persisted_claim.snapshot().generation(), 30);
     let active: ActiveTaskClaim = persisted_claim
         .claim_receipt()
         .activate(&activation, &run)

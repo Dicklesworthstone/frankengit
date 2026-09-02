@@ -2,21 +2,20 @@
 //! Public-path tests for pre-situation task projection collection.
 
 use fgit_agent::{
-    AgentSituationReceipt, AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime,
-    OperationClass, RunId, SituationComponent, SituationComponentKind,
-    SituationOmissionReason, TaskProjectionCollectionAdapterRefusal,
-    TaskProjectionCollectionExecutionRefusal, TaskProjectionCollectionObservation,
-    TaskProjectionCollectionRefusal, TaskProjectionCollectionRequest,
-    TaskProjectionCollectionRequestId, TaskProjectionCollector, TaskProjectionGeneration,
-    TaskProjectionRow, TaskPhase, WorkConflict, WorkFrontier, WorkRankingInputs, WorkTaskId,
-    collect_task_projection,
+    AgentSituationReceipt, AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime, OperationClass,
+    RunId, SituationComponent, SituationComponentKind, SituationOmissionReason, TaskPhase,
+    TaskProjectionCollectionAdapterRefusal, TaskProjectionCollectionExecutionRefusal,
+    TaskProjectionCollectionObservation, TaskProjectionCollectionRefusal,
+    TaskProjectionCollectionRequest, TaskProjectionCollectionRequestId, TaskProjectionCollector,
+    TaskProjectionGeneration, TaskProjectionRow, WorkConflict, WorkFrontier, WorkRankingInputs,
+    WorkTaskId, collect_task_projection,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -71,12 +70,8 @@ fn authority_receipt(store_id: u64) -> AuthorityReadReceipt {
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("authenticated agent receipt")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("authenticated agent receipt")
 }
 
 fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
@@ -142,7 +137,8 @@ impl TaskProjectionCollector for Collector {
             return Err(refusal);
         }
         Ok(TaskProjectionCollectionObservation::new(
-            self.override_request.unwrap_or_else(|| request.request_id()),
+            self.override_request
+                .unwrap_or_else(|| request.request_id()),
             self.generation,
             self.observed_at,
             self.rows.clone(),
@@ -158,13 +154,8 @@ fn current_generation_collection_builds_situation_and_frontier_without_cycle() {
     let run = run(&receipt);
     let mut collector = Collector::healthy(vec![row(0x41), row(0x42)]);
 
-    let collection = collect_task_projection(
-        &mut collector,
-        &receipt,
-        &run,
-        LogicalTime::new(20),
-    )
-    .expect("current generation is collected");
+    let collection = collect_task_projection(&mut collector, &receipt, &run, LogicalTime::new(20))
+        .expect("current generation is collected");
     assert_eq!(collection.snapshot().rows().len(), 2);
     assert_eq!(collection.snapshot().generation().as_bytes(), &GENERATION);
     assert_eq!(collection.repository_id(), receipt.repository_id());
@@ -188,19 +179,12 @@ fn current_generation_collection_builds_situation_and_frontier_without_cycle() {
             )
         }
     });
-    let situation = AgentSituationReceipt::build(
-        receipt,
-        Some(&run),
-        None,
-        LogicalTime::new(21),
-        components,
-    )
-    .expect("collection supplies the previously unknown task generation");
-    let frontier = WorkFrontier::build_action_scoped(
-        &situation,
-        collection.snapshot().work_items(),
-    )
-    .expect("complete task rows feed the frontier");
+    let situation =
+        AgentSituationReceipt::build(receipt, Some(&run), None, LogicalTime::new(21), components)
+            .expect("collection supplies the previously unknown task generation");
+    let frontier =
+        WorkFrontier::build_action_scoped(&situation, collection.snapshot().work_items())
+            .expect("complete task rows feed the frontier");
     assert_eq!(frontier.candidates().len(), 2);
     assert_eq!(collector.calls, 1);
 }
@@ -209,12 +193,8 @@ fn current_generation_collection_builds_situation_and_frontier_without_cycle() {
 fn collector_is_invoked_once_and_backend_refusal_remains_typed() {
     let receipt = authority_receipt(932);
     let run = run(&receipt);
-    let request = TaskProjectionCollectionRequest::new(
-        &receipt,
-        &run,
-        LogicalTime::new(20),
-    )
-    .expect("valid request");
+    let request = TaskProjectionCollectionRequest::new(&receipt, &run, LogicalTime::new(20))
+        .expect("valid request");
     let refusal = TaskProjectionCollectionAdapterRefusal::Unavailable {
         request_id: request.request_id(),
     };
@@ -222,13 +202,8 @@ fn collector_is_invoked_once_and_backend_refusal_remains_typed() {
     collector.refusal = Some(refusal.clone());
 
     assert_eq!(
-        collect_task_projection(
-            &mut collector,
-            &receipt,
-            &run,
-            LogicalTime::new(20),
-        )
-        .expect_err("unavailable backend remains a read-only refusal"),
+        collect_task_projection(&mut collector, &receipt, &run, LogicalTime::new(20),)
+            .expect_err("unavailable backend remains a read-only refusal"),
         TaskProjectionCollectionExecutionRefusal::Adapter(refusal)
     );
     assert_eq!(collector.calls, 1);
@@ -238,23 +213,14 @@ fn collector_is_invoked_once_and_backend_refusal_remains_typed() {
 fn substituted_request_identity_is_refused() {
     let receipt = authority_receipt(933);
     let run = run(&receipt);
-    let alternate = TaskProjectionCollectionRequest::new(
-        &receipt,
-        &run,
-        LogicalTime::new(21),
-    )
-    .expect("alternate request");
+    let alternate = TaskProjectionCollectionRequest::new(&receipt, &run, LogicalTime::new(21))
+        .expect("alternate request");
     let mut collector = Collector::healthy(vec![row(0x41)]);
     collector.override_request = Some(alternate.request_id());
     collector.observed_at = LogicalTime::new(22);
 
-    let refusal = collect_task_projection(
-        &mut collector,
-        &receipt,
-        &run,
-        LogicalTime::new(20),
-    )
-    .expect_err("collector cannot substitute another request");
+    let refusal = collect_task_projection(&mut collector, &receipt, &run, LogicalTime::new(20))
+        .expect_err("collector cannot substitute another request");
     assert!(matches!(
         refusal,
         TaskProjectionCollectionExecutionRefusal::Collection(
@@ -271,13 +237,8 @@ fn observation_rollback_is_refused() {
     collector.observed_at = LogicalTime::new(19);
 
     assert_eq!(
-        collect_task_projection(
-            &mut collector,
-            &receipt,
-            &run,
-            LogicalTime::new(20),
-        )
-        .expect_err("backend observation cannot predate its request"),
+        collect_task_projection(&mut collector, &receipt, &run, LogicalTime::new(20),)
+            .expect_err("backend observation cannot predate its request"),
         TaskProjectionCollectionExecutionRefusal::Collection(
             TaskProjectionCollectionRefusal::ObservationRollback {
                 requested_at: LogicalTime::new(20),
@@ -295,12 +256,7 @@ fn duplicate_task_rows_are_refused_by_canonical_snapshot_validation() {
     let mut collector = Collector::healthy(vec![duplicate.clone(), duplicate]);
 
     assert!(matches!(
-        collect_task_projection(
-            &mut collector,
-            &receipt,
-            &run,
-            LogicalTime::new(20),
-        ),
+        collect_task_projection(&mut collector, &receipt, &run, LogicalTime::new(20),),
         Err(TaskProjectionCollectionExecutionRefusal::Collection(
             TaskProjectionCollectionRefusal::Projection(
                 fgit_agent::TaskProjectionRefusal::DuplicateTask { .. }
@@ -317,13 +273,8 @@ fn zero_collector_identity_refuses_before_io() {
     collector.identity = [0; 32];
 
     assert_eq!(
-        collect_task_projection(
-            &mut collector,
-            &receipt,
-            &run,
-            LogicalTime::new(20),
-        )
-        .expect_err("zero profile is reserved"),
+        collect_task_projection(&mut collector, &receipt, &run, LogicalTime::new(20),)
+            .expect_err("zero profile is reserved"),
         TaskProjectionCollectionExecutionRefusal::Collection(
             TaskProjectionCollectionRefusal::ZeroAdapterIdentity,
         )

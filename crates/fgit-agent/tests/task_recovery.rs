@@ -3,31 +3,29 @@
 
 use fgit_agent::{
     AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentSituationReceipt,
-    AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, ClassSet, EvidenceClass,
-    IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
-    PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId,
-    PlanStopConditionSet, PlanSurface, PlanSurfaceKind,
-    RecoveredTaskReleasePersistenceOutcome, RejectedShortcutSet, RunBoundRecoveredTaskClaim,
-    RunId, SituationComponent, SituationComponentKind, SituationOmissionReason,
-    TaskClaimCancellationOutcome, TaskClaimProjection, TaskClaimReceipt,
-    TaskLeaseHistoryObservation, TaskLeaseReconstructionReceipt, TaskProjectionAssignment,
-    TaskProjectionCollectionObservation, TaskProjectionCollectionReceipt,
+    AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, ClassSet, EvidenceClass, IntentRun,
+    LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
+    PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet,
+    PlanSurface, PlanSurfaceKind, RecoveredTaskReleasePersistenceOutcome, RejectedShortcutSet,
+    RunBoundRecoveredTaskClaim, RunId, SituationComponent, SituationComponentKind,
+    SituationOmissionReason, TaskClaimCancellationOutcome, TaskClaimProjection, TaskClaimReceipt,
+    TaskLeaseHistoryObservation, TaskLeaseReconstructionReceipt, TaskPhase,
+    TaskProjectionAssignment, TaskProjectionCollectionObservation, TaskProjectionCollectionReceipt,
     TaskProjectionCollectionRequest, TaskProjectionCollector, TaskProjectionGeneration,
     TaskProjectionMutationEnvelope, TaskProjectionPersistedState, TaskProjectionRow,
     TaskProjectionStore, TaskProjectionStoreFlushOutcome, TaskProjectionStoreFlushRefusal,
-    TaskProjectionStoreKey, TaskProjectionStoreReadRefusal,
-    TaskProjectionStoreWriteOutcome, TaskProjectionStoreWriteRefusal,
-    TaskRecoveryPersistenceRefusal, TaskReleaseDisposition, TaskPhase, WorkConflict,
-    WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
-    collect_task_projection, persist_recovered_task_release,
-    reconstruct_collected_task_lease, recover_task_claim_for_cleanup,
+    TaskProjectionStoreKey, TaskProjectionStoreReadRefusal, TaskProjectionStoreWriteOutcome,
+    TaskProjectionStoreWriteRefusal, TaskRecoveryPersistenceRefusal, TaskReleaseDisposition,
+    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    collect_task_projection, persist_recovered_task_release, reconstruct_collected_task_lease,
+    recover_task_claim_for_cleanup,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -85,12 +83,8 @@ fn authority_receipt() -> AuthorityReadReceipt {
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("authenticated read")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("authenticated read")
 }
 
 fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
@@ -102,10 +96,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -129,14 +120,8 @@ fn situation(
             )
         }
     });
-    AgentSituationReceipt::build(
-        receipt.clone(),
-        Some(run),
-        None,
-        observed_at,
-        components,
-    )
-    .expect("complete situation")
+    AgentSituationReceipt::build(receipt.clone(), Some(run), None, observed_at, components)
+        .expect("complete situation")
 }
 
 fn pulse_and_plan(
@@ -145,12 +130,7 @@ fn pulse_and_plan(
     task_id: WorkTaskId,
     surface: PlanSurface,
 ) -> (AgentControlPulse, AgentChangePlan) {
-    let planning = situation(
-        receipt,
-        run,
-        PREVIOUS_GENERATION,
-        LogicalTime::new(14),
-    );
+    let planning = situation(receipt, run, PREVIOUS_GENERATION, LogicalTime::new(14));
     let item = WorkItem::new(
         task_id,
         PREVIOUS_GENERATION,
@@ -158,17 +138,14 @@ fn pulse_and_plan(
         WorkRankingInputs::new(1, 2, 3),
         WorkEligibilityInputs::new(0, None, None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&planning, vec![item])
-        .expect("task is eligible");
-    let pulse = AgentControlPulse::build(&planning, &frontier, Some(run))
-        .expect("actionable pulse");
+    let frontier =
+        WorkFrontier::build_action_scoped(&planning, vec![item]).expect("task is eligible");
+    let pulse =
+        AgentControlPulse::build(&planning, &frontier, Some(run)).expect("actionable pulse");
     let spec = AgentChangePlanSpec::new(
         digest(0x60),
         run.allowed_operation_classes(),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -268,13 +245,8 @@ fn recovery_fixture(history_profile: u8, history_evidence: u8) -> RecoveryFixtur
     )
     .expect("claimed current row");
     let mut collector = Collector { row };
-    let collection = collect_task_projection(
-        &mut collector,
-        &receipt,
-        &run,
-        LogicalTime::new(20),
-    )
-    .expect("current claimed generation");
+    let collection = collect_task_projection(&mut collector, &receipt, &run, LogicalTime::new(20))
+        .expect("current claimed generation");
     let reconstruction = reconstruct_collected_task_lease(
         &collection,
         &receipt,
@@ -300,19 +272,9 @@ fn recovery_fixture(history_profile: u8, history_evidence: u8) -> RecoveryFixtur
             .run_commitment(),
         run_commitment
     );
-    let refreshed = situation(
-        &receipt,
-        &run,
-        CLAIMED_GENERATION,
-        LogicalTime::new(21),
-    );
-    let recovered = recover_task_claim_for_cleanup(
-        &reconstruction,
-        &claim,
-        &refreshed,
-        &run,
-    )
-    .expect("run-bound active claim recovery");
+    let refreshed = situation(&receipt, &run, CLAIMED_GENERATION, LogicalTime::new(21));
+    let recovered = recover_task_claim_for_cleanup(&reconstruction, &claim, &refreshed, &run)
+        .expect("run-bound active claim recovery");
     RecoveryFixture {
         run,
         claim,
@@ -559,10 +521,7 @@ fn same_id_changed_run_is_refused_before_store_io() {
 #[test]
 fn ambiguous_release_retains_run_bound_recovery_identity_as_debt() {
     let fixture = recovery_fixture(0x85, 0x86);
-    let mut store = RecoveryStore::new(
-        &fixture.reconstruction,
-        StoreMode::AmbiguousPredecessor,
-    );
+    let mut store = RecoveryStore::new(&fixture.reconstruction, StoreMode::AmbiguousPredecessor);
     let outcome = persist_recovered_task_release(
         &mut store,
         &fixture.reconstruction,

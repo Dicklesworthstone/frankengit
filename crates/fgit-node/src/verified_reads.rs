@@ -130,6 +130,14 @@ pub enum VerifiedReadServingRefusal {
     OutcomeRootMismatch,
     /// A terminal-outcome inclusion proof cannot answer an undecided query.
     OutcomeProofUnavailable,
+    /// The selected configuration body uses a schema minor the verified-read
+    /// envelope vocabulary cannot yet carry exactly. Serving a normalized
+    /// projection instead would let the envelope recompute an identity the
+    /// head never committed to, so the read fails closed.
+    ConfigurationSchemaUnsupported {
+        /// Exact stored schema minor that has no envelope representation.
+        schema_minor: u16,
+    },
 }
 
 impl fmt::Display for VerifiedReadServingRefusal {
@@ -177,6 +185,11 @@ impl fmt::Display for VerifiedReadServingRefusal {
             Self::OutcomeProofUnavailable => {
                 formatter.write_str("an undecided outcome has no membership proof")
             }
+            Self::ConfigurationSchemaUnsupported { schema_minor } => write!(
+                formatter,
+                "the selected 2.{schema_minor} configuration body has no exact \
+                 verified-read envelope representation yet"
+            ),
         }
     }
 }
@@ -522,6 +535,14 @@ impl OneNode {
             // must recompute the identity selected by `configuration_root`.
             Ok(RepositoryIncarnationConfigurationEvidence::V2_1(body)) => {
                 Ok(VerifiedReadConfiguration::RepositoryIncarnationV2_1(body))
+            }
+            // The revocation-aware 2.2 body has no exact envelope variant yet.
+            // Handing the envelope the normalized projection (or a downgraded
+            // 2.1 body) would let it recompute an identity other than the one
+            // `head.configuration_root` committed to, so this read fails
+            // closed until the verified-read vocabulary carries 2.2 exactly.
+            Ok(RepositoryIncarnationConfigurationEvidence::V2_2(_)) => {
+                Err(VerifiedReadServingRefusal::ConfigurationSchemaUnsupported { schema_minor: 2 })
             }
             Err(OutcomeFailure::Codec(_)) => read_repository_configuration_async(
                 &self.authority,

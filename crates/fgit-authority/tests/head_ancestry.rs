@@ -2,8 +2,7 @@
 //! Public-path tests for bounded exact authority-head ancestry proofs.
 
 use core::future::Future;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityHeadAncestryRefusal,
@@ -207,8 +206,8 @@ fn equal_generation_does_not_turn_a_fork_into_a_descendant() {
     assert_eq!(
         refusal,
         AuthorityHeadAncestryRefusal::NotDescendant {
-            expected: head_id(&expected),
-            observed: head_id(&observed),
+            expected: Box::new(head_id(&expected)),
+            observed: Box::new(head_id(&observed)),
         }
     );
 }
@@ -244,12 +243,7 @@ fn a_discontinuous_predecessor_generation_fails_closed() {
     let backing = store(75);
     let ancestor = head(repository(0x76), 1, None, 0x51);
     stage_head(&backing, &ancestor);
-    let malformed = head(
-        ancestor.repository_id,
-        3,
-        Some(head_id(&ancestor)),
-        0x52,
-    );
+    let malformed = head(ancestor.repository_id, 3, Some(head_id(&ancestor)), 0x52);
     initialize(&backing, &malformed);
 
     let refusal = read_current_authority_head_descendant(
@@ -291,7 +285,7 @@ fn a_non_genesis_head_without_a_predecessor_is_refused() {
     assert_eq!(
         refusal,
         AuthorityHeadAncestryRefusal::MissingPredecessor {
-            head_id: head_id(&malformed),
+            head_id: Box::new(head_id(&malformed)),
             generation: malformed.generation,
         }
     );
@@ -362,10 +356,7 @@ impl AsyncAuthorityStore for AsyncMirror<'_> {
         body: &[u8],
     ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
         core::future::ready(AuthorityStore::initialize_head(
-            self.0,
-            key,
-            generation,
-            body,
+            self.0, key, generation, body,
         ))
     }
 
@@ -403,15 +394,9 @@ impl AsyncAuthorityStore for AsyncMirror<'_> {
     }
 }
 
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
     let mut future = Box::pin(future);
     loop {
         match future.as_mut().poll(&mut context) {

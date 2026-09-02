@@ -4,8 +4,8 @@
 use fgit_authority::{
     MemoryAuthorityStore, OutcomeFailure, RepositoryIncarnationConfiguration, StoreInstanceId,
     read_hidden_ref_policy, read_repository_incarnation_configuration, stage_hidden_ref_policy,
-    stage_latest_repository_incarnation_configuration,
-    stage_repository_configuration, stage_repository_incarnation_configuration,
+    stage_latest_repository_incarnation_configuration, stage_repository_configuration,
+    stage_repository_incarnation_configuration,
     stage_revocation_aware_repository_incarnation_configuration,
 };
 use fgit_codec::{

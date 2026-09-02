@@ -15,9 +15,7 @@ use core::fmt;
 use fgit_codec::{CodecRefusal, Encoder};
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 
-use crate::{
-    AgentSituationReceipt, RunId, SituationComponentKind, SituationOmissionReason,
-};
+use crate::{AgentSituationReceipt, RunId, SituationComponentKind, SituationOmissionReason};
 
 /// Maximum task rows accepted by one frontier construction.
 pub const MAX_WORK_ITEMS: usize = 4_096;
@@ -78,7 +76,7 @@ impl fmt::Display for WorkFrontierId {
 }
 
 /// Task lifecycle phase represented by the task projection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum TaskPhase {
     /// Work has not started.
     Open,
@@ -123,7 +121,7 @@ impl TaskPhase {
 }
 
 /// Action an eligible row asks the active run to perform.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum WorkAction {
     /// Implement the accepted task contract.
     Implement,
@@ -613,11 +611,7 @@ impl WorkFrontier {
         }
         excluded.sort_unstable_by_key(|entry| entry.item.task_id);
 
-        let frontier_id = WorkFrontierId(frontier_commitment(
-            &basis,
-            &candidates,
-            &excluded,
-        )?);
+        let frontier_id = WorkFrontierId(frontier_commitment(&basis, &candidates, &excluded)?);
 
         Ok(Self {
             frontier_id,
@@ -778,11 +772,10 @@ fn exclusion_reason(basis: &FrontierBasis, item: WorkItem) -> Option<FrontierExc
         None => return Some(FrontierExclusionReason::NoIntentRun),
     };
 
-    if let Some(assignee) = item.eligibility.assignee {
-        if assignee != active_run {
+    if let Some(assignee) = item.eligibility.assignee
+        && assignee != active_run {
             return Some(FrontierExclusionReason::AssignedElsewhere { assignee });
         }
-    }
     if item.eligibility.independent_from == Some(active_run) {
         return Some(FrontierExclusionReason::IndependenceRequired {
             implementation_run: active_run,
@@ -795,9 +788,7 @@ fn exclusion_reason(basis: &FrontierBasis, item: WorkItem) -> Option<FrontierExc
     match item.eligibility.conflict {
         WorkConflict::Clear => None,
         WorkConflict::ReservedBy(owner) if owner == active_run => None,
-        WorkConflict::ReservedBy(owner) => {
-            Some(FrontierExclusionReason::ReservedByOther { owner })
-        }
+        WorkConflict::ReservedBy(owner) => Some(FrontierExclusionReason::ReservedByOther { owner }),
         WorkConflict::Unknown => Some(FrontierExclusionReason::ConflictUnknown),
     }
 }
@@ -927,9 +918,9 @@ fn write_count(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExcludedWorkItem, FrontierBasis, FrontierExclusionReason, FrontierRefusal,
-        MAX_WORK_ITEMS, TaskPhase, WorkAction, WorkCandidate, WorkConflict,
-        WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+        ExcludedWorkItem, FrontierBasis, FrontierExclusionReason, FrontierRefusal, MAX_WORK_ITEMS,
+        TaskPhase, WorkAction, WorkCandidate, WorkConflict, WorkEligibilityInputs, WorkFrontier,
+        WorkItem, WorkRankingInputs, WorkTaskId,
     };
     use crate::RunId;
 
@@ -1000,7 +991,10 @@ mod tests {
         assert_eq!(first.candidates()[1].action(), WorkAction::Verify);
         assert_eq!(first.candidates()[2].action(), WorkAction::Implement);
         for (index, candidate) in first.candidates().iter().enumerate() {
-            assert_eq!(candidate.rank(), u32::try_from(index).expect("five ranks fit"));
+            assert_eq!(
+                candidate.rank(),
+                u32::try_from(index).expect("five ranks fit")
+            );
         }
     }
 
@@ -1057,26 +1051,14 @@ mod tests {
                 GENERATION,
                 TaskPhase::Open,
                 WorkRankingInputs::new(0, u32::MAX, 0),
-                WorkEligibilityInputs::new(
-                    0,
-                    None,
-                    None,
-                    true,
-                    WorkConflict::ReservedBy(other),
-                ),
+                WorkEligibilityInputs::new(0, None, None, true, WorkConflict::ReservedBy(other)),
             ),
             WorkItem::new(
                 task_id(9),
                 GENERATION,
                 TaskPhase::Open,
                 WorkRankingInputs::new(0, 0, 0),
-                WorkEligibilityInputs::new(
-                    0,
-                    Some(run),
-                    None,
-                    true,
-                    WorkConflict::ReservedBy(run),
-                ),
+                WorkEligibilityInputs::new(0, Some(run), None, true, WorkConflict::ReservedBy(run)),
             ),
         ];
         let frontier = WorkFrontier::build_from_basis(basis(Some(run)), rows)
@@ -1130,11 +1112,8 @@ mod tests {
             WorkEligibilityInputs::new(1, None, None, true, WorkConflict::Clear),
         );
         let otherwise_ready = item(2, TaskPhase::Open, 0, 0, 0);
-        let frontier = WorkFrontier::build_from_basis(
-            basis(None),
-            vec![otherwise_ready, blocked],
-        )
-        .expect("missing run yields exclusions rather than a fabricated candidate");
+        let frontier = WorkFrontier::build_from_basis(basis(None), vec![otherwise_ready, blocked])
+            .expect("missing run yields exclusions rather than a fabricated candidate");
 
         assert!(frontier.candidates().is_empty());
         assert_eq!(

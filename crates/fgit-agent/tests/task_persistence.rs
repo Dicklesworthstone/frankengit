@@ -3,23 +3,21 @@
 
 use fgit_agent::{
     AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentSituationReceipt,
-    AuthorityBoundTaskClaimApplication, AuthorityBoundTaskProjectionSnapshot,
-    AuthorityReadReceipt, ClassSet, EvidenceClass, IntentRun, LogicalTime, OperationClass,
-    PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
-    PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface,
-    PlanSurfaceKind, RejectedShortcutSet, RunId, SituationComponent,
-    SituationComponentKind, SituationOmissionReason, TaskProjectionAssignment,
-    TaskProjectionMutationEnvelope, TaskProjectionPersistedState,
-    TaskProjectionPersistenceDecision, TaskProjectionPersistenceRefusal, TaskPhase,
-    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs,
-    WorkTaskId,
+    AuthorityBoundTaskClaimApplication, AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt,
+    ClassSet, EvidenceClass, IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint,
+    PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId,
+    PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RunId,
+    SituationComponent, SituationComponentKind, SituationOmissionReason, TaskPhase,
+    TaskProjectionAssignment, TaskProjectionMutationEnvelope, TaskProjectionPersistedState,
+    TaskProjectionPersistenceDecision, TaskProjectionPersistenceRefusal, WorkConflict,
+    WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -73,12 +71,8 @@ fn authority_receipt() -> AuthorityReadReceipt {
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("authenticated agent receipt")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("authenticated agent receipt")
 }
 
 fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
@@ -90,10 +84,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -139,18 +130,15 @@ fn pulse_and_plan(
         WorkRankingInputs::new(1, 2, 3),
         WorkEligibilityInputs::new(0, None, None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&current, vec![item])
-        .expect("task is eligible");
+    let frontier =
+        WorkFrontier::build_action_scoped(&current, vec![item]).expect("task is eligible");
     let pulse = AgentControlPulse::build(&current, &frontier, Some(run))
         .expect("live run makes an actionable pulse");
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x61));
     let spec = AgentChangePlanSpec::new(
         digest(0x60),
         run.allowed_operation_classes(),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -227,12 +215,7 @@ fn reread(
 }
 
 fn predecessor_state(envelope: &TaskProjectionMutationEnvelope) -> TaskProjectionPersistedState {
-    TaskProjectionPersistedState::new(
-        reread(envelope.before_snapshot(), 26),
-        None,
-        None,
-        None,
-    )
+    TaskProjectionPersistedState::new(reread(envelope.before_snapshot(), 26), None, None, None)
 }
 
 fn successor_state(envelope: &TaskProjectionMutationEnvelope) -> TaskProjectionPersistedState {
@@ -304,7 +287,10 @@ fn complete_successor_and_metadata_make_a_receipt() {
     assert_eq!(receipt.envelope_id(), envelope.envelope_id());
     assert_eq!(receipt.snapshot_id(), envelope.after_snapshot_id());
     assert_eq!(receipt.generation(), envelope.resulting_generation());
-    assert_eq!(receipt.transition_id(), *envelope.transition_id().as_bytes());
+    assert_eq!(
+        receipt.transition_id(),
+        *envelope.transition_id().as_bytes()
+    );
     assert_ne!(receipt.receipt_id().as_bytes(), &[0; 32]);
 }
 
@@ -386,8 +372,20 @@ fn logical_successor_is_independent_from_adapter_evidence_identity() {
     let first = claim_application(0x81, 0x82);
     let second = claim_application(0x83, 0x84);
 
-    assert_eq!(first.snapshot().generation(), second.snapshot().generation());
-    assert_eq!(first.snapshot().snapshot_id(), second.snapshot().snapshot_id());
-    assert_ne!(first.transition().transition_id(), second.transition().transition_id());
-    assert_ne!(first.projection().adapter_identity(), second.projection().adapter_identity());
+    assert_eq!(
+        first.snapshot().generation(),
+        second.snapshot().generation()
+    );
+    assert_eq!(
+        first.snapshot().snapshot_id(),
+        second.snapshot().snapshot_id()
+    );
+    assert_ne!(
+        first.transition().transition_id(),
+        second.transition().transition_id()
+    );
+    assert_ne!(
+        first.projection().adapter_identity(),
+        second.projection().adapter_identity()
+    );
 }

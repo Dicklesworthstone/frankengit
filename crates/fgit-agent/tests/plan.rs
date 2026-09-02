@@ -7,16 +7,16 @@ use fgit_agent::{
     IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
     PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRefusal, PlanRequirementId,
     PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RetrievalChannel,
-    RunId, SITUATION_COMPONENT_COUNT, SituationComponent, SituationComponentKind,
-    SituationOmissionReason, TaskPhase, WorkAction, WorkConflict, WorkEligibilityInputs,
-    WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    RunId, SituationComponent, SituationComponentKind, SituationOmissionReason, TaskPhase,
+    WorkAction, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs,
+    WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -103,10 +103,7 @@ fn run(receipt: &AuthorityReadReceipt, run_id: u128) -> IntentRun {
         RunId::new(run_id),
         receipt.clone(),
         allowed_classes(),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 32_768),
-            (Grade::CpuMicros, 50_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 32_768), (Grade::CpuMicros, 50_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -119,11 +116,7 @@ fn situation(receipt: &AuthorityReadReceipt, active_run: &IntentRun) -> AgentSit
             SituationComponent::observed(kind, receipt.authority_head_id(), TASK_GENERATION)
         } else {
             let byte = u8::try_from(index + 1).expect("component index fits u8");
-            SituationComponent::omitted(
-                kind,
-                SituationOmissionReason::NotAvailable,
-                [byte; 32],
-            )
+            SituationComponent::omitted(kind, SituationOmissionReason::NotAvailable, [byte; 32])
         }
     });
     AgentSituationReceipt::build(
@@ -175,8 +168,7 @@ fn context(receipt: AuthorityReadReceipt, byte: u8) -> ContextPacket {
         vec![byte; 16],
     )
     .expect("bounded source body");
-    ContextPacket::build(receipt, control, vec![source])
-        .expect("single-generation context packet")
+    ContextPacket::build(receipt, control, vec![source]).expect("single-generation context packet")
 }
 
 fn spec(action: WorkAction) -> AgentChangePlanSpec {
@@ -194,10 +186,7 @@ fn spec(action: WorkAction) -> AgentChangePlanSpec {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 8_192),
-            (Grade::CpuMicros, 10_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 8_192), (Grade::CpuMicros, 10_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -227,7 +216,7 @@ fn plan_binds_selected_work_and_canonicalizes_unordered_inputs() {
     let active_run = run(&receipt, 7);
     let pulse = pulse(&receipt, &active_run, TaskPhase::Open);
     let first_context = context(receipt.clone(), 0x71);
-    let second_context = context(receipt.clone(), 0x72);
+    let second_context = context(receipt, 0x72);
 
     let plan = AgentChangePlan::build(
         &pulse,
@@ -311,19 +300,14 @@ fn plan_budget_cannot_amplify_the_run() {
 fn verification_plan_requires_independent_evidence() {
     let receipt = authority_receipt(104, 0x25);
     let active_run = run(&receipt, 7);
-    let pulse = pulse(
-        &receipt,
-        &active_run,
-        TaskPhase::VerificationPending,
-    );
-    let not_independent = spec(WorkAction::Verify).with_evidence_plan(vec![
-        PlanEvidenceRequirement::new(
+    let pulse = pulse(&receipt, &active_run, TaskPhase::VerificationPending);
+    let not_independent =
+        spec(WorkAction::Verify).with_evidence_plan(vec![PlanEvidenceRequirement::new(
             PlanRequirementId::from_bytes([0x68; 32]),
             EvidenceClass::Executed,
             digest(0x69),
             false,
-        ),
-    ]);
+        )]);
 
     assert_eq!(
         AgentChangePlan::build(&pulse, &active_run, &[], not_independent)
@@ -344,7 +328,7 @@ fn context_from_another_authority_position_is_refused() {
         AgentChangePlan::build(
             &pulse,
             &active_run,
-            &[foreign_packet.clone()],
+            std::slice::from_ref(&foreign_packet),
             spec(WorkAction::Implement),
         )
         .expect_err("mixed authority context must fail closed"),

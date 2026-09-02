@@ -24,8 +24,8 @@ use fgit_types::Digest;
 use crate::{
     ActiveTaskClaim, ActiveTaskClaimId, AgentChangePlan, AgentChangePlanId, AgentInstanceId,
     AgentSituationReceipt, ClassSet, EffectId, EffectResolutionAction, EvidenceRecordRef,
-    IntentRun, LogicalTime, OperationClass, ReconciledEffect, RequirementDisposition,
-    RunId, RunReconciliationReadiness, RunReconciliationReport, SituationId, VerifierAttestation,
+    IntentRun, LogicalTime, OperationClass, ReconciledEffect, RequirementDisposition, RunId,
+    RunReconciliationReadiness, RunReconciliationReport, SituationId, VerifierAttestation,
 };
 
 /// Maximum entries accepted by any general handoff collection.
@@ -255,13 +255,7 @@ impl AgentHandoffCapsule {
         reconciliation: RunReconciliationReport,
         mut spec: AgentHandoffCapsuleSpec,
     ) -> Result<Self, HandoffRefusal> {
-        validate_control_basis(
-            latest_situation,
-            plan,
-            active_claim,
-            run,
-            &reconciliation,
-        )?;
+        validate_control_basis(latest_situation, plan, active_claim, run, &reconciliation)?;
         validate_attenuation(
             latest_situation,
             active_claim,
@@ -419,9 +413,10 @@ impl AgentHandoffCapsule {
 
     /// Outstanding effects, preserving complete records and typed next actions.
     pub fn outstanding_effects(&self) -> impl Iterator<Item = &ReconciledEffect> {
-        self.reconciliation.effects().iter().filter(|effect| {
-            effect.required_action() != EffectResolutionAction::NoFurtherAction
-        })
+        self.reconciliation
+            .effects()
+            .iter()
+            .filter(|effect| effect.required_action() != EffectResolutionAction::NoFurtherAction)
     }
 
     /// Number of outstanding effects or containment failures.
@@ -620,15 +615,9 @@ impl fmt::Display for HandoffRefusal {
                 formatter,
                 "plan run {expected} differs from supplied run {observed}"
             ),
-            Self::ClaimPlanMismatch => {
-                formatter.write_str("active claim belongs to another plan")
-            }
-            Self::ClaimTaskMismatch => {
-                formatter.write_str("active claim belongs to another task")
-            }
-            Self::ClaimRunMismatch => {
-                formatter.write_str("active claim belongs to another run")
-            }
+            Self::ClaimPlanMismatch => formatter.write_str("active claim belongs to another plan"),
+            Self::ClaimTaskMismatch => formatter.write_str("active claim belongs to another task"),
+            Self::ClaimRunMismatch => formatter.write_str("active claim belongs to another run"),
             Self::ClaimExpired {
                 expires_at,
                 observed_at,
@@ -646,9 +635,9 @@ impl fmt::Display for HandoffRefusal {
             Self::ReconciliationRunMismatch => {
                 formatter.write_str("reconciliation report belongs to another run")
             }
-            Self::ReconciliationAuthorityMismatch => formatter.write_str(
-                "reconciliation report belongs to another authority position",
-            ),
+            Self::ReconciliationAuthorityMismatch => {
+                formatter.write_str("reconciliation report belongs to another authority position")
+            }
             Self::ReconciliationObservationMismatch {
                 situation,
                 reconciliation,
@@ -656,8 +645,9 @@ impl fmt::Display for HandoffRefusal {
                 formatter,
                 "situation observed at {situation}, reconciliation at {reconciliation}"
             ),
-            Self::ReconciliationRunNotOpen => formatter
-                .write_str("reconciliation report says the source run was not open"),
+            Self::ReconciliationRunNotOpen => {
+                formatter.write_str("reconciliation report says the source run was not open")
+            }
             Self::EmptyCapabilityAttenuation => {
                 formatter.write_str("handoff receiver scope authorizes no operations")
             }
@@ -716,9 +706,8 @@ impl fmt::Display for HandoffRefusal {
                 formatter,
                 "handoff requirement {requirement} has no disposition"
             ),
-            Self::SatisfiedWithoutEvidence => formatter.write_str(
-                "handoff claims a satisfied requirement but carries no evidence record",
-            ),
+            Self::SatisfiedWithoutEvidence => formatter
+                .write_str("handoff claims a satisfied requirement but carries no evidence record"),
             Self::DuplicateEvidenceRecord { artifact } => write!(
                 formatter,
                 "handoff repeats evidence artifact {artifact:032x}"
@@ -883,9 +872,8 @@ fn validate_dispositions(
     }
     let mut complete = Vec::with_capacity(dispositions.len());
     for (requirement, disposition) in dispositions.into_iter().enumerate() {
-        let disposition = disposition.ok_or(HandoffRefusal::MissingRequirementDisposition {
-            requirement,
-        })?;
+        let disposition =
+            disposition.ok_or(HandoffRefusal::MissingRequirementDisposition { requirement })?;
         complete.push(disposition);
     }
     if evidence_is_empty
@@ -948,7 +936,7 @@ fn canonicalize_verifiers(
     Ok(())
 }
 
-fn verifier_sort_key(
+const fn verifier_sort_key(
     attestation: &VerifierAttestation,
 ) -> (
     u128,
@@ -1057,10 +1045,7 @@ fn capsule_commitment(capsule: &AgentHandoffCapsule) -> Result<[u8; 32], Handoff
         &capsule.requested_next_actions,
     )?;
     encoder.write_scalar(capsule.capability_attenuation.operations.bits());
-    write_resource_vector(
-        &mut encoder,
-        capsule.capability_attenuation.resource_budget,
-    );
+    write_resource_vector(&mut encoder, capsule.capability_attenuation.resource_budget);
     encoder.write_scalar(capsule.capability_attenuation.expiry.value());
     write_digests(&mut encoder, "handoff.non_claims", &capsule.non_claims)?;
     encoder.write_digest(&capsule.producer_attestation_root)?;
@@ -1093,11 +1078,7 @@ fn write_verifiers(
     encoder: &mut Encoder,
     attestations: &[VerifierAttestation],
 ) -> Result<(), HandoffRefusal> {
-    write_count(
-        encoder,
-        "handoff.verifier_attestations",
-        attestations.len(),
-    )?;
+    write_count(encoder, "handoff.verifier_attestations", attestations.len())?;
     for attestation in attestations {
         encoder.write_raw(&attestation.verifier.to_be_bytes());
         write_optional_u128(encoder, attestation.facts.workspace);

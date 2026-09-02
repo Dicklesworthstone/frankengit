@@ -65,8 +65,8 @@ mod admission;
 mod async_contract;
 mod capability_revocation;
 mod contract;
-pub mod history;
 mod head_ancestry;
+pub mod history;
 mod identity;
 mod injection;
 mod keys;
@@ -99,12 +99,11 @@ pub use crate::admission::{
 };
 pub use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
 pub use crate::capability_revocation::{
-    MAX_CAPABILITY_REVOCATION_ENTRIES, CapabilityRevocationAuthorityFailure,
-    CapabilityRevocationBodyRefusal, CapabilityRevocationGenerationBody,
-    CapabilityRevocationGenerationId, CapabilityRevocationGenerationRead,
-    CapabilityRevocationGenerationStage, capability_revocation_generation_id_from_root,
-    read_capability_revocation_generation_by_id,
-    read_capability_revocation_generation_by_id_async,
+    CapabilityRevocationAuthorityFailure, CapabilityRevocationBodyRefusal,
+    CapabilityRevocationGenerationBody, CapabilityRevocationGenerationId,
+    CapabilityRevocationGenerationRead, CapabilityRevocationGenerationStage,
+    MAX_CAPABILITY_REVOCATION_ENTRIES, capability_revocation_generation_id_from_root,
+    read_capability_revocation_generation_by_id, read_capability_revocation_generation_by_id_async,
     read_head_selected_capability_revocation_generation,
     read_head_selected_capability_revocation_generation_async,
     stage_capability_revocation_generation, stage_capability_revocation_generation_async,
@@ -115,9 +114,9 @@ pub use crate::contract::{
     resolve_ambiguous_put, resolve_ambiguous_put_async,
 };
 pub use crate::head_ancestry::{
-    MAX_AUTHORITY_HEAD_ANCESTRY_HOPS, AuthorityHeadAncestryReceipt,
-    AuthorityHeadAncestryReceiptId, AuthorityHeadAncestryRefusal, CurrentAuthorityHead,
-    read_current_authority_head_descendant, read_current_authority_head_descendant_async,
+    AuthorityHeadAncestryReceipt, AuthorityHeadAncestryReceiptId, AuthorityHeadAncestryRefusal,
+    CurrentAuthorityHead, MAX_AUTHORITY_HEAD_ANCESTRY_HOPS, read_current_authority_head_descendant,
+    read_current_authority_head_descendant_async,
 };
 pub use crate::identity::{
     IdempotencyKey, IdentityRefusal, MAX_IDEMPOTENCY_KEY_BYTES, TxIdPreimage, canonical_body_id,

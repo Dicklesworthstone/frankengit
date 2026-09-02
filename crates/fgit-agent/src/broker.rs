@@ -455,24 +455,22 @@ impl EffectJournal {
                 effect_id: record.effect_id,
             });
         }
-        if let Some(expected) = self.run_id {
-            if record.run_id != expected {
+        if let Some(expected) = self.run_id
+            && record.run_id != expected {
                 return Err(EffectJournalRefusal::MixedRun {
                     effect_id: record.effect_id,
                     expected,
                     observed: record.run_id,
                 });
             }
-        }
-        if let Some(expected) = self.run_commitment {
-            if record.run_commitment != expected {
+        if let Some(expected) = self.run_commitment
+            && record.run_commitment != expected {
                 return Err(EffectJournalRefusal::MixedRunCommitment {
                     effect_id: record.effect_id,
                     expected,
                     observed: record.run_commitment,
                 });
             }
-        }
         if self.contains(record.effect_id) {
             return Err(EffectJournalRefusal::DuplicateEffectId {
                 effect_id: record.effect_id,
@@ -1394,7 +1392,10 @@ impl fmt::Display for BrokerRefusal {
                 "effect {effect_id} is already registered and cannot reserve again"
             ),
             Self::RunIdentity(source) => {
-                write!(formatter, "effect broker could not identify its run: {source}")
+                write!(
+                    formatter,
+                    "effect broker could not identify its run: {source}"
+                )
             }
             Self::RunExpired { now, expiry } => {
                 write!(

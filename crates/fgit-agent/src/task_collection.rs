@@ -20,7 +20,7 @@
 use core::fmt;
 
 use fgit_codec::{CodecRefusal, Encoder};
-use fgit_crypto::{DigestHasher, GitHashAlgorithm, NativeObjectIdentity, Sha256};
+use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_types::{Digest, HeadGeneration, RepositoryAuthorityHeadId, RepositoryId};
 
 use crate::{
@@ -31,8 +31,7 @@ use crate::{
 };
 
 const REQUEST_DOMAIN: &[u8] = b"frankengit.agent.task-projection-collection/v1\0";
-const RECEIPT_DOMAIN: &[u8] =
-    b"frankengit.agent.task-projection-collection-receipt/v1\0";
+const RECEIPT_DOMAIN: &[u8] = b"frankengit.agent.task-projection-collection-receipt/v1\0";
 
 /// Stable identity of one current-generation collection request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -359,7 +358,7 @@ impl TaskProjectionCollectionReceipt {
 
     /// Task-projection component inserted into the Agent Situation.
     #[must_use]
-    pub fn situation_component(&self) -> SituationComponent {
+    pub const fn situation_component(&self) -> SituationComponent {
         SituationComponent::observed(
             SituationComponentKind::TaskProjection,
             self.authority_head_id,
@@ -391,13 +390,8 @@ pub fn collect_task_projection<C: TaskProjectionCollector>(
     let observation = collector
         .collect(&request)
         .map_err(TaskProjectionCollectionExecutionRefusal::Adapter)?;
-    validate_observation(
-        request,
-        expected_adapter_identity,
-        observation,
-        authority,
-    )
-    .map_err(TaskProjectionCollectionExecutionRefusal::Collection)
+    validate_observation(request, expected_adapter_identity, observation, authority)
+        .map_err(TaskProjectionCollectionExecutionRefusal::Collection)
 }
 
 /// Definite read-only collector refusal.
@@ -510,7 +504,10 @@ impl core::error::Error for TaskProjectionCollectionAdapterRefusal {}
 
 impl fmt::Display for TaskProjectionCollectionExecutionRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "task projection collection execution refused: {self:?}")
+        write!(
+            formatter,
+            "task projection collection execution refused: {self:?}"
+        )
     }
 }
 
@@ -555,10 +552,12 @@ fn validate_observation(
     authority: &AuthorityReadReceipt,
 ) -> Result<TaskProjectionCollectionReceipt, TaskProjectionCollectionRefusal> {
     if observation.request_id != request.request_id {
-        return Err(TaskProjectionCollectionRefusal::ObservationRequestMismatch {
-            expected: request.request_id,
-            observed: observation.request_id,
-        });
+        return Err(
+            TaskProjectionCollectionRefusal::ObservationRequestMismatch {
+                expected: request.request_id,
+                observed: observation.request_id,
+            },
+        );
     }
     if is_zero(&observation.adapter_identity) {
         return Err(TaskProjectionCollectionRefusal::ZeroAdapterIdentity);

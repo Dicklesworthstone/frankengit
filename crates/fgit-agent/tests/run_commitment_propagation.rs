@@ -2,17 +2,16 @@
 //! End-to-end public-path tests for complete Intent Run identity propagation.
 
 use fgit_agent::{
-    ActionPacketRefusal, ActionPreconditionSet, ActionStep, ActionStepId,
-    AgentActionPacket, AgentActionPacketSpec, AgentChangePlan, AgentChangePlanSpec,
-    AgentControlPulse, AgentSituationReceipt, AuthorityBoundTaskProjectionSnapshot,
-    AuthorityReadReceipt, ClassSet, EvidenceClass, IntentRun, LogicalTime, OperationClass,
-    PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
-    PlanEvidenceRequirement, PlanRefusal, PlanRequirementId, PlanStopConditionSet,
-    PlanSurface, PlanSurfaceKind, PulseRefusal, RejectedShortcutSet, RunId,
-    SituationComponent, SituationComponentKind, SituationOmissionReason,
-    TaskClaimProjection, TaskClaimReceipt, TaskClaimRefusal, TaskCoordinationRefusal,
-    TaskProjectionAdapterRefusal, TaskProjectionAssignment, TaskReleaseDisposition,
-    TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
+    ActionPacketRefusal, ActionPreconditionSet, ActionStep, ActionStepId, AgentActionPacket,
+    AgentActionPacketSpec, AgentChangePlan, AgentChangePlanSpec, AgentControlPulse,
+    AgentSituationReceipt, AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, ClassSet,
+    EvidenceClass, IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint,
+    PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRefusal,
+    PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind, PulseRefusal,
+    RejectedShortcutSet, RunId, SituationComponent, SituationComponentKind,
+    SituationOmissionReason, TaskClaimProjection, TaskClaimReceipt, TaskClaimRefusal,
+    TaskCoordinationRefusal, TaskPhase, TaskProjectionAdapterRefusal, TaskProjectionAssignment,
+    TaskReleaseDisposition, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
     WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
@@ -20,11 +19,11 @@ use fgit_authority::{
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch,
-    RegistryEpoch, RepositoryCommitId, RepositoryId, RepositorySequence,
+    CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
+    RepositoryCommitId, RepositoryId, RepositorySequence,
 };
 
 const TASK_BASIS: [u8; 32] = [0x44; 32];
@@ -68,8 +67,7 @@ fn authority_receipt() -> AuthorityReadReceipt {
         last_checkpoint_id: None,
     };
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(1_041));
-    let key = HeadKey::new(b"run-commitment-propagation-test".to_vec())
-        .expect("bounded head key");
+    let key = HeadKey::new(b"run-commitment-propagation-test".to_vec()).expect("bounded head key");
     let read = match initialize_repository(&store, &key, &body).expect("initialize head") {
         HeadInit::Created(read) => read,
         HeadInit::IdenticalRetry(_) | HeadInit::Conflict => panic!("fresh store must create"),
@@ -77,12 +75,8 @@ fn authority_receipt() -> AuthorityReadReceipt {
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("authenticated agent receipt")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("authenticated agent receipt")
 }
 
 fn run(
@@ -95,10 +89,7 @@ fn run(
         RunId::new(7),
         receipt.clone(),
         ClassSet::from_classes(classes),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, bytes),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, bytes), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(expiry),
     )
     .expect("authenticated run opens")
@@ -148,16 +139,9 @@ fn frontier(
         TASK_BASIS,
         TaskPhase::Open,
         WorkRankingInputs::new(1, 2, 3),
-        WorkEligibilityInputs::new(
-            0,
-            Some(run.run_id()),
-            None,
-            true,
-            WorkConflict::Clear,
-        ),
+        WorkEligibilityInputs::new(0, Some(run.run_id()), None, true, WorkConflict::Clear),
     );
-    WorkFrontier::build_action_scoped(situation, vec![item])
-        .expect("task is eligible")
+    WorkFrontier::build_action_scoped(situation, vec![item]).expect("task is eligible")
 }
 
 fn plan_spec(surface: PlanSurface) -> AgentChangePlanSpec {
@@ -168,10 +152,7 @@ fn plan_spec(surface: PlanSurface) -> AgentChangePlanSpec {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -259,19 +240,15 @@ fn control_chain(task_byte: u8) -> ControlChain {
     let task_id = WorkTaskId::from_bytes([task_byte; 32]);
     let situation = situation(&receipt, &run, TASK_BASIS, 20);
     let frontier = frontier(&situation, &run, task_id);
-    let pulse = AgentControlPulse::build(&situation, &frontier, Some(&run))
-        .expect("complete-run pulse");
+    let pulse =
+        AgentControlPulse::build(&situation, &frontier, Some(&run)).expect("complete-run pulse");
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x51));
-    let plan = AgentChangePlan::build(&pulse, &run, &[], plan_spec(surface))
-        .expect("complete-run plan");
-    let claim = TaskClaimReceipt::admit(
-        &pulse,
-        &plan,
-        &run,
-        claim_projection(&plan, &run, surface),
-    )
-    .expect("complete-run claim");
-    let activation = situation(&receipt, &run, CLAIMED_GENERATION, 30);
+    let plan =
+        AgentChangePlan::build(&pulse, &run, &[], plan_spec(surface)).expect("complete-run plan");
+    let claim =
+        TaskClaimReceipt::admit(&pulse, &plan, &run, claim_projection(&plan, &run, surface))
+            .expect("complete-run claim");
+    let activation = self::situation(&receipt, &run, CLAIMED_GENERATION, 30);
     let active = claim
         .activate(&activation, &run)
         .expect("complete-run activation");
@@ -368,13 +345,8 @@ fn same_id_altered_run_is_refused_at_every_control_boundary() {
     );
 
     assert_eq!(
-        AgentChangePlan::build(
-            &chain.pulse,
-            &altered,
-            &[],
-            plan_spec(chain.surface),
-        )
-        .expect_err("planning must refuse before resource-scope arithmetic"),
+        AgentChangePlan::build(&chain.pulse, &altered, &[], plan_spec(chain.surface),)
+            .expect_err("planning must refuse before resource-scope arithmetic"),
         PlanRefusal::ActiveRunCommitmentMismatch {
             expected: original,
             observed: changed,
@@ -507,19 +479,10 @@ fn overlapping_same_id_claims_with_different_commitments_are_conflicts() {
         &first_run,
         WorkTaskId::from_bytes([0x43; 32]),
     );
-    let first_pulse = AgentControlPulse::build(
-        &first_situation,
-        &first_frontier,
-        Some(&first_run),
-    )
-    .expect("first pulse");
-    let first_plan = AgentChangePlan::build(
-        &first_pulse,
-        &first_run,
-        &[],
-        plan_spec(surface),
-    )
-    .expect("first plan");
+    let first_pulse = AgentControlPulse::build(&first_situation, &first_frontier, Some(&first_run))
+        .expect("first pulse");
+    let first_plan = AgentChangePlan::build(&first_pulse, &first_run, &[], plan_spec(surface))
+        .expect("first plan");
     let first = TaskClaimReceipt::admit(
         &first_pulse,
         &first_plan,
@@ -534,19 +497,11 @@ fn overlapping_same_id_claims_with_different_commitments_are_conflicts() {
         &second_run,
         WorkTaskId::from_bytes([0x44; 32]),
     );
-    let second_pulse = AgentControlPulse::build(
-        &second_situation,
-        &second_frontier,
-        Some(&second_run),
-    )
-    .expect("second pulse");
-    let second_plan = AgentChangePlan::build(
-        &second_pulse,
-        &second_run,
-        &[],
-        plan_spec(surface),
-    )
-    .expect("second plan");
+    let second_pulse =
+        AgentControlPulse::build(&second_situation, &second_frontier, Some(&second_run))
+            .expect("second pulse");
+    let second_plan = AgentChangePlan::build(&second_pulse, &second_run, &[], plan_spec(surface))
+        .expect("second plan");
     let second = TaskClaimReceipt::admit(
         &second_pulse,
         &second_plan,

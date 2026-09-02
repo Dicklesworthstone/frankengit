@@ -26,8 +26,7 @@
 use core::fmt;
 
 use fgit_authority::{
-    AsyncAuthorityStore, AuthenticatedHead, AuthorityStore,
-    CapabilityRevocationAuthorityFailure,
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityStore, CapabilityRevocationAuthorityFailure,
     read_head_selected_capability_revocation_generation,
     read_head_selected_capability_revocation_generation_async,
 };
@@ -39,9 +38,7 @@ use crate::effect_authorization::{
     CapabilityRevocationReadRequestId, CapabilityRevocationReader, CapabilityRevocationReceipt,
     MAX_CAPABILITY_REVOCATIONS, read_capability_revocations,
 };
-use crate::{
-    AuthorityReadReceipt, CapabilityId, IntentRun, LogicalTime, ProtocolRefusal,
-};
+use crate::{AuthorityReadReceipt, CapabilityId, IntentRun, LogicalTime, ProtocolRefusal};
 
 /// Stable identity of the canonical authority-generation reader profile.
 ///
@@ -76,14 +73,16 @@ impl fmt::Display for AuthorityCapabilityRevocationReadRefusal {
         match self {
             Self::Read(refusal) => write!(formatter, "revocation read refused: {refusal}"),
             Self::Authority(refusal) => {
-                write!(formatter, "canonical revocation authority refused: {refusal}")
+                write!(
+                    formatter,
+                    "canonical revocation authority refused: {refusal}"
+                )
             }
             Self::Protocol(refusal) => {
                 write!(formatter, "revocation authority receipt refused: {refusal}")
             }
-            Self::AuthorityReceiptMismatch => formatter.write_str(
-                "the authenticated head differs from the Intent Run authority receipt",
-            ),
+            Self::AuthorityReceiptMismatch => formatter
+                .write_str("the authenticated head differs from the Intent Run authority receipt"),
             Self::GenerationDigestWidth { observed, expected } => write!(
                 formatter,
                 "revocation generation digest has {observed} bytes, expected {expected}"
@@ -139,18 +138,21 @@ where
     let authority = run
         .authority_read_receipt()
         .ok_or(CapabilityRevocationReadRefusal::RunAuthorityReceiptRequired)?;
-    let request = CapabilityRevocationReadRequest::build(
+    let request =
+        CapabilityRevocationReadRequest::build(authority, run, requested_at, max_age, max_entries)?;
+    validate_authenticated_head(authority, authenticated)?;
+
+    let generation =
+        read_head_selected_capability_revocation_generation(store, tenant_id, authenticated)?;
+    admit_generation(
         authority,
         run,
         requested_at,
         max_age,
         max_entries,
-    )?;
-    validate_authenticated_head(authority, authenticated)?;
-
-    let generation =
-        read_head_selected_capability_revocation_generation(store, tenant_id, authenticated)?;
-    admit_generation(authority, run, requested_at, max_age, max_entries, request, &generation)
+        request,
+        &generation,
+    )
 }
 
 /// Production asynchronous twin of
@@ -176,13 +178,8 @@ where
     let authority = run
         .authority_read_receipt()
         .ok_or(CapabilityRevocationReadRefusal::RunAuthorityReceiptRequired)?;
-    let request = CapabilityRevocationReadRequest::build(
-        authority,
-        run,
-        requested_at,
-        max_age,
-        max_entries,
-    )?;
+    let request =
+        CapabilityRevocationReadRequest::build(authority, run, requested_at, max_age, max_entries)?;
     validate_authenticated_head(authority, authenticated)?;
 
     let generation = read_head_selected_capability_revocation_generation_async(
@@ -192,7 +189,15 @@ where
         authenticated,
     )
     .await?;
-    admit_generation(authority, run, requested_at, max_age, max_entries, request, &generation)
+    admit_generation(
+        authority,
+        run,
+        requested_at,
+        max_age,
+        max_entries,
+        request,
+        &generation,
+    )
 }
 
 fn validate_authenticated_head(
@@ -220,8 +225,7 @@ fn admit_generation(
     generation: &fgit_authority::CapabilityRevocationGenerationRead,
 ) -> Result<CapabilityRevocationReceipt, AuthorityCapabilityRevocationReadRefusal> {
     let observed_rows = generation.body().revoked_capability_ids().len();
-    if observed_rows > request.max_entries() as usize
-        || observed_rows > MAX_CAPABILITY_REVOCATIONS
+    if observed_rows > request.max_entries() as usize || observed_rows > MAX_CAPABILITY_REVOCATIONS
     {
         return Err(CapabilityRevocationReadRefusal::TooManyRevocations {
             observed: observed_rows,

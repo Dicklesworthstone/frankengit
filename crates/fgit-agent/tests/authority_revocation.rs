@@ -103,8 +103,8 @@ fn fixture(store_id: u64, revoked: Vec<CapabilityId>) -> Fixture {
         digest(0x91),
     )
     .expect("bounded canonical generation");
-    let generation_stage = stage_capability_revocation_generation(&store, &generation)
-        .expect("generation stages");
+    let generation_stage =
+        stage_capability_revocation_generation(&store, &generation).expect("generation stages");
     let configuration = RepositoryIncarnationConfigurationBodyV2_2 {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: fgit_types::GitHashAlgorithm::Sha256,
@@ -117,14 +117,15 @@ fn fixture(store_id: u64, revoked: Vec<CapabilityId>) -> Fixture {
             .expect("revocation-aware configuration stages");
     let head_key = HeadKey::new(format!("agent-authority-revocation-{store_id}").into_bytes())
         .expect("bounded head key");
-    let head_read = match initialize_repository(&store, &head_key, &head(repository_id, configuration_root))
-        .expect("head initializes")
-    {
-        HeadInit::Created(receipt) => receipt,
-        HeadInit::IdenticalRetry(_) | HeadInit::Conflict => {
-            panic!("fresh store must create its head")
-        }
-    };
+    let head_read =
+        match initialize_repository(&store, &head_key, &head(repository_id, configuration_root))
+            .expect("head initializes")
+        {
+            HeadInit::Created(receipt) => receipt,
+            HeadInit::IdenticalRetry(_) | HeadInit::Conflict => {
+                panic!("fresh store must create its head")
+            }
+        };
     let authenticated = store
         .authenticate_head_receipt(&head_read)
         .expect("issuing store authenticates its receipt");
@@ -216,7 +217,10 @@ fn canonical_generation_produces_a_deterministic_receipt_and_revokes_ancestors()
 
     assert_eq!(first.receipt_id(), second.receipt_id());
     assert_eq!(first.authority_read_receipt(), &fixture.authority);
-    assert_eq!(first.run_commitment(), fixture.run.commitment().expect("run identity"));
+    assert_eq!(
+        first.run_commitment(),
+        fixture.run.commitment().expect("run identity")
+    );
     assert_eq!(first.revoked_capability_ids(), &[CapabilityId::new(1)]);
     assert_eq!(
         first.reader_profile(),
@@ -340,16 +344,18 @@ fn configuration_without_a_revocation_root_is_not_an_empty_set() {
         repository_incarnation_id: incarnation(0x33),
         policy_root: None,
     };
-    let configuration_root = stage_latest_repository_incarnation_configuration(&store, &configuration)
-        .expect("historical configuration stages");
-    let head_key = HeadKey::new(b"agent-authority-revocation-legacy".to_vec())
-        .expect("bounded head key");
-    let head_read = match initialize_repository(&store, &head_key, &head(repository_id, configuration_root))
-        .expect("head initializes")
-    {
-        HeadInit::Created(receipt) => receipt,
-        HeadInit::IdenticalRetry(_) | HeadInit::Conflict => panic!("fresh head"),
-    };
+    let configuration_root =
+        stage_latest_repository_incarnation_configuration(&store, &configuration)
+            .expect("historical configuration stages");
+    let head_key =
+        HeadKey::new(b"agent-authority-revocation-legacy".to_vec()).expect("bounded head key");
+    let head_read =
+        match initialize_repository(&store, &head_key, &head(repository_id, configuration_root))
+            .expect("head initializes")
+        {
+            HeadInit::Created(receipt) => receipt,
+            HeadInit::IdenticalRetry(_) | HeadInit::Conflict => panic!("fresh head"),
+        };
     let authenticated = store
         .authenticate_head_receipt(&head_read)
         .expect("head authenticates");
@@ -454,7 +460,7 @@ impl AsyncAuthorityStore for AsyncMemoryStore {
 
     fn put_if_absent(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
@@ -463,7 +469,7 @@ impl AsyncAuthorityStore for AsyncMemoryStore {
 
     fn read_immutable(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         core::future::ready(AuthorityStore::read_immutable(&self.0, key))
@@ -471,22 +477,19 @@ impl AsyncAuthorityStore for AsyncMemoryStore {
 
     fn initialize_head(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
     ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
         core::future::ready(AuthorityStore::initialize_head(
-            &self.0,
-            key,
-            generation,
-            body,
+            &self.0, key, generation, body,
         ))
     }
 
     fn read_head(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         core::future::ready(AuthorityStore::read_head(&self.0, key))
@@ -494,7 +497,7 @@ impl AsyncAuthorityStore for AsyncMemoryStore {
 
     fn compare_exchange_head(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         key: &HeadKey,
         expected: AuthorityVersionToken,
         new_generation: HeadGeneration,
@@ -511,9 +514,10 @@ impl AsyncAuthorityStore for AsyncMemoryStore {
 
     fn authenticate_head_receipt(
         &self,
-        _: &Self::Context,
+        (): &Self::Context,
         receipt: &HeadReadReceipt,
-    ) -> impl Future<Output = Result<fgit_authority::AuthenticatedHead, AuthorityFailure>> + Send {
+    ) -> impl Future<Output = Result<fgit_authority::AuthenticatedHead, AuthorityFailure>> + Send
+    {
         core::future::ready(AuthorityStore::authenticate_head_receipt(&self.0, receipt))
     }
 }

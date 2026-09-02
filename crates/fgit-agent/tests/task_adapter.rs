@@ -5,20 +5,19 @@ use fgit_agent::{
     AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentSituationReceipt,
     AuthorityReadReceipt, ClaimTaskOutcome, ClassSet, EvidenceClass, IntentRun, LogicalTime,
     OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
-    PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface,
-    PlanSurfaceKind, RejectedShortcutSet, ReleaseTaskOutcome, RunId, SituationComponent,
-    SituationComponentKind, SituationOmissionReason, TaskAdapterRefusal,
-    TaskCoordinatorRefusal, TaskMutationObservation, TaskMutationReplay, TaskMutationRequest,
-    TaskPhase, TaskProjectionAdapter, TaskProjectionGeneration, TaskProjectionRow,
-    TaskProjectionSnapshot, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
-    WorkRankingInputs, WorkTaskId, claim_selected_task, release_active_task,
+    PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind,
+    RejectedShortcutSet, ReleaseTaskOutcome, RunId, SituationComponent, SituationComponentKind,
+    SituationOmissionReason, TaskAdapterRefusal, TaskCoordinatorRefusal, TaskMutationObservation,
+    TaskMutationReplay, TaskMutationRequest, TaskPhase, TaskProjectionAdapter,
+    TaskProjectionGeneration, TaskProjectionRow, TaskProjectionSnapshot, WorkConflict,
+    WorkFrontier, WorkRankingInputs, WorkTaskId, claim_selected_task, release_active_task,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -72,12 +71,8 @@ fn authority_receipt() -> AuthorityReadReceipt {
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("authenticated agent receipt")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("authenticated agent receipt")
 }
 
 fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
@@ -89,10 +84,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -155,7 +147,7 @@ fn fixture() -> Fixture {
         &receipt,
         BASIS_GENERATION,
         LogicalTime::new(20),
-        vec![row.clone()],
+        vec![row],
     )
     .expect("complete task projection");
     let frontier = WorkFrontier::build_action_scoped(&planning, snapshot.work_items())
@@ -169,10 +161,7 @@ fn fixture() -> Fixture {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -286,14 +275,19 @@ fn strict_claim_and_release_flow_into_existing_receipt_types() {
         }
     };
     assert_eq!(
-        claimed.claim_receipt().previous_task_projection_generation(),
+        claimed
+            .claim_receipt()
+            .previous_task_projection_generation(),
         claimed.mutation_receipt().previous_generation().as_bytes()
     );
     assert_eq!(
         claimed.claim_receipt().claimed_task_projection_generation(),
         claimed.mutation_receipt().resulting_generation().as_bytes()
     );
-    assert_eq!(claimed.claim_receipt().reserved_surfaces(), &[fixture.surface]);
+    assert_eq!(
+        claimed.claim_receipt().reserved_surfaces(),
+        &[fixture.surface]
+    );
 
     let activation = situation(
         &fixture.receipt,
@@ -345,11 +339,13 @@ fn strict_claim_and_release_flow_into_existing_receipt_types() {
         fgit_agent::TaskClaimCancellationOutcome::Released
     );
     assert_eq!(released.mutation_receipt().after().assignee(), None);
-    assert!(released
-        .mutation_receipt()
-        .after()
-        .reserved_surfaces()
-        .is_empty());
+    assert!(
+        released
+            .mutation_receipt()
+            .after()
+            .reserved_surfaces()
+            .is_empty()
+    );
     assert_eq!(adapter.calls, 2);
 }
 

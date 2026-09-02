@@ -28,9 +28,9 @@ use core::fmt;
 use fgit_types::{Digest, RepositoryId};
 
 use crate::{
-    TaskProjectionMutationEnvelope, TaskProjectionMutationEnvelopeId,
-    TaskProjectionPersistedState, TaskProjectionPersistenceDecision,
-    TaskProjectionPersistenceReceipt, TaskProjectionPersistenceRefusal, WorkTaskId,
+    TaskProjectionMutationEnvelope, TaskProjectionMutationEnvelopeId, TaskProjectionPersistedState,
+    TaskProjectionPersistenceDecision, TaskProjectionPersistenceReceipt,
+    TaskProjectionPersistenceRefusal, WorkTaskId,
 };
 
 /// Repository/task address used by a durable task store.
@@ -354,10 +354,12 @@ pub fn execute_task_projection_store<S: TaskProjectionStore>(
         return Err(TaskProjectionStoreExecutionRefusal::ZeroAdapterIdentity);
     }
     if adapter_identity != envelope.adapter_identity() {
-        return Err(TaskProjectionStoreExecutionRefusal::AdapterIdentityMismatch {
-            expected: envelope.adapter_identity(),
-            observed: adapter_identity,
-        });
+        return Err(
+            TaskProjectionStoreExecutionRefusal::AdapterIdentityMismatch {
+                expected: envelope.adapter_identity(),
+                observed: adapter_identity,
+            },
+        );
     }
 
     let key = TaskProjectionStoreKey::from(envelope);
@@ -495,10 +497,7 @@ fn finish_attempt<S: TaskProjectionStore>(
             })
         }
         TaskProjectionPersistenceDecision::RetrySafe { .. } => {
-            let cause = if matches!(
-                write,
-                TaskProjectionStoreWriteDisposition::Ambiguous { .. }
-            ) {
+            let cause = if matches!(write, TaskProjectionStoreWriteDisposition::Ambiguous { .. }) {
                 TaskProjectionStoreReconciliationCause::AmbiguousWriteUnresolved
             } else {
                 TaskProjectionStoreReconciliationCause::BackendContradiction
@@ -517,7 +516,10 @@ fn finish_attempt<S: TaskProjectionStore>(
             current_generation,
             ..
         } => {
-            if matches!(write, TaskProjectionStoreWriteDisposition::PreconditionFailed) {
+            if matches!(
+                write,
+                TaskProjectionStoreWriteDisposition::PreconditionFailed
+            ) {
                 Ok(TaskProjectionStoreExecution::Conflict {
                     envelope_id: envelope.envelope_id(),
                     write,

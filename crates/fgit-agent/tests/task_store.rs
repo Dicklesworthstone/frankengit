@@ -5,26 +5,25 @@ use std::collections::VecDeque;
 
 use fgit_agent::{
     AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentSituationReceipt,
-    AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, ClassSet, EvidenceClass,
-    IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
+    AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, ClassSet, EvidenceClass, IntentRun,
+    LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
     PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet,
     PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RunId, SituationComponent,
-    SituationComponentKind, SituationOmissionReason, TaskProjectionAssignment,
+    SituationComponentKind, SituationOmissionReason, TaskPhase, TaskProjectionAssignment,
     TaskProjectionMutationEnvelope, TaskProjectionPersistedState, TaskProjectionStore,
     TaskProjectionStoreExecution, TaskProjectionStoreExecutionRefusal,
     TaskProjectionStoreFlushOutcome, TaskProjectionStoreFlushRefusal,
     TaskProjectionStoreReadRefusal, TaskProjectionStoreReconciliationCause,
-    TaskProjectionStoreStage, TaskProjectionStoreWriteDisposition,
-    TaskProjectionStoreWriteOutcome, TaskProjectionStoreWriteRefusal, TaskPhase,
-    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs,
-    WorkTaskId, execute_task_projection_store,
+    TaskProjectionStoreStage, TaskProjectionStoreWriteDisposition, TaskProjectionStoreWriteOutcome,
+    TaskProjectionStoreWriteRefusal, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
+    WorkRankingInputs, WorkTaskId, execute_task_projection_store,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -79,12 +78,8 @@ fn authority_receipt() -> AuthorityReadReceipt {
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("authenticated agent receipt")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("authenticated agent receipt")
 }
 
 fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
@@ -96,10 +91,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -152,18 +144,15 @@ fn envelope() -> TaskProjectionMutationEnvelope {
         WorkRankingInputs::new(1, 2, 3),
         WorkEligibilityInputs::new(0, None, None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&current, vec![item])
-        .expect("task is eligible");
-    let pulse = AgentControlPulse::build(&current, &frontier, Some(&run))
-        .expect("actionable pulse");
+    let frontier =
+        WorkFrontier::build_action_scoped(&current, vec![item]).expect("task is eligible");
+    let pulse =
+        AgentControlPulse::build(&current, &frontier, Some(&run)).expect("actionable pulse");
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x61));
     let spec = AgentChangePlanSpec::new(
         digest(0x60),
         run.allowed_operation_classes(),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -195,8 +184,7 @@ fn envelope() -> TaskProjectionMutationEnvelope {
             digest(0x82),
         )
         .expect("claim transition");
-    TaskProjectionMutationEnvelope::from_claim(&application)
-        .expect("complete mutation envelope")
+    TaskProjectionMutationEnvelope::from_claim(&application).expect("complete mutation envelope")
 }
 
 fn reread(
@@ -226,12 +214,7 @@ fn reread(
 }
 
 fn predecessor(envelope: &TaskProjectionMutationEnvelope) -> TaskProjectionPersistedState {
-    TaskProjectionPersistedState::new(
-        reread(envelope.before_snapshot(), 26),
-        None,
-        None,
-        None,
-    )
+    TaskProjectionPersistedState::new(reread(envelope.before_snapshot(), 26), None, None, None)
 }
 
 fn successor(envelope: &TaskProjectionMutationEnvelope) -> TaskProjectionPersistedState {
@@ -320,7 +303,10 @@ impl TaskProjectionStore for ScriptedStore {
 fn applied_write_flush_and_reread_confirm_once() {
     let envelope = envelope();
     let mut store = ScriptedStore::new(
-        vec![Ok(Some(predecessor(&envelope))), Ok(Some(successor(&envelope)))],
+        vec![
+            Ok(Some(predecessor(&envelope))),
+            Ok(Some(successor(&envelope))),
+        ],
         Ok(TaskProjectionStoreWriteOutcome::Applied),
         Ok(TaskProjectionStoreFlushOutcome::Flushed),
     );
@@ -366,7 +352,10 @@ fn initial_exact_successor_is_identical_retry_without_cas() {
 fn already_applied_then_replaced_requires_history_not_simple_conflict() {
     let envelope = envelope();
     let mut store = ScriptedStore::new(
-        vec![Ok(Some(successor(&envelope))), Ok(Some(conflict(&envelope)))],
+        vec![
+            Ok(Some(successor(&envelope))),
+            Ok(Some(conflict(&envelope))),
+        ],
         Ok(TaskProjectionStoreWriteOutcome::Applied),
         Ok(TaskProjectionStoreFlushOutcome::NotRequired),
     );
@@ -410,7 +399,10 @@ fn initial_conflicting_state_returns_without_write_or_flush() {
 fn ambiguous_write_is_resolved_by_exact_successor() {
     let envelope = envelope();
     let mut store = ScriptedStore::new(
-        vec![Ok(Some(predecessor(&envelope))), Ok(Some(successor(&envelope)))],
+        vec![
+            Ok(Some(predecessor(&envelope))),
+            Ok(Some(successor(&envelope))),
+        ],
         Ok(TaskProjectionStoreWriteOutcome::Ambiguous {
             probe_root: digest(0x91),
         }),
@@ -419,7 +411,10 @@ fn ambiguous_write_is_resolved_by_exact_successor() {
 
     let outcome = execute_task_projection_store(&mut store, &envelope)
         .expect("exact successor resolves write ambiguity");
-    assert!(matches!(outcome, TaskProjectionStoreExecution::Confirmed { .. }));
+    assert!(matches!(
+        outcome,
+        TaskProjectionStoreExecution::Confirmed { .. }
+    ));
     assert_eq!(store.write_calls, 1);
 }
 
@@ -473,7 +468,10 @@ fn definite_precondition_failure_and_conflicting_reread_are_conflict() {
 fn flush_refusal_after_confirmed_successor_remains_debt() {
     let envelope = envelope();
     let mut store = ScriptedStore::new(
-        vec![Ok(Some(predecessor(&envelope))), Ok(Some(successor(&envelope)))],
+        vec![
+            Ok(Some(predecessor(&envelope))),
+            Ok(Some(successor(&envelope))),
+        ],
         Ok(TaskProjectionStoreWriteOutcome::Applied),
         Err(TaskProjectionStoreFlushRefusal::Unavailable),
     );

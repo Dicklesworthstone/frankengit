@@ -21,8 +21,8 @@ use fgit_types::Digest;
 
 use crate::{
     AgentControlPulse, ClassSet, ContextPacket, ContextPacketId, EvidenceClass, IntentRun,
-    IntentRunCommitment, IntentRunIdentityRefusal, PulseSelection, PulseState, RunId,
-    TaskPhase, WorkAction, WorkFrontierId, WorkTaskId,
+    IntentRunCommitment, IntentRunIdentityRefusal, PulseSelection, PulseState, RunId, TaskPhase,
+    WorkAction, WorkFrontierId, WorkTaskId,
 };
 
 /// Largest collection accepted in one plan field.
@@ -580,11 +580,7 @@ impl AgentChangePlanSpec {
 
     /// Sets intended and conflict surfaces.
     #[must_use]
-    pub fn with_surfaces(
-        mut self,
-        intended: Vec<PlanSurface>,
-        conflict: Vec<PlanSurface>,
-    ) -> Self {
+    pub fn with_surfaces(mut self, intended: Vec<PlanSurface>, conflict: Vec<PlanSurface>) -> Self {
         self.intended_change_surface = intended;
         self.conflict_surface = conflict;
         self
@@ -972,14 +968,20 @@ impl fmt::Display for PlanRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PulseNotActionable { state } => {
-                write!(formatter, "agent control pulse is not actionable: {state:?}")
+                write!(
+                    formatter,
+                    "agent control pulse is not actionable: {state:?}"
+                )
             }
             Self::ActiveRunMissing => formatter.write_str("actionable pulse has no active run"),
             Self::ActiveRunCommitmentMissing => {
                 formatter.write_str("actionable pulse has no complete active-run commitment")
             }
             Self::ActiveRunMismatch { expected, observed } => {
-                write!(formatter, "supplied run {observed} differs from pulse run {expected}")
+                write!(
+                    formatter,
+                    "supplied run {observed} differs from pulse run {expected}"
+                )
             }
             Self::ActiveRunCommitmentMismatch { expected, observed } => write!(
                 formatter,
@@ -991,13 +993,18 @@ impl fmt::Display for PlanRefusal {
             Self::ActiveRunAuthorityMismatch => {
                 formatter.write_str("active run authority differs from the pulse")
             }
-            Self::RunIdentity(refusal) => write!(formatter, "active run identity refused: {refusal}"),
+            Self::RunIdentity(refusal) => {
+                write!(formatter, "active run identity refused: {refusal}")
+            }
             Self::ActiveRunExpired { run_id } => {
                 write!(formatter, "active run {run_id} expired before planning")
             }
             Self::EmptyEffectPlan => formatter.write_str("change plan declares no effect classes"),
             Self::EffectOutsideRun { missing } => {
-                write!(formatter, "change plan requests unauthorized effect classes {missing}")
+                write!(
+                    formatter,
+                    "change plan requests unauthorized effect classes {missing}"
+                )
             }
             Self::EmptyResourceBudget => {
                 formatter.write_str("change plan declares a zero resource budget")
@@ -1138,10 +1145,7 @@ fn validate_plan_run(
     Ok((selected, observed_commitment))
 }
 
-fn validate_plan_scope(
-    run: &IntentRun,
-    spec: &AgentChangePlanSpec,
-) -> Result<(), PlanRefusal> {
+fn validate_plan_scope(run: &IntentRun, spec: &AgentChangePlanSpec) -> Result<(), PlanRefusal> {
     if spec.effect_plan.is_empty() {
         return Err(PlanRefusal::EmptyEffectPlan);
     }
@@ -1150,9 +1154,7 @@ fn validate_plan_scope(
         .is_subset_of(run.allowed_operation_classes())
     {
         return Err(PlanRefusal::EffectOutsideRun {
-            missing: spec
-                .effect_plan
-                .difference(run.allowed_operation_classes()),
+            missing: spec.effect_plan.difference(run.allowed_operation_classes()),
         });
     }
     if spec.resource_budget.is_zero() {
@@ -1205,10 +1207,7 @@ fn collect_context_packets(
     Ok(ids)
 }
 
-fn canonicalize_digests(
-    field: &'static str,
-    values: &mut Vec<Digest>,
-) -> Result<(), PlanRefusal> {
+fn canonicalize_digests(field: &'static str, values: &mut Vec<Digest>) -> Result<(), PlanRefusal> {
     check_len(field, values.len(), MAX_PLAN_ENTRIES)?;
     values.sort_unstable();
     for adjacent in values.windows(2) {
@@ -1326,7 +1325,7 @@ fn canonicalize_evidence(
     Ok(())
 }
 
-fn check_len(field: &'static str, observed: usize, limit: usize) -> Result<(), PlanRefusal> {
+const fn check_len(field: &'static str, observed: usize, limit: usize) -> Result<(), PlanRefusal> {
     if observed > limit {
         return Err(PlanRefusal::TooManyEntries {
             field,
@@ -1387,10 +1386,7 @@ fn write_digests(
     Ok(())
 }
 
-fn write_context_ids(
-    encoder: &mut Encoder,
-    values: &[ContextPacketId],
-) -> Result<(), PlanRefusal> {
+fn write_context_ids(encoder: &mut Encoder, values: &[ContextPacketId]) -> Result<(), PlanRefusal> {
     write_count(encoder, "input_context_packets", values.len())?;
     for value in values {
         encoder.write_raw(value.as_bytes());
@@ -1411,10 +1407,7 @@ fn write_surfaces(
     Ok(())
 }
 
-fn write_checkpoints(
-    encoder: &mut Encoder,
-    values: &[PlanCheckpoint],
-) -> Result<(), PlanRefusal> {
+fn write_checkpoints(encoder: &mut Encoder, values: &[PlanCheckpoint]) -> Result<(), PlanRefusal> {
     write_count(encoder, "checkpoints", values.len())?;
     for value in values {
         encoder.write_raw(value.checkpoint_id.as_bytes());

@@ -318,13 +318,8 @@ pub fn read_task_projection<R: TaskProjectionReader>(
     let observation = reader
         .read(&request)
         .map_err(TaskProjectionReadExecutionRefusal::Adapter)?;
-    validate_observation(
-        request,
-        expected_adapter_identity,
-        observation,
-        situation,
-    )
-    .map_err(TaskProjectionReadExecutionRefusal::Read)
+    validate_observation(request, expected_adapter_identity, observation, situation)
+        .map_err(TaskProjectionReadExecutionRefusal::Read)
 }
 
 /// Definite backend/read refusal.
@@ -441,7 +436,10 @@ impl core::error::Error for TaskProjectionReadAdapterRefusal {}
 
 impl fmt::Display for TaskProjectionReadExecutionRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "task projection read execution refused: {self:?}")
+        write!(
+            formatter,
+            "task projection read execution refused: {self:?}"
+        )
     }
 }
 
@@ -557,10 +555,7 @@ fn receipt_commitment(
     receipt: &TaskProjectionReadReceipt,
 ) -> Result<[u8; 32], TaskProjectionReadRefusal> {
     let mut encoder = Encoder::with_capacity(256);
-    encoder.write_bytes(
-        "task_projection_read_receipt_domain",
-        READ_RECEIPT_DOMAIN,
-    )?;
+    encoder.write_bytes("task_projection_read_receipt_domain", READ_RECEIPT_DOMAIN)?;
     encoder.write_raw(receipt.request_id.as_bytes());
     encoder.write_raw(&receipt.adapter_identity);
     encoder.write_digest(&receipt.evidence_root)?;

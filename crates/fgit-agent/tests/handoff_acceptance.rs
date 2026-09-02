@@ -2,25 +2,23 @@
 //! Public-path tests for receiver-side handoff verification.
 
 use fgit_agent::{
-    ActiveTaskClaim, AgentChangePlan, AgentChangePlanSpec, AgentControlPulse,
-    AgentHandoffCapsule, AgentHandoffCapsuleSpec, AgentInstanceId, AgentSituationReceipt,
-    AuthorityReadReceipt, CapabilityId, ClassSet, EffectClass, EffectId, EffectRecord,
-    EffectResolutionAction, EvidenceClass, HandoffAcceptanceRefusal,
-    HandoffCapabilityAttenuation, HandoffTargetResolution, IntentRun, LogicalTime,
-    OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
-    PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface,
-    PlanSurfaceKind, RejectedShortcutSet, RequirementDisposition, RunId,
-    RunReconciliationReport, SITUATION_COMPONENT_COUNT, SituationComponent,
-    SituationComponentKind, SituationOmissionReason, TaskClaimProjection, TaskClaimReceipt,
-    TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs,
-    WorkTaskId,
+    ActiveTaskClaim, AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentHandoffCapsule,
+    AgentHandoffCapsuleSpec, AgentInstanceId, AgentSituationReceipt, AuthorityReadReceipt,
+    CapabilityId, ClassSet, EffectClass, EffectId, EffectRecord, EffectResolutionAction,
+    EvidenceClass, HandoffAcceptanceRefusal, HandoffCapabilityAttenuation, HandoffTargetResolution,
+    IntentRun, LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
+    PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet,
+    PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RequirementDisposition, RunId,
+    RunReconciliationReport, SituationComponent, SituationComponentKind, SituationOmissionReason,
+    TaskClaimProjection, TaskClaimReceipt, TaskPhase, WorkConflict, WorkEligibilityInputs,
+    WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ObligationState, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -99,10 +97,7 @@ fn source_run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("source run opens")
@@ -182,18 +177,11 @@ fn source_plan(
         TASK_BASIS,
         TaskPhase::Open,
         WorkRankingInputs::new(1, 2, 3),
-        WorkEligibilityInputs::new(
-            0,
-            Some(run.run_id()),
-            None,
-            true,
-            WorkConflict::Clear,
-        ),
+        WorkEligibilityInputs::new(0, Some(run.run_id()), None, true, WorkConflict::Clear),
     );
     let frontier = WorkFrontier::build_action_scoped(&source_situation, vec![item])
         .expect("eligible frontier");
-    let pulse =
-        AgentControlPulse::build(&source_situation, &frontier, Some(run)).expect("pulse");
+    let pulse = AgentControlPulse::build(&source_situation, &frontier, Some(run)).expect("pulse");
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x61));
     let spec = AgentChangePlanSpec::new(
         digest(0x60),
@@ -203,10 +191,7 @@ fn source_plan(
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {

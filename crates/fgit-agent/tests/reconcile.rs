@@ -12,7 +12,7 @@ use fgit_authority::{
     authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{
     EscalationReason, Grade, IdempotencyKey, ObligationClass, ObligationState, ResourceVector,
     TerminalFailureReason,
@@ -95,10 +95,7 @@ fn run(receipt: &AuthorityReadReceipt, bytes: u64) -> IntentRun {
             OperationClass::ExternalIntegration,
             OperationClass::SubmitEvidence,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, bytes),
-            (Grade::CpuMicros, 10_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, bytes), (Grade::CpuMicros, 10_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -281,10 +278,7 @@ fn report_is_order_independent_and_preserves_every_lifecycle_class() {
         first.readiness(),
         RunReconciliationReadiness::ContainmentFailure
     );
-    assert_eq!(
-        first.effects()[0].record().effect_id,
-        EffectId::new(1)
-    );
+    assert_eq!(first.effects()[0].record().effect_id, EffectId::new(1));
     assert_eq!(
         first.effects()[1].required_action(),
         EffectResolutionAction::AbortReservation
@@ -401,10 +395,7 @@ fn same_run_id_with_another_machine_scope_is_refused_first() {
         source.run_id(),
         receipt.clone(),
         source.allowed_operation_classes(),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 999),
-            (Grade::CpuMicros, 10_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 999), (Grade::CpuMicros, 10_000)]),
         LogicalTime::new(90),
     )
     .expect("same-ID altered run is structurally valid");

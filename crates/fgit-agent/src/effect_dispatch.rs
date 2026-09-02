@@ -23,20 +23,19 @@
 use core::fmt;
 
 use fgit_resource::{
-    DownstreamChannel, ReconcilePlan, RegionCloseOutcome, RegionId, ReleaseReceipt,
-    ResourceVector, SettledObligation, TerminalFailureReason,
+    DownstreamChannel, ReconcilePlan, RegionCloseOutcome, RegionId, ReleaseReceipt, ResourceVector,
+    SettledObligation, TerminalFailureReason,
     kinds::{DispatchAbortReason, DownstreamAck, OutboxDispatch, OutboxEffectPermit},
 };
 use fgit_types::PrincipalId;
 
 use crate::{
-    AgentInstanceId, AuthorizedOutboxReservationRefused, Capability,
-    CapabilityEffectAuthorization, CapabilityEffectAuthorizationRefusal,
-    CapabilityRevocationReceipt, DeferredOutboxEffect, EffectGrant, EffectId,
-    EffectJournalEntry, EffectJournalRefusal, EffectRecord, EffectRequest, EscalatedOutboxEffect,
-    ExternalEffectOutcome, IntentRun, IntentRunCommitment, LogicalTime, OutboxCommitRefused,
-    ReconciliationRefused, RevocationAuthorizedEffectGrant, RevocationCheckedEffectRefusal,
-    RunId, VerifiedCapabilityChain, VerifiedCapabilityChainId,
+    AgentInstanceId, AuthorizedOutboxReservationRefused, Capability, CapabilityEffectAuthorization,
+    CapabilityEffectAuthorizationRefusal, CapabilityRevocationReceipt, DeferredOutboxEffect,
+    EffectGrant, EffectId, EffectJournalEntry, EffectJournalRefusal, EffectRecord, EffectRequest,
+    EscalatedOutboxEffect, ExternalEffectOutcome, IntentRun, IntentRunCommitment, LogicalTime,
+    OutboxCommitRefused, ReconciliationRefused, RevocationAuthorizedEffectGrant,
+    RevocationCheckedEffectRefusal, RunId, VerifiedCapabilityChain, VerifiedCapabilityChainId,
 };
 
 /// Production-facing broker whose external dispatch path rechecks revocation.
@@ -159,10 +158,12 @@ impl RevocationCheckedEffectBroker {
         if self.dispatch_authorizations.len()
             >= crate::effect_authorization::MAX_EFFECT_AUTHORIZATIONS
         {
-            return Err(AuthorizedOutboxDispatchRefused::AuthorizationLimitExceeded {
-                effect: Box::new(effect),
-                limit: crate::effect_authorization::MAX_EFFECT_AUTHORIZATIONS,
-            });
+            return Err(
+                AuthorizedOutboxDispatchRefused::AuthorizationLimitExceeded {
+                    effect: Box::new(effect),
+                    limit: crate::effect_authorization::MAX_EFFECT_AUTHORIZATIONS,
+                },
+            );
         }
         let dispatch_authorization = match CapabilityEffectAuthorization::authorize(
             &self.run,
@@ -200,12 +201,14 @@ impl RevocationCheckedEffectBroker {
         let authorized_at = dispatch_authorization.authorized_at();
         let valid_until = dispatch_authorization.valid_until();
         if now < authorized_at || now >= valid_until {
-            return Err(AuthorizedOutboxDispatchRefused::AuthorizationWindowInvalid {
-                effect: Box::new(effect),
-                authorized_at,
-                valid_until,
-                dispatched_at: now,
-            });
+            return Err(
+                AuthorizedOutboxDispatchRefused::AuthorizationWindowInvalid {
+                    effect: Box::new(effect),
+                    authorized_at,
+                    valid_until,
+                    dispatched_at: now,
+                },
+            );
         }
 
         self.dispatch_authorizations.push(dispatch_authorization);
@@ -363,13 +366,7 @@ impl RevocationAuthorizedDeferredOutboxEffect {
             request,
             deferred,
         } = self;
-        match deferred.reconcile(
-            plan,
-            channel,
-            owner,
-            acknowledgement,
-            output_commitments,
-        ) {
+        match deferred.reconcile(plan, channel, owner, acknowledgement, output_commitments) {
             Ok(ExternalEffectOutcome::Acknowledged(settled)) => {
                 Ok(RevocationAuthorizedExternalEffectOutcome::Acknowledged(
                     RevocationAuthorizedSettledOutboxEffect {
@@ -461,9 +458,8 @@ impl RevocationAuthorizedReconciliationRefused {
 impl fmt::Display for RevocationAuthorizedReconciliationRefused {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WrongPlan { .. } => formatter.write_str(
-                "authorized reconciliation plan does not match the deferred effect",
-            ),
+            Self::WrongPlan { .. } => formatter
+                .write_str("authorized reconciliation plan does not match the deferred effect"),
             Self::AfterSettlement { source, .. } => write!(
                 formatter,
                 "authorized effect settled but journal mirroring failed: {source}"
@@ -518,12 +514,8 @@ impl RevocationAuthorizedSettledOutboxEffect {
 
     /// Shared terminal obligation evidence.
     #[must_use]
-    pub fn settled(&self) -> &SettledObligation<OutboxEffectPermit> {
+    pub const fn settled(&self) -> &SettledObligation<OutboxEffectPermit> {
         &self.settled
-    }
-
-    pub(crate) fn into_settled(self) -> SettledObligation<OutboxEffectPermit> {
-        self.settled
     }
 }
 
@@ -563,8 +555,10 @@ impl RevocationAuthorizedEscalatedOutboxEffect {
         self,
         acknowledgement: DownstreamAck,
         output_commitments: Vec<[u8; 32]>,
-    ) -> Result<RevocationAuthorizedSettledOutboxEffect, RevocationAuthorizedEscalationResolutionRefused>
-    {
+    ) -> Result<
+        RevocationAuthorizedSettledOutboxEffect,
+        RevocationAuthorizedEscalationResolutionRefused,
+    > {
         let Self {
             initial_authorization,
             dispatch_authorization,
@@ -593,8 +587,10 @@ impl RevocationAuthorizedEscalatedOutboxEffect {
         self,
         reason: TerminalFailureReason,
         output_commitments: Vec<[u8; 32]>,
-    ) -> Result<RevocationAuthorizedSettledOutboxEffect, RevocationAuthorizedEscalationResolutionRefused>
-    {
+    ) -> Result<
+        RevocationAuthorizedSettledOutboxEffect,
+        RevocationAuthorizedEscalationResolutionRefused,
+    > {
         let Self {
             initial_authorization,
             dispatch_authorization,
@@ -615,10 +611,6 @@ impl RevocationAuthorizedEscalatedOutboxEffect {
                 source,
             }),
         }
-    }
-
-    pub(crate) fn into_effect(self) -> EscalatedOutboxEffect {
-        self.effect
     }
 }
 
@@ -768,14 +760,14 @@ impl AuthorizedOutboxDispatchRefused {
                 dispatch_authorization,
                 request,
                 source,
-            } => source.into_deferred().map(|deferred| {
-                RevocationAuthorizedDeferredOutboxEffect {
+            } => source
+                .into_deferred()
+                .map(|deferred| RevocationAuthorizedDeferredOutboxEffect {
                     initial_authorization,
                     dispatch_authorization,
                     request,
                     deferred,
-                }
-            }),
+                }),
             Self::Authorization { .. }
             | Self::CapabilityChainChanged { .. }
             | Self::LeafCapabilityChanged { .. }
@@ -817,7 +809,10 @@ impl fmt::Display for AuthorizedOutboxDispatchRefused {
                 "dispatch authorization evidence limit {limit} is exhausted"
             ),
             Self::Commit { source, .. } => {
-                write!(formatter, "authorized outbox dispatch commit refused: {source:?}")
+                write!(
+                    formatter,
+                    "authorized outbox dispatch commit refused: {source:?}"
+                )
             }
         }
     }

@@ -281,7 +281,7 @@ impl TaskProjectionRow {
 
     /// Converts this row into the existing frontier input vocabulary.
     #[must_use]
-    pub fn work_item(&self, generation: TaskProjectionGeneration) -> WorkItem {
+    pub const fn work_item(&self, generation: TaskProjectionGeneration) -> WorkItem {
         WorkItem::new(
             self.task_id,
             *generation.as_bytes(),
@@ -672,11 +672,11 @@ impl TaskMutationRequest {
                 expires_at: target_run.expiry(),
             });
         }
-        let target_authority = target_run
-            .authority_read_receipt()
-            .ok_or(TaskMutationRefusal::RunAuthorityReceiptRequired {
+        let target_authority = target_run.authority_read_receipt().ok_or(
+            TaskMutationRefusal::RunAuthorityReceiptRequired {
                 run_id: target_run.run_id(),
-            })?;
+            },
+        )?;
         if source_authority.repository_id() != target_authority.repository_id()
             || source_authority.authority_head_id() != target_authority.authority_head_id()
             || source_authority.authority_head_generation()
@@ -1499,11 +1499,11 @@ fn validate_snapshot_run(
     if authority_id != snapshot.authority_read_receipt_id {
         return Err(TaskMutationRefusal::SnapshotAuthorityMismatch);
     }
-    let run_authority = run
-        .authority_read_receipt()
-        .ok_or(TaskMutationRefusal::RunAuthorityReceiptRequired {
-            run_id: run.run_id(),
-        })?;
+    let run_authority =
+        run.authority_read_receipt()
+            .ok_or(TaskMutationRefusal::RunAuthorityReceiptRequired {
+                run_id: run.run_id(),
+            })?;
     let run_authority_id = run_authority
         .receipt_id()
         .map_err(TaskProjectionRefusal::from)?;
@@ -1569,9 +1569,7 @@ fn validate_task_id(task_id: WorkTaskId) -> Result<(), TaskProjectionRefusal> {
     Ok(())
 }
 
-fn canonicalize_surfaces(
-    surfaces: &mut Vec<PlanSurface>,
-) -> Result<(), TaskProjectionRefusal> {
+fn canonicalize_surfaces(surfaces: &mut Vec<PlanSurface>) -> Result<(), TaskProjectionRefusal> {
     if surfaces.len() > MAX_TASK_ROW_SURFACES {
         return Err(TaskProjectionRefusal::TooManyReservedSurfaces {
             observed: surfaces.len(),
@@ -1604,9 +1602,7 @@ fn snapshot_commitment(
     Ok(hash(encoder.into_bytes()))
 }
 
-fn request_commitment(
-    request: &TaskMutationRequest,
-) -> Result<[u8; 32], TaskMutationRefusal> {
+fn request_commitment(request: &TaskMutationRequest) -> Result<[u8; 32], TaskMutationRefusal> {
     let mut encoder = Encoder::with_capacity(1_024);
     encoder.write_bytes("task_mutation_request_domain", REQUEST_DOMAIN)?;
     encoder.write_raw_byte(request.operation.code_point());
@@ -1646,9 +1642,7 @@ fn request_commitment(
     Ok(hash(encoder.into_bytes()))
 }
 
-fn receipt_commitment(
-    receipt: &TaskMutationReceipt,
-) -> Result<[u8; 32], TaskMutationRefusal> {
+fn receipt_commitment(receipt: &TaskMutationReceipt) -> Result<[u8; 32], TaskMutationRefusal> {
     let mut encoder = Encoder::with_capacity(384);
     encoder.write_bytes("task_mutation_receipt_domain", RECEIPT_DOMAIN)?;
     encoder.write_raw(receipt.request_id.as_bytes());
@@ -1690,7 +1684,11 @@ fn write_row(encoder: &mut Encoder, row: &TaskProjectionRow) -> Result<(), Codec
         }
         None => encoder.write_bool(false),
     }
-    write_count(encoder, "task_projection.reserved_surfaces", row.reserved_surfaces.len())?;
+    write_count(
+        encoder,
+        "task_projection.reserved_surfaces",
+        row.reserved_surfaces.len(),
+    )?;
     for surface in &row.reserved_surfaces {
         encoder.write_raw_byte(surface_kind_code(surface.kind()));
         encoder.write_digest(&surface.selector())?;

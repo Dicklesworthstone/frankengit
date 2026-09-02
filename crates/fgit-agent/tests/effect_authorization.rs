@@ -5,10 +5,10 @@ use fgit_agent::{
     AgentInstanceId, AttenuationRequest, AuthorityReadReceipt, Capability,
     CapabilityEffectAuthorization, CapabilityEffectAuthorizationRefusal, CapabilityId,
     CapabilityRevocationReadAdapterRefusal, CapabilityRevocationReadObservation,
-    CapabilityRevocationReadRefusal, CapabilityRevocationReadRequest,
-    CapabilityRevocationReader, ClassSet, EffectId, EffectRequest, IntentRun, LogicalTime,
-    OperationClass, RevocationCheckedEffectBroker, RevocationCheckedEffectRefusal, RunId,
-    VerifiedCapabilityChain, VerifiedCapabilityChainRefusal, read_capability_revocations,
+    CapabilityRevocationReadRefusal, CapabilityRevocationReadRequest, CapabilityRevocationReader,
+    ClassSet, EffectId, EffectRequest, IntentRun, LogicalTime, OperationClass,
+    RevocationCheckedEffectBroker, RevocationCheckedEffectRefusal, RunId, VerifiedCapabilityChain,
+    VerifiedCapabilityChainRefusal, read_capability_revocations,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
@@ -71,19 +71,12 @@ fn authority_receipt(store_id: u64, repository_byte: u8) -> AuthorityReadReceipt
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("complete authenticated read")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("complete authenticated read")
 }
 
 fn budget(egress: u64, bytes: u64) -> ResourceVector {
-    ResourceVector::from_grades(&[
-        (Grade::EgressBytes, egress),
-        (Grade::Bytes, bytes),
-    ])
+    ResourceVector::from_grades(&[(Grade::EgressBytes, egress), (Grade::Bytes, bytes)])
 }
 
 fn authenticated_run(receipt: &AuthorityReadReceipt) -> IntentRun {
@@ -182,15 +175,8 @@ fn revocations(
         revoked,
         profile: [0x83; 32],
     };
-    read_capability_revocations(
-        &mut reader,
-        receipt,
-        run,
-        LogicalTime::new(20),
-        max_age,
-        32,
-    )
-    .expect("bounded revocation read")
+    read_capability_revocations(&mut reader, receipt, run, LogicalTime::new(20), max_age, 32)
+        .expect("bounded revocation read")
 }
 
 #[test]
@@ -220,7 +206,10 @@ fn high_value_effect_binds_verified_ancestry_freshness_and_exact_request() {
     assert_eq!(first.authorization_id(), second.authorization_id());
     assert_eq!(first.revocation_receipt_id(), revocations.receipt_id());
     assert_eq!(first.verified_chain_id(), chain.chain_id());
-    assert_eq!(first.run_commitment(), run.commitment().expect("run identity"));
+    assert_eq!(
+        first.run_commitment(),
+        run.commitment().expect("run identity")
+    );
     assert_eq!(first.capability_id(), CapabilityId::new(2));
     assert_eq!(first.effect_id(), EffectId::new(1));
     assert_eq!(first.valid_until(), LogicalTime::new(41));
@@ -235,12 +224,9 @@ fn high_value_effect_binds_verified_ancestry_freshness_and_exact_request() {
     .expect("another request can be authorized independently");
     assert_ne!(first.authorization_id(), changed.authorization_id());
 
-    let mut broker = RevocationCheckedEffectBroker::open(
-        run.clone(),
-        RegionId::new(1),
-        AgentInstanceId::new(1),
-    )
-    .expect("complete run opens the checked broker");
+    let mut broker =
+        RevocationCheckedEffectBroker::open(run, RegionId::new(1), AgentInstanceId::new(1))
+            .expect("complete run opens the checked broker");
     let grant = broker
         .request_high_value(&chain, &revocations, LogicalTime::new(22), &request)
         .expect("checked broker accepts the authorized high-value effect");
@@ -263,12 +249,9 @@ fn revoked_ancestor_refuses_before_budget_or_journal_state_moves() {
     let revoked = revocations(&receipt, &run, vec![CapabilityId::new(1)], 21, 20);
     let clean = revocations(&receipt, &run, Vec::new(), 21, 20);
     let request = external_request(1, 800);
-    let mut broker = RevocationCheckedEffectBroker::open(
-        run,
-        RegionId::new(2),
-        AgentInstanceId::new(2),
-    )
-    .expect("checked broker opens");
+    let mut broker =
+        RevocationCheckedEffectBroker::open(run, RegionId::new(2), AgentInstanceId::new(2))
+            .expect("checked broker opens");
 
     let refusal = broker
         .request_high_value(&chain, &revoked, LogicalTime::new(22), &request)
@@ -348,12 +331,9 @@ fn checked_broker_has_no_raw_high_value_fallthrough() {
     let receipt = authority_receipt(1_004, 0x24);
     let run = authenticated_run(&receipt);
     let high_capability = verified_chain().leaf().clone();
-    let mut broker = RevocationCheckedEffectBroker::open(
-        run,
-        RegionId::new(4),
-        AgentInstanceId::new(4),
-    )
-    .expect("checked broker opens");
+    let mut broker =
+        RevocationCheckedEffectBroker::open(run, RegionId::new(4), AgentInstanceId::new(4))
+            .expect("checked broker opens");
     let request = external_request(1, 100);
 
     assert!(matches!(
@@ -384,12 +364,9 @@ fn legacy_run_cannot_authorize_high_value_effects() {
     .expect("legacy compatibility run opens");
     let chain = verified_chain();
     let request = external_request(1, 100);
-    let mut broker = RevocationCheckedEffectBroker::open(
-        legacy,
-        RegionId::new(5),
-        AgentInstanceId::new(5),
-    )
-    .expect("legacy run still has a complete legacy commitment");
+    let mut broker =
+        RevocationCheckedEffectBroker::open(legacy, RegionId::new(5), AgentInstanceId::new(5))
+            .expect("legacy run still has a complete legacy commitment");
 
     assert!(matches!(
         broker
@@ -414,15 +391,8 @@ fn revocation_reader_is_bounded_deduplicated_and_profiled() {
         profile: [0x83; 32],
     };
     assert_eq!(
-        read_capability_revocations(
-            &mut excessive,
-            &receipt,
-            &run,
-            LogicalTime::new(20),
-            20,
-            1,
-        )
-        .expect_err("reader cannot exceed the request row bound"),
+        read_capability_revocations(&mut excessive, &receipt, &run, LogicalTime::new(20), 20, 1,)
+            .expect_err("reader cannot exceed the request row bound"),
         CapabilityRevocationReadRefusal::TooManyRevocations {
             observed: 2,
             request_limit: 1,
@@ -436,15 +406,8 @@ fn revocation_reader_is_bounded_deduplicated_and_profiled() {
         profile: [0x83; 32],
     };
     assert_eq!(
-        read_capability_revocations(
-            &mut duplicate,
-            &receipt,
-            &run,
-            LogicalTime::new(20),
-            20,
-            32,
-        )
-        .expect_err("duplicate revocations are not silently collapsed"),
+        read_capability_revocations(&mut duplicate, &receipt, &run, LogicalTime::new(20), 20, 32,)
+            .expect_err("duplicate revocations are not silently collapsed"),
         CapabilityRevocationReadRefusal::DuplicateRevocation {
             capability_id: CapabilityId::new(1),
         }

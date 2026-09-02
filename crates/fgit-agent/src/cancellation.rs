@@ -23,11 +23,10 @@ use fgit_resource::{ObligationState, ResourceError};
 use fgit_types::{Digest, PrincipalId};
 
 use crate::{
-    ActiveTaskClaim, ActiveTaskClaimId, AgentChangePlanId, AgentInstanceId,
-    AgentSituationReceipt, EffectId, EffectRecord, EffectResolutionAction,
-    EffectTerminalOutcome, IntentRun, LogicalTime, RunId, RunReconciliationReport,
-    RunReconciliationReportId, SituationComponentKind, SituationId, TaskClaimReceiptId,
-    WorkTaskId,
+    ActiveTaskClaim, ActiveTaskClaimId, AgentChangePlanId, AgentInstanceId, AgentSituationReceipt,
+    EffectId, EffectRecord, EffectResolutionAction, EffectTerminalOutcome, IntentRun, LogicalTime,
+    RunId, RunReconciliationReport, RunReconciliationReportId, SituationComponentKind, SituationId,
+    TaskClaimReceiptId, WorkTaskId,
 };
 
 /// Maximum transfer or containment evidence rows accepted by one completion.
@@ -468,8 +467,7 @@ impl RunCancellationIntent {
             containment_evidence,
             state,
         };
-        completion.completion_id =
-            RunCancellationCompletionId(completion_commitment(&completion)?);
+        completion.completion_id = RunCancellationCompletionId(completion_commitment(&completion)?);
         Ok(completion)
     }
 
@@ -548,12 +546,6 @@ impl RunCancellationCompletion {
     #[must_use]
     pub const fn completion_id(&self) -> RunCancellationCompletionId {
         self.completion_id
-    }
-
-    /// Cancellation request completed.
-    #[must_use]
-    pub const fn cancellation_id(&self) -> RunCancellationId {
-        self.cancellation_id
     }
 
     /// Cancelled run.
@@ -833,9 +825,7 @@ fn validate_final_report(
     if report.run_id() != intent.run_id {
         return Err(RunCancellationRefusal::FinalReportRunMismatch);
     }
-    if report.authority_read_receipt()
-        != intent.initial_reconciliation.authority_read_receipt()
-    {
+    if report.authority_read_receipt() != intent.initial_reconciliation.authority_read_receipt() {
         return Err(RunCancellationRefusal::FinalReportAuthorityMismatch);
     }
     if report.observed_at() < intent.requested_at {
@@ -876,17 +866,12 @@ fn validate_effect_progress(
                 to: after.obligation_state,
             });
         }
-        if before.terminal_outcome.is_some()
-            && before.terminal_outcome != after.terminal_outcome
-        {
+        if before.terminal_outcome.is_some() && before.terminal_outcome != after.terminal_outcome {
             return Err(RunCancellationRefusal::TerminalOutcomeChanged {
                 effect_id: before.effect_id,
             });
         }
-        if let Some(deficit) = after
-            .budget_consumed
-            .first_deficit(&before.budget_consumed)
-        {
+        if let Some(deficit) = after.budget_consumed.first_deficit(&before.budget_consumed) {
             return Err(RunCancellationRefusal::EffectBudgetRegressed {
                 effect_id: before.effect_id,
                 deficit,

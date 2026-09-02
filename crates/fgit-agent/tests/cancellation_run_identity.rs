@@ -2,8 +2,8 @@
 //! Public-path tests for complete-run identity in cancellation.
 
 use fgit_agent::{
-    AgentInstanceId, AgentSituationReceipt, AuthorityReadReceipt, ClassSet, IntentRun,
-    LogicalTime, OperationClass, RunCancellationCompletionRefusal, RunCancellationIntent,
+    AgentInstanceId, AgentSituationReceipt, AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime,
+    OperationClass, RunCancellationCompletionRefusal, RunCancellationIntent,
     RunCancellationRequestRefusal, RunId, RunReconciliationReport, SituationComponent,
     SituationComponentKind, SituationOmissionReason,
 };
@@ -60,12 +60,8 @@ fn authority_receipt() -> AuthorityReadReceipt {
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("complete authenticated read")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("complete authenticated read")
 }
 
 fn run(receipt: &AuthorityReadReceipt, bytes: u64, expiry: u64) -> IntentRun {
@@ -135,20 +131,13 @@ fn same_id_altered_run_cannot_request_or_complete_source_cancellation() {
         digest(0x81),
     )
     .expect("source cancellation request opens");
-    let final_report = RunReconciliationReport::build(
-        &altered,
-        Vec::new(),
-        LogicalTime::new(30),
-    )
-    .expect("altered run has its own valid empty report");
+    let final_report = RunReconciliationReport::build(&altered, Vec::new(), LogicalTime::new(30))
+        .expect("altered run has its own valid empty report");
 
     assert_eq!(
         intent
             .complete(final_report, None, Vec::new(), Vec::new())
             .expect_err("another complete run cannot finish the source cancellation"),
-        RunCancellationCompletionRefusal::RunCommitmentMismatch {
-            expected,
-            observed,
-        }
+        RunCancellationCompletionRefusal::RunCommitmentMismatch { expected, observed }
     );
 }

@@ -17,7 +17,7 @@
 use core::fmt;
 
 use fgit_codec::{CodecRefusal, Encoder};
-use fgit_crypto::{DigestHasher, GitHashAlgorithm, NativeObjectIdentity, Sha256};
+use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_types::{Digest, RepositoryId};
 
 use crate::task_projection_adapter::{
@@ -28,14 +28,11 @@ use crate::task_projection_adapter::{
 use crate::{
     ActiveTaskClaim, AgentChangePlan, AgentControlPulse, AuthorityReadIdentityRefusal,
     AuthorityReadReceipt, AuthorityReadReceiptId, IntentRun, LogicalTime,
-    TaskClaimCancellationProjection, TaskClaimProjection, TaskClaimReceipt, TaskPhase,
-    WorkTaskId,
+    TaskClaimCancellationProjection, TaskClaimProjection, TaskClaimReceipt, TaskPhase, WorkTaskId,
 };
 
-const SCOPED_SNAPSHOT_DOMAIN: &[u8] =
-    b"frankengit.agent.authority-bound-task-snapshot/v2\0";
-const SCOPED_TRANSITION_DOMAIN: &[u8] =
-    b"frankengit.agent.authority-bound-task-transition/v2\0";
+const SCOPED_SNAPSHOT_DOMAIN: &[u8] = b"frankengit.agent.authority-bound-task-snapshot/v2\0";
+const SCOPED_TRANSITION_DOMAIN: &[u8] = b"frankengit.agent.authority-bound-task-transition/v2\0";
 
 /// Stable semantic identity of one authority-position-scoped task state.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -126,13 +123,8 @@ impl AuthorityBoundTaskProjectionSnapshot {
         lease: TaskProjectionLease,
         observed_at: LogicalTime,
     ) -> Result<Self, TaskCoordinationRefusal> {
-        let inner = TaskProjectionSnapshot::observed_with_lease(
-            task_id,
-            generation,
-            phase,
-            lease,
-        )
-        .map_err(TaskCoordinationRefusal::Adapter)?;
+        let inner = TaskProjectionSnapshot::observed_with_lease(task_id, generation, phase, lease)
+            .map_err(TaskCoordinationRefusal::Adapter)?;
         Self::from_inner(authority.clone(), observed_at, inner)
     }
 
@@ -288,11 +280,8 @@ impl AuthorityBoundTaskProjectionSnapshot {
             observed_at,
             inner_snapshot,
         )?;
-        let transition = AuthorityBoundTaskProjectionTransition::build(
-            self,
-            &snapshot,
-            inner_transition,
-        )?;
+        let transition =
+            AuthorityBoundTaskProjectionTransition::build(self, &snapshot, inner_transition)?;
         Ok(AuthorityBoundTaskClaimApplication {
             before_snapshot: self.clone(),
             snapshot,
@@ -312,11 +301,8 @@ impl AuthorityBoundTaskProjectionSnapshot {
             observed_at,
             inner_snapshot,
         )?;
-        let transition = AuthorityBoundTaskProjectionTransition::build(
-            self,
-            &snapshot,
-            inner_transition,
-        )?;
+        let transition =
+            AuthorityBoundTaskProjectionTransition::build(self, &snapshot, inner_transition)?;
         Ok(AuthorityBoundTaskResolutionApplication {
             before_snapshot: self.clone(),
             snapshot,
@@ -442,9 +428,8 @@ impl AuthorityBoundTaskProjectionTransition {
             inner_transition_id,
             inner,
         };
-        transition.transition_id = AuthorityBoundTaskProjectionTransitionId(
-            scoped_transition_commitment(&transition)?,
-        );
+        transition.transition_id =
+            AuthorityBoundTaskProjectionTransitionId(scoped_transition_commitment(&transition)?);
         Ok(transition)
     }
 
@@ -726,7 +711,10 @@ fn scoped_snapshot_commitment(
     snapshot: &AuthorityBoundTaskProjectionSnapshot,
 ) -> Result<[u8; 32], TaskCoordinationRefusal> {
     let mut encoder = Encoder::with_capacity(256);
-    encoder.write_bytes("authority_bound_task_snapshot_domain", SCOPED_SNAPSHOT_DOMAIN)?;
+    encoder.write_bytes(
+        "authority_bound_task_snapshot_domain",
+        SCOPED_SNAPSHOT_DOMAIN,
+    )?;
     encoder.write_opaque_id(snapshot.repository_id.as_bytes());
     encoder.write_internal_object_id(
         snapshot

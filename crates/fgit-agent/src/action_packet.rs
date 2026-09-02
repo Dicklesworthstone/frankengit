@@ -28,10 +28,10 @@ use fgit_resource::{ResourceError, ResourceVector};
 use fgit_types::Digest;
 
 use crate::{
-    ActiveTaskClaim, ActiveTaskClaimId, AgentChangePlan, AgentChangePlanId,
-    AgentSituationReceipt, ClassSet, ContextPacket, ContextPacketId, IntentRun,
-    IntentRunCommitment, IntentRunIdentityRefusal, LogicalTime, OperationClass,
-    PlanRequirementId, PlanSurface, RunId, SituationComponentKind, SituationId, WorkTaskId,
+    ActiveTaskClaim, ActiveTaskClaimId, AgentChangePlan, AgentChangePlanId, AgentSituationReceipt,
+    ClassSet, ContextPacket, ContextPacketId, IntentRun, IntentRunCommitment,
+    IntentRunIdentityRefusal, LogicalTime, OperationClass, PlanRequirementId, PlanSurface, RunId,
+    SituationComponentKind, SituationId, WorkTaskId,
 };
 
 /// Maximum ordered steps in one action packet.
@@ -1008,10 +1008,7 @@ fn packet_commitment(packet: &AgentActionPacket) -> Result<[u8; 32], ActionPacke
     Ok(hasher.finish())
 }
 
-fn write_surface(
-    encoder: &mut Encoder,
-    surface: PlanSurface,
-) -> Result<(), ActionPacketRefusal> {
+fn write_surface(encoder: &mut Encoder, surface: PlanSurface) -> Result<(), ActionPacketRefusal> {
     encoder.write_raw_byte(surface_kind_code(surface.kind()));
     encoder.write_digest(&surface.selector())?;
     Ok(())

@@ -4,13 +4,12 @@
 use core::num::NonZeroU32;
 
 use fgit_agent::{
-    AgentInstanceId, AttenuationRequest, AuthorizedOutboxDispatchRefused,
-    AuthorityReadReceipt, Capability, CapabilityEffectAuthorizationRefusal, CapabilityId,
+    AgentInstanceId, AttenuationRequest, AuthorityReadReceipt, AuthorizedOutboxDispatchRefused,
+    Capability, CapabilityEffectAuthorizationRefusal, CapabilityId,
     CapabilityRevocationReadAdapterRefusal, CapabilityRevocationReadObservation,
-    CapabilityRevocationReadRequest, CapabilityRevocationReader, ClassSet, EffectId,
-    EffectRequest, IntentRun, LogicalTime, OperationClass,
-    RevocationAuthorizedExternalEffectOutcome, RevocationCheckedEffectBroker, RunId,
-    VerifiedCapabilityChain, read_capability_revocations,
+    CapabilityRevocationReadRequest, CapabilityRevocationReader, ClassSet, EffectId, EffectRequest,
+    IntentRun, LogicalTime, OperationClass, RevocationAuthorizedExternalEffectOutcome,
+    RevocationCheckedEffectBroker, RunId, VerifiedCapabilityChain, read_capability_revocations,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
@@ -70,8 +69,8 @@ fn authority_receipt(store_id: u64) -> AuthorityReadReceipt {
         last_checkpoint_id: None,
     };
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(store_id));
-    let key = HeadKey::new(format!("effect-dispatch-{store_id}").into_bytes())
-        .expect("bounded head key");
+    let key =
+        HeadKey::new(format!("effect-dispatch-{store_id}").into_bytes()).expect("bounded head key");
     let read = match initialize_repository(&store, &key, &body).expect("initialize head") {
         HeadInit::Created(read) => read,
         HeadInit::IdenticalRetry(_) | HeadInit::Conflict => panic!("fresh store must create"),
@@ -79,12 +78,8 @@ fn authority_receipt(store_id: u64) -> AuthorityReadReceipt {
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("complete authenticated read")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("complete authenticated read")
 }
 
 fn egress(amount: u64) -> ResourceVector {
@@ -178,15 +173,8 @@ fn revocations(
         observed_at: LogicalTime::new(observed_at),
         revoked,
     };
-    read_capability_revocations(
-        &mut reader,
-        receipt,
-        run,
-        LogicalTime::new(20),
-        max_age,
-        32,
-    )
-    .expect("bounded revocation read")
+    read_capability_revocations(&mut reader, receipt, run, LogicalTime::new(20), max_age, 32)
+        .expect("bounded revocation read")
 }
 
 fn opaque(tag: u8) -> OpaqueHandle {
@@ -221,12 +209,9 @@ fn request_time_proof_cannot_be_reused_after_its_dispatch_deadline() {
     let chain = verified_chain();
     let initial = revocations(&receipt, &run, Vec::new(), 21, 5);
     let request = effect_request(1, 100);
-    let mut broker = RevocationCheckedEffectBroker::open(
-        run,
-        RegionId::new(1),
-        AgentInstanceId::new(1),
-    )
-    .expect("checked broker opens");
+    let mut broker =
+        RevocationCheckedEffectBroker::open(run, RegionId::new(1), AgentInstanceId::new(1))
+            .expect("checked broker opens");
     let grant = broker
         .request_high_value(&chain, &initial, LogicalTime::new(22), &request)
         .expect("request-time proof is fresh");
@@ -275,12 +260,9 @@ fn newly_revoked_ancestor_blocks_dispatch_without_leaking_reservation() {
     let initial = revocations(&receipt, &run, Vec::new(), 21, 30);
     let revoked = revocations(&receipt, &run, vec![CapabilityId::new(1)], 30, 20);
     let request = effect_request(2, 100);
-    let mut broker = RevocationCheckedEffectBroker::open(
-        run,
-        RegionId::new(2),
-        AgentInstanceId::new(2),
-    )
-    .expect("checked broker opens");
+    let mut broker =
+        RevocationCheckedEffectBroker::open(run, RegionId::new(2), AgentInstanceId::new(2))
+            .expect("checked broker opens");
     let grant = broker
         .request_high_value(&chain, &initial, LogicalTime::new(22), &request)
         .expect("ancestry is initially clear");
@@ -327,12 +309,9 @@ fn fresh_dispatch_proof_commits_and_reconciliation_retains_both_proofs() {
     let fresh = revocations(&receipt, &run, Vec::new(), 30, 20);
     let request = effect_request(3, 100);
     let dispatch = dispatch(0x71);
-    let mut broker = RevocationCheckedEffectBroker::open(
-        run.clone(),
-        RegionId::new(3),
-        AgentInstanceId::new(3),
-    )
-    .expect("checked broker opens");
+    let mut broker =
+        RevocationCheckedEffectBroker::open(run.clone(), RegionId::new(3), AgentInstanceId::new(3))
+            .expect("checked broker opens");
     let grant = broker
         .request_high_value(&chain, &initial, LogicalTime::new(22), &request)
         .expect("request-time proof is fresh");

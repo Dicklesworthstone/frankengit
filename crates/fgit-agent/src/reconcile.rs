@@ -27,8 +27,8 @@ use fgit_resource::settlement::{
     DeliveryVerdict, Observation, ProbeVerdict, ReconcileState, ReconcileTransition,
 };
 use fgit_resource::{
-    DownstreamIdempotency, EscalationReason, GradeDisposition, ObligationClass,
-    ObligationState, ResourceError, ResourceVector, TerminalFailureReason,
+    DownstreamIdempotency, EscalationReason, GradeDisposition, ObligationClass, ObligationState,
+    ResourceError, ResourceVector, TerminalFailureReason,
 };
 
 use crate::{
@@ -183,10 +183,7 @@ impl RunReconciliationCounts {
     /// Every effect represented by the report.
     #[must_use]
     pub const fn total(self) -> u32 {
-        self.unsettled()
-            + self.acknowledged
-            + self.aborted
-            + self.terminally_failed
+        self.unsettled() + self.acknowledged + self.aborted + self.terminally_failed
     }
 }
 
@@ -319,14 +316,10 @@ impl RunReconciliationReport {
 
         validate_parent_graph(&effects, &index_by_id)?;
 
-        let consumable_budget = run
-            .resource_budget()
-            .mask(GradeDisposition::Consumable);
+        let consumable_budget = run.resource_budget().mask(GradeDisposition::Consumable);
         let consumable_spend = cumulative_budget_consumed.mask(GradeDisposition::Consumable);
         if let Some(deficit) = consumable_budget.first_deficit(&consumable_spend) {
-            return Err(
-                RunReconciliationRefusal::ConsumableBudgetExceedsRun { deficit },
-            );
+            return Err(RunReconciliationRefusal::ConsumableBudgetExceedsRun { deficit });
         }
 
         let readiness = readiness(counts);
@@ -610,14 +603,20 @@ impl fmt::Display for RunReconciliationRefusal {
                 "run reconciliation requires a complete authenticated authority receipt",
             ),
             Self::RunIdentity(source) => {
-                write!(formatter, "run reconciliation could not identify its run: {source}")
+                write!(
+                    formatter,
+                    "run reconciliation could not identify its run: {source}"
+                )
             }
             Self::ObservationBeforeAuthorityVerification { observed, verified } => write!(
                 formatter,
                 "reconciliation observed at {observed} before authority verification at {verified}"
             ),
             Self::TooManyEffects { observed, limit } => {
-                write!(formatter, "effect inventory has {observed} rows, limit {limit}")
+                write!(
+                    formatter,
+                    "effect inventory has {observed} rows, limit {limit}"
+                )
             }
             Self::DuplicateEffectId { effect_id } => {
                 write!(formatter, "effect inventory repeats {effect_id}")
@@ -643,7 +642,10 @@ impl fmt::Display for RunReconciliationRefusal {
                 "effect {effect_id} has no complete authenticated authority receipt"
             ),
             Self::EffectAuthorityMismatch { effect_id } => {
-                write!(formatter, "effect {effect_id} belongs to another authority position")
+                write!(
+                    formatter,
+                    "effect {effect_id} belongs to another authority position"
+                )
             }
             Self::OperationOutsideRun {
                 effect_id,
@@ -734,7 +736,10 @@ impl fmt::Display for RunReconciliationRefusal {
                 "effect {effect_id} predates parent {parent_effect_id}"
             ),
             Self::ParentCycle { effect_id } => {
-                write!(formatter, "effect parent graph contains a cycle at {effect_id}")
+                write!(
+                    formatter,
+                    "effect parent graph contains a cycle at {effect_id}"
+                )
             }
             Self::ResourceTotalOverflow { field, source } => {
                 write!(formatter, "{field} overflowed: {source}")
@@ -845,13 +850,11 @@ fn validate_record(
     }
     if let Some(evidence) = &record.reconciliation_evidence {
         if evidence.transitions.len() > MAX_EFFECT_RECONCILIATION_TRANSITIONS {
-            return Err(
-                RunReconciliationRefusal::TooManyReconciliationTransitions {
-                    effect_id: record.effect_id,
-                    observed: evidence.transitions.len(),
-                    limit: MAX_EFFECT_RECONCILIATION_TRANSITIONS,
-                },
-            );
+            return Err(RunReconciliationRefusal::TooManyReconciliationTransitions {
+                effect_id: record.effect_id,
+                observed: evidence.transitions.len(),
+                limit: MAX_EFFECT_RECONCILIATION_TRANSITIONS,
+            });
         }
         if record.external_idempotency_key.is_none() {
             return Err(
@@ -862,8 +865,7 @@ fn validate_record(
         }
     }
     if record.effect_class != EffectClass::ExternalEffect
-        && (record.external_idempotency_key.is_some()
-            || record.reconciliation_evidence.is_some())
+        && (record.external_idempotency_key.is_some() || record.reconciliation_evidence.is_some())
     {
         return Err(RunReconciliationRefusal::ExternalMetadataOnNonExternal {
             effect_id: record.effect_id,
@@ -948,7 +950,7 @@ fn validate_parent_graph(
     Ok(())
 }
 
-fn classify_record(
+const fn classify_record(
     record: &EffectRecord,
 ) -> Result<EffectResolutionAction, RunReconciliationRefusal> {
     let action = match (record.obligation_state, record.terminal_outcome) {
@@ -956,14 +958,10 @@ fn classify_record(
         (ObligationState::Committed | ObligationState::DeferredExternally, None) => {
             EffectResolutionAction::ReconcileCommittedEffect
         }
-        (
-            ObligationState::Escalated,
-            Some(EffectTerminalOutcome::Escalated { .. }),
-        ) => EffectResolutionAction::ResolveEscalation,
-        (
-            ObligationState::Acknowledged,
-            Some(EffectTerminalOutcome::Acknowledged),
-        )
+        (ObligationState::Escalated, Some(EffectTerminalOutcome::Escalated { .. })) => {
+            EffectResolutionAction::ResolveEscalation
+        }
+        (ObligationState::Acknowledged, Some(EffectTerminalOutcome::Acknowledged))
         | (ObligationState::Aborted, Some(EffectTerminalOutcome::Aborted))
         | (
             ObligationState::TerminallyFailed,
@@ -980,7 +978,7 @@ fn classify_record(
     Ok(action)
 }
 
-fn update_counts(counts: &mut RunReconciliationCounts, state: ObligationState) {
+const fn update_counts(counts: &mut RunReconciliationCounts, state: ObligationState) {
     match state {
         ObligationState::Reserved => counts.reserved += 1,
         ObligationState::Committed | ObligationState::DeferredExternally => {
@@ -1040,7 +1038,11 @@ fn report_commitment(
     write_counts(&mut encoder, report.counts);
     write_resource_vector(&mut encoder, report.cumulative_budget_reserved);
     write_resource_vector(&mut encoder, report.cumulative_budget_consumed);
-    write_count(&mut encoder, "run_reconciliation.effects", report.effects.len())?;
+    write_count(
+        &mut encoder,
+        "run_reconciliation.effects",
+        report.effects.len(),
+    )?;
     for effect in &report.effects {
         write_effect(&mut encoder, effect)?;
     }
@@ -1096,9 +1098,7 @@ fn write_effect(
     match &record.reconciliation_evidence {
         Some(evidence) => {
             encoder.write_bool(true);
-            encoder.write_raw_byte(downstream_idempotency_code(
-                evidence.downstream_idempotency,
-            ));
+            encoder.write_raw_byte(downstream_idempotency_code(evidence.downstream_idempotency));
             write_count(
                 encoder,
                 "run_reconciliation.transitions",

@@ -2,15 +2,15 @@
 //! Public-path tests for state-stable task snapshot identity.
 
 use fgit_agent::{
-    AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, LogicalTime,
-    TaskProjectionAssignment, TaskPhase, WorkTaskId,
+    AuthorityBoundTaskProjectionSnapshot, AuthorityReadReceipt, LogicalTime, TaskPhase,
+    TaskProjectionAssignment, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
     RepositoryCommitId, RepositorySequence,
@@ -65,12 +65,8 @@ fn authority_receipt(store_id: u64, repository_byte: u8) -> AuthorityReadReceipt
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("authenticate receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x51; 32],
-    )
-    .expect("complete authority receipt")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x51; 32])
+        .expect("complete authority receipt")
 }
 
 #[test]

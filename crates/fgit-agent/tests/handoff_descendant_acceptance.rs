@@ -2,16 +2,16 @@
 //! Public-path tests for descendant-authority handoff acceptance.
 
 use fgit_agent::{
-    ActiveTaskClaim, AgentChangePlan, AgentChangePlanSpec, AgentControlPulse,
-    AgentHandoffCapsule, AgentHandoffCapsuleSpec, AgentInstanceId, AgentSituationReceipt,
-    AuthorityReadReceipt, ClassSet, EvidenceClass, HandoffAcceptanceRefusal,
-    HandoffAuthorityRelation, HandoffCapabilityAttenuation, HandoffTargetResolution, IntentRun,
-    LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
-    PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet,
-    PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RequirementDisposition, RunId,
-    RunReconciliationReport, SituationComponent, SituationComponentKind,
-    SituationOmissionReason, TaskClaimProjection, TaskClaimReceipt, TaskPhase, WorkConflict,
-    WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    ActiveTaskClaim, AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentHandoffCapsule,
+    AgentHandoffCapsuleSpec, AgentInstanceId, AgentSituationReceipt, AuthorityReadReceipt,
+    ClassSet, EvidenceClass, HandoffAcceptanceRefusal, HandoffAuthorityRelation,
+    HandoffCapabilityAttenuation, HandoffTargetResolution, IntentRun, LogicalTime, OperationClass,
+    PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement,
+    PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet,
+    RequirementDisposition, RunId, RunReconciliationReport, SituationComponent,
+    SituationComponentKind, SituationOmissionReason, TaskClaimProjection, TaskClaimReceipt,
+    TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs,
+    WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, CasOutcome, HeadInit, HeadKey, HeadRead, MemoryAuthorityStore, PutOutcome,
@@ -22,8 +22,8 @@ use fgit_codec::{RepositoryAuthorityHeadBody, encode_body};
 use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
-    Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
-    RepositoryAuthorityHeadId, RepositoryId,
+    Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositoryAuthorityHeadId,
+    RepositoryId,
 };
 
 const TASK_BASIS: [u8; 32] = [0x44; 32];
@@ -90,8 +90,8 @@ fn advance(
         Some(head_id(previous)),
         marker,
     );
-    let immutable_key = body_key(IdentityDomain::RepositoryAuthorityHead, &next)
-        .expect("successor immutable key");
+    let immutable_key =
+        body_key(IdentityDomain::RepositoryAuthorityHead, &next).expect("successor immutable key");
     let bytes = encode_body(&next).expect("successor encodes");
     assert!(matches!(
         store
@@ -131,12 +131,7 @@ fn authority_receipt(
     .expect("complete agent authority receipt")
 }
 
-fn run(
-    receipt: &AuthorityReadReceipt,
-    run_id: u128,
-    bytes: u64,
-    expiry: u64,
-) -> IntentRun {
+fn run(receipt: &AuthorityReadReceipt, run_id: u128, bytes: u64, expiry: u64) -> IntentRun {
     IntentRun::new_authenticated(
         RunId::new(run_id),
         receipt.clone(),
@@ -156,11 +151,7 @@ fn situation(
     let components = std::array::from_fn(|index| {
         let kind = SituationComponentKind::ALL[index];
         if kind == SituationComponentKind::TaskProjection {
-            SituationComponent::observed(
-                kind,
-                receipt.authority_head_id(),
-                task_generation,
-            )
+            SituationComponent::observed(kind, receipt.authority_head_id(), task_generation)
         } else {
             SituationComponent::omitted(
                 kind,
@@ -179,10 +170,7 @@ fn situation(
     .expect("complete situation")
 }
 
-fn source_capsule(
-    receipt: &AuthorityReadReceipt,
-    source: &IntentRun,
-) -> AgentHandoffCapsule {
+fn source_capsule(receipt: &AuthorityReadReceipt, source: &IntentRun) -> AgentHandoffCapsule {
     let planning = situation(receipt, source, TASK_BASIS, 20);
     let task_id = WorkTaskId::from_bytes([0x31; 32]);
     let item = WorkItem::new(
@@ -190,13 +178,7 @@ fn source_capsule(
         TASK_BASIS,
         TaskPhase::Open,
         WorkRankingInputs::new(1, 2, 3),
-        WorkEligibilityInputs::new(
-            0,
-            Some(source.run_id()),
-            None,
-            true,
-            WorkConflict::Clear,
-        ),
+        WorkEligibilityInputs::new(0, Some(source.run_id()), None, true, WorkConflict::Clear),
     );
     let frontier =
         WorkFrontier::build_action_scoped(&planning, vec![item]).expect("eligible frontier");
@@ -245,12 +227,9 @@ fn source_capsule(
     let active: ActiveTaskClaim = claim
         .activate(&activation, source)
         .expect("source claim activation");
-    let reconciliation = RunReconciliationReport::build(
-        source,
-        Vec::new(),
-        activation.observed_at(),
-    )
-    .expect("complete empty effect inventory");
+    let reconciliation =
+        RunReconciliationReport::build(source, Vec::new(), activation.observed_at())
+            .expect("complete empty effect inventory");
     let handoff_spec = AgentHandoffCapsuleSpec::new(
         AgentInstanceId::new(1),
         TARGET,
@@ -313,12 +292,7 @@ fn fixture(store_id: u64) -> Fixture {
     let descendant = advance(&store, &key, &genesis, 0x21);
     let receiver_receipt = authority_receipt(&store, &key, 40, 0x52);
     let receiver = run(&receiver_receipt, 8, 512, 65);
-    let receiver_situation = situation(
-        &receiver_receipt,
-        &receiver,
-        CLAIMED_GENERATION,
-        45,
-    );
+    let receiver_situation = situation(&receiver_receipt, &receiver, CLAIMED_GENERATION, 45);
     Fixture {
         store,
         key,
@@ -395,7 +369,10 @@ fn exact_descendant_proof_enables_deterministic_acceptance() {
             .commitment()
             .expect("complete receiver run commitment")
     );
-    assert_eq!(first.receiver_situation_id(), fixture.receiver_situation.situation_id());
+    assert_eq!(
+        first.receiver_situation_id(),
+        fixture.receiver_situation.situation_id()
+    );
     assert_eq!(ancestry.descendant_head_id(), head_id(&fixture.descendant));
     assert_ne!(first.acceptance_id().as_bytes(), &[0; 32]);
 }
@@ -424,7 +401,9 @@ fn ancestry_for_the_wrong_source_head_is_refused() {
                 target_resolution(&fixture.receiver),
                 ancestry,
             )
-            .expect_err("a current-head proof for another ancestor proves nothing about the capsule"),
+            .expect_err(
+                "a current-head proof for another ancestor proves nothing about the capsule"
+            ),
         HandoffAcceptanceRefusal::AncestryAncestorMismatch {
             expected_head: fixture.source_receipt.authority_head_id(),
             observed_head: ancestry.ancestor_head_id(),
@@ -452,12 +431,7 @@ fn ancestry_is_bound_to_the_receivers_exact_current_slot_token() {
     initialize(&other_store, &fixture.key, &fixture.descendant);
     let other_receipt = authority_receipt(&other_store, &fixture.key, 40, 0x52);
     let other_receiver = run(&other_receipt, 8, 512, 65);
-    let other_situation = situation(
-        &other_receipt,
-        &other_receiver,
-        CLAIMED_GENERATION,
-        45,
-    );
+    let other_situation = situation(&other_receipt, &other_receiver, CLAIMED_GENERATION, 45);
 
     assert_eq!(
         fixture

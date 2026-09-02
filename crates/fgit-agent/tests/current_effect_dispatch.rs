@@ -83,8 +83,8 @@ fn stage_configuration(
         digest(marker),
     )
     .expect("the bounded generation constructs");
-    let generation = stage_capability_revocation_generation(store, &generation)
-        .expect("the generation stages");
+    let generation =
+        stage_capability_revocation_generation(store, &generation).expect("the generation stages");
     let configuration = RepositoryIncarnationConfigurationBodyV2_2 {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: fgit_types::GitHashAlgorithm::Sha256,
@@ -184,11 +184,7 @@ fn fixture(store_id: u64) -> Fixture {
     }
 }
 
-fn advance(
-    fixture: &Fixture,
-    revoked: &[CapabilityId],
-    marker: u8,
-) -> RepositoryAuthorityHeadBody {
+fn advance(fixture: &Fixture, revoked: &[CapabilityId], marker: u8) -> RepositoryAuthorityHeadBody {
     let configuration_root = stage_configuration(&fixture.store, revoked, marker);
     let next = head(
         fixture.genesis.generation.get() + 1,
@@ -307,7 +303,7 @@ impl DownstreamChannel for Delivered {
     }
 }
 
-fn plan(dispatch: OutboxDispatch) -> ReconcilePlan {
+const fn plan(dispatch: OutboxDispatch) -> ReconcilePlan {
     ReconcilePlan::new(
         dispatch.idempotency,
         dispatch.idempotency_strength,
@@ -323,7 +319,7 @@ fn current_head_authorizations_survive_acknowledged_reconciliation() {
     let request = request(1);
     let dispatch = dispatch(0x51);
     let mut broker = CurrentAuthorityRevocationCheckedEffectBroker::open(
-        fixture.run.clone(),
+        fixture.run,
         RegionId::new(1),
         AgentInstanceId::new(1),
     )
@@ -387,12 +383,7 @@ fn a_later_revocation_blocks_dispatch_and_preserves_abort_ownership() {
     )
     .expect("the broker opens");
     let grant = broker
-        .request_high_value(
-            &chain,
-            &initial_revocations,
-            LogicalTime::new(21),
-            &request,
-        )
+        .request_high_value(&chain, &initial_revocations, LogicalTime::new(21), &request)
         .expect("the ancestor is initially clear");
     let reserved = broker
         .reserve_authorized_outbox(grant, dispatch(0x61))
@@ -438,7 +429,7 @@ fn a_wrong_reconciliation_plan_returns_the_same_proof_carrying_effect() {
     let request = request(3);
     let dispatch = dispatch(0x71);
     let mut broker = CurrentAuthorityRevocationCheckedEffectBroker::open(
-        fixture.run.clone(),
+        fixture.run,
         RegionId::new(3),
         AgentInstanceId::new(3),
     )
@@ -461,7 +452,7 @@ fn a_wrong_reconciliation_plan_returns_the_same_proof_carrying_effect() {
         .expect("dispatch succeeds");
     let initial = deferred.initial_authorization();
     let dispatched = deferred.dispatch_authorization();
-    let wrong_dispatch = dispatch(0x72);
+    let wrong_dispatch = self::dispatch(0x72);
     let refusal = deferred
         .reconcile(
             &mut plan(wrong_dispatch),
@@ -509,19 +500,14 @@ fn a_stale_current_receipt_refuses_before_any_broker_record() {
     let chain = verified_chain();
     let revocations = current_revocations(&fixture, 20, 5, 0);
     let mut broker = CurrentAuthorityRevocationCheckedEffectBroker::open(
-        fixture.run.clone(),
+        fixture.run,
         RegionId::new(4),
         AgentInstanceId::new(4),
     )
     .expect("the broker opens");
 
     let refusal = broker
-        .request_high_value(
-            &chain,
-            &revocations,
-            LogicalTime::new(25),
-            &request(4),
-        )
+        .request_high_value(&chain, &revocations, LogicalTime::new(25), &request(4))
         .expect_err("the exclusive freshness deadline must fail closed");
     assert!(matches!(
         refusal,

@@ -704,7 +704,7 @@ impl ContextPacket {
 }
 
 /// Why a protocol boundary refused its input.
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProtocolRefusal {
     /// An authenticated receipt did not carry a valid, generation-matched head body.
     AuthorityHeadBody(HeadBodyRefusal),

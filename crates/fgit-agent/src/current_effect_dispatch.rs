@@ -29,8 +29,8 @@
 use core::fmt;
 
 use fgit_resource::{
-    DownstreamChannel, ReconcilePlan, RegionCloseOutcome, RegionId, ReleaseReceipt,
-    ResourceVector, SettledObligation, TerminalFailureReason,
+    DownstreamChannel, ReconcilePlan, RegionCloseOutcome, RegionId, ReleaseReceipt, ResourceVector,
+    SettledObligation, TerminalFailureReason,
     kinds::{DispatchAbortReason, DownstreamAck, OutboxDispatch, OutboxEffectPermit},
 };
 use fgit_types::PrincipalId;
@@ -42,11 +42,10 @@ use crate::{
     EffectGrant, EffectId, EffectJournalEntry, EffectRecord, EffectRequest, IntentRun,
     IntentRunCommitment, LogicalTime, RevocationAuthorizedDeferredOutboxEffect,
     RevocationAuthorizedEffectGrant, RevocationAuthorizedEscalatedOutboxEffect,
-    RevocationAuthorizedEscalationResolutionRefused,
-    RevocationAuthorizedExternalEffectOutcome, RevocationAuthorizedOutboxEffect,
-    RevocationAuthorizedReconciliationRefused, RevocationAuthorizedSettledOutboxEffect,
-    RevocationCheckedEffectBroker, RevocationCheckedEffectRefusal, RunId,
-    VerifiedCapabilityChain,
+    RevocationAuthorizedEscalationResolutionRefused, RevocationAuthorizedExternalEffectOutcome,
+    RevocationAuthorizedOutboxEffect, RevocationAuthorizedReconciliationRefused,
+    RevocationAuthorizedSettledOutboxEffect, RevocationCheckedEffectBroker,
+    RevocationCheckedEffectRefusal, RunId, VerifiedCapabilityChain,
 };
 
 /// Why a current-authority high-value request could not become a live grant.
@@ -62,10 +61,16 @@ impl fmt::Display for CurrentAuthorityRevocationCheckedEffectRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Authorization(source) => {
-                write!(formatter, "current-authority effect authorization refused: {source}")
+                write!(
+                    formatter,
+                    "current-authority effect authorization refused: {source}"
+                )
             }
             Self::Broker(source) => {
-                write!(formatter, "current-authority effect broker refused: {source}")
+                write!(
+                    formatter,
+                    "current-authority effect broker refused: {source}"
+                )
             }
         }
     }
@@ -73,9 +78,7 @@ impl fmt::Display for CurrentAuthorityRevocationCheckedEffectRefusal {
 
 impl core::error::Error for CurrentAuthorityRevocationCheckedEffectRefusal {}
 
-impl From<CapabilityEffectAuthorizationRefusal>
-    for CurrentAuthorityRevocationCheckedEffectRefusal
-{
+impl From<CapabilityEffectAuthorizationRefusal> for CurrentAuthorityRevocationCheckedEffectRefusal {
     fn from(value: CapabilityEffectAuthorizationRefusal) -> Self {
         Self::Authorization(value)
     }
@@ -111,11 +114,7 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
         agent_instance_id: AgentInstanceId,
     ) -> Result<Self, RevocationCheckedEffectRefusal> {
         let run_commitment = run.commitment()?;
-        let inner = RevocationCheckedEffectBroker::open(
-            run.clone(),
-            region,
-            agent_instance_id,
-        )?;
+        let inner = RevocationCheckedEffectBroker::open(run.clone(), region, agent_instance_id)?;
         Ok(Self {
             run,
             run_commitment,
@@ -160,12 +159,9 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
             now,
             request,
         )?;
-        let grant = self.inner.request_high_value(
-            chain,
-            revocations.admitted(),
-            now,
-            request,
-        )?;
+        let grant = self
+            .inner
+            .request_high_value(chain, revocations.admitted(), now, request)?;
         self.authorizations.push(authorization);
         Ok(CurrentAuthorityRevocationAuthorizedEffectGrant {
             authorization,
@@ -317,9 +313,7 @@ impl CurrentAuthorityRevocationCheckedEffectBroker {
 
     /// Accepted ancestry-bound dispatch authorizations in attempt order.
     #[must_use]
-    pub fn dispatch_authorizations(
-        &self,
-    ) -> &[CurrentAuthorityCapabilityEffectAuthorization] {
+    pub fn dispatch_authorizations(&self) -> &[CurrentAuthorityCapabilityEffectAuthorization] {
         &self.dispatch_authorizations
     }
 
@@ -399,9 +393,7 @@ impl CurrentAuthorityOutboxReservationRefused {
     /// Recovers the live proof-carrying grant when the ordinary refusal retained
     /// one.
     #[must_use]
-    pub fn into_authorized_grant(
-        self,
-    ) -> Option<CurrentAuthorityRevocationAuthorizedEffectGrant> {
+    pub fn into_authorized_grant(self) -> Option<CurrentAuthorityRevocationAuthorizedEffectGrant> {
         self.source.into_authorized_grant().map(|grant| {
             CurrentAuthorityRevocationAuthorizedEffectGrant {
                 authorization: self.authorization,
@@ -506,9 +498,7 @@ impl CurrentAuthorityOutboxDispatchRefused {
     /// Recovers a committed proof-carrying effect when dispatch occurred before
     /// the ordinary journal mirror refused.
     #[must_use]
-    pub fn into_deferred(
-        self,
-    ) -> Option<CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect> {
+    pub fn into_deferred(self) -> Option<CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect> {
         match self {
             Self::Dispatch {
                 initial_authorization,
@@ -602,13 +592,7 @@ impl CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect {
             request,
             deferred,
         } = self;
-        match deferred.reconcile(
-            plan,
-            channel,
-            owner,
-            acknowledgement,
-            output_commitments,
-        ) {
+        match deferred.reconcile(plan, channel, owner, acknowledgement, output_commitments) {
             Ok(RevocationAuthorizedExternalEffectOutcome::Acknowledged(settled)) => {
                 Ok(CurrentAuthorityExternalEffectOutcome::Acknowledged(
                     CurrentAuthoritySettledOutboxEffect {
@@ -688,9 +672,7 @@ pub enum CurrentAuthorityReconciliationRefused {
 impl CurrentAuthorityReconciliationRefused {
     /// Recovers the deferred effect on the wrong-plan path.
     #[must_use]
-    pub fn into_effect(
-        self,
-    ) -> Option<CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect> {
+    pub fn into_effect(self) -> Option<CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect> {
         match self {
             Self::WrongPlan { effect } => Some(*effect),
             Self::AfterSettlement { .. } => None,
@@ -764,7 +746,7 @@ impl CurrentAuthoritySettledOutboxEffect {
 
     /// Shared terminal obligation evidence.
     #[must_use]
-    pub fn settled(&self) -> &SettledObligation<OutboxEffectPermit> {
+    pub const fn settled(&self) -> &SettledObligation<OutboxEffectPermit> {
         self.settled.settled()
     }
 }

@@ -25,20 +25,17 @@ use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_types::Digest;
 
 use crate::{
-    AgentSituationReceipt, IntentRun, IntentRunCommitment, IntentRunIdentityRefusal,
-    LogicalTime, PersistedTaskResolution, RecoveredActiveTaskClaim,
-    RecoveredActiveTaskClaimId, TaskClaimReceipt, TaskClaimRecoveryRefusal,
-    TaskCoordinationRefusal, TaskLeaseReconstructionReceipt,
-    TaskLeaseReconstructionReceiptId, TaskPersistenceGateRefusal,
+    AgentSituationReceipt, IntentRun, IntentRunCommitment, IntentRunIdentityRefusal, LogicalTime,
+    PersistedTaskResolution, RecoveredActiveTaskClaim, RecoveredActiveTaskClaimId,
+    TaskClaimReceipt, TaskClaimRecoveryRefusal, TaskCoordinationRefusal,
+    TaskLeaseReconstructionReceipt, TaskLeaseReconstructionReceiptId, TaskPersistenceGateRefusal,
     TaskProjectionMutationEnvelope, TaskProjectionStore, TaskProjectionStoreExecution,
-    TaskReleaseDisposition, TaskResolutionPersistenceOutcome,
-    activate_reconstructed_task_claim, persist_task_resolution,
+    TaskReleaseDisposition, TaskResolutionPersistenceOutcome, activate_reconstructed_task_claim,
+    persist_task_resolution,
 };
 
-const RECOVERY_BINDING_DOMAIN: &[u8] =
-    b"frankengit.agent.run-bound-recovered-task-claim/v1\0";
-const RECOVERED_RELEASE_DOMAIN: &[u8] =
-    b"frankengit.agent.recovered-task-release/v2\0";
+const RECOVERY_BINDING_DOMAIN: &[u8] = b"frankengit.agent.run-bound-recovered-task-claim/v1\0";
+const RECOVERED_RELEASE_DOMAIN: &[u8] = b"frankengit.agent.recovered-task-release/v2\0";
 
 /// Stable identity of one recovered claim bound to the complete run validated
 /// during recovery.
@@ -358,10 +355,12 @@ pub fn persist_recovered_task_release<S: TaskProjectionStore>(
     evidence_root: Digest,
 ) -> Result<RecoveredTaskReleasePersistenceOutcome, TaskRecoveryPersistenceRefusal> {
     if recovered.lease_reconstruction_id() != reconstruction.receipt_id() {
-        return Err(TaskRecoveryPersistenceRefusal::LeaseReconstructionMismatch {
-            expected: reconstruction.receipt_id(),
-            observed: recovered.lease_reconstruction_id(),
-        });
+        return Err(
+            TaskRecoveryPersistenceRefusal::LeaseReconstructionMismatch {
+                expected: reconstruction.receipt_id(),
+                observed: recovered.lease_reconstruction_id(),
+            },
+        );
     }
     if recovered.claim_id() != claim.claim_id()
         || recovered.active_claim().claim_id() != claim.claim_id()
@@ -398,8 +397,7 @@ pub fn persist_recovered_task_release<S: TaskProjectionStore>(
                 lease_reconstruction_id,
                 resolution,
             };
-            persisted.receipt_id =
-                PersistedRecoveredTaskReleaseId(release_commitment(&persisted)?);
+            persisted.receipt_id = PersistedRecoveredTaskReleaseId(release_commitment(&persisted)?);
             Ok(RecoveredTaskReleasePersistenceOutcome::Persisted(persisted))
         }
         TaskResolutionPersistenceOutcome::Conflict {
@@ -415,13 +413,15 @@ pub fn persist_recovered_task_release<S: TaskProjectionStore>(
         TaskResolutionPersistenceOutcome::NeedsReconciliation {
             envelope,
             execution,
-        } => Ok(RecoveredTaskReleasePersistenceOutcome::NeedsReconciliation {
-            run_bound_recovery_id,
-            recovery_id,
-            lease_reconstruction_id,
-            envelope,
-            execution,
-        }),
+        } => Ok(
+            RecoveredTaskReleasePersistenceOutcome::NeedsReconciliation {
+                run_bound_recovery_id,
+                recovery_id,
+                lease_reconstruction_id,
+                envelope,
+                execution,
+            },
+        ),
     }
 }
 
@@ -429,7 +429,10 @@ fn recovery_binding_commitment(
     recovered: &RunBoundRecoveredTaskClaim,
 ) -> Result<[u8; 32], TaskRecoveryBindingRefusal> {
     let mut encoder = Encoder::with_capacity(128);
-    encoder.write_bytes("run_bound_recovered_task_claim_domain", RECOVERY_BINDING_DOMAIN)?;
+    encoder.write_bytes(
+        "run_bound_recovered_task_claim_domain",
+        RECOVERY_BINDING_DOMAIN,
+    )?;
     encoder.write_raw(recovered.recovered.recovery_id().as_bytes());
     encoder.write_raw(recovered.run_commitment.as_bytes());
     Ok(hash(&encoder.into_bytes()))

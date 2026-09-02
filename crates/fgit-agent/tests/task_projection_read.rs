@@ -2,19 +2,18 @@
 //! Public-path tests for evidenced exact-generation task projection reads.
 
 use fgit_agent::{
-    AgentSituationReceipt, AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime,
-    OperationClass, RunId, SituationComponent, SituationComponentKind,
-    SituationOmissionReason, TaskProjectionGeneration, TaskProjectionReadAdapterRefusal,
-    TaskProjectionReadExecutionRefusal, TaskProjectionReadObservation, TaskProjectionReadRequest,
-    TaskProjectionReader, TaskProjectionRow, TaskPhase, WorkConflict, WorkRankingInputs,
-    WorkTaskId, read_task_projection,
+    AgentSituationReceipt, AuthorityReadReceipt, ClassSet, IntentRun, LogicalTime, OperationClass,
+    RunId, SituationComponent, SituationComponentKind, SituationOmissionReason, TaskPhase,
+    TaskProjectionGeneration, TaskProjectionReadAdapterRefusal, TaskProjectionReadExecutionRefusal,
+    TaskProjectionReadObservation, TaskProjectionReadRequest, TaskProjectionReader,
+    TaskProjectionRow, WorkConflict, WorkRankingInputs, WorkTaskId, read_task_projection,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -68,12 +67,8 @@ fn authority_receipt() -> AuthorityReadReceipt {
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("authenticated agent receipt")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("authenticated agent receipt")
 }
 
 fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
@@ -176,8 +171,8 @@ fn exact_generation_read_is_evidenced_and_deterministic() {
     let receipt = authority_receipt();
     let run = run(&receipt);
     let situation = situation(&receipt, &run);
-    let generation = TaskProjectionGeneration::try_from_bytes(GENERATION)
-        .expect("nonzero generation");
+    let generation =
+        TaskProjectionGeneration::try_from_bytes(GENERATION).expect("nonzero generation");
     let mut first_reader = Reader {
         identity: [0x81; 32],
         generation,
@@ -199,7 +194,10 @@ fn exact_generation_read_is_evidenced_and_deterministic() {
     assert_eq!(first.receipt_id(), second.receipt_id());
     assert_eq!(first.snapshot().generation(), generation);
     assert_eq!(first.work_items().len(), 1);
-    assert_eq!(first.work_items()[0].task_id(), WorkTaskId::from_bytes([0x51; 32]));
+    assert_eq!(
+        first.work_items()[0].task_id(),
+        WorkTaskId::from_bytes([0x51; 32])
+    );
     assert_eq!(first_reader.calls, 1);
     assert_eq!(second_reader.calls, 1);
     assert_ne!(first.receipt_id().as_bytes(), &[0; 32]);

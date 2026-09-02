@@ -22,13 +22,13 @@
 use core::fmt;
 
 use fgit_codec::{CodecRefusal, Encoder};
-use fgit_crypto::{DigestHasher, GitHashAlgorithm, NativeObjectIdentity, Sha256};
+use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_treefs::WorkspaceId;
 use fgit_types::{HeadGeneration, RepositoryAuthorityHeadId, RepositoryId};
 
 use crate::{
-    AuthorityReadReceipt, IntentRun, IntentRunCommitment, IntentRunIdentityRefusal,
-    LogicalTime, RunId, WorkspaceBinding,
+    AuthorityReadReceipt, IntentRun, IntentRunCommitment, IntentRunIdentityRefusal, LogicalTime,
+    RunId, WorkspaceBinding,
 };
 
 /// Number of component classes in the v1 situation profile.
@@ -280,8 +280,7 @@ impl SituationComponent {
         match self.state {
             SituationComponentState::Observed { .. } => None,
             SituationComponentState::Omitted {
-                detail_commitment,
-                ..
+                detail_commitment, ..
             } => Some(detail_commitment),
         }
     }
@@ -408,8 +407,8 @@ impl AgentSituationReceipt {
 
         if let Some(workspace) = workspace {
             let run_id = intent_run_id.ok_or(SituationRefusal::WorkspaceRequiresIntentRun)?;
-            let run_commitment = intent_run_commitment
-                .ok_or(SituationRefusal::WorkspaceRequiresIntentRun)?;
+            let run_commitment =
+                intent_run_commitment.ok_or(SituationRefusal::WorkspaceRequiresIntentRun)?;
             if workspace.run_id != run_id {
                 return Err(SituationRefusal::WorkspaceRunMismatch {
                     expected: run_id,
@@ -445,13 +444,12 @@ impl AgentSituationReceipt {
         }
 
         for component in &components {
-            if let Some(observed) = component.basis_head_id() {
-                if observed != authority_read_receipt.authority_head_id() {
+            if let Some(observed) = component.basis_head_id()
+                && observed != authority_read_receipt.authority_head_id() {
                     return Err(SituationRefusal::ComponentAuthorityMismatch {
                         kind: component.kind,
                     });
                 }
-            }
         }
 
         let situation_id = SituationId(situation_commitment(
@@ -615,8 +613,7 @@ impl SituationDelta {
         from: &AgentSituationReceipt,
         to: &AgentSituationReceipt,
     ) -> Result<Self, SituationRefusal> {
-        if from.authority_read_receipt.repository_id()
-            != to.authority_read_receipt.repository_id()
+        if from.authority_read_receipt.repository_id() != to.authority_read_receipt.repository_id()
         {
             return Err(SituationRefusal::DeltaRepositoryMismatch {
                 from: from.authority_read_receipt.repository_id(),
@@ -657,10 +654,12 @@ impl SituationDelta {
             SituationAuthorityChange::Unchanged
         } else {
             if to_head_id == from_head_id {
-                return Err(SituationRefusal::AuthorityGenerationChangedWithoutIdentity {
-                    from: from_generation,
-                    to: to_generation,
-                });
+                return Err(
+                    SituationRefusal::AuthorityGenerationChangedWithoutIdentity {
+                        from: from_generation,
+                        to: to_generation,
+                    },
+                );
             }
             SituationAuthorityChange::LaterGenerationObserved {
                 from: from_generation,
@@ -682,8 +681,7 @@ impl SituationDelta {
             from_situation_id: from.situation_id,
             to_situation_id: to.situation_id,
             authority_change,
-            authority_receipt_changed: from.authority_read_receipt
-                != to.authority_read_receipt,
+            authority_receipt_changed: from.authority_read_receipt != to.authority_read_receipt,
             intent_run_changed: from.intent_run_id != to.intent_run_id
                 || from.intent_run_commitment != to.intent_run_commitment,
             workspace_changed: from.workspace != to.workspace,
@@ -742,7 +740,7 @@ impl SituationDelta {
 
     /// True when only the observation instant changed.
     #[must_use]
-    pub fn has_no_context_changes(&self) -> bool {
+    pub const fn has_no_context_changes(&self) -> bool {
         matches!(self.authority_change, SituationAuthorityChange::Unchanged)
             && !self.authority_receipt_changed
             && !self.intent_run_changed
@@ -953,18 +951,15 @@ fn classify_component_transition(
                 SituationComponentTransition::GenerationChanged
             }
         }
-        (
-            SituationComponentState::Observed { .. },
-            SituationComponentState::Omitted { .. },
-        ) => SituationComponentTransition::BecameOmitted,
-        (
-            SituationComponentState::Omitted { .. },
-            SituationComponentState::Observed { .. },
-        ) => SituationComponentTransition::BecameObserved,
-        (
-            SituationComponentState::Omitted { .. },
-            SituationComponentState::Omitted { .. },
-        ) => SituationComponentTransition::OmissionChanged,
+        (SituationComponentState::Observed { .. }, SituationComponentState::Omitted { .. }) => {
+            SituationComponentTransition::BecameOmitted
+        }
+        (SituationComponentState::Omitted { .. }, SituationComponentState::Observed { .. }) => {
+            SituationComponentTransition::BecameObserved
+        }
+        (SituationComponentState::Omitted { .. }, SituationComponentState::Omitted { .. }) => {
+            SituationComponentTransition::OmissionChanged
+        }
     }
 }
 

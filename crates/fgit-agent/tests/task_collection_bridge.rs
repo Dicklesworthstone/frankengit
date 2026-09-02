@@ -3,25 +3,23 @@
 
 use fgit_agent::{
     AgentChangePlan, AgentChangePlanId, AgentChangePlanSpec, AgentControlPulse,
-    AgentSituationReceipt, AuthorityReadReceipt, ClassSet, EvidenceClass, IntentRun,
-    LogicalTime, OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId,
-    PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId,
-    PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RunId,
-    SituationComponent, SituationComponentKind, SituationOmissionReason,
-    TaskClaimProjection, TaskClaimReceipt, TaskClaimRecoveryRefusal,
-    TaskCollectionBridgeRefusal, TaskLeaseHistoryObservation, TaskProjectionAssignment,
-    TaskProjectionCollectionObservation, TaskProjectionCollectionRequest,
-    TaskProjectionCollector, TaskProjectionGeneration, TaskProjectionRow, TaskPhase,
-    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs,
-    WorkTaskId, activate_reconstructed_task_claim, collect_task_projection,
-    collected_unclaimed_task, reconstruct_collected_task_lease,
+    AgentSituationReceipt, AuthorityReadReceipt, ClassSet, EvidenceClass, IntentRun, LogicalTime,
+    OperationClass, PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
+    PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind,
+    RejectedShortcutSet, RunId, SituationComponent, SituationComponentKind,
+    SituationOmissionReason, TaskClaimProjection, TaskClaimReceipt, TaskClaimRecoveryRefusal,
+    TaskCollectionBridgeRefusal, TaskLeaseHistoryObservation, TaskPhase, TaskProjectionAssignment,
+    TaskProjectionCollectionObservation, TaskProjectionCollectionRequest, TaskProjectionCollector,
+    TaskProjectionGeneration, TaskProjectionRow, WorkConflict, WorkEligibilityInputs, WorkFrontier,
+    WorkItem, WorkRankingInputs, WorkTaskId, activate_reconstructed_task_claim,
+    collect_task_projection, collected_unclaimed_task, reconstruct_collected_task_lease,
 };
 use fgit_authority::{
-    AuthenticatedHead, AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore,
-    StoreInstanceId, initialize_repository, outcome_index_root,
+    AuthenticatedHead, AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
+    initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -87,10 +85,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -114,8 +109,7 @@ impl TaskProjectionCollector for Collector {
     > {
         Ok(TaskProjectionCollectionObservation::new(
             request.request_id(),
-            TaskProjectionGeneration::try_from_bytes(GENERATION)
-                .expect("nonzero generation"),
+            TaskProjectionGeneration::try_from_bytes(GENERATION).expect("nonzero generation"),
             LogicalTime::new(21),
             vec![self.row.clone()],
             [0x81; 32],
@@ -139,13 +133,8 @@ fn collect_row(
     row: TaskProjectionRow,
 ) -> fgit_agent::TaskProjectionCollectionReceipt {
     let mut collector = Collector { row };
-    collect_task_projection(
-        &mut collector,
-        receipt,
-        run,
-        LogicalTime::new(20),
-    )
-    .expect("current task collection")
+    collect_task_projection(&mut collector, receipt, run, LogicalTime::new(20))
+        .expect("current task collection")
 }
 
 fn situation(
@@ -166,14 +155,8 @@ fn situation(
             )
         }
     });
-    AgentSituationReceipt::build(
-        receipt.clone(),
-        Some(run),
-        None,
-        observed_at,
-        components,
-    )
-    .expect("complete task-bound situation")
+    AgentSituationReceipt::build(receipt.clone(), Some(run), None, observed_at, components)
+        .expect("complete task-bound situation")
 }
 
 fn real_plan(
@@ -182,12 +165,7 @@ fn real_plan(
     task_id: WorkTaskId,
     surface: PlanSurface,
 ) -> (AgentControlPulse, AgentChangePlan) {
-    let planning = situation(
-        receipt,
-        run,
-        PREVIOUS_GENERATION,
-        LogicalTime::new(14),
-    );
+    let planning = situation(receipt, run, PREVIOUS_GENERATION, LogicalTime::new(14));
     let item = WorkItem::new(
         task_id,
         PREVIOUS_GENERATION,
@@ -195,8 +173,8 @@ fn real_plan(
         WorkRankingInputs::new(1, 2, 3),
         WorkEligibilityInputs::new(0, None, None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&planning, vec![item])
-        .expect("task is eligible");
+    let frontier =
+        WorkFrontier::build_action_scoped(&planning, vec![item]).expect("task is eligible");
     let pulse = AgentControlPulse::build(&planning, &frontier, Some(run))
         .expect("live run makes an actionable pulse");
     let spec = AgentChangePlanSpec::new(
@@ -206,10 +184,7 @@ fn real_plan(
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -229,8 +204,8 @@ fn real_plan(
         digest(0x66),
         false,
     )]);
-    let plan = AgentChangePlan::build(&pulse, run, &[], spec)
-        .expect("complete pre-claim change plan");
+    let plan =
+        AgentChangePlan::build(&pulse, run, &[], spec).expect("complete pre-claim change plan");
     (pulse, plan)
 }
 
@@ -265,7 +240,10 @@ fn collected_unassigned_row_becomes_exact_claim_basis() {
     assert_eq!(claim_basis.repository_id(), receipt.repository_id());
     assert_eq!(claim_basis.task_id(), task_id);
     assert_eq!(claim_basis.generation(), &GENERATION);
-    assert_eq!(claim_basis.assignment(), TaskProjectionAssignment::Unassigned);
+    assert_eq!(
+        claim_basis.assignment(),
+        TaskProjectionAssignment::Unassigned
+    );
     assert_eq!(claim_basis.observed_at(), LogicalTime::new(21));
 }
 
@@ -370,13 +348,8 @@ fn collected_claimed_row_reconstructs_exact_lease_deterministically() {
         TaskCollectionBridgeRefusal::LeaseReconstructionRequired { task_id }
     );
 
-    let first = reconstruct_collected_task_lease(
-        &collection,
-        &receipt,
-        task_id,
-        history.clone(),
-    )
-    .expect("complete durable history reconstructs the lease");
+    let first = reconstruct_collected_task_lease(&collection, &receipt, task_id, history.clone())
+        .expect("complete durable history reconstructs the lease");
     let second = reconstruct_collected_task_lease(&collection, &receipt, task_id, history)
         .expect("identical history reconstruction is deterministic");
     assert_eq!(first.receipt_id(), second.receipt_id());
@@ -386,7 +359,10 @@ fn collected_claimed_row_reconstructs_exact_lease_deterministically() {
         first.snapshot().assignment(),
         TaskProjectionAssignment::assigned(run.run_id(), run_commitment)
     );
-    let lease = first.snapshot().lease().expect("active lease reconstructed");
+    let lease = first
+        .snapshot()
+        .lease()
+        .expect("active lease reconstructed");
     assert_eq!(lease.plan_id(), plan_id);
     assert_eq!(lease.assignee(), run.run_id());
     assert_eq!(lease.run_commitment(), run_commitment);
@@ -422,8 +398,8 @@ fn lease_history_cannot_be_replayed_across_generation() {
     )
     .expect("claimed collection row");
     let collection = collect_row(&receipt, &run, row);
-    let observed = TaskProjectionGeneration::try_from_bytes([0x45; 32])
-        .expect("different nonzero generation");
+    let observed =
+        TaskProjectionGeneration::try_from_bytes([0x45; 32]).expect("different nonzero generation");
     let history = TaskLeaseHistoryObservation::new(
         collection.receipt_id(),
         task_id,
@@ -559,14 +535,12 @@ fn reconstructed_lease_recovers_active_claim_only_on_the_exact_read_event() {
     .expect("original validated claim receipt");
     let refreshed = situation(&receipt, &run, GENERATION, LogicalTime::new(21));
 
-    let recovered = activate_reconstructed_task_claim(
-        &reconstruction,
-        &claim,
-        &refreshed,
-        &run,
-    )
-    .expect("lease, claim, refresh, complete run, and exact read all agree");
-    assert_eq!(recovered.lease_reconstruction_id(), reconstruction.receipt_id());
+    let recovered = activate_reconstructed_task_claim(&reconstruction, &claim, &refreshed, &run)
+        .expect("lease, claim, refresh, complete run, and exact read all agree");
+    assert_eq!(
+        recovered.lease_reconstruction_id(),
+        reconstruction.receipt_id()
+    );
     assert_eq!(recovered.claim_id(), claim.claim_id());
     assert_eq!(recovered.active_claim().task_id(), task_id);
     assert_eq!(recovered.active_claim().plan_id(), plan.plan_id());
@@ -574,21 +548,11 @@ fn reconstructed_lease_recovers_active_claim_only_on_the_exact_read_event() {
     assert_eq!(recovered.active_claim().run_commitment(), run_commitment);
     assert_ne!(recovered.recovery_id().as_bytes(), &[0; 32]);
 
-    let later_run = run(&later);
-    let later_refreshed = situation(
-        &later,
-        &later_run,
-        GENERATION,
-        LogicalTime::new(21),
-    );
+    let later_run = self::run(&later);
+    let later_refreshed = situation(&later, &later_run, GENERATION, LogicalTime::new(21));
     assert_eq!(
-        activate_reconstructed_task_claim(
-            &reconstruction,
-            &claim,
-            &later_refreshed,
-            &later_run,
-        )
-        .expect_err("same head and RunId cannot substitute another exact read"),
+        activate_reconstructed_task_claim(&reconstruction, &claim, &later_refreshed, &later_run,)
+            .expect_err("same head and RunId cannot substitute another exact read"),
         TaskClaimRecoveryRefusal::RunCommitmentMismatch {
             expected: run_commitment,
             claim: run_commitment,
@@ -669,13 +633,8 @@ fn same_id_changed_run_history_cannot_recover_the_original_claim() {
     let refreshed = situation(&receipt, &run, GENERATION, LogicalTime::new(21));
 
     assert_eq!(
-        activate_reconstructed_task_claim(
-            &reconstruction,
-            &claim,
-            &refreshed,
-            &run,
-        )
-        .expect_err("same-ID history cannot substitute another complete claimant"),
+        activate_reconstructed_task_claim(&reconstruction, &claim, &refreshed, &run,)
+            .expect_err("same-ID history cannot substitute another complete claimant"),
         TaskClaimRecoveryRefusal::RunCommitmentMismatch {
             expected: altered_commitment,
             claim: original_commitment,

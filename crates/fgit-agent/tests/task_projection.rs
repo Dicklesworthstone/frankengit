@@ -6,22 +6,21 @@ use std::collections::BTreeMap;
 use fgit_agent::{
     AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentSituationReceipt,
     AuthorityReadReceipt, ClassSet, EvidenceClass, IntentRun, LogicalTime, OperationClass,
-    PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
-    PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface,
-    PlanSurfaceKind, RejectedShortcutSet, RunId, SituationComponent, SituationComponentKind,
-    SituationOmissionReason, TaskAdapterRefusal, TaskClaimProjection, TaskClaimReceipt,
-    TaskMutationAttempt, TaskMutationAttemptRefusal, TaskMutationObservation, TaskMutationReplay,
-    TaskMutationRequest, TaskMutationRequestId, TaskMutationReceipt, TaskPhase,
-    TaskProjectionAdapter, TaskProjectionGeneration, TaskProjectionRow, TaskProjectionSnapshot,
-    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
-    apply_task_mutation,
+    PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement,
+    PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet,
+    RunId, SituationComponent, SituationComponentKind, SituationOmissionReason, TaskAdapterRefusal,
+    TaskClaimProjection, TaskClaimReceipt, TaskMutationAttempt, TaskMutationAttemptRefusal,
+    TaskMutationObservation, TaskMutationReceipt, TaskMutationReplay, TaskMutationRequest,
+    TaskMutationRequestId, TaskPhase, TaskProjectionAdapter, TaskProjectionGeneration,
+    TaskProjectionRow, TaskProjectionSnapshot, WorkConflict, WorkEligibilityInputs, WorkFrontier,
+    WorkItem, WorkRankingInputs, WorkTaskId, apply_task_mutation,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -75,12 +74,8 @@ fn authority_receipt() -> AuthorityReadReceipt {
     let authenticated = store
         .authenticate_head_receipt(&read)
         .expect("issuing store authenticates its receipt");
-    AuthorityReadReceipt::from_authenticated_head(
-        &authenticated,
-        LogicalTime::new(10),
-        [0x71; 32],
-    )
-    .expect("authenticated agent receipt")
+    AuthorityReadReceipt::from_authenticated_head(&authenticated, LogicalTime::new(10), [0x71; 32])
+        .expect("authenticated agent receipt")
 }
 
 fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
@@ -92,10 +87,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -143,8 +135,8 @@ fn plan(
         WorkRankingInputs::new(1, 2, 3),
         WorkEligibilityInputs::new(0, None, None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&situation, vec![item])
-        .expect("task is eligible");
+    let frontier =
+        WorkFrontier::build_action_scoped(&situation, vec![item]).expect("task is eligible");
     let pulse = AgentControlPulse::build(&situation, &frontier, Some(run))
         .expect("live run makes an actionable pulse");
     let spec = AgentChangePlanSpec::new(
@@ -154,10 +146,7 @@ fn plan(
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -196,7 +185,7 @@ struct ReferenceAdapter {
 }
 
 impl ReferenceAdapter {
-    fn new(generation: TaskProjectionGeneration, row: TaskProjectionRow) -> Self {
+    const fn new(generation: TaskProjectionGeneration, row: TaskProjectionRow) -> Self {
         Self {
             identity: [0x91; 32],
             generation,
@@ -320,13 +309,9 @@ fn fixture() -> Fixture {
         WorkConflict::Clear,
     )
     .expect("valid unclaimed row");
-    let snapshot = TaskProjectionSnapshot::build(
-        &receipt,
-        BASIS_GENERATION,
-        LogicalTime::new(20),
-        vec![row],
-    )
-    .expect("complete task projection");
+    let snapshot =
+        TaskProjectionSnapshot::build(&receipt, BASIS_GENERATION, LogicalTime::new(20), vec![row])
+            .expect("complete task projection");
     Fixture {
         receipt,
         run,
@@ -376,7 +361,7 @@ fn snapshot_feeds_frontier_and_claim_mutation_is_idempotent() {
     let first = apply_task_mutation(&mut adapter, &request).expect("claim applies");
     let second = apply_task_mutation(&mut adapter, &request).expect("retry is recognized");
     let applied = applied(first);
-    let retry = applied(second);
+    let retry = self::applied(second);
 
     assert_eq!(applied.receipt_id(), retry.receipt_id());
     assert_eq!(applied.replay(), TaskMutationReplay::Applied);
@@ -391,8 +376,8 @@ fn snapshot_feeds_frontier_and_claim_mutation_is_idempotent() {
 fn stale_generation_is_a_definite_typed_backend_refusal() {
     let fixture = fixture();
     let request = claim_request(&fixture);
-    let current = TaskProjectionGeneration::try_from_bytes([0x54; 32])
-        .expect("nonzero current generation");
+    let current =
+        TaskProjectionGeneration::try_from_bytes([0x54; 32]).expect("nonzero current generation");
     let mut adapter = ReferenceAdapter::new(current, request.before().clone());
 
     assert_eq!(
@@ -414,8 +399,7 @@ fn ambiguous_outcome_is_not_retried_by_the_coordinator() {
     let mut adapter = AmbiguousAdapter { calls: 0 };
 
     assert_eq!(
-        apply_task_mutation(&mut adapter, &request)
-            .expect_err("ambiguous result requires a probe"),
+        apply_task_mutation(&mut adapter, &request).expect_err("ambiguous result requires a probe"),
         TaskMutationAttemptRefusal::Adapter(TaskAdapterRefusal::Ambiguous {
             request_id: request.request_id(),
             probe_root: digest(0xa2),
@@ -485,9 +469,8 @@ fn release_remains_constructible_after_the_source_run_expires() {
         fixture.snapshot.generation(),
         claim_request.before().clone(),
     );
-    let mutation = applied(
-        apply_task_mutation(&mut adapter, &claim_request).expect("claim mutation applies"),
-    );
+    let mutation =
+        applied(apply_task_mutation(&mut adapter, &claim_request).expect("claim mutation applies"));
     let projection = TaskClaimProjection::new(
         fixture.plan.task_id(),
         fixture.plan.plan_id(),
@@ -503,13 +486,8 @@ fn release_remains_constructible_after_the_source_run_expires() {
         mutation.adapter_identity(),
         mutation.evidence_root(),
     );
-    let claim = TaskClaimReceipt::admit(
-        &fixture.pulse,
-        &fixture.plan,
-        &fixture.run,
-        projection,
-    )
-    .expect("task claim receipt admits exact adapter result");
+    let claim = TaskClaimReceipt::admit(&fixture.pulse, &fixture.plan, &fixture.run, projection)
+        .expect("task claim receipt admits exact adapter result");
     let activation = situation(
         &fixture.receipt,
         &fixture.run,

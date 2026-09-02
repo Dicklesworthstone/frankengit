@@ -22,8 +22,7 @@ use core::fmt;
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthorityHeadAncestryRefusal, AuthorityStore, AuthorityVersionToken,
-    HeadKey, read_current_authority_head_descendant,
-    read_current_authority_head_descendant_async,
+    HeadKey, read_current_authority_head_descendant, read_current_authority_head_descendant_async,
 };
 use fgit_types::{HeadGeneration, RepositoryAuthorityHeadId};
 
@@ -223,18 +222,22 @@ fn validate_receiver_current_slot(
     if receiver.authority_head_id() != current_head_id
         || receiver.authority_head_generation() != current_generation
     {
-        return Err(CurrentAuthorityHandoffRefusal::ReceiverCurrentHeadMismatch {
-            expected_head: current_head_id,
-            observed_head: receiver.authority_head_id(),
-            expected_generation: current_generation,
-            observed_generation: receiver.authority_head_generation(),
-        });
+        return Err(
+            CurrentAuthorityHandoffRefusal::ReceiverCurrentHeadMismatch {
+                expected_head: current_head_id,
+                observed_head: receiver.authority_head_id(),
+                expected_generation: current_generation,
+                observed_generation: receiver.authority_head_generation(),
+            },
+        );
     }
     if receiver.backend_version_token() != current_token {
-        return Err(CurrentAuthorityHandoffRefusal::ReceiverCurrentTokenMismatch {
-            expected: current_token,
-            observed: receiver.backend_version_token(),
-        });
+        return Err(
+            CurrentAuthorityHandoffRefusal::ReceiverCurrentTokenMismatch {
+                expected: current_token,
+                observed: receiver.backend_version_token(),
+            },
+        );
     }
     Ok(())
 }

@@ -3,16 +3,16 @@
 
 use fgit_agent::{
     AgentControlPulse, AgentSituationReceipt, AuthorityReadReceipt, ClassSet, IntentRun,
-    LogicalTime, OperationClass, PulseRefusal, PulseState, RunId, SITUATION_COMPONENT_COUNT,
-    SituationComponent, SituationComponentKind, SituationOmissionReason, TaskPhase, WorkAction,
-    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    LogicalTime, OperationClass, PulseRefusal, PulseState, RunId, SituationComponent,
+    SituationComponentKind, SituationOmissionReason, TaskPhase, WorkAction, WorkConflict,
+    WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -96,11 +96,7 @@ fn situation(
         if kind == SituationComponentKind::TaskProjection {
             SituationComponent::observed(kind, receipt.authority_head_id(), TASK_GENERATION)
         } else if kind == SituationComponentKind::Search {
-            SituationComponent::observed(
-                kind,
-                receipt.authority_head_id(),
-                [extra_generation; 32],
-            )
+            SituationComponent::observed(kind, receipt.authority_head_id(), [extra_generation; 32])
         } else {
             SituationComponent::omitted(
                 kind,
@@ -125,13 +121,7 @@ fn item(id: u8, blockers: u32, owner: RunId) -> WorkItem {
         TASK_GENERATION,
         TaskPhase::Open,
         WorkRankingInputs::new(1, u32::from(id), u64::from(id)),
-        WorkEligibilityInputs::new(
-            blockers,
-            Some(owner),
-            None,
-            true,
-            WorkConflict::Clear,
-        ),
+        WorkEligibilityInputs::new(blockers, Some(owner), None, true, WorkConflict::Clear),
     )
 }
 
@@ -165,11 +155,9 @@ fn pulse_refuses_an_expired_or_substituted_run() {
     let receipt = receipt();
     let expired = run(&receipt, 7, 20);
     let situation = situation(&receipt, &expired, 20, 0x71);
-    let frontier = WorkFrontier::build_action_scoped(
-        &situation,
-        vec![item(1, 0, expired.run_id())],
-    )
-    .expect("frontier remains an inert observation");
+    let frontier =
+        WorkFrontier::build_action_scoped(&situation, vec![item(1, 0, expired.run_id())])
+            .expect("frontier remains an inert observation");
     assert_eq!(
         AgentControlPulse::build(&situation, &frontier, Some(&expired))
             .expect_err("expiry is exclusive"),

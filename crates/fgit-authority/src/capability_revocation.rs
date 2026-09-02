@@ -40,8 +40,7 @@ use fgit_types::{
 use crate::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, HeadBodyRefusal,
     ImmutableRead, OutcomeFailure, PutOutcome, SealFailure, body_key, body_key_for_id,
-    read_repository_incarnation_configuration,
-    read_repository_incarnation_configuration_async,
+    read_repository_incarnation_configuration, read_repository_incarnation_configuration_async,
 };
 
 /// Maximum revoked capability identities retained in one canonical generation.
@@ -160,9 +159,7 @@ impl CapabilityRevocationGenerationBody {
 
     /// Previous revocation generation, when lineage was retained.
     #[must_use]
-    pub const fn predecessor_generation_id(
-        &self,
-    ) -> Option<CapabilityRevocationGenerationId> {
+    pub const fn predecessor_generation_id(&self) -> Option<CapabilityRevocationGenerationId> {
         self.predecessor_generation_id
     }
 
@@ -189,9 +186,7 @@ impl CapabilityRevocationGenerationBody {
     }
 
     /// Digest carried by repository configuration schema 2.2.
-    pub fn generation_root(
-        &self,
-    ) -> Result<Digest, CapabilityRevocationAuthorityFailure> {
+    pub fn generation_root(&self) -> Result<Digest, CapabilityRevocationAuthorityFailure> {
         Ok(capability_revocation_generation_root(self.generation_id()?))
     }
 }
@@ -229,18 +224,15 @@ impl CanonicalBody for CapabilityRevocationGenerationBody {
     }
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
-        let tenant_id = TenantId::from_bytes(
-            input.read_opaque_id("capability_revocation.tenant_id")?,
-        );
-        let repository_id = RepositoryId::from_bytes(
-            input.read_opaque_id("capability_revocation.repository_id")?,
-        );
+        let tenant_id =
+            TenantId::from_bytes(input.read_opaque_id("capability_revocation.tenant_id")?);
+        let repository_id =
+            RepositoryId::from_bytes(input.read_opaque_id("capability_revocation.repository_id")?);
         let repository_incarnation_id = RepositoryIncarnationId::from_bytes(
             input.read_opaque_id("capability_revocation.repository_incarnation_id")?,
         );
-        let policy_epoch = PolicyEpoch::try_new(
-            input.read_scalar::<u64>("capability_revocation.policy_epoch")?,
-        )?;
+        let policy_epoch =
+            PolicyEpoch::try_new(input.read_scalar::<u64>("capability_revocation.policy_epoch")?)?;
         let predecessor_generation_id = input.read_option(
             "capability_revocation.predecessor_generation_id",
             |decoder| {
@@ -249,10 +241,10 @@ impl CanonicalBody for CapabilityRevocationGenerationBody {
                 )?)
             },
         )?;
-        let revoked_capability_ids = input.read_canonical_set(
-            "capability_revocation.revoked_capability_ids",
-            |decoder| decoder.read_opaque_id("capability_revocation.capability_id"),
-        )?;
+        let revoked_capability_ids = input
+            .read_canonical_set("capability_revocation.revoked_capability_ids", |decoder| {
+                decoder.read_opaque_id("capability_revocation.capability_id")
+            })?;
         if revoked_capability_ids.len() > MAX_CAPABILITY_REVOCATION_ENTRIES {
             return Err(too_many_codec_refusal(revoked_capability_ids.len()));
         }
@@ -285,7 +277,7 @@ impl CapabilityRevocationGenerationStage {
 
     /// Digest a schema-2.2 configuration carries.
     #[must_use]
-    pub fn generation_root(self) -> Digest {
+    pub const fn generation_root(self) -> Digest {
         capability_revocation_generation_root(self.generation_id)
     }
 
@@ -312,7 +304,7 @@ impl CapabilityRevocationGenerationRead {
 
     /// Digest selected by repository configuration.
     #[must_use]
-    pub fn generation_root(&self) -> Digest {
+    pub const fn generation_root(&self) -> Digest {
         capability_revocation_generation_root(self.generation_id)
     }
 
@@ -396,7 +388,10 @@ impl fmt::Display for CapabilityRevocationAuthorityFailure {
             Self::Codec(refusal) => write!(formatter, "revocation codec refused: {refusal}"),
             Self::Type(refusal) => write!(formatter, "revocation identity refused: {refusal}"),
             Self::Authority(refusal) => {
-                write!(formatter, "revocation authority operation failed: {refusal}")
+                write!(
+                    formatter,
+                    "revocation authority operation failed: {refusal}"
+                )
             }
             Self::HeadBody(refusal) => write!(formatter, "revocation head refused: {refusal}"),
             Self::Configuration(refusal) => {
@@ -415,9 +410,8 @@ impl fmt::Display for CapabilityRevocationAuthorityFailure {
                 formatter,
                 "revocation body stored for {expected} re-identifies as {observed}"
             ),
-            Self::ConfigurationHasNoRevocationRoot => formatter.write_str(
-                "repository configuration has no canonical capability revocation root",
-            ),
+            Self::ConfigurationHasNoRevocationRoot => formatter
+                .write_str("repository configuration has no canonical capability revocation root"),
             Self::TenantMismatch { expected, observed } => write!(
                 formatter,
                 "selected revocation generation names tenant {observed}, expected {expected}"
@@ -486,7 +480,7 @@ impl From<SealFailure> for CapabilityRevocationAuthorityFailure {
 
 /// Converts a generation identity into the digest carried by configuration 2.2.
 #[must_use]
-pub fn capability_revocation_generation_root(
+pub const fn capability_revocation_generation_root(
     generation_id: CapabilityRevocationGenerationId,
 ) -> Digest {
     let identity = generation_id.as_internal_object_id();
@@ -496,7 +490,7 @@ pub fn capability_revocation_generation_root(
 /// Converts the digest carried by configuration 2.2 into its typed generation
 /// identity.
 #[must_use]
-pub fn capability_revocation_generation_id_from_root(
+pub const fn capability_revocation_generation_id_from_root(
     root: &Digest,
 ) -> CapabilityRevocationGenerationId {
     CapabilityRevocationGenerationId::from_digest(
@@ -522,9 +516,11 @@ where
     let key = body_key(IdentityDomain::Generation, body)?;
     let outcome = store.put_if_absent(&key, &encode_body(body)?)?;
     if outcome == PutOutcome::Conflict {
-        return Err(CapabilityRevocationAuthorityFailure::ContentAddressedConflict {
-            generation_id: Box::new(generation_id),
-        });
+        return Err(
+            CapabilityRevocationAuthorityFailure::ContentAddressedConflict {
+                generation_id: Box::new(generation_id),
+            },
+        );
     }
     Ok(CapabilityRevocationGenerationStage {
         generation_id,
@@ -545,9 +541,11 @@ where
     let key = body_key(IdentityDomain::Generation, body)?;
     let outcome = store.put_if_absent(cx, &key, &encode_body(body)?).await?;
     if outcome == PutOutcome::Conflict {
-        return Err(CapabilityRevocationAuthorityFailure::ContentAddressedConflict {
-            generation_id: Box::new(generation_id),
-        });
+        return Err(
+            CapabilityRevocationAuthorityFailure::ContentAddressedConflict {
+                generation_id: Box::new(generation_id),
+            },
+        );
     }
     Ok(CapabilityRevocationGenerationStage {
         generation_id,
@@ -608,8 +606,7 @@ where
 {
     let authenticated = store.authenticate_head_receipt(authenticated.receipt())?;
     let head = authenticated.body()?;
-    let configuration =
-        read_repository_incarnation_configuration(store, &head.configuration_root)?;
+    let configuration = read_repository_incarnation_configuration(store, &head.configuration_root)?;
     let root = configuration
         .capability_revocation_root
         .ok_or(CapabilityRevocationAuthorityFailure::ConfigurationHasNoRevocationRoot)?;
@@ -640,12 +637,9 @@ where
         .authenticate_head_receipt(cx, authenticated.receipt())
         .await?;
     let head = authenticated.body()?;
-    let configuration = read_repository_incarnation_configuration_async(
-        store,
-        cx,
-        &head.configuration_root,
-    )
-    .await?;
+    let configuration =
+        read_repository_incarnation_configuration_async(store, cx, &head.configuration_root)
+            .await?;
     let root = configuration
         .capability_revocation_root
         .ok_or(CapabilityRevocationAuthorityFailure::ConfigurationHasNoRevocationRoot)?;
@@ -666,14 +660,15 @@ fn identified_generation(
     bytes: &[u8],
     expected: CapabilityRevocationGenerationId,
 ) -> Result<CapabilityRevocationGenerationRead, CapabilityRevocationAuthorityFailure> {
-    let body: CapabilityRevocationGenerationBody =
-        decode_body(bytes, REVOCATION_DECODE_LIMITS)?;
+    let body: CapabilityRevocationGenerationBody = decode_body(bytes, REVOCATION_DECODE_LIMITS)?;
     let observed = body.generation_id()?;
     if observed != expected {
-        return Err(CapabilityRevocationAuthorityFailure::GenerationIdentityMismatch {
-            expected: Box::new(expected),
-            observed: Box::new(observed),
-        });
+        return Err(
+            CapabilityRevocationAuthorityFailure::GenerationIdentityMismatch {
+                expected: Box::new(expected),
+                observed: Box::new(observed),
+            },
+        );
     }
     Ok(CapabilityRevocationGenerationRead {
         generation_id: expected,
@@ -717,7 +712,7 @@ fn validate_selected_generation(
 }
 
 fn validate_revoked_ids(
-    revoked_capability_ids: &mut Vec<[u8; 16]>,
+    revoked_capability_ids: &mut [[u8; 16]],
 ) -> Result<(), CapabilityRevocationBodyRefusal> {
     if revoked_capability_ids.len() > MAX_CAPABILITY_REVOCATION_ENTRIES {
         return Err(CapabilityRevocationBodyRefusal::TooManyRevocations {

@@ -97,10 +97,7 @@ pub enum TaskProjectionAssignment {
 impl TaskProjectionAssignment {
     /// Builds one complete assignment or transfer preference.
     #[must_use]
-    pub const fn assigned(
-        run_id: RunId,
-        run_commitment: IntentRunCommitment,
-    ) -> Self {
+    pub const fn assigned(run_id: RunId, run_commitment: IntentRunCommitment) -> Self {
         Self::Assigned {
             run_id,
             run_commitment,
@@ -329,11 +326,13 @@ impl TaskProjectionSnapshot {
                 run_id,
                 run_commitment: assigned_commitment,
             } => {
-                return Err(TaskProjectionAdapterRefusal::AssignedRunCommitmentMismatch {
-                    run_id,
-                    expected: assigned_commitment,
-                    observed: run_commitment,
-                });
+                return Err(
+                    TaskProjectionAdapterRefusal::AssignedRunCommitmentMismatch {
+                        run_id,
+                        expected: assigned_commitment,
+                        observed: run_commitment,
+                    },
+                );
             }
         }
         if claimed_at < pulse.observed_at() {
@@ -458,13 +457,8 @@ impl TaskProjectionSnapshot {
         )?;
         let next_phase = disposition.phase();
         let kind = TaskProjectionTransitionKind::Released { next_phase };
-        let next_generation = derive_resolution_generation(
-            self,
-            claim_receipt,
-            active_claim,
-            kind,
-            resolved_at,
-        )?;
+        let next_generation =
+            derive_resolution_generation(self, claim_receipt, active_claim, kind, resolved_at)?;
         validate_successor_generation(self.generation, next_generation)?;
         let projection = TaskClaimCancellationProjection::new(
             active_claim.activation_id(),
@@ -557,13 +551,8 @@ impl TaskProjectionSnapshot {
             successor_run_id: successor_run.run_id(),
             successor_run_commitment,
         };
-        let next_generation = derive_resolution_generation(
-            self,
-            claim_receipt,
-            active_claim,
-            kind,
-            resolved_at,
-        )?;
+        let next_generation =
+            derive_resolution_generation(self, claim_receipt, active_claim, kind, resolved_at)?;
         validate_successor_generation(self.generation, next_generation)?;
         let projection = TaskClaimCancellationProjection::new(
             active_claim.activation_id(),
@@ -584,10 +573,7 @@ impl TaskProjectionSnapshot {
             self.task_id,
             next_generation,
             self.phase,
-            TaskProjectionAssignment::assigned(
-                successor_run.run_id(),
-                successor_run_commitment,
-            ),
+            TaskProjectionAssignment::assigned(successor_run.run_id(), successor_run_commitment),
             None,
         )?;
         let transition = TaskProjectionTransition::build(
@@ -618,16 +604,13 @@ impl TaskProjectionSnapshot {
         if is_zero(&generation) {
             return Err(TaskProjectionAdapterRefusal::ZeroGeneration);
         }
-        if phase_is_terminal(phase) {
-            if !matches!(assignment, TaskProjectionAssignment::Unassigned) || lease.is_some() {
+        if phase_is_terminal(phase)
+            && (!matches!(assignment, TaskProjectionAssignment::Unassigned) || lease.is_some()) {
                 return Err(TaskProjectionAdapterRefusal::TerminalTaskAssigned { phase });
             }
-        }
         if let Some(active) = lease.as_ref() {
-            let expected = TaskProjectionAssignment::assigned(
-                active.assignee,
-                active.run_commitment,
-            );
+            let expected =
+                TaskProjectionAssignment::assigned(active.assignee, active.run_commitment);
             if assignment != expected {
                 return Err(TaskProjectionAdapterRefusal::LeaseAssignmentMismatch);
             }
@@ -773,8 +756,7 @@ impl TaskProjectionTransition {
             adapter_identity,
             evidence_root,
         };
-        transition.transition_id =
-            TaskProjectionTransitionId(transition_commitment(&transition)?);
+        transition.transition_id = TaskProjectionTransitionId(transition_commitment(&transition)?);
         Ok(transition)
     }
 
@@ -848,24 +830,6 @@ pub struct TaskClaimApplication {
 }
 
 impl TaskClaimApplication {
-    /// Successor task snapshot.
-    #[must_use]
-    pub const fn snapshot(&self) -> &TaskProjectionSnapshot {
-        &self.snapshot
-    }
-
-    /// Exact transition receipt.
-    #[must_use]
-    pub const fn transition(&self) -> TaskProjectionTransition {
-        self.transition
-    }
-
-    /// Projection consumed by [`TaskClaimReceipt::admit`].
-    #[must_use]
-    pub const fn projection(&self) -> &TaskClaimProjection {
-        &self.projection
-    }
-
     /// Decomposes the application for persistence and admission.
     #[must_use]
     pub fn into_parts(
@@ -888,24 +852,6 @@ pub struct TaskResolutionApplication {
 }
 
 impl TaskResolutionApplication {
-    /// Successor task snapshot.
-    #[must_use]
-    pub const fn snapshot(&self) -> &TaskProjectionSnapshot {
-        &self.snapshot
-    }
-
-    /// Exact transition receipt.
-    #[must_use]
-    pub const fn transition(&self) -> TaskProjectionTransition {
-        self.transition
-    }
-
-    /// Projection consumed by cancellation completion or handoff transfer logic.
-    #[must_use]
-    pub const fn projection(&self) -> &TaskClaimCancellationProjection {
-        &self.projection
-    }
-
     /// Decomposes the application for persistence and reconciliation.
     #[must_use]
     pub fn into_parts(
@@ -1426,12 +1372,10 @@ fn write_surfaces(
     encoder: &mut Encoder,
     surfaces: &[PlanSurface],
 ) -> Result<(), TaskProjectionAdapterRefusal> {
-    let count = u32::try_from(surfaces.len()).map_err(|_| {
-        CodecRefusal::ValueUnrepresentable {
-            field: "task_projection.reserved_surfaces",
-            observed: u64::try_from(surfaces.len()).unwrap_or(u64::MAX),
-            limit: u64::from(u32::MAX),
-        }
+    let count = u32::try_from(surfaces.len()).map_err(|_| CodecRefusal::ValueUnrepresentable {
+        field: "task_projection.reserved_surfaces",
+        observed: u64::try_from(surfaces.len()).unwrap_or(u64::MAX),
+        limit: u64::from(u32::MAX),
     })?;
     encoder.write_scalar(count);
     for surface in surfaces {

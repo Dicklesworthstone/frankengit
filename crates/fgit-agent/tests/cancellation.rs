@@ -9,17 +9,17 @@ use fgit_agent::{
     PlanCheckpointPurpose, PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet,
     PlanSurface, PlanSurfaceKind, RejectedShortcutSet, RunCancellationIntent,
     RunCancellationRefusal, RunCancellationState, RunId, RunReconciliationReport,
-    SITUATION_COMPONENT_COUNT, SituationComponent, SituationComponentKind,
-    SituationOmissionReason, TaskClaimCancellationOutcome, TaskClaimCancellationProjection,
-    TaskClaimProjection, TaskClaimReceipt, TaskPhase, WorkConflict, WorkEligibilityInputs,
-    WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    SituationComponent, SituationComponentKind, SituationOmissionReason,
+    TaskClaimCancellationOutcome, TaskClaimCancellationProjection, TaskClaimProjection,
+    TaskClaimReceipt, TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
+    WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{
     EscalationReason, Grade, IdempotencyKey, ObligationClass, ObligationState, ResourceVector,
 };
@@ -100,10 +100,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("run opens")
@@ -147,16 +144,10 @@ fn plan(
         TASK_BASIS,
         TaskPhase::Open,
         WorkRankingInputs::new(1, 2, 3),
-        WorkEligibilityInputs::new(
-            0,
-            Some(run.run_id()),
-            None,
-            true,
-            WorkConflict::Clear,
-        ),
+        WorkEligibilityInputs::new(0, Some(run.run_id()), None, true, WorkConflict::Clear),
     );
-    let frontier = WorkFrontier::build_action_scoped(&situation, vec![item])
-        .expect("eligible frontier");
+    let frontier =
+        WorkFrontier::build_action_scoped(&situation, vec![item]).expect("eligible frontier");
     let pulse = AgentControlPulse::build(&situation, &frontier, Some(run)).expect("pulse");
     let surface = PlanSurface::new(PlanSurfaceKind::RepositoryPath, digest(0x61));
     let spec = AgentChangePlanSpec::new(
@@ -168,10 +159,7 @@ fn plan(
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -295,8 +283,7 @@ fn external_effect(
     }
 }
 
-fn cancellation_fixture(
-) -> (
+fn cancellation_fixture() -> (
     AuthorityReadReceipt,
     IntentRun,
     ActiveTaskClaim,
@@ -413,12 +400,8 @@ fn accepted_effect_identity_cannot_be_rewritten_during_cancellation() {
         8,
     );
     changed.input_commitment = [0xff; 32];
-    let final_report = RunReconciliationReport::build(
-        &run,
-        vec![changed],
-        LogicalTime::new(50),
-    )
-    .expect("the final snapshot is internally valid but not the frozen effect");
+    let final_report = RunReconciliationReport::build(&run, vec![changed], LogicalTime::new(50))
+        .expect("the final snapshot is internally valid but not the frozen effect");
 
     assert_eq!(
         intent

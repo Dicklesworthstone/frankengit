@@ -2,17 +2,17 @@
 //! Public-path tests for authority-bound work-frontier construction.
 
 use fgit_agent::{
-    AgentSituationReceipt, AuthorityReadReceipt, ClassSet, FrontierRefusal, IntentRun,
-    LogicalTime, OperationClass, RunId, SITUATION_COMPONENT_COUNT, SituationComponent,
-    SituationComponentKind, SituationOmissionReason, TaskPhase, WorkAction, WorkConflict,
-    WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    AgentSituationReceipt, AuthorityReadReceipt, ClassSet, FrontierRefusal, IntentRun, LogicalTime,
+    OperationClass, RunId, SITUATION_COMPONENT_COUNT, SituationComponent, SituationComponentKind,
+    SituationOmissionReason, TaskPhase, WorkAction, WorkConflict, WorkEligibilityInputs,
+    WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
-    HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId, authority_head_identity,
-    initialize_repository, outcome_index_root,
+    AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
+    authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{ResourceVector, algebra::Grade};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -110,7 +110,7 @@ fn situation_components(
     })
 }
 
-fn ready_item() -> WorkItem {
+const fn ready_item() -> WorkItem {
     WorkItem::new(
         WorkTaskId::from_bytes([0x61; 32]),
         TASK_GENERATION,
@@ -151,14 +151,9 @@ fn omitted_task_projection_is_a_refusal_not_an_empty_frontier() {
     let expected_detail = components[0]
         .omission_detail_commitment()
         .expect("task projection is explicitly omitted");
-    let situation = AgentSituationReceipt::build(
-        receipt,
-        Some(&run),
-        None,
-        LogicalTime::new(20),
-        components,
-    )
-    .expect("omitted components are a complete situation");
+    let situation =
+        AgentSituationReceipt::build(receipt, Some(&run), None, LogicalTime::new(20), components)
+            .expect("omitted components are a complete situation");
 
     assert_eq!(
         WorkFrontier::build(&situation, vec![ready_item()])

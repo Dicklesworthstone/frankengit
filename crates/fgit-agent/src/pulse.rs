@@ -23,14 +23,14 @@
 use core::fmt;
 
 use fgit_codec::{CodecRefusal, Encoder};
-use fgit_crypto::{DigestHasher, GitHashAlgorithm, NativeObjectIdentity, Sha256};
+use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_treefs::WorkspaceId;
 use fgit_types::{HeadGeneration, RepositoryAuthorityHeadId, RepositoryId};
 
 use crate::{
     AgentSituationReceipt, FrontierExclusionReason, IntentRun, IntentRunCommitment,
-    IntentRunIdentityRefusal, LogicalTime, RunId, SituationComponentKind, TaskPhase,
-    WorkAction, WorkCandidate, WorkFrontier, WorkFrontierId, WorkRankingWitness, WorkTaskId,
+    IntentRunIdentityRefusal, LogicalTime, RunId, SituationComponentKind, TaskPhase, WorkAction,
+    WorkCandidate, WorkFrontier, WorkFrontierId, WorkRankingWitness, WorkTaskId,
 };
 
 const PULSE_DOMAIN: &[u8] = b"frankengit.agent.control-pulse/v2\0";
@@ -336,14 +336,10 @@ impl AgentControlPulse {
 
         let active_run_commitment = validate_active_run(situation, active_run)?;
 
-        let observed_components = count_u32(
-            "observed_components",
-            situation.observed_component_count(),
-        )?;
-        let omitted_components = count_u32(
-            "omitted_components",
-            situation.omitted_component_count(),
-        )?;
+        let observed_components =
+            count_u32("observed_components", situation.observed_component_count())?;
+        let omitted_components =
+            count_u32("omitted_components", situation.omitted_component_count())?;
         let candidate_count = count_u32("candidate_count", frontier.candidates().len())?;
         let excluded_count = count_u32("excluded_count", frontier.excluded().len())?;
         let exclusions = PulseExclusionCounts::from_frontier(frontier)?;
@@ -367,7 +363,9 @@ impl AgentControlPulse {
         };
 
         let receipt = situation.authority_read_receipt();
-        let workspace_id = situation.workspace().map(|workspace| workspace.workspace_id());
+        let workspace_id = situation
+            .workspace()
+            .map(|workspace| workspace.workspace_id());
 
         let mut pulse = Self {
             pulse_id: AgentControlPulseId([0; 32]),
@@ -609,7 +607,10 @@ impl fmt::Display for PulseRefusal {
                 write!(formatter, "complete active run {expected} is required")
             }
             Self::UnexpectedActiveRun { observed } => {
-                write!(formatter, "run {observed} was supplied but the situation has no active run")
+                write!(
+                    formatter,
+                    "run {observed} was supplied but the situation has no active run"
+                )
             }
             Self::ActiveRunIdMismatch { expected, observed } => write!(
                 formatter,
@@ -619,16 +620,16 @@ impl fmt::Display for PulseRefusal {
                 formatter,
                 "supplied run commitment {observed} differs from situation run {expected}"
             ),
-            Self::InconsistentSituationRunIdentity => formatter.write_str(
-                "agent situation carries an inconsistent run ID/commitment pair",
-            ),
+            Self::InconsistentSituationRunIdentity => formatter
+                .write_str("agent situation carries an inconsistent run ID/commitment pair"),
             Self::ActiveRunAuthorityReceiptRequired => formatter.write_str(
                 "control pulse requires a run with a complete authenticated authority receipt",
             ),
-            Self::ActiveRunAuthorityMismatch => formatter.write_str(
-                "active run authority receipt differs from the situation receipt",
-            ),
-            Self::RunIdentity(refusal) => write!(formatter, "active run identity refused: {refusal}"),
+            Self::ActiveRunAuthorityMismatch => formatter
+                .write_str("active run authority receipt differs from the situation receipt"),
+            Self::RunIdentity(refusal) => {
+                write!(formatter, "active run identity refused: {refusal}")
+            }
             Self::ActiveRunExpired {
                 run_id,
                 expiry,
@@ -638,7 +639,10 @@ impl fmt::Display for PulseRefusal {
                 "active run {run_id} expired at {expiry} before situation observation {observed}"
             ),
             Self::CountUnrepresentable { field, observed } => {
-                write!(formatter, "{field} value {observed} is not representable as u32")
+                write!(
+                    formatter,
+                    "{field} value {observed} is not representable as u32"
+                )
             }
             Self::DeclaredBlockerCountOverflow => {
                 formatter.write_str("declared blocker count overflowed u64")
@@ -648,7 +652,10 @@ impl fmt::Display for PulseRefusal {
                 "frontier excludes {expected} rows but pulse counters account for {observed}"
             ),
             Self::Codec(refusal) => {
-                write!(formatter, "agent control pulse commitment refused: {refusal}")
+                write!(
+                    formatter,
+                    "agent control pulse commitment refused: {refusal}"
+                )
             }
         }
     }
@@ -733,11 +740,7 @@ fn pulse_commitment(pulse: &AgentControlPulse) -> Result<[u8; 32], PulseRefusal>
     encoder.write_raw(&pulse.task_projection_generation);
     encoder.write_scalar(pulse.observed_at.value());
 
-    write_optional_run(
-        &mut encoder,
-        pulse.active_run,
-        pulse.active_run_commitment,
-    )?;
+    write_optional_run(&mut encoder, pulse.active_run, pulse.active_run_commitment)?;
     match pulse.workspace_id {
         Some(workspace_id) => {
             encoder.write_bool(true);

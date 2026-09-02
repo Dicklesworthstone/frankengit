@@ -8,20 +8,18 @@ use fgit_agent::{
     EvidenceRecordRef, FailedHypothesis, IntentRun, LearningPhase, LearningRequirementOutcome,
     LearningResourceObservation, LearningTerminalOutcome, LogicalTime, OperationClass,
     OutcomeLearningRecord, OutcomeLearningRecordSpec, OutcomeLearningRefusal, PartyFacts,
-    PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose,
-    PlanEvidenceRequirement, PlanRequirementId, PlanStopConditionSet, PlanSurface,
-    PlanSurfaceKind, RejectedShortcutSet, RequirementDisposition, ReusablePattern, RunId,
-    SITUATION_COMPONENT_COUNT, SituationComponent, SituationComponentKind,
-    SituationOmissionReason, TaskClaimProjection, TaskClaimReceipt, TaskPhase,
-    VerifierAttestation, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
-    WorkRankingInputs, WorkTaskId,
+    PlanApproval, PlanCheckpoint, PlanCheckpointId, PlanCheckpointPurpose, PlanEvidenceRequirement,
+    PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind, RejectedShortcutSet,
+    RequirementDisposition, ReusablePattern, RunId, SituationComponent, SituationComponentKind,
+    SituationOmissionReason, TaskClaimProjection, TaskClaimReceipt, TaskPhase, VerifierAttestation,
+    WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{IdentityDomain, NativeObjectIdentity};
+use fgit_crypto::IdentityDomain;
 use fgit_resource::{Grade, ResourceVector};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestBytes, HeadGeneration, PolicyEpoch, RegistryEpoch,
@@ -72,8 +70,7 @@ fn authority_receipt() -> AuthorityReadReceipt {
     let expected_head_id = authority_head_identity(&head)
         .expect("a complete canonical authority head re-identifies itself");
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(191));
-    let head_key =
-        HeadKey::new(b"agent-learning-test-head".to_vec()).expect("bounded head key");
+    let head_key = HeadKey::new(b"agent-learning-test-head".to_vec()).expect("bounded head key");
     let head_read = match initialize_repository(&store, &head_key, &head)
         .expect("reference store initializes one complete authority head")
     {
@@ -104,10 +101,7 @@ fn run(receipt: &AuthorityReadReceipt) -> IntentRun {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
-            (Grade::CpuMicros, 20_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 16_384), (Grade::CpuMicros, 20_000)]),
         LogicalTime::new(100),
     )
     .expect("authenticated run opens")
@@ -158,13 +152,7 @@ fn fixture(requires_independent_verifier: bool) -> Fixture {
         TASK_BASIS,
         TaskPhase::Open,
         WorkRankingInputs::new(1, 2, 3),
-        WorkEligibilityInputs::new(
-            0,
-            Some(run.run_id()),
-            None,
-            true,
-            WorkConflict::Clear,
-        ),
+        WorkEligibilityInputs::new(0, Some(run.run_id()), None, true, WorkConflict::Clear),
     );
     let frontier = WorkFrontier::build_action_scoped(&planning_situation, vec![item])
         .expect("task is eligible");
@@ -178,10 +166,7 @@ fn fixture(requires_independent_verifier: bool) -> Fixture {
             OperationClass::SubmitEvidence,
             OperationClass::ConsumeBudget,
         ]),
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 4_096),
-            (Grade::CpuMicros, 5_000),
-        ]),
+        ResourceVector::from_grades(&[(Grade::Bytes, 4_096), (Grade::CpuMicros, 5_000)]),
         PlanStopConditionSet::MANDATORY,
         RejectedShortcutSet::BASELINE,
         PlanApproval::NotRequired {
@@ -201,8 +186,7 @@ fn fixture(requires_independent_verifier: bool) -> Fixture {
         digest(0x67),
         requires_independent_verifier,
     )]);
-    let plan = AgentChangePlan::build(&pulse, &run, &[], plan_spec)
-        .expect("complete change plan");
+    let plan = AgentChangePlan::build(&pulse, &run, &[], plan_spec).expect("complete change plan");
     let projection = TaskClaimProjection::new(
         plan.task_id(),
         plan.plan_id(),
@@ -237,15 +221,8 @@ fn fixture(requires_independent_verifier: bool) -> Fixture {
         digest(0x86),
         [0x87; 32],
     );
-    let packet = AgentActionPacket::build(
-        &activation,
-        &plan,
-        active_claim,
-        &run,
-        &[],
-        packet_spec,
-    )
-    .expect("bounded Level-1 packet");
+    let packet = AgentActionPacket::build(&activation, &plan, active_claim, &run, &[], packet_spec)
+        .expect("bounded Level-1 packet");
     Fixture {
         run,
         activation,
@@ -255,7 +232,7 @@ fn fixture(requires_independent_verifier: bool) -> Fixture {
     }
 }
 
-fn facts(tag: u128) -> PartyFacts {
+const fn facts(tag: u128) -> PartyFacts {
     PartyFacts {
         workspace: Some(tag),
         credentials: Some(tag + 1),
@@ -267,7 +244,7 @@ fn facts(tag: u128) -> PartyFacts {
     }
 }
 
-fn evidence(artifact: u128) -> EvidenceRecordRef {
+const fn evidence(artifact: u128) -> EvidenceRecordRef {
     EvidenceRecordRef {
         class: EvidenceClass::Executed,
         artifact,
