@@ -3,16 +3,16 @@
 //! A change plan is inert and a task projection is derived metadata. The
 //! adapter that mutates Beads or another task system therefore returns a
 //! [`TaskClaimProjection`], not authority. This module validates that projection
-//! against the exact pulse, plan, run, and conflict surface, commits it into a
-//! [`TaskClaimReceipt`], and requires a fresh [`crate::AgentSituationReceipt`]
-//! to observe the post-claim projection generation before the claim becomes
-//! usable.
+//! against the exact pulse, plan, complete run, and conflict surface, commits it
+//! into a [`TaskClaimReceipt`], and requires a fresh
+//! [`crate::AgentSituationReceipt`] to observe both the post-claim task
+//! generation and the same complete Intent Run before the claim becomes usable.
 //!
 //! The receipt grants no repository mutation authority and reserves no files by
 //! itself. It proves only that one external task/coordination projection
-//! reported the expected claim transition under the exact plan. Repository
-//! effects still require ordinary capabilities, obligations, and canonical
-//! publication.
+//! reported the expected claim transition under the exact plan and run.
+//! Repository effects still require ordinary capabilities, obligations, and
+//! canonical publication.
 
 use core::fmt;
 
@@ -22,14 +22,14 @@ use fgit_types::{Digest, HeadGeneration, RepositoryAuthorityHeadId, RepositoryId
 
 use crate::{
     AgentChangePlan, AgentChangePlanId, AgentControlPulse, AgentSituationReceipt, IntentRun,
-    LogicalTime, PlanSurface, PulseState, RunId, SituationComponentKind, WorkAction,
-    WorkFrontierId, WorkTaskId,
+    IntentRunCommitment, IntentRunIdentityRefusal, LogicalTime, PlanSurface, PulseState, RunId,
+    SituationComponentKind, WorkAction, WorkFrontierId, WorkTaskId,
 };
 
 /// Largest conflict/reservation surface admitted by one claim.
 pub const MAX_CLAIM_SURFACES: usize = crate::MAX_PLAN_ENTRIES;
-const CLAIM_DOMAIN: &[u8] = b"frankengit.agent.task-claim/v1\0";
-const ACTIVATION_DOMAIN: &[u8] = b"frankengit.agent.task-claim-activation/v1\0";
+const CLAIM_DOMAIN: &[u8] = b"frankengit.agent.task-claim/v2\0";
+const ACTIVATION_DOMAIN: &[u8] = b"frankengit.agent.task-claim-activation/v2\0";
 
 /// Stable identity of one validated task-claim receipt.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -79,7 +79,8 @@ impl fmt::Display for ActiveTaskClaimId {
 ///
 /// This is deliberately a claim *input*, not a receipt. All fields remain
 /// caller supplied until [`TaskClaimReceipt::admit`] checks them against the
-/// exact control-plane objects.
+/// exact control-plane objects. The complete run commitment is taken only from
+/// those authenticated control objects, never from this untrusted projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskClaimProjection {
     task_id: WorkTaskId,
@@ -198,6 +199,7 @@ pub struct TaskClaimReceipt {
     task_id: WorkTaskId,
     action: WorkAction,
     assignee: RunId,
+    run_commitment: IntentRunCommitment,
     previous_task_projection_generation: [u8; 32],
     claimed_task_projection_generation: [u8; 32],
     reserved_surfaces: Vec<PlanSurface>,
@@ -212,18 +214,19 @@ impl TaskClaimReceipt {
     ///
     /// # Errors
     ///
-    /// Refuses a non-actionable pulse, pulse/plan/run substitution, authority
-    /// mismatch, stale or unchanged task generation, wrong task/assignee/plan,
-    /// incomplete reservation surface, invalid time window, claim lifetime
-    /// beyond the run, zero adapter identity, duplicate reservation entries,
-    /// excessive surfaces, and unrepresentable canonical framing.
+    /// Refuses a non-actionable pulse, pulse/plan/complete-run substitution,
+    /// authority mismatch, stale or unchanged task generation, wrong
+    /// task/assignee/plan, incomplete reservation surface, invalid time window,
+    /// claim lifetime beyond the run, zero adapter identity, duplicate
+    /// reservation entries, excessive surfaces, and unrepresentable canonical
+    /// framing.
     pub fn admit(
         pulse: &AgentControlPulse,
         plan: &AgentChangePlan,
         run: &IntentRun,
         mut projection: TaskClaimProjection,
     ) -> Result<Self, TaskClaimRefusal> {
-        validate_claim_control(pulse, plan, run)?;
+        let run_commitment = validate_claim_control(pulse, plan, run)?;
         validate_projection(pulse, plan, run, &mut projection)?;
 
         let mut receipt = Self {
@@ -238,6 +241,7 @@ impl TaskClaimReceipt {
             task_id: plan.task_id(),
             action: plan.action(),
             assignee: run.run_id(),
+            run_commitment,
             previous_task_projection_generation: projection
                 .previous_task_projection_generation,
             claimed_task_projection_generation: projection.claimed_task_projection_generation,
@@ -252,13 +256,14 @@ impl TaskClaimReceipt {
     }
 
     /// Activates the claim only after a new situation observes its post-claim
-    /// task projection generation.
+    /// task projection generation and exact complete run.
     ///
     /// # Errors
     ///
-    /// Refuses authority movement, another active run, missing/inconsistent
-    /// task projection material, an unobserved claim generation, time rollback,
-    /// expiry, a stale/substituted run, and unrepresentable activation framing.
+    /// Refuses authority movement, another active run or run commitment,
+    /// missing/inconsistent task projection material, an unobserved claim
+    /// generation, time rollback, expiry, and unrepresentable activation
+    /// framing.
     pub fn activate(
         &self,
         refreshed: &AgentSituationReceipt,
@@ -272,6 +277,7 @@ impl TaskClaimReceipt {
             situation_id: *refreshed.situation_id().as_bytes(),
             task_id: self.task_id,
             assignee: self.assignee,
+            run_commitment: self.run_commitment,
             observed_at: refreshed.observed_at(),
             expires_at: self.expires_at,
         };
@@ -339,10 +345,16 @@ impl TaskClaimReceipt {
         self.action
     }
 
-    /// Run assigned by the task projection.
+    /// Run coordination identity assigned by the task projection.
     #[must_use]
     pub const fn assignee(&self) -> RunId {
         self.assignee
+    }
+
+    /// Complete machine-enforced run identity assigned by the claim.
+    #[must_use]
+    pub const fn run_commitment(&self) -> IntentRunCommitment {
+        self.run_commitment
     }
 
     /// Projection generation the claim mutation replaced.
@@ -387,12 +399,13 @@ impl TaskClaimReceipt {
         self.claim_evidence_root
     }
 
-    /// Whether this claim's reserved surface overlaps another active claim in
-    /// the same repository held by a different run.
+    /// Whether this claim's reserved surface overlaps another live claim in the
+    /// same repository held by a different complete run.
     #[must_use]
     pub fn conflicts_with(&self, other: &Self, at: LogicalTime) -> bool {
         self.repository_id == other.repository_id
-            && self.assignee != other.assignee
+            && (self.assignee != other.assignee
+                || self.run_commitment != other.run_commitment)
             && self.is_live_at(at)
             && other.is_live_at(at)
             && surfaces_overlap(&self.reserved_surfaces, &other.reserved_surfaces)
@@ -414,6 +427,7 @@ pub struct ActiveTaskClaim {
     situation_id: [u8; 32],
     task_id: WorkTaskId,
     assignee: RunId,
+    run_commitment: IntentRunCommitment,
     observed_at: LogicalTime,
     expires_at: LogicalTime,
 }
@@ -449,10 +463,16 @@ impl ActiveTaskClaim {
         self.task_id
     }
 
-    /// Active assignee.
+    /// Active assignee coordination identity.
     #[must_use]
     pub const fn assignee(self) -> RunId {
         self.assignee
+    }
+
+    /// Complete machine-enforced identity of the active assignee.
+    #[must_use]
+    pub const fn run_commitment(self) -> IntentRunCommitment {
+        self.run_commitment
     }
 
     /// Observation instant of the activating refresh.
@@ -486,17 +506,33 @@ pub enum TaskClaimRefusal {
     PlanPulseMismatch,
     /// Plan task/action differs from the pulse selection.
     PlanSelectionMismatch,
-    /// Plan and supplied run disagree.
+    /// Plan and supplied run IDs disagree.
     PlanRunMismatch {
         /// Run bound to the plan.
         expected: RunId,
         /// Supplied run.
         observed: RunId,
     },
+    /// Plan and supplied complete run commitments disagree.
+    PlanRunCommitmentMismatch {
+        /// Commitment bound to the plan.
+        expected: IntentRunCommitment,
+        /// Commitment computed from the supplied run.
+        observed: IntentRunCommitment,
+    },
+    /// Pulse and supplied complete run commitments disagree.
+    PulseRunCommitmentMismatch {
+        /// Commitment bound to the plan and supplied run.
+        expected: IntentRunCommitment,
+        /// Commitment retained by the pulse, when present.
+        observed: Option<IntentRunCommitment>,
+    },
     /// Run lacks a complete authenticated authority receipt.
     RunAuthorityReceiptRequired,
     /// Run and pulse/claim name different authority positions.
     RunAuthorityMismatch,
+    /// Complete run identity could not be produced.
+    RunIdentity(IntentRunIdentityRefusal),
     /// Run was expired at claim or refresh time.
     RunExpired {
         /// Expired run.
@@ -575,8 +611,15 @@ pub enum TaskClaimRefusal {
     ReservationSurfaceMismatch,
     /// Refreshed situation moved repository authority.
     RefreshedAuthorityMismatch,
-    /// Refreshed situation belongs to another run.
+    /// Refreshed situation belongs to another run ID.
     RefreshedRunMismatch,
+    /// Refreshed situation or supplied run carries another complete run.
+    RefreshedRunCommitmentMismatch {
+        /// Commitment bound to the claim.
+        expected: IntentRunCommitment,
+        /// Commitment retained by the refreshed situation, when present.
+        observed: Option<IntentRunCommitment>,
+    },
     /// Refreshed task component is omitted or structurally inconsistent.
     RefreshedTaskProjectionUnavailable,
     /// Refreshed situation did not observe the post-claim generation.
@@ -617,12 +660,21 @@ impl fmt::Display for TaskClaimRefusal {
             Self::PlanRunMismatch { expected, observed } => {
                 write!(formatter, "plan run {expected} differs from supplied run {observed}")
             }
+            Self::PlanRunCommitmentMismatch { expected, observed } => write!(
+                formatter,
+                "plan run commitment {expected} differs from supplied run {observed}"
+            ),
+            Self::PulseRunCommitmentMismatch { expected, observed } => write!(
+                formatter,
+                "pulse run commitment {observed:?} differs from expected {expected}"
+            ),
             Self::RunAuthorityReceiptRequired => formatter.write_str(
                 "task claim requires a run with a complete authenticated authority receipt",
             ),
             Self::RunAuthorityMismatch => {
                 formatter.write_str("run authority differs from the claim control turn")
             }
+            Self::RunIdentity(refusal) => write!(formatter, "task claim run identity refused: {refusal}"),
             Self::RunExpired { run_id, observed } => {
                 write!(formatter, "run {run_id} is expired at {observed}")
             }
@@ -690,6 +742,10 @@ impl fmt::Display for TaskClaimRefusal {
             Self::RefreshedRunMismatch => {
                 formatter.write_str("post-claim situation names another active run")
             }
+            Self::RefreshedRunCommitmentMismatch { expected, observed } => write!(
+                formatter,
+                "post-claim run commitment {observed:?} differs from claim run {expected}"
+            ),
             Self::RefreshedTaskProjectionUnavailable => formatter.write_str(
                 "post-claim situation has no observed task projection generation",
             ),
@@ -717,6 +773,12 @@ impl fmt::Display for TaskClaimRefusal {
 
 impl core::error::Error for TaskClaimRefusal {}
 
+impl From<IntentRunIdentityRefusal> for TaskClaimRefusal {
+    fn from(value: IntentRunIdentityRefusal) -> Self {
+        Self::RunIdentity(value)
+    }
+}
+
 impl From<CodecRefusal> for TaskClaimRefusal {
     fn from(value: CodecRefusal) -> Self {
         Self::Codec(value)
@@ -727,7 +789,7 @@ fn validate_claim_control(
     pulse: &AgentControlPulse,
     plan: &AgentChangePlan,
     run: &IntentRun,
-) -> Result<(), TaskClaimRefusal> {
+) -> Result<IntentRunCommitment, TaskClaimRefusal> {
     if pulse.state() != PulseState::Actionable {
         return Err(TaskClaimRefusal::PulseNotActionable {
             state: pulse.state(),
@@ -750,6 +812,19 @@ fn validate_claim_control(
             observed: run.run_id(),
         });
     }
+    let run_commitment = run.commitment()?;
+    if plan.intent_run_commitment() != run_commitment {
+        return Err(TaskClaimRefusal::PlanRunCommitmentMismatch {
+            expected: plan.intent_run_commitment(),
+            observed: run_commitment,
+        });
+    }
+    if pulse.active_run_commitment() != Some(run_commitment) {
+        return Err(TaskClaimRefusal::PulseRunCommitmentMismatch {
+            expected: run_commitment,
+            observed: pulse.active_run_commitment(),
+        });
+    }
     let run_receipt = run
         .authority_read_receipt()
         .ok_or(TaskClaimRefusal::RunAuthorityReceiptRequired)?;
@@ -759,7 +834,7 @@ fn validate_claim_control(
     {
         return Err(TaskClaimRefusal::RunAuthorityMismatch);
     }
-    Ok(())
+    Ok(run_commitment)
 }
 
 fn validate_projection(
@@ -862,6 +937,15 @@ fn validate_activation(
     if refreshed.intent_run_id() != Some(claim.assignee) || run.run_id() != claim.assignee {
         return Err(TaskClaimRefusal::RefreshedRunMismatch);
     }
+    let run_commitment = run.commitment()?;
+    if run_commitment != claim.run_commitment
+        || refreshed.intent_run_commitment() != Some(claim.run_commitment)
+    {
+        return Err(TaskClaimRefusal::RefreshedRunCommitmentMismatch {
+            expected: claim.run_commitment,
+            observed: refreshed.intent_run_commitment(),
+        });
+    }
     let run_receipt = run
         .authority_read_receipt()
         .ok_or(TaskClaimRefusal::RunAuthorityReceiptRequired)?;
@@ -905,7 +989,7 @@ fn validate_activation(
 }
 
 fn claim_commitment(claim: &TaskClaimReceipt) -> Result<[u8; 32], TaskClaimRefusal> {
-    let mut encoder = Encoder::with_capacity(768);
+    let mut encoder = Encoder::with_capacity(832);
     encoder.write_bytes("task_claim_domain", CLAIM_DOMAIN)?;
     encoder.write_raw(claim.plan_id.as_bytes());
     encoder.write_raw(&claim.pulse_id);
@@ -917,6 +1001,7 @@ fn claim_commitment(claim: &TaskClaimReceipt) -> Result<[u8; 32], TaskClaimRefus
     encoder.write_raw(claim.task_id.as_bytes());
     encoder.write_raw_byte(work_action_code(claim.action));
     encoder.write_raw(&claim.assignee.value().to_be_bytes());
+    encoder.write_raw(claim.run_commitment.as_bytes());
     encoder.write_raw(&claim.previous_task_projection_generation);
     encoder.write_raw(&claim.claimed_task_projection_generation);
     write_surfaces(&mut encoder, &claim.reserved_surfaces)?;
@@ -928,13 +1013,14 @@ fn claim_commitment(claim: &TaskClaimReceipt) -> Result<[u8; 32], TaskClaimRefus
 }
 
 fn activation_commitment(active: &ActiveTaskClaim) -> Result<[u8; 32], TaskClaimRefusal> {
-    let mut encoder = Encoder::with_capacity(256);
+    let mut encoder = Encoder::with_capacity(320);
     encoder.write_bytes("task_claim_activation_domain", ACTIVATION_DOMAIN)?;
     encoder.write_raw(active.claim_id.as_bytes());
     encoder.write_raw(active.plan_id.as_bytes());
     encoder.write_raw(&active.situation_id);
     encoder.write_raw(active.task_id.as_bytes());
     encoder.write_raw(&active.assignee.value().to_be_bytes());
+    encoder.write_raw(active.run_commitment.as_bytes());
     encoder.write_scalar(active.observed_at.value());
     encoder.write_scalar(active.expires_at.value());
     hash(encoder.into_bytes())
