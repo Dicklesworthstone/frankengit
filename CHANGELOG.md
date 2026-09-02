@@ -6,6 +6,24 @@ FrankenGit has moved beyond its original architecture-only phase into active imp
 
 ## [Unreleased] — 2026-09-02
 
+### Added — descendant-head handoff acceptance
+
+The Agent Control Plane can now accept one proof-carrying handoff at either the same authenticated repository head or a strictly later head proven to descend from the capsule's source head.
+
+- Added `AgentHandoffCapsule::accept_at_descendant_head`, consuming the authority layer's bounded `AuthorityHeadAncestryReceipt`.
+- Required exact agreement on repository, source head/generation, receiver head/generation, receiver backend version token, and full generation-distance hop count.
+- Added `DescendantAuthenticatedHead` as a closed authority relation distinct from same-head acceptance.
+- Bound receiver acceptance to the complete `IntentRunCommitment` retained by the receiver situation, refusing same-ID runs with changed authority read, scope, budget, or expiry before attenuation checks.
+- Retained the exact ancestry receipt in the accepted value and its identity rather than validating the proof and dropping it.
+- Added synchronous and asynchronous `accept_handoff_at_current_authority` drivers that authenticate the current `HeadKey`, prove ancestry, require the receiver to carry that exact current slot token, and immediately consume the proof.
+- Versioned `AgentHandoffAcceptance` from v1 to v2 to commit the complete receiver run, authority relation, and optional ancestry receipt identity.
+
+Focused source tests cover later-head refusal without ancestry, deterministic descendant acceptance, wrong-ancestor refusal, same-body cross-store token substitution, same-ID receiver-run substitution, atomic current-slot proof consumption, and synchronous/asynchronous parity.
+
+Receiver acceptance remains distinct from durable task ownership transfer. The current task-persistence envelope has one authenticated-read basis for predecessor and successor; a cross-head transfer requires a future two-authority-basis envelope rather than removal of the existing exact-read check.
+
+The focused contract is [`docs/AGENT_CONTROL_PLANE_HANDOFF_ANCESTRY.md`](docs/AGENT_CONTROL_PLANE_HANDOFF_ANCESTRY.md).
+
 ### Added — effect-time capability revocation and irreversible-dispatch gating
 
 The `fgit-agent` effect boundary now includes:
@@ -60,7 +78,7 @@ Focused public-path source tests now cover:
 
 Source-level test presence is not a test result.
 
-### Identity revisions — effect authorization
+### Identity revisions — effect authorization and handoff
 
 The following identities changed deliberately rather than silently reinterpreting old bytes:
 
@@ -68,9 +86,10 @@ The following identities changed deliberately rather than silently reinterpretin
 RunReconciliationReport          v1 -> v2
 public RunCancellationIntent     v1 -> v2
 public RunCancellationCompletion v1 -> v2
+AgentHandoffAcceptance           v1 -> v2
 ```
 
-New v1 identities were added for revocation read requests/receipts, verified capability chains, and exact effect authorizations. Registered durable codecs and migrations remain future work.
+New identity families were added for revocation read requests/receipts, verified capability chains, exact effect authorizations, and authority-head ancestry receipts. Registered durable codecs and migrations remain future work. In particular, an old v1 handoff acceptance must never be interpreted as though it carried complete receiver-run or descendant-ancestry evidence.
 
 ### Added — task collection, persistence, and restart recovery
 
@@ -123,7 +142,8 @@ Landed final-abstraction slices include:
 - `AgentActionPacket`: bounded Level-1 ordered steps with complete plan-approved context, plan-contained targets, evidence obligations, aggregate resource attenuation, peer-change commitments, mandatory preconditions, and result/refusal/continuation contracts;
 - `ActiveClaimContinuityReceipt` and `AgentActionPacketContinuation`: proof that only logical time advanced while authority, run, workspace, and every situation component stayed unchanged, without mutating the original packet;
 - `RunReconciliationReport`: complete run-level effect inventory, parent-graph and lifecycle validation, conserved consumable spend, and one typed remaining action per effect;
-- public `AgentHandoffCapsule` and receiver-side `AgentHandoffAcceptance`: debt-preserving handoff with attenuation, target-resolution evidence, exact-head validation, and inherited-effect responsibility; exact-activation construction needs no extra proof, while a later observation requires and commits a specific `ActiveClaimContinuityReceipt`;
+- public `AgentHandoffCapsule` and receiver-side `AgentHandoffAcceptance`: debt-preserving source handoff with attenuation, target-resolution evidence, exact activation or source continuity, same-head or proven-descendant receiver authority, complete receiver run, and inherited-effect responsibility;
+- `accept_handoff_at_current_authority` and its async twin: one host operation that authenticates the current authority slot, proves bounded ancestry, checks the receiver's exact current token, and immediately consumes the proof;
 - public `RunCancellationIntent` and `RunCancellationCompletion`: request → drain → finalize over a frozen effect set and active claim, with immutable effect identity, monotone evidence, explicit task release/transfer, escalation transfer, and leak containment; cancellation remains available after context change and may optionally retain a continuity receipt when only time advanced;
 - `OutcomeLearningRecord`: immutable retrieval-only requirement, evidence, verifier-independence, ownership, failed-hypothesis, resource, reusable-pattern, applicability, invalidation, and negative-evidence record.
 
@@ -144,7 +164,10 @@ The exact current implementation boundary and module map are maintained in [`doc
 - Required completed learning outcomes to retain complete requirement dispositions and refused hidden unsatisfied requirements.
 - Kept learning ownership findings inside the plan surface and measured resource totals inside the plan budget.
 - Preserved every accepted effect through reconciliation, handoff, and cancellation rather than reducing outstanding responsibility to prose or a count.
-- Made the raw handoff capsule engine crate-private. The public facade now refuses a later situation without a full-context continuity receipt and commits either exact activation or the receipt ID into the public capsule identity, which receiver acceptance inherits.
+- Made the raw handoff capsule engine crate-private. The public facade now refuses a later source situation without a full-context continuity receipt and commits either exact activation or the receipt ID into the public capsule identity, which receiver acceptance inherits.
+- Required later-head receiver acceptance to carry a bounded exact authority ancestry receipt rather than trusting generation comparison.
+- Bound receiver acceptance to the complete `IntentRunCommitment` retained by its situation and exact current slot token when using the atomic host driver.
+- Kept receiver acceptance separate from task ownership transfer; cross-head transfer remains blocked until a two-authority-basis persistence envelope exists.
 - Made the raw cancellation engine crate-private behind a public identity-preserving facade. Cancellation completion commits the public request identity, so optional continuity evidence cannot be checked and then lost.
 - Corrected an overstrict provisional cancellation rule during fresh review: handoff continues work and needs continuity, but cancellation is a conservative stop operation and must remain available after context change. Continuity is optional audit evidence for cancellation, never permission to stop.
 
@@ -164,7 +187,7 @@ Public-path tests now cover:
 - action-packet context completeness, exact activation continuity, same-ID scope revalidation, target containment, and budget bounds;
 - time-only claim continuity, context-change refusal, claim expiry, and packet continuation;
 - complete run-effect reconciliation, terminal markers, parent cycles, authority, and conserved spend;
-- handoff exact-activation refusal, proof-carrying later construction, proof identity retention, attenuation, receiver verification, target resolution, and inherited effect debt;
+- handoff exact-activation refusal, proof-carrying source construction, same-head and descendant receiver acceptance, ancestry retention, complete receiver-run binding, wrong-ancestor refusal, cross-store token refusal, and sync/async current-head parity;
 - cancellation after changed context, optional continuity evidence, effect-set preservation, immutable effect identity, claim release, escalation transfer, and containment;
 - learning determinism, evidence requirements, ownership containment, resource bounds, completed-outcome completeness, and machine-classified verifier independence.
 
@@ -176,17 +199,19 @@ Source-level test presence is not a test result.
 - Reconciled [`docs/AGENT_CONTROL_PLANE_TASK_COORDINATION.md`](docs/AGENT_CONTROL_PLANE_TASK_COORDINATION.md) through collection, persistence, and restart recovery.
 - Added [`docs/AGENT_CONTROL_PLANE_TASK_RECOVERY.md`](docs/AGENT_CONTROL_PLANE_TASK_RECOVERY.md).
 - Added [`docs/AGENT_CONTROL_PLANE_EFFECT_AUTHORIZATION.md`](docs/AGENT_CONTROL_PLANE_EFFECT_AUTHORIZATION.md).
+- Added [`docs/AGENT_CONTROL_PLANE_HANDOFF_ANCESTRY.md`](docs/AGENT_CONTROL_PLANE_HANDOFF_ANCESTRY.md).
 - Added dated change records under `docs/changes/` for the Agent Control Plane evolution.
 - Retained explicit Beads reconciliation handoffs instead of hand-editing the multi-megabyte `.beads/issues.jsonl` ledger from an environment without `br`.
 
 ### Verification state
 
-The environment used for the latest effect-authorization commits did not contain a local FrankenGit checkout, Cargo, rustc, rustfmt, Clippy, `br`, or `bv`. No formatter, compiler, test, Clippy, repository verification, or independent batch result is claimed for these revisions.
+The environment used for the latest handoff-ancestry commits did not contain a local FrankenGit checkout, Cargo, rustc, rustfmt, Clippy, `br`, or `bv`. No formatter, compiler, test, Clippy, repository verification, or independent batch result is claimed for these revisions.
 
 Required local evidence remains at least:
 
 ```text
 cargo fmt --all --check
+cargo test -p fgit-authority --all-targets --no-fail-fast
 cargo test -p fgit-agent --all-targets --no-fail-fast
 cargo clippy -p fgit-agent --all-targets -- -D warnings
 cargo test -p fgit-registry-check --no-fail-fast
@@ -201,17 +226,15 @@ GitHub-hosted Actions availability or status is neither required nor used as evi
 
 This wave does not claim:
 
-- a canonical capability-revocation event/body schema or authority-selected revocation root;
-- a concrete revocation reader, durable cache, invalidation stream, or backend adapter;
-- mandatory checked-broker adoption by every network, secret, runner, forge, publication, or external-integration host;
+- a cross-head two-authority-basis task-transfer mutation or persistence envelope;
+- automatic receiver plan adoption or task ownership after descendant acceptance;
 - concrete `br`/Beads collection, lease-history, mutation, flush, reread, or envelope-probe I/O;
 - production collectors for the nine non-task situation components;
 - multi-task transactions or distributed reservations;
 - a production action-packet executor;
 - automatic process, workspace, credential, secret, tunnel, upload, VM, or external-resource cleanup;
 - plan-relative invalidation when a situation component changes;
-- handoff acceptance at a later authority head without an authenticated ancestry witness;
-- durable codecs, migrations, storage, or replay for the new control-plane and revocation objects;
+- durable codecs, migrations, storage, or replay for all new control-plane values, including `AgentHandoffAcceptance` v2;
 - an `fg agent` CLI, stable robot API, native API, or MCP surface;
 - automatic ECC assembly, task verification/closure transition, or canonical publication;
 - a durable authorization-filtered learning index;
