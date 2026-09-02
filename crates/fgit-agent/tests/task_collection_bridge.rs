@@ -384,7 +384,7 @@ fn collected_claimed_row_reconstructs_exact_lease_deterministically() {
     assert_eq!(first.run_commitment(), run_commitment);
     assert_eq!(
         first.snapshot().assignment(),
-        TaskProjectionAssignment::Assigned(run.run_id())
+        TaskProjectionAssignment::assigned(run.run_id(), run_commitment)
     );
     let lease = first.snapshot().lease().expect("active lease reconstructed");
     assert_eq!(lease.plan_id(), plan_id);
