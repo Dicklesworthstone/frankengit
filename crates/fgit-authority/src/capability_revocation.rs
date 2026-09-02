@@ -1,54 +1,59 @@
 //! Canonical capability-revocation generations selected by repository authority.
 //!
-//! Capability revocation is policy state, not a mutable local deny list.  The
-//! authority head already commits the exact [`PolicyEpoch`] and
-//! `configuration_root` under which a request is interpreted.  This module
-//! turns that authenticated tuple into one deterministic immutable selector:
+//! Capability revocation is policy state, not a mutable local deny list.  One
+//! immutable full snapshot is stored under the registered
+//! `frankengit/generation/v1` identity domain.  Repository configuration schema
+//! 2.2 carries that generation's exact digest, and the authority head carries
+//! the configuration digest.  Selection therefore follows one ordinary chain:
 //!
 //! ```text
-//! (repository_id, policy_epoch, configuration_root)
+//! authenticated RepositoryAuthorityHead
+//!     -> configuration_root
+//!     -> RepositoryIncarnationConfigurationBodyV2_2
+//!     -> capability_revocation_root
 //!     -> CapabilityRevocationGenerationBody
 //! ```
 //!
-//! The body is also stored under its ordinary content-addressed
-//! [`GenerationId`] key.  A read succeeds only when the selected bytes decode,
-//! name the exact authenticated tuple, re-identify canonically, and agree
-//! byte-for-byte with the content-addressed copy.  A local cache, listing, or
-//! caller-supplied set never decides revocation.
+//! There is deliberately no side selector or mutable cache in this module.  A
+//! selector populated after a head was published would let new bytes acquire
+//! authority retroactively without a head transition.  Here, changing the
+//! revoked set requires staging a new generation, staging a new configuration
+//! that names it, and publishing that configuration through the ordinary
+//! authority-head compare-and-swap.
 //!
-//! Staging is deliberately not publication.  The generation and selector are
-//! immutable candidate bodies until an ordinary repository authority-head
-//! transition selects their tuple.  A migration introducing this vocabulary
-//! must stage the generation before publishing a new policy epoch or
-//! configuration root; filling a selector behind an already advertised head is
-//! not revision-bound publication evidence.
+//! The selected body is a bounded full snapshot.  A reader never walks an
+//! unbounded revocation event history and never interprets an absent root as an
+//! empty set.  Repositories on configuration schema 2.0 or 2.1 therefore fail
+//! closed for high-value effect authorization until an explicit schema-2.2
+//! configuration names an explicit generation, including an explicit empty
+//! generation when no capability is revoked.
 
 use core::fmt;
 
-use fgit_codec::{
-    CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder, body_id,
-    decode_body, encode_body,
-};
+use fgit_codec::{CanonicalBody, CodecRefusal, DecodeLimits, Decoder, Encoder, decode_body, encode_body};
+use fgit_crypto::IdentityDomain;
 use fgit_types::{
-    Digest, GenerationId, PolicyEpoch, RepositoryId, SchemaFamily, TypeRefusal,
+    CANONICAL_CODEC_VERSION, Digest, GenerationId, PolicyEpoch, RepositoryId,
+    RepositoryIncarnationId, SchemaFamily, TenantId,
 };
 
 use crate::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, HeadBodyRefusal,
-    ImmutableKey, ImmutableRead, KeyError, PutOutcome, SealFailure, body_key_for_id,
+    ImmutableRead, OutcomeFailure, PutOutcome, SealFailure, body_key, body_key_for_id,
+    canonical_body_id, read_repository_incarnation_configuration,
+    read_repository_incarnation_configuration_async,
 };
 
 /// Maximum revoked capability identities retained in one canonical generation.
 ///
-/// This is the same system ceiling enforced by `fgit-agent` at the effect-time
-/// read boundary.  The body refuses a larger set before retaining or emitting
-/// it, so a storage adapter cannot hand the agent an already-unbounded value.
+/// The decoder applies this as its collection bound before allocating the
+/// vector.  It is also the effect-time receipt ceiling in `fgit-agent`.
 pub const MAX_CAPABILITY_REVOCATION_ENTRIES: usize = 4_096;
 
-/// Immutable namespace selecting the revocation generation for one exact
-/// authenticated policy tuple.
-pub const CAPABILITY_REVOCATION_SELECTOR_KEY_PREFIX: &[u8] =
-    b"fg/capability-revocations/v1/";
+const REVOCATION_DECODE_LIMITS: DecodeLimits = DecodeLimits {
+    elements: MAX_CAPABILITY_REVOCATION_ENTRIES as u64,
+    ..DecodeLimits::DEFAULT
+};
 
 /// The registered identity of one immutable capability-revocation generation.
 pub type CapabilityRevocationGenerationId = GenerationId;
@@ -87,18 +92,20 @@ impl fmt::Display for CapabilityRevocationBodyRefusal {
 
 impl core::error::Error for CapabilityRevocationBodyRefusal {}
 
-/// Complete immutable revocation state selected at one repository policy tuple.
+/// Complete immutable revocation state selected at one repository policy epoch.
 ///
-/// This is a full snapshot rather than a delta.  Effect authorization therefore
-/// performs one bounded exact read and never walks an unbounded event history.
-/// `predecessor_generation_id` preserves lineage for audit, migration, and
-/// anti-rollback verification without making predecessor availability a
-/// prerequisite for deciding the current set.
+/// This is a full snapshot rather than a delta.  `predecessor_generation_id`
+/// preserves lineage for audit and migration, but the current decision needs
+/// only the selected body.  Tenant, repository, and incarnation are all
+/// retained because a [`RepositoryId`] is scoped by tenant and can survive a
+/// human-readable rename while an incarnation deliberately does not survive
+/// delete/recreate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityRevocationGenerationBody {
+    tenant_id: TenantId,
     repository_id: RepositoryId,
+    repository_incarnation_id: RepositoryIncarnationId,
     policy_epoch: PolicyEpoch,
-    configuration_root: Digest,
     predecessor_generation_id: Option<CapabilityRevocationGenerationId>,
     revoked_capability_ids: Vec<[u8; 16]>,
     evidence_root: Digest,
@@ -111,9 +118,10 @@ impl CapabilityRevocationGenerationBody {
     /// refused rather than silently collapsed, so two producers cannot hide a
     /// disagreement behind set normalization.
     pub fn try_new(
+        tenant_id: TenantId,
         repository_id: RepositoryId,
+        repository_incarnation_id: RepositoryIncarnationId,
         policy_epoch: PolicyEpoch,
-        configuration_root: Digest,
         predecessor_generation_id: Option<CapabilityRevocationGenerationId>,
         mut revoked_capability_ids: Vec<[u8; 16]>,
         evidence_root: Digest,
@@ -133,13 +141,20 @@ impl CapabilityRevocationGenerationBody {
             }
         }
         Ok(Self {
+            tenant_id,
             repository_id,
+            repository_incarnation_id,
             policy_epoch,
-            configuration_root,
             predecessor_generation_id,
             revoked_capability_ids,
             evidence_root,
         })
+    }
+
+    /// Tenant containing the repository capability namespace.
+    #[must_use]
+    pub const fn tenant_id(&self) -> TenantId {
+        self.tenant_id
     }
 
     /// Repository whose capability namespace this snapshot covers.
@@ -148,16 +163,16 @@ impl CapabilityRevocationGenerationBody {
         self.repository_id
     }
 
+    /// Repository incarnation this snapshot may authorize against.
+    #[must_use]
+    pub const fn repository_incarnation_id(&self) -> RepositoryIncarnationId {
+        self.repository_incarnation_id
+    }
+
     /// Authenticated policy epoch selecting this snapshot.
     #[must_use]
     pub const fn policy_epoch(&self) -> PolicyEpoch {
         self.policy_epoch
-    }
-
-    /// Exact repository configuration under which this snapshot is interpreted.
-    #[must_use]
-    pub const fn configuration_root(&self) -> Digest {
-        self.configuration_root
     }
 
     /// Previous revocation generation, when the producer retained lineage.
@@ -185,7 +200,11 @@ impl CapabilityRevocationGenerationBody {
     pub fn generation_id(
         &self,
     ) -> Result<CapabilityRevocationGenerationId, CapabilityRevocationAuthorityFailure> {
-        let identity = body_id(&CryptoBodyIdentity, self)?;
+        let identity = canonical_body_id(
+            IdentityDomain::Generation,
+            CANONICAL_CODEC_VERSION,
+            self,
+        )?;
         Ok(CapabilityRevocationGenerationId::from_internal_object_id(
             identity,
         )?)
@@ -204,32 +223,43 @@ impl CanonicalBody for CapabilityRevocationGenerationBody {
             return Err(CodecRefusal::ValueUnrepresentable {
                 field: "capability_revocation.revoked_capability_ids",
                 observed: u64::try_from(self.revoked_capability_ids.len()).unwrap_or(u64::MAX),
-                limit: u64::try_from(MAX_CAPABILITY_REVOCATION_ENTRIES).unwrap_or(u64::MAX),
+                limit: MAX_CAPABILITY_REVOCATION_ENTRIES as u64,
             });
         }
+        out.write_opaque_id(self.tenant_id.as_bytes());
         out.write_opaque_id(self.repository_id.as_bytes());
+        out.write_opaque_id(self.repository_incarnation_id.as_bytes());
         out.write_scalar(self.policy_epoch.get());
-        out.write_digest(&self.configuration_root)?;
         out.write_option(
             self.predecessor_generation_id.as_ref(),
             |encoder, predecessor| {
                 encoder.write_internal_object_id(predecessor.as_internal_object_id())
             },
         )?;
-        out.write_canonical_set(&self.revoked_capability_ids, |encoder, capability_id| {
-            encoder.write_opaque_id(capability_id)
-        })?;
+        out.write_canonical_set(
+            "capability_revocation.revoked_capability_ids",
+            &self.revoked_capability_ids,
+            |encoder, capability_id| {
+                encoder.write_opaque_id(capability_id);
+                Ok(())
+            },
+        )?;
         out.write_digest(&self.evidence_root)
     }
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let tenant_id = TenantId::from_bytes(
+            input.read_opaque_id("capability_revocation.tenant_id")?,
+        );
         let repository_id = RepositoryId::from_bytes(
             input.read_opaque_id("capability_revocation.repository_id")?,
+        );
+        let repository_incarnation_id = RepositoryIncarnationId::from_bytes(
+            input.read_opaque_id("capability_revocation.repository_incarnation_id")?,
         );
         let policy_epoch = PolicyEpoch::try_new(
             input.read_scalar::<u64>("capability_revocation.policy_epoch")?,
         )?;
-        let configuration_root = input.read_digest()?;
         let predecessor_generation_id = input.read_option(
             "capability_revocation.predecessor_generation_id",
             |decoder| {
@@ -242,18 +272,12 @@ impl CanonicalBody for CapabilityRevocationGenerationBody {
             "capability_revocation.revoked_capability_ids",
             |decoder| decoder.read_opaque_id("capability_revocation.capability_id"),
         )?;
-        if revoked_capability_ids.len() > MAX_CAPABILITY_REVOCATION_ENTRIES {
-            return Err(CodecRefusal::ValueUnrepresentable {
-                field: "capability_revocation.revoked_capability_ids",
-                observed: u64::try_from(revoked_capability_ids.len()).unwrap_or(u64::MAX),
-                limit: u64::try_from(MAX_CAPABILITY_REVOCATION_ENTRIES).unwrap_or(u64::MAX),
-            });
-        }
         let evidence_root = input.read_digest()?;
         Ok(Self {
+            tenant_id,
             repository_id,
+            repository_incarnation_id,
             policy_epoch,
-            configuration_root,
             predecessor_generation_id,
             revoked_capability_ids,
             evidence_root,
@@ -261,12 +285,11 @@ impl CanonicalBody for CapabilityRevocationGenerationBody {
     }
 }
 
-/// The two immutable writes that stage one revocation generation.
+/// The immutable write that stages one revocation generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapabilityRevocationGenerationStage {
     generation_id: CapabilityRevocationGenerationId,
-    content_outcome: PutOutcome,
-    selector_outcome: PutOutcome,
+    outcome: PutOutcome,
 }
 
 impl CapabilityRevocationGenerationStage {
@@ -278,14 +301,8 @@ impl CapabilityRevocationGenerationStage {
 
     /// Outcome of writing the ordinary content-addressed body slot.
     #[must_use]
-    pub const fn content_outcome(self) -> PutOutcome {
-        self.content_outcome
-    }
-
-    /// Outcome of binding the authenticated policy tuple to the same bytes.
-    #[must_use]
-    pub const fn selector_outcome(self) -> PutOutcome {
-        self.selector_outcome
+    pub const fn outcome(self) -> PutOutcome {
+        self.outcome
     }
 }
 
@@ -315,16 +332,16 @@ impl CapabilityRevocationGenerationRead {
 pub enum CapabilityRevocationAuthorityFailure {
     /// Candidate construction refused an excessive or duplicate set.
     Body(CapabilityRevocationBodyRefusal),
-    /// Canonical framing or identity derivation failed.
+    /// Canonical framing or decoding failed.
     Codec(CodecRefusal),
-    /// A typed identity used the wrong domain or malformed bytes.
-    Type(TypeRefusal),
-    /// A deterministic immutable key exceeded the authority contract.
-    Key(KeyError),
+    /// A generation identity carried another domain.
+    Type(fgit_types::TypeRefusal),
     /// The authority backend refused or returned an ambiguous result.
     Authority(AuthorityFailure),
     /// The authenticated head body was malformed or generation-skewed.
     HeadBody(HeadBodyRefusal),
+    /// Repository configuration could not be resolved exactly.
+    Configuration(Box<OutcomeFailure>),
     /// Standard content-addressed body-key derivation failed.
     BodyKey(Box<SealFailure>),
     /// The content-addressed slot already held different bytes.
@@ -332,42 +349,47 @@ pub enum CapabilityRevocationAuthorityFailure {
         /// Generation whose own body slot conflicted.
         generation_id: Box<CapabilityRevocationGenerationId>,
     },
-    /// The authenticated policy tuple was already bound to another body.
-    SelectorConflict,
-    /// No revocation generation exists for the exact authenticated policy tuple.
-    SelectionMissing,
-    /// The selected body names another repository.
+    /// No body exists under the exact generation identity.
+    GenerationMissing {
+        /// Missing generation.
+        generation_id: Box<CapabilityRevocationGenerationId>,
+    },
+    /// Stored bytes re-identified to another generation.
+    GenerationIdentityMismatch {
+        /// Identity requested by configuration.
+        expected: Box<CapabilityRevocationGenerationId>,
+        /// Identity re-derived from stored bytes.
+        observed: Box<CapabilityRevocationGenerationId>,
+    },
+    /// The selected configuration predates or omits revocation state.
+    ConfigurationHasNoRevocationRoot,
+    /// The selected generation belongs to another tenant.
+    TenantMismatch {
+        /// Tenant supplied by the authenticated request boundary.
+        expected: TenantId,
+        /// Tenant named by the selected body.
+        observed: TenantId,
+    },
+    /// The selected generation belongs to another repository.
     RepositoryMismatch {
-        /// Repository selected by the authenticated head.
+        /// Repository named by the authenticated head.
         expected: RepositoryId,
         /// Repository named by the selected body.
         observed: RepositoryId,
     },
-    /// The selected body names another policy epoch.
+    /// The selected generation belongs to a stale repository incarnation.
+    IncarnationMismatch {
+        /// Incarnation selected by repository configuration.
+        expected: RepositoryIncarnationId,
+        /// Incarnation named by the selected body.
+        observed: RepositoryIncarnationId,
+    },
+    /// The selected generation belongs to another policy epoch.
     PolicyEpochMismatch {
-        /// Epoch selected by the authenticated head.
+        /// Epoch named by the authenticated head.
         expected: PolicyEpoch,
         /// Epoch named by the selected body.
         observed: PolicyEpoch,
-    },
-    /// The selected body names another configuration root.
-    ConfigurationRootMismatch,
-    /// The selected body re-identified to another generation.
-    GenerationIdentityMismatch {
-        /// Identity whose content-addressed slot was requested.
-        expected: Box<CapabilityRevocationGenerationId>,
-        /// Identity re-derived from the stored bytes.
-        observed: Box<CapabilityRevocationGenerationId>,
-    },
-    /// The selected generation had no copy under its canonical body key.
-    ContentAddressedCopyMissing {
-        /// Missing generation.
-        generation_id: Box<CapabilityRevocationGenerationId>,
-    },
-    /// The selector and content-addressed slots carried different bytes.
-    ContentAddressedCopyMismatch {
-        /// Generation whose two immutable copies disagreed.
-        generation_id: Box<CapabilityRevocationGenerationId>,
     },
 }
 
@@ -377,46 +399,46 @@ impl fmt::Display for CapabilityRevocationAuthorityFailure {
             Self::Body(refusal) => write!(formatter, "{refusal}"),
             Self::Codec(refusal) => write!(formatter, "revocation codec refused: {refusal}"),
             Self::Type(refusal) => write!(formatter, "revocation identity refused: {refusal}"),
-            Self::Key(refusal) => write!(formatter, "revocation key refused: {refusal}"),
             Self::Authority(refusal) => {
                 write!(formatter, "revocation authority operation failed: {refusal}")
             }
             Self::HeadBody(refusal) => write!(formatter, "revocation head refused: {refusal}"),
+            Self::Configuration(refusal) => {
+                write!(formatter, "revocation configuration refused: {refusal}")
+            }
             Self::BodyKey(refusal) => write!(formatter, "revocation body key refused: {refusal}"),
             Self::ContentAddressedConflict { generation_id } => write!(
                 formatter,
                 "content-addressed revocation slot for {generation_id} contains different bytes"
             ),
-            Self::SelectorConflict => formatter.write_str(
-                "the authenticated revocation selector already contains different bytes",
+            Self::GenerationMissing { generation_id } => write!(
+                formatter,
+                "selected capability revocation generation {generation_id} is missing"
             ),
-            Self::SelectionMissing => formatter.write_str(
-                "the authenticated policy tuple selects no capability revocation generation",
+            Self::GenerationIdentityMismatch { expected, observed } => write!(
+                formatter,
+                "revocation body stored for {expected} re-identifies as {observed}"
+            ),
+            Self::ConfigurationHasNoRevocationRoot => formatter.write_str(
+                "repository configuration has no canonical capability revocation root",
+            ),
+            Self::TenantMismatch { expected, observed } => write!(
+                formatter,
+                "selected revocation generation names tenant {observed}, expected {expected}"
             ),
             Self::RepositoryMismatch { expected, observed } => write!(
                 formatter,
                 "selected revocation generation names repository {observed}, expected {expected}"
+            ),
+            Self::IncarnationMismatch { expected, observed } => write!(
+                formatter,
+                "selected revocation generation names incarnation {observed}, expected {expected}"
             ),
             Self::PolicyEpochMismatch { expected, observed } => write!(
                 formatter,
                 "selected revocation generation names policy epoch {}, expected {}",
                 observed.get(),
                 expected.get()
-            ),
-            Self::ConfigurationRootMismatch => formatter.write_str(
-                "selected revocation generation names another repository configuration root",
-            ),
-            Self::GenerationIdentityMismatch { expected, observed } => write!(
-                formatter,
-                "revocation body stored for {expected} re-identifies as {observed}"
-            ),
-            Self::ContentAddressedCopyMissing { generation_id } => write!(
-                formatter,
-                "selected revocation generation {generation_id} has no content-addressed copy"
-            ),
-            Self::ContentAddressedCopyMismatch { generation_id } => write!(
-                formatter,
-                "selected and content-addressed bytes disagree for {generation_id}"
             ),
         }
     }
@@ -436,15 +458,9 @@ impl From<CodecRefusal> for CapabilityRevocationAuthorityFailure {
     }
 }
 
-impl From<TypeRefusal> for CapabilityRevocationAuthorityFailure {
-    fn from(value: TypeRefusal) -> Self {
+impl From<fgit_types::TypeRefusal> for CapabilityRevocationAuthorityFailure {
+    fn from(value: fgit_types::TypeRefusal) -> Self {
         Self::Type(value)
-    }
-}
-
-impl From<KeyError> for CapabilityRevocationAuthorityFailure {
-    fn from(value: KeyError) -> Self {
-        Self::Key(value)
     }
 }
 
@@ -460,45 +476,36 @@ impl From<HeadBodyRefusal> for CapabilityRevocationAuthorityFailure {
     }
 }
 
+impl From<OutcomeFailure> for CapabilityRevocationAuthorityFailure {
+    fn from(value: OutcomeFailure) -> Self {
+        Self::Configuration(Box::new(value))
+    }
+}
+
 impl From<SealFailure> for CapabilityRevocationAuthorityFailure {
     fn from(value: SealFailure) -> Self {
         Self::BodyKey(Box::new(value))
     }
 }
 
-/// Deterministic immutable selector for one exact authenticated policy tuple.
-///
-/// The key contains the repository, nonzero policy epoch, digest algorithm,
-/// digest length, and complete configuration-root bytes.  No listing or local
-/// index participates in resolution.
-pub fn capability_revocation_selector_key(
-    repository_id: RepositoryId,
-    policy_epoch: PolicyEpoch,
-    configuration_root: &Digest,
-) -> Result<ImmutableKey, KeyError> {
-    let digest_bytes = configuration_root.bytes().as_bytes();
-    let digest_len = u16::try_from(digest_bytes.len()).map_err(|_| KeyError::TooLong {
-        len: digest_bytes.len(),
-        limit: usize::from(u16::MAX),
-    })?;
-    let mut key = Vec::with_capacity(
-        CAPABILITY_REVOCATION_SELECTOR_KEY_PREFIX.len() + 16 + 8 + 2 + 2 + digest_bytes.len(),
-    );
-    key.extend_from_slice(CAPABILITY_REVOCATION_SELECTOR_KEY_PREFIX);
-    key.extend_from_slice(repository_id.as_bytes());
-    key.extend_from_slice(&policy_epoch.get().to_be_bytes());
-    key.extend_from_slice(&configuration_root.algorithm().code_point().to_be_bytes());
-    key.extend_from_slice(&digest_len.to_be_bytes());
-    key.extend_from_slice(digest_bytes);
-    ImmutableKey::new(key)
+/// Converts the digest carried by configuration schema 2.2 into its typed
+/// generation identity.
+#[must_use]
+pub fn capability_revocation_generation_id_from_root(
+    root: &Digest,
+) -> CapabilityRevocationGenerationId {
+    CapabilityRevocationGenerationId::from_digest(
+        root.algorithm(),
+        CANONICAL_CODEC_VERSION,
+        *root.bytes(),
+    )
 }
 
-/// Stages one immutable candidate on the deterministic verification surface.
+/// Stages one immutable full snapshot under its ordinary content identity.
 ///
-/// The content body is written first and the tuple selector second.  Either
-/// conflict is a refusal.  An orphaned content body after a selector race is
-/// harmless and non-authoritative; the authority head selects only the exact
-/// tuple and the selector remains immutable.
+/// Staging alone grants no authority.  A caller must next stage configuration
+/// schema 2.2 with this generation's digest and publish that configuration root
+/// through an ordinary authority-head transition.
 pub fn stage_capability_revocation_generation<S>(
     store: &S,
     body: &CapabilityRevocationGenerationBody,
@@ -507,27 +514,16 @@ where
     S: AuthorityStore + ?Sized,
 {
     let generation_id = body.generation_id()?;
-    let encoded = encode_body(body)?;
-    let content_key = body_key_for_id(generation_id.as_internal_object_id())?;
-    let content_outcome = store.put_if_absent(&content_key, &encoded)?;
-    if content_outcome == PutOutcome::Conflict {
+    let key = body_key(IdentityDomain::Generation, body)?;
+    let outcome = store.put_if_absent(&key, &encode_body(body)?)?;
+    if outcome == PutOutcome::Conflict {
         return Err(CapabilityRevocationAuthorityFailure::ContentAddressedConflict {
             generation_id: Box::new(generation_id),
         });
     }
-    let selector_key = capability_revocation_selector_key(
-        body.repository_id,
-        body.policy_epoch,
-        &body.configuration_root,
-    )?;
-    let selector_outcome = store.put_if_absent(&selector_key, &encoded)?;
-    if selector_outcome == PutOutcome::Conflict {
-        return Err(CapabilityRevocationAuthorityFailure::SelectorConflict);
-    }
     Ok(CapabilityRevocationGenerationStage {
         generation_id,
-        content_outcome,
-        selector_outcome,
+        outcome,
     })
 }
 
@@ -541,31 +537,21 @@ where
     S: AsyncAuthorityStore + ?Sized,
 {
     let generation_id = body.generation_id()?;
-    let encoded = encode_body(body)?;
-    let content_key = body_key_for_id(generation_id.as_internal_object_id())?;
-    let content_outcome = store.put_if_absent(cx, &content_key, &encoded).await?;
-    if content_outcome == PutOutcome::Conflict {
+    let key = body_key(IdentityDomain::Generation, body)?;
+    let outcome = store.put_if_absent(cx, &key, &encode_body(body)?).await?;
+    if outcome == PutOutcome::Conflict {
         return Err(CapabilityRevocationAuthorityFailure::ContentAddressedConflict {
             generation_id: Box::new(generation_id),
         });
     }
-    let selector_key = capability_revocation_selector_key(
-        body.repository_id,
-        body.policy_epoch,
-        &body.configuration_root,
-    )?;
-    let selector_outcome = store.put_if_absent(cx, &selector_key, &encoded).await?;
-    if selector_outcome == PutOutcome::Conflict {
-        return Err(CapabilityRevocationAuthorityFailure::SelectorConflict);
-    }
     Ok(CapabilityRevocationGenerationStage {
         generation_id,
-        content_outcome,
-        selector_outcome,
+        outcome,
     })
 }
 
-/// Reads one generation by its content identity and requires re-identification.
+/// Reads one generation by its exact content identity and requires canonical
+/// re-identification.
 pub fn read_capability_revocation_generation_by_id<S>(
     store: &S,
     generation_id: CapabilityRevocationGenerationId,
@@ -575,7 +561,7 @@ where
 {
     let key = body_key_for_id(generation_id.as_internal_object_id())?;
     let ImmutableRead::Present(bytes) = store.read_immutable(&key)? else {
-        return Err(CapabilityRevocationAuthorityFailure::ContentAddressedCopyMissing {
+        return Err(CapabilityRevocationAuthorityFailure::GenerationMissing {
             generation_id: Box::new(generation_id),
         });
     };
@@ -594,84 +580,45 @@ where
 {
     let key = body_key_for_id(generation_id.as_internal_object_id())?;
     let ImmutableRead::Present(bytes) = store.read_immutable(cx, &key).await? else {
-        return Err(CapabilityRevocationAuthorityFailure::ContentAddressedCopyMissing {
+        return Err(CapabilityRevocationAuthorityFailure::GenerationMissing {
             generation_id: Box::new(generation_id),
         });
     };
     identified_generation(&bytes, generation_id)
 }
 
-/// Resolves the generation selected by one authenticated repository tuple.
-pub fn read_capability_revocation_generation<S>(
-    store: &S,
-    repository_id: RepositoryId,
-    policy_epoch: PolicyEpoch,
-    configuration_root: &Digest,
-) -> Result<CapabilityRevocationGenerationRead, CapabilityRevocationAuthorityFailure>
-where
-    S: AuthorityStore + ?Sized,
-{
-    let selector_key =
-        capability_revocation_selector_key(repository_id, policy_epoch, configuration_root)?;
-    let ImmutableRead::Present(selected_bytes) = store.read_immutable(&selector_key)? else {
-        return Err(CapabilityRevocationAuthorityFailure::SelectionMissing);
-    };
-    validate_selected_generation(
-        store,
-        &selected_bytes,
-        repository_id,
-        policy_epoch,
-        configuration_root,
-    )
-}
-
-/// Production asynchronous twin of [`read_capability_revocation_generation`].
-pub async fn read_capability_revocation_generation_async<S>(
-    store: &S,
-    cx: &S::Context,
-    repository_id: RepositoryId,
-    policy_epoch: PolicyEpoch,
-    configuration_root: &Digest,
-) -> Result<CapabilityRevocationGenerationRead, CapabilityRevocationAuthorityFailure>
-where
-    S: AsyncAuthorityStore + ?Sized,
-{
-    let selector_key =
-        capability_revocation_selector_key(repository_id, policy_epoch, configuration_root)?;
-    let ImmutableRead::Present(selected_bytes) =
-        store.read_immutable(cx, &selector_key).await?
-    else {
-        return Err(CapabilityRevocationAuthorityFailure::SelectionMissing);
-    };
-    validate_selected_generation_async(
-        store,
-        cx,
-        &selected_bytes,
-        repository_id,
-        policy_epoch,
-        configuration_root,
-    )
-    .await
-}
-
-/// Resolves capability revocations from the exact authenticated head body.
+/// Resolves capability revocation from one exact authenticated head.
 ///
-/// The caller cannot substitute a repository, epoch, or configuration root:
-/// all three are taken from the store-authenticated, generation-checked body.
+/// The receipt is reauthenticated against `store` before any immutable read, so
+/// an [`AuthenticatedHead`] minted by another backend cannot route this lookup.
+/// The tenant remains an explicit request-bound input because repository IDs
+/// are tenant-scoped and the authority head intentionally does not duplicate
+/// tenant identity.
 pub fn read_head_selected_capability_revocation_generation<S>(
     store: &S,
+    tenant_id: TenantId,
     authenticated: &AuthenticatedHead,
 ) -> Result<CapabilityRevocationGenerationRead, CapabilityRevocationAuthorityFailure>
 where
     S: AuthorityStore + ?Sized,
 {
+    let authenticated = store.authenticate_head_receipt(authenticated.receipt())?;
     let head = authenticated.body()?;
-    read_capability_revocation_generation(
-        store,
+    let configuration =
+        read_repository_incarnation_configuration(store, &head.configuration_root)?;
+    let root = configuration
+        .capability_revocation_root
+        .ok_or(CapabilityRevocationAuthorityFailure::ConfigurationHasNoRevocationRoot)?;
+    let generation_id = capability_revocation_generation_id_from_root(&root);
+    let selected = read_capability_revocation_generation_by_id(store, generation_id)?;
+    validate_selected_generation(
+        &selected,
+        tenant_id,
         head.repository_id,
+        configuration.repository_incarnation_id,
         head.policy_epoch,
-        &head.configuration_root,
-    )
+    )?;
+    Ok(selected)
 }
 
 /// Production asynchronous twin of
@@ -679,27 +626,44 @@ where
 pub async fn read_head_selected_capability_revocation_generation_async<S>(
     store: &S,
     cx: &S::Context,
+    tenant_id: TenantId,
     authenticated: &AuthenticatedHead,
 ) -> Result<CapabilityRevocationGenerationRead, CapabilityRevocationAuthorityFailure>
 where
     S: AsyncAuthorityStore + ?Sized,
 {
+    let authenticated = store
+        .authenticate_head_receipt(cx, authenticated.receipt())
+        .await?;
     let head = authenticated.body()?;
-    read_capability_revocation_generation_async(
+    let configuration = read_repository_incarnation_configuration_async(
         store,
         cx,
-        head.repository_id,
-        head.policy_epoch,
         &head.configuration_root,
     )
-    .await
+    .await?;
+    let root = configuration
+        .capability_revocation_root
+        .ok_or(CapabilityRevocationAuthorityFailure::ConfigurationHasNoRevocationRoot)?;
+    let generation_id = capability_revocation_generation_id_from_root(&root);
+    let selected =
+        read_capability_revocation_generation_by_id_async(store, cx, generation_id).await?;
+    validate_selected_generation(
+        &selected,
+        tenant_id,
+        head.repository_id,
+        configuration.repository_incarnation_id,
+        head.policy_epoch,
+    )?;
+    Ok(selected)
 }
 
 fn identified_generation(
     bytes: &[u8],
     expected: CapabilityRevocationGenerationId,
 ) -> Result<CapabilityRevocationGenerationRead, CapabilityRevocationAuthorityFailure> {
-    let body: CapabilityRevocationGenerationBody = decode_body(bytes, DecodeLimits::DEFAULT)?;
+    let body: CapabilityRevocationGenerationBody =
+        decode_body(bytes, REVOCATION_DECODE_LIMITS)?;
     let observed = body.generation_id()?;
     if observed != expected {
         return Err(CapabilityRevocationAuthorityFailure::GenerationIdentityMismatch {
@@ -713,16 +677,30 @@ fn identified_generation(
     })
 }
 
-fn validate_selection_fields(
-    body: &CapabilityRevocationGenerationBody,
+fn validate_selected_generation(
+    selected: &CapabilityRevocationGenerationRead,
+    tenant_id: TenantId,
     repository_id: RepositoryId,
+    repository_incarnation_id: RepositoryIncarnationId,
     policy_epoch: PolicyEpoch,
-    configuration_root: &Digest,
 ) -> Result<(), CapabilityRevocationAuthorityFailure> {
+    let body = selected.body();
+    if body.tenant_id != tenant_id {
+        return Err(CapabilityRevocationAuthorityFailure::TenantMismatch {
+            expected: tenant_id,
+            observed: body.tenant_id,
+        });
+    }
     if body.repository_id != repository_id {
         return Err(CapabilityRevocationAuthorityFailure::RepositoryMismatch {
             expected: repository_id,
             observed: body.repository_id,
+        });
+    }
+    if body.repository_incarnation_id != repository_incarnation_id {
+        return Err(CapabilityRevocationAuthorityFailure::IncarnationMismatch {
+            expected: repository_incarnation_id,
+            observed: body.repository_incarnation_id,
         });
     }
     if body.policy_epoch != policy_epoch {
@@ -731,81 +709,7 @@ fn validate_selection_fields(
             observed: body.policy_epoch,
         });
     }
-    if &body.configuration_root != configuration_root {
-        return Err(CapabilityRevocationAuthorityFailure::ConfigurationRootMismatch);
-    }
     Ok(())
-}
-
-fn validate_selected_generation<S>(
-    store: &S,
-    selected_bytes: &[u8],
-    repository_id: RepositoryId,
-    policy_epoch: PolicyEpoch,
-    configuration_root: &Digest,
-) -> Result<CapabilityRevocationGenerationRead, CapabilityRevocationAuthorityFailure>
-where
-    S: AuthorityStore + ?Sized,
-{
-    let body: CapabilityRevocationGenerationBody =
-        decode_body(selected_bytes, DecodeLimits::DEFAULT)?;
-    validate_selection_fields(&body, repository_id, policy_epoch, configuration_root)?;
-    let generation_id = body.generation_id()?;
-    let content_key = body_key_for_id(generation_id.as_internal_object_id())?;
-    match store.read_immutable(&content_key)? {
-        ImmutableRead::Absent => {
-            Err(CapabilityRevocationAuthorityFailure::ContentAddressedCopyMissing {
-                generation_id: Box::new(generation_id),
-            })
-        }
-        ImmutableRead::Present(content_bytes) if content_bytes == selected_bytes => {
-            Ok(CapabilityRevocationGenerationRead {
-                generation_id,
-                body,
-            })
-        }
-        ImmutableRead::Present(_) => {
-            Err(CapabilityRevocationAuthorityFailure::ContentAddressedCopyMismatch {
-                generation_id: Box::new(generation_id),
-            })
-        }
-    }
-}
-
-async fn validate_selected_generation_async<S>(
-    store: &S,
-    cx: &S::Context,
-    selected_bytes: &[u8],
-    repository_id: RepositoryId,
-    policy_epoch: PolicyEpoch,
-    configuration_root: &Digest,
-) -> Result<CapabilityRevocationGenerationRead, CapabilityRevocationAuthorityFailure>
-where
-    S: AsyncAuthorityStore + ?Sized,
-{
-    let body: CapabilityRevocationGenerationBody =
-        decode_body(selected_bytes, DecodeLimits::DEFAULT)?;
-    validate_selection_fields(&body, repository_id, policy_epoch, configuration_root)?;
-    let generation_id = body.generation_id()?;
-    let content_key = body_key_for_id(generation_id.as_internal_object_id())?;
-    match store.read_immutable(cx, &content_key).await? {
-        ImmutableRead::Absent => {
-            Err(CapabilityRevocationAuthorityFailure::ContentAddressedCopyMissing {
-                generation_id: Box::new(generation_id),
-            })
-        }
-        ImmutableRead::Present(content_bytes) if content_bytes == selected_bytes => {
-            Ok(CapabilityRevocationGenerationRead {
-                generation_id,
-                body,
-            })
-        }
-        ImmutableRead::Present(_) => {
-            Err(CapabilityRevocationAuthorityFailure::ContentAddressedCopyMismatch {
-                generation_id: Box::new(generation_id),
-            })
-        }
-    }
 }
 
 fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
