@@ -3,6 +3,8 @@
 **Status:** product architecture profile; additive to the existing Agent Collaboration Protocol  
 **Scope:** the agent-facing observation, planning, execution, verification, handoff, and learning surfaces of FrankenGit  
 **Authority:** subordinate to [`NORMATIVE_PROTOCOL_CONTRACTS.md`](NORMATIVE_PROTOCOL_CONTRACTS.md), [`AGENT_PROTOCOL.md`](AGENT_PROTOCOL.md), and the repository authority-head model  
+**Implementation ledger:** [`AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md`](AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md)  
+**Handoff ancestry:** [`AGENT_CONTROL_PLANE_HANDOFF_ANCESTRY.md`](AGENT_CONTROL_PLANE_HANDOFF_ANCESTRY.md)  
 **Initial consumers:** `fg` CLI, native API, MCP surface, TreeFS workspaces, multi-agent schedulers, review agents, and human operators inspecting agent work
 
 ---
@@ -57,9 +59,13 @@ Graph centrality, Beads priority, ownership history, model output, test history,
 
 Progressive disclosure may omit detail but may not omit the existence of uncertainty, stale generations, blocked requirements, conflicting evidence, unverified claims, unsettled obligations, or scope boundaries. A compact view contains typed counters and continuation identities for every omitted class.
 
-### 2.5 Handoffs preserve identity and debt
+### 2.5 Handoffs preserve identity, ancestry, and debt
 
 A handoff carries the exact base, intent, accepted requirements, modified objects, unresolved questions, failed approaches, outstanding obligations, evidence state, and budget consumption. It cannot convert “not checked” into “passed,” discard negative evidence, or silently widen scope.
+
+Source capsule construction and receiver authority acceptance are separate proofs. The source must use its exact activation situation or full-context continuity. A receiver at a later authority head must prove an exact bounded predecessor path from the capsule's head; generation comparison alone is not ancestry.
+
+Receiver acceptance binds the complete `IntentRunCommitment`, exact authority relationship, and every inherited effect responsibility. It grants no capability or task ownership.
 
 ### 2.6 Cancellation is a protocol
 
@@ -135,7 +141,7 @@ Execution occurs in a capability-scoped TreeFS workspace. ACP presents the small
 - peer changes that intersect the declared conflict set;
 - the latest authority delta since the plan basis.
 
-Every external or canonical effect uses the effect broker, stable idempotency, and an obligation. Local edits remain proposed state until exported into an Evidence-Carrying Change and admitted through the ordinary publication path.
+Every external or canonical effect uses the checked effect broker, stable idempotency, and an obligation. Local edits remain proposed state until exported into an Evidence-Carrying Change and admitted through the ordinary publication path.
 
 ### 3.5 Verify
 
@@ -197,6 +203,7 @@ AgentSituationReceipt {
   repository_id,
   authority_read_receipt,
   intent_run_id?,
+  intent_run_commitment?,
   workspace_id?,
   task_projection_generation?,
   claim_registry_generation,
@@ -245,6 +252,7 @@ AgentChangePlan {
   plan_id,
   situation_id,
   intent_run_id,
+  intent_run_commitment,
   task_id,
   acceptance_contract_root,
   owning_invariants[],
@@ -283,12 +291,13 @@ SituationDelta {
 
 This is the primary refresh primitive. It lets an agent update context incrementally instead of rebuilding a giant prompt after every commit.
 
-### 4.5 `AgentHandoffCapsule`
+### 4.5 `AgentHandoffCapsule` and `AgentHandoffAcceptance`
 
 ```text
 AgentHandoffCapsule {
   capsule_id,
   source_run_id,
+  source_run_commitment,
   source_instance_id,
   target_selector,
   latest_situation_id,
@@ -306,9 +315,28 @@ AgentHandoffCapsule {
   expiry,
   producer_attestation,
 }
+
+AgentHandoffAcceptance v2 {
+  acceptance_id,
+  capsule_id,
+  receiver_situation_id,
+  receiver_run_id,
+  receiver_run_commitment,
+  receiver_instance_id,
+  accepted_at,
+  authority_relation,
+  authority_ancestry_receipt?,
+  receiver_operations,
+  receiver_budget,
+  receiver_expiry,
+  target_resolution,
+  inherited_effect_responsibilities[],
+}
 ```
 
-A receiver verifies the capsule, independently refreshes authority, and either accepts it under a child Intent Run or refuses with a reason. Handoff text is explanatory; the capsule fields carry the contract.
+The receiver independently refreshes authority and either accepts under the same authenticated head or supplies an exact bounded ancestry receipt proving its current head descends from the source. The recommended sync/async host driver authenticates the current slot and consumes the proof in one operation.
+
+Acceptance does not transfer task ownership or mint a receiver plan. Cross-head task transfer requires a separate two-authority-basis persistence envelope.
 
 ### 4.6 `OutcomeLearningRecord`
 
@@ -316,6 +344,7 @@ A receiver verifies the capsule, independently refreshes authority, and either a
 OutcomeLearningRecord {
   learning_id,
   source_run_id,
+  source_run_commitment,
   task_id,
   terminal_outcome,
   exact_revision_or_decision,
@@ -374,7 +403,7 @@ The owning subsystem’s contracts, dependency neighborhood, recent decisions, n
 
 ### Level 3: audit expansion
 
-Complete source/evidence lineage, graph witnesses, raw results, historical attempts, and authority proofs required for independent review or incident analysis.
+Complete source/evidence lineage, graph witnesses, raw results, historical attempts, authority proofs, and handoff ancestry required for independent review or incident analysis.
 
 An agent requests expansion by stable identity, not by asking the server to repeat an unbounded transcript. Every compact node carries a continuation token or object identity that opens the exact detail behind it.
 
@@ -437,6 +466,12 @@ A failed gate returns the task to the same owning plan when possible and attache
 - evidence needed to re-enter verification.
 
 Rework does not create an unbounded new task unless the original acceptance contract truly excludes the defect. Scope splitting to manufacture closure is refused.
+
+### 6.5 Handoff acceptance versus task transfer
+
+A receiver may accept responsibility metadata under the same head or a proven descendant head without automatically changing the task projection.
+
+Same-read task transfer uses the existing single-basis exact-predecessor envelope. A transfer whose source lease and receiver assignment are governed by different authority heads needs a two-authority-basis envelope and separate reconciliation rules. The implementation must not weaken the existing same-read equality check to simulate that protocol.
 
 ---
 
@@ -510,11 +545,12 @@ ACP uses typed refusals for conditions including:
 - requirement missing a disposition;
 - evidence stale, unbound, unsupported, or wrong claim class;
 - obligation unsettled or external outcome ambiguous;
-- handoff loses authority ancestry or negative evidence;
+- handoff loses source continuity, authority ancestry, exact receiver-run identity, or negative evidence;
+- ancestry proof names another ancestor, descendant, repository, slot, store, token, or hop count;
 - publication basis moved;
 - cancellation containment incomplete.
 
-Every refusal names the failed precondition, supporting receipt, whether retry can help, and the minimal safe next action. It never silently falls back to a broader read, ambient credential, unverified summary, or weaker gate.
+Every refusal names the failed precondition, supporting receipt, whether retry can help, and the minimal safe next action. It never silently falls back to a broader read, ambient credential, unverified summary, weaker gate, or generation-only ancestry claim.
 
 ---
 
@@ -533,7 +569,9 @@ Untrusted content cannot:
 - approve publication;
 - hide negative evidence;
 - alter retention or disclosure;
-- change budget or effect destinations.
+- change budget or effect destinations;
+- assert that one authority head descends from another;
+- convert handoff acceptance into task ownership.
 
 Any model-generated plan amendment is a proposal evaluated against the Intent Run and policy. Any model-generated claim remains unsupported until evidence validates it.
 
@@ -569,7 +607,7 @@ Bind one task acceptance contract to an `AgentChangePlan`, then render requireme
 
 ### Slice E: handoff and cancellation reconciliation
 
-Produce and verify `AgentHandoffCapsule`; settle or transfer obligations; prove that omitted negative evidence, changed base, or amplified capability is refused.
+Produce and verify `AgentHandoffCapsule`; preserve source continuity; accept receivers at the same or a proven descendant authority head; settle or transfer obligations; prove that omitted negative evidence, changed base, forged ancestry, or amplified capability is refused.
 
 ### Slice F: outcome learning
 
@@ -583,6 +621,7 @@ The control plane requires tests for:
 
 - canonical byte stability and identity-domain separation;
 - authority receipt authentication and stale-head refusal;
+- bounded exact authority-head ancestry and current-token binding;
 - deterministic ordering and closed tie-breaks;
 - mixed-generation refusal;
 - compact/full rendering equivalence;
@@ -595,7 +634,7 @@ The control plane requires tests for:
 - evidence revision binding and invalidation;
 - requirement-disposition completeness;
 - peer conflict and contract-epoch invalidation;
-- handoff replay, tamper detection, and no amplification;
+- handoff replay, tamper detection, no amplification, wrong-ancestor refusal, and sync/async parity;
 - resource ceilings before allocation or expensive retrieval;
 - deterministic fallback when statistical support is absent;
 - negative-evidence applicability and expiry.
@@ -606,9 +645,11 @@ Performance evidence must report context bytes, retrieval work, graph/search req
 
 ## 13. Explicit non-claims
 
-This document does not claim that the ACP commands, API, MCP surface, scheduler, handoff protocol, or learning index are implemented today.
+This architecture does not claim that every ACP product surface is implemented. The exact landed library boundary is maintained in [`AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md`](AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md).
 
-It does not make Beads canonical repository state, make graph/model output authoritative, authorize agents through text, permit ambient credentials, weaken batch verification, or replace the ordinary transaction/publication path.
+Current library slices include authority-bound observation, frontier, planning, task coordination, capability/effect authorization, reconciliation, proof-carrying handoff and receiver acceptance, cancellation, and outcome learning. They do not by themselves provide a complete product host, durable transport for every value, action-packet executor, cross-head task-transfer persistence protocol, robot API, or canonical publication service.
+
+This document does not make Beads canonical repository state, make graph/model output authoritative, authorize agents through text, permit ambient credentials, weaken batch verification, or replace the ordinary transaction/publication path.
 
 It does not require a centralized hosted service. The same contracts must work in the embedded profile, with missing optional generations represented explicitly.
 
