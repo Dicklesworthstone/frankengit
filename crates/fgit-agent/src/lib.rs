@@ -35,10 +35,13 @@
 //!
 //! [`claim`] and [`action_packet`] bind an admitted task claim to concrete,
 //! bounded work without performing effects. [`claim_continuity`] permits only
-//! time-only continuation. [`broker`] authorizes and records effects, while
-//! [`effect_authorization`] authenticates bounded capability ancestry, reads
-//! run-bound revocation state with an explicit maximum age, and provides a
-//! broker facade whose high-value path cannot omit that effect-time proof.
+//! time-only continuation. [`broker`] owns typed effect reservations and the
+//! replayable journal. The crate-private `effect_authorization` module
+//! authenticates bounded capability ancestry and exact-position revocation
+//! reads; [`effect_dispatch`] exposes the production-facing broker, which
+//! requires that proof both at high-value request acceptance and again at an
+//! irreversible external dispatch. Abort and reconciliation remain available
+//! after revocation because they reduce outstanding responsibility.
 //! [`reconcile`], the crate-private handoff/cancellation engines and their public
 //! facades preserve responsibility through handoff or conservative stop.
 //! [`outcome_learning`] records validated retrieval-only learning and grants no
@@ -58,7 +61,8 @@ pub mod claim;
 pub mod claim_continuity;
 pub mod classes;
 pub mod ecc;
-pub mod effect_authorization;
+mod effect_authorization;
+pub mod effect_dispatch;
 pub mod frontier;
 mod frontier_policy;
 mod handoff;
@@ -133,9 +137,13 @@ pub use effect_authorization::{
     CapabilityRevocationReadRequestId, CapabilityRevocationReader,
     CapabilityRevocationReceipt, CapabilityRevocationReceiptId, MAX_CAPABILITY_REVOCATIONS,
     MAX_EFFECT_AUTHORIZATIONS, MAX_EFFECT_CAPABILITY_CHAIN, RevocationAuthorizedEffectGrant,
-    RevocationCheckedEffectBroker, RevocationCheckedEffectRefusal, VerifiedCapabilityChain,
-    VerifiedCapabilityChainId, VerifiedCapabilityChainRefusal, read_capability_revocations,
+    RevocationCheckedEffectRefusal, VerifiedCapabilityChain, VerifiedCapabilityChainId,
+    VerifiedCapabilityChainRefusal, read_capability_revocations,
     requires_effect_time_revocation,
+};
+pub use effect_dispatch::{
+    AuthorizedOutboxDispatchRefused, RevocationAuthorizedDeferredOutboxEffect,
+    RevocationAuthorizedOutboxEffect, RevocationCheckedEffectBroker,
 };
 pub use frontier::{
     ExcludedWorkItem, FrontierExclusionReason, FrontierRefusal, MAX_WORK_ITEMS, TaskPhase,
