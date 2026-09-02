@@ -7,6 +7,7 @@ pub mod bridge;
 pub mod error;
 pub mod harness;
 pub mod reader;
+pub mod repository_configuration;
 pub mod schema;
 pub mod wire;
 pub mod writer;
@@ -19,6 +20,7 @@ pub use bounds::DecodeLimits;
 pub use bridge::CryptoBodyIdentity;
 pub use error::CodecRefusal;
 pub use reader::Decoder;
+pub use repository_configuration::RepositoryIncarnationConfigurationBodyV2_2;
 pub use schema::{
     CreationAttemptBody, HiddenRefPolicyBody, MAX_REFUSAL_DETAIL_LEN, RefusalRecordBody,
     RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryConfigurationBody,
