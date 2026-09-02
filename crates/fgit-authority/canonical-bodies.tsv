@@ -3,5 +3,6 @@
 admission-receipt	Transaction-seal identity, admitted capability bytes, policy epoch, issuer identity, and first-seen logical time.
 authority-history	The ordered invocation and response history for authority operations, each with client, logical time, operation id, variant tag, and payload.
 canonical-request	Request schema, object format, atomic flag, ordered ref commands, ordered push options, and ordered scoped entries sealed for admission.
+capability-revocation-generation	Tenant, repository, repository incarnation, policy epoch, optional predecessor generation, canonical revoked-capability set, and generation evidence root.
 ref-txn	Tenant, repository, authenticated principal, raw idempotency key, and canonical-request digest used to derive a stable transaction identity.
-repository-configuration	Versioned repository configuration bytes: root-layout and object-format tags, with the selected major adding incarnation and optional hidden-ref-policy commitments.
+repository-configuration	Versioned repository configuration bytes: root-layout and object-format tags, with schema 2 adding incarnation and later minors adding hidden-ref-policy and capability-revocation-generation commitments.
