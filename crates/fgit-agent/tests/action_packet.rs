@@ -295,6 +295,10 @@ fn packet_is_deterministic_and_binds_complete_execution_inputs() {
     assert_eq!(first.active_claim_id(), active_claim.activation_id());
     assert_eq!(first.task_id(), plan.task_id());
     assert_eq!(first.run_id(), run.run_id());
+    assert_eq!(
+        first.run_commitment(),
+        run.commitment().expect("complete execution-run identity")
+    );
     assert_eq!(first.context_packet_ids(), &[context.packet_id()]);
     assert_eq!(first.steps().len(), 1);
     assert_eq!(
@@ -384,6 +388,8 @@ fn same_id_run_is_revalidated_instead_of_trusted_by_name() {
     let (plan, active_claim, activation, surface) =
         activated_plan(&receipt, &original, &context);
     let narrowed = run(&receipt, &[OperationClass::SubmitEvidence], 16_384);
+    let narrowed_commitment = narrowed.commitment().expect("narrowed run identity");
+    let original_commitment = original.commitment().expect("original run identity");
 
     assert_eq!(
         AgentActionPacket::build(
@@ -395,11 +401,9 @@ fn same_id_run_is_revalidated_instead_of_trusted_by_name() {
             packet_spec(surface, 512),
         )
         .expect_err("same run ID does not substitute for machine scope"),
-        ActionPacketRefusal::PlanOperationsOutsideRun {
-            missing: ClassSet::from_classes(&[
-                OperationClass::TreeFsWorkspace,
-                OperationClass::ConsumeBudget,
-            ]),
+        ActionPacketRefusal::SituationRunCommitmentMismatch {
+            expected: narrowed_commitment,
+            observed: Some(original_commitment),
         }
     );
 }
