@@ -8,8 +8,9 @@ use fgit_agent::{
     AuthorityReadReceipt, Capability, CapabilityEffectAuthorizationRefusal, CapabilityId,
     CapabilityRevocationReadAdapterRefusal, CapabilityRevocationReadObservation,
     CapabilityRevocationReadRequest, CapabilityRevocationReader, ClassSet, EffectId,
-    EffectRequest, IntentRun, LogicalTime, OperationClass, RevocationCheckedEffectBroker,
-    RunId, VerifiedCapabilityChain, read_capability_revocations,
+    EffectRequest, IntentRun, LogicalTime, OperationClass,
+    RevocationAuthorizedExternalEffectOutcome, RevocationCheckedEffectBroker, RunId,
+    VerifiedCapabilityChain, read_capability_revocations,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
@@ -318,7 +319,7 @@ fn newly_revoked_ancestor_blocks_dispatch_without_leaking_reservation() {
 }
 
 #[test]
-fn fresh_dispatch_proof_commits_and_reconciliation_remains_available() {
+fn fresh_dispatch_proof_commits_and_reconciliation_retains_both_proofs() {
     let receipt = authority_receipt(1_103);
     let run = run(&receipt);
     let chain = verified_chain();
@@ -359,6 +360,8 @@ fn fresh_dispatch_proof_commits_and_reconciliation_remains_available() {
         broker.records()[0].run_commitment,
         run.commitment().expect("complete run identity")
     );
+    let initial_authorization = committed.initial_authorization();
+    let dispatch_authorization = committed.dispatch_authorization();
 
     let mut plan = ReconcilePlan::new(
         dispatch.idempotency,
@@ -366,7 +369,6 @@ fn fresh_dispatch_proof_commits_and_reconciliation_remains_available() {
         ReconcilePolicy::new(NonZeroU32::MIN),
     );
     let outcome = committed
-        .into_deferred()
         .reconcile(
             &mut plan,
             &mut Delivered,
@@ -378,9 +380,11 @@ fn fresh_dispatch_proof_commits_and_reconciliation_remains_available() {
             vec![[0x73; 32]],
         )
         .expect("cleanup reconciliation remains available after dispatch");
-    assert!(matches!(
-        outcome,
-        fgit_agent::ExternalEffectOutcome::Acknowledged(_)
-    ));
+    let RevocationAuthorizedExternalEffectOutcome::Acknowledged(settled) = outcome else {
+        panic!("the delivered channel must acknowledge the effect");
+    };
+    assert_eq!(settled.initial_authorization(), initial_authorization);
+    assert_eq!(settled.dispatch_authorization(), dispatch_authorization);
+    assert_eq!(settled.request(), request);
     assert!(broker.close().is_quiescent());
 }
