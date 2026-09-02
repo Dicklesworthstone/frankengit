@@ -5,11 +5,12 @@
 //! computes one deterministic successor state, and emits the existing claim or
 //! cancellation projection consumed by the wider Agent Control Plane.
 //!
-//! The successor generation is a commitment to logical task state only. It does
-//! not depend on which conforming adapter executed the transition or on the
-//! evidence bytes that adapter later retains. Adapter identity and the declared
-//! evidence contract remain committed by [`TaskProjectionTransition`], so audit
-//! identity stays distinct without making backend choice alter task state.
+//! The successor generation is a commitment to logical task state, including
+//! the complete machine identity of an active lease holder. It does not depend
+//! on which conforming adapter executed the transition or on the evidence bytes
+//! that adapter later retains. Adapter identity and the declared evidence
+//! contract remain committed by [`TaskProjectionTransition`], so audit identity
+//! stays distinct without making backend choice alter task state.
 //!
 //! Values in this module are immutable derived coordination state. They are not
 //! durable storage and never become repository authority.
@@ -22,14 +23,14 @@ use fgit_types::Digest;
 
 use crate::{
     ActiveTaskClaim, AgentChangePlan, AgentChangePlanId, AgentControlPulse, IntentRun,
-    LogicalTime, PlanSurface, RunId, TaskClaimCancellationOutcome,
-    TaskClaimCancellationProjection, TaskClaimProjection, TaskClaimReceipt, TaskPhase,
-    WorkAction, WorkTaskId,
+    IntentRunCommitment, IntentRunIdentityRefusal, LogicalTime, PlanSurface, RunId,
+    TaskClaimCancellationOutcome, TaskClaimCancellationProjection, TaskClaimProjection,
+    TaskClaimReceipt, TaskPhase, WorkAction, WorkTaskId,
 };
 
-const SNAPSHOT_DOMAIN: &[u8] = b"frankengit.agent.task-projection-snapshot/v2\0";
-const GENERATION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-generation/v2\0";
-const TRANSITION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-transition/v2\0";
+const SNAPSHOT_DOMAIN: &[u8] = b"frankengit.agent.task-projection-snapshot/v3\0";
+const GENERATION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-generation/v3\0";
+const TRANSITION_DOMAIN: &[u8] = b"frankengit.agent.task-projection-transition/v3\0";
 
 /// Stable identity of one immutable semantic task snapshot.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -80,7 +81,10 @@ impl fmt::Display for TaskProjectionTransitionId {
 pub enum TaskProjectionAssignment {
     /// No run is currently preferred or assigned.
     Unassigned,
-    /// The task is assigned to one Intent Run.
+    /// The task is assigned to one Intent Run coordination identity.
+    ///
+    /// Without a lease this is only a preference. A successor must still
+    /// construct a complete-run-bound plan and claim.
     Assigned(RunId),
 }
 
@@ -89,6 +93,7 @@ pub enum TaskProjectionAssignment {
 pub struct TaskProjectionLease {
     plan_id: AgentChangePlanId,
     assignee: RunId,
+    run_commitment: IntentRunCommitment,
     previous_generation: [u8; 32],
     claimed_generation: [u8; 32],
     reserved_surfaces: Vec<PlanSurface>,
@@ -108,6 +113,7 @@ impl TaskProjectionLease {
     pub fn observed(
         plan_id: AgentChangePlanId,
         assignee: RunId,
+        run_commitment: IntentRunCommitment,
         previous_generation: [u8; 32],
         claimed_generation: [u8; 32],
         mut reserved_surfaces: Vec<PlanSurface>,
@@ -133,6 +139,7 @@ impl TaskProjectionLease {
         Ok(Self {
             plan_id,
             assignee,
+            run_commitment,
             previous_generation,
             claimed_generation,
             reserved_surfaces,
@@ -147,10 +154,16 @@ impl TaskProjectionLease {
         self.plan_id
     }
 
-    /// Run assigned by this lease.
+    /// Run coordination identity assigned by this lease.
     #[must_use]
     pub const fn assignee(&self) -> RunId {
         self.assignee
+    }
+
+    /// Complete machine-enforced run identity assigned by this lease.
+    #[must_use]
+    pub const fn run_commitment(&self) -> IntentRunCommitment {
+        self.run_commitment
     }
 
     /// Projection generation replaced by the claim.
@@ -243,10 +256,10 @@ impl TaskProjectionSnapshot {
     ///
     /// # Errors
     ///
-    /// Refuses stale pulse generations, task/phase/plan/run substitution,
-    /// assignment conflicts, an existing lease, invalid or amplified lifetime,
-    /// a zero adapter profile, generation collision, and canonical framing
-    /// failure.
+    /// Refuses stale pulse generations, task/phase/plan/complete-run
+    /// substitution, assignment conflicts, an existing lease, invalid or
+    /// amplified lifetime, a zero adapter profile, generation collision, and
+    /// canonical framing failure.
     #[allow(clippy::too_many_arguments)]
     pub fn claim(
         &self,
@@ -258,7 +271,7 @@ impl TaskProjectionSnapshot {
         adapter_identity: [u8; 32],
         evidence_root: Digest,
     ) -> Result<TaskClaimApplication, TaskProjectionAdapterRefusal> {
-        validate_claim_basis(self, pulse, plan, run)?;
+        let run_commitment = validate_claim_basis(self, pulse, plan, run)?;
         if self.lease.is_some() {
             return Err(TaskProjectionAdapterRefusal::ActiveLeaseExists);
         }
@@ -308,7 +321,8 @@ impl TaskProjectionSnapshot {
         let next_generation = derive_claim_generation(
             self,
             plan,
-            run,
+            run.run_id(),
+            run_commitment,
             claimed_at,
             expires_at,
             &reserved_surfaces,
@@ -330,6 +344,7 @@ impl TaskProjectionSnapshot {
         let lease = TaskProjectionLease::observed(
             plan.plan_id(),
             run.run_id(),
+            run_commitment,
             self.generation,
             next_generation,
             reserved_surfaces,
@@ -368,9 +383,9 @@ impl TaskProjectionSnapshot {
     ///
     /// # Errors
     ///
-    /// Refuses lease, receipt, claim, run, generation, surface, and time
-    /// substitution, a zero adapter profile, generation collision, and framing
-    /// failure.
+    /// Refuses lease, receipt, claim, complete-run, generation, surface, and
+    /// time substitution, a zero adapter profile, generation collision, and
+    /// framing failure.
     #[allow(clippy::too_many_arguments)]
     pub fn release(
         &self,
@@ -438,7 +453,8 @@ impl TaskProjectionSnapshot {
     /// Transfers assignment preference to another run and releases the source
     /// lease atomically at one projection generation.
     ///
-    /// The successor receives no plan, capability, or active claim. It must
+    /// The successor receives no plan, capability, or active claim. Its complete
+    /// run commitment is retained in transition audit identity, and it must
     /// build a new pulse and plan, claim the new generation, and activate that
     /// claim before continuing work.
     ///
@@ -484,9 +500,11 @@ impl TaskProjectionSnapshot {
                 resolved_at,
             });
         }
+        let successor_run_commitment = successor_run.commitment()?;
 
         let kind = TaskProjectionTransitionKind::Transferred {
             successor_run_id: successor_run.run_id(),
+            successor_run_commitment,
         };
         let next_generation = derive_resolution_generation(
             self,
@@ -644,8 +662,10 @@ pub enum TaskProjectionTransitionKind {
     },
     /// One run released its lease and assigned the task to a successor.
     Transferred {
-        /// Successor preference; not an active claim.
+        /// Successor coordination preference; not an active claim.
         successor_run_id: RunId,
+        /// Complete successor run committed by the transfer audit record.
+        successor_run_commitment: IntentRunCommitment,
     },
 }
 
@@ -909,17 +929,33 @@ pub enum TaskProjectionAdapterRefusal {
     },
     /// Plan action differs from the pulse selection.
     PlanActionMismatch,
-    /// Plan belongs to another run.
+    /// Plan belongs to another run ID.
     PlanRunMismatch {
         /// Plan run.
         expected: RunId,
         /// Supplied run.
         observed: RunId,
     },
-    /// Pulse names another active run.
+    /// Plan carries another complete run commitment.
+    PlanRunCommitmentMismatch {
+        /// Commitment bound to the plan.
+        expected: IntentRunCommitment,
+        /// Commitment computed from the supplied run.
+        observed: IntentRunCommitment,
+    },
+    /// Pulse names another active run ID.
     PulseRunMismatch,
+    /// Pulse carries another complete run commitment.
+    PulseRunCommitmentMismatch {
+        /// Commitment computed from the supplied run.
+        expected: IntentRunCommitment,
+        /// Commitment retained by the pulse, when present.
+        observed: Option<IntentRunCommitment>,
+    },
     /// Run lacks a complete authenticated authority receipt.
     RunAuthorityReceiptRequired,
+    /// Complete run identity could not be produced.
+    RunIdentity(IntentRunIdentityRefusal),
     /// Snapshot is assigned to another run.
     AssignedToOther {
         /// Existing assignment.
@@ -965,12 +1001,21 @@ pub enum TaskProjectionAdapterRefusal {
     MissingActiveLease,
     /// Snapshot assignment differs from its active lease.
     ActiveLeaseAssignmentMismatch,
+    /// Active lease belongs to another complete run.
+    LeaseRunCommitmentMismatch {
+        /// Commitment retained by the lease.
+        expected: IntentRunCommitment,
+        /// Commitment computed from the supplied source run.
+        observed: IntentRunCommitment,
+    },
     /// Claim receipt names another task.
     ClaimReceiptTaskMismatch,
     /// Claim receipt names another plan.
     ClaimReceiptPlanMismatch,
-    /// Claim receipt names another run.
+    /// Claim receipt names another run ID.
     ClaimReceiptRunMismatch,
+    /// Claim receipt carries another complete run commitment.
+    ClaimReceiptRunCommitmentMismatch,
     /// Claim receipt generation differs from the active snapshot.
     ClaimReceiptGenerationMismatch,
     /// Claim receipt reserved another conflict surface.
@@ -981,8 +1026,10 @@ pub enum TaskProjectionAdapterRefusal {
     ActiveClaimPlanMismatch,
     /// Active claim names another task.
     ActiveClaimTaskMismatch,
-    /// Active claim names another run.
+    /// Active claim names another run ID.
     ActiveClaimRunMismatch,
+    /// Active claim carries another complete run commitment.
+    ActiveClaimRunCommitmentMismatch,
     /// Resolution predates activation observation.
     ResolutionBeforeActivation {
         /// Activation observation.
@@ -1015,6 +1062,12 @@ impl fmt::Display for TaskProjectionAdapterRefusal {
 
 impl core::error::Error for TaskProjectionAdapterRefusal {}
 
+impl From<IntentRunIdentityRefusal> for TaskProjectionAdapterRefusal {
+    fn from(value: IntentRunIdentityRefusal) -> Self {
+        Self::RunIdentity(value)
+    }
+}
+
 impl From<CodecRefusal> for TaskProjectionAdapterRefusal {
     fn from(value: CodecRefusal) -> Self {
         Self::Codec(value)
@@ -1026,7 +1079,7 @@ fn validate_claim_basis(
     pulse: &AgentControlPulse,
     plan: &AgentChangePlan,
     run: &IntentRun,
-) -> Result<(), TaskProjectionAdapterRefusal> {
+) -> Result<IntentRunCommitment, TaskProjectionAdapterRefusal> {
     let selected = pulse
         .selected()
         .ok_or(TaskProjectionAdapterRefusal::PulseNotActionable)?;
@@ -1071,7 +1124,20 @@ fn validate_claim_basis(
     }
     run.authority_read_receipt()
         .ok_or(TaskProjectionAdapterRefusal::RunAuthorityReceiptRequired)?;
-    Ok(())
+    let run_commitment = run.commitment()?;
+    if plan.intent_run_commitment() != run_commitment {
+        return Err(TaskProjectionAdapterRefusal::PlanRunCommitmentMismatch {
+            expected: plan.intent_run_commitment(),
+            observed: run_commitment,
+        });
+    }
+    if pulse.active_run_commitment() != Some(run_commitment) {
+        return Err(TaskProjectionAdapterRefusal::PulseRunCommitmentMismatch {
+            expected: run_commitment,
+            observed: pulse.active_run_commitment(),
+        });
+    }
+    Ok(run_commitment)
 }
 
 fn validate_resolution_basis<'a>(
@@ -1089,6 +1155,13 @@ fn validate_resolution_basis<'a>(
     if snapshot.assignment != TaskProjectionAssignment::Assigned(lease.assignee) {
         return Err(TaskProjectionAdapterRefusal::ActiveLeaseAssignmentMismatch);
     }
+    let source_run_commitment = source_run.commitment()?;
+    if lease.run_commitment != source_run_commitment {
+        return Err(TaskProjectionAdapterRefusal::LeaseRunCommitmentMismatch {
+            expected: lease.run_commitment,
+            observed: source_run_commitment,
+        });
+    }
     if claim_receipt.task_id() != snapshot.task_id {
         return Err(TaskProjectionAdapterRefusal::ClaimReceiptTaskMismatch);
     }
@@ -1097,6 +1170,9 @@ fn validate_resolution_basis<'a>(
     }
     if claim_receipt.assignee() != lease.assignee || source_run.run_id() != lease.assignee {
         return Err(TaskProjectionAdapterRefusal::ClaimReceiptRunMismatch);
+    }
+    if claim_receipt.run_commitment() != lease.run_commitment {
+        return Err(TaskProjectionAdapterRefusal::ClaimReceiptRunCommitmentMismatch);
     }
     if *claim_receipt.claimed_task_projection_generation() != snapshot.generation
         || lease.claimed_generation != snapshot.generation
@@ -1118,6 +1194,9 @@ fn validate_resolution_basis<'a>(
     if active_claim.assignee() != lease.assignee {
         return Err(TaskProjectionAdapterRefusal::ActiveClaimRunMismatch);
     }
+    if active_claim.run_commitment() != lease.run_commitment {
+        return Err(TaskProjectionAdapterRefusal::ActiveClaimRunCommitmentMismatch);
+    }
     if resolved_at < active_claim.observed_at() {
         return Err(TaskProjectionAdapterRefusal::ResolutionBeforeActivation {
             activated_at: active_claim.observed_at(),
@@ -1136,18 +1215,20 @@ fn validate_resolution_basis<'a>(
 fn derive_claim_generation(
     snapshot: &TaskProjectionSnapshot,
     plan: &AgentChangePlan,
-    run: &IntentRun,
+    run_id: RunId,
+    run_commitment: IntentRunCommitment,
     claimed_at: LogicalTime,
     expires_at: LogicalTime,
     surfaces: &[PlanSurface],
 ) -> Result<[u8; 32], TaskProjectionAdapterRefusal> {
-    let mut encoder = Encoder::with_capacity(512);
+    let mut encoder = Encoder::with_capacity(576);
     encoder.write_bytes("task_projection_generation_domain", GENERATION_DOMAIN)?;
     encoder.write_raw_byte(1);
     encoder.write_raw(&snapshot.generation);
     encoder.write_raw(snapshot.task_id.as_bytes());
     encoder.write_raw(plan.plan_id().as_bytes());
-    encoder.write_raw(&run.run_id().value().to_be_bytes());
+    encoder.write_raw(&run_id.value().to_be_bytes());
+    encoder.write_raw(run_commitment.as_bytes());
     encoder.write_raw_byte(work_action_code(plan.action()));
     encoder.write_scalar(claimed_at.value());
     encoder.write_scalar(expires_at.value());
@@ -1162,12 +1243,13 @@ fn derive_resolution_generation(
     kind: TaskProjectionTransitionKind,
     resolved_at: LogicalTime,
 ) -> Result<[u8; 32], TaskProjectionAdapterRefusal> {
-    let mut encoder = Encoder::with_capacity(512);
+    let mut encoder = Encoder::with_capacity(576);
     encoder.write_bytes("task_projection_generation_domain", GENERATION_DOMAIN)?;
     encoder.write_raw_byte(kind.code_point());
     encoder.write_raw(&snapshot.generation);
     encoder.write_raw(snapshot.task_id.as_bytes());
     encoder.write_raw(claim_receipt.claim_id().as_bytes());
+    encoder.write_raw(claim_receipt.run_commitment().as_bytes());
     encoder.write_raw(active_claim.activation_id().as_bytes());
     write_transition_kind(&mut encoder, kind)?;
     encoder.write_scalar(resolved_at.value());
@@ -1177,7 +1259,7 @@ fn derive_resolution_generation(
 fn snapshot_commitment(
     snapshot: &TaskProjectionSnapshot,
 ) -> Result<[u8; 32], TaskProjectionAdapterRefusal> {
-    let mut encoder = Encoder::with_capacity(512);
+    let mut encoder = Encoder::with_capacity(576);
     encoder.write_bytes("task_projection_snapshot_domain", SNAPSHOT_DOMAIN)?;
     encoder.write_raw(snapshot.task_id.as_bytes());
     encoder.write_raw(&snapshot.generation);
@@ -1195,6 +1277,7 @@ fn snapshot_commitment(
             encoder.write_bool(true);
             encoder.write_raw(lease.plan_id.as_bytes());
             encoder.write_raw(&lease.assignee.value().to_be_bytes());
+            encoder.write_raw(lease.run_commitment.as_bytes());
             encoder.write_raw(&lease.previous_generation);
             encoder.write_raw(&lease.claimed_generation);
             write_surfaces(&mut encoder, &lease.reserved_surfaces)?;
@@ -1208,7 +1291,7 @@ fn snapshot_commitment(
 fn transition_commitment(
     transition: &TaskProjectionTransition,
 ) -> Result<[u8; 32], TaskProjectionAdapterRefusal> {
-    let mut encoder = Encoder::with_capacity(512);
+    let mut encoder = Encoder::with_capacity(576);
     encoder.write_bytes("task_projection_transition_domain", TRANSITION_DOMAIN)?;
     encoder.write_raw(transition.before_snapshot_id.as_bytes());
     encoder.write_raw(transition.after_snapshot_id.as_bytes());
@@ -1234,8 +1317,12 @@ fn write_transition_kind(
         TaskProjectionTransitionKind::Released { next_phase } => {
             encoder.write_raw_byte(task_phase_code(next_phase));
         }
-        TaskProjectionTransitionKind::Transferred { successor_run_id } => {
+        TaskProjectionTransitionKind::Transferred {
+            successor_run_id,
+            successor_run_commitment,
+        } => {
             encoder.write_raw(&successor_run_id.value().to_be_bytes());
+            encoder.write_raw(successor_run_commitment.as_bytes());
         }
     }
     Ok(())
