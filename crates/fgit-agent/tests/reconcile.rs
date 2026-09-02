@@ -123,6 +123,7 @@ const fn effect_class(operation: OperationClass) -> EffectClass {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record(
     receipt: &AuthorityReadReceipt,
     run: &IntentRun,
@@ -139,6 +140,7 @@ fn record(
     EffectRecord {
         effect_id: EffectId::new(id),
         run_id: run.run_id(),
+        run_commitment: run.commitment().expect("complete run commitment"),
         agent_instance_id: AgentInstanceId::new(1),
         parent_effect_id,
         capability_id: CapabilityId::new(2),
@@ -263,6 +265,10 @@ fn report_is_order_independent_and_preserves_every_lifecycle_class() {
         .expect("input ordering cannot change the report");
 
     assert_eq!(first.report_id(), second.report_id());
+    assert_eq!(
+        first.run_commitment(),
+        run.commitment().expect("complete run commitment")
+    );
     assert_eq!(first.counts().total(), 7);
     assert_eq!(first.counts().reserved(), 1);
     assert_eq!(first.counts().committed_or_deferred(), 1);
@@ -388,8 +394,47 @@ fn effect_authority_cannot_be_substituted() {
 }
 
 #[test]
-fn cumulative_consumable_spend_cannot_exceed_the_run() {
+fn same_run_id_with_another_machine_scope_is_refused_first() {
     let receipt = authority_receipt(136, 0x27);
+    let source = run(&receipt, 1_000);
+    let altered = IntentRun::new_authenticated(
+        source.run_id(),
+        receipt.clone(),
+        source.allowed_operation_classes(),
+        ResourceVector::from_grades(&[
+            (Grade::Bytes, 999),
+            (Grade::CpuMicros, 10_000),
+        ]),
+        LogicalTime::new(90),
+    )
+    .expect("same-ID altered run is structurally valid");
+    let effect = record(
+        &receipt,
+        &source,
+        1,
+        OperationClass::TreeFsWorkspace,
+        ObligationState::Reserved,
+        None,
+        None,
+        20,
+        40,
+        0,
+    );
+
+    assert_eq!(
+        RunReconciliationReport::build(&altered, vec![effect], LogicalTime::new(30))
+            .expect_err("numeric RunId cannot substitute complete machine scope"),
+        RunReconciliationRefusal::EffectRunCommitmentMismatch {
+            effect_id: EffectId::new(1),
+            expected: altered.commitment().expect("altered run commitment"),
+            observed: source.commitment().expect("source run commitment"),
+        }
+    );
+}
+
+#[test]
+fn cumulative_consumable_spend_cannot_exceed_the_run() {
+    let receipt = authority_receipt(137, 0x28);
     let run = run(&receipt, 100);
     let first = record(
         &receipt,
