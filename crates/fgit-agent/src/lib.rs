@@ -35,16 +35,19 @@
 //!
 //! [`claim`] and [`action_packet`] bind an admitted task claim to concrete,
 //! bounded work without performing effects. [`claim_continuity`] permits only
-//! time-only continuation. [`broker`] authorizes and records effects;
+//! time-only continuation. [`broker`] authorizes and records effects, while
+//! [`effect_authorization`] authenticates bounded capability ancestry, reads
+//! run-bound revocation state with an explicit maximum age, and provides a
+//! broker facade whose high-value path cannot omit that effect-time proof.
 //! [`reconcile`], the crate-private handoff/cancellation engines and their public
 //! facades preserve responsibility through handoff or conservative stop.
 //! [`outcome_learning`] records validated retrieval-only learning and grants no
 //! authority.
 //!
 //! Concrete Beads transport/codec mapping, action execution, ECC assembly,
-//! canonical publication, effect-time revocation, later-head ancestry proof,
-//! durable control-object codecs, and robot/API surfaces remain outside the
-//! current boundary.
+//! canonical publication, concrete revocation transport and durable codecs,
+//! later-head ancestry proof, durable control-object codecs, and robot/API
+//! surfaces remain outside the current boundary.
 
 pub mod action_packet;
 pub mod authority_identity;
@@ -55,6 +58,7 @@ pub mod claim;
 pub mod claim_continuity;
 pub mod classes;
 pub mod ecc;
+pub mod effect_authorization;
 pub mod frontier;
 mod frontier_policy;
 mod handoff;
@@ -120,6 +124,18 @@ pub use ecc::{
     EccPolicy, EccRefusal, EvidenceCarryingChange, EvidenceClass, EvidenceRecordRef,
     IndependenceClassification, IndependenceDimension, PartyFacts, RequirementDisposition,
     VerifierAttestation, classify_independence,
+};
+pub use effect_authorization::{
+    AuthorizedOutboxReservationRefused, CapabilityEffectAuthorization,
+    CapabilityEffectAuthorizationId, CapabilityEffectAuthorizationRefusal,
+    CapabilityRevocationReadAdapterRefusal, CapabilityRevocationReadObservation,
+    CapabilityRevocationReadRefusal, CapabilityRevocationReadRequest,
+    CapabilityRevocationReadRequestId, CapabilityRevocationReader,
+    CapabilityRevocationReceipt, CapabilityRevocationReceiptId, MAX_CAPABILITY_REVOCATIONS,
+    MAX_EFFECT_AUTHORIZATIONS, MAX_EFFECT_CAPABILITY_CHAIN, RevocationAuthorizedEffectGrant,
+    RevocationCheckedEffectBroker, RevocationCheckedEffectRefusal, VerifiedCapabilityChain,
+    VerifiedCapabilityChainId, VerifiedCapabilityChainRefusal, read_capability_revocations,
+    requires_effect_time_revocation,
 };
 pub use frontier::{
     ExcludedWorkItem, FrontierExclusionReason, FrontierRefusal, MAX_WORK_ITEMS, TaskPhase,
