@@ -246,6 +246,7 @@ fn internal_effect(
     EffectRecord {
         effect_id: EffectId::new(1),
         run_id: run.run_id(),
+        run_commitment: run.commitment().expect("complete run commitment"),
         agent_instance_id: AgentInstanceId::new(1),
         parent_effect_id: None,
         capability_id: CapabilityId::new(2),
@@ -274,6 +275,7 @@ fn external_effect(
     EffectRecord {
         effect_id: EffectId::new(2),
         run_id: run.run_id(),
+        run_commitment: run.commitment().expect("complete run commitment"),
         agent_instance_id: AgentInstanceId::new(1),
         parent_effect_id: None,
         capability_id: CapabilityId::new(3),
