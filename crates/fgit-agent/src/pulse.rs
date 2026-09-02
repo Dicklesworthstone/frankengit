@@ -13,13 +13,12 @@
 //!
 //! # Why the active `IntentRun` is supplied again
 //!
-//! A situation receipt retains the run identity, not a mutable run handle. That
-//! is enough to describe what was observed, but it is not enough to recommend an
-//! action safely: the run may have expired since it was attached. Pulse
-//! construction therefore requires the complete run again and re-checks its
-//! identity, authority receipt, and logical-time window at the observation
-//! instant. An expired run produces a typed refusal instead of an actionable
-//! looking summary.
+//! A situation receipt retains the run ID and complete machine commitment, not
+//! a mutable run handle. Pulse construction therefore requires the complete run
+//! again and re-checks its commitment, authenticated authority receipt, and
+//! logical-time window at the observation instant. A same-ID reconstructed run
+//! or an expired run produces a typed refusal instead of an actionable-looking
+//! summary.
 
 use core::fmt;
 
@@ -29,12 +28,12 @@ use fgit_treefs::WorkspaceId;
 use fgit_types::{HeadGeneration, RepositoryAuthorityHeadId, RepositoryId};
 
 use crate::{
-    AgentSituationReceipt, FrontierExclusionReason, IntentRun, LogicalTime, RunId,
-    SituationComponentKind, TaskPhase, WorkAction, WorkCandidate, WorkFrontier, WorkFrontierId,
-    WorkRankingWitness, WorkTaskId,
+    AgentSituationReceipt, FrontierExclusionReason, IntentRun, IntentRunCommitment,
+    IntentRunIdentityRefusal, LogicalTime, RunId, SituationComponentKind, TaskPhase,
+    WorkAction, WorkCandidate, WorkFrontier, WorkFrontierId, WorkRankingWitness, WorkTaskId,
 };
 
-const PULSE_DOMAIN: &[u8] = b"frankengit.agent.control-pulse/v1\0";
+const PULSE_DOMAIN: &[u8] = b"frankengit.agent.control-pulse/v2\0";
 
 /// Stable SHA-256 commitment to one complete compact pulse.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -285,6 +284,7 @@ pub struct AgentControlPulse {
     task_projection_generation: [u8; 32],
     observed_at: LogicalTime,
     active_run: Option<RunId>,
+    active_run_commitment: Option<IntentRunCommitment>,
     workspace_id: Option<WorkspaceId>,
     observed_components: u32,
     omitted_components: u32,
@@ -301,9 +301,9 @@ impl AgentControlPulse {
     /// # Errors
     ///
     /// Refuses a frontier from another situation, a mismatched task projection
-    /// or run identity, a missing/extra/legacy run, an authority-mismatched run,
-    /// an expired run, inconsistent exclusion accounting, and unrepresentable
-    /// commitment framing.
+    /// or complete run identity, a missing/extra/legacy run, an
+    /// authority-mismatched run, an expired run, inconsistent exclusion
+    /// accounting, and unrepresentable commitment framing.
     pub fn build(
         situation: &AgentSituationReceipt,
         frontier: &WorkFrontier,
@@ -334,7 +334,7 @@ impl AgentControlPulse {
             });
         }
 
-        validate_active_run(situation, active_run)?;
+        let active_run_commitment = validate_active_run(situation, active_run)?;
 
         let observed_components = count_u32(
             "observed_components",
@@ -379,6 +379,7 @@ impl AgentControlPulse {
             task_projection_generation: situation_generation,
             observed_at: situation.observed_at(),
             active_run: situation.intent_run_id(),
+            active_run_commitment,
             workspace_id,
             observed_components,
             omitted_components,
@@ -440,10 +441,16 @@ impl AgentControlPulse {
         self.observed_at
     }
 
-    /// Active live Intent Run, when present.
+    /// Active live Intent Run coordination identity, when present.
     #[must_use]
     pub const fn active_run(&self) -> Option<RunId> {
         self.active_run
+    }
+
+    /// Complete active Intent Run identity, when present.
+    #[must_use]
+    pub const fn active_run_commitment(&self) -> Option<IntentRunCommitment> {
+        self.active_run_commitment
     }
 
     /// Attached `TreeFS` workspace identity, when present.
@@ -531,18 +538,29 @@ pub enum PulseRefusal {
         /// Extra run supplied.
         observed: RunId,
     },
-    /// Complete run object has another identity.
+    /// Complete run object has another coordination identity.
     ActiveRunIdMismatch {
         /// Run identity retained by the situation.
         expected: RunId,
         /// Run object supplied.
         observed: RunId,
     },
+    /// Same coordination ID carries another complete run commitment.
+    ActiveRunCommitmentMismatch {
+        /// Commitment retained by the situation.
+        expected: IntentRunCommitment,
+        /// Commitment computed from the supplied run.
+        observed: IntentRunCommitment,
+    },
+    /// Situation carries an impossible run ID/commitment option pair.
+    InconsistentSituationRunIdentity,
     /// Supplied run uses the legacy identifying reference rather than the full
     /// authenticated authority receipt.
     ActiveRunAuthorityReceiptRequired,
     /// Supplied run and situation were authenticated at different positions.
     ActiveRunAuthorityMismatch,
+    /// Complete run identity could not be produced.
+    RunIdentity(IntentRunIdentityRefusal),
     /// The run was already expired at the situation's observation instant.
     ActiveRunExpired {
         /// Expired run.
@@ -597,12 +615,20 @@ impl fmt::Display for PulseRefusal {
                 formatter,
                 "supplied run {observed} differs from situation run {expected}"
             ),
+            Self::ActiveRunCommitmentMismatch { expected, observed } => write!(
+                formatter,
+                "supplied run commitment {observed} differs from situation run {expected}"
+            ),
+            Self::InconsistentSituationRunIdentity => formatter.write_str(
+                "agent situation carries an inconsistent run ID/commitment pair",
+            ),
             Self::ActiveRunAuthorityReceiptRequired => formatter.write_str(
                 "control pulse requires a run with a complete authenticated authority receipt",
             ),
             Self::ActiveRunAuthorityMismatch => formatter.write_str(
                 "active run authority receipt differs from the situation receipt",
             ),
+            Self::RunIdentity(refusal) => write!(formatter, "active run identity refused: {refusal}"),
             Self::ActiveRunExpired {
                 run_id,
                 expiry,
@@ -630,6 +656,12 @@ impl fmt::Display for PulseRefusal {
 
 impl core::error::Error for PulseRefusal {}
 
+impl From<IntentRunIdentityRefusal> for PulseRefusal {
+    fn from(value: IntentRunIdentityRefusal) -> Self {
+        Self::RunIdentity(value)
+    }
+}
+
 impl From<CodecRefusal> for PulseRefusal {
     fn from(value: CodecRefusal) -> Self {
         Self::Codec(value)
@@ -639,18 +671,29 @@ impl From<CodecRefusal> for PulseRefusal {
 fn validate_active_run(
     situation: &AgentSituationReceipt,
     active_run: Option<&IntentRun>,
-) -> Result<(), PulseRefusal> {
-    match (situation.intent_run_id(), active_run) {
-        (None, None) => Ok(()),
-        (None, Some(run)) => Err(PulseRefusal::UnexpectedActiveRun {
+) -> Result<Option<IntentRunCommitment>, PulseRefusal> {
+    match (
+        situation.intent_run_id(),
+        situation.intent_run_commitment(),
+        active_run,
+    ) {
+        (None, None, None) => Ok(None),
+        (None, None, Some(run)) => Err(PulseRefusal::UnexpectedActiveRun {
             observed: run.run_id(),
         }),
-        (Some(expected), None) => Err(PulseRefusal::ActiveRunRequired { expected }),
-        (Some(expected), Some(run)) => {
+        (Some(expected), Some(_), None) => Err(PulseRefusal::ActiveRunRequired { expected }),
+        (Some(expected), Some(expected_commitment), Some(run)) => {
             if run.run_id() != expected {
                 return Err(PulseRefusal::ActiveRunIdMismatch {
                     expected,
                     observed: run.run_id(),
+                });
+            }
+            let observed_commitment = run.commitment()?;
+            if observed_commitment != expected_commitment {
+                return Err(PulseRefusal::ActiveRunCommitmentMismatch {
+                    expected: expected_commitment,
+                    observed: observed_commitment,
                 });
             }
             let run_receipt = run
@@ -666,8 +709,9 @@ fn validate_active_run(
                     observed: situation.observed_at(),
                 });
             }
-            Ok(())
+            Ok(Some(observed_commitment))
         }
+        _ => Err(PulseRefusal::InconsistentSituationRunIdentity),
     }
 }
 
@@ -679,7 +723,7 @@ fn count_u32(field: &'static str, value: usize) -> Result<u32, PulseRefusal> {
 }
 
 fn pulse_commitment(pulse: &AgentControlPulse) -> Result<[u8; 32], PulseRefusal> {
-    let mut encoder = Encoder::with_capacity(512);
+    let mut encoder = Encoder::with_capacity(576);
     encoder.write_bytes("agent_control_pulse_domain", PULSE_DOMAIN)?;
     encoder.write_raw(&pulse.situation_id);
     encoder.write_raw(pulse.frontier_id.as_bytes());
@@ -689,7 +733,11 @@ fn pulse_commitment(pulse: &AgentControlPulse) -> Result<[u8; 32], PulseRefusal>
     encoder.write_raw(&pulse.task_projection_generation);
     encoder.write_scalar(pulse.observed_at.value());
 
-    write_optional_run(&mut encoder, pulse.active_run);
+    write_optional_run(
+        &mut encoder,
+        pulse.active_run,
+        pulse.active_run_commitment,
+    )?;
     match pulse.workspace_id {
         Some(workspace_id) => {
             encoder.write_bool(true);
@@ -724,13 +772,23 @@ fn pulse_commitment(pulse: &AgentControlPulse) -> Result<[u8; 32], PulseRefusal>
     Ok(hasher.finish())
 }
 
-fn write_optional_run(encoder: &mut Encoder, run_id: Option<RunId>) {
-    match run_id {
-        Some(run_id) => {
+fn write_optional_run(
+    encoder: &mut Encoder,
+    run_id: Option<RunId>,
+    run_commitment: Option<IntentRunCommitment>,
+) -> Result<(), PulseRefusal> {
+    match (run_id, run_commitment) {
+        (Some(run_id), Some(run_commitment)) => {
             encoder.write_bool(true);
             encoder.write_raw(&run_id.value().to_be_bytes());
+            encoder.write_raw(run_commitment.as_bytes());
+            Ok(())
         }
-        None => encoder.write_bool(false),
+        (None, None) => {
+            encoder.write_bool(false);
+            Ok(())
+        }
+        _ => Err(PulseRefusal::InconsistentSituationRunIdentity),
     }
 }
 
