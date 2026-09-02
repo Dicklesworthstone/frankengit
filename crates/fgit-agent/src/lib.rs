@@ -38,7 +38,9 @@
 //! time-only continuation. [`broker`] owns typed effect reservations and the
 //! replayable journal. The crate-private `effect_authorization` module
 //! authenticates bounded capability ancestry and exact-position revocation
-//! reads; [`effect_dispatch`] exposes the production-facing broker, which
+//! receipts. [`authority_revocation`] resolves those receipts from the canonical
+//! generation selected by repository configuration and the exact authenticated
+//! head. [`effect_dispatch`] exposes the production-facing broker, which
 //! requires that proof both at high-value request acceptance and again at an
 //! irreversible external dispatch. Abort and reconciliation remain available
 //! after revocation because they reduce outstanding responsibility.
@@ -47,13 +49,14 @@
 //! [`outcome_learning`] records validated retrieval-only learning and grants no
 //! authority.
 //!
-//! Concrete Beads transport/codec mapping, action execution, ECC assembly,
-//! canonical publication, concrete revocation transport and durable codecs,
-//! later-head ancestry proof, durable control-object codecs, and robot/API
-//! surfaces remain outside the current boundary.
+//! Concrete product-host adoption, action execution, ECC assembly, canonical
+//! publication orchestration, later-head ancestry proof, durable codecs for the
+//! agent control objects, and robot/API surfaces remain outside the current
+//! boundary.
 
 pub mod action_packet;
 pub mod authority_identity;
+pub mod authority_revocation;
 pub mod broker;
 mod cancellation;
 pub mod capability;
@@ -98,6 +101,11 @@ pub use action_packet::{
     MAX_ACTION_PEER_CHANGES, MAX_ACTION_STEPS,
 };
 pub use authority_identity::{AuthorityReadIdentityRefusal, AuthorityReadReceiptId};
+pub use authority_revocation::{
+    AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE,
+    AuthorityCapabilityRevocationReadRefusal, read_authority_capability_revocations,
+    read_authority_capability_revocations_async,
+};
 pub use broker::{
     AgentInstanceId, BrokerRefusal, DeferredOutboxEffect, EffectBroker, EffectClass, EffectGrant,
     EffectId, EffectJournalEntry, EffectJournalEvent, EffectJournalRefusal, EffectJournalReplay,
