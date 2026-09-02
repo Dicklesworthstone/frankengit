@@ -2,7 +2,7 @@
 
 **Status:** normative architecture profile (its IntentRun, AuthorityReadReceipt, and Evidence-Carrying Change constructs are depended on by `NORMATIVE_PROTOCOL_CONTRACTS.md` §28, which wins on any conflict)  
 **Scope:** software agents operating through FrankenGit  
-**Last updated:** 2026-08-20
+**Last updated:** 2026-09-02
 
 FrankenGit treats software agents as first-class collaborators, never as ambiently trusted shell sessions. The protocol makes an agent’s sponsor, identity, intent, authority, canonical base, supplied context, workspace state, effects, evidence, resource use, delegation, and terminal outcomes explicit enough that humans and other agents can inspect the change without trusting a conversational transcript.
 
@@ -195,7 +195,9 @@ IntentRun {
 
 ### 5.2 Identity
 
-The canonical Intent Run bytes are committed into `run_id` under a versioned domain. Reusing a run ID with different bytes is a terminal protocol violation.
+`RunId` is a stable coordination handle. `IntentRunCommitment` is the versioned commitment to every machine-enforced run field, including the exact authenticated authority-read event, allowed operation classes, resource budget, and expiry. Reusing one `RunId` with a different commitment is a terminal protocol violation.
+
+Every task lease, plan, claim, action packet, effect record, reconciliation report, handoff, cancellation record, and learning record that can outlive an API call retains the complete commitment. Numeric equality alone never proves that two run values are interchangeable.
 
 ### 5.3 Repository text is not control metadata
 
@@ -258,7 +260,17 @@ Delegation may only intersect selectors, reduce quotas, shorten expiry, narrow o
 
 ### 6.3 Revocation and freshness
 
-High-value tools validate revocation/freshness at effect time, not only workspace creation. Revocation is interpreted at a named canonical position. Cached capability decisions have explicit maximum age and invalidation.
+High-value tools validate the complete capability ancestry and revocation/freshness at effect time, not only workspace creation or request parsing. Revocation is interpreted at one named authenticated repository position and exact read event. A cached decision commits an explicit maximum age and uses a half-open interval:
+
+```text
+revocation_observed_at <= effect_time < valid_until
+```
+
+Use exactly at `valid_until` is stale. A head generation, wall-clock timestamp, or cache hit without the authenticated read is insufficient.
+
+For an external effect, request acceptance and outbox reservation are not the irreversible boundary. The downstream-visible boundary is dispatch. A request-time authorization MUST NOT be reused at a later dispatch instant. The dispatcher obtains a new authorization for the exact run, chain, leaf, effect ID, parent, operation, cost, and canonical input immediately before committing the typed outbox obligation.
+
+Revocation prevents new consequential work; it does not prevent cleanup. Abort-before-dispatch, stable-key reconciliation after commit, acknowledgement, terminal failure, escalation resolution, cancellation, and containment remain available after later revocation or expiry.
 
 ---
 
@@ -387,21 +399,27 @@ Every consequential operation uses an Asupersync-owned obligation and produces a
 EffectRecord {
   effect_id,
   run_id,
+  run_commitment,
   agent_instance_id,
   parent_effect_id?,
   capability_id,
+  effect_class,
   operation,
   canonical_input_commitment,
   source_authority_receipt?,
   budget_reserved,
+  budget_consumed,
   external_idempotency_key?,
   obligation_state,
+  obligation_class?,
   terminal_outcome?,
   output_commitments[],
-  budget_consumed,
   reconciliation_evidence?,
+  accepted_at,
 }
 ```
+
+The broker computes `run_commitment` before budget moves. Its append-only journal establishes numeric and complete run identity from the first accepted effect and refuses a later record from another complete run, even when `run_id` is equal. Reconciliation and cancellation preserve the same commitment.
 
 Obligation states follow the normative lifecycle: `Reserved -> Committed -> Acknowledged`, or `Reserved -> Aborted`, exactly as defined in `CALM_AND_OBLIGATIONS.md` §6. Region closure requires every obligation to be settled or terminally quarantined.
 
@@ -415,6 +433,15 @@ The ledger distinguishes:
 - external effects such as email, deployment, package publication, cloud resource change, or billing reservation.
 
 At-least-once retries use stable effect identities. An external API without idempotency support is wrapped by an effect-specific reconciliation protocol. “Maybe it happened” is not a valid terminal state for a registered effect.
+
+### 9.1 External dispatch proof
+
+A checked external-effect path retains two separate authorizations:
+
+1. request-time authorization before the run budget is reserved;
+2. dispatch-time authorization immediately before the downstream-visible obligation commits.
+
+The second authorization is reconstructed from the exact retained `EffectRequest`. It must preserve the verified ancestry and leaf capability used at acceptance and use a fresh revocation receipt for the actual dispatch instant. A refusal returns the live reservation. A post-commit journal failure returns the deferred obligation. Neither path loses cleanup ownership.
 
 ---
 
@@ -642,6 +669,9 @@ Initial refusals include:
 - `CapabilityExpired`
 - `CapabilityAudienceMismatch`
 - `CapabilityScopeViolation`
+- `CapabilityRevoked`
+- `CapabilityRevocationStale`
+- `CapabilityAncestryMismatch`
 - `DelegationAmplifiesAuthority`
 - `ContextGenerationMixed`
 - `ContextCoverageUnsupported`
@@ -671,7 +701,7 @@ Refusals are inspectable protocol outcomes, not generic internal errors.
 
 An implementation cannot claim Agent Protocol conformance until it passes:
 
-1. capability attenuation, ancestry, audience, expiry, and replay property tests;
+1. capability attenuation, ancestry, audience, expiry, replay, and ancestor-revocation property tests;
 2. repository-content prompt-injection red-team corpus;
 3. secret-exfiltration attempts across tool, process, log, context, evidence, and output surfaces;
 4. TreeFS path/symlink/reparse/hardlink escape corpus;
@@ -681,11 +711,12 @@ An implementation cannot claim Agent Protocol conformance until it passes:
 8. producer/verifier trust-domain classification tests;
 9. stale authority receipt and target-ref movement publication tests;
 10. exact external-effect reconciliation after crash and retry;
-11. human/API/compact rendering equivalence;
-12. evidence fabrication, stale evidence, and mixed-generation context rejection;
-13. cross-tenant workspace/index/cache isolation;
-14. quiescence proof with no orphan task, credential, process, or obligation;
-15. ordinary Git export of the committed result.
+11. revocation between request acceptance, outbox reservation, and irreversible dispatch;
+12. human/API/compact rendering equivalence;
+13. evidence fabrication, stale evidence, and mixed-generation context rejection;
+14. cross-tenant workspace/index/cache isolation;
+15. quiescence proof with no orphan task, credential, process, or obligation;
+16. ordinary Git export of the committed result.
 
 Claims and evidence levels are governed by [`VERIFY_SPEC.md`](../VERIFY_SPEC.md).
 
@@ -695,12 +726,13 @@ Claims and evidence levels are governed by [`VERIFY_SPEC.md`](../VERIFY_SPEC.md)
 
 The first implementation supports one repository and one local agent harness with:
 
-- authorized Intent Run;
+- authorized Intent Run and complete run commitment;
 - verified AuthorityReadReceipt;
 - read/TreeFS/process/network/effect capabilities;
+- bounded named-position revocation read and effect-time authorization;
 - bounded Context Packet with omissions;
 - sparse COW TreeFS workspace and intent log;
-- effect obligations and ledger;
+- effect obligations, complete-run-bound ledger records, and dispatch-time revocation recheck;
 - content-addressed logs/check evidence;
 - Evidence-Carrying Change;
 - independent deterministic verification;
