@@ -4,7 +4,10 @@
 **Date:** 2026-09-02  
 **Repository:** `Dicklesworthstone/frankengit`  
 **Owning subsystem:** Agent Control Plane / capability and effect authorization  
+**Implementation and documentation boundary to verify:** `6cf78b57a83edb9e3be6ad0fc0d66d73e6ef58f0`  
 **Tracker mutation:** none; `.beads/issues.jsonl` was not edited
+
+The commit containing this final anchor is a handoff-only descendant of the boundary above and is also acceptable for testing. Neither the boundary nor its metadata-only descendant changes the evidence class by existing: formatter, compiler, test, Clippy, repository lanes, and independent verification remain separate required results.
 
 ## Why this file exists
 
@@ -27,7 +30,7 @@ The wave began from:
 1c96a1596d7361ecdfe12226d01981b70dc59111
 ```
 
-The implementation and documentation commits through this handoff include, in first-parent order:
+The implementation and documentation commits through the dated change record include, in first-parent order:
 
 ```text
 9f8cb181122879f033f60cd9fdc42ecc2cfb9ed0  feat(agent-control): add effect-time revocation gate
@@ -52,7 +55,7 @@ d003fbdedaddcdde1347a3882785ba309b32db15  test(agent-control): reject mixed comp
 0e46beb848b46ada37b7816ecf83555ed38ca93b  docs(changes): record effect-time revocation wave
 ```
 
-Later status/changelog/threat-model/handoff commits are descendants of this source boundary and must be included by the verifier.
+The exact pinned boundary additionally includes the implementation-status, changelog, lifecycle-continuity, focused security, and focused verification documents.
 
 ## Implemented boundary
 
@@ -99,7 +102,7 @@ Test source is not a test result.
 
 ## Required local verification
 
-Resolve the live Bead first, then test the final descendant revision with the repository's pinned toolchain:
+Resolve the live Bead first, then test the pinned boundary or this handoff-only descendant with the repository's pinned toolchain:
 
 ```bash
 cargo fmt --all --check
@@ -147,7 +150,7 @@ If no existing task owns the complete slice, create or split one through `br` un
 ## Suggested progress-comment substance
 
 ```text
-Implemented the library-level Agent Control Plane effect-time revocation slice. Added exact authenticated-position revocation receipts with bounded half-open freshness, complete root-first capability-chain verification, ancestor-revocation refusal, exact complete-run/effect authorization, and a public checked broker that separates low-risk from revocation-gated work. External effects now carry a proof-bearing outbox reservation and obtain a fresh authorization at the actual dispatch boundary; stale or newly revoked ancestry returns the live reservation, while post-commit cleanup remains available. EffectRecord, journal replay, RunReconciliationReport v2, and public cancellation v2 now retain IntentRunCommitment and refuse same-RunId/different-scope substitution. Added focused adversarial source tests and reconciled the Agent Protocol and implementation docs. Mechanical and independent verification remain pending for the exact final descendant revision.
+Implemented the library-level Agent Control Plane effect-time revocation slice. Added exact authenticated-position revocation receipts with bounded half-open freshness, complete root-first capability-chain verification, ancestor-revocation refusal, exact complete-run/effect authorization, and a public checked broker that separates low-risk from revocation-gated work. External effects now carry a proof-bearing outbox reservation and obtain a fresh authorization at the actual dispatch boundary; stale or newly revoked ancestry returns the live reservation, while post-commit cleanup remains available. EffectRecord, journal replay, RunReconciliationReport v2, and public cancellation v2 now retain IntentRunCommitment and refuse same-RunId/different-scope substitution. Added focused adversarial source tests and reconciled the Agent Protocol, status, changelog, lifecycle, threat, and verification documents. Mechanical and independent verification remain pending for the exact pinned descendant revision.
 ```
 
 ## Stop conditions
@@ -166,7 +169,7 @@ Stop and leave the task in progress or verification-pending when:
 
 - any required local command fails;
 - the source SHA tested differs from the final delivered SHA;
-- a public raw high-value dispatch path bypasses the checked service integration;
+- a concrete high-value host path bypasses the checked service integration;
 - exact-position revocation cannot be reconstructed from durable canonical policy state;
 - a pre-dispatch refusal loses its reservation;
 - a post-commit failure loses the deferred obligation;
@@ -181,7 +184,7 @@ This wave deliberately leaves:
 - concrete authority-selected revocation reader;
 - durable revocation index/cache and invalidation stream;
 - durable codecs and migrations;
-- host integration for network, secret, runner, forge, and publication services;
+- mandatory checked-broker integration for network, secret, runner, forge, publication, and external-integration hosts;
 - process/workspace/credential/tunnel/upload/VM cleanup;
 - complete action-packet execution;
 - later-head ancestry witnesses;
