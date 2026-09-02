@@ -42,10 +42,13 @@
 //! canonical generation selected by repository configuration.
 //! [`descendant_revocation`] authenticates the run's historical receipt against
 //! the same store, proves the current head is an exact bounded descendant, and
-//! binds that path to current policy and effect authorization. [`effect_dispatch`]
-//! exposes the production-facing broker, which requires revocation proof both
-//! at high-value request acceptance and again at an irreversible external
-//! dispatch. Abort and reconciliation remain available after revocation because
+//! binds that path to current policy and effect authorization.
+//! [`current_effect_dispatch`] owns the same complete run as the checked broker
+//! and retains that current-head authorization through request acceptance,
+//! outbox reservation, dispatch, reconciliation, escalation, and terminal
+//! settlement without exposing a raw-obligation escape hatch.
+//! [`effect_dispatch`] remains the storage-neutral exact-position checked
+//! lifecycle. Abort and reconciliation remain available after revocation because
 //! they reduce outstanding responsibility.
 //! [`reconcile`], the crate-private handoff/cancellation engines and their public
 //! facades preserve responsibility through handoff or conservative stop.
@@ -65,6 +68,7 @@ pub mod capability;
 pub mod claim;
 pub mod claim_continuity;
 pub mod classes;
+pub mod current_effect_dispatch;
 pub mod descendant_revocation;
 pub mod ecc;
 mod effect_authorization;
@@ -135,6 +139,17 @@ pub use claim_continuity::{
     AgentActionPacketContinuationId,
 };
 pub use classes::{CLASS_COUNT, ClassSet, OperationClass, UnknownClassBits};
+pub use current_effect_dispatch::{
+    CurrentAuthorityEscalatedOutboxEffect, CurrentAuthorityEscalationResolutionRefused,
+    CurrentAuthorityExternalEffectOutcome, CurrentAuthorityOutboxDispatchRefused,
+    CurrentAuthorityOutboxReservationRefused, CurrentAuthorityReconciliationRefused,
+    CurrentAuthorityRevocationAuthorizedDeferredOutboxEffect,
+    CurrentAuthorityRevocationAuthorizedEffectGrant,
+    CurrentAuthorityRevocationAuthorizedOutboxEffect,
+    CurrentAuthorityRevocationCheckedEffectBroker,
+    CurrentAuthorityRevocationCheckedEffectRefusal,
+    CurrentAuthoritySettledOutboxEffect,
+};
 pub use descendant_revocation::{
     DESCENDANT_AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE,
     CurrentAuthorityCapabilityEffectAuthorization,
