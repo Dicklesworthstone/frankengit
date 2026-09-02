@@ -9,8 +9,9 @@ use fgit_agent::{
     PlanRequirementId, PlanStopConditionSet, PlanSurface, PlanSurfaceKind,
     RejectedShortcutSet, RunId, SituationComponent, SituationComponentKind,
     SituationOmissionReason, TaskClaimReceipt, TaskCoordinationRefusal,
-    TaskProjectionAssignment, TaskReleaseDisposition, TaskPhase, WorkConflict,
-    WorkEligibilityInputs, WorkFrontier, WorkItem, WorkRankingInputs, WorkTaskId,
+    TaskProjectionAdapterRefusal, TaskProjectionAssignment, TaskReleaseDisposition,
+    TaskPhase, WorkConflict, WorkEligibilityInputs, WorkFrontier, WorkItem,
+    WorkRankingInputs, WorkTaskId,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
@@ -85,6 +86,15 @@ fn authority_receipt(store_id: u64, repository_byte: u8) -> AuthorityReadReceipt
 }
 
 fn run(receipt: &AuthorityReadReceipt, id: u128) -> IntentRun {
+    run_with_profile(receipt, id, 16_384, 100)
+}
+
+fn run_with_profile(
+    receipt: &AuthorityReadReceipt,
+    id: u128,
+    bytes: u64,
+    expiry: u64,
+) -> IntentRun {
     IntentRun::new_authenticated(
         RunId::new(id),
         receipt.clone(),
@@ -94,10 +104,10 @@ fn run(receipt: &AuthorityReadReceipt, id: u128) -> IntentRun {
             OperationClass::ConsumeBudget,
         ]),
         ResourceVector::from_grades(&[
-            (Grade::Bytes, 16_384),
+            (Grade::Bytes, bytes),
             (Grade::CpuMicros, 20_000),
         ]),
-        LogicalTime::new(100),
+        LogicalTime::new(expiry),
     )
     .expect("authenticated run opens")
 }
@@ -137,10 +147,7 @@ fn pulse_and_plan(
     observed_at: u64,
 ) -> (AgentControlPulse, AgentChangePlan, PlanSurface) {
     let situation = situation(receipt, run, *snapshot.generation(), observed_at);
-    let assignee = match snapshot.assignment() {
-        TaskProjectionAssignment::Unassigned => None,
-        TaskProjectionAssignment::Assigned(run_id) => Some(run_id),
-    };
+    let assignee = snapshot.assignment().run_id();
     let item = WorkItem::new(
         snapshot.task_id(),
         *snapshot.generation(),
@@ -287,6 +294,13 @@ fn scoped_claim_identity_is_deterministic_and_protocol_compatible() {
     assert_eq!(first.transition().transition_id(), second.transition().transition_id());
     assert_eq!(first.snapshot().repository_id(), receipt.repository_id());
     assert_eq!(first.snapshot().observed_at(), LogicalTime::new(25));
+    assert_eq!(
+        first.snapshot().assignment(),
+        TaskProjectionAssignment::assigned(
+            run.run_id(),
+            run.commitment().expect("complete claimant identity"),
+        )
+    );
     assert_ne!(first.snapshot().snapshot_id().as_bytes(), &[0; 32]);
 
     TaskClaimReceipt::admit(&pulse, &plan, &run, first.projection().clone())
@@ -416,5 +430,83 @@ fn successor_transfer_cannot_cross_repository_namespace() {
             expected: fixture.receipt.repository_id(),
             observed: foreign.repository_id(),
         }
+    );
+}
+
+#[test]
+fn transferred_assignment_requires_the_exact_successor_run() {
+    let fixture = claimed_fixture();
+    let successor = run(&fixture.receipt, 8);
+    let successor_commitment = successor
+        .commitment()
+        .expect("complete intended successor identity");
+    let transferred = fixture
+        .snapshot
+        .transfer(
+            &fixture.claim_receipt,
+            fixture.active_claim,
+            &fixture.source_run,
+            &successor,
+            LogicalTime::new(40),
+            [0x75; 32],
+            digest(0x76),
+        )
+        .expect("same-repository successor assignment");
+    assert_eq!(
+        transferred.snapshot().assignment(),
+        TaskProjectionAssignment::assigned(successor.run_id(), successor_commitment)
+    );
+
+    let (successor_pulse, successor_plan, _) = pulse_and_plan(
+        &fixture.receipt,
+        &successor,
+        transferred.snapshot(),
+        41,
+    );
+    transferred
+        .snapshot()
+        .claim(
+            &successor_pulse,
+            &successor_plan,
+            &successor,
+            LogicalTime::new(42),
+            LogicalTime::new(80),
+            [0x77; 32],
+            digest(0x78),
+        )
+        .expect("the exact intended successor may claim the transferred generation");
+
+    let altered = run_with_profile(&fixture.receipt, 8, 8_192, 90);
+    let altered_commitment = altered
+        .commitment()
+        .expect("same-ID altered successor identity");
+    assert_ne!(successor_commitment, altered_commitment);
+    let (altered_pulse, altered_plan, _) = pulse_and_plan(
+        &fixture.receipt,
+        &altered,
+        transferred.snapshot(),
+        41,
+    );
+
+    assert_eq!(
+        transferred
+            .snapshot()
+            .claim(
+                &altered_pulse,
+                &altered_plan,
+                &altered,
+                LogicalTime::new(42),
+                LogicalTime::new(80),
+                [0x79; 32],
+                digest(0x7a),
+            )
+            .expect_err("numeric successor identity cannot substitute machine scope"),
+        TaskCoordinationRefusal::Adapter(
+            TaskProjectionAdapterRefusal::AssignedRunCommitmentMismatch {
+                run_id: successor.run_id(),
+                expected: successor_commitment,
+                observed: altered_commitment,
+            },
+        )
     );
 }
