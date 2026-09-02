@@ -72,6 +72,7 @@ mod keys;
 pub mod lincheck;
 mod outcome;
 mod reference;
+mod repository_configuration;
 mod request;
 mod schedule;
 mod seal;
@@ -125,9 +126,8 @@ pub use crate::keys::{HeadKey, ImmutableKey, KeyError, MAX_KEY_BYTES};
 pub use crate::outcome::{
     CREATION_ATTEMPT_KEY_PREFIX, CreationAttemptOutcome, CumulativeOutcomes, DuplicateDecision,
     DuplicateScan, HeadBodyRefusal, IdentityDisagreement, MAX_REPLAY_BATCHES, OUTCOME_KEY_PREFIX,
-    OutcomeFailure, OutcomeLookup, PublicationOutcome, PublishedBatch,
-    RepositoryIncarnationConfiguration, RepositoryIncarnationConfigurationEvidence,
-    TerminalOutcome, authority_head_identity, body_key_for_id, canonical_outcome_index_decisions,
+    OutcomeFailure, OutcomeLookup, PublicationOutcome, PublishedBatch, TerminalOutcome,
+    authority_head_identity, body_key_for_id, canonical_outcome_index_decisions,
     collect_cumulative_outcomes, collect_cumulative_outcomes_async,
     collect_cumulative_outcomes_from_checkpoint, collect_cumulative_outcomes_from_checkpoint_async,
     decision_batch_identity, fold_outcome_index, head_selected_ref_state_absence_proof,
@@ -137,12 +137,9 @@ pub use crate::outcome::{
     publish_decisions_async, read_authority_head_body, read_authority_head_body_async,
     read_decision_batch_body, read_decision_batch_body_async, read_hidden_ref_policy,
     read_hidden_ref_policy_async, read_repository_configuration,
-    read_repository_configuration_async, read_repository_incarnation_configuration,
-    read_repository_incarnation_configuration_async,
-    read_repository_incarnation_configuration_evidence,
-    read_repository_incarnation_configuration_evidence_async, reconcile_outcome,
-    record_creation_attempt, record_creation_attempt_async, replay_outcome, replay_outcome_async,
-    resolve_outcome, resolve_outcome_async, root_layout_for_proof, root_layout_for_proof_async,
+    read_repository_configuration_async, reconcile_outcome, record_creation_attempt,
+    record_creation_attempt_async, replay_outcome, replay_outcome_async, resolve_outcome,
+    resolve_outcome_async, root_layout_for_proof, root_layout_for_proof_async,
     root_layout_for_verification, root_layout_for_verification_async, scan_batch_for,
     scan_for_existing_decisions, scan_for_existing_decisions_async, stage_hidden_ref_policy,
     stage_hidden_ref_policy_async, stage_latest_repository_incarnation_configuration,
@@ -151,6 +148,14 @@ pub use crate::outcome::{
     stage_repository_incarnation_configuration_async, verify_outcome_index_membership,
 };
 pub use crate::reference::{MemoryAuthorityStore, MemoryStoreConfig};
+pub use crate::repository_configuration::{
+    RepositoryIncarnationConfiguration, RepositoryIncarnationConfigurationEvidence,
+    read_repository_incarnation_configuration, read_repository_incarnation_configuration_async,
+    read_repository_incarnation_configuration_evidence,
+    read_repository_incarnation_configuration_evidence_async,
+    stage_revocation_aware_repository_incarnation_configuration,
+    stage_revocation_aware_repository_incarnation_configuration_async,
+};
 pub use crate::request::{
     ExpectedOld, MAX_PUSH_OPTION_BYTES, MAX_PUSH_OPTIONS, MAX_REF_COMMANDS, MAX_SCOPED_ENTRIES,
     MAX_SCOPED_VALUE_BYTES, ProposedNew, PushOption, RefCommand, RequestRefusal, ScopedEntry,
