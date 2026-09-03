@@ -5,4 +5,4 @@ authority-history	The ordered invocation and response history for authority oper
 canonical-request	Request schema, object format, atomic flag, ordered ref commands, ordered push options, and ordered scoped entries sealed for admission.
 capability-revocation-generation	Tenant, repository, repository incarnation, policy epoch, optional predecessor generation, canonical revoked-capability set, and generation evidence root.
 ref-txn	Tenant, repository, authenticated principal, raw idempotency key, and canonical-request digest used to derive a stable transaction identity.
-repository-configuration	Versioned repository configuration bytes: root-layout and object-format tags, with schema 2 adding incarnation and later minors adding hidden-ref-policy and capability-revocation-generation commitments.
+repository-configuration	Versioned repository configuration bytes: root-layout and object-format tags; schema 2 adds incarnation, minor 1 adds an optional hidden-ref-policy root, and minor 2 adds an optional exact capability-revocation-generation root.

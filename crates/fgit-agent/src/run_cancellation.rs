@@ -215,7 +215,7 @@ impl RunCancellationIntent {
             .inner
             .complete(
                 final_reconciliation,
-                task_claim_resolution,
+                task_claim_resolution.as_ref(),
                 debt_transfers,
                 containment_evidence,
             )

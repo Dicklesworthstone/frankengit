@@ -457,7 +457,7 @@ impl AgentSituationReceipt {
             &authority_read_receipt,
             intent_run_id,
             intent_run_commitment,
-            workspace,
+            workspace.as_ref(),
             observed_at,
             &components,
         )?);
@@ -595,11 +595,45 @@ pub struct SituationDelta {
     from_situation_id: SituationId,
     to_situation_id: SituationId,
     authority_change: SituationAuthorityChange,
-    authority_receipt_changed: bool,
-    intent_run_changed: bool,
-    workspace_changed: bool,
-    observation_time_advanced: bool,
+    changes: SituationDeltaChanges,
     component_changes: Vec<SituationComponentChange>,
+}
+
+/// Which non-component situation facts differ between two receipts.
+///
+/// A closed bit-set rather than four loose booleans, so the delta names one
+/// change surface and a future fact extends it in one place.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SituationDeltaChanges(u8);
+
+impl SituationDeltaChanges {
+    const AUTHORITY_RECEIPT: u8 = 1 << 0;
+    const INTENT_RUN: u8 = 1 << 1;
+    const WORKSPACE: u8 = 1 << 2;
+    const OBSERVATION_TIME: u8 = 1 << 3;
+
+    fn between(from: &AgentSituationReceipt, to: &AgentSituationReceipt) -> Self {
+        let mut bits = 0;
+        if from.authority_read_receipt != to.authority_read_receipt {
+            bits |= Self::AUTHORITY_RECEIPT;
+        }
+        if from.intent_run_id != to.intent_run_id
+            || from.intent_run_commitment != to.intent_run_commitment
+        {
+            bits |= Self::INTENT_RUN;
+        }
+        if from.workspace != to.workspace {
+            bits |= Self::WORKSPACE;
+        }
+        if from.observed_at != to.observed_at {
+            bits |= Self::OBSERVATION_TIME;
+        }
+        Self(bits)
+    }
+
+    const fn contains(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
 }
 
 impl SituationDelta {
@@ -641,30 +675,34 @@ impl SituationDelta {
         let from_head_id = from.authority_read_receipt.authority_head_id();
         let to_head_id = to.authority_read_receipt.authority_head_id();
 
-        let authority_change = if to_generation < from_generation {
-            return Err(SituationRefusal::AuthorityGenerationRollback {
-                from: from_generation,
-                to: to_generation,
-            });
-        } else if to_generation == from_generation {
-            if to_head_id != from_head_id {
-                return Err(SituationRefusal::AuthorityForkAtSameGeneration {
-                    generation: from_generation,
+        let authority_change = match to_generation.cmp(&from_generation) {
+            core::cmp::Ordering::Less => {
+                return Err(SituationRefusal::AuthorityGenerationRollback {
+                    from: from_generation,
+                    to: to_generation,
                 });
             }
-            SituationAuthorityChange::Unchanged
-        } else {
-            if to_head_id == from_head_id {
-                return Err(
-                    SituationRefusal::AuthorityGenerationChangedWithoutIdentity {
-                        from: from_generation,
-                        to: to_generation,
-                    },
-                );
+            core::cmp::Ordering::Equal => {
+                if to_head_id != from_head_id {
+                    return Err(SituationRefusal::AuthorityForkAtSameGeneration {
+                        generation: from_generation,
+                    });
+                }
+                SituationAuthorityChange::Unchanged
             }
-            SituationAuthorityChange::LaterGenerationObserved {
-                from: from_generation,
-                to: to_generation,
+            core::cmp::Ordering::Greater => {
+                if to_head_id == from_head_id {
+                    return Err(
+                        SituationRefusal::AuthorityGenerationChangedWithoutIdentity {
+                            from: from_generation,
+                            to: to_generation,
+                        },
+                    );
+                }
+                SituationAuthorityChange::LaterGenerationObserved {
+                    from: from_generation,
+                    to: to_generation,
+                }
             }
         };
 
@@ -682,11 +720,7 @@ impl SituationDelta {
             from_situation_id: from.situation_id,
             to_situation_id: to.situation_id,
             authority_change,
-            authority_receipt_changed: from.authority_read_receipt != to.authority_read_receipt,
-            intent_run_changed: from.intent_run_id != to.intent_run_id
-                || from.intent_run_commitment != to.intent_run_commitment,
-            workspace_changed: from.workspace != to.workspace,
-            observation_time_advanced: from.observed_at != to.observed_at,
+            changes: SituationDeltaChanges::between(from, to),
             component_changes,
         })
     }
@@ -712,25 +746,27 @@ impl SituationDelta {
     /// Whether any authority receipt field changed.
     #[must_use]
     pub const fn authority_receipt_changed(&self) -> bool {
-        self.authority_receipt_changed
+        self.changes
+            .contains(SituationDeltaChanges::AUTHORITY_RECEIPT)
     }
 
     /// Whether the bound Intent Run identity or complete commitment changed.
     #[must_use]
     pub const fn intent_run_changed(&self) -> bool {
-        self.intent_run_changed
+        self.changes.contains(SituationDeltaChanges::INTENT_RUN)
     }
 
     /// Whether the bound workspace identity, manifest, or run changed.
     #[must_use]
     pub const fn workspace_changed(&self) -> bool {
-        self.workspace_changed
+        self.changes.contains(SituationDeltaChanges::WORKSPACE)
     }
 
     /// Whether the overall observation time advanced.
     #[must_use]
     pub const fn observation_time_advanced(&self) -> bool {
-        self.observation_time_advanced
+        self.changes
+            .contains(SituationDeltaChanges::OBSERVATION_TIME)
     }
 
     /// Component changes in canonical component order.
@@ -743,9 +779,9 @@ impl SituationDelta {
     #[must_use]
     pub const fn has_no_context_changes(&self) -> bool {
         matches!(self.authority_change, SituationAuthorityChange::Unchanged)
-            && !self.authority_receipt_changed
-            && !self.intent_run_changed
-            && !self.workspace_changed
+            && !self.authority_receipt_changed()
+            && !self.intent_run_changed()
+            && !self.workspace_changed()
             && self.component_changes.is_empty()
     }
 }
@@ -968,7 +1004,7 @@ fn situation_commitment(
     receipt: &AuthorityReadReceipt,
     intent_run_id: Option<RunId>,
     intent_run_commitment: Option<IntentRunCommitment>,
-    workspace: Option<SituationWorkspace>,
+    workspace: Option<&SituationWorkspace>,
     observed_at: LogicalTime,
     components: &[SituationComponent; SITUATION_COMPONENT_COUNT],
 ) -> Result<[u8; 32], SituationRefusal> {

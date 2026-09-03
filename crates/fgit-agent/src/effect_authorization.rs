@@ -962,11 +962,11 @@ impl RevocationCheckedEffectBroker {
     pub fn reserve_authorized_outbox(
         &mut self,
         grant: RevocationAuthorizedEffectGrant,
-        dispatch: OutboxDispatch,
+        dispatch: &OutboxDispatch,
     ) -> Result<ReservedOutboxEffect, AuthorizedOutboxReservationRefused> {
         let authorization = grant.authorization;
         self.broker
-            .reserve_outbox(grant.grant, dispatch)
+            .reserve_outbox(grant.grant, *dispatch)
             .map_err(|source| AuthorizedOutboxReservationRefused {
                 authorization,
                 source,

@@ -114,7 +114,7 @@ impl TaskProjectionMutationEnvelope {
         Self::from_parts(
             application.before_snapshot().clone(),
             application.snapshot().clone(),
-            application.transition(),
+            &application.transition(),
         )
     }
 
@@ -129,14 +129,14 @@ impl TaskProjectionMutationEnvelope {
         Self::from_parts(
             application.before_snapshot().clone(),
             application.snapshot().clone(),
-            application.transition(),
+            &application.transition(),
         )
     }
 
     fn from_parts(
         before: AuthorityBoundTaskProjectionSnapshot,
         after: AuthorityBoundTaskProjectionSnapshot,
-        transition: AuthorityBoundTaskProjectionTransition,
+        transition: &AuthorityBoundTaskProjectionTransition,
     ) -> Result<Self, TaskProjectionPersistenceRefusal> {
         if before.repository_id() != after.repository_id()
             || transition.repository_id() != after.repository_id()

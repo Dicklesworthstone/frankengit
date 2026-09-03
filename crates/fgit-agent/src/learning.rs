@@ -937,7 +937,7 @@ fn canonicalize_requirements(
     terminal: LearningTerminalOutcome,
     producer: &PartyFacts,
     attestations: &[VerifierAttestation],
-    outcomes: &mut Vec<LearningRequirementOutcome>,
+    outcomes: &mut [LearningRequirementOutcome],
 ) -> Result<(), OutcomeLearningRefusal> {
     if outcomes.len() > MAX_LEARNING_ENTRIES {
         return Err(OutcomeLearningRefusal::TooManyEntries {
@@ -1094,7 +1094,7 @@ fn collect_discriminating_evidence(
 }
 
 fn canonicalize_verifiers(
-    attestations: &mut Vec<VerifierAttestation>,
+    attestations: &mut [VerifierAttestation],
 ) -> Result<(), OutcomeLearningRefusal> {
     if attestations.len() > MAX_LEARNING_ENTRIES {
         return Err(OutcomeLearningRefusal::TooManyEntries {
@@ -1116,7 +1116,7 @@ fn canonicalize_verifiers(
 
 fn canonicalize_ownership(
     plan: &AgentChangePlan,
-    ownership: &mut Vec<ConfirmedOwnership>,
+    ownership: &mut [ConfirmedOwnership],
 ) -> Result<(), OutcomeLearningRefusal> {
     if ownership.len() > MAX_LEARNING_ENTRIES {
         return Err(OutcomeLearningRefusal::TooManyEntries {
@@ -1148,7 +1148,7 @@ fn canonicalize_ownership(
 }
 
 fn canonicalize_failed_hypotheses(
-    hypotheses: &mut Vec<FailedHypothesis>,
+    hypotheses: &mut [FailedHypothesis],
 ) -> Result<(), OutcomeLearningRefusal> {
     if hypotheses.len() > MAX_LEARNING_ENTRIES {
         return Err(OutcomeLearningRefusal::TooManyEntries {
@@ -1192,7 +1192,7 @@ fn canonicalize_failed_hypotheses(
 
 fn canonicalize_resource_observations(
     plan: &AgentChangePlan,
-    observations: &mut Vec<LearningResourceObservation>,
+    observations: &mut [LearningResourceObservation],
 ) -> Result<ResourceVector, OutcomeLearningRefusal> {
     if observations.len() > MAX_LEARNING_ENTRIES {
         return Err(OutcomeLearningRefusal::TooManyEntries {
@@ -1227,7 +1227,7 @@ fn canonicalize_resource_observations(
 }
 
 fn canonicalize_reusable_patterns(
-    patterns: &mut Vec<ReusablePattern>,
+    patterns: &mut [ReusablePattern],
 ) -> Result<(), OutcomeLearningRefusal> {
     if patterns.len() > MAX_LEARNING_ENTRIES {
         return Err(OutcomeLearningRefusal::TooManyEntries {
@@ -1266,7 +1266,7 @@ fn canonicalize_reusable_patterns(
 
 fn canonicalize_digests(
     field: &'static str,
-    values: &mut Vec<Digest>,
+    values: &mut [Digest],
     limit: usize,
 ) -> Result<(), OutcomeLearningRefusal> {
     if values.len() > limit {

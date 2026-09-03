@@ -134,7 +134,6 @@ impl AuthorityBoundTaskProjectionSnapshot {
     ///
     /// Refuses exact-read, repository, pulse-time, semantic transition, and
     /// canonical framing mismatches.
-    #[allow(clippy::too_many_arguments)]
     pub fn claim(
         &self,
         pulse: &AgentControlPulse,
@@ -174,7 +173,6 @@ impl AuthorityBoundTaskProjectionSnapshot {
     ///
     /// Refuses exact-read, observation-time, semantic transition, and canonical
     /// framing mismatches.
-    #[allow(clippy::too_many_arguments)]
     pub fn release(
         &self,
         claim_receipt: &TaskClaimReceipt,
@@ -211,7 +209,6 @@ impl AuthorityBoundTaskProjectionSnapshot {
     ///
     /// Refuses source/successor exact-read substitution, observation rollback,
     /// semantic transition, and canonical framing mismatches.
-    #[allow(clippy::too_many_arguments)]
     pub fn transfer(
         &self,
         claim_receipt: &TaskClaimReceipt,
@@ -281,7 +278,7 @@ impl AuthorityBoundTaskProjectionSnapshot {
             inner_snapshot,
         )?;
         let transition =
-            AuthorityBoundTaskProjectionTransition::build(self, &snapshot, inner_transition)?;
+            AuthorityBoundTaskProjectionTransition::build(self, &snapshot, &inner_transition)?;
         Ok(AuthorityBoundTaskClaimApplication {
             before_snapshot: self.clone(),
             snapshot,
@@ -302,7 +299,7 @@ impl AuthorityBoundTaskProjectionSnapshot {
             inner_snapshot,
         )?;
         let transition =
-            AuthorityBoundTaskProjectionTransition::build(self, &snapshot, inner_transition)?;
+            AuthorityBoundTaskProjectionTransition::build(self, &snapshot, &inner_transition)?;
         Ok(AuthorityBoundTaskResolutionApplication {
             before_snapshot: self.clone(),
             snapshot,
@@ -411,7 +408,7 @@ impl AuthorityBoundTaskProjectionTransition {
     fn build(
         before: &AuthorityBoundTaskProjectionSnapshot,
         after: &AuthorityBoundTaskProjectionSnapshot,
-        inner: TaskProjectionTransition,
+        inner: &TaskProjectionTransition,
     ) -> Result<Self, TaskCoordinationRefusal> {
         if before.repository_id != after.repository_id
             || before.authority_read_receipt_id != after.authority_read_receipt_id
@@ -426,7 +423,7 @@ impl AuthorityBoundTaskProjectionTransition {
             before_snapshot_id: before.snapshot_id,
             after_snapshot_id: after.snapshot_id,
             inner_transition_id,
-            inner,
+            inner: *inner,
         };
         transition.transition_id =
             AuthorityBoundTaskProjectionTransitionId(scoped_transition_commitment(&transition)?);

@@ -150,7 +150,7 @@ where
         requested_at,
         max_age,
         max_entries,
-        request,
+        &request,
         &generation,
     )
 }
@@ -195,7 +195,7 @@ where
         requested_at,
         max_age,
         max_entries,
-        request,
+        &request,
         &generation,
     )
 }
@@ -221,7 +221,7 @@ fn admit_generation(
     requested_at: LogicalTime,
     max_age: u64,
     max_entries: usize,
-    request: CapabilityRevocationReadRequest,
+    request: &CapabilityRevocationReadRequest,
     generation: &fgit_authority::CapabilityRevocationGenerationRead,
 ) -> Result<CapabilityRevocationReceipt, AuthorityCapabilityRevocationReadRefusal> {
     let observed_rows = generation.body().revoked_capability_ids().len();

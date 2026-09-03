@@ -108,7 +108,6 @@ pub struct TaskLeaseHistoryObservation {
 impl TaskLeaseHistoryObservation {
     /// Creates one backend-provided lease-history observation.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         collection_receipt_id: TaskProjectionCollectionReceiptId,
         task_id: WorkTaskId,

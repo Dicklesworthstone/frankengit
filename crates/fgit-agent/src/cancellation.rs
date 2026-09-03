@@ -121,7 +121,6 @@ pub struct TaskClaimCancellationProjection {
 impl TaskClaimCancellationProjection {
     /// Creates one complete adapter observation.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         active_claim_id: ActiveTaskClaimId,
         claim_id: TaskClaimReceiptId,
@@ -417,7 +416,7 @@ impl RunCancellationIntent {
     pub fn complete(
         &self,
         final_reconciliation: RunReconciliationReport,
-        task_claim_resolution: Option<TaskClaimCancellationProjection>,
+        task_claim_resolution: Option<&TaskClaimCancellationProjection>,
         mut debt_transfers: Vec<CancellationDebtTransfer>,
         mut containment_evidence: Vec<CancellationContainmentEvidence>,
     ) -> Result<RunCancellationCompletion, RunCancellationRefusal> {
@@ -462,7 +461,7 @@ impl RunCancellationIntent {
             completed_at: final_reconciliation.observed_at(),
             initial_report_id: self.initial_reconciliation.report_id(),
             final_reconciliation,
-            task_claim_resolution,
+            task_claim_resolution: task_claim_resolution.copied(),
             debt_transfers,
             containment_evidence,
             state,
@@ -988,7 +987,7 @@ fn reconciliation_evidence_extends(
 fn validate_task_claim_resolution(
     intent: &RunCancellationIntent,
     final_report: &RunReconciliationReport,
-    projection: Option<TaskClaimCancellationProjection>,
+    projection: Option<&TaskClaimCancellationProjection>,
 ) -> Result<(), RunCancellationRefusal> {
     match (intent.active_claim, projection) {
         (None, None) => Ok(()),
@@ -1054,7 +1053,7 @@ fn validate_task_claim_resolution(
 }
 
 fn canonicalize_debt_transfers(
-    transfers: &mut Vec<CancellationDebtTransfer>,
+    transfers: &mut [CancellationDebtTransfer],
 ) -> Result<(), RunCancellationRefusal> {
     if transfers.len() > MAX_CANCELLATION_EVIDENCE_ENTRIES {
         return Err(RunCancellationRefusal::TooManyEvidenceEntries {
@@ -1075,7 +1074,7 @@ fn canonicalize_debt_transfers(
 }
 
 fn canonicalize_containment_evidence(
-    evidence: &mut Vec<CancellationContainmentEvidence>,
+    evidence: &mut [CancellationContainmentEvidence],
 ) -> Result<(), RunCancellationRefusal> {
     if evidence.len() > MAX_CANCELLATION_EVIDENCE_ENTRIES {
         return Err(RunCancellationRefusal::TooManyEvidenceEntries {
@@ -1215,7 +1214,7 @@ fn completion_commitment(
     match completion.task_claim_resolution {
         Some(projection) => {
             encoder.write_bool(true);
-            write_task_claim_resolution(&mut encoder, projection)?;
+            write_task_claim_resolution(&mut encoder, &projection)?;
         }
         None => encoder.write_bool(false),
     }
@@ -1255,7 +1254,7 @@ fn completion_commitment(
 
 fn write_task_claim_resolution(
     encoder: &mut Encoder,
-    projection: TaskClaimCancellationProjection,
+    projection: &TaskClaimCancellationProjection,
 ) -> Result<(), RunCancellationRefusal> {
     encoder.write_raw(projection.active_claim_id.as_bytes());
     encoder.write_raw(projection.claim_id.as_bytes());

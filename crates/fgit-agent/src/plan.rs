@@ -1207,7 +1207,7 @@ fn collect_context_packets(
     Ok(ids)
 }
 
-fn canonicalize_digests(field: &'static str, values: &mut Vec<Digest>) -> Result<(), PlanRefusal> {
+fn canonicalize_digests(field: &'static str, values: &mut [Digest]) -> Result<(), PlanRefusal> {
     check_len(field, values.len(), MAX_PLAN_ENTRIES)?;
     values.sort_unstable();
     for adjacent in values.windows(2) {
@@ -1222,8 +1222,8 @@ fn canonicalize_digests(field: &'static str, values: &mut Vec<Digest>) -> Result
 }
 
 fn canonicalize_surfaces(
-    intended: &mut Vec<PlanSurface>,
-    conflict: &mut Vec<PlanSurface>,
+    intended: &mut [PlanSurface],
+    conflict: &mut [PlanSurface],
 ) -> Result<(), PlanRefusal> {
     if intended.is_empty() {
         return Err(PlanRefusal::EmptyIntendedChangeSurface);
@@ -1240,7 +1240,7 @@ fn canonicalize_surfaces(
 
 fn canonicalize_surface_set(
     field: &'static str,
-    values: &mut Vec<PlanSurface>,
+    values: &mut [PlanSurface],
 ) -> Result<(), PlanRefusal> {
     check_len(field, values.len(), MAX_PLAN_ENTRIES)?;
     values.sort_unstable();
@@ -1293,7 +1293,7 @@ fn validate_checkpoints(
 
 fn canonicalize_evidence(
     action: WorkAction,
-    evidence: &mut Vec<PlanEvidenceRequirement>,
+    evidence: &mut [PlanEvidenceRequirement],
 ) -> Result<(), PlanRefusal> {
     if evidence.is_empty() {
         return Err(PlanRefusal::EmptyEvidencePlan);

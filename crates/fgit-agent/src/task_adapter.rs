@@ -150,7 +150,6 @@ pub enum ReleaseTaskOutcome {
 ///
 /// Refuses snapshot/pulse/plan/run substitution, task or phase mismatch,
 /// request construction failure, and definite pre-observation adapter refusal.
-#[allow(clippy::too_many_arguments)]
 pub fn claim_selected_task<A: TaskProjectionAdapter>(
     adapter: &mut A,
     snapshot: &TaskProjectionSnapshot,
@@ -231,7 +230,6 @@ pub fn claim_selected_task<A: TaskProjectionAdapter>(
 /// Refuses situation/snapshot/plan/claim/run substitution, unavailable task
 /// projection, request construction failure, and definite pre-observation
 /// adapter refusal.
-#[allow(clippy::too_many_arguments)]
 pub fn release_active_task<A: TaskProjectionAdapter>(
     adapter: &mut A,
     snapshot: &TaskProjectionSnapshot,

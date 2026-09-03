@@ -890,7 +890,7 @@ fn validate_dispositions(
     Ok(complete)
 }
 
-fn canonicalize_evidence(records: &mut Vec<EvidenceRecordRef>) -> Result<(), HandoffRefusal> {
+fn canonicalize_evidence(records: &mut [EvidenceRecordRef]) -> Result<(), HandoffRefusal> {
     if records.len() > MAX_HANDOFF_EVIDENCE_RECORDS {
         return Err(HandoffRefusal::TooManyEntries {
             field: "evidence_records",
@@ -915,9 +915,7 @@ fn canonicalize_evidence(records: &mut Vec<EvidenceRecordRef>) -> Result<(), Han
     Ok(())
 }
 
-fn canonicalize_verifiers(
-    attestations: &mut Vec<VerifierAttestation>,
-) -> Result<(), HandoffRefusal> {
+fn canonicalize_verifiers(attestations: &mut [VerifierAttestation]) -> Result<(), HandoffRefusal> {
     if attestations.len() > MAX_HANDOFF_VERIFIER_ATTESTATIONS {
         return Err(HandoffRefusal::TooManyEntries {
             field: "verifier_attestations",
@@ -936,9 +934,9 @@ fn canonicalize_verifiers(
     Ok(())
 }
 
-const fn verifier_sort_key(
-    attestation: &VerifierAttestation,
-) -> (
+/// Deterministic ordering key over one verifier attestation's identity
+/// dimensions.
+type VerifierSortKey = (
     u128,
     Option<u128>,
     Option<u128>,
@@ -948,7 +946,9 @@ const fn verifier_sort_key(
     Option<u128>,
     Option<u128>,
     bool,
-) {
+);
+
+const fn verifier_sort_key(attestation: &VerifierAttestation) -> VerifierSortKey {
     (
         attestation.verifier,
         attestation.facts.workspace,
@@ -964,7 +964,7 @@ const fn verifier_sort_key(
 
 fn canonicalize_digests(
     field: &'static str,
-    values: &mut Vec<Digest>,
+    values: &mut [Digest],
     limit: usize,
 ) -> Result<(), HandoffRefusal> {
     if values.len() > limit {

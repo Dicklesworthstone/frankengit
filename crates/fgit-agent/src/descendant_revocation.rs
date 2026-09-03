@@ -92,16 +92,16 @@ pub struct CurrentAuthorityCapabilityRevocationReceipt {
 
 impl CurrentAuthorityCapabilityRevocationReceipt {
     fn try_new(
-        admitted: CapabilityRevocationReceipt,
-        ancestry: AuthorityHeadAncestryReceipt,
+        admitted: &CapabilityRevocationReceipt,
+        ancestry: &AuthorityHeadAncestryReceipt,
     ) -> Result<Self, CodecRefusal> {
         let receipt_id = CurrentAuthorityCapabilityRevocationReceiptId(
             current_revocation_receipt_commitment(admitted.receipt_id(), ancestry.receipt_id())?,
         );
         Ok(Self {
             receipt_id,
-            admitted,
-            ancestry,
+            admitted: admitted.clone(),
+            ancestry: *ancestry,
         })
     }
 
@@ -410,12 +410,12 @@ where
         requested_at,
         max_age,
         max_entries,
-        request,
+        &request,
         &generation,
     )?;
     Ok(CurrentAuthorityCapabilityRevocationReceipt::try_new(
-        admitted,
-        current.ancestry(),
+        &admitted,
+        &current.ancestry(),
     )?)
 }
 
@@ -474,12 +474,12 @@ where
         requested_at,
         max_age,
         max_entries,
-        request,
+        &request,
         &generation,
     )?;
     Ok(CurrentAuthorityCapabilityRevocationReceipt::try_new(
-        admitted,
-        current.ancestry(),
+        &admitted,
+        &current.ancestry(),
     )?)
 }
 
@@ -564,7 +564,7 @@ fn admit_generation(
     requested_at: LogicalTime,
     max_age: u64,
     max_entries: usize,
-    request: CapabilityRevocationReadRequest,
+    request: &CapabilityRevocationReadRequest,
     generation: &CapabilityRevocationGenerationRead,
 ) -> Result<CapabilityRevocationReceipt, CurrentAuthorityCapabilityRevocationReadRefusal> {
     let observed_rows = generation.body().revoked_capability_ids().len();

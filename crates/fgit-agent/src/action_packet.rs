@@ -933,7 +933,7 @@ fn validate_steps(
     Ok(aggregate)
 }
 
-fn canonicalize_peer_changes(values: &mut Vec<Digest>) -> Result<(), ActionPacketRefusal> {
+fn canonicalize_peer_changes(values: &mut [Digest]) -> Result<(), ActionPacketRefusal> {
     if values.len() > MAX_ACTION_PEER_CHANGES {
         return Err(ActionPacketRefusal::TooManyPeerChanges {
             observed: values.len(),

@@ -371,11 +371,11 @@ pub fn execute_task_projection_store<S: TaskProjectionStore>(
     };
     match envelope.reconcile(Some(&initial)) {
         Ok(TaskProjectionPersistenceDecision::Confirmed(_)) => {
-            return finish_attempt(
+            return Ok(finish_attempt(
                 store,
                 envelope,
                 TaskProjectionStoreWriteDisposition::NotAttempted,
-            );
+            ));
         }
         Ok(TaskProjectionPersistenceDecision::RetrySafe { .. }) => {}
         Ok(TaskProjectionPersistenceDecision::Conflict {
@@ -405,14 +405,14 @@ pub fn execute_task_projection_store<S: TaskProjectionStore>(
     let write = store
         .compare_and_replace(envelope)
         .map_err(TaskProjectionStoreExecutionRefusal::Write)?;
-    finish_attempt(store, envelope, write.into())
+    Ok(finish_attempt(store, envelope, write.into()))
 }
 
 fn finish_attempt<S: TaskProjectionStore>(
     store: &mut S,
     envelope: &TaskProjectionMutationEnvelope,
     write: TaskProjectionStoreWriteDisposition,
-) -> Result<TaskProjectionStoreExecution, TaskProjectionStoreExecutionRefusal> {
+) -> TaskProjectionStoreExecution {
     let flush = match store.flush(envelope) {
         Ok(TaskProjectionStoreFlushOutcome::Flushed) => {
             TaskProjectionStoreFlushDisposition::Flushed
@@ -430,37 +430,37 @@ fn finish_attempt<S: TaskProjectionStore>(
     let observed = match store.read(key) {
         Ok(Some(observed)) => observed,
         Ok(None) => {
-            return Ok(TaskProjectionStoreExecution::NeedsReconciliation {
+            return TaskProjectionStoreExecution::NeedsReconciliation {
                 envelope_id: envelope.envelope_id(),
                 stage: TaskProjectionStoreStage::ConfirmingRead,
                 write,
                 flush,
                 decision: None,
                 cause: TaskProjectionStoreReconciliationCause::ProjectionMissing,
-            });
+            };
         }
         Err(refusal) => {
-            return Ok(TaskProjectionStoreExecution::NeedsReconciliation {
+            return TaskProjectionStoreExecution::NeedsReconciliation {
                 envelope_id: envelope.envelope_id(),
                 stage: TaskProjectionStoreStage::ConfirmingRead,
                 write,
                 flush,
                 decision: None,
                 cause: TaskProjectionStoreReconciliationCause::ConfirmingRead(refusal),
-            });
+            };
         }
     };
     let decision = match envelope.reconcile(Some(&observed)) {
         Ok(decision) => decision,
         Err(refusal) => {
-            return Ok(TaskProjectionStoreExecution::NeedsReconciliation {
+            return TaskProjectionStoreExecution::NeedsReconciliation {
                 envelope_id: envelope.envelope_id(),
                 stage: TaskProjectionStoreStage::Reconcile,
                 write,
                 flush,
                 decision: None,
                 cause: TaskProjectionStoreReconciliationCause::Persistence(refusal),
-            });
+            };
         }
     };
 
@@ -478,23 +478,23 @@ fn finish_attempt<S: TaskProjectionStore>(
                 TaskProjectionStoreReconciliationCause::BackendContradiction
             }
         };
-        return Ok(TaskProjectionStoreExecution::NeedsReconciliation {
+        return TaskProjectionStoreExecution::NeedsReconciliation {
             envelope_id: envelope.envelope_id(),
             stage: TaskProjectionStoreStage::Flush,
             write,
             flush,
             decision: Some(decision),
             cause,
-        });
+        };
     }
 
     match decision {
         TaskProjectionPersistenceDecision::Confirmed(receipt) => {
-            Ok(TaskProjectionStoreExecution::Confirmed {
+            TaskProjectionStoreExecution::Confirmed {
                 receipt,
                 write,
                 flush,
-            })
+            }
         }
         TaskProjectionPersistenceDecision::RetrySafe { .. } => {
             let cause = if matches!(write, TaskProjectionStoreWriteDisposition::Ambiguous { .. }) {
@@ -502,14 +502,14 @@ fn finish_attempt<S: TaskProjectionStore>(
             } else {
                 TaskProjectionStoreReconciliationCause::BackendContradiction
             };
-            Ok(TaskProjectionStoreExecution::NeedsReconciliation {
+            TaskProjectionStoreExecution::NeedsReconciliation {
                 envelope_id: envelope.envelope_id(),
                 stage: TaskProjectionStoreStage::Reconcile,
                 write,
                 flush,
                 decision: Some(decision),
                 cause,
-            })
+            }
         }
         TaskProjectionPersistenceDecision::Conflict {
             current_snapshot_id,
@@ -520,21 +520,21 @@ fn finish_attempt<S: TaskProjectionStore>(
                 write,
                 TaskProjectionStoreWriteDisposition::PreconditionFailed
             ) {
-                Ok(TaskProjectionStoreExecution::Conflict {
+                TaskProjectionStoreExecution::Conflict {
                     envelope_id: envelope.envelope_id(),
                     write,
                     current_snapshot_id,
                     current_generation,
-                })
+                }
             } else {
-                Ok(TaskProjectionStoreExecution::NeedsReconciliation {
+                TaskProjectionStoreExecution::NeedsReconciliation {
                     envelope_id: envelope.envelope_id(),
                     stage: TaskProjectionStoreStage::Reconcile,
                     write,
                     flush,
                     decision: Some(decision),
                     cause: TaskProjectionStoreReconciliationCause::HistoryRequired,
-                })
+                }
             }
         }
     }

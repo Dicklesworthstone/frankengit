@@ -90,7 +90,7 @@ pub struct PulseSelection {
 }
 
 impl PulseSelection {
-    const fn from_candidate(candidate: WorkCandidate) -> Self {
+    const fn from_candidate(candidate: &WorkCandidate) -> Self {
         Self {
             task_id: candidate.item().task_id(),
             phase: candidate.item().phase(),
@@ -350,10 +350,7 @@ impl AgentControlPulse {
             });
         }
 
-        let selected = frontier
-            .selected()
-            .copied()
-            .map(PulseSelection::from_candidate);
+        let selected = frontier.selected().map(PulseSelection::from_candidate);
         let state = if selected.is_some() {
             PulseState::Actionable
         } else if situation.intent_run_id().is_none() {

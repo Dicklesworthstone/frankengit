@@ -173,7 +173,6 @@ impl TaskProjectionRow {
     ///
     /// Refuses a zero task identity, an empty/duplicate/excessive reservation
     /// surface, and an expiry that is not later than `claimed_at`.
-    #[allow(clippy::too_many_arguments)]
     pub fn claimed(
         task_id: WorkTaskId,
         phase: TaskPhase,
@@ -492,7 +491,6 @@ impl TaskMutationRequest {
     /// Refuses authority/run mismatch, stale time, blocked or already assigned
     /// work, unknown conflicts, invalid phase movement, empty reservations,
     /// expiry beyond the run, and canonical framing failure.
-    #[allow(clippy::too_many_arguments)]
     pub fn claim(
         snapshot: &TaskProjectionSnapshot,
         authority: &AuthorityReadReceipt,
@@ -587,7 +585,6 @@ impl TaskMutationRequest {
     ///
     /// Refuses authority, task, assignee, plan, generation, phase, time, and
     /// canonical framing mismatches.
-    #[allow(clippy::too_many_arguments)]
     pub fn release(
         snapshot: &TaskProjectionSnapshot,
         authority: &AuthorityReadReceipt,
@@ -631,7 +628,6 @@ impl TaskMutationRequest {
     /// Refuses source/target authority mismatch, source or target expiry,
     /// same-run transfer, task/plan/assignee mismatch, changed reservation or
     /// phase state, invalid target claim lifetime, and canonical framing failure.
-    #[allow(clippy::too_many_arguments)]
     pub fn transfer(
         snapshot: &TaskProjectionSnapshot,
         source_authority: &AuthorityReadReceipt,
@@ -725,7 +721,6 @@ impl TaskMutationRequest {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn finish(
         operation: TaskMutationOperation,
         snapshot: &TaskProjectionSnapshot,
@@ -873,7 +868,6 @@ pub struct TaskMutationObservation {
 impl TaskMutationObservation {
     /// Creates one complete adapter observation.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         request_id: TaskMutationRequestId,
         previous_generation: TaskProjectionGeneration,
@@ -1569,7 +1563,7 @@ fn validate_task_id(task_id: WorkTaskId) -> Result<(), TaskProjectionRefusal> {
     Ok(())
 }
 
-fn canonicalize_surfaces(surfaces: &mut Vec<PlanSurface>) -> Result<(), TaskProjectionRefusal> {
+fn canonicalize_surfaces(surfaces: &mut [PlanSurface]) -> Result<(), TaskProjectionRefusal> {
     if surfaces.len() > MAX_TASK_ROW_SURFACES {
         return Err(TaskProjectionRefusal::TooManyReservedSurfaces {
             observed: surfaces.len(),

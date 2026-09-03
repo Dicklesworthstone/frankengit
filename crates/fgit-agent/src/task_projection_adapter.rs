@@ -144,7 +144,6 @@ impl TaskProjectionLease {
     /// Refuses zero or unchanged generations, an empty/inverted interval,
     /// empty/duplicate/excessive reservation surfaces, and canonical framing
     /// bounds that cannot be represented.
-    #[allow(clippy::too_many_arguments)]
     pub fn observed(
         plan_id: AgentChangePlanId,
         assignee: RunId,
@@ -295,7 +294,6 @@ impl TaskProjectionSnapshot {
     /// substitution, assignment conflicts, an existing lease, invalid or
     /// amplified lifetime, a zero adapter profile, generation collision, and
     /// canonical framing failure.
-    #[allow(clippy::too_many_arguments)]
     pub fn claim(
         &self,
         pulse: &AgentControlPulse,
@@ -436,7 +434,6 @@ impl TaskProjectionSnapshot {
     /// Refuses lease, receipt, claim, complete-run, generation, surface, and
     /// time substitution, a zero adapter profile, generation collision, and
     /// framing failure.
-    #[allow(clippy::too_many_arguments)]
     pub fn release(
         &self,
         claim_receipt: &TaskClaimReceipt,
@@ -508,7 +505,6 @@ impl TaskProjectionSnapshot {
     /// Refuses source lease substitution, self-transfer, a successor from a
     /// different authority basis, an expired successor, zero adapter identity,
     /// generation collision, and framing failure.
-    #[allow(clippy::too_many_arguments)]
     pub fn transfer(
         &self,
         claim_receipt: &TaskClaimReceipt,
@@ -1268,7 +1264,7 @@ fn derive_resolution_generation(
     encoder.write_raw(claim_receipt.claim_id().as_bytes());
     encoder.write_raw(claim_receipt.run_commitment().as_bytes());
     encoder.write_raw(active_claim.activation_id().as_bytes());
-    write_transition_kind(&mut encoder, kind)?;
+    write_transition_kind(&mut encoder, kind);
     encoder.write_scalar(resolved_at.value());
     Ok(hash(&encoder.into_bytes()))
 }
@@ -1319,17 +1315,14 @@ fn transition_commitment(
     encoder.write_raw(transition.task_id.as_bytes());
     encoder.write_raw(&transition.previous_generation);
     encoder.write_raw(&transition.resulting_generation);
-    write_transition_kind(&mut encoder, transition.kind)?;
+    write_transition_kind(&mut encoder, transition.kind);
     encoder.write_scalar(transition.observed_at.value());
     encoder.write_raw(&transition.adapter_identity);
     encoder.write_digest(&transition.evidence_root)?;
     Ok(hash(&encoder.into_bytes()))
 }
 
-fn write_transition_kind(
-    encoder: &mut Encoder,
-    kind: TaskProjectionTransitionKind,
-) -> Result<(), TaskProjectionAdapterRefusal> {
+fn write_transition_kind(encoder: &mut Encoder, kind: TaskProjectionTransitionKind) {
     encoder.write_raw_byte(kind.code_point());
     match kind {
         TaskProjectionTransitionKind::Claimed { action } => {
@@ -1346,12 +1339,9 @@ fn write_transition_kind(
             encoder.write_raw(successor_run_commitment.as_bytes());
         }
     }
-    Ok(())
 }
 
-fn canonicalize_surfaces(
-    surfaces: &mut Vec<PlanSurface>,
-) -> Result<(), TaskProjectionAdapterRefusal> {
+fn canonicalize_surfaces(surfaces: &mut [PlanSurface]) -> Result<(), TaskProjectionAdapterRefusal> {
     if surfaces.len() > crate::MAX_PLAN_ENTRIES {
         return Err(TaskProjectionAdapterRefusal::TooManyReservedSurfaces {
             observed: surfaces.len(),

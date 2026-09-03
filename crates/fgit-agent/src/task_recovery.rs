@@ -343,7 +343,6 @@ pub fn recover_task_claim_for_cleanup(
 /// Refuses recovery/reconstruction or claim substitution, same-ID complete-run
 /// substitution, semantic release refusal, a definite pre-effect store refusal,
 /// and terminal receipt framing failure.
-#[allow(clippy::too_many_arguments)]
 pub fn persist_recovered_task_release<S: TaskProjectionStore>(
     store: &mut S,
     reconstruction: &TaskLeaseReconstructionReceipt,

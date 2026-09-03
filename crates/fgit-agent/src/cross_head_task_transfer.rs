@@ -163,7 +163,6 @@ impl CrossHeadTaskTransferEnvelope {
     /// Refuses source lease, claim, active-claim, capsule, acceptance,
     /// descendant proof, receiver situation, authority basis, semantic task,
     /// complete-run, time, adapter, and canonical-framing substitution.
-    #[allow(clippy::too_many_arguments)]
     pub fn build(
         source_snapshot: &AuthorityBoundTaskProjectionSnapshot,
         source_claim: &TaskClaimReceipt,
@@ -947,11 +946,11 @@ pub fn execute_cross_head_task_transfer_store<S: CrossHeadTaskTransferStore>(
     };
     match envelope.reconcile(Some(&initial)) {
         Ok(CrossHeadTaskTransferDecision::Confirmed(_)) => {
-            return finish_store_attempt(
+            return Ok(finish_store_attempt(
                 store,
                 envelope,
                 TaskProjectionStoreWriteDisposition::NotAttempted,
-            );
+            ));
         }
         Ok(CrossHeadTaskTransferDecision::RetrySafe { .. }) => {}
         Ok(CrossHeadTaskTransferDecision::Conflict {
@@ -981,14 +980,14 @@ pub fn execute_cross_head_task_transfer_store<S: CrossHeadTaskTransferStore>(
     let write = store
         .compare_and_replace(envelope)
         .map_err(CrossHeadTaskTransferExecutionRefusal::Write)?;
-    finish_store_attempt(store, envelope, write.into())
+    Ok(finish_store_attempt(store, envelope, write.into()))
 }
 
 fn finish_store_attempt<S: CrossHeadTaskTransferStore>(
     store: &mut S,
     envelope: &CrossHeadTaskTransferEnvelope,
     write: TaskProjectionStoreWriteDisposition,
-) -> Result<CrossHeadTaskTransferExecution, CrossHeadTaskTransferExecutionRefusal> {
+) -> CrossHeadTaskTransferExecution {
     let flush = match store.flush(envelope) {
         Ok(TaskProjectionStoreFlushOutcome::Flushed) => {
             TaskProjectionStoreFlushDisposition::Flushed
@@ -1006,37 +1005,37 @@ fn finish_store_attempt<S: CrossHeadTaskTransferStore>(
     let observed = match store.read(key) {
         Ok(Some(observed)) => observed,
         Ok(None) => {
-            return Ok(CrossHeadTaskTransferExecution::NeedsReconciliation {
+            return CrossHeadTaskTransferExecution::NeedsReconciliation {
                 envelope_id: envelope.envelope_id,
                 stage: TaskProjectionStoreStage::ConfirmingRead,
                 write,
                 flush,
                 decision: None,
                 cause: CrossHeadTaskTransferReconciliationCause::ProjectionMissing,
-            });
+            };
         }
         Err(refusal) => {
-            return Ok(CrossHeadTaskTransferExecution::NeedsReconciliation {
+            return CrossHeadTaskTransferExecution::NeedsReconciliation {
                 envelope_id: envelope.envelope_id,
                 stage: TaskProjectionStoreStage::ConfirmingRead,
                 write,
                 flush,
                 decision: None,
                 cause: CrossHeadTaskTransferReconciliationCause::ConfirmingRead(refusal),
-            });
+            };
         }
     };
     let decision = match envelope.reconcile(Some(&observed)) {
         Ok(decision) => decision,
         Err(refusal) => {
-            return Ok(CrossHeadTaskTransferExecution::NeedsReconciliation {
+            return CrossHeadTaskTransferExecution::NeedsReconciliation {
                 envelope_id: envelope.envelope_id,
                 stage: TaskProjectionStoreStage::Reconcile,
                 write,
                 flush,
                 decision: None,
                 cause: CrossHeadTaskTransferReconciliationCause::Persistence(refusal),
-            });
+            };
         }
     };
 
@@ -1054,23 +1053,23 @@ fn finish_store_attempt<S: CrossHeadTaskTransferStore>(
                 CrossHeadTaskTransferReconciliationCause::BackendContradiction
             }
         };
-        return Ok(CrossHeadTaskTransferExecution::NeedsReconciliation {
+        return CrossHeadTaskTransferExecution::NeedsReconciliation {
             envelope_id: envelope.envelope_id,
             stage: TaskProjectionStoreStage::Flush,
             write,
             flush,
             decision: Some(decision),
             cause,
-        });
+        };
     }
 
     match decision {
         CrossHeadTaskTransferDecision::Confirmed(receipt) => {
-            Ok(CrossHeadTaskTransferExecution::Confirmed {
+            CrossHeadTaskTransferExecution::Confirmed {
                 receipt,
                 write,
                 flush,
-            })
+            }
         }
         CrossHeadTaskTransferDecision::RetrySafe { .. } => {
             let cause = if matches!(write, TaskProjectionStoreWriteDisposition::Ambiguous { .. }) {
@@ -1078,14 +1077,14 @@ fn finish_store_attempt<S: CrossHeadTaskTransferStore>(
             } else {
                 CrossHeadTaskTransferReconciliationCause::BackendContradiction
             };
-            Ok(CrossHeadTaskTransferExecution::NeedsReconciliation {
+            CrossHeadTaskTransferExecution::NeedsReconciliation {
                 envelope_id: envelope.envelope_id,
                 stage: TaskProjectionStoreStage::Reconcile,
                 write,
                 flush,
                 decision: Some(decision),
                 cause,
-            })
+            }
         }
         CrossHeadTaskTransferDecision::Conflict {
             current_snapshot_id,
@@ -1096,21 +1095,21 @@ fn finish_store_attempt<S: CrossHeadTaskTransferStore>(
                 write,
                 TaskProjectionStoreWriteDisposition::PreconditionFailed
             ) {
-                Ok(CrossHeadTaskTransferExecution::Conflict {
+                CrossHeadTaskTransferExecution::Conflict {
                     envelope_id: envelope.envelope_id,
                     write,
                     current_snapshot_id,
                     current_generation,
-                })
+                }
             } else {
-                Ok(CrossHeadTaskTransferExecution::NeedsReconciliation {
+                CrossHeadTaskTransferExecution::NeedsReconciliation {
                     envelope_id: envelope.envelope_id,
                     stage: TaskProjectionStoreStage::Reconcile,
                     write,
                     flush,
                     decision: Some(decision),
                     cause: CrossHeadTaskTransferReconciliationCause::HistoryRequired,
-                })
+                }
             }
         }
     }
@@ -1683,7 +1682,6 @@ fn validate_source_lease(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn validate_handoff(
     source_snapshot: &AuthorityBoundTaskProjectionSnapshot,
     source_claim: &TaskClaimReceipt,
@@ -1822,7 +1820,6 @@ fn validate_successor_metadata(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn derive_transfer_generation(
     source_snapshot: &AuthorityBoundTaskProjectionSnapshot,
     receiver_predecessor: &AuthorityBoundTaskProjectionSnapshot,

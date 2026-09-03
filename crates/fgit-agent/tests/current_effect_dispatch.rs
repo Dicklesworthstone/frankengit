@@ -303,7 +303,7 @@ impl DownstreamChannel for Delivered {
     }
 }
 
-const fn plan(dispatch: OutboxDispatch) -> ReconcilePlan {
+const fn plan(dispatch: &OutboxDispatch) -> ReconcilePlan {
     ReconcilePlan::new(
         dispatch.idempotency,
         dispatch.idempotency_strength,
@@ -351,7 +351,7 @@ fn current_head_authorizations_survive_acknowledged_reconciliation() {
 
     let outcome = deferred
         .reconcile(
-            &mut plan(dispatch),
+            &mut plan(&dispatch),
             &mut Delivered,
             PrincipalId::from_bytes([0x61; 16]),
             |attempt| DownstreamAck {
@@ -455,7 +455,7 @@ fn a_wrong_reconciliation_plan_returns_the_same_proof_carrying_effect() {
     let wrong_dispatch = self::dispatch(0x72);
     let refusal = deferred
         .reconcile(
-            &mut plan(wrong_dispatch),
+            &mut plan(&wrong_dispatch),
             &mut Delivered,
             PrincipalId::from_bytes([0x62; 16]),
             |attempt| DownstreamAck {
@@ -477,7 +477,7 @@ fn a_wrong_reconciliation_plan_returns_the_same_proof_carrying_effect() {
 
     let outcome = deferred
         .reconcile(
-            &mut plan(dispatch),
+            &mut plan(&dispatch),
             &mut Delivered,
             PrincipalId::from_bytes([0x62; 16]),
             |attempt| DownstreamAck {

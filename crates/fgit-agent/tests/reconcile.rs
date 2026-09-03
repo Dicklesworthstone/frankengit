@@ -120,7 +120,6 @@ const fn effect_class(operation: OperationClass) -> EffectClass {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn record(
     receipt: &AuthorityReadReceipt,
     run: &IntentRun,

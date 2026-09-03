@@ -2,8 +2,7 @@
 //! Public-path tests for the canonical authority-to-agent revocation adapter.
 
 use core::future::Future;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgit_agent::{
     AUTHORITY_CAPABILITY_REVOCATION_READER_PROFILE, AttenuationRequest,
@@ -522,18 +521,12 @@ impl AsyncAuthorityStore for AsyncMemoryStore {
     }
 }
 
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn block_on<F>(future: F) -> F::Output
 where
     F: Future,
 {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
     let mut future = Box::pin(future);
     loop {
         match future.as_mut().poll(&mut context) {

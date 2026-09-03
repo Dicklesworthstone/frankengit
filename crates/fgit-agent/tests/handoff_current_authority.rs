@@ -2,8 +2,7 @@
 //! Public-path tests for atomic current-head handoff acceptance.
 
 use core::future::Future;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use fgit_agent::{
     AgentChangePlan, AgentChangePlanSpec, AgentControlPulse, AgentHandoffCapsule,
@@ -456,15 +455,9 @@ impl AsyncAuthorityStore for AsyncMirror<'_> {
     }
 }
 
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
     let mut future = Box::pin(future);
     loop {
         match future.as_mut().poll(&mut context) {

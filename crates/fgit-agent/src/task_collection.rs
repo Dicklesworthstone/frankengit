@@ -390,7 +390,7 @@ pub fn collect_task_projection<C: TaskProjectionCollector>(
     let observation = collector
         .collect(&request)
         .map_err(TaskProjectionCollectionExecutionRefusal::Adapter)?;
-    validate_observation(request, expected_adapter_identity, observation, authority)
+    validate_observation(&request, expected_adapter_identity, observation, authority)
         .map_err(TaskProjectionCollectionExecutionRefusal::Collection)
 }
 
@@ -546,7 +546,7 @@ impl From<CodecRefusal> for TaskProjectionCollectionRefusal {
 }
 
 fn validate_observation(
-    request: TaskProjectionCollectionRequest,
+    request: &TaskProjectionCollectionRequest,
     expected_adapter_identity: [u8; 32],
     observation: TaskProjectionCollectionObservation,
     authority: &AuthorityReadReceipt,

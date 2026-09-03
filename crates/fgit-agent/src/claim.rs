@@ -1009,7 +1009,7 @@ fn claim_commitment(claim: &TaskClaimReceipt) -> Result<[u8; 32], TaskClaimRefus
     encoder.write_scalar(claim.expires_at.value());
     encoder.write_raw(&claim.adapter_identity);
     encoder.write_digest(&claim.claim_evidence_root)?;
-    hash(encoder.into_bytes())
+    Ok(hash(encoder.into_bytes()))
 }
 
 fn activation_commitment(active: &ActiveTaskClaim) -> Result<[u8; 32], TaskClaimRefusal> {
@@ -1023,7 +1023,7 @@ fn activation_commitment(active: &ActiveTaskClaim) -> Result<[u8; 32], TaskClaim
     encoder.write_raw(active.run_commitment.as_bytes());
     encoder.write_scalar(active.observed_at.value());
     encoder.write_scalar(active.expires_at.value());
-    hash(encoder.into_bytes())
+    Ok(hash(encoder.into_bytes()))
 }
 
 fn write_surfaces(encoder: &mut Encoder, surfaces: &[PlanSurface]) -> Result<(), TaskClaimRefusal> {
@@ -1040,10 +1040,10 @@ fn write_surfaces(encoder: &mut Encoder, surfaces: &[PlanSurface]) -> Result<(),
     Ok(())
 }
 
-fn hash(bytes: Vec<u8>) -> Result<[u8; 32], TaskClaimRefusal> {
+fn hash(bytes: Vec<u8>) -> [u8; 32] {
     let mut hasher = <Sha256 as GitHashAlgorithm>::Hasher::new();
     hasher.update(&bytes);
-    Ok(hasher.finish())
+    hasher.finish()
 }
 
 fn surfaces_overlap(left: &[PlanSurface], right: &[PlanSurface]) -> bool {

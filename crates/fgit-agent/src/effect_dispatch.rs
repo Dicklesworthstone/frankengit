@@ -129,7 +129,7 @@ impl RevocationCheckedEffectBroker {
             cost: record.budget_reserved,
             input_commitment: record.input_commitment,
         };
-        let outbox = self.inner.reserve_authorized_outbox(grant, dispatch)?;
+        let outbox = self.inner.reserve_authorized_outbox(grant, &dispatch)?;
         Ok(RevocationAuthorizedOutboxEffect {
             initial_authorization,
             request,
