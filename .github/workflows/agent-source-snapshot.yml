@@ -1,0 +1,34 @@
+name: agent-crypto-gate
+
+on:
+  push:
+    branches:
+      - tooling/source-snapshot-20260903
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Test fgit-crypto
+        run: cargo test -p fgit-crypto --all-targets --no-fail-fast
+      - name: Lint fgit-crypto
+        run: cargo clippy -p fgit-crypto --all-targets -- -D warnings
+      - name: Package exact source tree
+        if: always()
+        run: tar --exclude=.git -czf "$RUNNER_TEMP/frankengit-source.tar.gz" .
+      - name: Upload source artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frankengit-source-d2c6447
+          path: ${{ runner.temp }}/frankengit-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
