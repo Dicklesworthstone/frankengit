@@ -99,8 +99,9 @@ use fgit_types::{
     TxId,
 };
 use fgit_wire::receive::{
-    ReceiveCancellation, ReceiveContext, ReceiveError, ReceiveEvent, ReceiveLimits, ReceivePack,
-    ReceiveRequest, SignedPushProfile, advertise_receive_pack,
+    ReceiveCancellation, ReceiveCommandStatus, ReceiveContext, ReceiveError, ReceiveEvent,
+    ReceiveLimits, ReceivePack, ReceiveRequest, SignedPushProfile, UnpackStatus,
+    advertise_receive_pack, report_status,
 };
 use fgit_wire::stale_disclosure::{LabelledAdvertisement, advertise_under_read_label_served_by};
 use fgit_wire::visibility::{RefVisibility, filter_advertised_refs};
@@ -4949,6 +4950,37 @@ fn read_receive_frame(
     Ok((raw, Packet::Data(payload)))
 }
 
+/// Builds a bounded, wire-safe report-status message from a receive refusal.
+///
+/// report-status forbids a NUL, CR, LF, or empty message and caps its length,
+/// so control bytes become spaces, the text is capped well under the negotiated
+/// ceiling, and an empty rendering falls back to a fixed reason.
+fn receive_rejection_message(
+    refusal: &NodeReceiveTransportRefusal,
+    max_status_message_bytes: usize,
+) -> Vec<u8> {
+    let mut message: Vec<u8> = refusal
+        .to_string()
+        .into_bytes()
+        .into_iter()
+        .map(|byte| {
+            if byte == 0 || byte == b'\r' || byte == b'\n' {
+                b' '
+            } else {
+                byte
+            }
+        })
+        .collect();
+    let cap = max_status_message_bytes.min(512).max(1);
+    if message.len() > cap {
+        message.truncate(cap);
+    }
+    if message.is_empty() {
+        message = b"receive rejected".to_vec();
+    }
+    message
+}
+
 fn write_packet_group(
     writer: &mut impl Write,
     packets: &[Packet],
@@ -7134,19 +7166,48 @@ impl OneNode {
             }
             true
         };
-        let outcome = self
-            .runtime
-            .block_on(self.receive_loopback_pack_durable_in(
-                request,
-                &session,
-                materialized,
-                context,
-                &captured,
-                ParseLimits::default(),
-                AdmissionLimits::default(),
-                &mut cancellation,
-            ))
-            .map_err(NodeGitDaemonServeRefusal::from)?;
+        let outcome = match self.runtime.block_on(self.receive_loopback_pack_durable_in(
+            request,
+            &session,
+            materialized,
+            context,
+            &captured,
+            ParseLimits::default(),
+            AdmissionLimits::default(),
+            &mut cancellation,
+        )) {
+            Ok(outcome) => outcome,
+            Err(refusal) => {
+                // A deadline that fired during admission is a transport-level
+                // fault, not a push the client can be told about; keep it as a
+                // typed serve error.
+                if admission_deadline_expired.load(Ordering::Relaxed) {
+                    return Err(NodeGitDaemonServeRefusal::from(
+                        GitDaemonTransportRefusal::SessionDeadlineExceeded {
+                            operation: "admit receive-pack request",
+                        },
+                    ));
+                }
+                // Every other refusal here is a decision about a push whose
+                // pack the boundary scanner already read to its trailer, so the
+                // client has finished sending and is reading the response. It
+                // must be told through report-status `unpack`/`ng` — the way
+                // upstream receive-pack reports an unpack failure — rather than
+                // by closing the socket, which leaves `git push` printing only
+                // "the remote end hung up unexpectedly" (frankengit-xefn).
+                self.write_receive_rejection_report(
+                    writer,
+                    &ready,
+                    &refusal,
+                    limits,
+                    &receive_limits,
+                )?;
+                return Ok(GitDaemonSessionOutcome::Receive(GitDaemonReceiveReceipt {
+                    request: greeting,
+                    commands: 0,
+                }));
+            }
+        };
         if admission_deadline_expired.load(Ordering::Relaxed) {
             return Err(NodeGitDaemonServeRefusal::from(
                 GitDaemonTransportRefusal::SessionDeadlineExceeded {
@@ -7166,6 +7227,52 @@ impl OneNode {
             request: greeting,
             commands: outcome.commands.len(),
         }))
+    }
+
+    /// Reports a receive-pack rejection to the client through report-status.
+    ///
+    /// The pack has already been read in full, so this emits an `unpack <error>`
+    /// record plus one `ng <ref> <reason>` per command — the same shape upstream
+    /// receive-pack uses for an unpack failure — instead of closing the socket.
+    /// A client that negotiated no `report-status` capability receives nothing
+    /// and the session simply ends, which is upstream behaviour for that case.
+    fn write_receive_rejection_report<W>(
+        &self,
+        writer: &mut W,
+        ready: &ReceiveRequest,
+        refusal: &NodeReceiveTransportRefusal,
+        limits: &WireLimits,
+        receive_limits: &ReceiveLimits,
+    ) -> Result<(), NodeGitDaemonServeRefusal>
+    where
+        W: Write,
+    {
+        let message = receive_rejection_message(refusal, receive_limits.max_status_message_bytes);
+        let mut statuses = Vec::new();
+        statuses
+            .try_reserve(ready.commands.len())
+            .map_err(|_| {
+                NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Wire(
+                    WireError::AllocationFailure,
+                ))
+            })?;
+        for _ in &ready.commands {
+            statuses.push(ReceiveCommandStatus::Rejected {
+                message: message.clone(),
+            });
+        }
+        let report = report_status(
+            ready,
+            UnpackStatus::Rejected { message },
+            &statuses,
+            receive_limits,
+        )
+        .map_err(NodeReceiveTransportRefusal::from)
+        .map_err(NodeGitDaemonServeRefusal::from)?;
+        if !report.is_empty() {
+            write_packet_group(writer, &report, limits).map_err(NodeGitDaemonServeRefusal::from)?;
+        }
+        Ok(())
     }
 
     /// Accepts a bounded number of git-daemon sessions and drains every child
