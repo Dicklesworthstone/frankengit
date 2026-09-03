@@ -456,9 +456,16 @@ struct TypedResolution {
 
 /// A bounded cache over the scalar resolver.
 ///
-/// It preserves the scalar resolver's logical expansion/work charging, so a
-/// cache hit cannot turn a resource refusal into success; it only avoids
-/// recomputing already-proven delta bytes.
+/// Each unique pack object's expanded bytes are charged to the aggregate
+/// [`max_total_expanded_bytes`](crate::PackLimits::max_total_expanded_bytes)
+/// budget exactly once, when that object is first resolved and cached. A later
+/// cache hit re-uses those already-counted bytes and charges no further
+/// expansion, so the bomb defence bounds the *unique* inflated size of the pack
+/// rather than the number of times a shared delta base is reconstructed across
+/// a receive (frankengit-rpqx). Reconstruction effort is the separate concern:
+/// a cache hit still charges the entry's `logical_work` against
+/// [`max_delta_work`](crate::PackLimits::max_delta_work), so caching cannot
+/// turn a work refusal into success.
 pub struct CachedResolver<'objects, 'lookup, L> {
     scalar: ScalarResolver<'objects, 'lookup, L>,
     entries: Vec<CacheEntry>,
@@ -469,7 +476,6 @@ struct CacheEntry {
     offset: u64,
     bytes: Vec<u8>,
     object_type: Option<ObjectType>,
-    logical_expanded: usize,
     logical_work: usize,
 }
 
@@ -586,11 +592,13 @@ where
     ) -> Result<Vec<u8>, PackError> {
         checkpoint(deadline)?;
         if let Some(cached) = self.cached(object.offset()) {
-            accounting.add_expanded(cached.logical_expanded, self.scalar.limits)?;
+            // The expanded bytes were charged the first time this offset was
+            // resolved; a cache hit re-uses them and charges only reconstruction
+            // work, so the aggregate expansion budget counts each unique object
+            // once (frankengit-rpqx).
             accounting.add_work(cached.logical_work, self.scalar.limits)?;
             return copy_bytes(&cached.bytes, deadline);
         }
-        let expanded_before = accounting.expanded;
         let work_before = accounting.work;
         if stack.contains(&object.offset()) {
             return Err(PackError::DeltaCycle);
@@ -635,13 +643,6 @@ where
                 Ok(result)
             }
         }?;
-        let logical_expanded =
-            accounting
-                .expanded
-                .checked_sub(expanded_before)
-                .ok_or(PackError::IntegerOverflow {
-                    context: "cached delta expanded accounting",
-                })?;
         let logical_work =
             accounting
                 .work
@@ -649,14 +650,7 @@ where
                 .ok_or(PackError::IntegerOverflow {
                     context: "cached delta work accounting",
                 })?;
-        self.cache(
-            object.offset(),
-            &result,
-            None,
-            logical_expanded,
-            logical_work,
-            deadline,
-        )?;
+        self.cache(object.offset(), &result, None, logical_work, deadline)?;
         Ok(result)
     }
 
@@ -672,14 +666,14 @@ where
         if let Some(cached) = self.cached(object.offset())
             && let Some(object_type) = cached.object_type
         {
-            accounting.add_expanded(cached.logical_expanded, self.scalar.limits)?;
+            // Expanded bytes are charged once, at first resolution; a typed
+            // cache hit charges only reconstruction work (frankengit-rpqx).
             accounting.add_work(cached.logical_work, self.scalar.limits)?;
             return Ok(TypedResolution {
                 object_type,
                 bytes: copy_bytes(&cached.bytes, deadline)?,
             });
         }
-        let expanded_before = accounting.expanded;
         let work_before = accounting.work;
         if stack.contains(&object.offset()) {
             return Err(PackError::DeltaCycle);
@@ -733,13 +727,6 @@ where
                 resolved?
             }
         };
-        let logical_expanded =
-            accounting
-                .expanded
-                .checked_sub(expanded_before)
-                .ok_or(PackError::IntegerOverflow {
-                    context: "cached typed delta expanded accounting",
-                })?;
         let logical_work =
             accounting
                 .work
@@ -751,7 +738,6 @@ where
             object.offset(),
             &resolved.bytes,
             Some(resolved.object_type),
-            logical_expanded,
             logical_work,
             deadline,
         )?;
@@ -845,7 +831,6 @@ where
         offset: u64,
         bytes: &[u8],
         object_type: Option<ObjectType>,
-        logical_expanded: usize,
         logical_work: usize,
         deadline: &mut impl Deadline,
     ) -> Result<(), PackError> {
@@ -881,7 +866,6 @@ where
                 offset,
                 bytes: copy,
                 object_type,
-                logical_expanded,
                 logical_work,
             },
         );
@@ -1501,9 +1485,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn caller_owned_budget_bounds_aggregate_cached_typed_resolutions() {
-        let objects = [
+    /// Two typed deltas share one base. Their unique inflated content is the
+    /// base (three bytes) plus each delta's result (three bytes each) = nine
+    /// bytes. Before frankengit-rpqx the shared base was re-charged on the
+    /// second resolution's cache hit, so the same receive was accounted as
+    /// twelve bytes and refused under an eleven-byte budget; counting each
+    /// unique object once, both deltas now resolve.
+    fn shared_base_typed_graph() -> [PackObject; 3] {
+        [
             PackObject::TypedBase {
                 offset: 12,
                 id: None,
@@ -1522,11 +1511,39 @@ mod tests {
                 base: DeltaBase::Ofs(12),
                 program: vec![3, 3, 0x91, 0, 3],
             }),
-        ];
+        ]
+    }
+
+    #[test]
+    fn caller_owned_budget_charges_a_shared_base_once_across_a_receive() {
+        let objects = shared_base_typed_graph();
         let mut limits = unlimited();
-        // Each resolution expands the typed base and its result (six bytes),
-        // but retaining two results would expand twelve bytes in one receive.
+        // Eleven bytes refused the second delta before rpqx (accounted 12 > 11).
+        // With the shared base counted once the receive expands nine bytes.
         limits.max_total_expanded_bytes = 11;
+        let mut resolver = CachedResolver::new(&objects, &(), &limits, &mut always)
+            .expect("the compact typed delta graph is structurally valid");
+        let mut budget = ResolutionBudget::new();
+
+        assert_eq!(
+            resolver.resolve_offset_typed_with_budget(24, &mut budget, &mut always),
+            Ok((ObjectType::Blob, b"abc".to_vec()))
+        );
+        assert_eq!(
+            resolver.resolve_offset_typed_with_budget(36, &mut budget, &mut always),
+            Ok((ObjectType::Blob, b"abc".to_vec())),
+            "the shared base is charged once, so nine unique bytes fit an eleven-byte budget"
+        );
+    }
+
+    #[test]
+    fn caller_owned_budget_still_refuses_when_unique_bytes_exceed_the_ceiling() {
+        let objects = shared_base_typed_graph();
+        let mut limits = unlimited();
+        // The aggregate bomb defence survives count-once: a budget below the
+        // pack's unique inflated size still refuses, and the reported total is
+        // the unique size (nine), not the pre-rpqx double-counted twelve.
+        limits.max_total_expanded_bytes = 8;
         let mut resolver = CachedResolver::new(&objects, &(), &limits, &mut always)
             .expect("the compact typed delta graph is structurally valid");
         let mut budget = ResolutionBudget::new();
@@ -1538,10 +1555,64 @@ mod tests {
         assert!(matches!(
             resolver.resolve_offset_typed_with_budget(36, &mut budget, &mut always),
             Err(PackError::TotalExpandedLimit {
-                actual: 12,
-                limit: 11,
+                actual: 9,
+                limit: 8,
             })
         ));
+    }
+
+    #[test]
+    fn caller_owned_budget_counts_a_delta_chain_once() {
+        // A three-deep chain B <- d1 <- d2 is the shape Git produces for a file
+        // edited across commits. Resolving d1 then d2 across one shared receive
+        // budget charges each object's expansion once: B (3) + d1 (4) + d2 (5)
+        // = twelve bytes. Before frankengit-rpqx, resolving d2 re-charged d1's
+        // whole subtree (B + d1 = 7) on the cache hit, overflowing the same
+        // twelve-byte budget -- the exact over-count that refused an ~85 MB
+        // first push accounted as ~150 MB.
+        let base = b"abc".to_vec();
+        let d1_program = copy_then_insert(&base, 0x11);
+        let mut d1_bytes = base.clone();
+        d1_bytes.push(0x11);
+        let d2_program = copy_then_insert(&d1_bytes, 0x22);
+        let mut d2_bytes = d1_bytes.clone();
+        d2_bytes.push(0x22);
+
+        let objects = [
+            PackObject::TypedBase {
+                offset: 12,
+                id: None,
+                kind: EntryKind::Blob,
+                data: base,
+            },
+            PackObject::Delta(DeltaObject {
+                offset: 24,
+                id: None,
+                base: DeltaBase::Ofs(12),
+                program: d1_program,
+            }),
+            PackObject::Delta(DeltaObject {
+                offset: 36,
+                id: None,
+                base: DeltaBase::Ofs(24),
+                program: d2_program,
+            }),
+        ];
+        let mut limits = unlimited();
+        limits.max_total_expanded_bytes = 12;
+        let mut resolver = CachedResolver::new(&objects, &(), &limits, &mut always)
+            .expect("the compact typed delta chain is structurally valid");
+        let mut budget = ResolutionBudget::new();
+
+        assert_eq!(
+            resolver.resolve_offset_typed_with_budget(24, &mut budget, &mut always),
+            Ok((ObjectType::Blob, d1_bytes))
+        );
+        assert_eq!(
+            resolver.resolve_offset_typed_with_budget(36, &mut budget, &mut always),
+            Ok((ObjectType::Blob, d2_bytes)),
+            "the chain's shared prefix is charged once, so twelve unique bytes fit a twelve-byte budget"
+        );
     }
 
     fn copy_then_insert(base: &[u8], byte: u8) -> Vec<u8> {
