@@ -37,7 +37,6 @@ pub struct MergeDeliveryInput {
 impl MergeDeliveryInput {
     /// Creates one complete transition input.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         repository_id: RepositoryId,
         stream: ForgeStreamId,

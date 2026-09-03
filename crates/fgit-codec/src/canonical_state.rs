@@ -249,7 +249,6 @@ pub struct CanonicalOutboxStateEntry {
 impl CanonicalOutboxStateEntry {
     /// Creates one typed immutable outbox binding.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         delivery_key: AsciiSlug,
         effect_class: AsciiSlug,
