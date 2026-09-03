@@ -15,7 +15,7 @@ use std::convert::Infallible;
 use std::io::Cursor;
 
 use fgit_node::{
-    GitDaemonSessionOutcome, GitDaemonTransportRefusal, parse_git_daemon_request,
+    GitDaemonService, GitDaemonSessionOutcome, GitDaemonTransportRefusal, parse_git_daemon_request,
     serve_git_daemon_upload_pack,
 };
 use fgit_wire::{
@@ -178,7 +178,10 @@ fn serve(
 fn version_two_greeting_selects_the_v2_lane() {
     let request = parse_git_daemon_request(&greeting(Some(b"2")), WireLimits::default())
         .expect("a version=2 greeting is admitted");
-    assert_eq!(request.upload_pack_version(), UploadPackVersion::V2);
+    assert_eq!(
+        request.service(),
+        GitDaemonService::UploadPack(UploadPackVersion::V2)
+    );
 }
 
 #[test]

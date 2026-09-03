@@ -61,7 +61,10 @@ use fgit_codec::schema::{
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body,
 };
-use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
+use fgit_crypto::{
+    DigestHasher, GitHashAlgorithm as CryptoDigestAlgorithm, GitObjectKind, IdentityDomain,
+    Sha256 as CryptoSha256, git_object_id, git_payload_commitment,
+};
 use fgit_forge::{ForgeEventBatch as CanonicalForgeEventBatch, HistoricalBatch};
 use fgit_git_object::{
     AcceptanceProfile, ObjectError, ObjectType, ParseLimits, ParsedObject, parse_object_body,
@@ -72,8 +75,8 @@ use fgit_object_fabric::fabric::{
 use fgit_object_fabric::local::{LocalFilesystemConfig, LocalFilesystemFabric};
 use fgit_object_fabric::{ObjectEnvelope, ObjectKind, SegmentLimits};
 use fgit_pack::{
-    CanonicalObjectSource, CanonicalPackObject, PackError, PackLimits, PackPlanner, PackWriteError,
-    PackWriteProfile, PackWriteReceipt, PackWriter,
+    CanonicalObjectSource, CanonicalPackObject, PackBoundaryScanner, PackError, PackLimits,
+    PackPlanner, PackWriteError, PackWriteProfile, PackWriteReceipt, PackWriter, ScanStatus,
 };
 use fgit_reference::intent::TransactionRequest;
 use fgit_resource::{
@@ -95,13 +98,16 @@ use fgit_types::{
     RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositoryIncarnationId, TenantId,
     TxId,
 };
-use fgit_wire::receive::{ReceiveCancellation, ReceiveError, ReceivePack};
+use fgit_wire::receive::{
+    ReceiveCancellation, ReceiveContext, ReceiveError, ReceiveEvent, ReceiveLimits, ReceivePack,
+    ReceiveRequest, SignedPushProfile, advertise_receive_pack,
+};
 use fgit_wire::stale_disclosure::{LabelledAdvertisement, advertise_under_read_label_served_by};
-use fgit_wire::visibility::RefVisibility;
+use fgit_wire::visibility::{RefVisibility, filter_advertised_refs};
 use fgit_wire::{
-    AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest,
-    Packet, PktLineDecoder, UploadPackRepository, UploadPackVersion, V1Advertisement, V2UploadPack,
-    WireError, WireEvent, WireLimits, encode_packets, sideband_pack_chunk,
+    AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, LegacyUploadPack, PackPayloadSource,
+    PackRequest, Packet, PktLineDecoder, UploadPackRepository, UploadPackVersion, V1Advertisement,
+    V2UploadPack, WireError, WireEvent, WireLimits, encode_packets, sideband_pack_chunk,
 };
 use fsqlite_types::cx::Cx as FsqliteCx;
 
@@ -740,6 +746,21 @@ pub enum ClosureSelectionSource {
     EmptyGenesis,
     /// The latest committed RCR found by replaying the authenticated head chain.
     RepositoryCommit(RepositoryCommitId),
+    /// The union of every committed RCR's closure along the verified head
+    /// chain, keyed by the latest record.
+    ///
+    /// One decision's closure names only the objects that decision admitted,
+    /// so a history built from several pushes reaches strictly more than the
+    /// latest closure alone. The union is a derived serving projection —
+    /// canonical per-decision closures are unchanged — and the selection
+    /// collapses to `RepositoryCommit` whenever the history carries exactly
+    /// one distinct closure root.
+    CumulativeHistory {
+        /// The newest committed record, which still gates head consistency.
+        latest: RepositoryCommitId,
+        /// Distinct closure roots united, for audit.
+        united_roots: usize,
+    },
 }
 
 /// A permitted object set selected from authenticated authority history.
@@ -1730,7 +1751,7 @@ impl DurableAdmissionMaterializer {
             let ref_state =
                 decode_body::<CanonicalRefState>(&frame, fgit_codec::DecodeLimits::DEFAULT)
                     .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
-            let (closure_root, selection_source) =
+            let (closure_roots, selection_source) =
                 select_authority_closure_in(authority, cx, body.clone(), &ref_state, is_cancelled)
                     .await?;
             ensure_materializer_catch_up_live(is_cancelled)?;
@@ -1813,34 +1834,53 @@ impl DurableAdmissionMaterializer {
                     RefusalCode::InternalInvariantBreach,
                 ));
             }
-            let closure_key =
-                admission_immutable_key(ADMISSION_CLOSURE_KEY_PREFIX, repository_id, closure_root)
-                    .map_err(AdmissionMaterializationRefusal::Key)?;
-            let ImmutableRead::Present(closure_frame) = authority
-                .read_immutable(cx, &closure_key)
-                .await
-                .map_err(AdmissionMaterializationRefusal::Authority)?
-            else {
-                return Err(AdmissionMaterializationRefusal::ImmutableAbsent(
-                    closure_root,
-                ));
-            };
-            ensure_materializer_catch_up_live(is_cancelled)?;
-            let closure = decode_body::<PermittedObjectClosure>(
-                &closure_frame,
-                fgit_codec::DecodeLimits::DEFAULT,
-            )
-            .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
-            if permitted_object_closure_root(&closure)
-                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
-                != closure_root
-            {
-                return Err(AdmissionMaterializationRefusal::CanonicalRoot(
-                    RefusalCode::InternalInvariantBreach,
-                ));
+            // The genesis arm carries a computed root for the canonical empty
+            // closure, which has no stored frame; every other root names one
+            // committed record's immutable closure and is read and verified
+            // exactly as before. Several distinct roots union into one derived
+            // serving closure whose root is recomputed from the union.
+            let mut united = BTreeSet::new();
+            for closure_root in &closure_roots {
+                if selection_source == ClosureSelectionSource::EmptyGenesis {
+                    break;
+                }
+                ensure_materializer_catch_up_live(is_cancelled)?;
+                let closure_key = admission_immutable_key(
+                    ADMISSION_CLOSURE_KEY_PREFIX,
+                    repository_id,
+                    *closure_root,
+                )
+                .map_err(AdmissionMaterializationRefusal::Key)?;
+                let ImmutableRead::Present(closure_frame) = authority
+                    .read_immutable(cx, &closure_key)
+                    .await
+                    .map_err(AdmissionMaterializationRefusal::Authority)?
+                else {
+                    return Err(AdmissionMaterializationRefusal::ImmutableAbsent(
+                        *closure_root,
+                    ));
+                };
+                let closure = decode_body::<PermittedObjectClosure>(
+                    &closure_frame,
+                    fgit_codec::DecodeLimits::DEFAULT,
+                )
+                .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+                if permitted_object_closure_root(&closure)
+                    .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
+                    != *closure_root
+                {
+                    return Err(AdmissionMaterializationRefusal::CanonicalRoot(
+                        RefusalCode::InternalInvariantBreach,
+                    ));
+                }
+                united.extend(closure.objects().iter().copied());
             }
+            ensure_materializer_catch_up_live(is_cancelled)?;
+            let closure = PermittedObjectClosure::new(united);
+            let root = permitted_object_closure_root(&closure)
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
             let selected_closure = AuthoritySelectedClosure {
-                root: closure_root,
+                root,
                 closure,
                 source: selection_source,
             };
@@ -2500,12 +2540,14 @@ async fn select_authority_closure_in<Authority>(
     current_head: RepositoryAuthorityHeadBody,
     current_refs: &CanonicalRefState,
     is_cancelled: &(impl Fn() -> bool + Sync),
-) -> Result<(Digest, ClosureSelectionSource), AdmissionMaterializationRefusal>
+) -> Result<(Vec<Digest>, ClosureSelectionSource), AdmissionMaterializationRefusal>
 where
     Authority: AsyncAuthorityStore + ?Sized,
 {
     let mut successor = current_head;
     let mut walked = 0_usize;
+    let mut latest_record: Option<RepositoryCommitId> = None;
+    let mut closure_roots: Vec<Digest> = Vec::new();
 
     loop {
         ensure_materializer_catch_up_live(is_cancelled)?;
@@ -2515,13 +2557,29 @@ where
             if successor.predecessor_head_id.is_some() {
                 return Err(AdmissionMaterializationRefusal::DecisionHistoryUnbound);
             }
-            if !current_refs.refs().is_empty() {
-                return Err(AdmissionMaterializationRefusal::NonEmptyGenesisWithoutClosure);
-            }
-            let closure = PermittedObjectClosure::default();
-            let root = permitted_object_closure_root(&closure)
-                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
-            return Ok((root, ClosureSelectionSource::EmptyGenesis));
+            return match (latest_record, closure_roots.len()) {
+                (None, 0) => {
+                    if !current_refs.refs().is_empty() {
+                        return Err(AdmissionMaterializationRefusal::NonEmptyGenesisWithoutClosure);
+                    }
+                    let closure = PermittedObjectClosure::default();
+                    let root = permitted_object_closure_root(&closure)
+                        .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
+                    Ok((vec![root], ClosureSelectionSource::EmptyGenesis))
+                }
+                (None, _) => Err(AdmissionMaterializationRefusal::DecisionHistoryUnbound),
+                (Some(latest), 1) => Ok((
+                    closure_roots,
+                    ClosureSelectionSource::RepositoryCommit(latest),
+                )),
+                (Some(latest), united_roots) => Ok((
+                    closure_roots,
+                    ClosureSelectionSource::CumulativeHistory {
+                        latest,
+                        united_roots,
+                    },
+                )),
+            };
         };
         let predecessor_id = successor
             .predecessor_head_id
@@ -2538,7 +2596,7 @@ where
         verify_pair(&CryptoBodyIdentity, &basis, &batch, &successor)
             .map_err(AdmissionMaterializationRefusal::DecisionHistoryVerification)?;
 
-        if let Some(record) = batch.committed_rcrs.last() {
+        if let (Some(record), None) = (batch.committed_rcrs.last(), latest_record) {
             let record_id = repository_commit_id(record)?;
             if successor.latest_committed_rcr_id != Some(record_id) {
                 return Err(AdmissionMaterializationRefusal::LatestCommitMismatch {
@@ -2567,10 +2625,16 @@ where
                     },
                 );
             }
-            return Ok((
-                record.object_closure_root,
-                ClosureSelectionSource::RepositoryCommit(record_id),
-            ));
+            latest_record = Some(record_id);
+        }
+        // Every committed record's closure participates in the serving union:
+        // one decision's closure names only what that decision admitted, and
+        // the refs at the current head reach objects admitted by every
+        // predecessor decision as well.
+        for record in &batch.committed_rcrs {
+            if !closure_roots.contains(&record.object_closure_root) {
+                closure_roots.push(record.object_closure_root);
+            }
         }
 
         successor = predecessor;
@@ -3612,11 +3676,26 @@ impl Display for GitDaemonPathRefusal {
 
 impl Error for GitDaemonPathRefusal {}
 
-/// The parsed git-daemon opening request for the supported upload-pack lane.
+/// Which git-daemon service one accepted greeting selected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitDaemonService {
+    /// `git-upload-pack` at the negotiated protocol version.
+    UploadPack(UploadPackVersion),
+    /// `git-receive-pack`, always the v0/v1 advertisement shape.
+    ///
+    /// A `version=2` greeting parameter is deliberately ignored rather than
+    /// refused: upstream `receive-pack` knows no protocol v2, answers such a
+    /// client with the v0 advertisement, and the client proceeds. Mirroring
+    /// that keeps ordinary `git push` working under `protocol.version=2`
+    /// without inventing a fictional v2 push.
+    ReceivePack,
+}
+
+/// The parsed git-daemon opening request for the supported service lanes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitDaemonRequest {
     repository_path: GitDaemonRepositoryPath,
-    upload_pack_version: UploadPackVersion,
+    service: GitDaemonService,
 }
 
 /// A finite wall-clock budget for one accepted git-daemon session.
@@ -3918,14 +3997,15 @@ impl GitDaemonRequest {
         &self.repository_path
     }
 
-    /// Returns the legacy upload-pack grammar selected by the greeting.
+    /// Returns the service and protocol grammar selected by the greeting.
     ///
-    /// The git-daemon lane admits the implicit V0 default and an explicit
-    /// `version=1` parameter. V2 remains a typed greeting refusal until its
-    /// distinct ls-refs serving path is attached.
+    /// The upload-pack lane admits the implicit V0 default plus explicit
+    /// `version=1`/`version=2` parameters; the receive-pack lane is always
+    /// the v0/v1 shape and ignores a `version=2` parameter the way upstream
+    /// `receive-pack` does.
     #[must_use]
-    pub const fn upload_pack_version(&self) -> UploadPackVersion {
-        self.upload_pack_version
+    pub const fn service(&self) -> GitDaemonService {
+        self.service
     }
 }
 
@@ -3973,6 +4053,13 @@ pub enum GitDaemonTransportRefusal {
     IncompleteNegotiation,
     /// The existing wire state machine rejected a bounded protocol input/output.
     Wire(WireError),
+    /// The incoming receive-pack stream failed bounded pack-boundary framing.
+    ReceivePackFraming(PackError),
+    /// The client kept sending after its pack trailer completed the request.
+    ReceiveTrailingBytes {
+        /// Bytes observed past the trailer.
+        excess: usize,
+    },
 }
 
 impl Display for GitDaemonTransportRefusal {
@@ -4026,6 +4113,14 @@ impl Display for GitDaemonTransportRefusal {
             Self::IncompleteNegotiation => formatter
                 .write_str("git-daemon transport ended before a complete upload-pack request"),
             Self::Wire(error) => Display::fmt(error, formatter),
+            Self::ReceivePackFraming(error) => write!(
+                formatter,
+                "git-daemon receive-pack stream is not one bounded pack: {error}"
+            ),
+            Self::ReceiveTrailingBytes { excess } => write!(
+                formatter,
+                "git-daemon receive-pack client sent {excess} bytes after its pack trailer"
+            ),
         }
     }
 }
@@ -4047,6 +4142,8 @@ impl Error for GitDaemonTransportRefusal {
             | Self::UnsupportedService { .. }
             | Self::UnsupportedProtocolVersion { .. }
             | Self::DuplicateProtocolVersion
+            | Self::ReceivePackFraming(_)
+            | Self::ReceiveTrailingBytes { .. }
             | Self::IncompleteNegotiation => None,
         }
     }
@@ -4146,6 +4243,22 @@ impl GitDaemonAdvertisementReceipt {
     }
 }
 
+/// The complete observable result of one receive-pack daemon session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitDaemonReceiveReceipt {
+    request: GitDaemonRequest,
+    /// Ref commands that reached an authenticated terminal outcome.
+    pub commands: usize,
+}
+
+impl GitDaemonReceiveReceipt {
+    /// Returns the greeting that selected this receive session.
+    #[must_use]
+    pub const fn request(&self) -> &GitDaemonRequest {
+        &self.request
+    }
+}
+
 /// The complete observable result of one legacy git-daemon session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitDaemonSessionOutcome {
@@ -4154,6 +4267,8 @@ pub enum GitDaemonSessionOutcome {
     EmptyRepository(GitDaemonAdvertisementReceipt),
     /// Negotiation selected a request and a canonical pack payload was emitted.
     Pack(GitDaemonSessionReceipt),
+    /// A receive-pack session reached authenticated terminal outcomes.
+    Receive(GitDaemonReceiveReceipt),
 }
 
 impl GitDaemonSessionOutcome {
@@ -4163,6 +4278,7 @@ impl GitDaemonSessionOutcome {
         match self {
             Self::EmptyRepository(receipt) => receipt.request(),
             Self::Pack(receipt) => receipt.request(),
+            Self::Receive(receipt) => receipt.request(),
         }
     }
 }
@@ -4178,6 +4294,8 @@ pub enum NodeGitDaemonServeRefusal {
     Pack(Box<NodePackMaterializationRefusal>),
     /// The request selected another repository endpoint before authority work.
     RepositoryPathMismatch,
+    /// The authenticated durable receive path refused the push.
+    Receive(Box<NodeReceiveTransportRefusal>),
 }
 
 impl Display for NodeGitDaemonServeRefusal {
@@ -4189,6 +4307,7 @@ impl Display for NodeGitDaemonServeRefusal {
             Self::RepositoryPathMismatch => {
                 formatter.write_str("git-daemon request does not select this node repository")
             }
+            Self::Receive(error) => Display::fmt(error, formatter),
         }
     }
 }
@@ -4200,7 +4319,14 @@ impl Error for NodeGitDaemonServeRefusal {
             Self::Admission(error) => Some(error.as_ref()),
             Self::Pack(error) => Some(error.as_ref()),
             Self::RepositoryPathMismatch => None,
+            Self::Receive(error) => Some(error.as_ref()),
         }
+    }
+}
+
+impl From<NodeReceiveTransportRefusal> for NodeGitDaemonServeRefusal {
+    fn from(value: NodeReceiveTransportRefusal) -> Self {
+        Self::Receive(Box::new(value))
     }
 }
 
@@ -4362,7 +4488,12 @@ where
         FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, GitDaemonServeError<PackError>>,
     Payload: PackPayloadSource,
 {
-    if matches!(request.upload_pack_version(), UploadPackVersion::V2) {
+    let GitDaemonService::UploadPack(upload_pack_version) = request.service() else {
+        return Err(GitDaemonServeError::Transport(
+            GitDaemonTransportRefusal::UnsupportedService { service_bytes: 16 },
+        ));
+    };
+    if matches!(upload_pack_version, UploadPackVersion::V2) {
         return serve_v2_upload_pack_after_greeting(
             reader,
             writer,
@@ -4382,8 +4513,7 @@ where
         &limits,
     )
     .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))?;
-    advertisement.version_one_prelude =
-        matches!(request.upload_pack_version(), UploadPackVersion::V1);
+    advertisement.version_one_prelude = matches!(upload_pack_version, UploadPackVersion::V1);
     write_packet_group(
         writer,
         &advertisement.encode(&limits).map_err(|error| {
@@ -4400,11 +4530,8 @@ where
         ));
     }
 
-    let mut machine =
-        LegacyUploadPack::new(request.upload_pack_version(), capabilities, limits.clone())
-            .map_err(|error| {
-                GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
-            })?;
+    let mut machine = LegacyUploadPack::new(upload_pack_version, capabilities, limits.clone())
+        .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))?;
     let mut input = [0_u8; 16 * 1024];
     loop {
         let read = reader.read(&mut input).map_err(|source| {
@@ -4649,7 +4776,8 @@ fn parse_git_daemon_request_payload(
         return Err(GitDaemonTransportRefusal::MalformedServiceRequest);
     };
     let service = &service_and_path[..separator];
-    if service != b"git-upload-pack" {
+    let is_upload = service == b"git-upload-pack";
+    if !is_upload && service != b"git-receive-pack" {
         return Err(GitDaemonTransportRefusal::UnsupportedService {
             service_bytes: service.len(),
         });
@@ -4669,19 +4797,33 @@ fn parse_git_daemon_request_payload(
         }
         requested_version = Some(version);
     }
-    let upload_pack_version = match requested_version {
-        None => UploadPackVersion::V0,
-        Some(b"1") => UploadPackVersion::V1,
-        Some(b"2") => UploadPackVersion::V2,
-        Some(version) => {
-            return Err(GitDaemonTransportRefusal::UnsupportedProtocolVersion {
-                version_bytes: version.len(),
-            });
+    let service = if is_upload {
+        GitDaemonService::UploadPack(match requested_version {
+            None => UploadPackVersion::V0,
+            Some(b"1") => UploadPackVersion::V1,
+            Some(b"2") => UploadPackVersion::V2,
+            Some(version) => {
+                return Err(GitDaemonTransportRefusal::UnsupportedProtocolVersion {
+                    version_bytes: version.len(),
+                });
+            }
+        })
+    } else {
+        // Mirror upstream receive-pack: it understands only the v0/v1 shape,
+        // ignores a `version=2` request, and still refuses a parameter that
+        // names a version no Git speaks at all.
+        match requested_version {
+            None | Some(b"1" | b"2") => GitDaemonService::ReceivePack,
+            Some(version) => {
+                return Err(GitDaemonTransportRefusal::UnsupportedProtocolVersion {
+                    version_bytes: version.len(),
+                });
+            }
         }
     };
     Ok(GitDaemonRequest {
         repository_path,
-        upload_pack_version,
+        service,
     })
 }
 
@@ -4740,6 +4882,54 @@ fn git_daemon_packet_length(header: [u8; 4]) -> Result<usize, GitDaemonTransport
             .ok_or(GitDaemonTransportRefusal::InvalidGreetingLength)?;
     }
     Ok(declared)
+}
+
+/// Everything one receive-pack daemon session needs beyond its two streams.
+struct ReceivePackSessionInputs<'a> {
+    deadline: GitDaemonSessionDeadline,
+    principal: PrincipalId,
+    materialized: &'a MaterializedAdmission,
+    request: &'a NodeRequestContext,
+    greeting: GitDaemonRequest,
+}
+
+/// Reads one bounded pkt-line frame, returning its exact raw bytes and the
+/// decoded packet. Control packets other than flush are refused: the v0/v1
+/// receive-pack command section has no delimiter or response-end grammar.
+fn read_receive_frame(
+    reader: &mut impl Read,
+    limits: &WireLimits,
+) -> Result<(Vec<u8>, Packet), GitDaemonTransportRefusal> {
+    let mut header = [0_u8; 4];
+    reader
+        .read_exact(&mut header)
+        .map_err(|source| GitDaemonTransportRefusal::Io {
+            operation: "read receive-pack pkt-line header",
+            source,
+        })?;
+    let declared = git_daemon_packet_length(header)?;
+    if declared == 0 {
+        return Ok((header.to_vec(), Packet::Flush));
+    }
+    if declared < 4 {
+        return Err(GitDaemonTransportRefusal::GreetingControlPacket);
+    }
+    if declared > limits.max_packet_bytes {
+        return Err(GitDaemonTransportRefusal::GreetingPacketTooLarge {
+            declared,
+            maximum: limits.max_packet_bytes,
+        });
+    }
+    let mut payload = vec![0_u8; declared - 4];
+    reader
+        .read_exact(&mut payload)
+        .map_err(|source| GitDaemonTransportRefusal::Io {
+            operation: "read receive-pack pkt-line payload",
+            source,
+        })?;
+    let mut raw = header.to_vec();
+    raw.extend_from_slice(&payload);
+    Ok((raw, Packet::Data(payload)))
 }
 
 fn write_packet_group(
@@ -4896,6 +5086,17 @@ pub struct NodeConfig {
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
+    /// The principal the git-daemon receive-pack lane publishes as, or `None`
+    /// to keep the compatibility default: receive-pack refused as an
+    /// unsupported service.
+    ///
+    /// The raw `git://` transport carries no authentication of its own, so the
+    /// lane opens only when the operator names the principal explicitly —
+    /// exactly the trust model `fg import` already uses for its
+    /// operator-supplied principal argument. Identity/policy wiring (FG-042/
+    /// FG-043) replaces this with authenticated principals on the
+    /// authenticated transports.
+    git_daemon_receive_principal: Option<PrincipalId>,
     /// Which cell this process is, for answers it serves.
     ///
     /// `frankengit-1egm`. Unset by default and typed as such: a deployment that
@@ -4936,6 +5137,7 @@ impl NodeConfig {
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             segment_limits: SegmentLimits::default(),
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
+            git_daemon_receive_principal: None,
         }
     }
 
@@ -5044,6 +5246,18 @@ impl NodeConfig {
         self
     }
 
+    /// Opens the git-daemon receive-pack lane, publishing as `principal`.
+    ///
+    /// Without this the daemon keeps its compatibility default and refuses
+    /// `git-receive-pack` as an unsupported service. The raw transport has no
+    /// authentication of its own, so the operator names the principal the way
+    /// `fg import` already does.
+    #[must_use]
+    pub const fn with_git_daemon_receive_principal(mut self, principal: PrincipalId) -> Self {
+        self.git_daemon_receive_principal = Some(principal);
+        self
+    }
+
     #[must_use]
     pub const fn with_git_daemon_session_timeout(
         mut self,
@@ -5141,6 +5355,7 @@ pub struct OneNode {
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
+    git_daemon_receive_principal: Option<PrincipalId>,
     /// Which cell this process is, stamped onto answers it serves.
     serving_cell: ServingCell,
     /// Re-openable service configuration for independently owned transport
@@ -5437,6 +5652,7 @@ impl OneNode {
             max_object_bytes: config.max_object_bytes,
             segment_limits: config.segment_limits,
             git_daemon_session_timeout: config.git_daemon_session_timeout,
+            git_daemon_receive_principal: config.git_daemon_receive_principal,
             serving_cell: config.serving_cell,
             service_config,
             push_quota: PushQuota::default(),
@@ -6574,6 +6790,41 @@ impl OneNode {
         let materialized = admission.map_err(|error| {
             NodeGitDaemonServeRefusal::from(NodeAdmissionViewRefusal::from(error))
         })?;
+        if greeting.service() == GitDaemonService::ReceivePack {
+            // The raw transport authenticates nobody, so this lane opens only
+            // when the operator explicitly named a publishing principal; the
+            // compatibility default remains the same refusal the parser used
+            // to emit before the lane existed.
+            let Some(principal) = self.git_daemon_receive_principal else {
+                return Err(NodeGitDaemonServeRefusal::from(
+                    GitDaemonTransportRefusal::UnsupportedService { service_bytes: 16 },
+                ));
+            };
+            let served = {
+                let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline);
+                self.serve_git_daemon_receive_pack_session(
+                    &mut reader,
+                    &mut writer,
+                    ReceivePackSessionInputs {
+                        deadline,
+                        principal,
+                        materialized: &materialized,
+                        request: &request,
+                        greeting,
+                    },
+                    &limits,
+                )?
+            };
+            let _ = response_stream.shutdown(Shutdown::Write);
+            let mut drain_buf = [0_u8; 1024];
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(1000)));
+            while let Ok(read) = stream.read(&mut drain_buf) {
+                if read == 0 {
+                    break;
+                }
+            }
+            return Ok(served);
+        }
         let repository = AdmissionUploadPackRepository::from_snapshot(
             materialized.snapshot(),
             self.object_format,
@@ -6681,6 +6932,222 @@ impl OneNode {
             }
         }
         Ok(served)
+    }
+
+    /// Serves one raw git-daemon `git-receive-pack` session end to end.
+    ///
+    /// The advertisement derives from the same authenticated materialization
+    /// the upload lane uses and passes through [`filter_advertised_refs`], so
+    /// a hidden ref never reaches the wire. The command section and pack
+    /// stream are captured verbatim and then admitted through the node's one
+    /// authenticated durable receive boundary
+    /// ([`Self::receive_loopback_pack_durable_in`]), which owns quarantine,
+    /// validation, policy, and exact-predecessor head publication; this
+    /// transport arm never invents a second admission path. `report-status`
+    /// derives only from authenticated terminal outcomes.
+    ///
+    /// The client retry identity is the digest of the exact command section,
+    /// so an identical retried push resolves to the same sealed transaction
+    /// while any semantic change selects a fresh identity.
+    fn serve_git_daemon_receive_pack_session<R, W>(
+        &self,
+        reader: &mut R,
+        writer: &mut W,
+        inputs: ReceivePackSessionInputs<'_>,
+        limits: &WireLimits,
+    ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal>
+    where
+        R: Read,
+        W: Write,
+    {
+        let ReceivePackSessionInputs {
+            deadline,
+            principal,
+            materialized,
+            request,
+            greeting,
+        } = inputs;
+        let receive_limits = ReceiveLimits {
+            wire: limits.clone(),
+            ..ReceiveLimits::default()
+        };
+        let format_name = match self.object_format {
+            GitHashAlgorithm::Sha1 => "sha1",
+            GitHashAlgorithm::Sha256 => "sha256",
+        };
+        let capability_text =
+            format!("report-status delete-refs ofs-delta object-format={format_name}");
+        let server_capabilities = Capabilities::parse_v1(capability_text.as_bytes(), limits)
+            .map_err(GitDaemonTransportRefusal::Wire)
+            .map_err(NodeGitDaemonServeRefusal::from)?;
+        let wire_format = match self.object_format {
+            GitHashAlgorithm::Sha1 => GitObjectFormat::Sha1,
+            GitHashAlgorithm::Sha256 => GitObjectFormat::Sha256,
+        };
+        let context = ReceiveContext::new(
+            wire_format,
+            server_capabilities,
+            receive_limits.clone(),
+            SignedPushProfile::Refuse,
+        )
+        .map_err(NodeReceiveTransportRefusal::from)
+        .map_err(NodeGitDaemonServeRefusal::from)?;
+
+        deadline
+            .check("prepare receive-pack advertisement")
+            .map_err(NodeGitDaemonServeRefusal::from)?;
+        let snapshot = materialized.snapshot();
+        // The visible set is derived once, exactly as the upload lane does:
+        // every later decision reads it, so nothing is computed over refs the
+        // principal never sees.
+        let mut visible = Vec::new();
+        for (name, oid) in snapshot
+            .refs
+            .iter()
+            .filter(|&(name, _)| !snapshot.hidden_refs.hides(name.as_bytes()))
+        {
+            if oid.algorithm() != self.object_format {
+                return Err(NodeGitDaemonServeRefusal::from(
+                    NodeReceiveTransportRefusal::from(ReceiveError::AuthoritativeRefusal(
+                        RefusalCode::HashAlgorithmDomainMismatch,
+                    )),
+                ));
+            }
+            visible.push(
+                AdvertisedRef::new(*oid, name.as_bytes(), limits)
+                    .map_err(GitDaemonTransportRefusal::Wire)
+                    .map_err(NodeGitDaemonServeRefusal::from)?,
+            );
+        }
+        // The canonical visibility helper stays on the wire path even though
+        // the set above is already visible-only: advertisement encoding must
+        // never depend on a caller having remembered to pre-filter.
+        let advertised = filter_advertised_refs(&visible, &snapshot.hidden_refs);
+        let advertisement = advertise_receive_pack(advertised, &context)
+            .map_err(NodeReceiveTransportRefusal::from)
+            .map_err(NodeGitDaemonServeRefusal::from)?;
+        write_packet_group(writer, &advertisement, limits)
+            .map_err(NodeGitDaemonServeRefusal::from)?;
+
+        // Frame the command section packet by packet so the machine decides
+        // when the request is complete; capture the raw bytes verbatim for the
+        // single authenticated admission pass below.
+        let mut machine = ReceivePack::new(context.clone())
+            .map_err(NodeReceiveTransportRefusal::from)
+            .map_err(NodeGitDaemonServeRefusal::from)?;
+        let mut captured = Vec::new();
+        let ready: Box<ReceiveRequest> = 'commands: loop {
+            deadline
+                .check("read receive-pack command section")
+                .map_err(NodeGitDaemonServeRefusal::from)?;
+            let (raw, packet) = read_receive_frame(reader, limits)
+                .map_err(classify_session_deadline)
+                .map_err(NodeGitDaemonServeRefusal::from)?;
+            captured.extend_from_slice(&raw);
+            let transition = machine
+                .push_packet(packet)
+                .map_err(NodeReceiveTransportRefusal::from)
+                .map_err(NodeGitDaemonServeRefusal::from)?;
+            for event in transition.events {
+                if let ReceiveEvent::RequestReady(request_ready) = event {
+                    break 'commands request_ready;
+                }
+            }
+        };
+        let command_section_bytes = captured.len();
+
+        if ready.requires_pack() {
+            let mut scanner =
+                PackBoundaryScanner::new(self.object_format, receive_limits.pack.clone());
+            let mut live = || !deadline.expired();
+            let mut chunk = [0_u8; 8_192];
+            loop {
+                deadline
+                    .check("read receive-pack pack stream")
+                    .map_err(NodeGitDaemonServeRefusal::from)?;
+                let read = reader.read(&mut chunk).map_err(|source| {
+                    NodeGitDaemonServeRefusal::from(classify_session_deadline(
+                        GitDaemonTransportRefusal::Io {
+                            operation: "read receive-pack pack stream",
+                            source,
+                        },
+                    ))
+                })?;
+                if read == 0 {
+                    return Err(NodeGitDaemonServeRefusal::from(
+                        GitDaemonTransportRefusal::IncompleteNegotiation,
+                    ));
+                }
+                captured.extend_from_slice(&chunk[..read]);
+                match scanner
+                    .push(&chunk[..read], &mut live)
+                    .map_err(GitDaemonTransportRefusal::ReceivePackFraming)
+                    .map_err(NodeGitDaemonServeRefusal::from)?
+                {
+                    ScanStatus::NeedInput => {}
+                    ScanStatus::Finished { .. } => {
+                        let excess = scanner.excess_bytes().len();
+                        if excess != 0 {
+                            return Err(NodeGitDaemonServeRefusal::from(
+                                GitDaemonTransportRefusal::ReceiveTrailingBytes { excess },
+                            ));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut hasher = <CryptoSha256 as CryptoDigestAlgorithm>::Hasher::new();
+        hasher.update(b"frankengit.git-daemon.receive-idempotency/v1\0");
+        hasher.update(greeting.repository_path().as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&captured[..command_section_bytes]);
+        let retry_key = IdempotencyKey::new(hasher.finish().to_vec())
+            .map_err(|_| NodeReceiveTransportRefusal::Unauthenticated)
+            .map_err(NodeGitDaemonServeRefusal::from)?;
+        let session = LoopbackReceiveSession::authenticated(principal, retry_key);
+
+        let admission_deadline_expired = AtomicBool::new(false);
+        let mut cancellation = || {
+            if deadline.expired() {
+                admission_deadline_expired.store(true, Ordering::Relaxed);
+                return false;
+            }
+            true
+        };
+        let outcome = self
+            .runtime
+            .block_on(self.receive_loopback_pack_durable_in(
+                request,
+                &session,
+                materialized,
+                context,
+                &captured,
+                ParseLimits::default(),
+                AdmissionLimits::default(),
+                &mut cancellation,
+            ))
+            .map_err(NodeGitDaemonServeRefusal::from)?;
+        if admission_deadline_expired.load(Ordering::Relaxed) {
+            return Err(NodeGitDaemonServeRefusal::from(
+                GitDaemonTransportRefusal::SessionDeadlineExceeded {
+                    operation: "admit receive-pack request",
+                },
+            ));
+        }
+
+        let report = outcome
+            .report_packets(&ready, &receive_limits)
+            .map_err(NodeReceiveTransportRefusal::from)
+            .map_err(NodeGitDaemonServeRefusal::from)?;
+        if !report.is_empty() {
+            write_packet_group(writer, &report, limits).map_err(NodeGitDaemonServeRefusal::from)?;
+        }
+        Ok(GitDaemonSessionOutcome::Receive(GitDaemonReceiveReceipt {
+            request: greeting,
+            commands: outcome.commands.len(),
+        }))
     }
 
     /// Accepts a bounded number of git-daemon sessions and drains every child
@@ -8453,13 +8920,21 @@ mod tests {
     }
 
     #[test]
-    fn git_daemon_parser_refuses_a_non_upload_pack_service() {
-        let greeting = daemon_greeting(b"git-receive-pack /demo.git\0host=example.test\0");
+    fn git_daemon_parser_refuses_a_service_outside_the_served_set() {
+        let greeting = daemon_greeting(b"git-upload-archive /demo.git\0host=example.test\0");
 
         assert!(matches!(
             parse_git_daemon_request(&greeting, WireLimits::default()),
             Err(GitDaemonTransportRefusal::UnsupportedService { .. })
         ));
+
+        // The receive-pack grammar parses since the daemon push lane
+        // (frankengit-hh37); an unconfigured node refuses it at the service
+        // gate instead, pinned by the git_daemon_receive_transport suite.
+        let receive = daemon_greeting(b"git-receive-pack /demo.git\0host=example.test\0");
+        let request = parse_git_daemon_request(&receive, WireLimits::default())
+            .expect("receive-pack is a served grammar");
+        assert_eq!(request.service(), crate::GitDaemonService::ReceivePack);
     }
 
     #[test]

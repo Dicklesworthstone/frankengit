@@ -182,7 +182,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -405,7 +405,8 @@ pub enum CliOutcome {
 
 /// Executes a bounded command invocation without ambient configuration.
 pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
-    match arguments {
+    let (arguments, receive_principal) = extract_receive_principal(arguments)?;
+    match &arguments[..] {
         [command, storage_root, tenant, repository] if command == "init" => run_init(
             storage_root,
             tenant,
@@ -566,6 +567,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 listen_address,
                 None,
                 GitDaemonServerLimits::DEFAULT,
+                receive_principal,
             )
         }
         [
@@ -586,6 +588,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 RepositoryResolutionInput::TransportTarget,
             )?),
             GitDaemonServerLimits::DEFAULT,
+            receive_principal,
         ),
         [
             command,
@@ -608,6 +611,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 listen_address,
                 None,
                 parse_server_limits(sessions, in_flight)?,
+                receive_principal,
             )
         }
         [
@@ -637,9 +641,10 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                     RepositoryResolutionInput::TransportTarget,
                 )?),
                 parse_server_limits(sessions, in_flight)?,
+                receive_principal,
             )
         }
-        [command, ..] if command == "at" => parse_and_run_at(arguments),
+        [command, ..] if command == "at" => parse_and_run_at(&arguments),
         _ => Err(CliRefusal::Usage),
     }
 }
@@ -673,19 +678,18 @@ fn run_serve(
     listen_address: &str,
     resolution_input: Option<RepositoryResolutionInput>,
     server_limits: GitDaemonServerLimits,
+    receive_principal: Option<PrincipalId>,
 ) -> Result<CliOutcome, CliRefusal> {
     {
         {
             let listener = TcpListener::bind(listen_address).map_err(CliRefusal::Listener)?;
             let listen_address = listener.local_addr().map_err(CliRefusal::Listener)?;
-            let mut node = OneNode::open_existing(node_config(
-                storage_root,
-                tenant,
-                repository,
-                None,
-                resolution_input,
-            )?)
-            .map_err(CliRefusal::Node)?;
+            let mut configuration =
+                node_config(storage_root, tenant, repository, None, resolution_input)?;
+            if let Some(principal) = receive_principal {
+                configuration = configuration.with_git_daemon_receive_principal(principal);
+            }
+            let mut node = OneNode::open_existing(configuration).map_err(CliRefusal::Node)?;
             let _ = node.bring_into_service(HeadGeneration::FIRST);
             let serving =
                 node.serve_git_daemon_bounded(&listener, server_limits, Default::default());
@@ -1428,6 +1432,39 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
             cleanup: Box::new(cleanup),
         }),
     }
+}
+
+/// Strips one optional `--receive-principal <principal-id-hex>` pair from a
+/// `serve` invocation before positional dispatch.
+///
+/// Extraction rather than more fixed arms keeps the flag orthogonal to
+/// `--expected-incarnation` and the session bounds. The flag is meaningful
+/// only for `serve`; anywhere else it stays in place and falls through to the
+/// usage refusal, so no other command silently accepts it.
+fn extract_receive_principal(
+    arguments: &[String],
+) -> Result<(Vec<String>, Option<PrincipalId>), CliRefusal> {
+    let is_serve = arguments.first().is_some_and(|command| command == "serve");
+    let mut retained = Vec::with_capacity(arguments.len());
+    let mut principal = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if is_serve && argument == "--receive-principal" {
+            if principal.is_some() {
+                return Err(CliRefusal::Usage);
+            }
+            let Some(value) = arguments.get(index + 1) else {
+                return Err(CliRefusal::Usage);
+            };
+            principal = Some(PrincipalId::from_hex(value).map_err(CliRefusal::Principal)?);
+            index += 2;
+            continue;
+        }
+        retained.push(argument.clone());
+        index += 1;
+    }
+    Ok((retained, principal))
 }
 
 fn node_config(

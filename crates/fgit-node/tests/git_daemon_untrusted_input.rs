@@ -67,7 +67,9 @@
 //!
 //! Nothing here modifies `crates/fgit-node/src/**` or any manifest.
 
-use fgit_node::{GitDaemonPathRefusal, GitDaemonTransportRefusal, parse_git_daemon_request};
+use fgit_node::{
+    GitDaemonPathRefusal, GitDaemonService, GitDaemonTransportRefusal, parse_git_daemon_request,
+};
 use fgit_wire::{UploadPackVersion, WireLimits};
 
 /// Wraps a payload in one pkt-line frame: four lowercase hex bytes of total
@@ -246,16 +248,45 @@ fn a_greeting_with_no_space_is_refused() {
     );
 }
 
-/// Only `git-upload-pack` is served on this lane; the refusal reports the
-/// length of what was asked for rather than echoing untrusted bytes.
+/// Only the two served services parse; the refusal reports the length of what
+/// was asked for rather than echoing untrusted bytes.
+///
+/// `git-receive-pack` moved from a parse refusal to a served grammar when the
+/// daemon gained its push lane (frankengit-hh37); the boundary that refuses it
+/// on an unconfigured node now lives at the service gate, where the twin below
+/// pins the accepted parse.
 #[test]
-fn a_service_other_than_upload_pack_is_refused() {
-    let error = parse(&frame(b"git-receive-pack /repo\0"))
-        .expect_err("receive-pack is not served on the V0 daemon lane");
+fn a_service_outside_the_served_set_is_refused() {
+    let error = parse(&frame(b"git-upload-archive /repo\0"))
+        .expect_err("upload-archive is not served on the daemon lane");
     assert!(
         matches!(
             error,
-            GitDaemonTransportRefusal::UnsupportedService { service_bytes: 16 }
+            GitDaemonTransportRefusal::UnsupportedService { service_bytes: 18 }
+        ),
+        "got {error:?}"
+    );
+
+    let request = parse(&frame(b"git-receive-pack /repo\0"))
+        .expect("receive-pack is a served grammar since the daemon push lane");
+    assert_eq!(request.service(), GitDaemonService::ReceivePack);
+}
+
+/// Upstream receive-pack ignores a `version=2` parameter and answers with the
+/// v0 advertisement; the parser mirrors that instead of inventing a v2 push.
+/// A version no Git speaks stays refused.
+#[test]
+fn receive_pack_ignores_version_two_but_refuses_unknown_versions() {
+    let request = parse(&frame(b"git-receive-pack /repo\0\0version=2\0"))
+        .expect("a v2-requesting push client is served the v0 shape");
+    assert_eq!(request.service(), GitDaemonService::ReceivePack);
+
+    let error = parse(&frame(b"git-receive-pack /repo\0\0version=3\0"))
+        .expect_err("an unknown protocol generation stays refused");
+    assert!(
+        matches!(
+            error,
+            GitDaemonTransportRefusal::UnsupportedProtocolVersion { version_bytes: 1 }
         ),
         "got {error:?}"
     );
@@ -341,7 +372,10 @@ fn a_version_two_request_is_now_admitted_and_selects_the_v2_lane() {
     // unknown-generation refusal twin below keeps the closed set honest.
     let request = parse(&frame(b"git-upload-pack /repo\0version=2\0"))
         .expect("version=2 selects the served v2 lane");
-    assert_eq!(request.upload_pack_version(), UploadPackVersion::V2);
+    assert_eq!(
+        request.service(),
+        GitDaemonService::UploadPack(UploadPackVersion::V2)
+    );
 }
 
 #[test]
@@ -391,12 +425,12 @@ fn a_missing_terminator_outranks_a_missing_space() {
 /// between a hostile peer and a lookup key.
 #[test]
 fn an_unsupported_service_outranks_a_traversal_path() {
-    let error = parse(&frame(b"git-receive-pack /../../etc\0"))
+    let error = parse(&frame(b"git-upload-archive /../../etc\0"))
         .expect_err("an input wrong in two ways must still refuse");
     assert!(
         matches!(
             error,
-            GitDaemonTransportRefusal::UnsupportedService { service_bytes: 16 }
+            GitDaemonTransportRefusal::UnsupportedService { service_bytes: 18 }
         ),
         "the service is rejected before the path is parsed, got {error:?}"
     );

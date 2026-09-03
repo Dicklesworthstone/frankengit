@@ -15,7 +15,8 @@ use std::convert::Infallible;
 use std::io::Cursor;
 
 use fgit_node::{
-    GitDaemonTransportRefusal, parse_git_daemon_request, serve_git_daemon_upload_pack,
+    GitDaemonService, GitDaemonTransportRefusal, parse_git_daemon_request,
+    serve_git_daemon_upload_pack,
 };
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource,
@@ -66,7 +67,7 @@ fn capabilities() -> Capabilities {
         .expect("the deterministic test capability is valid v0/v1 wire text")
 }
 
-fn serve_empty(greeting: Vec<u8>, capabilities: Capabilities) -> (UploadPackVersion, Vec<u8>) {
+fn serve_empty(greeting: Vec<u8>, capabilities: Capabilities) -> (GitDaemonService, Vec<u8>) {
     let mut reader = Cursor::new(greeting);
     let mut output = Vec::new();
     let outcome = serve_git_daemon_upload_pack(
@@ -78,7 +79,7 @@ fn serve_empty(greeting: Vec<u8>, capabilities: Capabilities) -> (UploadPackVers
         |_request, _pack_request| -> Result<EmptyPayload, Infallible> { Ok(EmptyPayload) },
     )
     .expect("an empty repository finishes after its complete advertisement");
-    (outcome.request().upload_pack_version(), output)
+    (outcome.request().service(), output)
 }
 
 #[test]
@@ -86,8 +87,14 @@ fn version_one_greeting_emits_only_its_required_prelude_before_the_v0_advertisem
     let (v0_version, v0_advertisement) = serve_empty(greeting(&[]), capabilities());
     let (v1_version, v1_advertisement) = serve_empty(greeting(&[b"version=1"]), capabilities());
 
-    assert_eq!(v0_version, UploadPackVersion::V0);
-    assert_eq!(v1_version, UploadPackVersion::V1);
+    assert_eq!(
+        v0_version,
+        GitDaemonService::UploadPack(UploadPackVersion::V0)
+    );
+    assert_eq!(
+        v1_version,
+        GitDaemonService::UploadPack(UploadPackVersion::V1)
+    );
 
     const V1_PRELUDE: &[u8] = b"000eversion 1\n";
     assert!(
