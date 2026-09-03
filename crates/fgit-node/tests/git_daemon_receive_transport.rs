@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest};
 use fgit_node::{NodeConfig, OneNode};
+use fgit_types::cell::{CellState, CellTransitionCause};
 use fgit_types::numeric::HeadGeneration;
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 use fgit_wire::WireLimits;
@@ -444,5 +445,77 @@ fn a_second_push_keeps_the_first_pushes_objects_servable() {
     assert!(
         closure.contains(&first_blob),
         "the earlier decision's object stays servable after a later push"
+    );
+}
+
+/// A push whose pack validates but whose publication is refused must be told to
+/// the client through report-status, not by closing the socket.
+///
+/// A `StagingOnly` cell is the deterministic small-corpus way to reach that
+/// refusal: it accepts and validates the pushed pack, then refuses to publish
+/// it. Before frankengit-xefn the session returned an error and the daemon
+/// closed the connection, leaving `git push` to print only "the remote end
+/// hung up unexpectedly"; now the client receives an `unpack`/`ng`
+/// report-status naming the reason, and nothing is published.
+#[test]
+fn a_publication_refusal_is_reported_not_hung_up() {
+    let scratch = ScratchDirectory::new();
+    let base = config(scratch.0.clone());
+    let (created, _) = OneNode::init(base.clone()).expect("the genesis configuration persists");
+    created.shutdown().expect("the initialized node quiesces");
+    let mut node = OneNode::open_existing(base.with_git_daemon_receive_principal(receive_principal()))
+        .expect("the published head opens");
+    node.bring_into_service(HeadGeneration::FIRST)
+        .expect("the reopened node enters service");
+    node.transition_cell_state(
+        CellState::StagingOnly,
+        CellTransitionCause::Operator,
+        HeadGeneration::FIRST,
+    )
+    .expect("serving -> staging-only is a legal operator transition");
+
+    let repository_path = node.git_daemon_repository_path().as_bytes().to_vec();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+    let address = listener.local_addr().expect("listener reports its address");
+    let server_thread = thread::spawn(move || {
+        let served = node
+            .serve_git_daemon_once_with_limits(&listener, WireLimits::default())
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        node.shutdown().expect("the staging node quiesces");
+        served
+    });
+
+    let mut client = TcpStream::connect(address).expect("push client connects");
+    client
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("client read timeout configures");
+    client
+        .write_all(&greeting(&repository_path))
+        .expect("push greeting writes");
+    let _advertisement = read_through_flush(&mut client);
+    client.write_all(&push_request()).expect("push body writes");
+    // The pack is validated in full before publication is refused, so the
+    // client is reading the response: a report-status must arrive.
+    let report = read_through_flush(&mut client);
+    let server = server_thread.join().expect("server thread joins");
+
+    server
+        .as_ref()
+        .expect("the session completes by reporting the rejection, not erroring");
+    let text = String::from_utf8_lossy(&report);
+    assert!(
+        text.contains("unpack "),
+        "an unpack status line is reported to the client, got {text:?}"
+    );
+    assert!(
+        text.contains("ng "),
+        "the ref is reported rejected with an ng line, got {text:?}"
+    );
+
+    let refs = materialized_refs(&scratch);
+    assert!(
+        refs.is_empty(),
+        "a refused publication publishes nothing, got {refs:?}"
     );
 }
