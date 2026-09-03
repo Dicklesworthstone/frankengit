@@ -143,26 +143,100 @@ mod tests {
         TxId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, bytes(byte))
     }
 
-    fn input(payload: u8) -> OutboxDeliveryIdentityInput {
+    fn rcr(byte: u8) -> RepositoryCommitId {
+        RepositoryCommitId::from_digest(
+            algorithm(),
+            CANONICAL_CODEC_VERSION,
+            bytes(byte),
+        )
+    }
+
+    fn input() -> OutboxDeliveryIdentityInput {
         OutboxDeliveryIdentityInput::new(
             RepositoryId::from_bytes([0x11; 16]),
             AsciiSlug::from_static("forge-event-delivery"),
             AsciiSlug::from_static("forge-stream"),
-            digest(payload),
+            digest(0x41),
             tx(0x31),
-            None,
+            Some(rcr(0x32)),
         )
     }
 
     #[test]
-    fn identity_is_deterministic_and_change_sensitive() {
-        let first = derive_outbox_delivery_key(input(0x41)).expect("delivery key");
-        let identical = derive_outbox_delivery_key(input(0x41)).expect("delivery key");
-        let changed = derive_outbox_delivery_key(input(0x42)).expect("delivery key");
+    fn identity_is_deterministic_and_canonical_text() {
+        let first = derive_outbox_delivery_key(input()).expect("delivery key");
+        let identical = derive_outbox_delivery_key(input()).expect("delivery key");
 
         assert_eq!(first, identical);
-        assert_ne!(first, changed);
         assert_eq!(first.len(), 64);
-        assert!(first.as_bytes().iter().all(u8::is_ascii_hexdigit));
+        assert!(
+            first
+                .as_bytes()
+                .iter()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+    }
+
+    #[test]
+    fn every_semantic_field_changes_the_identity() {
+        let basis = input();
+        let expected = derive_outbox_delivery_key(basis).expect("basis key");
+        let variants = [
+            OutboxDeliveryIdentityInput::new(
+                RepositoryId::from_bytes([0x12; 16]),
+                basis.effect_class(),
+                basis.destination(),
+                basis.payload_root(),
+                basis.tx_id(),
+                basis.predecessor_rcr_id(),
+            ),
+            OutboxDeliveryIdentityInput::new(
+                basis.repository_id(),
+                AsciiSlug::from_static("another-effect-class"),
+                basis.destination(),
+                basis.payload_root(),
+                basis.tx_id(),
+                basis.predecessor_rcr_id(),
+            ),
+            OutboxDeliveryIdentityInput::new(
+                basis.repository_id(),
+                basis.effect_class(),
+                AsciiSlug::from_static("another-destination"),
+                basis.payload_root(),
+                basis.tx_id(),
+                basis.predecessor_rcr_id(),
+            ),
+            OutboxDeliveryIdentityInput::new(
+                basis.repository_id(),
+                basis.effect_class(),
+                basis.destination(),
+                digest(0x42),
+                basis.tx_id(),
+                basis.predecessor_rcr_id(),
+            ),
+            OutboxDeliveryIdentityInput::new(
+                basis.repository_id(),
+                basis.effect_class(),
+                basis.destination(),
+                basis.payload_root(),
+                tx(0x33),
+                basis.predecessor_rcr_id(),
+            ),
+            OutboxDeliveryIdentityInput::new(
+                basis.repository_id(),
+                basis.effect_class(),
+                basis.destination(),
+                basis.payload_root(),
+                basis.tx_id(),
+                None,
+            ),
+        ];
+
+        for variant in variants {
+            assert_ne!(
+                derive_outbox_delivery_key(variant).expect("variant key"),
+                expected
+            );
+        }
     }
 }
