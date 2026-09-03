@@ -6,17 +6,35 @@ use fgit_codec::{
     CodecRefusal, DecodeLimits, ForgePositionStateEntry, decode_body, encode_body,
 };
 use fgit_types::{
-    AsciiSlug, Digest, DigestAlgorithmId, DigestBytes, RepositoryId,
+    AsciiSlug, CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes,
+    RepositoryCommitId, RepositoryId, TxId,
 };
 
 fn slug(value: &'static str) -> AsciiSlug {
     AsciiSlug::from_static(value)
 }
 
+fn digest_bytes(byte: u8) -> DigestBytes {
+    DigestBytes::try_new(&[byte; 32]).expect("fixed-width digest")
+}
+
+fn algorithm() -> DigestAlgorithmId {
+    DigestAlgorithmId::try_new(2).expect("registered SHA-256 code point")
+}
+
 fn digest(byte: u8) -> Digest {
-    Digest::new(
-        DigestAlgorithmId::try_new(2).expect("registered SHA-256 code point"),
-        DigestBytes::try_new(&[byte; 32]).expect("fixed-width digest"),
+    Digest::new(algorithm(), digest_bytes(byte))
+}
+
+fn tx_id(byte: u8) -> TxId {
+    TxId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, digest_bytes(byte))
+}
+
+fn rcr_id(byte: u8) -> RepositoryCommitId {
+    RepositoryCommitId::from_digest(
+        algorithm(),
+        CANONICAL_CODEC_VERSION,
+        digest_bytes(byte),
     )
 }
 
@@ -41,8 +59,8 @@ fn outbox_entry(key: &'static str, payload_root: u8) -> CanonicalOutboxStateEntr
         slug("forge-event-delivery"),
         slug("forge-stream"),
         digest(payload_root),
-        digest(0x61),
-        digest(0x62),
+        tx_id(0x60),
+        Some(rcr_id(0x61)),
         digest(0x63),
         Some(digest(0x64)),
     )
@@ -122,6 +140,8 @@ fn outbox_state_round_trips_and_every_semantic_field_is_bound() {
     assert_eq!(delivery.payload_root(), digest(0x52));
     assert_eq!(delivery.effect_class(), slug("forge-event-delivery"));
     assert_eq!(delivery.destination(), slug("forge-stream"));
+    assert_eq!(delivery.tx_id(), tx_id(0x60));
+    assert_eq!(delivery.predecessor_rcr_id(), Some(rcr_id(0x61)));
 }
 
 #[test]
