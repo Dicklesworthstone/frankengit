@@ -4,6 +4,7 @@
 pub mod attest;
 pub mod bounds;
 pub mod bridge;
+pub mod canonical_state;
 pub mod error;
 pub mod harness;
 pub mod reader;
@@ -18,6 +19,10 @@ pub use attest::{
 };
 pub use bounds::DecodeLimits;
 pub use bridge::CryptoBodyIdentity;
+pub use canonical_state::{
+    CanonicalForgePositionState, CanonicalOutboxState, CanonicalOutboxStateEntry,
+    ForgePositionStateEntry, MAX_FORGE_POSITION_STATE_ENTRIES, MAX_OUTBOX_STATE_ENTRIES,
+};
 pub use error::CodecRefusal;
 pub use reader::Decoder;
 pub use repository_configuration::RepositoryIncarnationConfigurationBodyV2_2;
