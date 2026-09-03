@@ -191,12 +191,11 @@ impl CanonicalBody for CanonicalForgePositionState {
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         let repository_id = RepositoryId::from_bytes(input.read_opaque_id("repository_id")?);
-        let values = input.read_canonical_map(
+        let values = read_bounded_slug_map(
+            input,
             "forge_positions",
-            |input| {
-                AsciiSlug::try_new("forge_stream", input.read_bytes("forge_stream")?)
-                    .map_err(CodecRefusal::from)
-            },
+            "forge_stream",
+            MAX_FORGE_POSITION_STATE_ENTRIES,
             |input| {
                 let predecessor_position = input.read_scalar::<u64>("predecessor_position")?;
                 let event_count = input.read_scalar::<u32>("event_count")?;
@@ -207,11 +206,6 @@ impl CanonicalBody for CanonicalForgePositionState {
                     event_batch_root: input.read_digest()?,
                 })
             },
-        )?;
-        check_entry_count(
-            "forge_positions",
-            values.len(),
-            MAX_FORGE_POSITION_STATE_ENTRIES,
         )?;
         Ok(Self {
             repository_id,
@@ -445,15 +439,11 @@ impl CanonicalBody for CanonicalOutboxState {
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         let repository_id = RepositoryId::from_bytes(input.read_opaque_id("repository_id")?);
-        let values = input.read_canonical_map(
+        let values = read_bounded_slug_map(
+            input,
             "outbox_entries",
-            |input| {
-                AsciiSlug::try_new(
-                    "outbox_delivery_key",
-                    input.read_bytes("outbox_delivery_key")?,
-                )
-                .map_err(CodecRefusal::from)
-            },
+            "outbox_delivery_key",
+            MAX_OUTBOX_STATE_ENTRIES,
             |input| {
                 let effect_class = AsciiSlug::try_new(
                     "outbox_effect_class",
@@ -486,11 +476,6 @@ impl CanonicalBody for CanonicalOutboxState {
                 })
             },
         )?;
-        check_entry_count(
-            "outbox_entries",
-            values.len(),
-            MAX_OUTBOX_STATE_ENTRIES,
-        )?;
         Ok(Self {
             repository_id,
             entries: values
@@ -519,6 +504,77 @@ struct OutboxStateValue {
     predecessor_rcr_id: Option<RepositoryCommitId>,
     effect_state_root: Digest,
     predecessor_effect_state_root: Option<Digest>,
+}
+
+fn read_bounded_slug_map<V, F>(
+    input: &mut Decoder<'_>,
+    collection_field: &'static str,
+    key_field: &'static str,
+    schema_limit: usize,
+    mut read_value: F,
+) -> Result<Vec<(AsciiSlug, V)>, CodecRefusal>
+where
+    F: FnMut(&mut Decoder<'_>) -> Result<V, CodecRefusal>,
+{
+    if input.limits().depth == 0 {
+        return Err(CodecRefusal::DepthBoundExceeded {
+            limit: 0,
+            offset: input.offset(),
+        });
+    }
+    let collection_offset = input.offset();
+    let declared = u64::from(input.read_scalar::<u32>(collection_field)?);
+    let permanent_limit = u64::try_from(schema_limit).unwrap_or(u64::MAX);
+    let limit = input.limits().elements.min(permanent_limit);
+    if declared > limit {
+        return Err(CodecRefusal::CountBoundExceeded {
+            field: collection_field,
+            observed: declared,
+            limit,
+        });
+    }
+    let available = u64::try_from(input.remaining()).unwrap_or(u64::MAX);
+    if declared > available {
+        return Err(CodecRefusal::CountBoundExceeded {
+            field: collection_field,
+            observed: declared,
+            limit: available,
+        });
+    }
+    let count = usize::try_from(declared).map_err(|_| CodecRefusal::CountBoundExceeded {
+        field: collection_field,
+        observed: declared,
+        limit,
+    })?;
+    let mut values = Vec::with_capacity(count);
+    let mut previous: Option<AsciiSlug> = None;
+    for index in 0..count {
+        let key = AsciiSlug::try_new(key_field, input.read_bytes(key_field)?)
+            .map_err(CodecRefusal::from)?;
+        if let Some(previous) = previous {
+            let index = u64::try_from(index).unwrap_or(u64::MAX);
+            match compare_slug(previous, key) {
+                Ordering::Equal => {
+                    return Err(CodecRefusal::CollectionDuplicate {
+                        field: collection_field,
+                        index,
+                        offset: collection_offset,
+                    });
+                }
+                Ordering::Greater => {
+                    return Err(CodecRefusal::CollectionUnordered {
+                        field: collection_field,
+                        index,
+                        offset: collection_offset,
+                    });
+                }
+                Ordering::Less => {}
+            }
+        }
+        previous = Some(key);
+        values.push((key, read_value(input)?));
+    }
+    Ok(values)
 }
 
 fn canonical_state_root<B: CanonicalBody>(body: &B) -> Result<Digest, CodecRefusal> {
@@ -617,6 +673,7 @@ mod tests {
     use fgit_types::{DigestAlgorithmId, DigestBytes};
 
     use super::*;
+    use crate::DecodeLimits;
 
     fn slug(value: &'static str) -> AsciiSlug {
         AsciiSlug::from_static(value)
@@ -662,5 +719,28 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn permanent_schema_limit_precedes_collection_allocation() {
+        let mut payload = vec![0x11; 16];
+        payload.extend_from_slice(
+            &u32::try_from(MAX_FORGE_POSITION_STATE_ENTRIES + 1)
+                .expect("schema limit fits u32")
+                .to_be_bytes(),
+        );
+        let mut decoder = Decoder::new(&payload, DecodeLimits::DEFAULT);
+
+        assert_eq!(
+            CanonicalForgePositionState::read_payload(&mut decoder)
+                .expect_err("schema limit must beat the generic decoder limit"),
+            CodecRefusal::CountBoundExceeded {
+                field: "forge_positions",
+                observed: u64::try_from(MAX_FORGE_POSITION_STATE_ENTRIES + 1)
+                    .expect("schema limit fits u64"),
+                limit: u64::try_from(MAX_FORGE_POSITION_STATE_ENTRIES)
+                    .expect("schema limit fits u64"),
+            }
+        );
     }
 }
