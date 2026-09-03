@@ -11,13 +11,10 @@
 //! winning head generation.
 
 use fgit_codec::{
-    CanonicalForgePositionState, CanonicalOutboxState, CanonicalOutboxStateEntry,
-    CodecRefusal, ForgePositionStateEntry, OutboxDeliveryIdentityInput,
-    derive_outbox_delivery_key,
+    CanonicalForgePositionState, CanonicalOutboxState, CanonicalOutboxStateEntry, CodecRefusal,
+    ForgePositionStateEntry, OutboxDeliveryIdentityInput, derive_outbox_delivery_key,
 };
-use fgit_types::{
-    AsciiSlug, Digest, RepositoryCommitId, RepositoryId, TxId,
-};
+use fgit_types::{AsciiSlug, Digest, RepositoryCommitId, RepositoryId, TxId};
 
 use crate::intent::{ForgeStreamId, ForgeStreamPosition, OutboxDeliveryKey};
 
@@ -226,9 +223,7 @@ pub fn apply_merge_delivery_transition(
     let delivery_label = derive_outbox_delivery_key(identity_input)?;
     let delivery_key = OutboxDeliveryKey::new(delivery_label);
     if outbox_basis.entry(delivery_label).is_some() {
-        return Err(MergeDeliveryTransitionRefusal::DeliveryKeyAlreadyPresent {
-            delivery_key,
-        });
+        return Err(MergeDeliveryTransitionRefusal::DeliveryKeyAlreadyPresent { delivery_key });
     }
 
     let next_forge_entry = ForgePositionStateEntry::try_new(
@@ -246,10 +241,7 @@ pub fn apply_merge_delivery_transition(
     } else {
         forge_entries.push(next_forge_entry);
     }
-    let forge_positions = CanonicalForgePositionState::try_new(
-        input.repository_id,
-        forge_entries,
-    )?;
+    let forge_positions = CanonicalForgePositionState::try_new(input.repository_id, forge_entries)?;
 
     let mut outbox_entries = outbox_basis.entries().to_vec();
     outbox_entries.push(CanonicalOutboxStateEntry::new(

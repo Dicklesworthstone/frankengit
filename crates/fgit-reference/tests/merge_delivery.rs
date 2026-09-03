@@ -2,13 +2,13 @@
 //! Public-path tests for the pure merge delivery transition.
 
 use fgit_codec::{CanonicalForgePositionState, CanonicalOutboxState};
+use fgit_reference::intent::{ForgeStreamId, ForgeStreamPosition};
 use fgit_reference::{
     MergeDeliveryInput, MergeDeliveryTransitionRefusal, apply_merge_delivery_transition,
 };
-use fgit_reference::intent::{ForgeStreamId, ForgeStreamPosition};
 use fgit_types::{
-    AsciiSlug, CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes,
-    RepositoryCommitId, RepositoryId, TxId,
+    AsciiSlug, CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, RepositoryCommitId,
+    RepositoryId, TxId,
 };
 
 fn algorithm() -> DigestAlgorithmId {
@@ -28,11 +28,7 @@ fn tx(byte: u8) -> TxId {
 }
 
 fn rcr(byte: u8) -> RepositoryCommitId {
-    RepositoryCommitId::from_digest(
-        algorithm(),
-        CANONICAL_CODEC_VERSION,
-        bytes(byte),
-    )
+    RepositoryCommitId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, bytes(byte))
 }
 
 fn input(repository_id: RepositoryId, payload: u8) -> MergeDeliveryInput {
@@ -51,14 +47,10 @@ fn input(repository_id: RepositoryId, payload: u8) -> MergeDeliveryInput {
     )
 }
 
-fn empty_basis(
-    repository_id: RepositoryId,
-) -> (CanonicalForgePositionState, CanonicalOutboxState) {
+fn empty_basis(repository_id: RepositoryId) -> (CanonicalForgePositionState, CanonicalOutboxState) {
     (
-        CanonicalForgePositionState::try_new(repository_id, Vec::new())
-            .expect("empty forge state"),
-        CanonicalOutboxState::try_new(repository_id, Vec::new())
-            .expect("empty outbox state"),
+        CanonicalForgePositionState::try_new(repository_id, Vec::new()).expect("empty forge state"),
+        CanonicalOutboxState::try_new(repository_id, Vec::new()).expect("empty outbox state"),
     )
 }
 
@@ -81,11 +73,11 @@ fn identical_inputs_produce_identical_successor_roots_and_delivery_key() {
             .successor_position(),
         1
     );
-    assert!(first
-        .outbox()
-        .entry(first.delivery_key().label())
-        .is_some());
-    assert_ne!(first.forge_position_root(), forge.root().expect("basis root"));
+    assert!(first.outbox().entry(first.delivery_key().label()).is_some());
+    assert_ne!(
+        first.forge_position_root(),
+        forge.root().expect("basis root")
+    );
     assert_ne!(first.outbox_root(), outbox.root().expect("basis root"));
 }
 

@@ -16,11 +16,8 @@ use fgit_types::{
 
 use crate::{CodecRefusal, Encoder};
 
-const DELIVERY_IDENTITY_SCHEMA: SchemaId = SchemaId::new(
-    SchemaFamily::from_static("outbox-delivery-key"),
-    1,
-    0,
-);
+const DELIVERY_IDENTITY_SCHEMA: SchemaId =
+    SchemaId::new(SchemaFamily::from_static("outbox-delivery-key"), 1, 0);
 
 /// Immutable semantic inputs defining one external delivery obligation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -121,9 +118,7 @@ pub fn derive_outbox_delivery_key(
 
 #[cfg(test)]
 mod tests {
-    use fgit_types::{
-        CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes,
-    };
+    use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes};
 
     use super::*;
 
@@ -144,11 +139,7 @@ mod tests {
     }
 
     fn rcr(byte: u8) -> RepositoryCommitId {
-        RepositoryCommitId::from_digest(
-            algorithm(),
-            CANONICAL_CODEC_VERSION,
-            bytes(byte),
-        )
+        RepositoryCommitId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, bytes(byte))
     }
 
     fn input() -> OutboxDeliveryIdentityInput {

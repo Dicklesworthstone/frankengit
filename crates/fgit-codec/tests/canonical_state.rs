@@ -2,12 +2,12 @@
 //! Public-path tests for canonical forge-position and outbox state bodies.
 
 use fgit_codec::{
-    CanonicalForgePositionState, CanonicalOutboxState, CanonicalOutboxStateEntry,
-    CodecRefusal, DecodeLimits, ForgePositionStateEntry, decode_body, encode_body,
+    CanonicalForgePositionState, CanonicalOutboxState, CanonicalOutboxStateEntry, CodecRefusal,
+    DecodeLimits, ForgePositionStateEntry, decode_body, encode_body,
 };
 use fgit_types::{
-    AsciiSlug, CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes,
-    RepositoryCommitId, RepositoryId, TxId,
+    AsciiSlug, CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, RepositoryCommitId,
+    RepositoryId, TxId,
 };
 
 fn slug(value: &'static str) -> AsciiSlug {
@@ -31,11 +31,7 @@ fn tx_id(byte: u8) -> TxId {
 }
 
 fn rcr_id(byte: u8) -> RepositoryCommitId {
-    RepositoryCommitId::from_digest(
-        algorithm(),
-        CANONICAL_CODEC_VERSION,
-        digest_bytes(byte),
-    )
+    RepositoryCommitId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, digest_bytes(byte))
 }
 
 fn forge_entry(
@@ -87,11 +83,8 @@ fn forge_position_state_round_trips_and_root_ignores_input_order() {
     .expect("same map in another caller order");
 
     let encoded = encode_body(&first).expect("canonical frame");
-    let decoded = decode_body::<CanonicalForgePositionState>(
-        &encoded,
-        DecodeLimits::DEFAULT,
-    )
-    .expect("strict decode");
+    let decoded = decode_body::<CanonicalForgePositionState>(&encoded, DecodeLimits::DEFAULT)
+        .expect("strict decode");
 
     assert_eq!(decoded, first);
     assert_eq!(first, reordered);
@@ -109,17 +102,26 @@ fn outbox_state_round_trips_and_every_semantic_field_is_bound() {
     let repository_id = RepositoryId::from_bytes([0x22; 16]);
     let first = CanonicalOutboxState::try_new(
         repository_id,
-        vec![outbox_entry("delivery-b", 0x51), outbox_entry("delivery-a", 0x52)],
+        vec![
+            outbox_entry("delivery-b", 0x51),
+            outbox_entry("delivery-a", 0x52),
+        ],
     )
     .expect("valid outbox state");
     let reordered = CanonicalOutboxState::try_new(
         repository_id,
-        vec![outbox_entry("delivery-a", 0x52), outbox_entry("delivery-b", 0x51)],
+        vec![
+            outbox_entry("delivery-a", 0x52),
+            outbox_entry("delivery-b", 0x51),
+        ],
     )
     .expect("same map in another caller order");
     let payload_changed = CanonicalOutboxState::try_new(
         repository_id,
-        vec![outbox_entry("delivery-a", 0x53), outbox_entry("delivery-b", 0x51)],
+        vec![
+            outbox_entry("delivery-a", 0x53),
+            outbox_entry("delivery-b", 0x51),
+        ],
     )
     .expect("valid changed outbox state");
 

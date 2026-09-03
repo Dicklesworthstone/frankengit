@@ -338,11 +338,7 @@ impl CanonicalOutboxState {
         repository_id: RepositoryId,
         mut entries: Vec<CanonicalOutboxStateEntry>,
     ) -> Result<Self, CodecRefusal> {
-        check_entry_count(
-            "outbox_entries",
-            entries.len(),
-            MAX_OUTBOX_STATE_ENTRIES,
-        )?;
+        check_entry_count("outbox_entries", entries.len(), MAX_OUTBOX_STATE_ENTRIES)?;
         entries.sort_unstable_by(compare_outbox_entries);
         reject_duplicate_delivery_keys(&entries)?;
         Ok(Self {
@@ -417,9 +413,7 @@ impl CanonicalBody for CanonicalOutboxState {
         out.write_canonical_map(
             "outbox_entries",
             &values,
-            |out, delivery_key| {
-                out.write_bytes("outbox_delivery_key", delivery_key.as_bytes())
-            },
+            |out, delivery_key| out.write_bytes("outbox_delivery_key", delivery_key.as_bytes()),
             |out, value| {
                 out.write_bytes("outbox_effect_class", value.effect_class.as_bytes())?;
                 out.write_bytes("outbox_destination", value.destination.as_bytes())?;
@@ -463,8 +457,8 @@ impl CanonicalBody for CanonicalOutboxState {
                         .map_err(CodecRefusal::from)
                 })?;
                 let effect_state_root = input.read_digest()?;
-                let predecessor_effect_state_root = input
-                    .read_option("predecessor_effect_state_root", Decoder::read_digest)?;
+                let predecessor_effect_state_root =
+                    input.read_option("predecessor_effect_state_root", Decoder::read_digest)?;
                 Ok(OutboxStateValue {
                     effect_class,
                     destination,
@@ -638,9 +632,7 @@ fn compare_outbox_entries(
     compare_slug(left.delivery_key, right.delivery_key)
 }
 
-fn reject_duplicate_forge_streams(
-    entries: &[ForgePositionStateEntry],
-) -> Result<(), CodecRefusal> {
+fn reject_duplicate_forge_streams(entries: &[ForgePositionStateEntry]) -> Result<(), CodecRefusal> {
     for (index, adjacent) in entries.windows(2).enumerate() {
         if adjacent[0].stream == adjacent[1].stream {
             return Err(CodecRefusal::CollectionDuplicate {
@@ -691,10 +683,8 @@ mod tests {
         let state = CanonicalForgePositionState::try_new(
             RepositoryId::from_bytes([0x11; 16]),
             vec![
-                ForgePositionStateEntry::try_new(slug("zz"), 0, 1, digest(1))
-                    .expect("entry"),
-                ForgePositionStateEntry::try_new(slug("a"), 2, 1, digest(2))
-                    .expect("entry"),
+                ForgePositionStateEntry::try_new(slug("zz"), 0, 1, digest(1)).expect("entry"),
+                ForgePositionStateEntry::try_new(slug("a"), 2, 1, digest(2)).expect("entry"),
             ],
         )
         .expect("state");
