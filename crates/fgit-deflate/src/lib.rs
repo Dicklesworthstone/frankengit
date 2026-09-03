@@ -20,6 +20,16 @@ const HUFFMAN_LOOKUP_MISSING: u16 = u16::MAX;
 const HUFFMAN_LOOKUP_SYMBOL_BITS: u8 = 9;
 const MATCH_HASH_ENTRIES: usize = 32_768;
 const MATCH_INDEX_NONE: usize = usize::MAX;
+
+/// Work units between cancellation polls in the streaming encoder.
+///
+/// One unit is one literal byte or one match-chain step, so this bounds the
+/// pure-CPU compression performed between two cancellation checks to a
+/// fraction of a millisecond — responsive for any session-length transport
+/// deadline, while removing the per-byte clock reads that dominated a served
+/// clone (frankengit-1n25). It does not affect the work-unit budget ceiling,
+/// which is still charged on every unit.
+const DEFLATE_CANCELLATION_PROBE_UNITS: u64 = 16_384;
 const ZLIB_MAGIC_ERROR: &str = "invalid RFC 1950 zlib header";
 
 /// Explicit resource ceilings for one zlib member.
@@ -1736,6 +1746,19 @@ pub struct Deflater {
     accepted_input_bytes: usize,
     output_bytes: usize,
     work_units: u64,
+    /// Work units remaining before the next cancellation poll.
+    ///
+    /// The dynamic-Huffman encoder charges one work unit per literal byte and
+    /// per match-chain step, so a multi-megabyte object charges millions of
+    /// units. Polling the caller's cancellation source on every one of those
+    /// dominated a served clone: a profile of `fg serve` (frankengit-1n25)
+    /// spent ~79% of all cycles reading two clocks per unit through the
+    /// transport deadline and the Asupersync budget `Cx`. This counter batches
+    /// the poll onto a bounded work stride. The budget counter below still
+    /// advances every unit, so the ceiling keeps full precision; only the
+    /// cancellation probe is amortized, and cancellation latency stays bounded
+    /// to [`DEFLATE_CANCELLATION_PROBE_UNITS`] units of pure-CPU compression.
+    probe_countdown: u64,
     block_count: usize,
     writer: BitWriter,
     adler32: Adler32,
@@ -1755,6 +1778,7 @@ impl Deflater {
             accepted_input_bytes: 0,
             output_bytes: 0,
             work_units: 0,
+            probe_countdown: 0,
             block_count: 0,
             writer: BitWriter::new(),
             adler32: Adler32::new(),
@@ -1782,6 +1806,11 @@ impl Deflater {
             DeflateState::Refused => return Err(DeflateRefusal::RefusedAfterFailure),
             DeflateState::Active => {}
         }
+        // Each public streaming call may carry a different control, so force a
+        // cancellation poll at its start; the amortization then applies within
+        // this call's own byte stream. Callers feed the encoder in bounded
+        // chunks, so this is one guaranteed poll per chunk.
+        self.probe_countdown = 0;
         let result = self.push_active(input, control);
         if result.is_err() {
             self.refuse();
@@ -1807,6 +1836,10 @@ impl Deflater {
             DeflateState::Refused => return Err(DeflateRefusal::RefusedAfterFailure),
             DeflateState::Active => {}
         }
+        // Finalization is a fresh control boundary: poll it at least once so a
+        // caller that cancels only at finish is honoured regardless of how the
+        // preceding push calls drained the probe stride.
+        self.probe_countdown = 0;
         let result = self.finish_active(control);
         if result.is_err() {
             self.refuse();
@@ -2298,12 +2331,22 @@ impl Deflater {
         control: &mut impl CancellationProbe,
         units: usize,
     ) -> Result<(), DeflateRefusal> {
-        if control.is_cancelled() {
-            return Err(DeflateRefusal::Cancelled);
+        let units = u64::try_from(units).unwrap_or(u64::MAX);
+        // Poll cancellation on a bounded work stride rather than per unit: the
+        // caller's probe can be expensive (two clock reads through the
+        // transport deadline and the budget Cx), and this loop charges one
+        // unit per byte. The budget ceiling below is unaffected — it advances
+        // every unit — so only the cancellation latency is coarsened, and only
+        // to a bounded amount of pure-CPU compression. See `probe_countdown`.
+        if self.probe_countdown < units {
+            if control.is_cancelled() {
+                return Err(DeflateRefusal::Cancelled);
+            }
+            self.probe_countdown = DEFLATE_CANCELLATION_PROBE_UNITS;
+        } else {
+            self.probe_countdown -= units;
         }
-        let observed = self
-            .work_units
-            .saturating_add(u64::try_from(units).unwrap_or(u64::MAX));
+        let observed = self.work_units.saturating_add(units);
         if observed > self.limits.max_work_units {
             return Err(DeflateRefusal::ResourceLimit {
                 resource: Resource::WorkUnits,
