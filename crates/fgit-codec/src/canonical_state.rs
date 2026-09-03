@@ -16,9 +16,8 @@
 
 use core::cmp::Ordering;
 
-use fgit_crypto::IdentityDomain;
 use fgit_types::{
-    AsciiSlug, Digest, DomainTag, RepositoryId, SchemaFamily,
+    AsciiSlug, Digest, DomainTag, RepositoryCommitId, RepositoryId, SchemaFamily, TxId,
 };
 
 use crate::{
@@ -27,13 +26,13 @@ use crate::{
 
 /// Largest forge-position map this schema will encode or strictly accept.
 ///
-/// The ordinary decoder's default collection bound is also one million. The
-/// schema keeps its own permanent ceiling so raising transport limits cannot
-/// silently turn this body into an unbounded allocation surface.
-pub const MAX_FORGE_POSITION_STATE_ENTRIES: usize = 1_048_576;
+/// At the maximum label and digest widths this remains comfortably below the
+/// ordinary 16 MiB frame ceiling. Raising a transport decoder limit therefore
+/// cannot silently turn this schema into an unbounded allocation surface.
+pub const MAX_FORGE_POSITION_STATE_ENTRIES: usize = 16_384;
 
 /// Largest outbox map this schema will encode or strictly accept.
-pub const MAX_OUTBOX_STATE_ENTRIES: usize = 1_048_576;
+pub const MAX_OUTBOX_STATE_ENTRIES: usize = 16_384;
 
 const STATE_DOMAIN: DomainTag = DomainTag::from_static("frankengit/generation/v1");
 
@@ -91,8 +90,8 @@ impl ForgePositionStateEntry {
 
     /// Exact position after the retained event batch.
     #[must_use]
-    pub const fn successor_position(&self) -> u64 {
-        self.predecessor_position + self.event_count as u64
+    pub fn successor_position(&self) -> u64 {
+        self.predecessor_position + u64::from(self.event_count)
     }
 
     /// Immutable canonical event-batch commitment.
@@ -257,17 +256,18 @@ struct ForgePositionValue {
 /// One stable delivery-key binding in canonical outbox state.
 ///
 /// `effect_state_root` names the existing canonical effect/obligation state;
-/// this index does not duplicate that state machine. The remaining fields make
-/// the semantic delivery binding independently auditable from the authority
-/// head and immutable object store.
+/// this index does not duplicate that state machine. The transaction and
+/// predecessor RCR form a non-circular basis: the resulting RCR commits this
+/// outbox root, so placing that resulting identity inside the body would require
+/// an impossible hash fixed point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CanonicalOutboxStateEntry {
     delivery_key: AsciiSlug,
     effect_class: AsciiSlug,
     destination: AsciiSlug,
     payload_root: Digest,
-    decision_batch_root: Digest,
-    repository_commit_root: Digest,
+    tx_id: TxId,
+    predecessor_rcr_id: Option<RepositoryCommitId>,
     effect_state_root: Digest,
     predecessor_effect_state_root: Option<Digest>,
 }
@@ -281,8 +281,8 @@ impl CanonicalOutboxStateEntry {
         effect_class: AsciiSlug,
         destination: AsciiSlug,
         payload_root: Digest,
-        decision_batch_root: Digest,
-        repository_commit_root: Digest,
+        tx_id: TxId,
+        predecessor_rcr_id: Option<RepositoryCommitId>,
         effect_state_root: Digest,
         predecessor_effect_state_root: Option<Digest>,
     ) -> Self {
@@ -291,8 +291,8 @@ impl CanonicalOutboxStateEntry {
             effect_class,
             destination,
             payload_root,
-            decision_batch_root,
-            repository_commit_root,
+            tx_id,
+            predecessor_rcr_id,
             effect_state_root,
             predecessor_effect_state_root,
         }
@@ -322,16 +322,17 @@ impl CanonicalOutboxStateEntry {
         self.payload_root
     }
 
-    /// Decision-batch basis commitment.
+    /// Sealed transaction whose semantics produced this obligation.
     #[must_use]
-    pub const fn decision_batch_root(&self) -> Digest {
-        self.decision_batch_root
+    pub const fn tx_id(&self) -> TxId {
+        self.tx_id
     }
 
-    /// Repository Commit Record basis commitment.
+    /// Previously committed RCR at the transition basis, absent only at
+    /// repository creation.
     #[must_use]
-    pub const fn repository_commit_root(&self) -> Digest {
-        self.repository_commit_root
+    pub const fn predecessor_rcr_id(&self) -> Option<RepositoryCommitId> {
+        self.predecessor_rcr_id
     }
 
     /// Current canonical effect/obligation-state commitment.
@@ -434,8 +435,8 @@ impl CanonicalBody for CanonicalOutboxState {
                         effect_class: entry.effect_class,
                         destination: entry.destination,
                         payload_root: entry.payload_root,
-                        decision_batch_root: entry.decision_batch_root,
-                        repository_commit_root: entry.repository_commit_root,
+                        tx_id: entry.tx_id,
+                        predecessor_rcr_id: entry.predecessor_rcr_id,
                         effect_state_root: entry.effect_state_root,
                         predecessor_effect_state_root: entry.predecessor_effect_state_root,
                     },
@@ -452,8 +453,10 @@ impl CanonicalBody for CanonicalOutboxState {
                 out.write_bytes("outbox_effect_class", value.effect_class.as_bytes())?;
                 out.write_bytes("outbox_destination", value.destination.as_bytes())?;
                 out.write_digest(&value.payload_root)?;
-                out.write_digest(&value.decision_batch_root)?;
-                out.write_digest(&value.repository_commit_root)?;
+                out.write_internal_object_id(value.tx_id.as_internal_object_id())?;
+                out.write_option(value.predecessor_rcr_id.as_ref(), |out, rcr_id| {
+                    out.write_internal_object_id(rcr_id.as_internal_object_id())
+                })?;
                 out.write_digest(&value.effect_state_root)?;
                 out.write_option(
                     value.predecessor_effect_state_root.as_ref(),
@@ -486,12 +489,18 @@ impl CanonicalBody for CanonicalOutboxState {
                     input.read_bytes("outbox_destination")?,
                 )
                 .map_err(CodecRefusal::from)?;
+                let tx_id = TxId::from_internal_object_id(input.read_internal_object_id()?)
+                    .map_err(CodecRefusal::from)?;
+                let predecessor_rcr_id = input.read_option("predecessor_rcr_id", |input| {
+                    RepositoryCommitId::from_internal_object_id(input.read_internal_object_id()?)
+                        .map_err(CodecRefusal::from)
+                })?;
                 Ok(OutboxStateValue {
                     effect_class,
                     destination,
                     payload_root: input.read_digest()?,
-                    decision_batch_root: input.read_digest()?,
-                    repository_commit_root: input.read_digest()?,
+                    tx_id,
+                    predecessor_rcr_id,
                     effect_state_root: input.read_digest()?,
                     predecessor_effect_state_root: input
                         .read_option("predecessor_effect_state_root", Decoder::read_digest)?,
@@ -510,8 +519,8 @@ impl CanonicalBody for CanonicalOutboxState {
                 effect_class: value.effect_class,
                 destination: value.destination,
                 payload_root: value.payload_root,
-                decision_batch_root: value.decision_batch_root,
-                repository_commit_root: value.repository_commit_root,
+                tx_id: value.tx_id,
+                predecessor_rcr_id: value.predecessor_rcr_id,
                 effect_state_root: value.effect_state_root,
                 predecessor_effect_state_root: value.predecessor_effect_state_root,
             })
@@ -528,8 +537,8 @@ struct OutboxStateValue {
     effect_class: AsciiSlug,
     destination: AsciiSlug,
     payload_root: Digest,
-    decision_batch_root: Digest,
-    repository_commit_root: Digest,
+    tx_id: TxId,
+    predecessor_rcr_id: Option<RepositoryCommitId>,
     effect_state_root: Digest,
     predecessor_effect_state_root: Option<Digest>,
 }
