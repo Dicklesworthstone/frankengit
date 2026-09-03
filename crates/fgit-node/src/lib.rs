@@ -168,6 +168,10 @@ const GIT_DAEMON_CAPABILITIES: &[u8] = b"agent=frankengit-node";
 fn git_daemon_capabilities(object_format: GitHashAlgorithm, head_target: Option<&[u8]>) -> Vec<u8> {
     let mut tokens = b"object-format=".to_vec();
     tokens.extend_from_slice(object_format.as_str().as_bytes());
+    // `ofs-delta` opens delta-compressed serving: without this token a v0/v1
+    // client never echoes the capability and every pack must ship full bases
+    // (frankengit-x7ja measured that at ~62x upstream's clone egress).
+    tokens.extend_from_slice(b" ofs-delta");
     if let Some(target) = head_target {
         tokens.extend_from_slice(b" symref=HEAD:");
         tokens.extend_from_slice(target);
@@ -3020,6 +3024,19 @@ fn reachable_within_permitted_closure_bounded(
         }
     }
     Ok(visited)
+}
+
+/// Selects the pack-write profile the client's negotiated capabilities admit.
+///
+/// `ofs-delta` gates the delta-capable interior-match profile; a client that
+/// never echoed it receives structurally delta-free full bases, because a
+/// v0/v1 pack may carry OFS_DELTA entries only under that capability.
+const fn selected_write_profile(ofs_delta_negotiated: bool) -> PackWriteProfile {
+    if ofs_delta_negotiated {
+        PackWriteProfile::COMPRESSED_V2
+    } else {
+        PackWriteProfile::COMPRESSED_NO_DELTA_V1
+    }
 }
 
 fn selected_pack_ids(
@@ -6589,6 +6606,9 @@ impl OneNode {
                 &materialized,
                 None,
                 &[],
+                // Local authority materialization has no wire capability to
+                // respect; a pack file carries OFS deltas unconditionally.
+                PackWriteProfile::COMPRESSED_V2,
                 request.authority(),
                 &database_exhaustion,
                 None,
@@ -6624,6 +6644,7 @@ impl OneNode {
         materialized: &MaterializedAdmission,
         client_wants: Option<&[GitOid]>,
         client_haves: &[GitOid],
+        write_profile: PackWriteProfile,
         database_context: &FsqliteCx,
         database_exhaustion: &Cell<Option<Exhaustion>>,
         session_is_live: Option<&dyn Fn() -> bool>,
@@ -6646,11 +6667,7 @@ impl OneNode {
             client_haves,
             &limits,
         )?;
-        let planner = PackPlanner::new(
-            self.object_format,
-            PackWriteProfile::COMPRESSED_V1,
-            limits.clone(),
-        );
+        let planner = PackPlanner::new(self.object_format, write_profile, limits.clone());
         let plan = planner
             .plan_selected(&source, &ids, is_live)
             .map_err(NodePackMaterializationRefusal::from)?;
@@ -6884,6 +6901,7 @@ impl OneNode {
                         &materialized,
                         Some(&pack_request.wants),
                         &pack_request.haves,
+                        selected_write_profile(pack_request.options.ofs_delta()),
                         request.authority(),
                         &database_exhaustion,
                         Some(&session_is_live),
@@ -9142,13 +9160,13 @@ mod tests {
         );
         let mut expected = format!(
             "{:04x}",
-            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 agent=frankengit-node\n"
+            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta agent=frankengit-node\n"
                 .len()
                 + 4
         )
         .into_bytes();
         expected.extend_from_slice(
-            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 agent=frankengit-node\n0000",
+            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta agent=frankengit-node\n0000",
         );
         assert_eq!(
             response, expected,
@@ -9164,7 +9182,10 @@ mod tests {
         // advertises one for every format. Measured, not assumed: the oracle
         // shows `object-format=sha1` on an empty --object-format=sha1 repository.
         let sha1 = git_daemon_capabilities(GitHashAlgorithm::Sha1, None);
-        assert_eq!(sha1.as_slice(), b"object-format=sha1 agent=frankengit-node");
+        assert_eq!(
+            sha1.as_slice(),
+            b"object-format=sha1 ofs-delta agent=frankengit-node"
+        );
         assert!(
             Capabilities::parse_v1(&sha1, &limits)
                 .expect("the SHA-1 daemon capability list stays wire-valid")
@@ -9178,7 +9199,7 @@ mod tests {
         let sha256 = git_daemon_capabilities(GitHashAlgorithm::Sha256, None);
         assert_eq!(
             sha256.as_slice(),
-            b"object-format=sha256 agent=frankengit-node"
+            b"object-format=sha256 ofs-delta agent=frankengit-node"
         );
         let parsed = Capabilities::parse_v1(&sha256, &limits)
             .expect("the SHA-256 daemon capability list is wire-valid");
@@ -9194,7 +9215,7 @@ mod tests {
         let with_head = git_daemon_capabilities(GitHashAlgorithm::Sha1, Some(b"refs/heads/main"));
         assert_eq!(
             with_head.as_slice(),
-            b"object-format=sha1 symref=HEAD:refs/heads/main agent=frankengit-node"
+            b"object-format=sha1 ofs-delta symref=HEAD:refs/heads/main agent=frankengit-node"
         );
         assert!(
             Capabilities::parse_v1(&with_head, &limits)
@@ -9254,8 +9275,9 @@ mod tests {
         // why the capability must be present: without it a stock client keeps
         // the SHA-1 domain and cannot parse this advertisement.
         let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
-        let line =
-            format!("{identity} capabilities^{{}}\0object-format=sha256 agent=frankengit-node\n");
+        let line = format!(
+            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta agent=frankengit-node\n"
+        );
         let mut expected = format!("{:04x}", line.len() + 4).into_bytes();
         expected.extend_from_slice(line.as_bytes());
         expected.extend_from_slice(b"0000");
@@ -9316,8 +9338,9 @@ mod tests {
         ));
 
         let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
-        let advertisement =
-            format!("{identity} capabilities^{{}}\0object-format=sha256 agent=frankengit-node\n");
+        let advertisement = format!(
+            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta agent=frankengit-node\n"
+        );
         let packet = |payload: &str| {
             let mut out = format!("{:04x}", payload.len() + 4).into_bytes();
             out.extend_from_slice(payload.as_bytes());
@@ -9444,7 +9467,7 @@ mod tests {
         let response = read_one_daemon_advertisement(node, b"\0host=loopback\0");
 
         let mut expected = packet(&format!(
-            "{identity} refs/heads/sha256-main\0object-format=sha256 agent=frankengit-node\n"
+            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta agent=frankengit-node\n"
         ));
         expected.extend_from_slice(b"0000");
         assert_eq!(
@@ -9462,7 +9485,7 @@ mod tests {
 
         let mut expected = packet("version 1\n");
         expected.extend_from_slice(&packet(&format!(
-            "{identity} refs/heads/sha256-main\0object-format=sha256 agent=frankengit-node\n"
+            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta agent=frankengit-node\n"
         )));
         expected.extend_from_slice(b"0000");
         assert_eq!(

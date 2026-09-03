@@ -1389,6 +1389,15 @@ impl PackOptions {
     pub const fn sideband_64k(self) -> bool {
         self.contains(Self::SIDE_BAND_64K.0)
     }
+
+    /// Whether the client negotiated `ofs-delta` entry encoding.
+    ///
+    /// A served pack may carry OFS_DELTA entries only when this is true; a
+    /// v0/v1 client that never echoed the capability must receive full bases.
+    #[must_use]
+    pub const fn ofs_delta(self) -> bool {
+        self.contains(Self::OFS_DELTA)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

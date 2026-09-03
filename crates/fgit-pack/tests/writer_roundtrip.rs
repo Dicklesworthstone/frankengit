@@ -47,7 +47,7 @@ use fgit_git_object::{ObjectType, Sha1, native_object_oid};
 use fgit_pack::{
     CanonicalObjectSource, CanonicalPackObject, NativeChecksumVerifier, ObjectFormat, ObjectId,
     PackLimits, PackPlan, PackPlanner, PackWriteError, PackWriteProfile, PackWriter,
-    ScalarResolver, read_verified_pack,
+    ScalarResolver, parse_quarantined_pack, read_verified_pack,
 };
 
 /// Where the e2e lane asks the producer to leave packs and their manifests.
@@ -622,4 +622,126 @@ fn emit_packs_for_the_pinned_oracle_lane() {
     let manifest_path = directory.join("manifest.ndjson");
     fs::write(&manifest_path, manifest)
         .unwrap_or_else(|error| panic!("cannot write {}: {error}", manifest_path.display()));
+}
+
+// ---------------------------------------------------------------------------
+// Capability-gated delta emission (frankengit-x7ja)
+// ---------------------------------------------------------------------------
+
+/// A pair of line-shifted blobs: the shape interior matching deltas well and
+/// prefix/suffix matching cannot encode at all.
+fn shifted_pair_corpus() -> Corpus {
+    let mut first = String::new();
+    let mut second = String::new();
+    for line in 0..400 {
+        let _ = writeln!(first, "line number {line} keeps every row distinct");
+        let _ = writeln!(second, "line number {} keeps every row distinct", line + 1);
+    }
+    let base = blob(first.as_bytes());
+    let target = blob(second.as_bytes());
+    let roots = vec![base.id, target.id];
+    Corpus {
+        name: "shifted-pair",
+        objects: vec![base, target],
+        roots,
+    }
+}
+
+fn plan_under(corpus: &Corpus, profile: PackWriteProfile) -> (Vec<u8>, PackPlan) {
+    let planner = PackPlanner::new(ObjectFormat::Sha1, profile, limits());
+    let source = CorpusSource::new(corpus);
+    let mut deadline = || true;
+    let plan = planner
+        .plan(&source, &corpus.roots, &mut deadline)
+        .unwrap_or_else(|error| panic!("planning {} failed: {error:?}", corpus.name));
+    let (bytes, _) = PackWriter::new(limits())
+        .write(&plan, &mut deadline)
+        .unwrap_or_else(|error| panic!("writing {} failed: {error:?}", corpus.name));
+    (bytes, plan)
+}
+
+/// The no-delta profile can never emit a delta entry, and the interior-match
+/// profile actually does on the shape that motivated it — the structural pair
+/// behind serving's `ofs-delta` capability gate: a client that negotiated the
+/// capability gets the compressed form, one that did not gets full bases.
+#[test]
+fn delta_emission_is_structural_per_profile() {
+    let corpus = shifted_pair_corpus();
+    let mut deadline = || true;
+
+    let (plain_bytes, _) = plan_under(&corpus, PackWriteProfile::COMPRESSED_NO_DELTA_V1);
+    let plain = parse_quarantined_pack(&plain_bytes, ObjectFormat::Sha1, &limits(), &mut deadline)
+        .expect("the delta-free pack parses");
+    assert!(
+        plain
+            .entries()
+            .iter()
+            .all(|entry| entry.delta_base.is_none()),
+        "a zero-window profile must be structurally incapable of a delta entry"
+    );
+
+    let (delta_bytes, _) = plan_under(&corpus, PackWriteProfile::COMPRESSED_V2);
+    let deltas = parse_quarantined_pack(&delta_bytes, ObjectFormat::Sha1, &limits(), &mut deadline)
+        .expect("the interior-match pack parses");
+    assert!(
+        deltas
+            .entries()
+            .iter()
+            .any(|entry| entry.delta_base.is_some()),
+        "interior matching must delta the shifted pair it was built for"
+    );
+    assert!(
+        delta_bytes.len() < plain_bytes.len(),
+        "the deltified pack must be smaller: {} vs {}",
+        delta_bytes.len(),
+        plain_bytes.len()
+    );
+
+    // Both packs must round-trip to identical native objects, deltas resolved
+    // through the crate's own scalar resolver and re-hashed to their identities.
+    for (bytes, label) in [(&plain_bytes, "no-delta"), (&delta_bytes, "interior-match")] {
+        let quarantined = read_verified_pack(
+            bytes,
+            ObjectFormat::Sha1,
+            &limits(),
+            &mut deadline,
+            &NativeChecksumVerifier,
+        )
+        .unwrap_or_else(|error| panic!("{label}: our reader refused our pack: {error:?}"));
+        assert_eq!(quarantined.entries().len(), corpus.objects.len());
+
+        let offsets: Vec<u64> = quarantined
+            .entries()
+            .iter()
+            .map(|entry| entry.offset)
+            .collect();
+        // The identity association is a lookup hint only; resolution below
+        // re-derives every identity from reconstructed bytes.
+        let objects = quarantined
+            .into_scalar_objects(|_| None)
+            .unwrap_or_else(|error| panic!("{label}: scalar conversion refused: {error:?}"));
+        let resolver_limits = limits();
+        let resolver = ScalarResolver::new(&objects, &(), &resolver_limits, &mut || true)
+            .unwrap_or_else(|error| panic!("{label}: resolver construction refused: {error:?}"));
+        let mut reconstructed_bodies: Vec<Vec<u8>> = Vec::new();
+        for offset in offsets {
+            reconstructed_bodies.push(
+                resolver
+                    .resolve_offset(offset, &mut || true)
+                    .unwrap_or_else(|error| {
+                        panic!("{label}: delta resolution refused at {offset}: {error:?}")
+                    }),
+            );
+        }
+        for object in &corpus.objects {
+            assert!(
+                reconstructed_bodies.iter().any(|body| {
+                    fgit_crypto::git_object_id(ObjectFormat::Sha1, object.object_type, body)
+                        == object.id
+                }),
+                "{label}: object {:?} must survive byte for byte",
+                object.id
+            );
+        }
+    }
 }

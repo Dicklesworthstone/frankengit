@@ -223,6 +223,23 @@ impl PackWriteProfile {
     /// every object ships as a full base.  The versions of a line-oriented file
     /// differ by a shift, which leaves no common prefix and a one-byte common
     /// suffix -- the one shape prefix/suffix search cannot encode.
+    /// [`Self::COMPRESSED_V1`]'s compression with delta emission disabled.
+    ///
+    /// The v0/v1 wire contract permits OFS_DELTA entries only when the client
+    /// echoed the `ofs-delta` capability, so a serving path needs a profile
+    /// that can never emit one. A zero window admits no delta bases, which
+    /// removes the emission structurally rather than by a filter a later
+    /// change could bypass. Also the honest fallback for the latent violation
+    /// where a delta-capable profile served OFS entries to clients that never
+    /// negotiated them.
+    pub const COMPRESSED_NO_DELTA_V1: Self = Self {
+        id: "git-pack-compressed-no-delta-v1",
+        delta_window: 0,
+        max_delta_depth: 8,
+        compression: DeflateProfile::DEFAULT,
+        delta_search: DeltaSearch::PrefixSuffix,
+    };
+
     pub const COMPRESSED_V2: Self = Self {
         id: "git-pack-compressed-v2",
         delta_window: 32,
