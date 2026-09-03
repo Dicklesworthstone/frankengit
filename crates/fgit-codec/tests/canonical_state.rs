@@ -10,7 +10,7 @@ use fgit_types::{
     RepositoryId, TxId,
 };
 
-fn slug(value: &'static str) -> AsciiSlug {
+const fn slug(value: &'static str) -> AsciiSlug {
     AsciiSlug::from_static(value)
 }
 
