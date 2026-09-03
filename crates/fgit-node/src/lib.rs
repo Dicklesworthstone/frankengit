@@ -4971,7 +4971,7 @@ fn receive_rejection_message(
             }
         })
         .collect();
-    let cap = max_status_message_bytes.min(512).max(1);
+    let cap = max_status_message_bytes.clamp(1, 512);
     if message.len() > cap {
         message.truncate(cap);
     }
@@ -7195,7 +7195,7 @@ impl OneNode {
                 // upstream receive-pack reports an unpack failure — rather than
                 // by closing the socket, which leaves `git push` printing only
                 // "the remote end hung up unexpectedly" (frankengit-xefn).
-                self.write_receive_rejection_report(
+                Self::write_receive_rejection_report(
                     writer,
                     &ready,
                     &refusal,
@@ -7237,7 +7237,6 @@ impl OneNode {
     /// A client that negotiated no `report-status` capability receives nothing
     /// and the session simply ends, which is upstream behaviour for that case.
     fn write_receive_rejection_report<W>(
-        &self,
         writer: &mut W,
         ready: &ReceiveRequest,
         refusal: &NodeReceiveTransportRefusal,
@@ -7249,13 +7248,11 @@ impl OneNode {
     {
         let message = receive_rejection_message(refusal, receive_limits.max_status_message_bytes);
         let mut statuses = Vec::new();
-        statuses
-            .try_reserve(ready.commands.len())
-            .map_err(|_| {
-                NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Wire(
-                    WireError::AllocationFailure,
-                ))
-            })?;
+        statuses.try_reserve(ready.commands.len()).map_err(|_| {
+            NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Wire(
+                WireError::AllocationFailure,
+            ))
+        })?;
         for _ in &ready.commands {
             statuses.push(ReceiveCommandStatus::Rejected {
                 message: message.clone(),

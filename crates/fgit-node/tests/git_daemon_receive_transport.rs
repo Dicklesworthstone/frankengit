@@ -463,8 +463,9 @@ fn a_publication_refusal_is_reported_not_hung_up() {
     let base = config(scratch.0.clone());
     let (created, _) = OneNode::init(base.clone()).expect("the genesis configuration persists");
     created.shutdown().expect("the initialized node quiesces");
-    let mut node = OneNode::open_existing(base.with_git_daemon_receive_principal(receive_principal()))
-        .expect("the published head opens");
+    let mut node =
+        OneNode::open_existing(base.with_git_daemon_receive_principal(receive_principal()))
+            .expect("the published head opens");
     node.bring_into_service(HeadGeneration::FIRST)
         .expect("the reopened node enters service");
     node.transition_cell_state(

@@ -175,3 +175,74 @@ git -C "$CLONE2" show-ref --hash | sort -u >"$WORK/clone2-oids.txt"
 OID_SRC2=$(cat "$WORK/src-oids2.txt")
 OID_CLONE2=$(cat "$WORK/clone2-oids.txt")
 fge_assert_eq FG-HH37-PUSH-021 "$OID_SRC2" "$OID_CLONE2" 'the incremental tip identity round-trips exactly'
+
+# --- A large push that exceeds the receive budget is REPORTED, not hung up
+# (frankengit-xefn). Before the report-status fix a rejected push closed the
+# socket and `git push` printed only "the remote end hung up unexpectedly";
+# now the client receives an unpack/ng report-status naming the reason and the
+# repository publishes nothing.
+REPOID_LARGE=44444444444444444444444444444444
+STORAGE_LARGE="$WORK/storage-large"
+LSRC="$WORK/large-src"
+
+# A delta-chained corpus whose reconstruction accounting crosses the default
+# receive expanded budget: four commits each rewriting four ~6 MB files.
+git init -q -b main "$LSRC"
+git -C "$LSRC" config user.email first-push-large@invalid.example
+git -C "$LSRC" config user.name 'FG-HH37 large fixture'
+for c in 1 2 3 4; do
+  for f in a b c d; do
+    seq "$c" $((c + 300000)) | sed "s/^/file-$f line /" > "$LSRC/$f.txt"
+  done
+  git -C "$LSRC" add -A
+  git -C "$LSRC" commit -qm "large commit $c"
+done
+
+LINIT_RC=0
+"$FG_BIN" init "$STORAGE_LARGE" "$TENANT" "$REPOID_LARGE" >/dev/null 2>&1 || LINIT_RC=$?
+fge_assert_eq FG-HH37-PUSH-022 0 "$LINIT_RC" 'a fresh node for the large-push case initializes'
+
+SERVE_LARGE_STATE=''
+START_SERVE_LARGE() { # NAME PORT EXTRA...
+  local name=$1 port=$2
+  shift 2
+  fge_spawn "$name" bash -c 'port=$1; bin=$2; store=$3; tenant=$4; repo=$5; shift 5; exec "$bin" serve "$store" "$tenant" "$repo" "127.0.0.1:$port" "$@" 2>"/tmp/first-push-large-serve-$port.err"' _ "$port" "$FG_BIN" "$STORAGE_LARGE" "$TENANT" "$REPOID_LARGE" "$@"
+  sleep 1
+  if kill -0 "$FGE_LAST_PID" 2>/dev/null; then SERVE_LARGE_STATE=ok; else SERVE_LARGE_STATE=dead; fi
+}
+FIND_PORT_AND_SERVE_LARGE() { # PREFIX EXTRA...
+  local prefix=$1; shift
+  FOUND_PORT='' FOUND_NAME=''
+  local off cand
+  for off in 0 4 8 12 16 20 24 28; do
+    cand=$(( PORT_BASE + off ))
+    START_SERVE_LARGE "$prefix-$cand" "$cand" "$@"
+    if [ "$SERVE_LARGE_STATE" = ok ]; then FOUND_PORT=$cand; FOUND_NAME="$prefix-$cand"; break; fi
+  done
+  PORT_BASE=$(( PORT_BASE + 32 ))
+}
+
+FIND_PORT_AND_SERVE_LARGE large --receive-principal "$PRINCIPAL"
+fge_assert_cmd FG-HH37-PUSH-023 'a large-push serve session is listening' test -n "$FOUND_PORT"
+LPUSH_RC=0
+GIT_TERMINAL_PROMPT=0 git -C "$LSRC" -c protocol.version=1 push \
+  "git://127.0.0.1:$FOUND_PORT/$REPOID_LARGE.git" main >"$WORK/large-push.out" 2>&1 || LPUSH_RC=$?
+fge_reap "$FOUND_NAME"
+LPUSH_OUT=$(cat "$WORK/large-push.out")
+fge_assert_cmd FG-HH37-PUSH-024 'a push over the receive budget exits non-zero' test "$LPUSH_RC" -ne 0
+fge_assert_contains FG-HH37-PUSH-025 "$LPUSH_OUT" 'unpack' \
+  'the client receives a report-status unpack line, not a bare hangup'
+fge_assert_not_contains FG-HH37-PUSH-026 "$LPUSH_OUT" 'hung up' \
+  'the rejection is a typed report-status, never a silent socket hangup'
+fge_assert_contains FG-HH37-PUSH-027 "$LPUSH_OUT" 'rejected' \
+  'the ref is reported remotely rejected with a reason'
+
+# The rejected repository published nothing: a clone finds no main.
+FIND_PORT_AND_SERVE_LARGE large-verify
+fge_assert_cmd FG-HH37-PUSH-028 'a large-verify serve session is listening' test -n "$FOUND_PORT"
+LCLONE="$WORK/large-clone"
+GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 clone \
+  "git://127.0.0.1:$FOUND_PORT/$REPOID_LARGE.git" "$LCLONE" >"$WORK/large-clone.out" 2>&1 || true
+fge_reap "$FOUND_NAME"
+LREFS=$( (git -C "$LCLONE" show-ref 2>/dev/null || true) | wc -l | tr -d ' ')
+fge_assert_eq FG-HH37-PUSH-029 0 "$LREFS" 'a rejected large push published no refs'
