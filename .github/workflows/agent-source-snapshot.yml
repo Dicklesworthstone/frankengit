@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   verify:
-    runs-on: macos-15
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 30
     steps:
       - name: Check out repository
@@ -28,7 +28,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: frankengit-source-d2c6447-macos
+          name: frankengit-source-d2c6447-self-hosted
           path: ${{ runner.temp }}/frankengit-source.tar.gz
           if-no-files-found: error
           retention-days: 1
