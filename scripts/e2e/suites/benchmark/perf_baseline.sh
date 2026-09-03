@@ -463,7 +463,7 @@ mkdir -p "$TEMPLATE"
 
 fge_phase assert
 fge_unsupported FG-028C-E2E-019 \
-  'push throughput is unmeasurable as a transport at this revision: the daemon refuses every service that is not git-upload-pack (GitDaemonTransportRefusal::UnsupportedService) and no receive-pack serve function exists. The gate is the absent daemon lane, tracked by frankengit-fg019; it is NOT frankengit-n6kg, whose production QuarantineValidator landed at 053176c while push stayed exactly as unmeasurable.'
+  'push egress is not yet measured by this harness: the daemon HAS served git-receive-pack since frankengit-hh37 (66de074e) behind fg serve --receive-principal, so the old absent-lane gate no longer holds; what is missing is this harness's push arm (fixture pusher, matched upstream receive baseline, and egress accounting). Adding that arm is follow-up work on the fg028c harness, not a transport gap.'
 if [ "$OPERATION" = clone ]; then
   fge_unsupported FG-028C-E2E-020 \
     'fetch is not measured in an explicit clone-only diagnostic run; use the matched lane for the clone-versus-fetch egress gate'
