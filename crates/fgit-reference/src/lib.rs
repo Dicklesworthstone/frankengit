@@ -16,8 +16,7 @@
 //!   in is never mutated.
 //! * No interior mutability. There is no `Cell`, `RefCell`, `Mutex`, `OnceLock`,
 //!   or atomic anywhere in the crate.
-//! * No ambient time, randomness, filesystem, network, or async runtime. The
-//!   only dependency is [`fgit_types`].
+//! * No ambient time, randomness, filesystem, network, or async runtime.
 //! * No unordered collection. Every map and set is a `BTreeMap` or `BTreeSet`
 //!   over a totally ordered key, because plan §16.3 forbids hash iteration
 //!   order from being publication semantics.
@@ -64,14 +63,11 @@
 //! Stated plainly, because the claim lattice is checked and this crate sits at
 //! the `bounded_model` rank, not at `proof`:
 //!
-//! * **This crate computes no digests.** Where §8.2 names a `Digest` root, the
-//!   model carries the root's *content*, and identities for seals, capsules,
-//!   batches, records, and heads are supplied by the caller. What the model
-//!   enforces is the derivation's *law* — determinism and injectivity of the
-//!   §3.3 transaction identity, and freshness of every other identity family
-//!   (see [`state::IdentityLedger`]) — so a broken derivation is caught here
-//!   even though the digest is computed elsewhere. Binding content to canonical
-//!   bytes is FG-003b's job, over exactly these values.
+//! * **This crate delegates canonical hashing to `fgit-codec`.** The general
+//!   model still carries caller-supplied identity values and enforces their
+//!   laws. The focused merge-delivery oracle additionally consumes shared
+//!   canonical forge/outbox bodies and asks the codec for their deterministic
+//!   roots; it does not define a second byte layout or hash preimage.
 //! * **The Git object model is not implemented here.** The model knows only
 //!   commit parentage, and only as much as the fast-forward predicate needs.
 //!   Trees, blobs, tags, packs, and deltas belong to the object engine.
@@ -103,6 +99,7 @@ pub mod effect;
 pub mod harness;
 pub mod intent;
 pub mod machine;
+pub mod merge_delivery;
 pub mod refs;
 pub mod refusal;
 pub mod state;
@@ -113,6 +110,10 @@ pub use harness::{IdentityMint, label};
 pub use machine::{
     CancellationPhase, CancellationReport, CancellationRequest, ModelInput, ModelOutput, ModelStep,
     step,
+};
+pub use merge_delivery::{
+    MergeDeliveryInput, MergeDeliveryTransition, MergeDeliveryTransitionRefusal,
+    apply_merge_delivery_transition,
 };
 pub use refusal::{MODEL_REFUSAL_SURFACE, RefusalClass, is_model_refusal};
 pub use state::{
