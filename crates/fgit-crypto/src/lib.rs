@@ -102,6 +102,7 @@ mod corpus;
 mod defense;
 mod derive;
 mod envelope;
+mod forge_position;
 mod hashing;
 mod keys;
 mod lifecycle;
@@ -135,6 +136,11 @@ pub use defense::{
 };
 pub use derive::{MAX_OUTPUT_BYTES, OutputTooLong, derive, derive_key, expand, extract};
 pub use envelope::{AEAD_TAG_BYTES, EnvelopeError, EnvelopeNonce, NONCE_BYTES, SealedEnvelope};
+pub use forge_position::{
+    ForgePositionRefusal, forge_position_leaf, forge_position_membership_proof,
+    forge_position_merkle_root, forge_position_schema, forge_stream_order,
+    verify_forge_position_membership,
+};
 pub use hashing::{DigestHasher, Sha1Hasher, Sha256Hasher, sha1_digest, sha256_digest};
 pub use keys::{
     AuthorityAdmin, Capsule, EncryptionCapable, Evidence, Identity, KEY_BYTES, KeyEpoch, KeyId,
