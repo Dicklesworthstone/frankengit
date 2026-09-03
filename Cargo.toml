@@ -75,6 +75,7 @@ fgit-resource = { path = "crates/fgit-resource" }
 fgit-runner = { path = "crates/fgit-runner" }
 fgit-runtime = { path = "crates/fgit-runtime" }
 fgit-schema = { path = "crates/fgit-schema" }
+fgit-slo = { path = "crates/fgit-slo" }
 fgit-statistics = { path = "crates/fgit-statistics" }
 fgit-txn = { path = "crates/fgit-txn" }
 fgit-treefs = { path = "crates/fgit-treefs" }

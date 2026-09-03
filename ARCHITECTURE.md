@@ -1,6 +1,6 @@
 # FrankenGit Architecture
 
-**Status:** pre-implementation architecture summary  
+**Status:** architecture summary; implementation is active and the README's reality snapshot tracks what exists  
 **Normative source:** [`docs/NORMATIVE_PROTOCOL_CONTRACTS.md`](docs/NORMATIVE_PROTOCOL_CONTRACTS.md)  
 **Full plan:** [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md)
 

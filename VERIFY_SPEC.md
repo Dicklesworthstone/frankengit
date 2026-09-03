@@ -1,6 +1,6 @@
 # FrankenGit Verification Specification
 
-**Status:** normative evidence and release-gate contract for the pre-implementation phase  
+**Status:** normative evidence and release-gate contract; the full/release lanes stay dormant typed refusals until their real gates land  
 **Architecture version:** 3.0  
 **Local entrypoint:** `./scripts/verify.sh`
 

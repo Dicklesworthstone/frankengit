@@ -6,6 +6,42 @@ FrankenGit has moved beyond its original architecture-only phase into active imp
 
 ## [Unreleased] — 2026-09-02
 
+### Added — network push over the raw git-daemon transport (frankengit-hh37)
+
+`fg serve` now serves `git-receive-pack` when the operator names a publishing
+principal with `--receive-principal <principal-id-hex>`; without the flag the
+compatibility default stands and the service is refused. The session
+advertises through the canonical hidden-ref filter, finds the exact pack end
+with a new incremental `fgit-pack::PackBoundaryScanner` (over a new framed
+mode of the streaming inflater), and admits the verbatim captured request
+through the existing authenticated durable receive boundary — quarantine,
+validation, policy, and exact-predecessor head CAS unchanged, with
+`report-status` derived only from authenticated terminal outcomes. An
+identical retried push resolves to the same sealed transaction. The
+`first_push.sh` e2e suite passes 21/21 with a stock `git` client, including
+the refusal twin, a byte-identical re-clone, an idempotent retry, and an
+incremental push.
+
+### Fixed — serving closure now unions the verified decision history
+
+Closure selection returned only the latest committed record's closure, so a
+clone after an incremental push was missing every earlier decision's objects.
+The materializer now unions closure roots along the verified head chain as a
+derived serving projection (`ClosureSelectionSource::CumulativeHistory`);
+canonical per-decision closures are unchanged and single-closure histories
+behave byte-identically.
+
+### Fixed — the 2026-08-31..09-02 agent-control stream builds and tests again
+
+The toolchain-less implementation wave left the workspace unbuildable (an
+oversized refusal enum failing its 128-byte const bound, missing derives,
+shadowed test helpers, never-imported traits, a dead duplicate of the
+incarnation-configuration family, and a non-exhaustive verified-read match
+for the new V2_2 configuration schema, which now serves a typed refusal).
+All repaired with the workspace green: 4,513 tests / 0 failures at
+`66de074e`. The constitution lane still refuses fgit-agent's 23
+`too_many_arguments` allows, tracked as the lint-debt drain bead.
+
 ### Added — descendant-head handoff acceptance
 
 The Agent Control Plane can now accept one proof-carrying handoff at either the same authenticated repository head or a strictly later head proven to descend from the capsule's source head.
