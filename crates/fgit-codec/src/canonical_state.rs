@@ -1,18 +1,12 @@
 //! Canonical persisted forge-position and outbox state bodies.
 //!
-//! The repository authority head already publishes `forge_position_root` and
-//! `outbox_root`, but a root is useful only when a reader can resolve one exact
-//! canonical body behind it. This module owns those two shared byte layouts.
-//!
-//! It deliberately does **not** own transition policy. `fgit-reference` decides
-//! whether a stream may advance or an outbox obligation may change state. The
-//! codec owns only bounded, repository-scoped, canonically ordered bytes and
-//! their deterministic roots.
+//! The repository authority head publishes `forge_position_root` and
+//! `outbox_root`; these shared bodies make those roots independently resolvable.
+//! Transition legality remains in `fgit-reference`. This module owns bounded,
+//! repository-scoped, canonically ordered bytes and deterministic roots only.
 //!
 //! Both bodies use the registered `frankengit/generation/v1` identity domain
-//! with distinct schema families. The schema identifier is committed into the
-//! digest preimage, so forge-position bytes cannot be replayed as outbox state
-//! even though both are immutable state generations.
+//! with distinct schema families, so equal payload bytes cannot cross types.
 
 use core::cmp::Ordering;
 
@@ -20,27 +14,19 @@ use fgit_types::{
     AsciiSlug, Digest, DomainTag, RepositoryCommitId, RepositoryId, SchemaFamily, TxId,
 };
 
-use crate::{
-    CanonicalBody, CodecRefusal, CryptoBodyIdentity, Decoder, Encoder, body_id,
-};
+use crate::{CanonicalBody, CodecRefusal, CryptoBodyIdentity, Decoder, Encoder, body_id};
 
-/// Largest forge-position map this schema will encode or strictly accept.
-///
-/// At the maximum label and digest widths this remains comfortably below the
-/// ordinary 16 MiB frame ceiling. Raising a transport decoder limit therefore
-/// cannot silently turn this schema into an unbounded allocation surface.
+/// Permanent forge-position entry ceiling for schema v1.
 pub const MAX_FORGE_POSITION_STATE_ENTRIES: usize = 16_384;
-
-/// Largest outbox map this schema will encode or strictly accept.
+/// Permanent outbox entry ceiling for schema v1.
 pub const MAX_OUTBOX_STATE_ENTRIES: usize = 16_384;
 
 const STATE_DOMAIN: DomainTag = DomainTag::from_static("frankengit/generation/v1");
 
 /// One stream's latest canonical forge-position transition.
 ///
-/// `successor_position` is derived from `predecessor_position + event_count`
-/// rather than encoded redundantly. A malformed body therefore cannot claim a
-/// predecessor, count, and contradictory successor simultaneously.
+/// The successor is derived instead of encoded redundantly, preventing a body
+/// from claiming a contradictory predecessor/count/successor triple.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ForgePositionStateEntry {
     stream: AsciiSlug,
@@ -50,11 +36,11 @@ pub struct ForgePositionStateEntry {
 }
 
 impl ForgePositionStateEntry {
-    /// Creates one structurally valid transition entry.
+    /// Creates one valid nonempty position range.
     ///
     /// # Errors
     ///
-    /// Refuses a zero event count and a position range that would overflow.
+    /// Refuses zero events and arithmetic overflow.
     pub fn try_new(
         stream: AsciiSlug,
         predecessor_position: u64,
@@ -70,31 +56,31 @@ impl ForgePositionStateEntry {
         })
     }
 
-    /// Canonical forge stream label.
+    /// Canonical stream label.
     #[must_use]
     pub const fn stream(&self) -> AsciiSlug {
         self.stream
     }
 
-    /// Exact position before the retained event batch.
+    /// Position before the retained event batch.
     #[must_use]
     pub const fn predecessor_position(&self) -> u64 {
         self.predecessor_position
     }
 
-    /// Number of events committed by the retained batch.
+    /// Number of ordered events in the batch.
     #[must_use]
     pub const fn event_count(&self) -> u32 {
         self.event_count
     }
 
-    /// Exact position after the retained event batch.
+    /// Position after the retained event batch.
     #[must_use]
     pub fn successor_position(&self) -> u64 {
         self.predecessor_position + u64::from(self.event_count)
     }
 
-    /// Immutable canonical event-batch commitment.
+    /// Immutable event-batch commitment.
     #[must_use]
     pub const fn event_batch_root(&self) -> Digest {
         self.event_batch_root
@@ -113,7 +99,7 @@ impl CanonicalForgePositionState {
     ///
     /// # Errors
     ///
-    /// Refuses an oversized map or two entries for the same stream.
+    /// Refuses an oversized map or a duplicate stream.
     pub fn try_new(
         repository_id: RepositoryId,
         mut entries: Vec<ForgePositionStateEntry>,
@@ -131,7 +117,7 @@ impl CanonicalForgePositionState {
         })
     }
 
-    /// Repository namespace this state belongs to.
+    /// Repository namespace.
     #[must_use]
     pub const fn repository_id(&self) -> RepositoryId {
         self.repository_id
@@ -143,7 +129,7 @@ impl CanonicalForgePositionState {
         &self.entries
     }
 
-    /// Looks up one stream without changing canonical ordering.
+    /// Looks up one stream.
     #[must_use]
     pub fn entry(&self, stream: AsciiSlug) -> Option<&ForgePositionStateEntry> {
         self.entries
@@ -152,12 +138,11 @@ impl CanonicalForgePositionState {
             .map(|index| &self.entries[index])
     }
 
-    /// Deterministic authenticated root for this exact canonical body.
+    /// Deterministic authenticated root.
     ///
     /// # Errors
     ///
-    /// Refuses a body that cannot be canonically encoded or identified under
-    /// the registered generation domain.
+    /// Refuses canonical encoding or registered-domain identity failure.
     pub fn root(&self) -> Result<Digest, CodecRefusal> {
         canonical_state_root(self)
     }
@@ -177,7 +162,7 @@ impl CanonicalBody for CanonicalForgePositionState {
         )?;
         reject_duplicate_forge_streams(&self.entries)?;
         out.write_opaque_id(self.repository_id.as_bytes());
-        let entries: Vec<(AsciiSlug, ForgePositionValue)> = self
+        let values: Vec<(AsciiSlug, ForgePositionValue)> = self
             .entries
             .iter()
             .map(|entry| {
@@ -193,7 +178,7 @@ impl CanonicalBody for CanonicalForgePositionState {
             .collect();
         out.write_canonical_map(
             "forge_positions",
-            &entries,
+            &values,
             |out, stream| out.write_bytes("forge_stream", stream.as_bytes()),
             |out, value| {
                 validate_position_range(value.predecessor_position, value.event_count)?;
@@ -205,17 +190,15 @@ impl CanonicalBody for CanonicalForgePositionState {
     }
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
-        let repository_id =
-            RepositoryId::from_bytes(input.read_opaque_id("repository_id")?);
-        let entries = input.read_canonical_map(
+        let repository_id = RepositoryId::from_bytes(input.read_opaque_id("repository_id")?);
+        let values = input.read_canonical_map(
             "forge_positions",
             |input| {
                 AsciiSlug::try_new("forge_stream", input.read_bytes("forge_stream")?)
                     .map_err(CodecRefusal::from)
             },
             |input| {
-                let predecessor_position =
-                    input.read_scalar::<u64>("predecessor_position")?;
+                let predecessor_position = input.read_scalar::<u64>("predecessor_position")?;
                 let event_count = input.read_scalar::<u32>("event_count")?;
                 validate_position_range(predecessor_position, event_count)?;
                 Ok(ForgePositionValue {
@@ -227,21 +210,20 @@ impl CanonicalBody for CanonicalForgePositionState {
         )?;
         check_entry_count(
             "forge_positions",
-            entries.len(),
+            values.len(),
             MAX_FORGE_POSITION_STATE_ENTRIES,
         )?;
-        let entries = entries
-            .into_iter()
-            .map(|(stream, value)| ForgePositionStateEntry {
-                stream,
-                predecessor_position: value.predecessor_position,
-                event_count: value.event_count,
-                event_batch_root: value.event_batch_root,
-            })
-            .collect();
         Ok(Self {
             repository_id,
-            entries,
+            entries: values
+                .into_iter()
+                .map(|(stream, value)| ForgePositionStateEntry {
+                    stream,
+                    predecessor_position: value.predecessor_position,
+                    event_count: value.event_count,
+                    event_batch_root: value.event_batch_root,
+                })
+                .collect(),
         })
     }
 }
@@ -255,11 +237,9 @@ struct ForgePositionValue {
 
 /// One stable delivery-key binding in canonical outbox state.
 ///
-/// `effect_state_root` names the existing canonical effect/obligation state;
-/// this index does not duplicate that state machine. The transaction and
-/// predecessor RCR form a non-circular basis: the resulting RCR commits this
-/// outbox root, so placing that resulting identity inside the body would require
-/// an impossible hash fixed point.
+/// `effect_state_root` points at the existing effect/obligation state rather
+/// than duplicating that state machine. `tx_id` and `predecessor_rcr_id` form a
+/// non-circular transition basis: the resulting RCR commits this outbox root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CanonicalOutboxStateEntry {
     delivery_key: AsciiSlug,
@@ -304,32 +284,31 @@ impl CanonicalOutboxStateEntry {
         self.delivery_key
     }
 
-    /// Stable effect-class label.
+    /// Stable effect class.
     #[must_use]
     pub const fn effect_class(&self) -> AsciiSlug {
         self.effect_class
     }
 
-    /// Stable destination or audience label.
+    /// Stable destination or audience.
     #[must_use]
     pub const fn destination(&self) -> AsciiSlug {
         self.destination
     }
 
-    /// Immutable payload or payload-identity commitment.
+    /// Immutable payload commitment.
     #[must_use]
     pub const fn payload_root(&self) -> Digest {
         self.payload_root
     }
 
-    /// Sealed transaction whose semantics produced this obligation.
+    /// Sealed transaction producing this obligation.
     #[must_use]
     pub const fn tx_id(&self) -> TxId {
         self.tx_id
     }
 
-    /// Previously committed RCR at the transition basis, absent only at
-    /// repository creation.
+    /// Previously committed RCR at the transition basis.
     #[must_use]
     pub const fn predecessor_rcr_id(&self) -> Option<RepositoryCommitId> {
         self.predecessor_rcr_id
@@ -341,8 +320,7 @@ impl CanonicalOutboxStateEntry {
         self.effect_state_root
     }
 
-    /// Prior effect-state commitment required to audit a transition, when one
-    /// exists.
+    /// Prior effect-state commitment, when one exists.
     #[must_use]
     pub const fn predecessor_effect_state_root(&self) -> Option<Digest> {
         self.predecessor_effect_state_root
@@ -361,7 +339,7 @@ impl CanonicalOutboxState {
     ///
     /// # Errors
     ///
-    /// Refuses an oversized map or two states for the same delivery key.
+    /// Refuses an oversized map or a duplicate delivery key.
     pub fn try_new(
         repository_id: RepositoryId,
         mut entries: Vec<CanonicalOutboxStateEntry>,
@@ -379,7 +357,7 @@ impl CanonicalOutboxState {
         })
     }
 
-    /// Repository namespace this state belongs to.
+    /// Repository namespace.
     #[must_use]
     pub const fn repository_id(&self) -> RepositoryId {
         self.repository_id
@@ -400,12 +378,11 @@ impl CanonicalOutboxState {
             .map(|index| &self.entries[index])
     }
 
-    /// Deterministic authenticated root for this exact canonical body.
+    /// Deterministic authenticated root.
     ///
     /// # Errors
     ///
-    /// Refuses a body that cannot be canonically encoded or identified under
-    /// the registered generation domain.
+    /// Refuses canonical encoding or registered-domain identity failure.
     pub fn root(&self) -> Result<Digest, CodecRefusal> {
         canonical_state_root(self)
     }
@@ -425,7 +402,7 @@ impl CanonicalBody for CanonicalOutboxState {
         )?;
         reject_duplicate_delivery_keys(&self.entries)?;
         out.write_opaque_id(self.repository_id.as_bytes());
-        let entries: Vec<(AsciiSlug, OutboxStateValue)> = self
+        let values: Vec<(AsciiSlug, OutboxStateValue)> = self
             .entries
             .iter()
             .map(|entry| {
@@ -445,7 +422,7 @@ impl CanonicalBody for CanonicalOutboxState {
             .collect();
         out.write_canonical_map(
             "outbox_entries",
-            &entries,
+            &values,
             |out, delivery_key| {
                 out.write_bytes("outbox_delivery_key", delivery_key.as_bytes())
             },
@@ -467,9 +444,8 @@ impl CanonicalBody for CanonicalOutboxState {
     }
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
-        let repository_id =
-            RepositoryId::from_bytes(input.read_opaque_id("repository_id")?);
-        let entries = input.read_canonical_map(
+        let repository_id = RepositoryId::from_bytes(input.read_opaque_id("repository_id")?);
+        let values = input.read_canonical_map(
             "outbox_entries",
             |input| {
                 AsciiSlug::try_new(
@@ -489,45 +465,47 @@ impl CanonicalBody for CanonicalOutboxState {
                     input.read_bytes("outbox_destination")?,
                 )
                 .map_err(CodecRefusal::from)?;
+                let payload_root = input.read_digest()?;
                 let tx_id = TxId::from_internal_object_id(input.read_internal_object_id()?)
                     .map_err(CodecRefusal::from)?;
                 let predecessor_rcr_id = input.read_option("predecessor_rcr_id", |input| {
                     RepositoryCommitId::from_internal_object_id(input.read_internal_object_id()?)
                         .map_err(CodecRefusal::from)
                 })?;
+                let effect_state_root = input.read_digest()?;
+                let predecessor_effect_state_root = input
+                    .read_option("predecessor_effect_state_root", Decoder::read_digest)?;
                 Ok(OutboxStateValue {
                     effect_class,
                     destination,
-                    payload_root: input.read_digest()?,
+                    payload_root,
                     tx_id,
                     predecessor_rcr_id,
-                    effect_state_root: input.read_digest()?,
-                    predecessor_effect_state_root: input
-                        .read_option("predecessor_effect_state_root", Decoder::read_digest)?,
+                    effect_state_root,
+                    predecessor_effect_state_root,
                 })
             },
         )?;
         check_entry_count(
             "outbox_entries",
-            entries.len(),
+            values.len(),
             MAX_OUTBOX_STATE_ENTRIES,
         )?;
-        let entries = entries
-            .into_iter()
-            .map(|(delivery_key, value)| CanonicalOutboxStateEntry {
-                delivery_key,
-                effect_class: value.effect_class,
-                destination: value.destination,
-                payload_root: value.payload_root,
-                tx_id: value.tx_id,
-                predecessor_rcr_id: value.predecessor_rcr_id,
-                effect_state_root: value.effect_state_root,
-                predecessor_effect_state_root: value.predecessor_effect_state_root,
-            })
-            .collect();
         Ok(Self {
             repository_id,
-            entries,
+            entries: values
+                .into_iter()
+                .map(|(delivery_key, value)| CanonicalOutboxStateEntry {
+                    delivery_key,
+                    effect_class: value.effect_class,
+                    destination: value.destination,
+                    payload_root: value.payload_root,
+                    tx_id: value.tx_id,
+                    predecessor_rcr_id: value.predecessor_rcr_id,
+                    effect_state_root: value.effect_state_root,
+                    predecessor_effect_state_root: value.predecessor_effect_state_root,
+                })
+                .collect(),
         })
     }
 }
@@ -653,9 +631,8 @@ mod tests {
 
     #[test]
     fn constructor_order_matches_canonical_encoded_key_order() {
-        let repository_id = RepositoryId::from_bytes([0x11; 16]);
         let state = CanonicalForgePositionState::try_new(
-            repository_id,
+            RepositoryId::from_bytes([0x11; 16]),
             vec![
                 ForgePositionStateEntry::try_new(slug("zz"), 0, 1, digest(1))
                     .expect("entry"),
