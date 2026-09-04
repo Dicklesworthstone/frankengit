@@ -600,6 +600,22 @@ impl NodeRuntime {
         self.runtime.request_cx_with_budget(self.budget_for(class))
     }
 
+    /// Mint a production request context carrying an explicit budget.
+    ///
+    /// The supplied budget is met against the node root first, so a caller
+    /// can narrow a class policy for one operation — for example scaling one
+    /// admission's database budget to the work its request actually admitted
+    /// — but can never carry more budget than the root granted.
+    #[must_use]
+    pub fn request_cx_with_budget(&self, budget: Budget) -> Cx {
+        let bounded = self
+            .profile
+            .budgets
+            .budget_at(self.now(), BudgetClass::NodeRoot)
+            .meet(budget);
+        self.runtime.request_cx_with_budget(bounded)
+    }
+
     /// Mint a production request context **narrowed to a capability row**.
     ///
     /// This is the capability boundary actually being enforced, as opposed to

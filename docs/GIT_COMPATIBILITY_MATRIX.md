@@ -30,6 +30,7 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Shallow clone/fetch | required-v1 | Depth, deepen, deepen-since/not, unshallow, and reachability edge cases |
 | Partial clone / filters | required-v1 | `blob:none`, tree-depth filters, promisor correctness, authenticated omissions, lazy fetch |
 | Pack delta chains | required-v1 | Compatible bounded validation; depth/fan-out/expanded-byte limits; thin-pack completion |
+| Receive session envelope | required-v1 profile | Deliberate, operator-selected size/time bounds for one pushed pack; typed refusals, never a silent hangup after the pack trailer — see the envelope section below |
 | Hidden refs | required-v1 | Authorization and advertisement separation; no side-channel disclosure |
 | Namespaces | planned | Tenant/repository isolation; no accidental cross-namespace advertisement |
 | Annotated and lightweight tags | required-v1 | Peeling, protection, deletion, signature evidence, deterministic ordering |
@@ -43,6 +44,50 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Arbitrary user wire hooks | explicitly-out-of-scope | Replaced with typed events, policies, obligations, and effect broker |
 | Archive generation | required-v1 subset | Pure-Rust tar/zip generation, path safety, deterministic ordering, resource bounds |
 | Diff/merge | required-v1 core | Pure-Rust Myers/patience/histogram-style diff profiles and deterministic merge; oracle corpus for observable behavior |
+
+## Receive session envelope (git-daemon slice)
+
+Resource limits are compatibility semantics (constitution section 6), so the
+receive envelope is a deliberate, documented policy rather than an accidental
+function of a fixed connection timeout and the host's seal throughput
+(frankengit-asb8). For one raw git-daemon `git-receive-pack` session, two
+limit families govern:
+
+- **Size.** `ReceiveLimits`/`PackLimits`: pushed-pack input bytes (default
+  64 MiB; quarantine retention tracks it), unique expanded content bytes
+  (default 128 MiB; the delta-resolver cache tracks it), per-object bytes
+  (default 32 MiB), entry/delta depth/fan-out/work bounds. A violation is a
+  typed `PackError` surfaced through report-status as `unpack`/`ng` with
+  `ResourceBudgetExceeded` wording (frankengit-xefn).
+- **Time.** The session budget is `base + min(admitted_bytes * per_byte,
+  max_extension)`, charged against every byte received from the client.
+  Defaults: base 300 s, per-byte ≈ 1 s per admitted MiB, extension ceiling
+  3600 s. A peer that stops delivering bytes earns no extension, so the
+  anti-trickle property of the original absolute deadline is preserved as a
+  sustained-minimum-rate policy. A zero per-byte rate with a zero ceiling
+  selects the legacy flat envelope.
+
+The admission layer's database budget derives from the same policy rather
+than from the generic 15 s database class default: the seal's deadline is
+the session's own envelope value, and its poll and cost quotas scale with
+admitted bytes above the class floors (one poll per 64 bytes, one cost unit
+per 8 bytes). One work-proportional doctrine bounds both the socket session
+and the seal, so a large-but-legitimate first push is never capped by the
+host's incidental throughput rank.
+
+`fg serve` selects the envelope explicitly: `--session-timeout-secs`,
+`--session-secs-per-mib`, `--session-max-extension-secs`,
+`--receive-max-input-mib`, `--receive-max-expanded-mib`.
+
+Refusal behavior by phase: a deadline that fires while the client is still
+sending (greeting, command section, pack stream) is a typed serve error and
+the connection ends, matching upstream mid-transfer failure behavior; a
+deadline that fires during admission — after the client has finished sending —
+is delivered through report-status with the notice "push outcome unknown:
+retry the identical push to resolve it idempotently" (cancellation never
+proves non-commit, normative contract section 5.2), written inside one bounded
+30 s terminal report grace. The committed report is likewise always
+deliverable when the envelope fires after the verdict exists.
 
 ## Native ATP-Git transport
 

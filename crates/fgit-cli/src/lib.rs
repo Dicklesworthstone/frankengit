@@ -9,15 +9,16 @@ use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use fgit_forge::snapshot::{
     ForgeSnapshot, ForgeSnapshotDiff, PositionTarget, SnapshotDisclosurePolicy, SnapshotLimits,
     SnapshotRefusal, project_snapshot_from_history, verify_continuous_consistency,
 };
 use fgit_node::{
-    DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, NodeConfig,
-    NodeGitDaemonServeRefusal, NodeGitDaemonServerRefusal, NodeInitialization,
-    NodeSourceImportRefusal, OneNode, RepositoryResolutionInput,
+    DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionTimeout,
+    GitDaemonSessionWorkScaling, NodeConfig, NodeGitDaemonServeRefusal, NodeGitDaemonServerRefusal,
+    NodeInitialization, NodeSourceImportRefusal, OneNode, RepositoryResolutionInput,
 };
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::numeric::{CodecVersion, DecisionSequence, HeadGeneration, RepositorySequence};
@@ -182,7 +183,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -406,6 +407,7 @@ pub enum CliOutcome {
 /// Executes a bounded command invocation without ambient configuration.
 pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
     let (arguments, receive_principal) = extract_receive_principal(arguments)?;
+    let (arguments, serve_envelope) = extract_serve_envelope(&arguments)?;
     match &arguments[..] {
         [command, storage_root, tenant, repository] if command == "init" => run_init(
             storage_root,
@@ -568,6 +570,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 None,
                 GitDaemonServerLimits::DEFAULT,
                 receive_principal,
+                serve_envelope,
             )
         }
         [
@@ -589,6 +592,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             )?),
             GitDaemonServerLimits::DEFAULT,
             receive_principal,
+            serve_envelope,
         ),
         [
             command,
@@ -612,6 +616,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 None,
                 parse_server_limits(sessions, in_flight)?,
                 receive_principal,
+                serve_envelope,
             )
         }
         [
@@ -642,6 +647,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 )?),
                 parse_server_limits(sessions, in_flight)?,
                 receive_principal,
+                serve_envelope,
             )
         }
         [command, ..] if command == "at" => parse_and_run_at(&arguments),
@@ -670,7 +676,9 @@ fn run_init(
 /// Serves one explicitly bounded multi-session git-daemon run.
 ///
 /// The repository's object format is selected from its authenticated canonical
-/// configuration, not supplied by this open-path command.
+/// configuration, not supplied by this open-path command. The operator-facing
+/// receive envelope (session time scaling and pack size ceilings) is applied
+/// from the parsed flags; omitted flags keep the documented defaults.
 fn run_serve(
     storage_root: &str,
     tenant: &str,
@@ -679,16 +687,19 @@ fn run_serve(
     resolution_input: Option<RepositoryResolutionInput>,
     server_limits: GitDaemonServerLimits,
     receive_principal: Option<PrincipalId>,
+    envelope: ServeEnvelope,
 ) -> Result<CliOutcome, CliRefusal> {
+    let mut configuration = node_config(storage_root, tenant, repository, None, resolution_input)?;
+    if let Some(principal) = receive_principal {
+        configuration = configuration.with_git_daemon_receive_principal(principal);
+    }
+    // A malformed envelope is a typed refusal, not a partially opened
+    // listener: validate before any side effect.
+    configuration = envelope.apply(configuration)?;
     {
         {
             let listener = TcpListener::bind(listen_address).map_err(CliRefusal::Listener)?;
             let listen_address = listener.local_addr().map_err(CliRefusal::Listener)?;
-            let mut configuration =
-                node_config(storage_root, tenant, repository, None, resolution_input)?;
-            if let Some(principal) = receive_principal {
-                configuration = configuration.with_git_daemon_receive_principal(principal);
-            }
             let mut node = OneNode::open_existing(configuration).map_err(CliRefusal::Node)?;
             let _ = node.bring_into_service(HeadGeneration::FIRST);
             let serving =
@@ -742,6 +753,157 @@ fn parse_server_limits(
             }
         }
     })
+}
+
+/// The operator-selected git-daemon receive envelope parsed from `fg serve`
+/// flags (frankengit-asb8).
+///
+/// Every field is optional; an omitted component keeps the node's documented
+/// default. The envelope is deployment policy, never persisted canonical
+/// state: it decides which pushes this serve run admits, not what the
+/// repository contains.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ServeEnvelope {
+    /// Base absolute session budget in seconds (`--session-timeout-secs`).
+    session_timeout_secs: Option<u64>,
+    /// Work scaling rate in seconds per admitted MiB (`--session-secs-per-mib`).
+    session_secs_per_mib: Option<u64>,
+    /// Hard ceiling on the earned extension (`--session-max-extension-secs`).
+    session_max_extension_secs: Option<u64>,
+    /// Pushed-pack input byte ceiling in MiB (`--receive-max-input-mib`).
+    receive_max_input_mib: Option<u64>,
+    /// Unique expanded content ceiling in MiB (`--receive-max-expanded-mib`).
+    receive_max_expanded_mib: Option<u64>,
+}
+
+impl ServeEnvelope {
+    /// Applies the parsed envelope to one node configuration.
+    fn apply(self, mut configuration: NodeConfig) -> Result<NodeConfig, CliRefusal> {
+        if let Some(secs) = self.session_timeout_secs {
+            let timeout =
+                GitDaemonSessionTimeout::try_new(Duration::from_secs(secs)).map_err(|_| {
+                    CliRefusal::InvalidServeLimit {
+                        field: "--session-timeout-secs",
+                        value: secs.to_string(),
+                    }
+                })?;
+            configuration = configuration.with_git_daemon_session_timeout(timeout);
+        }
+        if self.session_secs_per_mib.is_some() || self.session_max_extension_secs.is_some() {
+            let secs_per_mib = self.session_secs_per_mib.unwrap_or(1);
+            // A zero rate is the deliberate flat envelope; it must then carry
+            // no extension ceiling (the node's typed refusal covers the
+            // contradictory combination).
+            let extension_secs = self
+                .session_max_extension_secs
+                .unwrap_or(if secs_per_mib == 0 {
+                    0
+                } else {
+                    GitDaemonSessionWorkScaling::DEFAULT
+                        .max_extension()
+                        .as_secs()
+                });
+            let scaling = GitDaemonSessionWorkScaling::try_new(
+                Duration::from_secs(secs_per_mib) / 1_048_576,
+                Duration::from_secs(extension_secs),
+            )
+            .map_err(|_| CliRefusal::InvalidServeLimit {
+                field: "--session-secs-per-mib",
+                value: format!(
+                    "{} with --session-max-extension-secs {extension_secs}",
+                    self.session_secs_per_mib.unwrap_or(1)
+                ),
+            })?;
+            configuration = configuration.with_git_daemon_session_work_scaling(scaling);
+        }
+        if self.receive_max_input_mib.is_some() || self.receive_max_expanded_mib.is_some() {
+            let input_bytes = self
+                .receive_max_input_mib
+                .map(|mib| serve_mib_to_bytes(mib, "--receive-max-input-mib"))
+                .transpose()?;
+            let expanded_bytes = self
+                .receive_max_expanded_mib
+                .map(|mib| serve_mib_to_bytes(mib, "--receive-max-expanded-mib"))
+                .transpose()?;
+            configuration =
+                configuration.with_git_daemon_receive_byte_envelope(input_bytes, expanded_bytes);
+        }
+        Ok(configuration)
+    }
+}
+
+/// Converts a MiB flag value to bytes with overflow and width checks.
+fn serve_mib_to_bytes(mib: u64, field: &'static str) -> Result<usize, CliRefusal> {
+    mib.checked_mul(1_048_576)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .filter(|bytes| *bytes != 0)
+        .ok_or_else(|| CliRefusal::InvalidServeLimit {
+            field,
+            value: mib.to_string(),
+        })
+}
+
+/// Extracts the receive-envelope flags, which are optional and position-free
+/// but meaningful only for `serve`; anywhere else they stay in place and fall
+/// through to the usage refusal, so no other command silently accepts them.
+fn extract_serve_envelope(
+    arguments: &[String],
+) -> Result<(Vec<String>, ServeEnvelope), CliRefusal> {
+    let is_serve = arguments.first().is_some_and(|command| command == "serve");
+    let mut retained = Vec::with_capacity(arguments.len());
+    let mut envelope = ServeEnvelope::default();
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        let field = if is_serve && argument == "--session-timeout-secs" {
+            Some(&mut envelope.session_timeout_secs)
+        } else if is_serve && argument == "--session-secs-per-mib" {
+            Some(&mut envelope.session_secs_per_mib)
+        } else if is_serve && argument == "--session-max-extension-secs" {
+            Some(&mut envelope.session_max_extension_secs)
+        } else if is_serve && argument == "--receive-max-input-mib" {
+            Some(&mut envelope.receive_max_input_mib)
+        } else if is_serve && argument == "--receive-max-expanded-mib" {
+            Some(&mut envelope.receive_max_expanded_mib)
+        } else {
+            None
+        };
+        let Some(slot) = field else {
+            retained.push(argument.clone());
+            index += 1;
+            continue;
+        };
+        if slot.is_some() {
+            return Err(CliRefusal::Usage);
+        }
+        let Some(value) = arguments.get(index + 1) else {
+            return Err(CliRefusal::Usage);
+        };
+        *slot = Some(
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|parsed| {
+                    *parsed != 0
+                        || argument == "--session-secs-per-mib"
+                        || argument == "--session-max-extension-secs"
+                })
+                .ok_or_else(|| CliRefusal::InvalidServeLimit {
+                    // Borrow a stable name for the refusal: the matched flag
+                    // string is already a 'static literal.
+                    field: match argument.as_str() {
+                        "--session-timeout-secs" => "--session-timeout-secs",
+                        "--session-secs-per-mib" => "--session-secs-per-mib",
+                        "--session-max-extension-secs" => "--session-max-extension-secs",
+                        "--receive-max-input-mib" => "--receive-max-input-mib",
+                        _ => "--receive-max-expanded-mib",
+                    },
+                    value: value.clone(),
+                })?,
+        );
+        index += 2;
+    }
+    Ok((retained, envelope))
 }
 
 fn run_import(
@@ -1636,6 +1798,115 @@ mod tests {
             run(&zero_in_flight),
             Err(CliRefusal::InvalidServeLimit {
                 field: "--max-in-flight",
+                ..
+            })
+        ));
+    }
+
+    fn serve_argv(extra: &[&str]) -> Vec<String> {
+        let mut argv = vec![
+            "serve".to_owned(),
+            "/missing".to_owned(),
+            "11111111111111111111111111111111".to_owned(),
+            "22222222222222222222222222222222".to_owned(),
+            "127.0.0.1:0".to_owned(),
+        ];
+        argv.extend(extra.iter().map(|flag| (*flag).to_owned()));
+        argv
+    }
+
+    #[test]
+    fn serve_envelope_flags_parse_and_strip_from_serve_argv() {
+        let (retained, envelope) = super::extract_serve_envelope(&serve_argv(&[
+            "--session-timeout-secs",
+            "600",
+            "--session-secs-per-mib",
+            "2",
+            "--session-max-extension-secs",
+            "900",
+            "--receive-max-input-mib",
+            "256",
+            "--receive-max-expanded-mib",
+            "512",
+        ]))
+        .expect("a complete envelope flag set parses");
+        assert_eq!(retained.len(), 5, "only the positional serve argv remains");
+        assert_eq!(envelope.session_timeout_secs, Some(600));
+        assert_eq!(envelope.session_secs_per_mib, Some(2));
+        assert_eq!(envelope.session_max_extension_secs, Some(900));
+        assert_eq!(envelope.receive_max_input_mib, Some(256));
+        assert_eq!(envelope.receive_max_expanded_mib, Some(512));
+    }
+
+    #[test]
+    fn serve_envelope_flags_refuse_bad_values_before_opening_a_node() {
+        for (extra, field) in [
+            (
+                &["--session-timeout-secs", "0"][..],
+                "--session-timeout-secs",
+            ),
+            (
+                &["--session-timeout-secs", "soon"][..],
+                "--session-timeout-secs",
+            ),
+            (
+                &["--receive-max-input-mib", "0"][..],
+                "--receive-max-input-mib",
+            ),
+            (
+                &["--receive-max-expanded-mib", "lots"][..],
+                "--receive-max-expanded-mib",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    run(&serve_argv(extra)),
+                    Err(CliRefusal::InvalidServeLimit { field: observed, .. }) if observed == field
+                ),
+                "{field} with a bad value is a typed refusal"
+            );
+        }
+    }
+
+    #[test]
+    fn serve_envelope_refuses_a_duplicate_flag_and_an_orphan_flag() {
+        assert!(matches!(
+            run(&serve_argv(&[
+                "--session-timeout-secs",
+                "600",
+                "--session-timeout-secs",
+                "700",
+            ])),
+            Err(CliRefusal::Usage)
+        ));
+        // Envelope flags on another command stay in place and fall through to
+        // the usage refusal rather than being silently accepted there.
+        assert!(matches!(
+            run(&[
+                "doctor".to_owned(),
+                "/missing".to_owned(),
+                "11111111111111111111111111111111".to_owned(),
+                "22222222222222222222222222222222".to_owned(),
+                "--session-timeout-secs".to_owned(),
+                "5".to_owned(),
+            ]),
+            Err(CliRefusal::Usage)
+        ));
+    }
+
+    #[test]
+    fn serve_envelope_flat_scaling_refuses_a_ceiling_before_opening_a_node() {
+        // A zero per-byte rate with a non-zero extension ceiling names a
+        // ceiling no amount of admitted work could ever reach.
+        assert!(matches!(
+            run(&serve_argv(&[
+                "--session-secs-per-mib",
+                "0",
+                "--session-max-extension-secs",
+                "5",
+            ])),
+            Err(CliRefusal::InvalidServeLimit {
+                field: "--session-secs-per-mib",
                 ..
             })
         ));

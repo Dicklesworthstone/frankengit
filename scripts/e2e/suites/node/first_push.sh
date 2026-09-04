@@ -17,7 +17,11 @@
 # the receive lane claims; this is not the pinned differential oracle lane.
 #
 # NON-CLAIMS: this suite does not cover hidden-ref policy content (jkbo),
-# SHA-256 repositories, atomic multi-ref pushes, or push certificates. A
+# SHA-256 repositories, atomic multi-ref pushes, or push certificates. The
+# opt-in XL case (FG_E2E_LARGE_PUSH=1, release node) additionally pins the
+# documented receive session envelope (frankengit-asb8): a >= 300 MB inflated
+# first push under explicit size ceilings, a work-scaled deadline that admits
+# it under a 5 s base, and the over-budget report-status refusal. A
 # successful run is compatibility evidence for exactly the cells exercised.
 set -euo pipefail
 E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -258,6 +262,132 @@ if [ "${FG_E2E_LARGE_PUSH:-0}" = "1" ]; then
   LSRC_HEAD=$(git -C "$LSRC" rev-parse HEAD 2>/dev/null || echo source-missing)
   LCLONE_HEAD=$(git -C "$LCLONE" rev-parse HEAD 2>/dev/null || echo clone-missing)
   fge_assert_eq FG-HH37-PUSH-029 "$LSRC_HEAD" "$LCLONE_HEAD" 'the published head round-trips identically'
+
+  # --- XL case (frankengit-asb8): a >= 300 MB inflated first push under a
+  # deliberate, documented receive envelope. The corpus is ONE commit with 24
+  # blobs of ~13.8 MB unique text (~330 MB unique inflated content; each blob
+  # under the 32 MiB per-object ceiling; `pack.window=0` keeps the pack raw so
+  # no delta-work limit applies). Three serves pin the envelope semantics:
+  #   1. explicit size envelope + default time scaling -> admitted;
+  #   2. a 5 s base timeout + explicit per-MiB scaling -> admitted, because the
+  #      deadline scales with admitted work (a flat 5 s envelope cannot
+  #      transfer + inflate + seal ~330 MB even on a release node);
+  #   3. a 3 s flat envelope -> the over-budget push is refused through
+  #      report-status with the envelope-exhausted notice, never a hangup, and
+  #      an identical retry under a sufficient envelope resolves the unknown
+  #      outcome idempotently (section 5.2).
+  XL_SRC="$WORK/xl-src"
+  git init -q -b main "$XL_SRC"
+  git -C "$XL_SRC" config user.email first-push-xl@invalid.example
+  git -C "$XL_SRC" config user.name 'FG-ASB8 XL fixture'
+  for f in $(seq 1 24); do
+    seq 1 600000 | sed "s/^/xl-file-$f line /" > "$XL_SRC/xl$f.txt"
+  done
+  git -C "$XL_SRC" add -A
+  git -C "$XL_SRC" commit -qm 'XL commit: ~330 MB inflated unique content'
+
+  START_SERVE_XL() { # NAME PORT STORAGE REPOID EXTRA...
+    local name=$1 port=$2 storage=$3 repoid=$4
+    shift 4
+    fge_spawn "$name" bash -c 'port=$1; bin=$2; store=$3; tenant=$4; repo=$5; shift 5; exec "$bin" serve "$store" "$tenant" "$repo" "127.0.0.1:$port" "$@" 2>"/tmp/first-push-xl-serve-$port.err"' _ "$port" "$FG_BIN" "$storage" "$TENANT" "$repoid" "$@"
+    sleep 1
+    if kill -0 "$FGE_LAST_PID" 2>/dev/null; then SERVE_XL_STATE=ok; else SERVE_XL_STATE=dead; fi
+  }
+  FIND_PORT_AND_SERVE_XL() { # PREFIX STORAGE REPOID EXTRA...
+    local prefix=$1 storage=$2 repoid=$3
+    shift 3
+    FOUND_PORT='' FOUND_NAME=''
+    local off cand
+    for off in 0 4 8 12 16 20 24 28; do
+      cand=$(( PORT_BASE + off ))
+      START_SERVE_XL "$prefix-$cand" "$cand" "$storage" "$repoid" "$@"
+      if [ "$SERVE_XL_STATE" = ok ]; then FOUND_PORT=$cand; FOUND_NAME="$prefix-$cand"; break; fi
+    done
+    PORT_BASE=$(( PORT_BASE + 32 ))
+  }
+
+  # 1. The documented bound: explicit size envelope, default time scaling.
+  REPOID_XL1=66666666666666666666666666666666
+  STORAGE_XL1="$WORK/storage-xl1"
+  XL1_INIT_RC=0
+  "$FG_BIN" init "$STORAGE_XL1" "$TENANT" "$REPOID_XL1" >/dev/null 2>&1 || XL1_INIT_RC=$?
+  fge_assert_eq FG-HH37-PUSH-030 0 "$XL1_INIT_RC" 'the XL repository initializes'
+  FIND_PORT_AND_SERVE_XL xl1 "$STORAGE_XL1" "$REPOID_XL1" --receive-principal "$PRINCIPAL" --receive-max-input-mib 256 --receive-max-expanded-mib 512
+  fge_assert_cmd FG-HH37-PUSH-031 'an XL serve session with the explicit size envelope is listening' test -n "$FOUND_PORT"
+  XL1_RC=0
+  GIT_TERMINAL_PROMPT=0 git -C "$XL_SRC" -c protocol.version=1 -c pack.window=0 push \
+    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL1.git" main >"$WORK/xl1-push.out" 2>&1 || XL1_RC=$?
+  fge_reap "$FOUND_NAME"
+  XL1_OUT=$(cat "$WORK/xl1-push.out")
+  fge_assert_eq FG-HH37-PUSH-032 0 "$XL1_RC" 'a >= 300 MB inflated first push succeeds under the documented envelope'
+  fge_assert_contains FG-HH37-PUSH-033 "$XL1_OUT" 'main -> main' 'the XL push is accepted and reported to the client'
+  fge_assert_not_contains FG-HH37-PUSH-034 "$XL1_OUT" 'hung up' 'the XL outcome is report-status, never a hangup'
+
+  # The published XL head is canonical: the verify session's ls-remote
+  # advertisement reports the pushed tip exactly, and the authenticated
+  # doctor path re-verifies one named XL blob's envelope. A full byte-level
+  # clone-back of a >= 300 MB repository is a separate capability: the
+  # selected-pack writer carries its own 128 MiB expanded ceiling
+  # (frankengit-e6jj).
+  FIND_PORT_AND_SERVE_XL xl1-verify "$STORAGE_XL1" "$REPOID_XL1"
+  fge_assert_cmd FG-HH37-PUSH-035 'an XL verification serve session is listening' test -n "$FOUND_PORT"
+  GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 ls-remote \
+    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL1.git" main >"$WORK/xl-lsremote.out" 2>&1 || true
+  fge_reap "$FOUND_NAME"
+  XLSRC_HEAD=$(git -C "$XL_SRC" rev-parse HEAD 2>/dev/null || echo source-missing)
+  XLSERVED_HEAD=$(awk '{print $1}' "$WORK/xl-lsremote.out" 2>/dev/null || true)
+  fge_assert_eq FG-HH37-PUSH-036 "$XLSRC_HEAD" "$XLSERVED_HEAD" 'the published XL head round-trips identically through ls-remote'
+  XL_BLOB_OID=$(git -C "$XL_SRC" ls-tree HEAD xl1.txt | awk '{print $3}')
+  XL_DOCTOR_RC=0
+  "$FG_BIN" doctor "$STORAGE_XL1" "$TENANT" "$REPOID_XL1" "$XL_BLOB_OID" >"$WORK/xl-doctor.out" 2>&1 || XL_DOCTOR_RC=$?
+  fge_assert_eq FG-HH37-PUSH-046 0 "$XL_DOCTOR_RC" 'the doctor path re-verifies one named XL blob against the authenticated head'
+
+  # 2. Work-proportional deadline: a 5 s base with 4 s/MiB scaling admits the
+  # push; a flat 5 s envelope fails it anywhere (client-side pack streaming
+  # alone takes longer), and the flat 300 s legacy envelope caps it on a
+  # slower host. Scaling funds the session in proportion to admitted bytes.
+  REPOID_XL2=77777777777777777777777777777777
+  STORAGE_XL2="$WORK/storage-xl2"
+  "$FG_BIN" init "$STORAGE_XL2" "$TENANT" "$REPOID_XL2" >/dev/null 2>&1
+  FIND_PORT_AND_SERVE_XL xl2 "$STORAGE_XL2" "$REPOID_XL2" --receive-principal "$PRINCIPAL" --receive-max-input-mib 256 --receive-max-expanded-mib 512 --session-timeout-secs 5 --session-secs-per-mib 4
+  fge_assert_cmd FG-HH37-PUSH-037 'a scaled-envelope XL serve session is listening' test -n "$FOUND_PORT"
+  XL2_RC=0
+  GIT_TERMINAL_PROMPT=0 git -C "$XL_SRC" -c protocol.version=1 -c pack.window=0 push \
+    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL2.git" main >"$WORK/xl2-push.out" 2>&1 || XL2_RC=$?
+  fge_reap "$FOUND_NAME"
+  XL2_OUT=$(cat "$WORK/xl2-push.out")
+  fge_assert_eq FG-HH37-PUSH-038 0 "$XL2_RC" 'the work-scaled envelope admits a push a flat 5 s deadline cannot'
+  fge_assert_contains FG-HH37-PUSH-039 "$XL2_OUT" 'main -> main' 'the scaled-envelope push publishes main'
+
+  # 3. Planted negative: a flat 15 s envelope cannot admit ~330 MB of work
+  # (pack streaming finishes inside it, then the inflate/seal cannot). The
+  # refusal must reach the client through report-status with the
+  # envelope-exhausted notice (outcome unknown; retry resolves), never a
+  # hangup (frankengit-xefn preserved).
+  REPOID_XL3=88888888888888888888888888888888
+  STORAGE_XL3="$WORK/storage-xl3"
+  "$FG_BIN" init "$STORAGE_XL3" "$TENANT" "$REPOID_XL3" >/dev/null 2>&1
+  FIND_PORT_AND_SERVE_XL xl3 "$STORAGE_XL3" "$REPOID_XL3" --receive-principal "$PRINCIPAL" --receive-max-input-mib 256 --receive-max-expanded-mib 512 --session-timeout-secs 15 --session-max-extension-secs 0
+  fge_assert_cmd FG-HH37-PUSH-040 'a flat-envelope XL serve session is listening' test -n "$FOUND_PORT"
+  XL3_RC=0
+  GIT_TERMINAL_PROMPT=0 git -C "$XL_SRC" -c protocol.version=1 -c pack.window=0 push \
+    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL3.git" main >"$WORK/xl3-push.out" 2>&1 || XL3_RC=$?
+  fge_reap "$FOUND_NAME"
+  XL3_OUT=$(cat "$WORK/xl3-push.out")
+  fge_assert_cmd FG-HH37-PUSH-041 'the genuinely over-budget push fails' test "$XL3_RC" -ne 0
+  fge_assert_contains FG-HH37-PUSH-042 "$XL3_OUT" 'envelope exhausted' 'the over-budget refusal is diagnosable through report-status'
+  fge_assert_not_contains FG-HH37-PUSH-043 "$XL3_OUT" 'hung up' 'the over-budget refusal is never a silent hangup'
+
+  # The unknown outcome resolves idempotently: the identical retried push
+  # under a sufficient envelope exits zero (whether the cancelled admission
+  # committed or not, section 5.2).
+  FIND_PORT_AND_SERVE_XL xl3-retry "$STORAGE_XL3" "$REPOID_XL3" --receive-principal "$PRINCIPAL" --receive-max-input-mib 256 --receive-max-expanded-mib 512 --session-timeout-secs 60
+  fge_assert_cmd FG-HH37-PUSH-044 'the retry serve session is listening' test -n "$FOUND_PORT"
+  XL3_RETRY_RC=0
+  GIT_TERMINAL_PROMPT=0 git -C "$XL_SRC" -c protocol.version=1 -c pack.window=0 push \
+    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL3.git" main >"$WORK/xl3-retry.out" 2>&1 || XL3_RETRY_RC=$?
+  fge_reap "$FOUND_NAME"
+  fge_assert_eq FG-HH37-PUSH-045 0 "$XL3_RETRY_RC" 'the identical retried push resolves the unknown outcome'
 else
-  fge_note FG-HH37-PUSH-022 'large-push end-to-end case skipped: set FG_E2E_LARGE_PUSH=1 with a release fg to run it. The frankengit-rpqx expanded-accounting fix is pinned by fgit-pack caller_owned_budget_* unit tests; a release-node run of this corpus published main and clone-back matched the pushed head exactly.'
+  fge_note FG-HH37-PUSH-022 'large-push and XL end-to-end cases skipped: set FG_E2E_LARGE_PUSH=1 with a release fg to run them. The frankengit-rpqx expanded-accounting fix is pinned by fgit-pack caller_owned_budget_* unit tests; the frankengit-asb8 envelope arithmetic and terminal-grace mechanism are pinned by fgit-node session_envelope_tests and the flag parsing by fgit-cli serve_envelope tests; a release-node run of the XL corpus is the whole-stack evidence.'
 fi

@@ -68,8 +68,22 @@ nothing. Receive-pack reuses the bounded framing, quarantine, validation,
 policy, sealed-admission, and exact-predecessor authority-CAS path rather than
 making socket-local refs authoritative. Its compatibility default remains one
 session and one in-flight client; callers explicitly opt into larger non-zero
-`--max-sessions` and `--max-in-flight` bounds. Smart HTTP, production SSH, and
-a native API are still absent.
+`--max-sessions` and `--max-in-flight` bounds. The bring-up transcript below
+deliberately names the one-session bound. One pushed pack is bounded by the
+documented receive session envelope — size ceilings
+(`--receive-max-input-mib`, `--receive-max-expanded-mib`) and a
+work-proportional session budget, `base + admitted bytes x rate` clamped to a
+hard ceiling (`--session-timeout-secs`, `--session-secs-per-mib`,
+`--session-max-extension-secs`) — and an over-budget verdict is delivered
+through report-status, never a silent hangup (see
+[`docs/GIT_COMPATIBILITY_MATRIX.md`](docs/GIT_COMPATIBILITY_MATRIX.md)).
+Ingress time cannot consume the independent server-work budget that starts
+after the pack trailer. Smart HTTP, production SSH, and a native API are still
+absent. Ordinary production push over authenticated transports remains
+unsupported; the raw git-daemon receive lane is the composition slice the
+`first_push.sh` E2E suite exercises with a real `git` client. No command
+treats local object placement, a routing hint, or a connection-local ref map
+as canonical state.
 
 [`scripts/one_node_bringup.sh`](scripts/one_node_bringup.sh) exercises the
 intended empty-repository lifecycle end to end — verified at `be60ac19`,

@@ -21,7 +21,7 @@ use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -84,7 +84,7 @@ use fgit_resource::{
     ObligationLedger, OpaqueHandle, RegionCloseOutcome, RegionId, ResourceError, ResourceVector,
 };
 use fgit_runtime::{
-    BudgetClass, BudgetPolicy, Exhaustion, NodeRuntime, RuntimeProfile, RuntimeRefusal,
+    BudgetClass, BudgetPolicy, ClassLimits, Exhaustion, NodeRuntime, RuntimeProfile, RuntimeRefusal,
 };
 use fgit_txn::TransactionFoldReport;
 use fgit_types::cell::{
@@ -3839,6 +3839,104 @@ impl Display for GitDaemonReceiveProcessingTimeoutRefusal {
 
 impl Error for GitDaemonReceiveProcessingTimeoutRefusal {}
 
+/// Work-proportional extension of one git-daemon session envelope.
+///
+/// The session budget is `base + min(admitted_bytes * per_byte, max_extension)`,
+/// where `admitted_bytes` counts every byte received from the client on this
+/// connection.  A fixed wall-clock deadline caps a legitimate large first push
+/// at whatever the host's seal throughput happens to be (frankengit-asb8), so
+/// the envelope instead charges time against admitted work: holding a session
+/// open past the base requires having delivered
+/// `(elapsed - base) / per_byte` bytes, which is a sustained minimum-rate
+/// policy rather than an idle-timeout loophole.  The hard `max_extension`
+/// ceiling keeps the envelope finite regardless of admitted bytes.
+///
+/// A zero `per_byte` selects the flat envelope: the session is bounded by the
+/// base timeout alone, exactly as before this knob existed.  The compatibility
+/// default scales, so an ordinary large push is bounded by its own size rather
+/// than by one fixed 300 s value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GitDaemonSessionWorkScaling {
+    per_byte: Duration,
+    max_extension: Duration,
+}
+
+impl GitDaemonSessionWorkScaling {
+    /// Default scaling profile: about one additional second per admitted MiB
+    /// (exactly 953 ns per byte), capped one hour past the base timeout.
+    ///
+    /// The observed release-node seal throughput for a large first push is
+    /// ~9 MB/s inflated (frankengit-rpqx verification), so this rate funds
+    /// admission work roughly nine times over while still refusing a peer
+    /// that sustains less than ~1 MiB/s of delivered request bytes.
+    pub const DEFAULT: Self = Self {
+        per_byte: Duration::from_nanos(953),
+        max_extension: Duration::from_secs(3600),
+    };
+
+    /// The flat envelope: admitted bytes buy no additional time.
+    pub const FLAT: Self = Self {
+        per_byte: Duration::ZERO,
+        max_extension: Duration::ZERO,
+    };
+
+    /// Constructs a scaling profile. A zero `per_byte` is a deliberate flat
+    /// envelope and must then carry a zero `max_extension`: a ceiling no rate
+    /// can ever reach is a configuration contradiction, not a policy.
+    pub const fn try_new(
+        per_byte: Duration,
+        max_extension: Duration,
+    ) -> Result<Self, GitDaemonSessionWorkScalingRefusal> {
+        if per_byte.is_zero() && !max_extension.is_zero() {
+            return Err(GitDaemonSessionWorkScalingRefusal::ZeroRateWithExtension);
+        }
+        Ok(Self {
+            per_byte,
+            max_extension,
+        })
+    }
+
+    /// The per-admitted-byte allowance.
+    #[must_use]
+    pub const fn per_byte(self) -> Duration {
+        self.per_byte
+    }
+
+    /// The hard ceiling on the earned extension past the base timeout.
+    #[must_use]
+    pub const fn max_extension(self) -> Duration {
+        self.max_extension
+    }
+
+    /// The extension earned by `admitted_bytes`, clamped to the hard ceiling.
+    fn extension(self, admitted_bytes: u64) -> Duration {
+        let earned = u128::from(admitted_bytes).saturating_mul(self.per_byte.as_nanos());
+        let capped = earned.min(self.max_extension.as_nanos());
+        let capped = capped.min(u128::from(u64::MAX));
+        Duration::from_nanos(capped as u64)
+    }
+}
+
+/// Why a git-daemon session work-scaling profile is not admissible.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitDaemonSessionWorkScalingRefusal {
+    /// A zero per-byte rate with a non-zero extension ceiling names an
+    /// unreachable ceiling: no amount of admitted work could ever earn it.
+    ZeroRateWithExtension,
+}
+
+impl Display for GitDaemonSessionWorkScalingRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroRateWithExtension => formatter.write_str(
+                "git-daemon session scaling with a zero per-byte rate must carry a zero extension ceiling",
+            ),
+        }
+    }
+}
+
+impl Error for GitDaemonSessionWorkScalingRefusal {}
+
 /// Explicit bounds for one node-owned legacy git-daemon service run.
 ///
 /// The listener stops accepting after `max_sessions` connections, then drains
@@ -3986,30 +4084,88 @@ impl Error for NodeGitDaemonServerRefusal {
     }
 }
 
-/// Absolute elapsed-time accounting for one accepted git-daemon connection.
+/// Elapsed-time accounting for one accepted git-daemon connection.
 ///
 /// The deadline is shared by the read and write halves. Each socket operation
 /// installs only the remaining duration, so a peer cannot turn an idle timeout
-/// into an unbounded session by periodically sending a single byte.
-#[derive(Clone, Copy, Debug)]
+/// into an unbounded session by periodically sending a single byte. The budget
+/// itself scales with admitted client bytes (see [`GitDaemonSessionWorkScaling`]),
+/// so a large-but-legitimate push is bounded by its own work rather than by
+/// one fixed wall-clock value, while a peer that stops delivering bytes still
+/// reaches the same deadline.
+///
+/// Once a terminal admission verdict exists the deadline grants one bounded
+/// [`Self::TERMINAL_REPORT_GRACE`] so the verdict — a committed report or the
+/// over-budget refusal itself — is always deliverable through report-status
+/// instead of a bare socket close (frankengit-asb8 acceptance 3).
+#[derive(Clone, Debug)]
 struct GitDaemonSessionDeadline {
     started: Instant,
     timeout: GitDaemonSessionTimeout,
+    scaling: GitDaemonSessionWorkScaling,
+    shared: Arc<GitDaemonSessionDeadlineShared>,
+}
+
+/// Cross-clone session accounting: every `DeadlineTcpStream` half and every
+/// liveness closure of one accepted connection observe the same counters.
+#[derive(Debug)]
+struct GitDaemonSessionDeadlineShared {
+    /// Every byte received from the client on this connection.
+    admitted_bytes: AtomicU64,
+    /// Set once a terminal admission verdict exists and must be delivered.
+    report_grace_granted: AtomicBool,
 }
 
 impl GitDaemonSessionDeadline {
-    fn new(timeout: GitDaemonSessionTimeout) -> Self {
+    /// Bounded write window granted past the exhausted envelope so a reached
+    /// terminal verdict is delivered through report-status rather than lost to
+    /// a socket close. Client-driven phases never observe the grace: it is
+    /// granted exactly once, after the verdict exists.
+    const TERMINAL_REPORT_GRACE: Duration = Duration::from_secs(30);
+
+    fn new(timeout: GitDaemonSessionTimeout, scaling: GitDaemonSessionWorkScaling) -> Self {
         Self {
             started: Instant::now(),
             timeout,
+            scaling,
+            shared: Arc::new(GitDaemonSessionDeadlineShared {
+                admitted_bytes: AtomicU64::new(0),
+                report_grace_granted: AtomicBool::new(false),
+            }),
         }
     }
 
-    fn remaining(self) -> io::Result<Duration> {
-        let remaining = self
+    /// Charges bytes received from the client to the work-scaled envelope.
+    fn note_admitted(&self, bytes: usize) {
+        self.shared
+            .admitted_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Grants the one terminal report grace after a verdict exists.
+    fn grant_terminal_report_grace(&self) {
+        self.shared
+            .report_grace_granted
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// The current total session budget: base plus the extension earned by
+    /// admitted client bytes (clamped to the configured ceiling), plus the
+    /// terminal report grace once granted.
+    fn budget(&self) -> Duration {
+        let admitted = self.shared.admitted_bytes.load(Ordering::Relaxed);
+        let mut budget = self
             .timeout
             .duration()
-            .saturating_sub(self.started.elapsed());
+            .saturating_add(self.scaling.extension(admitted));
+        if self.shared.report_grace_granted.load(Ordering::Relaxed) {
+            budget = budget.saturating_add(Self::TERMINAL_REPORT_GRACE);
+        }
+        budget
+    }
+
+    fn remaining(&self) -> io::Result<Duration> {
+        let remaining = self.budget().saturating_sub(self.started.elapsed());
         if remaining.is_zero() {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -4019,11 +4175,11 @@ impl GitDaemonSessionDeadline {
         Ok(remaining)
     }
 
-    fn expired(self) -> bool {
+    fn expired(&self) -> bool {
         self.remaining().is_err()
     }
 
-    fn check(self, operation: &'static str) -> Result<(), GitDaemonTransportRefusal> {
+    fn check(&self, operation: &'static str) -> Result<(), GitDaemonTransportRefusal> {
         self.remaining()
             .map(|_| ())
             .map_err(|_| GitDaemonTransportRefusal::SessionDeadlineExceeded { operation })
@@ -4031,7 +4187,7 @@ impl GitDaemonSessionDeadline {
 }
 
 fn check_session_deadline(
-    deadline: Option<GitDaemonSessionDeadline>,
+    deadline: Option<&GitDaemonSessionDeadline>,
     operation: &'static str,
 ) -> Result<(), GitDaemonTransportRefusal> {
     deadline.map_or(Ok(()), |deadline| deadline.check(operation))
@@ -4059,14 +4215,14 @@ impl GitDaemonReceiveProcessingDeadline {
     }
 }
 
-/// A socket half whose every operation observes a shared absolute deadline.
+/// A socket half whose every operation observes the shared session deadline.
 struct DeadlineTcpStream<'stream> {
     stream: &'stream mut TcpStream,
     deadline: GitDaemonSessionDeadline,
 }
 
 impl<'stream> DeadlineTcpStream<'stream> {
-    const fn new(stream: &'stream mut TcpStream, deadline: GitDaemonSessionDeadline) -> Self {
+    fn new(stream: &'stream mut TcpStream, deadline: GitDaemonSessionDeadline) -> Self {
         Self { stream, deadline }
     }
 
@@ -4088,7 +4244,11 @@ impl<'stream> DeadlineTcpStream<'stream> {
 impl Read for DeadlineTcpStream<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.prepare_read()?;
-        self.stream.read(buffer)
+        let read = self.stream.read(buffer)?;
+        // Only bytes the client actually delivered earn the session its
+        // work-scaled extension; a stalled peer earns nothing.
+        self.deadline.note_admitted(read);
+        Ok(read)
     }
 }
 
@@ -4592,7 +4752,7 @@ fn serve_git_daemon_upload_pack_after_greeting<R, W, BuildPack, Payload, PackErr
     repository: &impl UploadPackRepository,
     capabilities: Capabilities,
     limits: WireLimits,
-    session_deadline: Option<GitDaemonSessionDeadline>,
+    session_deadline: Option<&GitDaemonSessionDeadline>,
     mut build_pack: BuildPack,
 ) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
 where
@@ -4717,7 +4877,7 @@ fn serve_v2_upload_pack_after_greeting<R, W, BuildPack, Payload, PackError>(
     request: GitDaemonRequest,
     repository: &impl UploadPackRepository,
     limits: WireLimits,
-    session_deadline: Option<GitDaemonSessionDeadline>,
+    session_deadline: Option<&GitDaemonSessionDeadline>,
     mut build_pack: BuildPack,
 ) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
 where
@@ -4845,9 +5005,10 @@ where
             source,
         })
     })?;
-    let deadline = GitDaemonSessionDeadline::new(session_timeout);
-    let mut reader = DeadlineTcpStream::new(&mut stream, deadline);
-    let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline);
+    let deadline =
+        GitDaemonSessionDeadline::new(session_timeout, GitDaemonSessionWorkScaling::DEFAULT);
+    let mut reader = DeadlineTcpStream::new(&mut stream, deadline.clone());
+    let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline.clone());
     let request = read_git_daemon_request(&mut reader, &limits)
         .map_err(classify_session_deadline)
         .map_err(GitDaemonServeError::Transport)?;
@@ -4858,7 +5019,7 @@ where
         repository,
         capabilities,
         limits,
-        Some(deadline),
+        Some(&deadline),
         |request, pack_request| {
             build_pack(request, pack_request).map_err(GitDaemonServeError::Pack)
         },
@@ -5003,7 +5164,6 @@ struct ReceivePackSessionInputs<'a> {
     deadline: GitDaemonSessionDeadline,
     principal: PrincipalId,
     materialized: &'a MaterializedAdmission,
-    request: &'a NodeRequestContext,
     greeting: GitDaemonRequest,
 }
 
@@ -5045,6 +5205,15 @@ fn read_receive_frame(
     raw.extend_from_slice(&payload);
     Ok((raw, Packet::Data(payload)))
 }
+
+/// Report-status notice for a push whose admission could not finish inside
+/// the configured receive session envelope.
+///
+/// The outcome is genuinely unknown — cancellation never proves non-commit
+/// (section 5.2) — so the notice names the idempotent resolution rather than
+/// claiming the push failed. ASCII, control-free, and far under the
+/// report-status message ceiling.
+const RECEIVE_ENVELOPE_EXHAUSTED_MESSAGE: &[u8] = b"receive session envelope exhausted before admission completed; push outcome unknown: retry the identical push to resolve it idempotently";
 
 /// Builds a bounded, wire-safe report-status message from a receive refusal.
 ///
@@ -5102,7 +5271,7 @@ fn emit_pack_payload(
     payload: &mut impl PackPayloadSource,
     request: &PackRequest,
     limits: &WireLimits,
-    session_deadline: Option<GitDaemonSessionDeadline>,
+    session_deadline: Option<&GitDaemonSessionDeadline>,
 ) -> Result<(), GitDaemonTransportRefusal> {
     let maximum_chunk_bytes = if request.options.sideband_64k() {
         limits
@@ -5232,6 +5401,15 @@ pub struct NodeConfig {
     segment_limits: SegmentLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
     git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout,
+    /// Work-proportional extension of the git-daemon session envelope: the
+    /// effective session budget is the base timeout plus a per-admitted-byte
+    /// allowance clamped to a hard ceiling (frankengit-asb8). Runtime-only
+    /// deployment policy; it is never persisted into canonical state.
+    git_daemon_session_work_scaling: GitDaemonSessionWorkScaling,
+    /// The receive-pack size envelope (input, expanded, cache, and per-object
+    /// byte ceilings plus command/option bounds) applied to one pushed pack.
+    /// Runtime-only deployment policy; the defaults are the documented
+    /// compatibility profile and a deployment widens them explicitly.
     git_daemon_receive_limits: ReceiveLimits,
     /// The principal the git-daemon receive-pack lane publishes as, or `None`
     /// to keep the compatibility default: receive-pack refused as an
@@ -5285,6 +5463,7 @@ impl NodeConfig {
             segment_limits: SegmentLimits::default(),
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
             git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout::DEFAULT,
+            git_daemon_session_work_scaling: GitDaemonSessionWorkScaling::DEFAULT,
             git_daemon_receive_limits: ReceiveLimits::default(),
             git_daemon_receive_principal: None,
         }
@@ -5444,6 +5623,42 @@ impl NodeConfig {
         self.git_daemon_receive_limits = receive_limits;
         self
     }
+
+    /// Selects the work-proportional extension of the git-daemon session
+    /// envelope (frankengit-asb8). The default scales with admitted client
+    /// bytes; [`GitDaemonSessionWorkScaling::FLAT`] restores the legacy fixed
+    /// wall-clock bound.
+    #[must_use]
+    pub const fn with_git_daemon_session_work_scaling(
+        mut self,
+        work_scaling: GitDaemonSessionWorkScaling,
+    ) -> Self {
+        self.git_daemon_session_work_scaling = work_scaling;
+        self
+    }
+
+    /// Selects the receive-pack size envelope in bytes: the pushed pack's
+    /// input ceiling and the unique expanded content ceiling it may resolve
+    /// to. The quarantine retention bound tracks the input ceiling and the
+    /// delta-resolver cache bound tracks the expanded ceiling, exactly as the
+    /// wire-crate default profile couples them; a `None` component keeps the
+    /// documented default.
+    #[must_use]
+    pub fn with_git_daemon_receive_byte_envelope(
+        mut self,
+        max_input_bytes: Option<usize>,
+        max_expanded_bytes: Option<usize>,
+    ) -> Self {
+        if let Some(bytes) = max_input_bytes {
+            self.git_daemon_receive_limits.pack.max_input_bytes = bytes;
+            self.git_daemon_receive_limits.max_quarantine_bytes = bytes;
+        }
+        if let Some(bytes) = max_expanded_bytes {
+            self.git_daemon_receive_limits.pack.max_total_expanded_bytes = bytes;
+            self.git_daemon_receive_limits.pack.max_cached_bytes = bytes;
+        }
+        self
+    }
 }
 
 /// The idempotent result of creating the initial authority head.
@@ -5534,6 +5749,7 @@ pub struct OneNode {
     segment_limits: SegmentLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
     git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout,
+    git_daemon_session_work_scaling: GitDaemonSessionWorkScaling,
     git_daemon_receive_limits: ReceiveLimits,
     git_daemon_receive_principal: Option<PrincipalId>,
     /// Which cell this process is, stamped onto answers it serves.
@@ -5833,7 +6049,8 @@ impl OneNode {
             segment_limits: config.segment_limits,
             git_daemon_session_timeout: config.git_daemon_session_timeout,
             git_daemon_receive_processing_timeout: config.git_daemon_receive_processing_timeout,
-            git_daemon_receive_limits: config.git_daemon_receive_limits,
+            git_daemon_session_work_scaling: config.git_daemon_session_work_scaling,
+            git_daemon_receive_limits: config.git_daemon_receive_limits.clone(),
             git_daemon_receive_principal: config.git_daemon_receive_principal,
             serving_cell: config.serving_cell,
             service_config,
@@ -6938,8 +7155,11 @@ impl OneNode {
                 source,
             })
         })?;
-        let deadline = GitDaemonSessionDeadline::new(self.git_daemon_session_timeout);
-        let mut reader = DeadlineTcpStream::new(&mut stream, deadline);
+        let deadline = GitDaemonSessionDeadline::new(
+            self.git_daemon_session_timeout,
+            self.git_daemon_session_work_scaling,
+        );
+        let mut reader = DeadlineTcpStream::new(&mut stream, deadline.clone());
         let greeting = read_git_daemon_request(&mut reader, &limits)
             .map_err(classify_session_deadline)
             .map_err(NodeGitDaemonServeRefusal::from)?;
@@ -6983,15 +7203,14 @@ impl OneNode {
                 ));
             };
             let served = {
-                let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline);
+                let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline.clone());
                 self.serve_git_daemon_receive_pack_session(
                     &mut reader,
                     &mut writer,
                     ReceivePackSessionInputs {
-                        deadline,
+                        deadline: deadline.clone(),
                         principal,
                         materialized: &materialized,
-                        request: &request,
                         greeting,
                     },
                     &limits,
@@ -7021,7 +7240,7 @@ impl OneNode {
         let capabilities = Capabilities::parse_v1(&advertised_capabilities, &limits)
             .map_err(GitDaemonTransportRefusal::Wire)
             .map_err(NodeGitDaemonServeRefusal::from)?;
-        let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline);
+        let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline.clone());
         let served = serve_git_daemon_upload_pack_after_greeting(
             &mut reader,
             &mut writer,
@@ -7029,7 +7248,7 @@ impl OneNode {
             &repository,
             capabilities,
             limits,
-            Some(deadline),
+            Some(&deadline),
             |_request, pack_request| {
                 let pack_context = self.pack_materialization_context();
                 let database_exhaustion = Cell::new(None);
@@ -7146,11 +7365,14 @@ impl OneNode {
             deadline,
             principal,
             materialized,
-            request,
             greeting,
         } = inputs;
-        let mut receive_limits = self.git_daemon_receive_limits.clone();
-        receive_limits.wire = limits.clone();
+        // The operator-selected receive size envelope governs; the wire bounds
+        // still come from the caller's transport profile.
+        let receive_limits = ReceiveLimits {
+            wire: limits.clone(),
+            ..self.git_daemon_receive_limits.clone()
+        };
         let format_name = match self.object_format {
             GitHashAlgorithm::Sha1 => "sha1",
             GitHashAlgorithm::Sha256 => "sha256",
@@ -7294,15 +7516,27 @@ impl OneNode {
         let processing_timeout = self.git_daemon_receive_processing_timeout;
         let processing_deadline = GitDaemonReceiveProcessingDeadline::new(processing_timeout);
         let processing_deadline_expired = AtomicBool::new(false);
+        // The admission's database budget scales with the admitted request
+        // bytes: its deadline is this session's own envelope value, so the
+        // seal of a large-but-legitimate push is bounded by its work rather
+        // than by the generic database class default (frankengit-asb8).
+        let admission_request = NodeRequestContext {
+            authority: self.receive_admission_authority_context(captured.len() as u64, &deadline),
+        };
+        let admission_deadline_expired = AtomicBool::new(false);
         let mut cancellation = || {
             if processing_deadline.expired() {
                 processing_deadline_expired.store(true, Ordering::Relaxed);
                 return false;
             }
+            if deadline.expired() {
+                admission_deadline_expired.store(true, Ordering::Relaxed);
+                return false;
+            }
             true
         };
         let outcome = match self.runtime.block_on(self.receive_loopback_pack_durable_in(
-            request,
+            &admission_request,
             &session,
             materialized,
             context,
@@ -7321,12 +7555,32 @@ impl OneNode {
                 } else {
                     refusal
                 };
+                // A deadline that fired during admission leaves the push
+                // outcome genuinely unknown: cancellation never proves
+                // non-commit (section 5.2). Deliver through report-status,
+                // never a bare socket close (frankengit-xefn, frankengit-asb8).
+                if admission_deadline_expired.load(Ordering::Relaxed) || deadline.expired() {
+                    deadline.grant_terminal_report_grace();
+                    Self::write_receive_rejection_message_report(
+                        writer,
+                        &ready,
+                        RECEIVE_ENVELOPE_EXHAUSTED_MESSAGE.to_owned(),
+                        limits,
+                        &receive_limits,
+                    )?;
+                    return Ok(GitDaemonSessionOutcome::Receive(GitDaemonReceiveReceipt {
+                        request: greeting,
+                        commands: 0,
+                    }));
+                }
                 // The complete pack is already present and the client is now
                 // reading. Give report-status its own fresh, finite network
                 // phase so an elapsed ingress deadline can never turn a typed
                 // processing refusal into a socket hangup (frankengit-xefn).
-                let report_deadline =
-                    GitDaemonSessionDeadline::new(self.git_daemon_session_timeout);
+                let report_deadline = GitDaemonSessionDeadline::new(
+                    self.git_daemon_session_timeout,
+                    self.git_daemon_session_work_scaling,
+                );
                 writer.restart_deadline(report_deadline);
                 report_deadline
                     .check("prepare receive-pack rejection report")
@@ -7344,6 +7598,13 @@ impl OneNode {
                 }));
             }
         };
+        if admission_deadline_expired.load(Ordering::Relaxed) || deadline.expired() {
+            // Admission completed but the envelope fired during it: the
+            // terminal outcome is real, so the client must receive the actual
+            // report rather than a socket close. Grant the one bounded
+            // terminal grace and fall through to the ordinary report write.
+            deadline.grant_terminal_report_grace();
+        }
 
         // An authenticated success is canonical even when a cancellation probe
         // fired near the commit boundary. Report that success; never overwrite
@@ -7385,6 +7646,24 @@ impl OneNode {
         W: Write,
     {
         let message = receive_rejection_message(refusal, receive_limits.max_status_message_bytes);
+        Self::write_receive_rejection_message_report(writer, ready, message, limits, receive_limits)
+    }
+
+    /// Emits the report-status rejection shape for a message that did not
+    /// originate in a [`NodeReceiveTransportRefusal`] — today exactly the
+    /// receive-envelope exhaustion notice, whose push outcome is unknown
+    /// rather than refused on the merits. The caller supplies an already
+    /// bounded message (the exhaustion notice is a short fixed constant).
+    fn write_receive_rejection_message_report<W>(
+        writer: &mut W,
+        ready: &ReceiveRequest,
+        message: Vec<u8>,
+        limits: &WireLimits,
+        receive_limits: &ReceiveLimits,
+    ) -> Result<(), NodeGitDaemonServeRefusal>
+    where
+        W: Write,
+    {
         let mut statuses = Vec::new();
         statuses.try_reserve(ready.commands.len()).map_err(|_| {
             NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Wire(
@@ -7709,6 +7988,43 @@ impl OneNode {
 
     fn authority_context(&self) -> FsqliteCx {
         authority_context_for(&self.runtime)
+    }
+
+    /// Mint the authority context for one receive admission, with the
+    /// Database budget scaled to the admitted request bytes.
+    ///
+    /// The class defaults fund an ordinary push; a large first push would
+    /// exhaust the 15 s database deadline mid-seal no matter how healthy the
+    /// work is (frankengit-asb8). Seal work is proportional to the admitted
+    /// bytes, so its budget is too: the deadline is this session's own
+    /// envelope value — one time policy rather than a second wall-clock bound
+    /// — and the poll and cost quotas scale at documented per-byte rates
+    /// above the class floors (one poll per 64 admitted bytes, one cost unit
+    /// per 8 admitted bytes), keeping a finite liveness backstop for stuck
+    /// work without capping legitimate work by host throughput.
+    fn receive_admission_authority_context(
+        &self,
+        admitted_bytes: u64,
+        deadline: &GitDaemonSessionDeadline,
+    ) -> FsqliteCx {
+        let floors = self
+            .service_config
+            .runtime_budgets
+            .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS);
+        let poll_quota = u64::from(floors.poll_quota)
+            .max(admitted_bytes / 64)
+            .min(u64::from(u32::MAX) / 2) as u32;
+        let cost_quota = floors.cost_quota.unwrap_or(0).max(admitted_bytes / 8);
+        let scaled = ClassLimits {
+            timeout: Some(deadline.budget()),
+            poll_quota,
+            cost_quota: Some(cost_quota),
+            priority: floors.priority,
+        };
+        let budget = scaled.at(self.runtime.now());
+        let authority = FsqliteCx::new();
+        authority.set_native_cx(self.runtime.request_cx_with_budget(budget));
+        authority
     }
 
     /// Switches from the unopened candidate namespace to the one the
@@ -11638,5 +11954,107 @@ mod push_quota_tests {
         ));
         // The bystander's window is independent: reversibility is per key.
         assert!(quota.evaluate(&bystander).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod session_envelope_tests {
+    use super::*;
+
+    fn timeout_seconds(seconds: u64) -> GitDaemonSessionTimeout {
+        GitDaemonSessionTimeout::try_new(Duration::from_secs(seconds))
+            .expect("a non-zero test session budget is admitted")
+    }
+
+    #[test]
+    fn zero_rate_scaling_with_a_ceiling_is_a_typed_refusal() {
+        assert_eq!(
+            GitDaemonSessionWorkScaling::try_new(Duration::ZERO, Duration::from_secs(1)),
+            Err(GitDaemonSessionWorkScalingRefusal::ZeroRateWithExtension),
+            "a ceiling no rate can reach is a configuration contradiction"
+        );
+        assert_eq!(
+            GitDaemonSessionWorkScaling::try_new(Duration::ZERO, Duration::ZERO),
+            Ok(GitDaemonSessionWorkScaling::FLAT),
+            "a zero rate with a zero ceiling is the deliberate flat envelope"
+        );
+    }
+
+    #[test]
+    fn admitted_bytes_extend_the_budget_in_proportion_within_the_ceiling() {
+        let scaling = GitDaemonSessionWorkScaling::try_new(
+            Duration::from_secs(1) / 1_048_576,
+            Duration::from_secs(10),
+        )
+        .expect("a non-zero scaling profile is admitted");
+        let deadline = GitDaemonSessionDeadline::new(timeout_seconds(100), scaling);
+
+        let base = deadline.budget();
+        assert!(
+            base >= Duration::from_secs(100) && base < Duration::from_millis(100_100),
+            "no admitted bytes means no extension: {base:?}"
+        );
+
+        deadline.note_admitted(1_048_576);
+        let one_mib = deadline.budget();
+        assert!(
+            one_mib >= Duration::from_millis(100_900) && one_mib <= Duration::from_secs(101),
+            "one admitted MiB earns about one second: {one_mib:?}"
+        );
+
+        deadline.note_admitted(99 * 1_048_576);
+        assert_eq!(
+            deadline.budget(),
+            Duration::from_secs(110),
+            "the earned extension clamps at the hard ceiling"
+        );
+    }
+
+    #[test]
+    fn the_flat_envelope_never_scales() {
+        let deadline =
+            GitDaemonSessionDeadline::new(timeout_seconds(60), GitDaemonSessionWorkScaling::FLAT);
+        deadline.note_admitted(u64::MAX as usize / 2);
+        assert_eq!(
+            deadline.budget(),
+            Duration::from_secs(60),
+            "the flat envelope is exactly the base budget at any admitted size"
+        );
+    }
+
+    #[test]
+    fn the_terminal_report_grace_reopens_an_exhausted_envelope_exactly_once() {
+        let deadline = GitDaemonSessionDeadline::new(
+            GitDaemonSessionTimeout::try_new(Duration::from_millis(1)).expect("a non-zero budget"),
+            GitDaemonSessionWorkScaling::FLAT,
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(deadline.expired(), "the tiny envelope has elapsed");
+
+        deadline.grant_terminal_report_grace();
+        let remaining = deadline
+            .remaining()
+            .expect("the granted grace reopens the budget for the verdict write");
+        assert!(
+            remaining > Duration::ZERO
+                && remaining <= GitDaemonSessionDeadline::TERMINAL_REPORT_GRACE,
+            "the grace is bounded by the terminal report window: {remaining:?}"
+        );
+
+        // The grace composes with the (here flat) work-scaled envelope rather
+        // than replacing it: admitted bytes still earn nothing.
+        deadline.note_admitted(1_048_576);
+        let after = deadline.remaining().expect("the grace still holds");
+        assert!(
+            after <= GitDaemonSessionDeadline::TERMINAL_REPORT_GRACE,
+            "the flat envelope contributes no extension under the grace: {after:?}"
+        );
+    }
+
+    #[test]
+    fn the_default_profile_matches_the_documented_envelope() {
+        let profile = GitDaemonSessionWorkScaling::DEFAULT;
+        assert_eq!(profile.per_byte(), Duration::from_nanos(953));
+        assert_eq!(profile.max_extension(), Duration::from_secs(3600));
     }
 }
