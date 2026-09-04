@@ -1,0 +1,54 @@
+name: gpt56pro-fix-bv-test-quote
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-asb8-diagnostic
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EXPECTED_MAIN: 91a796db982dae16efca4088fbf2bf159f33bb40
+    steps:
+      - name: Check out exact main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Repair the exact corrupted delimiter
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_MAIN"
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/tests/bv_compat.sh")
+          text = path.read_text()
+          bad = '''[ "$malformed_hash" = "$(sha256sum "$WORK/repo/.beads/issues.jsonl" | awk '{print $1}'" ] || fail 'malformed source changed'\n'''
+          good = '''[ "$malformed_hash" = "$(sha256sum "$WORK/repo/.beads/issues.jsonl" | awk '{print $1}')" ] || fail 'malformed source changed'\n'''
+          assert text.count(bad) == 1, "the expected corrupted line is not unique"
+          path.write_text(text.replace(bad, good))
+          PY
+          bash -n scripts/bv_compat.sh scripts/tests/bv_compat.sh
+          scripts/tests/bv_compat.sh
+          test "$(git diff --name-only)" = "scripts/tests/bv_compat.sh"
+
+      - name: Commit and fast-forward main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name IndigoHeron
+          git config user.email indigoheron@invalid.example
+          git add scripts/tests/bv_compat.sh
+          git commit -m "fix(test): repair malformed tracker hash assertion [frankengit-bv-batch-pending-compat-1e3q]"
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          git push origin HEAD:main
