@@ -31,10 +31,14 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_MAIN"
           cat _control/.github/gpt56pro-control/change.b64.part* | base64 --decode > "$RUNNER_TEMP/change.diff"
+          base64 --decode _control/.github/gpt56pro-control/fix.b64 > "$RUNNER_TEMP/fix.diff"
+          echo "f145642a1acbffb65a21a327e8d6a75b024f7b3d331269e9ca1349f427f60b9f  $RUNNER_TEMP/change.diff" | sha256sum -c -
+          echo "e29925246aeae2dc0efdb1e4cfe6e439bee96b77ce1fa5f40ec26ac4f70820a7  $RUNNER_TEMP/fix.diff" | sha256sum -c -
           cp _control/.github/gpt56pro-control/commit-message.txt "$RUNNER_TEMP/commit-message.txt"
           cp _control/.github/gpt56pro-control/validate.sh "$RUNNER_TEMP/validate.sh"
           rm -rf _control
           git apply --index "$RUNNER_TEMP/change.diff"
+          git apply --index "$RUNNER_TEMP/fix.diff"
           bash "$RUNNER_TEMP/validate.sh"
           git config user.name CobaltKite
           git config user.email cobaltkite@invalid.example
