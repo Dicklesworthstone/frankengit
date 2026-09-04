@@ -1,0 +1,345 @@
+name: gpt56pro-agent-context-hardening
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-agent-context-hardening-20260904
+
+permissions:
+  contents: write
+
+concurrency:
+  group: frankengit-gpt56pro-mainline-mutator
+  cancel-in-progress: false
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Make manifest.json the actual root-last completion marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          test -f scripts/agent_context_snapshot.sh
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/agent_context_snapshot.sh')
+          text = path.read_text()
+          old = '''          files = {}
+          for path in sorted(root.iterdir()):
+              if path.name in {"manifest.json", "SUMMARY.md"} or not path.is_file():
+                  continue
+              body = path.read_bytes()
+              files[path.name] = {
+                  "bytes": len(body),
+                  "sha256": hashlib.sha256(body).hexdigest(),
+              }
+          manifest = {
+              "schema": "frankengit.agent-context.v1",
+              "generated_at": datetime.now(timezone.utc).isoformat(),
+              "revision": revision,
+              "branch": branch,
+              "dirty": any(
+                  line and not line.startswith("## ")
+                  for line in status.splitlines()
+              ),
+              "beads_available": beads_available,
+              "files": files,
+          }
+          (root / "manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\\n"
+          )
+          summary = [
+              "# FrankenGit agent context snapshot",
+              "",
+              f"- Revision: `{revision}`",
+              f"- Branch: `{branch}`",
+              f"- Dirty: `{str(manifest['dirty']).lower()}`",
+              f"- Beads available: `{str(beads_available).lower()}`",
+              f"- Captured files: `{len(files)}`",
+              "",
+              "`manifest.json` is written last and binds every captured file by SHA-256.",
+              "The snapshot is evidence about one checkout, not authority for repository state.",
+              "",
+          ]
+          (root / "SUMMARY.md").write_text("\\n".join(summary))
+'''
+          new = '''          dirty = any(
+              line and not line.startswith("## ")
+              for line in status.splitlines()
+          )
+          payload_paths = [
+              path
+              for path in sorted(root.iterdir())
+              if path.name not in {"manifest.json", "SUMMARY.md"} and path.is_file()
+          ]
+          summary = [
+              "# FrankenGit agent context snapshot",
+              "",
+              f"- Revision: `{revision}`",
+              f"- Branch: `{branch}`",
+              f"- Dirty: `{str(dirty).lower()}`",
+              f"- Beads available: `{str(beads_available).lower()}`",
+              f"- Captured payload files: `{len(payload_paths) + 1}`",
+              "",
+              "`manifest.json` is written last and binds every captured payload file by SHA-256.",
+              "The snapshot is evidence about one checkout, not authority for repository state.",
+              "",
+          ]
+          (root / "SUMMARY.md").write_text("\\n".join(summary))
+
+          files = {}
+          for path in sorted(root.iterdir()):
+              if path.name == "manifest.json" or not path.is_file():
+                  continue
+              body = path.read_bytes()
+              files[path.name] = {
+                  "bytes": len(body),
+                  "sha256": hashlib.sha256(body).hexdigest(),
+              }
+          manifest = {
+              "schema": "frankengit.agent-context.v1",
+              "generated_at": datetime.now(timezone.utc).isoformat(),
+              "revision": revision,
+              "branch": branch,
+              "dirty": dirty,
+              "beads_available": beads_available,
+              "files": files,
+          }
+          (root / "manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\\n"
+          )
+'''
+          if old in text:
+              path.write_text(text.replace(old, new, 1))
+          elif 'if path.name == "manifest.json" or not path.is_file()' in text and '(root / "SUMMARY.md").write_text' in text.split('(root / "manifest.json").write_text', 1)[0]:
+              raise SystemExit(0)
+          else:
+              raise SystemExit('agent context manifest block changed unexpectedly')
+          PY
+          bash -n scripts/agent_context_snapshot.sh
+          git diff --check
+          if git diff --quiet; then
+            echo 'root-last manifest repair already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = 'scripts/agent_context_snapshot.sh' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add scripts/agent_context_snapshot.sh
+          git commit -m 'fix(tooling): make agent-context manifest genuinely root-last'
+          git push origin HEAD:main
+
+      - name: Add adversarial contract tests for agent context snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          mkdir -p scripts/tests
+          cat > scripts/tests/agent_context_snapshot.sh <<'TEST'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          root=$(git rev-parse --show-toplevel)
+          tmp=$(mktemp -d)
+          worktree="$tmp/worktree"
+          cleanup() {
+            git -C "$root" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+            rm -rf "$tmp"
+          }
+          trap cleanup EXIT HUP INT TERM
+
+          git -C "$root" worktree add --detach "$worktree" HEAD >/dev/null
+          revision=$(git -C "$worktree" rev-parse HEAD)
+
+          validate_manifest() {
+            local directory=$1 expected_dirty=$2
+            python3 - "$directory" "$revision" "$expected_dirty" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          revision = sys.argv[2]
+          expected_dirty = sys.argv[3] == "true"
+          manifest_path = root / "manifest.json"
+          manifest = json.loads(manifest_path.read_text())
+          assert manifest["schema"] == "frankengit.agent-context.v1"
+          assert manifest["revision"] == revision
+          assert manifest["dirty"] is expected_dirty
+          assert "SUMMARY.md" in manifest["files"]
+          assert "manifest.json" not in manifest["files"]
+          assert manifest["files"]
+          for name, expected in manifest["files"].items():
+              path = root / name
+              body = path.read_bytes()
+              assert len(body) == expected["bytes"], name
+              assert hashlib.sha256(body).hexdigest() == expected["sha256"], name
+          assert manifest_path.stat().st_mtime_ns >= max(
+              (root / name).stat().st_mtime_ns for name in manifest["files"]
+          )
+          PY
+          }
+
+          clean="$tmp/clean"
+          PATH=/usr/bin:/bin "$worktree/scripts/agent_context_snapshot.sh" "$clean" >/dev/null
+          validate_manifest "$clean" false
+          test -f "$clean/beads-unavailable.json"
+          test ! -e "$clean/frankengit-source-$revision.tar.gz"
+
+          set +e
+          existing_output=$(PATH=/usr/bin:/bin "$worktree/scripts/agent_context_snapshot.sh" "$clean" 2>&1)
+          existing_rc=$?
+          set -e
+          test "$existing_rc" -ne 0
+          case "$existing_output" in
+            *'refusing to replace existing snapshot'*) ;;
+            *) printf 'existing-destination refusal was not diagnostic: %s\n' "$existing_output" >&2; exit 1 ;;
+          esac
+
+          printf '\nagent-context-dirty-probe\n' >> "$worktree/README.md"
+          dirty="$tmp/dirty"
+          PATH=/usr/bin:/bin "$worktree/scripts/agent_context_snapshot.sh" "$dirty" >/dev/null
+          validate_manifest "$dirty" true
+          git -C "$worktree" checkout -- README.md
+
+          printf 'must-not-enter-tracked-archive\n' > "$worktree/UNTRACKED_AGENT_CONTEXT_SENTINEL"
+          sourced="$tmp/source"
+          PATH=/usr/bin:/bin FGIT_AGENT_SNAPSHOT_SOURCE=1 \
+            "$worktree/scripts/agent_context_snapshot.sh" "$sourced" >/dev/null
+          validate_manifest "$sourced" true
+          archive="$sourced/frankengit-source-$revision.tar.gz"
+          test -s "$archive"
+          sha256sum -c "$archive.sha256"
+          tar -tzf "$archive" > "$tmp/archive-members.txt"
+          grep -qx 'scripts/agent_context_snapshot.sh' "$tmp/archive-members.txt"
+          ! grep -q 'UNTRACKED_AGENT_CONTEXT_SENTINEL' "$tmp/archive-members.txt"
+          ! grep -q '^\.git/' "$tmp/archive-members.txt"
+
+          printf 'agent-context snapshot contract: PASS\n'
+          TEST
+          chmod +x scripts/tests/agent_context_snapshot.sh
+          scripts/tests/agent_context_snapshot.sh
+          git diff --check
+          if git diff --quiet; then
+            echo 'agent-context contract tests already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = 'scripts/tests/agent_context_snapshot.sh' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add scripts/tests/agent_context_snapshot.sh
+          git commit -m 'test(tooling): pin the agent-context snapshot contract'
+          git push origin HEAD:main
+
+      - name: Make the generic snapshot lane run its contract test
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          path=.github/workflows/agent-source-snapshot.yml
+          test -f "$path"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/agent-source-snapshot.yml')
+          text = path.read_text()
+          marker = '                - name: Capture revision-bound context\n'
+          insertion = '''                - name: Verify the snapshot contract
+                  shell: bash
+                  run: scripts/tests/agent_context_snapshot.sh
+'''
+          if 'name: Verify the snapshot contract' not in text:
+              if marker not in text:
+                  raise SystemExit('generic snapshot capture step changed unexpectedly')
+              path.write_text(text.replace(marker, insertion + marker, 1))
+          PY
+          git diff --check
+          if git diff --quiet; then
+            echo 'generic snapshot lane contract gate already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = '.github/workflows/agent-source-snapshot.yml' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add .github/workflows/agent-source-snapshot.yml
+          git commit -m 'ci(agent): gate context artifacts on their contract test'
+          git push origin HEAD:main
+
+      - name: Reconcile documentation and changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+
+          doc = Path('docs/AGENT_CONTEXT_SNAPSHOT.md')
+          text = doc.read_text()
+          text = text.replace(
+              '`manifest.json` is the root-last completion marker. It SHA-256 binds\nevery other regular file in the directory.',
+              '`manifest.json` is the root-last completion marker. It SHA-256 binds\nevery other regular file in the directory, including the human-readable\n`SUMMARY.md`.',
+          )
+          if 'scripts/tests/agent_context_snapshot.sh' not in text:
+              text += '''
+
+## Contract verification
+
+Run `scripts/tests/agent_context_snapshot.sh` to exercise immutable-destination
+refusal, clean and dirty checkout disclosure, manifest hash verification,
+operation without `br`, and exclusion of untracked files from the optional
+tracked-source archive. The hosted snapshot lane runs the same test before it
+publishes an artifact.
+'''
+          doc.write_text(text)
+
+          changelog = Path('CHANGELOG.md')
+          if changelog.exists():
+              c = changelog.read_text()
+              line = '- Made `manifest.json` a genuine root-last agent-context completion marker that also binds `SUMMARY.md`, with adversarial contract coverage.\n'
+              if line not in c:
+                  marker = '### Fixed\n\n'
+                  if marker in c:
+                      c = c.replace(marker, marker + line, 1)
+                  else:
+                      c += '\n' + line
+                  changelog.write_text(c)
+          PY
+          git diff --check
+          if git diff --quiet; then
+            echo 'agent-context hardening documentation already landed'
+            exit 0
+          fi
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add docs/AGENT_CONTEXT_SNAPSHOT.md CHANGELOG.md
+          git commit -m 'docs(agent): record the hardened snapshot completion contract'
+          git push origin HEAD:main
+
+      - name: Final contract verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B verify origin/main
+          bash -n scripts/agent_context_snapshot.sh
+          bash -n scripts/tests/agent_context_snapshot.sh
+          scripts/tests/agent_context_snapshot.sh
+          cargo fmt --all --check
+          git status --short
