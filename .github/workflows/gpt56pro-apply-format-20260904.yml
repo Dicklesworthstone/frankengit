@@ -1,0 +1,44 @@
+name: gpt56pro-apply-format-20260904
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-apply-format-20260904
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EXPECTED_MAIN: 735ad7a519fcdeb91d965de6d996ba015b950931
+    steps:
+      - name: Check out guarded main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: ${{ env.EXPECTED_MAIN }}
+          fetch-depth: 0
+      - name: Check out immutable control payload
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: ${{ github.sha }}
+          path: _control
+      - name: Apply, validate, and publish one guarded commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_MAIN"
+          cp _control/.github/gpt56pro-control/change.diff "$RUNNER_TEMP/change.diff"
+          cp _control/.github/gpt56pro-control/commit-message.txt "$RUNNER_TEMP/commit-message.txt"
+          cp _control/.github/gpt56pro-control/validate.sh "$RUNNER_TEMP/validate.sh"
+          rm -rf _control
+          git apply --index "$RUNNER_TEMP/change.diff"
+          bash "$RUNNER_TEMP/validate.sh"
+          git config user.name CobaltKite
+          git config user.email cobaltkite@invalid.example
+          git commit -F "$RUNNER_TEMP/commit-message.txt"
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          git push origin HEAD:main
