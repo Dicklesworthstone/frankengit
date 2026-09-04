@@ -142,6 +142,33 @@ class BootstrapLinks(unittest.TestCase):
     def test_missing_python_is_unavailable_not_consistency(self):
         self.invoke(2, "Python 3.11+ is required", env={**self.env, "PYTHON_BIN": str(self.root / "absent-python")})
 
+    def test_docs_lane_checks_metadata_before_cargo(self):
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        shutil.copy2(SUBJECT, scripts / SUBJECT.name)
+        shutil.copy2(ROOT / "scripts/verify.sh", scripts / "verify.sh")
+        binary_dir = self.root / "bin"
+        binary_dir.mkdir()
+        cargo = binary_dir / "cargo"
+        cargo.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$CARGO_CALLS\"\nexit 37\n", encoding="utf-8")
+        cargo.chmod(0o755)
+        calls = self.cwd / "cargo-calls"
+        env = {**self.env, "PATH": str(binary_dir) + os.pathsep + os.environ["PATH"], "CARGO_CALLS": str(calls)}
+        for note, expected in [(NOTE, 37), (NOTE.replace("dist/2026-08-31/", "dist/2026-08-30/"), 3)]:
+            with self.subTest(note=note):
+                calls.unlink(missing_ok=True)
+                self.write("tooling-rust-bootstrap-links.md", note)
+                before = self.snapshot()
+                result = subprocess.run([str(scripts / "verify.sh"), "--no-artifact", "docs"],
+                                        cwd=self.cwd, env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                self.assertEqual(self.snapshot(), before)
+                if expected == 37:
+                    self.assertEqual(calls.read_text(), "run --locked -p fgit-registry-check -- docs\n")
+                else:
+                    self.assertFalse(calls.exists(), "metadata refusal must prevent the Cargo call")
+                    self.assertIn("bootstrap URLs do not match", result.stderr)
+
     def test_default_root_is_script_relative(self):
         target = self.root / "scripts/check_toolchain_bootstrap_links.sh"
         target.parent.mkdir()

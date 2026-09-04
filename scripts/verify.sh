@@ -54,6 +54,8 @@ refuse_dormant() {
 }
 
 run_docs() {
+  echo_step "Checking pinned Rust bootstrap metadata before Cargo"
+  "$ROOT/scripts/check_toolchain_bootstrap_links.sh"
   echo_step "Checking FrankenGit documentation and registries"
   cargo run --locked -p fgit-registry-check -- docs
 }
