@@ -1,0 +1,57 @@
+name: gpt56pro-apply-bv-changelog
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-asb8-diagnostic
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EXPECTED_MAIN: df41b7fa2e7823e43f6b37d56a1c4153b335c236
+      PATCH_SHA256: b82b5385d9181485a46157e725ded4dcbf6e56c100d97ab1927753eab336a7f7
+    steps:
+      - name: Check out patch carrier
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          path: control
+
+      - name: Check out exact main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+          path: repo
+
+      - name: Guard, apply, and inspect changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C repo rev-parse HEAD)" = "$EXPECTED_MAIN"
+          test "$(git -C repo rev-parse origin/main)" = "$EXPECTED_MAIN"
+          patch="$GITHUB_WORKSPACE/control/.github/patches/bv-changelog.patch"
+          test "$(sha256sum "$patch" | awk '{print $1}')" = "$PATCH_SHA256"
+          git -C repo apply --check "$patch"
+          git -C repo apply "$patch"
+          test "$(git -C repo diff --name-only)" = "CHANGELOG.md"
+          grep -q '^## \[Unreleased\] — 2026-09-04$' repo/CHANGELOG.md
+          grep -q 'frankengit-bv-batch-pending-compat-1e3q' repo/CHANGELOG.md
+          grep -q '555 non-tombstone records from 580 source rows' repo/CHANGELOG.md
+          grep -q 'completed work moves to `batch_pending`' repo/CHANGELOG.md
+
+      - name: Commit and fast-forward main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C repo config user.name IndigoHeron
+          git -C repo config user.email indigoheron@invalid.example
+          git -C repo add CHANGELOG.md
+          git -C repo commit -m "docs(changelog): record complete-graph bv compatibility [frankengit-bv-batch-pending-compat-1e3q]"
+          git -C repo fetch origin main
+          test "$(git -C repo rev-parse origin/main)" = "$EXPECTED_MAIN"
+          git -C repo push origin HEAD:main
