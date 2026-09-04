@@ -1,0 +1,238 @@
+name: gpt56pro-finalize-bv-compat
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-asb8-diagnostic
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-handoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      EXPECTED_MAIN: 693925a69869071cd3a1cd47c63247fce8c8164e
+      ISSUE_ID: frankengit-bv-batch-pending-compat-1e3q
+      ACTOR: IndigoHeron
+      BV_VERSION: 0.22.0
+      BR_VERSION: 0.5.7
+    steps:
+      - name: Check out exact live main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Guard the finalization base
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_MAIN"
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          test -z "$(git status --porcelain)"
+
+      - name: Run repository-owned documentation and fixture gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/bv_compat.sh scripts/tests/bv_compat.sh
+          scripts/tests/bv_compat.sh
+          ./scripts/verify.sh --no-artifact docs
+          git diff --check
+          test -z "$(git status --porcelain)"
+
+      - name: Install pinned graph and tracker tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          bv_archive="$RUNNER_TEMP/bv_linux_amd64.tar.gz"
+          curl --fail --location --retry 3 \
+            --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
+            --output "$bv_archive" \
+            "https://github.com/Dicklesworthstone/beads_viewer/releases/download/v${BV_VERSION}/bv_linux_amd64.tar.gz"
+          echo "e0b6c8b6d3230c601b19e19264b321e5ee513e6e2adacad7ef4aa29ecad9dae9  $bv_archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bv-bin"
+          tar -xzf "$bv_archive" -C "$RUNNER_TEMP/bv-bin"
+          BV="$(find "$RUNNER_TEMP/bv-bin" -type f -name bv -print -quit)"
+          test -n "$BV"
+          chmod +x "$BV"
+          "$BV" --version
+          echo "BV=$BV" >> "$GITHUB_ENV"
+
+          br_archive="$RUNNER_TEMP/br-${BR_VERSION}-linux_amd64.tar.gz"
+          curl --fail --location --retry 3 \
+            --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
+            --output "$br_archive" \
+            "https://github.com/Dicklesworthstone/beads_rust/releases/download/v${BR_VERSION}/br-${BR_VERSION}-linux_amd64.tar.gz"
+          echo "634aaacd0aac256b2be7250af9fe1e863e8a0316875c20959a6a1c2da75bf843  $br_archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/br-bin"
+          tar -xzf "$br_archive" -C "$RUNNER_TEMP/br-bin"
+          BR="$(find "$RUNNER_TEMP/br-bin" -type f -name br -print -quit)"
+          test -n "$BR"
+          chmod +x "$BR"
+          "$BR" --version
+          echo "BR=$BR" >> "$GITHUB_ENV"
+
+      - name: Verify the exact bead and complete live graph before handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BR" show "$ISSUE_ID" --no-db --json > "$RUNNER_TEMP/issue.before.json"
+          python3 - "$RUNNER_TEMP/issue.before.json" "$ISSUE_ID" "$ACTOR" <<'PY'
+          import json
+          import sys
+
+          path, issue_id, actor = sys.argv[1:]
+          with open(path, encoding="utf-8") as handle:
+              value = json.load(handle)
+          if isinstance(value, list):
+              assert len(value) == 1, value
+              value = value[0]
+          assert value["id"] == issue_id, value
+          assert value["status"] == "in_progress", value
+          assignee = value.get("assignee") or value.get("owner")
+          if assignee is not None:
+              assert assignee == actor, value
+          PY
+
+          cat > "$RUNNER_TEMP/check_live_graph.py" <<'PY'
+          from collections import Counter
+          import json
+          import re
+          import sys
+
+          triage_path, ready_path, stderr_path, source_path, issue_id = sys.argv[1:]
+          with open(triage_path, encoding="utf-8") as handle:
+              output = json.load(handle)
+          with open(ready_path, encoding="utf-8") as handle:
+              ready = json.load(handle)
+          with open(stderr_path, encoding="utf-8") as handle:
+              diagnostics = handle.read()
+          with open(source_path, encoding="utf-8") as handle:
+              records = [json.loads(line) for line in handle]
+
+          live_records = [record for record in records if record["status"] != "tombstone"]
+          expected_statuses = Counter(
+              "review" if record["status"] == "batch_pending" else record["status"]
+              for record in live_records
+          )
+          batch_pending = sum(record["status"] == "batch_pending" for record in records)
+          meta = output["triage"]["meta"]
+          health = output["triage"]["project_health"]["counts"]
+          by_status = health["by_status"]
+
+          assert meta["issue_count"] == len(live_records), (meta, len(live_records))
+          assert health["total"] == len(live_records), (health, len(live_records))
+          assert by_status == dict(expected_statuses), (by_status, dict(expected_statuses))
+          assert "batch_pending" not in by_status, by_status
+          assert re.search(
+              rf"projected {batch_pending} batch_pending record\(s\) to review across {len(records)} tracker record\(s\)",
+              diagnostics,
+          ), diagnostics
+          assert "invalid status" not in diagnostics.lower(), diagnostics
+
+          ready_ids = {record["id"] for record in ready}
+          assert issue_id not in ready_ids, (issue_id, sorted(ready_ids))
+          command = output["triage"]["commands"].get("claim_top", "")
+          match = re.search(r"\bbr update ([^ ]+)", command)
+          if match:
+              candidate = match.group(1)
+              assert candidate in ready_ids, {
+                  "candidate": candidate,
+                  "authoritative_ready": sorted(ready_ids),
+                  "claim_top": command,
+              }
+          elif not ready_ids:
+              assert "No top pick available" in command, command
+
+          print(json.dumps({
+              "tracker_records": len(records),
+              "live_records": len(live_records),
+              "batch_pending": batch_pending,
+              "ready_count": len(ready_ids),
+              "status_counts": dict(expected_statuses),
+          }, sort_keys=True))
+          PY
+
+          run_live_graph_check() {
+            prefix="$1"
+            mkdir -p "$RUNNER_TEMP/$prefix"
+            sha256sum .beads/issues.jsonl > "$RUNNER_TEMP/$prefix/source.before.sha256"
+            BV_BIN="$BV" scripts/bv_compat.sh --robot-triage \
+              > "$RUNNER_TEMP/$prefix/triage.json" \
+              2> "$RUNNER_TEMP/$prefix/triage.stderr"
+            "$BR" ready --unassigned --no-db --json > "$RUNNER_TEMP/$prefix/ready.json"
+            sha256sum .beads/issues.jsonl > "$RUNNER_TEMP/$prefix/source.after.sha256"
+            cmp "$RUNNER_TEMP/$prefix/source.before.sha256" "$RUNNER_TEMP/$prefix/source.after.sha256"
+            python3 "$RUNNER_TEMP/check_live_graph.py" \
+              "$RUNNER_TEMP/$prefix/triage.json" \
+              "$RUNNER_TEMP/$prefix/ready.json" \
+              "$RUNNER_TEMP/$prefix/triage.stderr" \
+              .beads/issues.jsonl \
+              "$ISSUE_ID" | tee "$RUNNER_TEMP/$prefix/summary.json"
+          }
+
+          run_live_graph_check before-handoff
+          cp "$RUNNER_TEMP/check_live_graph.py" "$RUNNER_TEMP/check-live-graph.py"
+
+      - name: Move completed implementation to independent batch verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BR" update "$ISSUE_ID" \
+            --status batch_pending \
+            --actor "$ACTOR" \
+            --transition-comment "Implementation complete at ${EXPECTED_MAIN}. Acceptance mapping: (1) scripts/tests/bv_compat.sh covers exact-field projection, source immutability, count preservation, cleanup, argument forwarding, malformed input, missing tools, non-robot refusal, and both caller --db spellings; (2) its fake-bv fixture proves repository-root cwd, launcher-owned projection, clean stdout, and diagnostic stderr; (3) pinned bv v${BV_VERSION} plus br v${BR_VERSION} consumed the complete live graph at ${EXPECTED_MAIN}, matched projected status counts, preserved the source hash, and emitted no unauthorized claim; (4) AGENTS.md routes every robot command through scripts/bv_compat.sh and requires exact membership in br ready --unassigned --no-db --json. ./scripts/verify.sh --no-artifact docs and the hermetic suite passed at ${EXPECTED_MAIN}. No known defect; handoff is to independent batch verification, not self-closure." \
+            --json
+          "$BR" sync --flush-only
+
+          "$BR" show "$ISSUE_ID" --no-db --json > "$RUNNER_TEMP/issue.after.json"
+          python3 - "$RUNNER_TEMP/issue.after.json" "$ISSUE_ID" <<'PY'
+          import json
+          import sys
+
+          path, issue_id = sys.argv[1:]
+          with open(path, encoding="utf-8") as handle:
+              value = json.load(handle)
+          if isinstance(value, list):
+              assert len(value) == 1, value
+              value = value[0]
+          assert value["id"] == issue_id, value
+          assert value["status"] == "batch_pending", value
+          PY
+
+          mkdir -p "$RUNNER_TEMP/after-handoff"
+          sha256sum .beads/issues.jsonl > "$RUNNER_TEMP/after-handoff/source.before.sha256"
+          BV_BIN="$BV" scripts/bv_compat.sh --robot-triage \
+            > "$RUNNER_TEMP/after-handoff/triage.json" \
+            2> "$RUNNER_TEMP/after-handoff/triage.stderr"
+          "$BR" ready --unassigned --no-db --json > "$RUNNER_TEMP/after-handoff/ready.json"
+          sha256sum .beads/issues.jsonl > "$RUNNER_TEMP/after-handoff/source.after.sha256"
+          cmp "$RUNNER_TEMP/after-handoff/source.before.sha256" "$RUNNER_TEMP/after-handoff/source.after.sha256"
+          python3 "$RUNNER_TEMP/check-live-graph.py" \
+            "$RUNNER_TEMP/after-handoff/triage.json" \
+            "$RUNNER_TEMP/after-handoff/ready.json" \
+            "$RUNNER_TEMP/after-handoff/triage.stderr" \
+            .beads/issues.jsonl \
+            "$ISSUE_ID" | tee "$RUNNER_TEMP/after-handoff/summary.json"
+
+          "$BR" comments add "$ISSUE_ID" --author "$ACTOR" --message \
+            "Post-transition regression passed in the candidate worktree based on ${EXPECTED_MAIN}: pinned bv v${BV_VERSION} consumed the tracker with this bead now in batch_pending, exact projected counts matched, the source hash remained unchanged during analysis, and authoritative br readiness still rejected this bead. The published tracker commit below is metadata handoff only; independent batch verification remains required for closure." --json
+          "$BR" sync --flush-only
+
+          test "$(git diff --name-only)" = ".beads/issues.jsonl"
+          git diff --check
+
+      - name: Commit and fast-forward the tracker handoff directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "$ACTOR"
+          git config user.email "indigoheron@invalid.example"
+          git add .beads/issues.jsonl
+          git commit -m "chore(beads): hand bv compatibility to batch verification [$ISSUE_ID]"
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          git push origin HEAD:main
