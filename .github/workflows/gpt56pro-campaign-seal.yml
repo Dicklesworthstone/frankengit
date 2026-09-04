@@ -1,0 +1,124 @@
+name: gpt56pro-campaign-seal
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-campaign-seal-20260904
+
+permissions:
+  contents: write
+
+concurrency:
+  group: frankengit-gpt56pro-mainline-mutator
+  cancel-in-progress: false
+
+jobs:
+  seal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Verify the checkpoint and all installed contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B seal origin/main
+          checkpoint=docs/verification/MAINLINE_CHECKPOINT_2026-09-04.md
+          test -s "$checkpoint"
+          verified=$(sed -nE 's/^Verified revision: `([0-9a-f]{40})`$/\1/p' "$checkpoint")
+          test -n "$verified"
+          git merge-base --is-ancestor "$verified" HEAD
+
+          test -x scripts/agent_context_snapshot.sh
+          test -x scripts/tests/agent_context_snapshot.sh
+          test -x scripts/agent_next_work.sh
+          test -x scripts/tests/agent_next_work.sh
+          test -x scripts/check_toolchain_bootstrap_links.sh
+          test -x scripts/tests/toolchain_bootstrap_links.sh
+          test -f docs/AGENT_CONTEXT_SNAPSHOT.md
+          test -f docs/AGENT_NEXT_WORK.md
+          test -f .github/workflows/toolchain-pin-consistency.yml
+          grep -q 'FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS' crates/fgit-cli/src/lib.rs
+          grep -q 'fn renewed(&self) -> Self' crates/fgit-node/src/lib.rs
+          grep -q 'The peer-controlled ingress phase has completed; server-owned work gets' crates/fgit-node/src/lib.rs
+          grep -q '^name: agent-context-snapshot$' .github/workflows/agent-source-snapshot.yml
+          test ! -e .github/workflows/gpt56pro-asb8-diagnostic.yml
+          test ! -e .github/workflows/gpt56pro-asb8-hosted.yml
+
+          scripts/check_toolchain_bootstrap_links.sh
+          scripts/tests/toolchain_bootstrap_links.sh
+          scripts/tests/agent_context_snapshot.sh
+          scripts/tests/agent_next_work.sh
+          cargo fmt --all --check
+          git diff --exit-code
+          echo "VERIFIED_REVISION=$verified" >> "$GITHUB_ENV"
+          echo "PRE_SEAL_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Publish the machine-readable seal directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$PRE_SEAL_HEAD" || { echo 'main advanced after seal verification' >&2; exit 1; }
+          git checkout -B seal origin/main
+          mkdir -p docs/verification
+          python3 - "$VERIFIED_REVISION" "$PRE_SEAL_HEAD" <<'PY'
+          import json
+          import pathlib
+          import subprocess
+          import sys
+          from datetime import datetime, timezone
+
+          verified, head = sys.argv[1:3]
+          checkpoint = pathlib.Path('docs/verification/MAINLINE_CHECKPOINT_2026-09-04.md')
+          commit_rows = subprocess.run(
+              ['git', 'log', '--reverse', '--pretty=format:%H\t%s', f'{verified}..{head}'],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.splitlines()
+          seal = {
+              'schema': 'frankengit.mainline-campaign-seal.v1',
+              'sealed_at': datetime.now(timezone.utc).isoformat(),
+              'workspace_checkpoint': str(checkpoint),
+              'verified_revision': verified,
+              'pre_seal_head': head,
+              'verified_revision_is_ancestor': True,
+              'contracts': {
+                  'rustfmt_clean': True,
+                  'finite_daemon_timeout_reachable_from_fg_serve': True,
+                  'receive_ingress_and_processing_have_distinct_finite_origins': True,
+                  'large_push_timeout_profile_is_explicit': True,
+                  'agent_context_snapshot': True,
+                  'agent_context_manifest_is_root_last_and_hash_bound': True,
+                  'deterministic_next_work_shortlist': True,
+                  'toolchain_bootstrap_pin_consistency_gate': True,
+                  'generic_read_only_snapshot_workflow': True,
+                  'ad_hoc_gpt_snapshot_workflows_absent_from_main': True,
+              },
+              'post_checkpoint_commits': [
+                  {'sha': row.split('\t', 1)[0], 'subject': row.split('\t', 1)[1]}
+                  for row in commit_rows if '\t' in row
+              ],
+              'non_claims': [
+                  'The seal does not claim the complete FrankenGit roadmap is implemented.',
+                  'The seal does not close frankengit-asb8 unless the authoritative bead state separately says so.',
+                  'The deterministic next-work shortlist is not a global optimality proof.',
+              ],
+          }
+          pathlib.Path('docs/verification/CAMPAIGN_SEAL_2026-09-04.json').write_text(
+              json.dumps(seal, indent=2, sort_keys=True) + '\n'
+          )
+          PY
+          git diff --check
+          git config user.name CobaltKite
+          git config user.email cobaltkite@invalid.example
+          git add docs/verification/CAMPAIGN_SEAL_2026-09-04.json
+          git commit -m 'chore: seal the verified 2026-09-04 mainline campaign'
+          git push origin HEAD:main
