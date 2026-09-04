@@ -1,0 +1,383 @@
+name: gpt56pro-agent-context-sequence
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-agent-context-sequence-20260904
+
+permissions:
+  contents: write
+
+concurrency:
+  group: frankengit-gpt56pro-mainline-mutator
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Add the revision-bound agent context snapshot command
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          cat > scripts/agent_context_snapshot.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          usage() {
+            cat <<'EOF'
+          usage: scripts/agent_context_snapshot.sh [output-directory]
+
+          Creates a new, revision-bound agent context directory without mutating
+          repository or bead state. Set FGIT_AGENT_SNAPSHOT_SOURCE=1 to include a
+          tracked-source archive produced by git archive.
+          EOF
+          }
+
+          case "${1:-}" in
+            -h|--help) usage; exit 0 ;;
+          esac
+
+          root=$(git rev-parse --show-toplevel)
+          cd "$root"
+          output=${1:-"$root/agent-context-$(git rev-parse --short=12 HEAD)"}
+          case "$output" in
+            /*) ;;
+            *) output="$PWD/$output" ;;
+          esac
+          if [ -e "$output" ]; then
+            printf 'refusing to replace existing snapshot: %s\n' "$output" >&2
+            exit 1
+          fi
+          staging="${output}.staging.$$"
+          cleanup() { rm -rf "$staging"; }
+          trap cleanup EXIT HUP INT TERM
+          mkdir -p "$staging"
+
+          revision=$(git rev-parse HEAD)
+          branch=$(git symbolic-ref --quiet --short HEAD || printf 'detached')
+          git status --porcelain=v1 --branch > "$staging/git-status.txt"
+          git diff --stat > "$staging/worktree-diff-stat.txt"
+          git diff --cached --stat > "$staging/index-diff-stat.txt"
+          git log -n 50 --date=iso-strict --pretty=format:'%H%x09%ad%x09%an%x09%s' > "$staging/recent-commits.tsv"
+          printf '%s\n' "$revision" > "$staging/revision.txt"
+          printf '%s\n' "$branch" > "$staging/branch.txt"
+          sha256sum AGENTS.md README.md Cargo.toml Cargo.lock rust-toolchain.toml > "$staging/governing-files.sha256"
+
+          if command -v rustc >/dev/null 2>&1; then rustc -Vv > "$staging/rustc.txt" 2>&1 || true; fi
+          if command -v cargo >/dev/null 2>&1; then cargo -Vv > "$staging/cargo.txt" 2>&1 || true; fi
+          uname -a > "$staging/platform.txt"
+
+          beads_available=false
+          if command -v br >/dev/null 2>&1; then
+            beads_available=true
+            br ready --unassigned --no-db --json > "$staging/beads-ready-unassigned.json"
+            br list --status open --unassigned --no-db --json > "$staging/beads-open-unassigned.json"
+            br list --status in_progress --no-db --json > "$staging/beads-in-progress.json"
+            br list --status batch_pending --no-db --json > "$staging/beads-batch-pending.json"
+          else
+            printf '%s\n' '{"available":false,"reason":"br not found on PATH"}' > "$staging/beads-unavailable.json"
+          fi
+
+          if [ "${FGIT_AGENT_SNAPSHOT_SOURCE:-0}" = 1 ]; then
+            git archive --format=tar.gz --output="$staging/frankengit-source-${revision}.tar.gz" HEAD
+            sha256sum "$staging/frankengit-source-${revision}.tar.gz" > "$staging/frankengit-source-${revision}.tar.gz.sha256"
+          fi
+
+          python3 - "$staging" "$revision" "$branch" "$beads_available" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+          from datetime import datetime, timezone
+
+          root = pathlib.Path(sys.argv[1])
+          revision, branch = sys.argv[2], sys.argv[3]
+          beads_available = sys.argv[4] == "true"
+          status = (root / "git-status.txt").read_text()
+          files = {}
+          for path in sorted(root.iterdir()):
+              if path.name in {"manifest.json", "SUMMARY.md"} or not path.is_file():
+                  continue
+              body = path.read_bytes()
+              files[path.name] = {
+                  "bytes": len(body),
+                  "sha256": hashlib.sha256(body).hexdigest(),
+              }
+          manifest = {
+              "schema": "frankengit.agent-context.v1",
+              "generated_at": datetime.now(timezone.utc).isoformat(),
+              "revision": revision,
+              "branch": branch,
+              "dirty": any(
+                  line and not line.startswith("## ")
+                  for line in status.splitlines()
+              ),
+              "beads_available": beads_available,
+              "files": files,
+          }
+          (root / "manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+          )
+          summary = [
+              "# FrankenGit agent context snapshot",
+              "",
+              f"- Revision: `{revision}`",
+              f"- Branch: `{branch}`",
+              f"- Dirty: `{str(manifest['dirty']).lower()}`",
+              f"- Beads available: `{str(beads_available).lower()}`",
+              f"- Captured files: `{len(files)}`",
+              "",
+              "`manifest.json` is written last and binds every captured file by SHA-256.",
+              "The snapshot is evidence about one checkout, not authority for repository state.",
+              "",
+          ]
+          (root / "SUMMARY.md").write_text("\n".join(summary))
+          PY
+
+          mkdir -p "$(dirname "$output")"
+          mv "$staging" "$output"
+          trap - EXIT HUP INT TERM
+          printf '%s\n' "$output"
+          SCRIPT
+          chmod +x scripts/agent_context_snapshot.sh
+
+          cat > docs/AGENT_CONTEXT_SNAPSHOT.md <<'DOC'
+          # Revision-bound agent context snapshots
+
+          `scripts/agent_context_snapshot.sh` gives humans and coding agents one
+          stable, read-only entry point for establishing what they are actually
+          looking at before they plan or mutate anything.
+
+          ```bash
+          scripts/agent_context_snapshot.sh /tmp/frankengit-context
+          FGIT_AGENT_SNAPSHOT_SOURCE=1 \
+            scripts/agent_context_snapshot.sh /tmp/frankengit-context-with-source
+          ```
+
+          The command captures the exact Git revision and branch, dirty/index
+          summaries, the 50 most recent commits, hashes of the governing files,
+          toolchain and platform identity, and the authoritative ready/open/
+          in-progress/batch-pending bead views when `br` is available. The
+          optional source archive is produced by `git archive`, so it contains
+          exactly the tracked tree selected by the recorded revision.
+
+          `manifest.json` is the root-last completion marker. It SHA-256 binds
+          every other regular file in the directory. An existing destination is
+          never replaced, and the staging directory is removed after any failed
+          capture. The command never updates a bead, checks out another ref, or
+          writes into the repository worktree unless the caller deliberately
+          chooses a destination there.
+
+          This is an observation artifact, not another authority plane. The Git
+          ref and `.beads/issues.jsonl` remain authoritative in their respective
+          domains; a snapshot merely makes their observed state cheap to hand to
+          another agent without losing revision provenance.
+          DOC
+
+          bash -n scripts/agent_context_snapshot.sh
+          scratch=$(mktemp -d)
+          rm -rf "$scratch"
+          scripts/agent_context_snapshot.sh "$scratch"
+          test -f "$scratch/manifest.json"
+          test -f "$scratch/SUMMARY.md"
+          python3 - "$scratch/manifest.json" <<'PY'
+          import json, pathlib, sys
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert manifest['schema'] == 'frankengit.agent-context.v1'
+          assert len(manifest['revision']) == 40
+          assert manifest['files']
+          PY
+          rm -rf "$scratch"
+          git diff --check
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add scripts/agent_context_snapshot.sh docs/AGENT_CONTEXT_SNAPSHOT.md
+          git commit -m 'feat(tooling): add revision-bound agent context snapshots'
+          git push origin HEAD:main
+
+      - name: Replace ad hoc snapshot workflows with one generic read-only lane
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          cat > .github/workflows/agent-source-snapshot.yml <<'WORKFLOW'
+          name: agent-context-snapshot
+
+          on:
+            workflow_dispatch:
+              inputs:
+                ref:
+                  description: Git ref to capture
+                  required: false
+                  default: main
+                include_source:
+                  description: Include a tracked-source archive
+                  required: false
+                  type: boolean
+                  default: true
+            push:
+              branches:
+                - 'tooling/agent-context-snapshot/**'
+
+          permissions:
+            contents: read
+
+          jobs:
+            snapshot:
+              runs-on: ubuntu-latest
+              timeout-minutes: 30
+              env:
+                BR_VERSION: 0.5.7
+              steps:
+                - name: Check out the selected revision
+                  uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+                  with:
+                    ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || 'main' }}
+                    fetch-depth: 50
+                - name: Install the pinned beads reader
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    case "$(uname -m)" in
+                      x86_64) asset="br-${BR_VERSION}-linux_amd64.tar.gz" ;;
+                      aarch64|arm64) asset="br-${BR_VERSION}-linux_arm64.tar.gz" ;;
+                      *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+                    esac
+                    base="https://github.com/Dicklesworthstone/beads_rust/releases/download/v${BR_VERSION}"
+                    curl --fail --location --retry 3 --output "$RUNNER_TEMP/br.tar.gz" "$base/$asset"
+                    echo '634aaacd0aac256b2be7250af9fe1e863e8a0316875c20959a6a1c2da75bf843  '"$RUNNER_TEMP/br.tar.gz" | sha256sum -c -
+                    mkdir -p "$RUNNER_TEMP/br-bin"
+                    tar -xzf "$RUNNER_TEMP/br.tar.gz" -C "$RUNNER_TEMP/br-bin"
+                    BR="$(find "$RUNNER_TEMP/br-bin" -type f -name br | head -n 1)"
+                    test -n "$BR"
+                    chmod +x "$BR"
+                    echo "$(dirname "$BR")" >> "$GITHUB_PATH"
+                - name: Capture revision-bound context
+                  id: capture
+                  shell: bash
+                  env:
+                    REQUESTED_SOURCE: ${{ github.event_name != 'workflow_dispatch' || inputs.include_source }}
+                  run: |
+                    set -euo pipefail
+                    revision=$(git rev-parse HEAD)
+                    echo "revision=$revision" >> "$GITHUB_OUTPUT"
+                    if [ "$REQUESTED_SOURCE" = true ]; then
+                      export FGIT_AGENT_SNAPSHOT_SOURCE=1
+                    fi
+                    scripts/agent_context_snapshot.sh "$RUNNER_TEMP/agent-context-$revision"
+                - name: Upload immutable observation artifact
+                  uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+                  with:
+                    name: agent-context-${{ steps.capture.outputs.revision }}
+                    path: ${{ runner.temp }}/agent-context-${{ steps.capture.outputs.revision }}
+                    if-no-files-found: error
+                    retention-days: 7
+          WORKFLOW
+
+          rm -f .github/workflows/gpt56pro-asb8-diagnostic.yml
+          rm -f .github/workflows/gpt56pro-asb8-hosted.yml
+          git diff --check
+          changed="$(git diff --name-only | sort)"
+          expected="$(printf '%s\n' .github/workflows/agent-source-snapshot.yml .github/workflows/gpt56pro-asb8-diagnostic.yml .github/workflows/gpt56pro-asb8-hosted.yml | sort)"
+          test "$changed" = "$expected" || { printf 'unexpected workflow changes:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add -A .github/workflows
+          git commit -m 'ci: replace ad hoc snapshots with a generic read-only lane'
+          git push origin HEAD:main
+
+      - name: Link the snapshot contract from governing documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+
+          readme = Path('README.md')
+          text = readme.read_text()
+          marker = '## Current one-node integration boundary\n'
+          note = '''## Agent context bootstrap
+
+Before planning or mutating a checkout, run
+[`scripts/agent_context_snapshot.sh`](scripts/agent_context_snapshot.sh) to bind
+its revision, dirty state, recent history, toolchain, governing-file hashes,
+and authoritative bead queues into one root-last observation artifact. See
+[`docs/AGENT_CONTEXT_SNAPSHOT.md`](docs/AGENT_CONTEXT_SNAPSHOT.md). The artifact
+is explicitly non-authoritative; it makes provenance cheap without creating a
+new source of truth.
+
+'''
+          if '## Agent context bootstrap' not in text:
+              if marker not in text:
+                  raise SystemExit('README insertion point changed')
+              text = text.replace(marker, note + marker, 1)
+              readme.write_text(text)
+
+          agents = Path('AGENTS.md')
+          a = agents.read_text()
+          appendix = '''
+
+## Agent context bootstrap helper
+
+`scripts/agent_context_snapshot.sh` is the canonical read-only bootstrap helper
+for revision provenance, dirty-state disclosure, recent history, governing-file
+hashes, and authoritative bead queue snapshots. Its `manifest.json` is a
+root-last observation marker, not repository authority. See
+`docs/AGENT_CONTEXT_SNAPSHOT.md`.
+'''
+          if '## Agent context bootstrap helper' not in a:
+              agents.write_text(a.rstrip() + appendix + '\n')
+          PY
+          git diff --check
+          if git diff --quiet; then
+            echo 'governing documentation links already landed'
+            exit 0
+          fi
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add README.md AGENTS.md
+          git commit -m 'docs(agent): make revision-bound bootstrap discoverable'
+          git push origin HEAD:main
+
+      - name: Verify the installed control-plane primitive
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B verify origin/main
+          bash -n scripts/agent_context_snapshot.sh
+          destination=$(mktemp -d)
+          rm -rf "$destination"
+          FGIT_AGENT_SNAPSHOT_SOURCE=1 scripts/agent_context_snapshot.sh "$destination"
+          test -s "$destination/manifest.json"
+          test -s "$destination/SUMMARY.md"
+          archive=$(find "$destination" -maxdepth 1 -name 'frankengit-source-*.tar.gz' -print -quit)
+          test -n "$archive"
+          sha256sum -c "$archive.sha256"
+          python3 - "$destination/manifest.json" <<'PY'
+          import hashlib, json, pathlib, sys
+          root = pathlib.Path(sys.argv[1]).parent
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert manifest['schema'] == 'frankengit.agent-context.v1'
+          for name, expected in manifest['files'].items():
+              body = (root / name).read_bytes()
+              assert len(body) == expected['bytes']
+              assert hashlib.sha256(body).hexdigest() == expected['sha256']
+          PY
+          rm -rf "$destination"
+          cargo fmt --all --check
+          git status --short
