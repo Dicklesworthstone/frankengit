@@ -15,7 +15,9 @@ use core::cmp::Ordering;
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::label::{AsciiSlug, SchemaFamily, SchemaId};
 
-use crate::merkle::{MerkleProof, MerkleRefusal, merkle_leaf, merkle_proof, merkle_root, verify_merkle_proof};
+use crate::merkle::{
+    MerkleProof, MerkleRefusal, merkle_leaf, merkle_proof, merkle_root, verify_merkle_proof,
+};
 use crate::registry::IdentityDomain;
 
 /// Why a forge-position commitment or proof could not be produced.
@@ -38,7 +40,10 @@ impl core::fmt::Display for ForgePositionRefusal {
             Self::StreamNotPresent => {
                 formatter.write_str("the requested forge stream is absent from the offered state")
             }
-            Self::Merkle(source) => write!(formatter, "forge-position Merkle operation refused: {source}"),
+            Self::Merkle(source) => write!(
+                formatter,
+                "forge-position Merkle operation refused: {source}"
+            ),
         }
     }
 }
@@ -145,9 +150,7 @@ pub fn forge_position_membership_proof(
     let position = ordered[index].1;
     let leaves = ordered
         .into_iter()
-        .map(|(candidate, candidate_position)| {
-            forge_position_leaf(candidate, *candidate_position)
-        })
+        .map(|(candidate, candidate_position)| forge_position_leaf(candidate, *candidate_position))
         .collect::<Vec<_>>();
     Ok((
         position,

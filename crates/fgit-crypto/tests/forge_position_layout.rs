@@ -4,9 +4,8 @@
 //! so a verifier that simply rejects every input cannot satisfy this suite.
 
 use fgit_crypto::{
-    ForgePositionRefusal, MerkleProof, forge_position_leaf,
-    forge_position_membership_proof, forge_position_merkle_root,
-    verify_forge_position_membership,
+    ForgePositionRefusal, MerkleProof, forge_position_leaf, forge_position_membership_proof,
+    forge_position_merkle_root, verify_forge_position_membership,
 };
 use fgit_types::hash::{Digest, DigestAlgorithmId};
 use fgit_types::label::AsciiSlug;
@@ -90,9 +89,8 @@ fn every_stream_proves_the_exact_position_the_root_commits_to() {
 fn a_real_path_cannot_be_relabelled_as_another_stream() {
     let entries = state();
     let root = forge_position_merkle_root(&entries).expect("root");
-    let (position, proof) =
-        forge_position_membership_proof(&entries, &stream("pull-request/17"))
-            .expect("membership proof");
+    let (position, proof) = forge_position_membership_proof(&entries, &stream("pull-request/17"))
+        .expect("membership proof");
 
     assert!(verify_forge_position_membership(
         &root,
