@@ -1,0 +1,290 @@
+name: gpt56pro-toolchain-pin-gate
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-toolchain-pin-gate-20260904
+
+permissions:
+  contents: write
+
+concurrency:
+  group: frankengit-gpt56pro-mainline-mutator
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Add a zero-dependency pin consistency checker
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          cat > scripts/check_toolchain_bootstrap_links.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          toolchain_file=${1:-rust-toolchain.toml}
+          bootstrap_file=${2:-tooling-rust-bootstrap-links.md}
+
+          fail() {
+            printf 'toolchain bootstrap consistency: %s\n' "$*" >&2
+            exit 1
+          }
+
+          test -f "$toolchain_file" || fail "missing toolchain file: $toolchain_file"
+          test -f "$bootstrap_file" || fail "missing bootstrap note: $bootstrap_file"
+
+          channel=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' "$toolchain_file")
+          test -n "$channel" || fail "could not read one channel from $toolchain_file"
+          test "$(printf '%s\n' "$channel" | wc -l | tr -d ' ')" = 1 || fail "multiple channel declarations in $toolchain_file"
+
+          case "$channel" in
+            nightly-????-??-??) date=${channel#nightly-} ;;
+            *) fail "expected a date-pinned nightly channel, got: $channel" ;;
+          esac
+
+          occurrences=$(grep -Foc "$channel" "$bootstrap_file" || true)
+          test "$occurrences" -ge 1 || fail "$bootstrap_file does not name $channel"
+
+          archive_url="https://static.rust-lang.org/dist/$date/rust-nightly-x86_64-unknown-linux-gnu.tar.xz"
+          manifest_url="$archive_url.sha256"
+          grep -Fqx -- "- [Toolchain archive]($archive_url)" "$bootstrap_file" || fail "archive URL does not match $channel"
+          grep -Fqx -- "- [SHA-256 manifest]($manifest_url)" "$bootstrap_file" || fail "manifest URL does not match $channel"
+
+          stale_dates=$(grep -Eo 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}|/dist/[0-9]{4}-[0-9]{2}-[0-9]{2}/' "$bootstrap_file" \
+            | sed -E 's#nightly-##; s#^/dist/##; s#/$##' \
+            | sort -u \
+            | grep -Fvx "$date" || true)
+          test -z "$stale_dates" || fail "bootstrap note also names stale distribution date(s): $stale_dates"
+
+          grep -Fq 'rust-toolchain.toml' "$bootstrap_file" || fail "bootstrap note does not identify rust-toolchain.toml as its authority"
+          printf 'toolchain bootstrap consistency: PASS (%s)\n' "$channel"
+          SCRIPT
+          chmod +x scripts/check_toolchain_bootstrap_links.sh
+          scripts/check_toolchain_bootstrap_links.sh
+          git diff --check
+          if git diff --quiet; then
+            echo 'toolchain pin checker already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = 'scripts/check_toolchain_bootstrap_links.sh' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name CobaltKite
+          git config user.email cobaltkite@invalid.example
+          git add scripts/check_toolchain_bootstrap_links.sh
+          git commit -m 'feat(tooling): verify Rust bootstrap links against the pinned toolchain'
+          git push origin HEAD:main
+
+      - name: Add fixture-backed regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          mkdir -p scripts/tests
+          cat > scripts/tests/toolchain_bootstrap_links.sh <<'TEST'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          root=$(git rev-parse --show-toplevel)
+          checker="$root/scripts/check_toolchain_bootstrap_links.sh"
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+          write_toolchain() {
+            local date=$1
+            cat > "$tmp/rust-toolchain.toml" <<EOF
+          [toolchain]
+          channel = "nightly-$date"
+          profile = "minimal"
+          components = ["rustfmt", "clippy"]
+          EOF
+          }
+
+          write_note() {
+            local date=$1
+            cat > "$tmp/bootstrap.md" <<EOF
+          # Pinned Rust bootstrap links
+
+          Exact \`nightly-$date\`, matching \`rust-toolchain.toml\`:
+
+          - [SHA-256 manifest](https://static.rust-lang.org/dist/$date/rust-nightly-x86_64-unknown-linux-gnu.tar.xz.sha256)
+          - [Toolchain archive](https://static.rust-lang.org/dist/$date/rust-nightly-x86_64-unknown-linux-gnu.tar.xz)
+          EOF
+          }
+
+          write_toolchain 2026-08-31
+          write_note 2026-08-31
+          "$checker" "$tmp/rust-toolchain.toml" "$tmp/bootstrap.md" >/dev/null
+
+          write_note 2026-08-25
+          set +e
+          stale_output=$("$checker" "$tmp/rust-toolchain.toml" "$tmp/bootstrap.md" 2>&1)
+          stale_rc=$?
+          set -e
+          test "$stale_rc" -ne 0
+          case "$stale_output" in
+            *'does not name nightly-2026-08-31'*) ;;
+            *) printf 'stale pin refusal was not diagnostic: %s\n' "$stale_output" >&2; exit 1 ;;
+          esac
+
+          cat > "$tmp/rust-toolchain.toml" <<'EOF'
+          [toolchain]
+          channel = "nightly"
+          EOF
+          write_note 2026-08-31
+          set +e
+          rolling_output=$("$checker" "$tmp/rust-toolchain.toml" "$tmp/bootstrap.md" 2>&1)
+          rolling_rc=$?
+          set -e
+          test "$rolling_rc" -ne 0
+          case "$rolling_output" in
+            *'expected a date-pinned nightly channel'*) ;;
+            *) printf 'rolling-channel refusal was not diagnostic: %s\n' "$rolling_output" >&2; exit 1 ;;
+          esac
+
+          write_toolchain 2026-08-31
+          write_note 2026-08-31
+          printf '\nStale mirror: nightly-2026-08-25\n' >> "$tmp/bootstrap.md"
+          set +e
+          mixed_output=$("$checker" "$tmp/rust-toolchain.toml" "$tmp/bootstrap.md" 2>&1)
+          mixed_rc=$?
+          set -e
+          test "$mixed_rc" -ne 0
+          case "$mixed_output" in
+            *'stale distribution date'*) ;;
+            *) printf 'mixed-date refusal was not diagnostic: %s\n' "$mixed_output" >&2; exit 1 ;;
+          esac
+
+          printf 'toolchain bootstrap fixture tests: PASS\n'
+          TEST
+          chmod +x scripts/tests/toolchain_bootstrap_links.sh
+          scripts/tests/toolchain_bootstrap_links.sh
+          git diff --check
+          if git diff --quiet; then
+            echo 'toolchain pin regression tests already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = 'scripts/tests/toolchain_bootstrap_links.sh' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name CobaltKite
+          git config user.email cobaltkite@invalid.example
+          git add scripts/tests/toolchain_bootstrap_links.sh
+          git commit -m 'test(tooling): reject stale or rolling Rust bootstrap pins'
+          git push origin HEAD:main
+
+      - name: Add the cheap read-only CI gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          cat > .github/workflows/toolchain-pin-consistency.yml <<'WORKFLOW'
+          name: toolchain-pin-consistency
+
+          on:
+            push:
+              branches: [main]
+              paths:
+                - rust-toolchain.toml
+                - tooling-rust-bootstrap-links.md
+                - scripts/check_toolchain_bootstrap_links.sh
+                - scripts/tests/toolchain_bootstrap_links.sh
+                - .github/workflows/toolchain-pin-consistency.yml
+            pull_request:
+              paths:
+                - rust-toolchain.toml
+                - tooling-rust-bootstrap-links.md
+                - scripts/check_toolchain_bootstrap_links.sh
+                - scripts/tests/toolchain_bootstrap_links.sh
+                - .github/workflows/toolchain-pin-consistency.yml
+
+          permissions:
+            contents: read
+
+          jobs:
+            verify:
+              runs-on: ubuntu-latest
+              timeout-minutes: 5
+              steps:
+                - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+                - name: Check the live pin and regression fixtures
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    scripts/check_toolchain_bootstrap_links.sh
+                    scripts/tests/toolchain_bootstrap_links.sh
+          WORKFLOW
+          git diff --check
+          if git diff --quiet; then
+            echo 'toolchain pin CI gate already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = '.github/workflows/toolchain-pin-consistency.yml' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name CobaltKite
+          git config user.email cobaltkite@invalid.example
+          git add .github/workflows/toolchain-pin-consistency.yml
+          git commit -m 'ci(tooling): gate Rust bootstrap pin consistency'
+          git push origin HEAD:main
+
+      - name: Reconcile documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+
+          note = Path('tooling-rust-bootstrap-links.md')
+          text = note.read_text()
+          line = '\nValidate this coupling locally with `scripts/check_toolchain_bootstrap_links.sh`; its fixture suite also rejects rolling channels, stale URLs, and mixed dates.\n'
+          if line.strip() not in text:
+              note.write_text(text.rstrip() + '\n' + line)
+
+          changelog = Path('CHANGELOG.md')
+          if changelog.exists():
+              c = changelog.read_text()
+              entry = '- Added a zero-dependency gate that keeps transport-only Rust bootstrap URLs synchronized with `rust-toolchain.toml`.\n'
+              if entry not in c:
+                  marker = '### Added\n\n'
+                  if marker in c:
+                      c = c.replace(marker, marker + entry, 1)
+                  else:
+                      c += '\n' + entry
+                  changelog.write_text(c)
+          PY
+          scripts/check_toolchain_bootstrap_links.sh
+          scripts/tests/toolchain_bootstrap_links.sh
+          git diff --check
+          if git diff --quiet; then
+            echo 'toolchain pin documentation already landed'
+            exit 0
+          fi
+          git config user.name CobaltKite
+          git config user.email cobaltkite@invalid.example
+          git add tooling-rust-bootstrap-links.md CHANGELOG.md
+          git commit -m 'docs(tooling): document the Rust pin consistency contract'
+          git push origin HEAD:main
+
+      - name: Final verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B verify origin/main
+          scripts/check_toolchain_bootstrap_links.sh
+          scripts/tests/toolchain_bootstrap_links.sh
+          cargo fmt --all --check
+          git status --short
