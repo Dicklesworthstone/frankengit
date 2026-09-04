@@ -1,0 +1,53 @@
+name: gpt56pro-format-live-main
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-format-live-main-20260904
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Restore the exact pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc -Vv
+          cargo -Vv
+      - name: Apply rustfmt and enforce mechanical scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          unexpected="$(git diff --name-only | grep -Ev '\.rs$' || true)"
+          test -z "$unexpected" || { printf 'rustfmt changed non-Rust files:\n%s\n' "$unexpected" >&2; exit 1; }
+          git diff --stat
+      - name: Commit and push directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'live main is already rustfmt-clean'
+            exit 0
+          fi
+          base="$(git rev-parse HEAD)"
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add -- '*.rs'
+          git commit -m 'style: restore rustfmt-clean workspace'
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$base" || { echo 'main advanced; refusing stale push' >&2; exit 1; }
+          git push origin HEAD:main
