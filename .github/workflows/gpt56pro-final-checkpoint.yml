@@ -1,0 +1,266 @@
+name: gpt56pro-final-checkpoint
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-final-checkpoint-20260904
+
+permissions:
+  contents: write
+
+concurrency:
+  group: frankengit-gpt56pro-mainline-mutator
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      BR_VERSION: 0.5.7
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Pin the exact verification revision and assert every intended slice
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B verify origin/main
+          revision=$(git rev-parse HEAD)
+          echo "VERIFIED_REVISION=$revision" >> "$GITHUB_ENV"
+          printf '%s\n' "$revision" > "$RUNNER_TEMP/verified-revision.txt"
+
+          test -x scripts/agent_context_snapshot.sh
+          test -x scripts/tests/agent_context_snapshot.sh
+          test -x scripts/agent_next_work.sh
+          test -x scripts/tests/agent_next_work.sh
+          test -x scripts/check_toolchain_bootstrap_links.sh
+          test -x scripts/tests/toolchain_bootstrap_links.sh
+          test -f docs/AGENT_CONTEXT_SNAPSHOT.md
+          test -f docs/AGENT_NEXT_WORK.md
+          test -f CHANGELOG.md
+
+          grep -q 'FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS' crates/fgit-cli/src/lib.rs
+          grep -q 'The peer-controlled ingress phase has completed; server-owned work gets' crates/fgit-node/src/lib.rs
+          grep -q 'fn renewed(&self) -> Self' crates/fgit-node/src/lib.rs
+          grep -q 'FG_E2E_LARGE_PUSH_SESSION_TIMEOUT_SECONDS' scripts/e2e/suites/node/first_push.sh
+          grep -q '^name: agent-context-snapshot$' .github/workflows/agent-source-snapshot.yml
+          grep -q 'permissions:' .github/workflows/agent-source-snapshot.yml
+          grep -q 'contents: read' .github/workflows/agent-source-snapshot.yml
+          test ! -e .github/workflows/gpt56pro-asb8-diagnostic.yml
+          test ! -e .github/workflows/gpt56pro-asb8-hosted.yml
+          test -f .github/workflows/toolchain-pin-consistency.yml
+
+          scripts/check_toolchain_bootstrap_links.sh
+          git diff --exit-code
+
+      - name: Install the pinned beads reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="br-${BR_VERSION}-linux_amd64.tar.gz"
+          base="https://github.com/Dicklesworthstone/beads_rust/releases/download/v${BR_VERSION}"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/br.tar.gz" "$base/$asset"
+          echo '634aaacd0aac256b2be7250af9fe1e863e8a0316875c20959a6a1c2da75bf843  '"$RUNNER_TEMP/br.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/br-bin"
+          tar -xzf "$RUNNER_TEMP/br.tar.gz" -C "$RUNNER_TEMP/br-bin"
+          BR="$(find "$RUNNER_TEMP/br-bin" -type f -name br | head -n 1)"
+          test -n "$BR"
+          chmod +x "$BR"
+          echo "$(dirname "$BR")" >> "$GITHUB_PATH"
+
+      - name: Verify shell control-plane contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/agent_context_snapshot.sh
+          bash -n scripts/tests/agent_context_snapshot.sh
+          bash -n scripts/agent_next_work.sh
+          bash -n scripts/tests/agent_next_work.sh
+          bash -n scripts/check_toolchain_bootstrap_links.sh
+          bash -n scripts/tests/toolchain_bootstrap_links.sh
+          bash -n scripts/e2e/suites/node/first_push.sh
+          scripts/tests/agent_context_snapshot.sh | tee "$RUNNER_TEMP/agent-context-test.log"
+          scripts/tests/agent_next_work.sh | tee "$RUNNER_TEMP/agent-next-work-test.log"
+          scripts/tests/toolchain_bootstrap_links.sh | tee "$RUNNER_TEMP/toolchain-pin-test.log"
+          scripts/check_toolchain_bootstrap_links.sh | tee "$RUNNER_TEMP/toolchain-pin-live.log"
+
+          snapshot="$RUNNER_TEMP/final-agent-context"
+          FGIT_AGENT_SNAPSHOT_SOURCE=1 scripts/agent_context_snapshot.sh "$snapshot"
+          test -s "$snapshot/manifest.json"
+          test -s "$snapshot/beads-next-work.json"
+          archive=$(find "$snapshot" -maxdepth 1 -name 'frankengit-source-*.tar.gz' -print -quit)
+          test -n "$archive"
+          sha256sum -c "$archive.sha256"
+
+      - name: Verify formatting and the focused production seams
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check |& tee "$RUNNER_TEMP/cargo-fmt.log"
+          cargo check -p fgit-cli -p fgit-node --all-targets |& tee "$RUNNER_TEMP/cargo-check-focused.log"
+          cargo test -p fgit-cli --all-targets --no-fail-fast |& tee "$RUNNER_TEMP/cargo-test-cli.log"
+          cargo test -p fgit-node --lib --test git_daemon_deadline --test git_daemon_receive_transport --no-fail-fast |& tee "$RUNNER_TEMP/cargo-test-node-deadline.log"
+          cargo clippy -p fgit-cli -p fgit-node --all-targets -- -D warnings |& tee "$RUNNER_TEMP/cargo-clippy-focused.log"
+
+      - name: Verify the complete Rust workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --workspace --all-targets |& tee "$RUNNER_TEMP/cargo-check-workspace.log"
+          cargo test --workspace --all-targets --no-fail-fast |& tee "$RUNNER_TEMP/cargo-test-workspace.log"
+          cargo clippy --workspace --all-targets -- -D warnings |& tee "$RUNNER_TEMP/cargo-clippy-workspace.log"
+
+      - name: Publish the revision-bound verification ledger
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$VERIFIED_REVISION" || { echo 'main advanced after verification; refusing to attach stale evidence' >&2; exit 1; }
+          git checkout -B ledger origin/main
+          mkdir -p docs/verification
+
+          br show frankengit-asb8 --no-db --json > "$RUNNER_TEMP/asb8.json"
+          br ready --unassigned --no-db --json > "$RUNNER_TEMP/ready.json"
+          FGIT_READY_JSON_FILE="$RUNNER_TEMP/ready.json" scripts/agent_next_work.sh --json --limit 20 > "$RUNNER_TEMP/next-work.json"
+
+          python3 - "$VERIFIED_REVISION" "$RUNNER_TEMP/asb8.json" "$RUNNER_TEMP/next-work.json" <<'PY'
+          import json
+          import pathlib
+          import subprocess
+          import sys
+
+          revision = sys.argv[1]
+          asb8_payload = json.loads(pathlib.Path(sys.argv[2]).read_text())
+          next_work = json.loads(pathlib.Path(sys.argv[3]).read_text())
+
+          if isinstance(asb8_payload, list):
+              asb8 = asb8_payload[0] if asb8_payload else {}
+          elif isinstance(asb8_payload, dict) and isinstance(asb8_payload.get("issues"), list):
+              asb8 = asb8_payload["issues"][0] if asb8_payload["issues"] else {}
+          else:
+              asb8 = asb8_payload if isinstance(asb8_payload, dict) else {}
+
+          start = "735ad7a519fcdeb91d965de6d996ba015b950931"
+          ancestor = subprocess.run(
+              ["git", "merge-base", "--is-ancestor", start, revision],
+              check=False,
+          ).returncode == 0
+          range_spec = f"{start}..{revision}" if ancestor else revision
+          commits = subprocess.run(
+              ["git", "log", "--reverse", "--date=iso-strict", "--pretty=format:%H\t%ad\t%s", range_spec],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.splitlines()
+          changed = subprocess.run(
+              ["git", "diff", "--name-only", start, revision] if ancestor else ["git", "show", "--pretty=", "--name-only", revision],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.splitlines()
+
+          lines = [
+              "# Mainline verification checkpoint: 2026-09-04",
+              "",
+              f"Verified revision: `{revision}`",
+              "",
+              "## Result",
+              "",
+              "Every command below completed successfully against the exact verified revision before this ledger commit was created:",
+              "",
+              "- `cargo fmt --all --check`",
+              "- focused `fgit-cli` / `fgit-node` checks, tests, and Clippy with warnings denied",
+              "- `cargo check --workspace --all-targets`",
+              "- `cargo test --workspace --all-targets --no-fail-fast`",
+              "- `cargo clippy --workspace --all-targets -- -D warnings`",
+              "- agent-context, next-work, and Rust-pin shell contract suites",
+              "- large-push E2E shell syntax and exact source-archive checksum verification",
+              "",
+              "The ledger is revision-bound evidence, not a claim that every roadmap item is complete.",
+              "",
+              "## `frankengit-asb8`",
+              "",
+              f"- Status: `{asb8.get('status', 'unknown')}`",
+              f"- Assignee: `{asb8.get('assignee') or 'unassigned'}`",
+              "- Landed in this campaign: deployment-selectable finite timeout, explicit large-push profile, separate ingress/processing deadline origins, focused transport regressions, and truthful documentation.",
+              "- Residual deliberately not over-claimed: automatic byte/work-proportional scaling remains a distinct design choice unless the bead record is later narrowed or closed by independent verification.",
+              "",
+              "## Incremental commits since the campaign base",
+              "",
+          ]
+          if commits:
+              for row in commits:
+                  sha, date, subject = row.split("\t", 2)
+                  lines.append(f"- `{sha}` — {subject} ({date})")
+          else:
+              lines.append("- No descendant commits were found from the recorded campaign base.")
+
+          lines += ["", "## Changed paths", ""]
+          for name in sorted(set(filter(None, changed))):
+              lines.append(f"- `{name}`")
+
+          lines += ["", "## Deterministic next-work snapshot", ""]
+          items = next_work.get("items", [])
+          if items:
+              for index, item in enumerate(items, 1):
+                  lines.append(
+                      f"{index}. P{item.get('priority', 4)} `{item.get('id', '')}` — {item.get('title', '')}"
+                  )
+          else:
+              lines.append("No unassigned ready work was reported by the authoritative tracker view.")
+          lines += [
+              "",
+              "> This ordering is a deterministic shortlist, not proof of global optimality. Read the bead, dependencies, governing documents, and code before claiming it.",
+              "",
+          ]
+          pathlib.Path("docs/verification/MAINLINE_CHECKPOINT_2026-09-04.md").write_text("\n".join(lines))
+          PY
+
+          python3 - <<'PY'
+          from pathlib import Path
+          status_candidates = sorted(Path('.').glob('**/*IMPLEMENTATION*STATUS*.md'))
+          if status_candidates:
+              path = status_candidates[0]
+              text = path.read_text()
+              line = '\nA full revision-bound workspace checkpoint is recorded in [`docs/verification/MAINLINE_CHECKPOINT_2026-09-04.md`](verification/MAINLINE_CHECKPOINT_2026-09-04.md).\n'
+              if 'MAINLINE_CHECKPOINT_2026-09-04.md' not in text:
+                  path.write_text(text.rstrip() + '\n' + line)
+
+          changelog = Path('CHANGELOG.md')
+          if changelog.exists():
+              text = changelog.read_text()
+              line = '- Published a revision-bound full-workspace verification checkpoint for the 2026-09-04 mainline campaign.\n'
+              if line not in text:
+                  marker = '### Fixed\n\n'
+                  if marker in text:
+                      text = text.replace(marker, marker + line, 1)
+                  else:
+                      text += '\n' + line
+                  changelog.write_text(text)
+          PY
+
+          git diff --check
+          git config user.name CobaltKite
+          git config user.email cobaltkite@invalid.example
+          git add docs CHANGELOG.md
+          git commit -m 'docs: publish the 2026-09-04 verified mainline checkpoint'
+          git push origin HEAD:main
+
+      - name: Upload complete verification logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frankengit-mainline-verification-${{ env.VERIFIED_REVISION }}
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/*.json
+            ${{ runner.temp }}/verified-revision.txt
+            ${{ runner.temp }}/final-agent-context
+          if-no-files-found: warn
+          retention-days: 14
