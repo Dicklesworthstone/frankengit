@@ -1,0 +1,3 @@
+style(crypto): restore live-tree rustfmt cleanliness
+
+The nightly-2026-08-31 formatter rejects the forge-position implementation and its adversarial proof suite as currently checked in. Apply exactly the formatter-produced layout changes so the repository's first gate is green again before substantive receive-envelope work begins.
