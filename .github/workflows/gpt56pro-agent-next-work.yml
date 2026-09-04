@@ -1,0 +1,387 @@
+name: gpt56pro-agent-next-work
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-agent-next-work-20260904
+
+permissions:
+  contents: write
+
+concurrency:
+  group: frankengit-gpt56pro-mainline-mutator
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Add deterministic ready-work ranking
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          cat > scripts/agent_next_work.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          usage() {
+            cat <<'EOF'
+          usage: scripts/agent_next_work.sh [--json|--markdown|--id] [--limit N]
+
+          Reads the authoritative unassigned ready queue and emits a deterministic
+          shortlist. Set FGIT_READY_JSON_FILE to test or replay a captured queue
+          without invoking br. The command never updates a bead.
+          EOF
+          }
+
+          format=json
+          limit=12
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --json) format=json; shift ;;
+              --markdown) format=markdown; shift ;;
+              --id) format=id; shift ;;
+              --limit)
+                test "$#" -ge 2 || { usage >&2; exit 2; }
+                limit=$2
+                shift 2
+                ;;
+              -h|--help) usage; exit 0 ;;
+              *) printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+            esac
+          done
+
+          case "$limit" in
+            ''|*[!0-9]*) printf 'limit must be a non-zero decimal integer\n' >&2; exit 2 ;;
+          esac
+          test "$limit" -gt 0 || { printf 'limit must be a non-zero decimal integer\n' >&2; exit 2; }
+
+          tmp=$(mktemp)
+          trap 'rm -f "$tmp"' EXIT HUP INT TERM
+          if [ -n "${FGIT_READY_JSON_FILE:-}" ]; then
+            test -f "$FGIT_READY_JSON_FILE" || { printf 'ready queue fixture not found: %s\n' "$FGIT_READY_JSON_FILE" >&2; exit 1; }
+            cat "$FGIT_READY_JSON_FILE" > "$tmp"
+            source_kind=fixture
+          else
+            command -v br >/dev/null 2>&1 || { printf 'br is required on PATH (or set FGIT_READY_JSON_FILE)\n' >&2; exit 1; }
+            br ready --unassigned --no-db --json > "$tmp"
+            source_kind=br-ready-unassigned
+          fi
+
+          python3 - "$tmp" "$format" "$limit" "$source_kind" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          output_format = sys.argv[2]
+          limit = int(sys.argv[3])
+          source_kind = sys.argv[4]
+          payload = json.loads(path.read_text())
+
+          if isinstance(payload, list):
+              rows = payload
+          elif isinstance(payload, dict):
+              for key in ("issues", "items", "results", "ready"):
+                  value = payload.get(key)
+                  if isinstance(value, list):
+                      rows = value
+                      break
+              else:
+                  raise SystemExit("ready queue JSON has no recognized issue list")
+          else:
+              raise SystemExit("ready queue JSON must be an array or object")
+
+          normalized = []
+          for row in rows:
+              if not isinstance(row, dict):
+                  continue
+              issue_id = str(row.get("id") or row.get("issue_id") or "").strip()
+              if not issue_id:
+                  continue
+              status = str(row.get("status") or "open").strip().lower()
+              assignee = row.get("assignee")
+              if status not in {"open", "ready"}:
+                  continue
+              if assignee not in (None, "", []):
+                  continue
+              try:
+                  priority = int(row.get("priority", 4))
+              except (TypeError, ValueError):
+                  priority = 4
+              priority = max(0, min(priority, 4))
+              normalized.append(
+                  {
+                      "id": issue_id,
+                      "title": str(row.get("title") or "").strip(),
+                      "priority": priority,
+                      "issue_type": str(row.get("issue_type") or row.get("type") or "task").strip(),
+                      "created_at": str(row.get("created_at") or ""),
+                      "status": status,
+                  }
+              )
+
+          normalized.sort(key=lambda row: (row["priority"], row["created_at"], row["id"]))
+          selected = normalized[:limit]
+          document = {
+              "schema": "frankengit.agent-next-work.v1",
+              "source": source_kind,
+              "selection_contract": {
+                  "input": "authoritative unassigned ready queue",
+                  "filters": ["status is open/ready", "assignee is empty"],
+                  "order": ["priority ascending", "created_at ascending", "id ascending"],
+                  "limit": limit,
+                  "non_claim": "This is a deterministic shortlist, not proof that the first item is globally optimal.",
+              },
+              "candidate_count": len(normalized),
+              "items": selected,
+          }
+
+          if output_format == "json":
+              print(json.dumps(document, indent=2, sort_keys=True))
+          elif output_format == "id":
+              if selected:
+                  print(selected[0]["id"])
+          else:
+              print("# FrankenGit next-work shortlist")
+              print()
+              print("> Deterministic view of the authoritative unassigned ready queue; not an optimality claim.")
+              print()
+              print("| Rank | Priority | Type | Bead | Title |")
+              print("|---:|---:|---|---|---|")
+              for rank, item in enumerate(selected, 1):
+                  title = item["title"].replace("|", "\\|").replace("\n", " ")
+                  print(f'| {rank} | P{item["priority"]} | {item["issue_type"]} | `{item["id"]}` | {title} |')
+              if not selected:
+                  print("| - | - | - | - | No unassigned ready work |")
+          PY
+          SCRIPT
+          chmod +x scripts/agent_next_work.sh
+          bash -n scripts/agent_next_work.sh
+          git diff --check
+          if git diff --quiet; then
+            echo 'agent next-work command already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = 'scripts/agent_next_work.sh' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name CobaltKite
+          git config user.email cobaltkite@invalid.example
+          git add scripts/agent_next_work.sh
+          git commit -m 'feat(agent): add deterministic next-work shortlists'
+          git push origin HEAD:main
+
+      - name: Add fixture-backed ranking tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          mkdir -p scripts/tests
+          cat > scripts/tests/agent_next_work.sh <<'TEST'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          root=$(git rev-parse --show-toplevel)
+          command="$root/scripts/agent_next_work.sh"
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+          cat > "$tmp/ready.json" <<'JSON'
+          [
+            {"id":"fg-p2","title":"Later priority","priority":2,"status":"open","assignee":null,"created_at":"2026-01-01T00:00:00Z","issue_type":"task"},
+            {"id":"fg-p0-z","title":"P0 later id","priority":0,"status":"open","assignee":"","created_at":"2026-01-03T00:00:00Z","issue_type":"bug"},
+            {"id":"fg-p0-a","title":"P0 older","priority":0,"status":"open","created_at":"2026-01-02T00:00:00Z","issue_type":"bug"},
+            {"id":"fg-assigned","title":"Already owned","priority":0,"status":"open","assignee":"OtherAgent","created_at":"2025-01-01T00:00:00Z"},
+            {"id":"fg-closed","title":"Already done","priority":0,"status":"closed","assignee":null,"created_at":"2024-01-01T00:00:00Z"},
+            {"id":"fg-tie-b","title":"Tie B","priority":1,"status":"ready","assignee":null,"created_at":"2026-02-01T00:00:00Z"},
+            {"id":"fg-tie-a","title":"Tie A","priority":1,"status":"ready","assignee":null,"created_at":"2026-02-01T00:00:00Z"}
+          ]
+          JSON
+
+          FGIT_READY_JSON_FILE="$tmp/ready.json" "$command" --json --limit 4 > "$tmp/result.json"
+          python3 - "$tmp/result.json" <<'PY'
+          import json, pathlib, sys
+          payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert payload["schema"] == "frankengit.agent-next-work.v1"
+          assert payload["candidate_count"] == 5
+          assert [item["id"] for item in payload["items"]] == [
+              "fg-p0-a", "fg-p0-z", "fg-tie-a", "fg-tie-b"
+          ]
+          assert "globally optimal" in payload["selection_contract"]["non_claim"]
+          PY
+
+          first=$(FGIT_READY_JSON_FILE="$tmp/ready.json" "$command" --id)
+          test "$first" = fg-p0-a
+
+          FGIT_READY_JSON_FILE="$tmp/ready.json" "$command" --markdown --limit 2 > "$tmp/result.md"
+          grep -q '`fg-p0-a`' "$tmp/result.md"
+          grep -q '`fg-p0-z`' "$tmp/result.md"
+          ! grep -q 'fg-assigned' "$tmp/result.md"
+
+          set +e
+          invalid_output=$(FGIT_READY_JSON_FILE="$tmp/ready.json" "$command" --limit 0 2>&1)
+          invalid_rc=$?
+          set -e
+          test "$invalid_rc" -eq 2
+          case "$invalid_output" in
+            *'non-zero decimal integer'*) ;;
+            *) printf 'invalid limit refusal was not diagnostic: %s\n' "$invalid_output" >&2; exit 1 ;;
+          esac
+
+          printf 'agent next-work ranking tests: PASS\n'
+          TEST
+          chmod +x scripts/tests/agent_next_work.sh
+          scripts/tests/agent_next_work.sh
+          git diff --check
+          if git diff --quiet; then
+            echo 'agent next-work tests already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = 'scripts/tests/agent_next_work.sh' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name CobaltKite
+          git config user.email cobaltkite@invalid.example
+          git add scripts/tests/agent_next_work.sh
+          git commit -m 'test(agent): pin next-work filtering and tie-breaking'
+          git push origin HEAD:main
+
+      - name: Add the shortlist to revision-bound context snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/agent_context_snapshot.sh')
+          text = path.read_text()
+          needle = '''            br ready --unassigned --no-db --json > "$staging/beads-ready-unassigned.json"
+            br list --status open --unassigned --no-db --json > "$staging/beads-open-unassigned.json"
+'''
+          replacement = '''            br ready --unassigned --no-db --json > "$staging/beads-ready-unassigned.json"
+            FGIT_READY_JSON_FILE="$staging/beads-ready-unassigned.json" \\
+              scripts/agent_next_work.sh --json --limit 20 > "$staging/beads-next-work.json"
+            br list --status open --unassigned --no-db --json > "$staging/beads-open-unassigned.json"
+'''
+          if needle in text:
+              path.write_text(text.replace(needle, replacement, 1))
+          elif 'beads-next-work.json' not in text:
+              raise SystemExit('bead capture block changed unexpectedly')
+          PY
+          bash -n scripts/agent_context_snapshot.sh
+          scripts/tests/agent_next_work.sh
+          git diff --check
+          if git diff --quiet; then
+            echo 'snapshot shortlist integration already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = 'scripts/agent_context_snapshot.sh' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name CobaltKite
+          git config user.email cobaltkite@invalid.example
+          git add scripts/agent_context_snapshot.sh
+          git commit -m 'feat(agent): include ranked ready work in context snapshots'
+          git push origin HEAD:main
+
+      - name: Document the selection contract and update changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          cat > docs/AGENT_NEXT_WORK.md <<'DOC'
+          # Deterministic next-work shortlists
+
+          `scripts/agent_next_work.sh` turns the authoritative
+          `br ready --unassigned --no-db --json` result into a small,
+          machine-readable or human-readable shortlist:
+
+          ```bash
+          scripts/agent_next_work.sh --json --limit 20
+          scripts/agent_next_work.sh --markdown
+          scripts/agent_next_work.sh --id
+          ```
+
+          The command is deliberately simpler than a scheduler. It discards
+          non-open and assigned rows defensively, orders by numeric priority,
+          creation time, and bead ID, then applies the requested limit. Every
+          JSON result carries that contract and an explicit non-claim: the first
+          row is a deterministic safe place to investigate, not proof of global
+          optimality. An agent must still read the bead, its dependencies, the
+          governing documents, and the relevant code before claiming it.
+
+          Set `FGIT_READY_JSON_FILE` to replay a captured ready queue. This is
+          how `scripts/tests/agent_next_work.sh` pins filtering and tie-breaking
+          without mutating the live tracker. Revision-bound context snapshots
+          include the same ranked view as `beads-next-work.json` whenever `br`
+          is available.
+          DOC
+          python3 - <<'PY'
+          from pathlib import Path
+          readme = Path('README.md')
+          text = readme.read_text()
+          anchor = '[`docs/AGENT_CONTEXT_SNAPSHOT.md`](docs/AGENT_CONTEXT_SNAPSHOT.md).'
+          addition = anchor + ' A deterministic read-only shortlist of unassigned ready work is available through [`scripts/agent_next_work.sh`](scripts/agent_next_work.sh); see [`docs/AGENT_NEXT_WORK.md`](docs/AGENT_NEXT_WORK.md).'
+          if 'docs/AGENT_NEXT_WORK.md' not in text:
+              if anchor not in text:
+                  raise SystemExit('agent context README link changed unexpectedly')
+              readme.write_text(text.replace(anchor, addition, 1))
+
+          changelog = Path('CHANGELOG.md')
+          if changelog.exists():
+              c = changelog.read_text()
+              entry = '- Added deterministic, replayable next-work shortlists derived from the authoritative unassigned ready queue.\n'
+              if entry not in c:
+                  marker = '### Added\n\n'
+                  if marker in c:
+                      c = c.replace(marker, marker + entry, 1)
+                  else:
+                      c += '\n' + entry
+                  changelog.write_text(c)
+          PY
+          git diff --check
+          if git diff --quiet; then
+            echo 'next-work documentation already landed'
+            exit 0
+          fi
+          git config user.name CobaltKite
+          git config user.email cobaltkite@invalid.example
+          git add docs/AGENT_NEXT_WORK.md README.md CHANGELOG.md
+          git commit -m 'docs(agent): publish the deterministic next-work contract'
+          git push origin HEAD:main
+
+      - name: Final verification
+        shell: bash
+        env:
+          BR_VERSION: 0.5.7
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B verify origin/main
+          scripts/tests/agent_next_work.sh
+          bash -n scripts/agent_next_work.sh
+          bash -n scripts/agent_context_snapshot.sh
+          asset="br-${BR_VERSION}-linux_amd64.tar.gz"
+          base="https://github.com/Dicklesworthstone/beads_rust/releases/download/v${BR_VERSION}"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/br.tar.gz" "$base/$asset"
+          echo '634aaacd0aac256b2be7250af9fe1e863e8a0316875c20959a6a1c2da75bf843  '"$RUNNER_TEMP/br.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/br-bin"
+          tar -xzf "$RUNNER_TEMP/br.tar.gz" -C "$RUNNER_TEMP/br-bin"
+          export PATH="$(dirname "$(find "$RUNNER_TEMP/br-bin" -type f -name br | head -n 1)"):$PATH"
+          snapshot=$(mktemp -d)
+          rm -rf "$snapshot"
+          scripts/agent_context_snapshot.sh "$snapshot"
+          test -s "$snapshot/beads-next-work.json"
+          rm -rf "$snapshot"
+          cargo fmt --all --check
+          git status --short
