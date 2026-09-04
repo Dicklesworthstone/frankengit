@@ -59,9 +59,10 @@ impl RefVisibility {
     /// byte-exact or extends the pattern at a `/` boundary, so `refs/hidden`
     /// matches `refs/hidden/tip` but never `refs/hiddenx`.  Rule storage is
     /// bounded by `max_ref_prefixes` and each pattern by `max_ref_name_bytes`,
-    /// mirroring the other bounded collections in this crate.
+    /// mirroring the other bounded collections in this crate. A tighter limit
+    /// on a later call refuses new rules without changing the existing policy.
     pub fn push_rule(&mut self, rule: &[u8], limits: &WireLimits) -> Result<(), WireError> {
-        if self.rules.len() == limits.max_ref_prefixes {
+        if self.rules.len() >= limits.max_ref_prefixes {
             return Err(WireError::TooManyObjectIds {
                 field: "visibility rule",
                 limit: limits.max_ref_prefixes,
