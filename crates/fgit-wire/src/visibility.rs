@@ -76,8 +76,13 @@ impl RefVisibility {
     }
 
     /// Whether the policy hides `name`; the last matching rule wins.
+    ///
+    /// A peeled advertisement (`<ref>^{}`) is an attribute of its base ref,
+    /// not a separate name that can escape an exact hide rule. Apply every
+    /// hide/unhide rule to that base so both records receive one decision.
     #[must_use]
     pub fn hides(&self, name: &[u8]) -> bool {
+        let name = name.strip_suffix(b"^{}").unwrap_or(name);
         let mut hidden = false;
         for rule in &self.rules {
             if Self::pattern_matches(&rule.pattern, name) {
