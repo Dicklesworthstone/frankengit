@@ -156,16 +156,25 @@ impl<'a, R: ?Sized + UploadPackRepository> VisibleUploadPackRepository<'a, R> {
     /// A symbolic alias cannot disclose a hidden target, even through another
     /// advertised alias. Snapshot each alias edge once and propagate hiding
     /// backwards; every name enters the worklist at most once, including cycles.
-    /// Output retains the inner advertisement order, not map or worklist order.
+    /// Peeled records depend on their base names in the same graph. Both passes
+    /// use one advertised slice, so policy analysis and output cannot mix ref
+    /// snapshots. Output retains that slice's order, not map or worklist order.
     pub fn new(inner: &'a R, visibility: &RefVisibility) -> Self {
+        let advertised = inner.advertised_refs();
         let mut targets = BTreeMap::new();
         let mut dependents: BTreeMap<&[u8], Vec<&[u8]>> = BTreeMap::new();
         let mut hidden_names: HashSet<&[u8]> = HashSet::new();
         let mut pending = Vec::new();
-        for reference in inner.advertised_refs() {
+        for reference in advertised {
             let name = reference.name.as_slice();
             if visibility.hides(name) && hidden_names.insert(name) {
                 pending.push(name);
+            }
+            // A peeled record inherits hiding through aliases as well as
+            // direct policy rules. Otherwise a hidden symbolic tag could
+            // leave its derived record and peeled identity in the visible set.
+            if let Some(base) = name.strip_suffix(b"^{}") {
+                dependents.entry(base).or_default().push(name);
             }
             if let Some(target) = inner.symref_target(name) {
                 targets.insert(name, target);
@@ -203,7 +212,7 @@ impl<'a, R: ?Sized + UploadPackRepository> VisibleUploadPackRepository<'a, R> {
         let mut visible = Vec::new();
         let mut visible_tips = HashSet::new();
         let mut hidden_tips = HashSet::new();
-        for reference in inner.advertised_refs() {
+        for reference in advertised {
             if hidden_names.contains(reference.name.as_slice()) {
                 hidden_tips.insert(reference.oid);
             } else {
