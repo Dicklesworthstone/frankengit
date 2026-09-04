@@ -1,0 +1,107 @@
+name: gpt56pro-claim-bv-compat
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-asb8-diagnostic
+
+permissions:
+  contents: write
+
+jobs:
+  claim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EXPECTED_MAIN: dd2e48aa4cb8cd2ea2d001d04f189d35e63f49e9
+      ACTOR: IndigoHeron
+      BR_VERSION: 0.5.7
+    steps:
+      - name: Check out exact live main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Guard the claim base
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_MAIN"
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+
+      - name: Install pinned beads tracker
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/br-${BR_VERSION}-linux_amd64.tar.gz"
+          base="https://github.com/Dicklesworthstone/beads_rust/releases/download/v${BR_VERSION}"
+          curl --fail --location --retry 3 --output "$archive" "$base/br-${BR_VERSION}-linux_amd64.tar.gz"
+          echo "634aaacd0aac256b2be7250af9fe1e863e8a0316875c20959a6a1c2da75bf843  $archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/br-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/br-bin"
+          BR="$(find "$RUNNER_TEMP/br-bin" -type f -name br -print -quit)"
+          test -n "$BR"
+          chmod +x "$BR"
+          "$BR" --version
+          echo "BR=$BR" >> "$GITHUB_ENV"
+
+      - name: Create and claim the compatibility defect
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/description.md" <<'EOF'
+          MECHANISM
+          `bv` v0.22.0 does not recognize the repository-owned `batch_pending` status. On the current tracker generation, `bv --robot-triage` rejects and skips 21 records, then computes recommendations over an incomplete dependency graph. The emitted top pick is consequently not claim-safe even though AGENTS.md names `bv --robot-triage` as the required entry point.
+
+          SCOPE
+          Add a repository-owned, read-only compatibility launcher for robot-mode `bv` commands. It must project only the exact status field `batch_pending` to `review` in a private temporary JSONL file, invoke `bv` with that file through its explicit `--db` override while retaining the real repository as the working directory, and delete the projection on exit. `review` is the nearest supported state: non-closed and dependency-blocking, but not claimable and not counted as active implementation.
+
+          SAFETY
+          The authoritative `.beads/issues.jsonl` bytes must never change. Reject caller-supplied `--db` flags, missing tools, malformed source rows, count drift, incomplete projection, and any attempt to use the launcher without a robot/read-only mode. Keep stdout byte-for-byte owned by `bv`; compatibility diagnostics go to stderr.
+
+          ACCEPTANCE
+          1. Fixture tests prove the source hash is unchanged, line count is preserved, every and only exact `batch_pending` status field is mapped to `review`, temporary files are reaped, arguments are forwarded, and caller `--db` overrides are refused.
+          2. A fake `bv` proves invocation occurs from the repository root with the generated file and that stdout is not contaminated.
+          3. A pinned real `bv` v0.22.0 run over current main reports zero invalid-status load errors, retains every tracker record, keeps batch-pending work non-claimable, and does not emit a claim command that authoritative `br ready` rejects.
+          4. AGENTS.md routes graph triage through the compatibility launcher and explains that `br` remains authoritative for claimability.
+
+          NON-CLAIMS
+          This does not change Beads state, teach upstream `bv` a new status, make blocked work ready, or substitute graph ranking for the authoritative `br` claim gate.
+          EOF
+          cat > "$RUNNER_TEMP/acceptance.md" <<'EOF'
+          A read-only compatibility projection makes the complete current tracker graph consumable by pinned bv without mutating `.beads/issues.jsonl`, while preserving `batch_pending` as non-closed, dependency-blocking, and non-claimable. Hermetic fixtures and one real pinned-bv regression prove the behavior.
+          EOF
+          ISSUE_ID="$($BR create \
+            --title "Agent triage skips batch_pending records and ranks an incomplete graph" \
+            --slug bv-batch-pending-compat \
+            --type bug \
+            --priority 1 \
+            --labels "area:tooling,area:agent,risk:high" \
+            --description-file "$RUNNER_TEMP/description.md" \
+            --acceptance-criteria "$(cat "$RUNNER_TEMP/acceptance.md")" \
+            --agent-name "$ACTOR" \
+            --harness "ChatGPT" \
+            --model "GPT-5.6 Pro" \
+            --silent)"
+          test -n "$ISSUE_ID"
+          "$BR" update "$ISSUE_ID" --claim --actor "$ACTOR" --json
+          "$BR" comments add "$ISSUE_ID" --author "$ACTOR" --message \
+            "Claimed at main=$EXPECTED_MAIN. Agent Mail reservations are unavailable in this connector execution. Intended scope: scripts/bv_compat.sh, scripts/tests/bv_compat.sh, AGENTS.md, CHANGELOG.md, and implementation-status documentation. No production crate ownership overlap." --json
+          "$BR" sync --flush-only
+          printf '%s\n' "$ISSUE_ID" | tee "$RUNNER_TEMP/issue-id.txt"
+          changed="$(git diff --name-only)"
+          test "$changed" = ".beads/issues.jsonl"
+
+      - name: Commit and publish the claim directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          issue_id="$(cat "$RUNNER_TEMP/issue-id.txt")"
+          git config user.name "$ACTOR"
+          git config user.email "indigoheron@invalid.example"
+          git add .beads/issues.jsonl
+          git commit -m "chore(beads): claim ${issue_id} [${issue_id}]"
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          git push origin HEAD:main
