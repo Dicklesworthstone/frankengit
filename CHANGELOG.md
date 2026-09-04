@@ -4,7 +4,28 @@ All notable FrankenGit changes are recorded here. This file is a summary, not a 
 
 FrankenGit has moved beyond its original architecture-only phase into active implementation and pre-release integration. It is still not a general-purpose Git server, production-ready forge, or GitHub replacement.
 
-## [Unreleased] — 2026-09-02
+## [Unreleased] — 2026-09-04
+
+### Fixed — complete graph-aware Beads triage for pinned bv (frankengit-bv-batch-pending-compat-1e3q)
+
+Pinned `bv` v0.22.0 rejected FrankenGit's repository-owned `batch_pending`
+status and silently ranked a graph missing every record awaiting independent
+batch verification. `scripts/bv_compat.sh` now validates the authoritative
+JSONL, maps only that exact status field to non-claimable `review` in a private
+ephemeral projection, invokes robot-mode `bv` through its explicit `--db`
+override, preserves stdout, verifies the source hash did not change, and reaps
+staging. It refuses non-robot modes, caller-supplied database paths, malformed
+rows, missing tools, record-count drift, and incomplete projection.
+
+The hermetic fixture suite covers source immutability, exact-field projection,
+stdout/stderr ownership, cwd and argument forwarding, cleanup, malformed input,
+missing tools, non-robot modes, and both `--db` spellings. A pinned live-graph
+regression retained all 555 non-tombstone records from 580 source rows after
+exactly 21 pending-review mappings, reproduced every projected status count,
+left the tracker hash unchanged, and emitted no claim while authoritative
+`br ready --unassigned --no-db --json` was empty. `AGENTS.md` now makes that
+`br` cross-check mandatory and no longer tells implementers to close their own
+beads; completed work moves to `batch_pending` for independent verification.
 
 ### Added — network push over the raw git-daemon transport (frankengit-hh37)
 
