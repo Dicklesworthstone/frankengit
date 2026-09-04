@@ -107,8 +107,9 @@ use fgit_wire::stale_disclosure::{LabelledAdvertisement, advertise_under_read_la
 use fgit_wire::visibility::{RefVisibility, filter_advertised_refs};
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, LegacyUploadPack, PackPayloadSource,
-    PackRequest, Packet, PktLineDecoder, UploadPackRepository, UploadPackVersion, V1Advertisement,
-    V2UploadPack, WireError, WireEvent, WireLimits, encode_packets, sideband_pack_chunk,
+    PackRequest, Packet, PktLineDecoder, SidebandBand, UploadPackRepository, UploadPackVersion,
+    V1Advertisement, V2UploadPack, WireError, WireEvent, WireLimits, encode_packets,
+    encode_sideband_64k, sideband_pack_chunk,
 };
 use fsqlite_types::cx::Cx as FsqliteCx;
 
@@ -146,8 +147,12 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 // The git-daemon profile always advertises an `agent` capability. Besides
 // identifying the deterministic server profile, this keeps an authenticated
 // empty repository on Git's `capabilities^{}` advertisement form rather than
-// degenerating to a bare pkt-line flush.
-const GIT_DAEMON_CAPABILITIES: &[u8] = b"agent=frankengit-node";
+// degenerating to a bare pkt-line flush. `side-band-64k` is offered for the
+// same reason every upstream server offers it: it gives the pack phase a
+// progress channel and gives a refused selected-pack build the Fatal band —
+// the difference between a diagnosable client error and an early EOF
+// (frankengit-e6jj). Clients that do not request it keep the raw-pack flow.
+const GIT_DAEMON_CAPABILITIES: &[u8] = b"side-band-64k agent=frankengit-node";
 
 /// The git-daemon capability advertisement for one repository object format.
 ///
@@ -4689,6 +4694,7 @@ where
     W: Write,
     BuildPack: FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, PackError>,
     Payload: PackPayloadSource,
+    PackError: Display,
 {
     let request =
         read_git_daemon_request(reader, &limits).map_err(GitDaemonServeError::Transport)?;
@@ -4761,6 +4767,7 @@ where
     BuildPack:
         FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, GitDaemonServeError<PackError>>,
     Payload: PackPayloadSource,
+    PackError: Display,
 {
     let GitDaemonService::UploadPack(upload_pack_version) = request.service() else {
         return Err(GitDaemonServeError::Transport(
@@ -4842,7 +4849,16 @@ where
             }
             check_session_deadline(session_deadline, "build selected git pack")
                 .map_err(GitDaemonServeError::Transport)?;
-            let mut payload = build_pack(&request, &pack_request)?;
+            let mut payload = match build_pack(&request, &pack_request) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    // A pack-build refusal is reported to a sideband-
+                    // negotiated client before the session ends (e6jj).
+                    let _ =
+                        emit_pack_build_refusal(writer, &pack_request, &error.to_string(), &limits);
+                    return Err(error);
+                }
+            };
             check_session_deadline(session_deadline, "build selected git pack")
                 .map_err(GitDaemonServeError::Transport)?;
             emit_pack_payload(
@@ -4886,6 +4902,7 @@ where
     BuildPack:
         FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, GitDaemonServeError<PackError>>,
     Payload: PackPayloadSource,
+    PackError: Display,
 {
     check_session_deadline(session_deadline, "prepare protocol-v2 advertisement")
         .map_err(GitDaemonServeError::Transport)?;
@@ -4950,7 +4967,19 @@ where
                 WireEvent::PackRequested(pack_request) => {
                     check_session_deadline(session_deadline, "build selected git pack")
                         .map_err(GitDaemonServeError::Transport)?;
-                    let mut payload = build_pack(&request, &pack_request)?;
+                    let mut payload = match build_pack(&request, &pack_request) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            // Same sideband Fatal surfacing as the v1 lane.
+                            let _ = emit_pack_build_refusal(
+                                writer,
+                                &pack_request,
+                                &error.to_string(),
+                                &limits,
+                            );
+                            return Err(error);
+                        }
+                    };
                     check_session_deadline(session_deadline, "build selected git pack")
                         .map_err(GitDaemonServeError::Transport)?;
                     emit_pack_payload(
@@ -4992,6 +5021,7 @@ pub fn serve_git_daemon_tcp_once<BuildPack, Payload, PackError>(
 where
     BuildPack: FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, PackError>,
     Payload: PackPayloadSource,
+    PackError: Display,
 {
     let (mut stream, _) = listener.accept().map_err(|source| {
         GitDaemonServeError::Transport(GitDaemonTransportRefusal::Io {
@@ -5327,6 +5357,38 @@ fn emit_pack_payload(
     Ok(())
 }
 
+/// Surfaces a selected-pack build refusal to a sideband-negotiated client as
+/// one Fatal sideband message before the session ends, so an over-envelope or
+/// budget-exhausted build is diagnosable (the client prints the band-3 text)
+/// instead of a bare early EOF (frankengit-e6jj). A client that negotiated no
+/// sideband channel learns nothing further, which matches upstream's
+/// mid-service failure shape; the serve run still records the typed refusal.
+fn emit_pack_build_refusal(
+    writer: &mut impl Write,
+    pack_request: &PackRequest,
+    message: &str,
+    limits: &WireLimits,
+) -> Result<(), GitDaemonTransportRefusal> {
+    if !pack_request.options.sideband_64k() {
+        return Ok(());
+    }
+    let sanitized: Vec<u8> = message
+        .bytes()
+        .map(|byte| {
+            if byte == 0 || byte == b'\r' || byte == b'\n' {
+                b' '
+            } else {
+                byte
+            }
+        })
+        .take(512)
+        .collect();
+    let mut packets = encode_sideband_64k(SidebandBand::Fatal, &sanitized, limits)
+        .map_err(GitDaemonTransportRefusal::Wire)?;
+    packets.push(Packet::Flush);
+    write_packet_group(writer, &packets, limits)
+}
+
 /// A stale-bearing repository-resolution input presented to a node open.
 ///
 /// The variants remain distinct at the public boundary even though they all
@@ -5399,6 +5461,12 @@ pub struct NodeConfig {
     root_layout: RootLayoutVersion,
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
+    /// The selected-pack write envelope: the planner/writer bounds applied
+    /// when canonical content is packed for a client or an export
+    /// (frankengit-e6jj). Runtime-only deployment policy; the default is the
+    /// documented compatibility profile and a deployment widens it
+    /// explicitly.
+    selected_pack_limits: PackLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
     git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout,
     /// Work-proportional extension of the git-daemon session envelope: the
@@ -5461,6 +5529,7 @@ impl NodeConfig {
             root_layout: RootLayoutVersion::LegacyWholeBody,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             segment_limits: SegmentLimits::default(),
+            selected_pack_limits: PackLimits::default(),
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
             git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout::DEFAULT,
             git_daemon_session_work_scaling: GitDaemonSessionWorkScaling::DEFAULT,
@@ -5659,6 +5728,20 @@ impl NodeConfig {
         }
         self
     }
+
+    /// Selects the selected-pack write envelope in bytes: the total expanded
+    /// content one emitted pack may carry. The writer's delta-base cache
+    /// bound tracks the same value, exactly as the pack-crate default profile
+    /// couples them (frankengit-e6jj). The bound exists because the current
+    /// writer buffers the finished pack in memory before streaming it; a
+    /// deployment serving repositories larger than the documented 128 MiB
+    /// default widens it explicitly.
+    #[must_use]
+    pub fn with_selected_pack_byte_envelope(mut self, max_expanded_bytes: usize) -> Self {
+        self.selected_pack_limits.max_total_expanded_bytes = max_expanded_bytes;
+        self.selected_pack_limits.max_cached_bytes = max_expanded_bytes;
+        self
+    }
 }
 
 /// The idempotent result of creating the initial authority head.
@@ -5747,6 +5830,7 @@ pub struct OneNode {
     object_format: GitHashAlgorithm,
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
+    selected_pack_limits: PackLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
     git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout,
     git_daemon_session_work_scaling: GitDaemonSessionWorkScaling,
@@ -6047,6 +6131,7 @@ impl OneNode {
             object_format: config.object_format.unwrap_or(GitHashAlgorithm::Sha1),
             max_object_bytes: config.max_object_bytes,
             segment_limits: config.segment_limits,
+            selected_pack_limits: config.selected_pack_limits.clone(),
             git_daemon_session_timeout: config.git_daemon_session_timeout,
             git_daemon_receive_processing_timeout: config.git_daemon_receive_processing_timeout,
             git_daemon_session_work_scaling: config.git_daemon_session_work_scaling,
@@ -7032,7 +7117,8 @@ impl OneNode {
         session_is_live: Option<&dyn Fn() -> bool>,
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
-        let limits = PackLimits::default();
+        // The operator-selected write envelope governs (frankengit-e6jj).
+        let limits = self.selected_pack_limits.clone();
         let configured_limit = usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX);
         let source = VerifiedFabricPackSource {
             fabric: &self.fabric,
@@ -9718,13 +9804,13 @@ mod tests {
         );
         let mut expected = format!(
             "{:04x}",
-            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta agent=frankengit-node\n"
+            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta side-band-64k agent=frankengit-node\n"
                 .len()
                 + 4
         )
         .into_bytes();
         expected.extend_from_slice(
-            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta agent=frankengit-node\n0000",
+            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta side-band-64k agent=frankengit-node\n0000",
         );
         assert_eq!(
             response, expected,
@@ -9742,7 +9828,7 @@ mod tests {
         let sha1 = git_daemon_capabilities(GitHashAlgorithm::Sha1, None);
         assert_eq!(
             sha1.as_slice(),
-            b"object-format=sha1 ofs-delta agent=frankengit-node"
+            b"object-format=sha1 ofs-delta side-band-64k agent=frankengit-node"
         );
         assert!(
             Capabilities::parse_v1(&sha1, &limits)
@@ -9757,7 +9843,7 @@ mod tests {
         let sha256 = git_daemon_capabilities(GitHashAlgorithm::Sha256, None);
         assert_eq!(
             sha256.as_slice(),
-            b"object-format=sha256 ofs-delta agent=frankengit-node"
+            b"object-format=sha256 ofs-delta side-band-64k agent=frankengit-node"
         );
         let parsed = Capabilities::parse_v1(&sha256, &limits)
             .expect("the SHA-256 daemon capability list is wire-valid");
@@ -9773,7 +9859,7 @@ mod tests {
         let with_head = git_daemon_capabilities(GitHashAlgorithm::Sha1, Some(b"refs/heads/main"));
         assert_eq!(
             with_head.as_slice(),
-            b"object-format=sha1 ofs-delta symref=HEAD:refs/heads/main agent=frankengit-node"
+            b"object-format=sha1 ofs-delta symref=HEAD:refs/heads/main side-band-64k agent=frankengit-node"
         );
         assert!(
             Capabilities::parse_v1(&with_head, &limits)
@@ -9834,7 +9920,7 @@ mod tests {
         // the SHA-1 domain and cannot parse this advertisement.
         let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
         let line = format!(
-            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta agent=frankengit-node\n"
+            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta side-band-64k agent=frankengit-node\n"
         );
         let mut expected = format!("{:04x}", line.len() + 4).into_bytes();
         expected.extend_from_slice(line.as_bytes());
@@ -9897,7 +9983,7 @@ mod tests {
 
         let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
         let advertisement = format!(
-            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta agent=frankengit-node\n"
+            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta side-band-64k agent=frankengit-node\n"
         );
         let packet = |payload: &str| {
             let mut out = format!("{:04x}", payload.len() + 4).into_bytes();
@@ -10025,7 +10111,7 @@ mod tests {
         let response = read_one_daemon_advertisement(node, b"\0host=loopback\0");
 
         let mut expected = packet(&format!(
-            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta agent=frankengit-node\n"
+            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta side-band-64k agent=frankengit-node\n"
         ));
         expected.extend_from_slice(b"0000");
         assert_eq!(
@@ -10043,7 +10129,7 @@ mod tests {
 
         let mut expected = packet("version 1\n");
         expected.extend_from_slice(&packet(&format!(
-            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta agent=frankengit-node\n"
+            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta side-band-64k agent=frankengit-node\n"
         )));
         expected.extend_from_slice(b"0000");
         assert_eq!(
@@ -12056,5 +12142,111 @@ mod session_envelope_tests {
         let profile = GitDaemonSessionWorkScaling::DEFAULT;
         assert_eq!(profile.per_byte(), Duration::from_nanos(953));
         assert_eq!(profile.max_extension(), Duration::from_secs(3600));
+    }
+}
+
+#[cfg(test)]
+mod selected_pack_envelope_tests {
+    use super::*;
+    use fgit_wire::PackOptions;
+
+    #[test]
+    fn the_selected_pack_byte_envelope_couples_the_writer_cache_ceiling() {
+        let config = NodeConfig::new(
+            PathBuf::from("/nonexistent"),
+            TenantId::from_bytes([0x41; 16]),
+            RepositoryId::from_bytes([0x42; 16]),
+        )
+        .with_selected_pack_byte_envelope(512 * 1024 * 1024);
+        assert_eq!(
+            config.selected_pack_limits.max_total_expanded_bytes,
+            512 * 1024 * 1024
+        );
+        assert_eq!(
+            config.selected_pack_limits.max_cached_bytes,
+            512 * 1024 * 1024,
+            "the delta-base cache tracks the expanded ceiling as the default profile couples them"
+        );
+        // The untouched profile keeps the documented 128 MiB default.
+        let plain = NodeConfig::new(
+            PathBuf::from("/nonexistent"),
+            TenantId::from_bytes([0x41; 16]),
+            RepositoryId::from_bytes([0x42; 16]),
+        );
+        assert_eq!(
+            plain.selected_pack_limits.max_total_expanded_bytes,
+            128 * 1024 * 1024
+        );
+    }
+
+    fn pack_request(sideband: bool) -> PackRequest {
+        PackRequest {
+            version: UploadPackVersion::V1,
+            wants: Vec::new(),
+            haves: Vec::new(),
+            shallows: Vec::new(),
+            deepen: None,
+            deepen_since: None,
+            deepen_not: Vec::new(),
+            filter: None,
+            options: if sideband {
+                PackOptions::SIDE_BAND_64K
+            } else {
+                PackOptions::NONE
+            },
+        }
+    }
+
+    #[test]
+    fn a_pack_build_refusal_reaches_a_sideband_client_as_one_fatal_band() {
+        let message = "selected pack exceeds the configured write envelope: 135690048 > 134217728 expanded bytes";
+        let mut sink = Vec::new();
+        emit_pack_build_refusal(
+            &mut sink,
+            &pack_request(true),
+            message,
+            &WireLimits::default(),
+        )
+        .expect("the refusal emission encodes");
+
+        // Decode the pkt-line frames: exactly one band-3 (Fatal) packet whose
+        // payload carries the refusal text, then the terminal flush.
+        let mut offset = 0;
+        let mut fatal_payloads = 0;
+        let mut saw_flush = false;
+        while offset < sink.len() {
+            let header = std::str::from_utf8(&sink[offset..offset + 4]).expect("hex header");
+            let length = usize::from_str_radix(header, 16).expect("hex parses");
+            if length == 0 {
+                saw_flush = true;
+                offset += 4;
+                continue;
+            }
+            let frame = &sink[offset + 4..offset + length];
+            assert_eq!(frame[0], 3, "the refusal rides the Fatal band");
+            fatal_payloads += 1;
+            assert!(
+                frame[1..]
+                    .windows(message.len())
+                    .any(|w| w == message.as_bytes()),
+                "the band payload carries the exact refusal text"
+            );
+            offset += length;
+        }
+        assert_eq!(fatal_payloads, 1, "exactly one Fatal packet");
+        assert!(saw_flush, "a flush terminates the notice");
+    }
+
+    #[test]
+    fn a_pack_build_refusal_without_sideband_writes_nothing() {
+        let mut sink = Vec::new();
+        emit_pack_build_refusal(
+            &mut sink,
+            &pack_request(false),
+            "anything",
+            &WireLimits::default(),
+        )
+        .expect("a sideband-less client is a no-op");
+        assert!(sink.is_empty(), "no bytes without a negotiated sideband");
     }
 }

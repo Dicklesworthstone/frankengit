@@ -57,7 +57,10 @@ previously kept the wider node package gate red was fixed in `7ccaf8b`
 locally at that revision. `doctor` authenticates the head and can re-verify
 one explicitly named native object; it is not yet a complete replay, fabric,
 repair, or causal-diagnosis suite. `export` writes an authority-selected pack
-to a previously absent path.
+to a previously absent path. One emitted pack is bounded by the documented
+write-side envelope (`--pack-max-expanded-mib`; 128 MiB expanded by default),
+and an over-envelope clone receives a diagnosable Fatal sideband refusal
+rather than an unexplained early EOF.
 
 `serve` accepts a bounded raw git-daemon service run, drains every admitted
 session, and reports accepted/completed/refused counts before it exits. The

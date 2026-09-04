@@ -32,6 +32,7 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Pack delta chains | required-v1 | Compatible bounded validation; depth/fan-out/expanded-byte limits; thin-pack completion |
 | Receive session envelope | required-v1 profile | Deliberate, operator-selected size/time bounds for one pushed pack; typed refusals, never a silent hangup after the pack trailer — see the envelope section below |
 | Hidden refs | required-v1 | Authorization and advertisement separation; no side-channel disclosure |
+| Selected-pack write envelope | required-v1 profile | Deliberate, operator-selected bound on one emitted pack's expanded bytes; Fatal-sideband/typed refusal when exceeded — see the envelope section below |
 | Namespaces | planned | Tenant/repository isolation; no accidental cross-namespace advertisement |
 | Annotated and lightweight tags | required-v1 | Peeling, protection, deletion, signature evidence, deterministic ordering |
 | Git notes | required-v1 | Ordinary refs with explicit policy controls |
@@ -45,7 +46,7 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Archive generation | required-v1 subset | Pure-Rust tar/zip generation, path safety, deterministic ordering, resource bounds |
 | Diff/merge | required-v1 core | Pure-Rust Myers/patience/histogram-style diff profiles and deterministic merge; oracle corpus for observable behavior |
 
-## Receive session envelope (git-daemon slice)
+## Receive and selected-pack session envelopes (git-daemon slice)
 
 Resource limits are compatibility semantics (constitution section 6), so the
 receive envelope is a deliberate, documented policy rather than an accidental
@@ -75,9 +76,21 @@ per 8 bytes). One work-proportional doctrine bounds both the socket session
 and the seal, so a large-but-legitimate first push is never capped by the
 host's incidental throughput rank.
 
-`fg serve` selects the envelope explicitly: `--session-timeout-secs`,
+The sibling **write-side envelope** (frankengit-e6jj) bounds one emitted
+pack: `PackLimits.max_total_expanded_bytes` (default 128 MiB; the writer's
+delta-base cache tracks it) gates the selected-pack plan because the current
+writer buffers the finished pack in memory before streaming. `fg serve` and
+`fg export` widen it explicitly with `--pack-max-expanded-mib`. An
+over-envelope selected pack is refused before any pack byte is emitted: a
+client that negotiated sideband-64k receives one Fatal sideband message
+naming the limit (diagnosable, not an unexplained early EOF); without
+sideband the connection ends as in upstream mid-service failure. `fg export`
+prints the typed refusal directly.
+
+`fg serve` selects the receive envelope explicitly: `--session-timeout-secs`,
 `--session-secs-per-mib`, `--session-max-extension-secs`,
-`--receive-max-input-mib`, `--receive-max-expanded-mib`.
+`--receive-max-input-mib`, `--receive-max-expanded-mib`; `fg serve` and
+`fg export` select the write-side envelope with `--pack-max-expanded-mib`.
 
 Refusal behavior by phase: a deadline that fires while the client is still
 sending (greeting, command section, pack stream) is a typed serve error and

@@ -183,7 +183,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>] [--pack-max-expanded-mib <non-zero>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -209,7 +209,7 @@ impl Display for CliRefusal {
                 "bounded serve failed ({serving}) and node shutdown also failed ({cleanup})"
             ),
             Self::InvalidServeLimit { field, value } => {
-                write!(formatter, "invalid fg serve {field} `{value}`: expected a non-zero decimal integer")
+                write!(formatter, "invalid fg {field} `{value}`: expected a non-zero decimal integer")
             }
             Self::ExportMaterialization(error) => {
                 write!(formatter, "cannot materialize authority-selected export: {error}")
@@ -541,6 +541,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 repository,
                 PathBuf::from(destination),
                 None,
+                serve_envelope,
             )
         }
         [
@@ -560,6 +561,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 incarnation,
                 RepositoryResolutionInput::ObjectLocation,
             )?),
+            serve_envelope,
         ),
         [command, storage_root, tenant, repository, listen_address] if command == "serve" => {
             run_serve(
@@ -774,6 +776,9 @@ struct ServeEnvelope {
     receive_max_input_mib: Option<u64>,
     /// Unique expanded content ceiling in MiB (`--receive-max-expanded-mib`).
     receive_max_expanded_mib: Option<u64>,
+    /// Selected-pack write ceiling in MiB (`--pack-max-expanded-mib`),
+    /// accepted by `serve` and `export` (frankengit-e6jj).
+    pack_max_expanded_mib: Option<u64>,
 }
 
 impl ServeEnvelope {
@@ -828,6 +833,16 @@ impl ServeEnvelope {
             configuration =
                 configuration.with_git_daemon_receive_byte_envelope(input_bytes, expanded_bytes);
         }
+        self.apply_pack_envelope(configuration)
+    }
+
+    /// Applies the selected-pack write ceiling alone. `export` shares this
+    /// knob with `serve`; the receive/session envelopes are serve-only.
+    fn apply_pack_envelope(self, mut configuration: NodeConfig) -> Result<NodeConfig, CliRefusal> {
+        if let Some(mib) = self.pack_max_expanded_mib {
+            let bytes = serve_mib_to_bytes(mib, "--pack-max-expanded-mib")?;
+            configuration = configuration.with_selected_pack_byte_envelope(bytes);
+        }
         Ok(configuration)
     }
 }
@@ -843,13 +858,16 @@ fn serve_mib_to_bytes(mib: u64, field: &'static str) -> Result<usize, CliRefusal
         })
 }
 
-/// Extracts the receive-envelope flags, which are optional and position-free
-/// but meaningful only for `serve`; anywhere else they stay in place and fall
-/// through to the usage refusal, so no other command silently accepts them.
+/// Extracts the envelope flags, which are optional and position-free but
+/// scoped: the receive/session flags are meaningful only for `serve`, and
+/// `--pack-max-expanded-mib` for `serve` and `export`; anywhere else they
+/// stay in place and fall through to the usage refusal, so no other command
+/// silently accepts them.
 fn extract_serve_envelope(
     arguments: &[String],
 ) -> Result<(Vec<String>, ServeEnvelope), CliRefusal> {
     let is_serve = arguments.first().is_some_and(|command| command == "serve");
+    let is_export = arguments.first().is_some_and(|command| command == "export");
     let mut retained = Vec::with_capacity(arguments.len());
     let mut envelope = ServeEnvelope::default();
     let mut index = 0;
@@ -865,6 +883,8 @@ fn extract_serve_envelope(
             Some(&mut envelope.receive_max_input_mib)
         } else if is_serve && argument == "--receive-max-expanded-mib" {
             Some(&mut envelope.receive_max_expanded_mib)
+        } else if (is_serve || is_export) && argument == "--pack-max-expanded-mib" {
+            Some(&mut envelope.pack_max_expanded_mib)
         } else {
             None
         };
@@ -896,7 +916,8 @@ fn extract_serve_envelope(
                         "--session-secs-per-mib" => "--session-secs-per-mib",
                         "--session-max-extension-secs" => "--session-max-extension-secs",
                         "--receive-max-input-mib" => "--receive-max-input-mib",
-                        _ => "--receive-max-expanded-mib",
+                        "--receive-max-expanded-mib" => "--receive-max-expanded-mib",
+                        _ => "--pack-max-expanded-mib",
                     },
                     value: value.clone(),
                 })?,
@@ -1004,14 +1025,15 @@ fn run_export(
     repository: &str,
     destination: PathBuf,
     resolution_input: Option<RepositoryResolutionInput>,
+    envelope: ServeEnvelope,
 ) -> Result<CliOutcome, CliRefusal> {
-    let node = OneNode::open_existing(node_config(
+    let node = OneNode::open_existing(envelope.apply_pack_envelope(node_config(
         storage_root,
         tenant,
         repository,
         None,
         resolution_input,
-    )?)
+    )?)?)
     .map_err(CliRefusal::Node)?;
     let exported = node
         .runtime()

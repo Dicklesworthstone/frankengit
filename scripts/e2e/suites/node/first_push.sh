@@ -323,24 +323,39 @@ if [ "${FG_E2E_LARGE_PUSH:-0}" = "1" ]; then
   fge_assert_contains FG-HH37-PUSH-033 "$XL1_OUT" 'main -> main' 'the XL push is accepted and reported to the client'
   fge_assert_not_contains FG-HH37-PUSH-034 "$XL1_OUT" 'hung up' 'the XL outcome is report-status, never a hangup'
 
-  # The published XL head is canonical: the verify session's ls-remote
-  # advertisement reports the pushed tip exactly, and the authenticated
-  # doctor path re-verifies one named XL blob's envelope. A full byte-level
-  # clone-back of a >= 300 MB repository is a separate capability: the
-  # selected-pack writer carries its own 128 MiB expanded ceiling
-  # (frankengit-e6jj).
-  FIND_PORT_AND_SERVE_XL xl1-verify "$STORAGE_XL1" "$REPOID_XL1"
-  fge_assert_cmd FG-HH37-PUSH-035 'an XL verification serve session is listening' test -n "$FOUND_PORT"
-  GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 ls-remote \
-    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL1.git" main >"$WORK/xl-lsremote.out" 2>&1 || true
+  # The published XL head must reproduce the pushed head exactly (clone-back),
+  # with the serve session's write-side envelope widened deliberately
+  # (frankengit-e6jj): the selected-pack writer's default 128 MiB expanded
+  # ceiling cannot emit a >= 300 MB closure, so this serve names a 512 MiB
+  # bound. A same-content clone attempt against the DEFAULT envelope is the
+  # planted negative below.
+  FIND_PORT_AND_SERVE_XL xl1-verify "$STORAGE_XL1" "$REPOID_XL1" --pack-max-expanded-mib 512
+  fge_assert_cmd FG-HH37-PUSH-035 'an XL verification serve session with the widened write envelope is listening' test -n "$FOUND_PORT"
+  XLCLONE="$WORK/xl-clone"
+  GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 clone \
+    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL1.git" "$XLCLONE" >"$WORK/xl-clone.out" 2>&1 || true
   fge_reap "$FOUND_NAME"
   XLSRC_HEAD=$(git -C "$XL_SRC" rev-parse HEAD 2>/dev/null || echo source-missing)
-  XLSERVED_HEAD=$(awk '{print $1}' "$WORK/xl-lsremote.out" 2>/dev/null || true)
-  fge_assert_eq FG-HH37-PUSH-036 "$XLSRC_HEAD" "$XLSERVED_HEAD" 'the published XL head round-trips identically through ls-remote'
+  XLCLONE_HEAD=$(git -C "$XLCLONE" rev-parse HEAD 2>/dev/null || echo clone-missing)
+  fge_assert_eq FG-HH37-PUSH-036 "$XLSRC_HEAD" "$XLCLONE_HEAD" 'the published XL head round-trips identically under the documented write envelope'
   XL_BLOB_OID=$(git -C "$XL_SRC" ls-tree HEAD xl1.txt | awk '{print $3}')
   XL_DOCTOR_RC=0
   "$FG_BIN" doctor "$STORAGE_XL1" "$TENANT" "$REPOID_XL1" "$XL_BLOB_OID" >"$WORK/xl-doctor.out" 2>&1 || XL_DOCTOR_RC=$?
   fge_assert_eq FG-HH37-PUSH-046 0 "$XL_DOCTOR_RC" 'the doctor path re-verifies one named XL blob against the authenticated head'
+
+  # Planted negative (write side): the same clone against the DEFAULT 128 MiB
+  # write envelope must fail with a client-diagnosable Fatal sideband message
+  # naming the limit -- never an unexplained early EOF (frankengit-e6jj).
+  FIND_PORT_AND_SERVE_XL xl1-default "$STORAGE_XL1" "$REPOID_XL1"
+  fge_assert_cmd FG-HH37-PUSH-047 'a default-envelope XL serve session is listening' test -n "$FOUND_PORT"
+  XLCLONE_DEFAULT="$WORK/xl-clone-default"
+  XLDEFAULT_RC=0
+  GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 clone \
+    "git://127.0.0.1:$FOUND_PORT/$REPOID_XL1.git" "$XLCLONE_DEFAULT" >"$WORK/xl-clone-default.out" 2>&1 || XLDEFAULT_RC=$?
+  fge_reap "$FOUND_NAME"
+  XLDEFAULT_OUT=$(cat "$WORK/xl-clone-default.out")
+  fge_assert_cmd FG-HH37-PUSH-048 'the over-envelope clone fails' test "$XLDEFAULT_RC" -ne 0
+  fge_assert_contains FG-HH37-PUSH-049 "$XLDEFAULT_OUT" 'TotalExpandedLimit' 'the write-side refusal names the governing limit to the client'
 
   # 2. Work-proportional deadline: a 5 s base with 4 s/MiB scaling admits the
   # push; a flat 5 s envelope fails it anywhere (client-side pack streaming
