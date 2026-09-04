@@ -1,0 +1,59 @@
+name: gpt56pro-bv-triage
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-asb8-diagnostic
+
+permissions:
+  contents: read
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out live main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install pinned beads viewer
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/bv_linux_amd64.tar.gz"
+          curl --fail --location --retry 3 \
+            --user-agent "OpenAI File Downloader, XaiImageApiFetch/1.0" \
+            --output "$archive" \
+            "https://github.com/Dicklesworthstone/beads_viewer/releases/download/v0.22.0/bv_linux_amd64.tar.gz"
+          echo "e0b6c8b6d3230c601b19e19264b321e5ee513e6e2adacad7ef4aa29ecad9dae9  $archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bv-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/bv-bin"
+          BV="$(find "$RUNNER_TEMP/bv-bin" -type f -name bv -print -quit)"
+          test -n "$BV"
+          chmod +x "$BV"
+          "$BV" --version
+          echo "BV=$BV" >> "$GITHUB_ENV"
+
+      - name: Capture graph-aware triage
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/gpt56pro-bv-triage"
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/main-head.txt"
+          "$BV" --robot-triage > "$out/triage.json"
+          "$BV" --robot-triage --format toon > "$out/triage.toon"
+          "$BV" --robot-next > "$out/next.json"
+          "$BV" --robot-plan > "$out/plan.json"
+          "$BV" --robot-alerts > "$out/alerts.json"
+
+      - name: Upload triage artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gpt56pro-bv-triage
+          path: ${{ runner.temp }}/gpt56pro-bv-triage
+          if-no-files-found: error
+          retention-days: 1
