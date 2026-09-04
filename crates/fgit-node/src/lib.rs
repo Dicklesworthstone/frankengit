@@ -7696,7 +7696,10 @@ impl OneNode {
         // fired near the commit boundary. Report that success; never overwrite
         // it with a local timeout inference. The response itself receives one
         // new finite network phase, exactly like the rejection path above.
-        let report_deadline = GitDaemonSessionDeadline::new(self.git_daemon_session_timeout);
+        let report_deadline = GitDaemonSessionDeadline::new(
+                    self.git_daemon_session_timeout,
+                    self.git_daemon_session_work_scaling,
+                );
         writer.restart_deadline(report_deadline);
         report_deadline
             .check("prepare receive-pack report-status")
