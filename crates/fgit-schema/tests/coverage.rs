@@ -60,6 +60,10 @@ fn families_by_type() -> BTreeSet<String> {
     families.insert(fgit_codec::schema::RepositoryConfigurationBody::SCHEMA_FAMILY.to_string());
     families.insert(fgit_codec::schema::CreationAttemptBody::SCHEMA_FAMILY.to_string());
     families.insert(fgit_codec::schema::HiddenRefPolicyBody::SCHEMA_FAMILY.to_string());
+    // The canonical forge-position and outbox state maps. Both are registered
+    // as undescribable rather than described; see `registry::UNDESCRIBED`.
+    families.insert(fgit_codec::CanonicalForgePositionState::SCHEMA_FAMILY.to_string());
+    families.insert(fgit_codec::CanonicalOutboxState::SCHEMA_FAMILY.to_string());
     // `fgit-verified-read`.
     families.insert(fgit_verified_read::MerkleProofBody::SCHEMA_FAMILY.to_string());
     families.insert(fgit_verified_read::RefStateNonMembershipProofBody::SCHEMA_FAMILY.to_string());

@@ -1099,11 +1099,15 @@ pub struct UndescribedBody {
 
 /// Bodies `fgit-codec` encodes that this format cannot express.
 ///
-/// EMPTY as of `3xom`: describing `decision-batch` removed the last entry.
-/// The table is kept rather than deleted because it is the seam where the
-/// next undescribable body registers, and because an empty table plus a
-/// reachable arm is honest where a deleted arm would silently reclassify
-/// such a body as "unregistered".
+/// Each row names the exact construct that is missing, so `descriptor_for`
+/// refuses with a reason rather than reporting a live body as
+/// `FamilyUnregistered` — which this crate documents as "does not exist".
+///
+/// The seam matters more than the count. A body in NEITHER this table nor
+/// `DESCRIBED` is invisible to the coverage check rather than caught by it:
+/// that is the defect `frankengit-ovv2` created `tests/coverage.rs` to catch,
+/// and it recurred under `frankengit-y724` when the two canonical state maps
+/// landed registered in neither table.
 pub static UNDESCRIBED: &[UndescribedBody] = &[
     UndescribedBody {
         family: "repository-configuration",
@@ -1126,6 +1130,31 @@ pub static UNDESCRIBED: &[UndescribedBody] = &[
                     assert something weaker than what is encoded. There is also no field type \
                     meaning \"a complete encoded body of some other family appears inline here\", \
                     which is what `body_frame` carries",
+    },
+    UndescribedBody {
+        family: "forge-position-state",
+        construct: "a canonical MAP keyed by forge stream. `CanonicalForgePositionState::\
+                    try_new` sorts the entries and refuses a duplicate stream, and `entry` \
+                    resolves one by binary search, so both the ordering and the uniqueness \
+                    are invariants the encoding enforces rather than data the writer chose. \
+                    The only collection cardinality this format has is \
+                    `Cardinality::Sequence`, whose contract is a counted repetition in wire \
+                    order -- the shape `decision-batch` needs, where order is semantic and a \
+                    normalizer must never sort. Describing these entries as a sequence would \
+                    assert something strictly weaker than what is encoded, exactly as it \
+                    would for `signed-envelope`. What is missing is a keyed-map cardinality \
+                    carrying the key field and the canonical order the entries are sorted by",
+    },
+    UndescribedBody {
+        family: "outbox-state",
+        construct: "a canonical MAP keyed by delivery key, with the same obstacle as \
+                    `forge-position-state`: `CanonicalOutboxState::try_new` sorts the entries \
+                    and refuses a duplicate delivery key, so order and uniqueness are \
+                    encoding invariants rather than writer choices, and `Cardinality::\
+                    Sequence` can only claim a counted repetition in wire order. Registered \
+                    separately from its sibling rather than folded into one row because \
+                    `check_families_unique` keys a row by family and the two are distinct \
+                    families that must each resolve to a reason of their own",
     },
 ];
 
