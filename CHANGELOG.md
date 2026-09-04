@@ -6,6 +6,42 @@ FrankenGit has moved beyond its original architecture-only phase into active imp
 
 ## [Unreleased] — 2026-09-04
 
+### Fixed and added — hidden-ref disclosure boundaries (frankengit-22g1 follow-through)
+
+The `fgit-wire` visibility layer now treats related disclosure surfaces as one
+projection rather than independent name checks:
+
+- `a7d8e77c911e95e27eef308c79172700fd526ed2` applies ordered hide/unhide rules
+  to the base ref of a peeled `<ref>^{}` advertisement. An exact private-tag
+  rule no longer leaves its peeled record or hidden-only identity visible.
+- `6685c158090fdf37fb528190546a8fdc7f95228f` snapshots symbolic-ref metadata
+  with the advertised view, propagates hiding backwards through advertised
+  alias chains without recursion, and suppresses aliases of hidden targets.
+  Independent public refs sharing an object remain usable. The wrapper now
+  forwards canonical unborn `HEAD` metadata when both names are visible;
+  filtering all refs away does not manufacture unbornness.
+- `db82d3240a808155d9539e4d9fd854a763410c4f` refuses additional rules when
+  an existing policy already exceeds a later, tighter `max_ref_prefixes`.
+  Refusal preserves the policy, while an explicitly larger limit can admit
+  the same update.
+
+Sixteen source regression tests are present at
+`0f26c6856896021fd4008e40b917465ee713bd33` across
+`visibility_peeled_records.rs`, `visibility_symbolic_refs.rs`, and
+`visibility_rule_limits.rs`. They cover permitted/refused pairs, shared
+identities, ordered exceptions, alias chains/cycles, SHA-1/SHA-256 cases,
+actual v1/v2 packet output, and tighter/zero/increased rule limits. The last
+commit corrects the encoding fixture to construct an empty capability set
+with `Default`, not parse an invalid empty token; assertions are unchanged.
+
+These are committed implementation and test sources, not executed Rust test
+results. Compilation, formatting, crate tests, pinned-client differential
+checks, node integration, and independent batch verification remain unrun
+for this change set. No bead was claimed, transitioned, or closed. No
+canonical publication rule, runtime, dependency, or claim-registry status
+changed. The owning implementation status and remaining integration boundary
+are recorded in the [compatibility matrix](docs/GIT_COMPATIBILITY_MATRIX.md#hidden-ref-disclosure-implementation-status-2026-09-04).
+
 ### Fixed — complete graph-aware Beads triage for pinned bv (frankengit-bv-batch-pending-compat-1e3q)
 
 Pinned `bv` v0.22.0 rejected FrankenGit's repository-owned `batch_pending`
@@ -335,7 +371,7 @@ The initial FrankenGit architecture and execution plan was published at [`1c05cf
 
 ## Notes for agents
 
-- Truth order when sources disagree: executable evidence → normative contracts → constitutions/registries → ADRs → comprehensive plan → summaries.
+- Follow `AGENTS.md` §2 for semantic precedence. Revision-bound executable evidence establishes what the code actually does; a discrepancy with the normative contract is a defect to resolve, not permission to redefine it.
 - Read `AGENTS.md` before a material change.
 - Use the repository-owned local verification commands; do not encode unique correctness logic in hosted workflows.
 - Update Beads through `br`; do not replace `.beads/issues.jsonl` by hand.

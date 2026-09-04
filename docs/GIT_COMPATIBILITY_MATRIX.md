@@ -46,6 +46,53 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Archive generation | required-v1 subset | Pure-Rust tar/zip generation, path safety, deterministic ordering, resource bounds |
 | Diff/merge | required-v1 core | Pure-Rust Myers/patience/histogram-style diff profiles and deterministic merge; oracle corpus for observable behavior |
 
+## Hidden-ref disclosure: implementation status (2026-09-04)
+
+**Source revision:** `0f26c6856896021fd4008e40b917465ee713bd33`. The owning
+implementation is [`fgit-wire::visibility`](../crates/fgit-wire/src/visibility.rs).
+This subsection records landed source, not a promotion of the target row above
+or a claim that current node transports are verified.
+
+`RefVisibility` evaluates a peeled `<ref>^{}` record under its base ref's
+ordered hide/unhide rules. Its insertion bound rejects counts at or above the
+limit supplied for that call, including policies built under a larger earlier
+limit; refusal never partially installs an exception.
+
+`VisibleUploadPackRepository` derives its ordered advertisement, disclosable
+tips, and symbolic metadata together. It reads each advertised alias edge once,
+propagates hiding backwards through that advertised graph with a deduplicated
+nonrecursive worklist, and retains only permitted symbolic metadata. A hidden
+branch cannot become visible merely because `HEAD` or another advertised alias
+points to it. Shared object identity still remains disclosable through an
+independent public ref. Canonical unborn `HEAD` metadata is forwarded only when
+both `HEAD` and its target are visible; an empty filtered advertisement is not
+evidence that the canonical repository is unborn.
+
+The source regression targets are:
+
+| Test target | Authored coverage |
+|---|---|
+| [`visibility_peeled_records`](../crates/fgit-wire/tests/visibility_peeled_records.rs) | Exact tag/peeled pairing, ordered exceptions, shared identities, hidden-only wants/haves, SHA-1/SHA-256, encoded v1 output |
+| [`visibility_symbolic_refs`](../crates/fgit-wire/tests/visibility_symbolic_refs.rs) | Hidden/absent v2 output equality, permitted symrefs, alias chains/cycles, shared tips, one metadata lookup per advertised ref, visible/refused unborn metadata |
+| [`visibility_rule_limits`](../crates/fgit-wire/tests/visibility_rule_limits.rs) | Reduced, zero, equal, and increased rule limits; unchanged policy on refusal |
+
+**Remaining boundary.** The standalone `filter_advertised_refs` helper has
+names but no symbolic metadata; it is not a substitute for the wrapper or an
+equivalent authority-bound projection. The inner repository still owns the
+canonical permitted object closure, including non-tip wants and commonality;
+this wrapper does not derive reachability authorization from object existence.
+Adapters with separate view implementations, including node transport views,
+require their own integration evidence. This change set does not establish
+end-to-end pack disclosure safety, timing-side-channel resistance, or complete
+Git compatibility. It does not change the node receive/report deadlines.
+
+The sixteen tests above are authored, not executed in the implementation
+environment. Formatting, compilation, the sanctioned whole `fgit-wire` target
+set, node integration, pinned-client differential checks, and the independent
+batch gate remain to be run at an exact revision under `AGENTS.md` §16.2.
+Historical passing revisions and the presence of these tests are not current
+verification evidence.
+
 ## Receive and selected-pack session envelopes (git-daemon slice)
 
 Resource limits are compatibility semantics (constitution section 6), so the
