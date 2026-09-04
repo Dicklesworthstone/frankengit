@@ -1,0 +1,75 @@
+name: gpt56pro-nodeconfig-doc-fix
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-nodeconfig-doc-fix-20260904
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Correct the public configuration documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/fgit-node/src/lib.rs')
+          text = path.read_text()
+          misplaced = '''    /// Selects the absolute resource budget for one accepted git-daemon session.
+    #[must_use]
+    /// Name the cell this process is.
+'''
+          corrected = '''    /// Name the cell this process is.
+'''
+          if misplaced not in text:
+              raise SystemExit('expected misplaced timeout documentation was not found')
+          text = text.replace(misplaced, corrected, 1)
+          target = '''    #[must_use]
+    pub const fn with_git_daemon_session_timeout(
+'''
+          replacement = '''    /// Selects the absolute wall-clock budget for one accepted git-daemon session.
+    ///
+    /// The timeout is finite and non-zero by construction. It bounds the
+    /// legacy transport envelope; internal runtime work remains subject to the
+    /// node's independently configured finite budget classes.
+    #[must_use]
+    pub const fn with_git_daemon_session_timeout(
+'''
+          if target not in text:
+              raise SystemExit('timeout builder insertion point was not found')
+          path.write_text(text.replace(target, replacement, 1))
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          changed="$(git diff --name-only)"
+          test "$changed" = 'crates/fgit-node/src/lib.rs' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+      - name: Verify the focused public surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check -p fgit-node --all-targets
+          cargo test -p fgit-node --test git_daemon_deadline --no-fail-fast
+      - name: Commit and push directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(git rev-parse HEAD)"
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add crates/fgit-node/src/lib.rs
+          git commit -m 'docs(node): attach timeout contract to the correct builder'
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$base" || { echo 'main advanced; refusing stale push' >&2; exit 1; }
+          git push origin HEAD:main
