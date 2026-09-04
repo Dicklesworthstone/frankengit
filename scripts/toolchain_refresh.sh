@@ -10,9 +10,10 @@
 # reason naming the gate that regressed.
 #
 # WHAT THIS LANE IS NOT. It does not move the pin. ADR-0010 clause 3 requires
-# the advancement to be one commit that moves `rust-toolchain.toml` and nothing
-# else; a lane that edited the pin itself would make that commit unreviewable
-# and would let the evidence and the change land together unexamined. This lane
+# the advancement to be one commit that moves `rust-toolchain.toml` and its
+# mechanically coupled bootstrap-link metadata, separately from implementation
+# fallout. A lane that edited the pin itself would let the evidence and the
+# change land together unexamined. This lane
 # only ever produces (or refuses to produce) the evidence that such a commit
 # must cite.
 #

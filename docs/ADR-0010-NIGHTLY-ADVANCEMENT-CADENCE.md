@@ -2,6 +2,7 @@
 
 - **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1103)**
 - **Date:** 2026-08-21
+- **Clarified:** 2026-09-04, pin/transport-metadata coupling; cadence and advancement evidence requirements unchanged
 - **Decision owners:** FrankenGit architecture (toolchain, release)
 - **Scope:** plan decision D15 — dated-nightly pinning and the advancement procedure
 - **Binds:** `frankengit-fg068-toolchain-refresh-x5y3`, `frankengit-fg041a-proof-toolchain-cww`
@@ -17,15 +18,15 @@
 - Advancement requires compatibility, conformance, determinism, and performance checks, with regressions recorded as negative evidence (`AGENTS.md` §3.4).
 - Clippy pedantic and nursery are `deny`. A new nightly routinely adds lints, so an advancement is expected to produce work, and that work is not optional.
 
-## Remaining choice
+## Decision scope
 
 The cadence, and who may advance the pin.
 
-## Decision (proposed)
+## Decision
 
 1. **Scheduled, not reactive.** A candidate advancement is evaluated on a fixed cadence, and the pin moves only when a candidate passes. An urgent advancement to obtain a fix is permitted but takes the same evidence path, compressed rather than skipped. **The initial cadence is six weeks, aligned to the upstream Rust release train**, which is the natural forcing function for the lint and feature drift this ADR exists to absorb: aligning to it means each evaluation window contains at most one stable release's worth of change, so a regression has a bounded set of candidate causes. The candidate is evaluated in a branch as clause 2 requires; the cadence sets when an evaluation STARTS, never whether the evidence path may be shortened. Six weeks is the starting value, not a measured optimum, and it is revisited if two consecutive windows either find nothing to evaluate or cannot complete the lane in time.
 2. **The candidate is evaluated in a branch, never on the default branch.** The full local verification lane runs against the candidate before the pin moves, so the default branch never carries an unevaluated toolchain.
-3. **Advancement is one commit that moves the pin and nothing else**, alongside a separate commit for any lint or API fallout. A pin bump bundled with its own fallout is unreviewable, which is how a behaviour change hides.
+3. **Advancement is one commit that moves the pin and its mechanically coupled transport metadata**, alongside a separate commit for any lint, API, or implementation fallout. When `tooling-rust-bootstrap-links.md` exists, its declared pin and archive/checksum URLs must move with `rust-toolchain.toml`; `scripts/check_toolchain_bootstrap_links.sh`, called by the docs lane, checks that coupling without downloading or rewriting either input. These URLs are derived transport metadata, never a second toolchain authority or advancement evidence. A pin bump bundled with its own implementation fallout is unreviewable, which is how a behaviour change hides.
 4. **Determinism is the blocking check.** Golden artifacts, canonical bytes, and rendered surfaces must be byte-identical across the old and new toolchain. A codegen or formatting difference that changes a canonical byte blocks advancement outright; a difference that changes only a rendered surface requires an explicit marked golden change with a stated reason.
 5. **Regressions are recorded even when the advancement proceeds.** A performance regression inside tolerance still goes to `docs/NEGATIVE_EVIDENCE_LEDGER.md` and `registries/negative_evidence.tsv`, because the next investigator needs to know it was seen and accepted.
 6. **Rollback is always available and is exercised**, not merely assumed: the previous pin must build and pass the lane at the moment of advancement.
@@ -49,7 +50,7 @@ The cadence, and who may advance the pin.
 
 ## Migration and rollback
 
-Advancement changes one file. Rollback is reverting it and rebuilding, which is required to be demonstrated at advancement time rather than assumed. Because canonical bytes are a blocking check, no advancement can leave durable state that the previous toolchain cannot read.
+Advancement changes the authoritative pin and, while it exists, the mechanically coupled bootstrap note in one commit. Rollback restores both together and rebuilds, which is required to be demonstrated at advancement time rather than assumed. Neither direction bundles implementation fallout or weakens the evidence requirements above. Because canonical bytes are a blocking check, no advancement can leave durable state that the previous toolchain cannot read.
 
 ## Dependency, target, and unsafe consequences
 
