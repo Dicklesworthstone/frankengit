@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      EXPECTED_MAIN: 91a796db982dae16efca4088fbf2bf159f33bb40
+      EXPECTED_MAIN: c42cd2cd8b6392bb71cd45fab9ae07ed1d8507f4
       BV_VERSION: 0.22.0
       BR_VERSION: 0.5.7
     steps:
