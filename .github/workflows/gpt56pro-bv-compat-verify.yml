@@ -80,30 +80,40 @@ jobs:
           cmp "$out/source.before.sha256" "$out/source.after.sha256"
           ! grep -qi 'invalid status' "$out/triage.stderr"
 
-          python3 - "$out/triage.json" "$out/ready.json" .beads/issues.jsonl <<'PY'
+          python3 - "$out/triage.json" "$out/ready.json" "$out/triage.stderr" .beads/issues.jsonl <<'PY'
+          from collections import Counter
           import json
           import re
           import sys
 
-          triage_path, ready_path, source_path = sys.argv[1:]
+          triage_path, ready_path, stderr_path, source_path = sys.argv[1:]
           with open(triage_path, encoding="utf-8") as handle:
               output = json.load(handle)
           with open(ready_path, encoding="utf-8") as handle:
               ready = json.load(handle)
-          records = []
+          with open(stderr_path, encoding="utf-8") as handle:
+              diagnostics = handle.read()
           with open(source_path, encoding="utf-8") as handle:
-              for line in handle:
-                  records.append(json.loads(line))
+              records = [json.loads(line) for line in handle]
 
-          stats = output["load_stats"]
-          assert stats["errors"] == 0, stats
-          assert stats["skipped"] == 0, stats
-          assert stats["valid"] == len(records), (stats, len(records))
-
+          live_records = [record for record in records if record["status"] != "tombstone"]
+          expected_statuses = Counter(
+              "review" if record["status"] == "batch_pending" else record["status"]
+              for record in live_records
+          )
           batch_pending = sum(record["status"] == "batch_pending" for record in records)
-          by_status = output["triage"]["project_health"]["counts"]["by_status"]
-          assert by_status.get("review", 0) == batch_pending, (by_status, batch_pending)
+
+          meta = output["triage"]["meta"]
+          health = output["triage"]["project_health"]["counts"]
+          by_status = health["by_status"]
+          assert meta["issue_count"] == len(live_records), (meta, len(live_records))
+          assert health["total"] == len(live_records), (health, len(live_records))
+          assert by_status == dict(expected_statuses), (by_status, dict(expected_statuses))
           assert "batch_pending" not in by_status, by_status
+          assert re.search(
+              rf"projected {batch_pending} batch_pending record\(s\) to review across {len(records)} tracker record\(s\)",
+              diagnostics,
+          ), diagnostics
 
           ready_ids = {record["id"] for record in ready}
           command = output["triage"]["commands"].get("claim_top", "")
@@ -115,6 +125,8 @@ jobs:
                   "authoritative_ready": sorted(ready_ids),
                   "claim_top": command,
               }
+          elif not ready_ids:
+              assert "No top pick available" in command, command
           PY
 
       - name: Upload verification evidence
