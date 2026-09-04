@@ -1,0 +1,60 @@
+name: gpt56pro-apply-bv-status-docs
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-asb8-diagnostic
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EXPECTED_MAIN: 5c95100e9543499e2a1ead810490cb624fa8ed3d
+      PATCH_SHA256: ccfddc4fa30ccdd9a6ffeef05d5d70fb6b480cd284f1904c970e398f5f08d4ef
+    steps:
+      - name: Check out patch carrier
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          path: control
+
+      - name: Check out exact main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+          path: repo
+
+      - name: Guard, apply, and inspect status documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C repo rev-parse HEAD)" = "$EXPECTED_MAIN"
+          test "$(git -C repo rev-parse origin/main)" = "$EXPECTED_MAIN"
+          patch="$GITHUB_WORKSPACE/control/.github/patches/bv-status-docs.patch"
+          test "$(sha256sum "$patch" | awk '{print $1}')" = "$PATCH_SHA256"
+          git -C repo apply --check "$patch"
+          git -C repo apply "$patch"
+          test "$(git -C repo diff --name-only | sort)" = $'README.md\ndocs/AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md'
+          grep -q '### Repository-side agent triage' repo/README.md
+          grep -q 'receive-pack lane is available only' repo/README.md
+          grep -q 'scripts/bv_compat.sh' repo/docs/AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md
+          grep -q '555 non-tombstone records from 580 authoritative rows' repo/docs/AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md
+          ! grep -q 'The daemon does not serve receive-pack' repo/README.md
+          ! grep -q 'Network receive-pack/push, smart HTTP' repo/README.md
+          ! grep -q 'agent_context_snapshot.sh\|agent_next_work.sh' repo/README.md repo/docs/AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md
+
+      - name: Commit and fast-forward main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C repo config user.name IndigoHeron
+          git -C repo config user.email indigoheron@invalid.example
+          git -C repo add README.md docs/AGENT_CONTROL_PLANE_IMPLEMENTATION_STATUS.md
+          git -C repo commit -m "docs(status): reconcile raw receive and agent triage boundaries [frankengit-bv-batch-pending-compat-1e3q]"
+          git -C repo fetch origin main
+          test "$(git -C repo rev-parse origin/main)" = "$EXPECTED_MAIN"
+          git -C repo push origin HEAD:main
