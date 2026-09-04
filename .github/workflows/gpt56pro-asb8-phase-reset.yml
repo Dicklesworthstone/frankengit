@@ -1,0 +1,300 @@
+name: gpt56pro-asb8-phase-reset
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-asb8-phase-reset-20260904
+
+permissions:
+  contents: write
+
+concurrency:
+  group: frankengit-gpt56pro-mainline-mutator
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Give receive processing its own finite phase deadline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('crates/fgit-node/src/lib.rs')
+          text = path.read_text()
+          marker = 'The peer-controlled ingress phase has completed; server-owned work gets'
+          if marker in text:
+              raise SystemExit(0)
+
+          struct = re.search(r'struct\s+GitDaemonSessionDeadline\s*\{(?P<body>.*?)\n\}', text, re.S)
+          if struct is None:
+              raise SystemExit('GitDaemonSessionDeadline struct not found')
+          fields = re.findall(r'(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^,\n]+),', struct.group('body'))
+          instant_fields = [(name, ty.strip()) for name, ty in fields if ty.strip().endswith('Instant')]
+          budget_fields = [
+              (name, ty.strip())
+              for name, ty in fields
+              if 'GitDaemonSessionTimeout' in ty or ty.strip().endswith('Duration')
+          ]
+          if len(instant_fields) != 1 or len(budget_fields) != 1:
+              raise SystemExit(f'unexpected deadline fields: instant={instant_fields}, budget={budget_fields}')
+          instant_name, _ = instant_fields[0]
+          budget_name, budget_type = budget_fields[0]
+
+          impl_start = text.find('impl GitDaemonSessionDeadline')
+          if impl_start < 0:
+              raise SystemExit('GitDaemonSessionDeadline impl not found')
+          opening = text.find('{', impl_start)
+          depth = 0
+          impl_end = None
+          for index in range(opening, len(text)):
+              if text[index] == '{':
+                  depth += 1
+              elif text[index] == '}':
+                  depth -= 1
+                  if depth == 0:
+                      impl_end = index
+                      break
+          if impl_end is None:
+              raise SystemExit('GitDaemonSessionDeadline impl did not balance')
+          impl_body = text[opening:impl_end]
+          constructor = re.search(
+              r'(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^,)]+)\)\s*->\s*Self',
+              impl_body,
+          )
+          if constructor is None:
+              raise SystemExit('single-argument deadline constructor not found')
+          constructor_name = constructor.group(1)
+          constructor_type = constructor.group(3).strip()
+          if 'GitDaemonSessionTimeout' in constructor_type:
+              constructor_arg = f'self.{budget_name}'
+          elif constructor_type.endswith('Duration') and 'GitDaemonSessionTimeout' in budget_type:
+              constructor_arg = f'self.{budget_name}.duration()'
+          elif constructor_type.endswith('Duration') and budget_type.endswith('Duration'):
+              constructor_arg = f'self.{budget_name}'
+          else:
+              raise SystemExit(
+                  f'cannot renew constructor {constructor_name}({constructor_type}) from {budget_name}: {budget_type}'
+              )
+
+          renewal = f'''
+
+    /// Starts a fresh finite deadline for the next server-owned session phase.
+    ///
+    /// Renewal never widens the configured profile; it only prevents time spent
+    /// waiting on a peer in one phase from stealing the entire budget of the
+    /// bounded work that follows.
+    fn renewed(&self) -> Self {{
+        Self::{constructor_name}({constructor_arg})
+    }}
+'''
+          text = text[:impl_end] + renewal + text[impl_end:]
+
+          fn_match = re.search(r'fn\s+serve_git_daemon_receive_pack_session\b[^\{{]*\{{', text)
+          if fn_match is None:
+              raise SystemExit('serve_git_daemon_receive_pack_session definition not found')
+          fn_open = text.find('{', fn_match.start())
+          depth = 0
+          in_string = False
+          escaped = False
+          fn_close = None
+          for index in range(fn_open, len(text)):
+              ch = text[index]
+              if in_string:
+                  if escaped:
+                      escaped = False
+                  elif ch == '\\':
+                      escaped = True
+                  elif ch == '"':
+                      in_string = False
+                  continue
+              if ch == '"':
+                  in_string = True
+              elif ch == '{':
+                  depth += 1
+              elif ch == '}':
+                  depth -= 1
+                  if depth == 0:
+                      fn_close = index
+                      break
+          if fn_close is None:
+              raise SystemExit('receive-pack session function did not balance')
+          body = text[fn_open:fn_close]
+          expiry = body.find('deadline.expired()')
+          if expiry < 0:
+              raise SystemExit('receive processing cancellation no longer checks deadline.expired()')
+          absolute_expiry = fn_open + expiry
+          line_start = text.rfind('\n', 0, absolute_expiry) + 1
+          indent = re.match(r'[ \t]*', text[line_start:absolute_expiry]).group(0)
+          header = text[fn_match.start():fn_open]
+          if re.search(r'\bdeadline\s*:\s*&', header):
+              reset = f'''{indent}// The peer-controlled ingress phase has completed; server-owned work gets
+{indent}// the same finite profile from a fresh origin rather than inheriting time
+{indent}// already spent receiving bytes from the client.
+{indent}let processing_deadline = deadline.renewed();
+{indent}let deadline = &processing_deadline;
+'''
+          elif re.search(r'\bdeadline\s*:', header):
+              reset = f'''{indent}// The peer-controlled ingress phase has completed; server-owned work gets
+{indent}// the same finite profile from a fresh origin rather than inheriting time
+{indent}// already spent receiving bytes from the client.
+{indent}let deadline = deadline.renewed();
+'''
+          else:
+              raise SystemExit('deadline parameter shape changed')
+          text = text[:line_start] + reset + text[line_start:]
+
+          if 'mod git_daemon_deadline_phase_unit_tests' not in text:
+              if 'GitDaemonSessionTimeout' in budget_type:
+                  budget_value = 'timeout'
+              else:
+                  budget_value = 'Duration::from_secs(1)'
+              test = f'''
+
+#[cfg(test)]
+mod git_daemon_deadline_phase_unit_tests {{
+    use super::*;
+
+    #[test]
+    fn renewal_restarts_without_widening_the_finite_profile() {{
+        let timeout = GitDaemonSessionTimeout::try_new(Duration::from_secs(1))
+            .expect("the fixture profile is finite and non-zero");
+        let expired = GitDaemonSessionDeadline {{
+            {instant_name}: Instant::now() - Duration::from_secs(2),
+            {budget_name}: {budget_value},
+        }};
+        assert!(expired.expired(), "the fixture really is past its first phase");
+        let renewed = expired.renewed();
+        assert!(!renewed.expired(), "renewal starts the next bounded phase now");
+    }}
+}}
+'''
+              text += test
+
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          if git diff --quiet; then
+            echo 'receive processing phase deadline already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = 'crates/fgit-node/src/lib.rs' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          cargo check -p fgit-node --all-targets
+          cargo test -p fgit-node --lib --no-fail-fast
+          cargo test -p fgit-node --test git_daemon_deadline --test git_daemon_receive_transport --no-fail-fast
+          cargo clippy -p fgit-node --all-targets -- -D warnings
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add crates/fgit-node/src/lib.rs
+          git commit -m 'fix(node): separate receive ingress and processing deadlines [frankengit-asb8]'
+          git push origin HEAD:main
+
+      - name: Reconcile the phase-boundary documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+
+          readme = Path('README.md')
+          text = readme.read_text()
+          needle = '`FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS` to a non-zero decimal duration; zero\nand malformed values fail closed.'
+          replacement = '''`FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS` to a non-zero decimal duration; zero
+and malformed values fail closed. Receive ingress and server-owned
+quarantine/seal processing each start that same finite profile from their own
+phase boundary, so client upload time cannot silently consume the processing
+budget.'''
+          if needle in text:
+              text = text.replace(needle, replacement, 1)
+              readme.write_text(text)
+
+          candidates = sorted(Path('.').glob('**/*IMPLEMENTATION*STATUS*.md'))
+          for path in candidates[:1]:
+              status = path.read_text()
+              old = '- `frankengit-asb8` remains in progress: this slice makes the existing finite profile reachable and testable; automatic phase/work-scaled deadline accounting is not claimed complete.'
+              new = '- `frankengit-asb8` remains in progress: ingress and server-owned processing now receive distinct finite phase origins and the profile is reachable from `fg serve`; automatic byte/work-proportional scaling is not claimed complete.'
+              if old in status:
+                  path.write_text(status.replace(old, new, 1))
+
+          changelog = Path('CHANGELOG.md')
+          if changelog.exists():
+              c = changelog.read_text()
+              line = '- Separated peer-controlled receive ingress time from the fresh finite deadline used by server-owned quarantine and seal processing.\n'
+              if line not in c:
+                  marker = '### Fixed\n\n'
+                  if marker in c:
+                      c = c.replace(marker, marker + line, 1)
+                  else:
+                      c += '\n' + line
+                  changelog.write_text(c)
+          PY
+          git diff --check
+          if git diff --quiet; then
+            echo 'phase-boundary documentation already landed'
+            exit 0
+          fi
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add README.md CHANGELOG.md docs
+          git commit -m 'docs: record phase-separated receive deadline semantics'
+          git push origin HEAD:main
+
+      - name: Record the deeper asb8 progress without over-closing
+        shell: bash
+        env:
+          BR_VERSION: 0.5.7
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          asset="br-${BR_VERSION}-linux_amd64.tar.gz"
+          base="https://github.com/Dicklesworthstone/beads_rust/releases/download/v${BR_VERSION}"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/br.tar.gz" "$base/$asset"
+          echo '634aaacd0aac256b2be7250af9fe1e863e8a0316875c20959a6a1c2da75bf843  '"$RUNNER_TEMP/br.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/br-bin"
+          tar -xzf "$RUNNER_TEMP/br.tar.gz" -C "$RUNNER_TEMP/br-bin"
+          BR="$(find "$RUNNER_TEMP/br-bin" -type f -name br | head -n 1)"
+          chmod +x "$BR"
+          head=$(git rev-parse HEAD)
+          "$BR" comments add frankengit-asb8 --author CobaltKite --message "Deeper deadline semantics landed at ${head}: the receive lane renews the unchanged finite GitDaemonSessionTimeout at the ingress->server-processing boundary, so peer upload time no longer steals quarantine/seal time. Verified with fgit-node lib, git_daemon_deadline, git_daemon_receive_transport, check, clippy -D warnings, and rustfmt. The shipped fg serve profile remains explicitly configurable and finite. Honest residual: automatic byte/work-proportional timeout scaling is not yet implemented, so the bead remains in_progress." --json
+          "$BR" sync --flush-only
+          if git diff --quiet; then
+            echo 'phase progress bead comment already present'
+            exit 0
+          fi
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add .beads/issues.jsonl
+          git commit -m 'chore(beads): record phase-separated deadline progress [frankengit-asb8]'
+          git push origin HEAD:main
+
+      - name: Final phase-boundary verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B verify origin/main
+          cargo fmt --all --check
+          cargo check -p fgit-node --all-targets
+          cargo test -p fgit-node --lib --no-fail-fast
+          cargo test -p fgit-node --test git_daemon_deadline --test git_daemon_receive_transport --no-fail-fast
+          cargo clippy -p fgit-node --all-targets -- -D warnings
+          git status --short
