@@ -1,0 +1,957 @@
+name: gpt56pro-mainline-reconcile
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-mainline-reconcile-20260904
+
+permissions:
+  contents: write
+
+concurrency:
+  group: frankengit-gpt56pro-mainline-mutator
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Canonicalize the shipped finite timeout profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('crates/fgit-cli/src/lib.rs')
+          text = path.read_text()
+
+          duration_anchor = 'use std::sync::atomic::{AtomicU64, Ordering};\n'
+          if 'use std::time::Duration;' not in text:
+              if duration_anchor not in text:
+                  raise SystemExit('Duration import insertion point changed')
+              text = text.replace(duration_anchor, duration_anchor + 'use std::time::Duration;\n', 1)
+
+          node_use_start = text.find('use fgit_node::{')
+          node_use_end = text.find('};', node_use_start)
+          if node_use_start < 0 or node_use_end < 0:
+              raise SystemExit('fgit_node import block not found')
+          node_use = text[node_use_start:node_use_end]
+          if 'GitDaemonSessionTimeout' not in node_use:
+              token = 'GitDaemonServerReceipt,'
+              if token not in node_use:
+                  raise SystemExit('stable fgit_node import token not found')
+              node_use = node_use.replace(token, token + ' GitDaemonSessionTimeout,', 1)
+              text = text[:node_use_start] + node_use + text[node_use_end:]
+
+          helper = '''const GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV: &str =
+    "FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS";
+
+fn parse_git_daemon_session_timeout(
+    value: &std::ffi::OsStr,
+) -> Result<GitDaemonSessionTimeout, CliRefusal> {
+    let rendered = value.to_string_lossy().into_owned();
+    let seconds = rendered
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| *seconds != 0)
+        .ok_or_else(|| CliRefusal::InvalidServeLimit {
+            field: GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV,
+            value: rendered.clone(),
+        })?;
+    GitDaemonSessionTimeout::try_new(Duration::from_secs(seconds)).map_err(|_| {
+        CliRefusal::InvalidServeLimit {
+            field: GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV,
+            value: rendered,
+        }
+    })
+}
+
+fn configured_git_daemon_session_timeout() -> Result<Option<GitDaemonSessionTimeout>, CliRefusal> {
+    std::env::var_os(GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV)
+        .as_deref()
+        .map(parse_git_daemon_session_timeout)
+        .transpose()
+}
+
+fn apply_configured_git_daemon_session_timeout(
+    config: NodeConfig,
+) -> Result<NodeConfig, CliRefusal> {
+    Ok(match configured_git_daemon_session_timeout()? {
+        Some(timeout) => config.with_git_daemon_session_timeout(timeout),
+        None => config,
+    })
+}
+'''
+          static_anchor = 'static NEXT_EXPORT_TEMPORARY: AtomicU64 = AtomicU64::new(1);'
+          if static_anchor not in text:
+              raise SystemExit('NEXT_EXPORT_TEMPORARY anchor changed')
+          if 'const GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV' in text:
+              start = text.index('const GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV')
+              end = text.index(static_anchor, start)
+              text = text[:start] + helper + '\n' + text[end:]
+          else:
+              anchor = 'const EXPORT_TEMPORARY_ATTEMPTS: usize = 16;\n'
+              if anchor not in text:
+                  raise SystemExit('EXPORT_TEMPORARY_ATTEMPTS anchor changed')
+              text = text.replace(anchor, anchor + helper + '\n', 1)
+
+          production_end = text.find('#[cfg(test)]')
+          if production_end < 0:
+              production_end = len(text)
+          production = text[:production_end]
+          bind = production.find('TcpListener::bind')
+          if bind < 0:
+              raise SystemExit('production TcpListener::bind not found')
+
+          candidates = []
+          fn_pattern = re.compile(
+              r'(?m)^(?:pub(?:\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)[^;{]*\{'
+          )
+          for match in fn_pattern.finditer(production, 0, bind):
+              opening = production.find('{', match.start())
+              depth = 0
+              in_string = False
+              escaped = False
+              closing = None
+              for index in range(opening, len(production)):
+                  ch = production[index]
+                  if in_string:
+                      if escaped:
+                          escaped = False
+                      elif ch == '\\':
+                          escaped = True
+                      elif ch == '"':
+                          in_string = False
+                      continue
+                  if ch == '"':
+                      in_string = True
+                  elif ch == '{':
+                      depth += 1
+                  elif ch == '}':
+                      depth -= 1
+                      if depth == 0:
+                          closing = index + 1
+                          break
+              if closing is not None and opening < bind < closing:
+                  candidates.append((match.start(), opening, closing, match.group(1)))
+          if not candidates:
+              raise SystemExit('production serve function containing listener bind not found')
+          fn_start, fn_open, fn_close, fn_name = candidates[-1]
+          fn_body = text[fn_open:fn_close]
+
+          if 'apply_configured_git_daemon_session_timeout(' not in fn_body:
+              local_bind = bind - fn_open
+              config_matches = list(
+                  re.finditer(
+                      r'let\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*NodeConfig::new\(',
+                      fn_body[:local_bind],
+                  )
+              )
+              if not config_matches:
+                  raise SystemExit(f'NodeConfig::new binding not found in production function {fn_name}')
+              config_match = config_matches[-1]
+              variable = config_match.group(1)
+              statement_start = fn_open + config_match.start()
+              depth = 0
+              in_string = False
+              escaped = False
+              statement_end = None
+              for index in range(statement_start, fn_close):
+                  ch = text[index]
+                  if in_string:
+                      if escaped:
+                          escaped = False
+                      elif ch == '\\':
+                          escaped = True
+                      elif ch == '"':
+                          in_string = False
+                      continue
+                  if ch == '"':
+                      in_string = True
+                  elif ch in '([{':
+                      depth += 1
+                  elif ch in ')]}':
+                      depth -= 1
+                  elif ch == ';' and depth == 0:
+                      statement_end = index + 1
+                      break
+              if statement_end is None:
+                  raise SystemExit('NodeConfig binding terminator not found')
+              line_start = text.rfind('\n', 0, statement_start) + 1
+              indent = re.match(r'[ \t]*', text[line_start:statement_start]).group(0)
+              insertion = (
+                  f'\n{indent}let {variable} = '
+                  f'apply_configured_git_daemon_session_timeout({variable})?;'
+              )
+              text = text[:statement_end] + insertion + text[statement_end:]
+
+          module_name = 'mod git_daemon_session_timeout_profile_tests'
+          module_at = text.find(module_name)
+          if module_at >= 0:
+              attr_at = text.rfind('#[cfg(test)]', 0, module_at)
+              opening = text.find('{', module_at)
+              depth = 0
+              closing = None
+              for index in range(opening, len(text)):
+                  if text[index] == '{':
+                      depth += 1
+                  elif text[index] == '}':
+                      depth -= 1
+                      if depth == 0:
+                          closing = index + 1
+                          break
+              if attr_at < 0 or closing is None:
+                  raise SystemExit('existing timeout test module did not balance')
+              while closing < len(text) and text[closing] == '\n':
+                  closing += 1
+              text = text[:attr_at].rstrip() + '\n'
+
+          tests = '''
+
+#[cfg(test)]
+mod git_daemon_session_timeout_profile_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_timeout_text_is_a_typed_configuration_refusal() {
+        let refusal = parse_git_daemon_session_timeout(std::ffi::OsStr::new("not-a-number"))
+            .expect_err("invalid text must refuse");
+        assert!(matches!(
+            refusal,
+            CliRefusal::InvalidServeLimit {
+                field: GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn zero_timeout_is_a_typed_configuration_refusal() {
+        let refusal = parse_git_daemon_session_timeout(std::ffi::OsStr::new("0"))
+            .expect_err("zero cannot disable the finite envelope");
+        assert!(matches!(
+            refusal,
+            CliRefusal::InvalidServeLimit {
+                field: GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_nonzero_timeout_preserves_the_exact_duration() {
+        let timeout = parse_git_daemon_session_timeout(std::ffi::OsStr::new("901"))
+            .expect("a non-zero decimal duration is valid");
+        assert_eq!(timeout.duration(), Duration::from_secs(901));
+    }
+}
+'''
+          text = text.rstrip() + tests
+
+          usage = '[--receive-principal <principal-id-hex>]'
+          expanded = '[--receive-principal <principal-id-hex>] (set FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS to a non-zero finite override)'
+          if expanded not in text and usage in text:
+              text = text.replace(usage, expanded, 1)
+
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          if ! git diff --quiet; then
+            changed="$(git diff --name-only)"
+            test "$changed" = 'crates/fgit-cli/src/lib.rs' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+            cargo check -p fgit-cli --all-targets
+            cargo test -p fgit-cli --all-targets --no-fail-fast
+            cargo clippy -p fgit-cli --all-targets -- -D warnings
+            git config user.name CobaltKite
+            git config user.email cobaltkite@invalid.example
+            git add crates/fgit-cli/src/lib.rs
+            git commit -m 'fix(cli): canonicalize the finite daemon timeout profile [frankengit-asb8]'
+            git push origin HEAD:main
+          else
+            echo 'finite timeout profile already canonical'
+          fi
+
+      - name: Canonicalize root-last agent context snapshots and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          test -x scripts/agent_next_work.sh
+          mkdir -p scripts/tests
+          cat > scripts/agent_context_snapshot.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          usage() {
+            cat <<'EOF'
+          usage: scripts/agent_context_snapshot.sh [output-directory]
+
+          Creates a new revision-bound observation directory without mutating
+          repository or bead state. Set FGIT_AGENT_SNAPSHOT_SOURCE=1 to include
+          an exact tracked-source archive produced by git archive.
+          EOF
+          }
+
+          case "${1:-}" in
+            -h|--help) usage; exit 0 ;;
+          esac
+
+          root=$(git rev-parse --show-toplevel)
+          cd "$root"
+          revision=$(git rev-parse HEAD)
+          branch=$(git symbolic-ref --quiet --short HEAD || printf 'detached')
+          output=${1:-"$root/agent-context-${revision:0:12}"}
+          case "$output" in
+            /*) ;;
+            *) output="$PWD/$output" ;;
+          esac
+          if [ -e "$output" ]; then
+            printf 'refusing to replace existing snapshot: %s\n' "$output" >&2
+            exit 1
+          fi
+
+          # Observe dirtiness before creating a sibling staging directory. This
+          # keeps the convenient in-worktree default from making a clean checkout
+          # report itself dirty merely because the snapshot is being created.
+          observed_status=$(git status --porcelain=v1 --branch)
+
+          staging="${output}.staging.$$"
+          if [ -e "$staging" ]; then
+            printf 'refusing to replace existing staging path: %s\n' "$staging" >&2
+            exit 1
+          fi
+          cleanup() { rm -rf "$staging"; }
+          trap cleanup EXIT HUP INT TERM
+          mkdir -p "$staging"
+
+          printf '%s\n' "$observed_status" > "$staging/git-status.txt"
+          git diff --stat > "$staging/worktree-diff-stat.txt"
+          git diff --cached --stat > "$staging/index-diff-stat.txt"
+          git log -n 50 --date=iso-strict --pretty=format:'%H%x09%ad%x09%an%x09%s' > "$staging/recent-commits.tsv"
+          printf '%s\n' "$revision" > "$staging/revision.txt"
+          printf '%s\n' "$branch" > "$staging/branch.txt"
+          sha256sum AGENTS.md README.md Cargo.toml Cargo.lock rust-toolchain.toml > "$staging/governing-files.sha256"
+
+          if command -v rustc >/dev/null 2>&1; then rustc -Vv > "$staging/rustc.txt" 2>&1 || true; fi
+          if command -v cargo >/dev/null 2>&1; then cargo -Vv > "$staging/cargo.txt" 2>&1 || true; fi
+          uname -a > "$staging/platform.txt"
+
+          beads_available=false
+          if command -v br >/dev/null 2>&1; then
+            beads_available=true
+            br ready --unassigned --no-db --json > "$staging/beads-ready-unassigned.json"
+            FGIT_READY_JSON_FILE="$staging/beads-ready-unassigned.json" \
+              scripts/agent_next_work.sh --json --limit 20 > "$staging/beads-next-work.json"
+            br list --status open --unassigned --no-db --json > "$staging/beads-open-unassigned.json"
+            br list --status in_progress --no-db --json > "$staging/beads-in-progress.json"
+            br list --status batch_pending --no-db --json > "$staging/beads-batch-pending.json"
+          else
+            printf '%s\n' '{"available":false,"reason":"br not found on PATH"}' > "$staging/beads-unavailable.json"
+          fi
+
+          if [ "${FGIT_AGENT_SNAPSHOT_SOURCE:-0}" = 1 ]; then
+            archive="$staging/frankengit-source-${revision}.tar.gz"
+            git archive --format=tar.gz --output="$archive" HEAD
+            sha256sum "$archive" > "$archive.sha256"
+          fi
+
+          python3 - "$staging" "$revision" "$branch" "$beads_available" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+          from datetime import datetime, timezone
+
+          root = pathlib.Path(sys.argv[1])
+          revision, branch = sys.argv[2], sys.argv[3]
+          beads_available = sys.argv[4] == "true"
+          status = (root / "git-status.txt").read_text()
+          dirty = any(line and not line.startswith("## ") for line in status.splitlines())
+
+          payload_paths = [
+              path
+              for path in sorted(root.iterdir())
+              if path.name not in {"manifest.json", "SUMMARY.md"} and path.is_file()
+          ]
+          summary = [
+              "# FrankenGit agent context snapshot",
+              "",
+              f"- Revision: `{revision}`",
+              f"- Branch: `{branch}`",
+              f"- Dirty before capture: `{str(dirty).lower()}`",
+              f"- Beads available: `{str(beads_available).lower()}`",
+              f"- Captured payload files: `{len(payload_paths) + 1}`",
+              "",
+              "`manifest.json` is written last and binds every captured payload file by SHA-256.",
+              "The snapshot is evidence about one checkout, not authority for repository state.",
+              "",
+          ]
+          (root / "SUMMARY.md").write_text("\n".join(summary))
+
+          files = {}
+          for path in sorted(root.iterdir()):
+              if path.name == "manifest.json" or not path.is_file():
+                  continue
+              body = path.read_bytes()
+              files[path.name] = {
+                  "bytes": len(body),
+                  "sha256": hashlib.sha256(body).hexdigest(),
+              }
+          manifest = {
+              "schema": "frankengit.agent-context.v1",
+              "generated_at": datetime.now(timezone.utc).isoformat(),
+              "revision": revision,
+              "branch": branch,
+              "dirty": dirty,
+              "beads_available": beads_available,
+              "files": files,
+          }
+          (root / "manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+          )
+          PY
+
+          mkdir -p "$(dirname "$output")"
+          mv "$staging" "$output"
+          trap - EXIT HUP INT TERM
+          printf '%s\n' "$output"
+          SCRIPT
+          chmod +x scripts/agent_context_snapshot.sh
+
+          cat > scripts/tests/agent_context_snapshot.sh <<'TEST'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          root=$(git rev-parse --show-toplevel)
+          tmp=$(mktemp -d)
+          worktree="$tmp/worktree"
+          cleanup() {
+            git -C "$root" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+            rm -rf "$tmp"
+          }
+          trap cleanup EXIT HUP INT TERM
+
+          git -C "$root" worktree add --detach "$worktree" HEAD >/dev/null
+          revision=$(git -C "$worktree" rev-parse HEAD)
+
+          validate_manifest() {
+            local directory=$1 expected_dirty=$2
+            python3 - "$directory" "$revision" "$expected_dirty" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          revision = sys.argv[2]
+          expected_dirty = sys.argv[3] == "true"
+          manifest_path = root / "manifest.json"
+          manifest = json.loads(manifest_path.read_text())
+          assert manifest["schema"] == "frankengit.agent-context.v1"
+          assert manifest["revision"] == revision
+          assert manifest["dirty"] is expected_dirty
+          assert "SUMMARY.md" in manifest["files"]
+          assert "manifest.json" not in manifest["files"]
+          assert manifest["files"]
+          for name, expected in manifest["files"].items():
+              path = root / name
+              body = path.read_bytes()
+              assert len(body) == expected["bytes"], name
+              assert hashlib.sha256(body).hexdigest() == expected["sha256"], name
+          assert manifest_path.stat().st_mtime_ns >= max(
+              (root / name).stat().st_mtime_ns for name in manifest["files"]
+          )
+          PY
+          }
+
+          clean=$(cd "$worktree" && PATH=/usr/bin:/bin scripts/agent_context_snapshot.sh)
+          validate_manifest "$clean" false
+          test -f "$clean/beads-unavailable.json"
+          test ! -e "$clean/frankengit-source-$revision.tar.gz"
+
+          set +e
+          existing_output=$(PATH=/usr/bin:/bin "$worktree/scripts/agent_context_snapshot.sh" "$clean" 2>&1)
+          existing_rc=$?
+          set -e
+          test "$existing_rc" -ne 0
+          case "$existing_output" in
+            *'refusing to replace existing snapshot'*) ;;
+            *) printf 'existing-destination refusal was not diagnostic: %s\n' "$existing_output" >&2; exit 1 ;;
+          esac
+          rm -rf "$clean"
+          test -z "$(git -C "$worktree" status --porcelain)"
+
+          printf '\nagent-context-dirty-probe\n' >> "$worktree/README.md"
+          dirty="$tmp/dirty"
+          PATH=/usr/bin:/bin "$worktree/scripts/agent_context_snapshot.sh" "$dirty" >/dev/null
+          validate_manifest "$dirty" true
+          git -C "$worktree" checkout -- README.md
+
+          printf 'must-not-enter-tracked-archive\n' > "$worktree/UNTRACKED_AGENT_CONTEXT_SENTINEL"
+          sourced="$tmp/source"
+          PATH=/usr/bin:/bin FGIT_AGENT_SNAPSHOT_SOURCE=1 \
+            "$worktree/scripts/agent_context_snapshot.sh" "$sourced" >/dev/null
+          validate_manifest "$sourced" true
+          archive="$sourced/frankengit-source-$revision.tar.gz"
+          test -s "$archive"
+          sha256sum -c "$archive.sha256"
+          tar -tzf "$archive" > "$tmp/archive-members.txt"
+          grep -qx 'scripts/agent_context_snapshot.sh' "$tmp/archive-members.txt"
+          ! grep -q 'UNTRACKED_AGENT_CONTEXT_SENTINEL' "$tmp/archive-members.txt"
+          ! grep -q '^\.git/' "$tmp/archive-members.txt"
+
+          printf 'agent-context snapshot contract: PASS\n'
+          TEST
+          chmod +x scripts/tests/agent_context_snapshot.sh
+
+          bash -n scripts/agent_context_snapshot.sh
+          bash -n scripts/tests/agent_context_snapshot.sh
+          scripts/tests/agent_context_snapshot.sh
+          git diff --check
+          if ! git diff --quiet; then
+            changed="$(git diff --name-only | sort)"
+            expected="$(printf '%s\n' scripts/agent_context_snapshot.sh scripts/tests/agent_context_snapshot.sh | sort)"
+            test "$changed" = "$expected" || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+            git config user.name CobaltKite
+            git config user.email cobaltkite@invalid.example
+            git add scripts/agent_context_snapshot.sh scripts/tests/agent_context_snapshot.sh
+            git commit -m 'fix(agent): make context snapshots atomic, truthful, and root-last'
+            git push origin HEAD:main
+          else
+            echo 'agent context snapshot contract already canonical'
+          fi
+
+      - name: Canonicalize the generic read-only snapshot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          cat > .github/workflows/agent-source-snapshot.yml <<'WORKFLOW'
+          name: agent-context-snapshot
+
+          on:
+            workflow_dispatch:
+              inputs:
+                ref:
+                  description: Git ref to capture
+                  required: false
+                  default: main
+                include_source:
+                  description: Include a tracked-source archive
+                  required: false
+                  type: boolean
+                  default: true
+            push:
+              branches:
+                - 'tooling/agent-context-snapshot/**'
+
+          permissions:
+            contents: read
+
+          jobs:
+            snapshot:
+              runs-on: ubuntu-latest
+              timeout-minutes: 30
+              env:
+                BR_VERSION: 0.5.7
+              steps:
+                - name: Check out the selected revision
+                  uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+                  with:
+                    ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || 'main' }}
+                    fetch-depth: 0
+                - name: Install the pinned beads reader
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    asset="br-${BR_VERSION}-linux_amd64.tar.gz"
+                    base="https://github.com/Dicklesworthstone/beads_rust/releases/download/v${BR_VERSION}"
+                    curl --fail --location --retry 3 --output "$RUNNER_TEMP/br.tar.gz" "$base/$asset"
+                    echo '634aaacd0aac256b2be7250af9fe1e863e8a0316875c20959a6a1c2da75bf843  '"$RUNNER_TEMP/br.tar.gz" | sha256sum -c -
+                    mkdir -p "$RUNNER_TEMP/br-bin"
+                    tar -xzf "$RUNNER_TEMP/br.tar.gz" -C "$RUNNER_TEMP/br-bin"
+                    BR="$(find "$RUNNER_TEMP/br-bin" -type f -name br | head -n 1)"
+                    test -n "$BR"
+                    chmod +x "$BR"
+                    echo "$(dirname "$BR")" >> "$GITHUB_PATH"
+                - name: Verify the snapshot and ranking contracts
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    scripts/tests/agent_context_snapshot.sh
+                    scripts/tests/agent_next_work.sh
+                - name: Capture revision-bound context
+                  id: capture
+                  shell: bash
+                  env:
+                    REQUESTED_SOURCE: ${{ github.event_name != 'workflow_dispatch' || inputs.include_source }}
+                  run: |
+                    set -euo pipefail
+                    revision=$(git rev-parse HEAD)
+                    echo "revision=$revision" >> "$GITHUB_OUTPUT"
+                    if [ "$REQUESTED_SOURCE" = true ]; then
+                      export FGIT_AGENT_SNAPSHOT_SOURCE=1
+                    fi
+                    scripts/agent_context_snapshot.sh "$RUNNER_TEMP/agent-context-$revision"
+                - name: Upload immutable observation artifact
+                  uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+                  with:
+                    name: agent-context-${{ steps.capture.outputs.revision }}
+                    path: ${{ runner.temp }}/agent-context-${{ steps.capture.outputs.revision }}
+                    if-no-files-found: error
+                    retention-days: 7
+          WORKFLOW
+          rm -f .github/workflows/gpt56pro-asb8-diagnostic.yml
+          rm -f .github/workflows/gpt56pro-asb8-hosted.yml
+          git diff --check
+          if ! git diff --quiet; then
+            git config user.name CobaltKite
+            git config user.email cobaltkite@invalid.example
+            git add -A .github/workflows
+            git commit -m 'ci(agent): canonicalize the generic read-only context lane'
+            git push origin HEAD:main
+          else
+            echo 'generic read-only context lane already canonical'
+          fi
+
+      - name: Ensure receive ingress and processing have distinct finite origins
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('crates/fgit-node/src/lib.rs')
+          text = path.read_text()
+          marker = 'The peer-controlled ingress phase has completed; server-owned work gets'
+          if marker in text and 'fn renewed(&self) -> Self' in text:
+              raise SystemExit(0)
+
+          struct = re.search(r'struct\s+GitDaemonSessionDeadline\s*\{(?P<body>.*?)\n\}', text, re.S)
+          if struct is None:
+              raise SystemExit('GitDaemonSessionDeadline struct not found')
+          fields = re.findall(r'(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^,\n]+),', struct.group('body'))
+          instant_fields = [(name, ty.strip()) for name, ty in fields if ty.strip().endswith('Instant')]
+          budget_fields = [(name, ty.strip()) for name, ty in fields if 'GitDaemonSessionTimeout' in ty or ty.strip().endswith('Duration')]
+          if len(instant_fields) != 1 or len(budget_fields) != 1:
+              raise SystemExit(f'unexpected deadline fields: instant={instant_fields}, budget={budget_fields}')
+          instant_name, _ = instant_fields[0]
+          budget_name, budget_type = budget_fields[0]
+
+          impl_start = text.find('impl GitDaemonSessionDeadline')
+          opening = text.find('{', impl_start)
+          if impl_start < 0 or opening < 0:
+              raise SystemExit('GitDaemonSessionDeadline impl not found')
+          depth = 0
+          impl_end = None
+          for index in range(opening, len(text)):
+              if text[index] == '{':
+                  depth += 1
+              elif text[index] == '}':
+                  depth -= 1
+                  if depth == 0:
+                      impl_end = index
+                      break
+          if impl_end is None:
+              raise SystemExit('GitDaemonSessionDeadline impl did not balance')
+          impl_body = text[opening:impl_end]
+          constructor = re.search(r'(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^,)]+)\)\s*->\s*Self', impl_body)
+          if constructor is None:
+              raise SystemExit('deadline constructor not found')
+          constructor_name = constructor.group(1)
+          constructor_type = constructor.group(3).strip()
+          if 'GitDaemonSessionTimeout' in constructor_type:
+              constructor_arg = f'self.{budget_name}'
+          elif constructor_type.endswith('Duration') and 'GitDaemonSessionTimeout' in budget_type:
+              constructor_arg = f'self.{budget_name}.duration()'
+          elif constructor_type.endswith('Duration') and budget_type.endswith('Duration'):
+              constructor_arg = f'self.{budget_name}'
+          else:
+              raise SystemExit('deadline profile cannot be renewed without widening')
+
+          if 'fn renewed(&self) -> Self' not in impl_body:
+              renewal = f'''
+
+    /// Starts a fresh finite deadline for the next server-owned session phase.
+    ///
+    /// Renewal never widens the configured profile; it only prevents time spent
+    /// waiting on a peer in one phase from stealing the entire budget of the
+    /// bounded work that follows.
+    fn renewed(&self) -> Self {{
+        Self::{constructor_name}({constructor_arg})
+    }}
+'''
+              text = text[:impl_end] + renewal + text[impl_end:]
+
+          if marker not in text:
+              function = re.search(r'fn\s+serve_git_daemon_receive_pack_session\b[^\{{]*\{{', text)
+              if function is None:
+                  raise SystemExit('receive-pack session function not found')
+              fn_open = text.find('{', function.start())
+              depth = 0
+              in_string = False
+              escaped = False
+              fn_close = None
+              for index in range(fn_open, len(text)):
+                  ch = text[index]
+                  if in_string:
+                      if escaped:
+                          escaped = False
+                      elif ch == '\\':
+                          escaped = True
+                      elif ch == '"':
+                          in_string = False
+                      continue
+                  if ch == '"':
+                      in_string = True
+                  elif ch == '{':
+                      depth += 1
+                  elif ch == '}':
+                      depth -= 1
+                      if depth == 0:
+                          fn_close = index
+                          break
+              if fn_close is None:
+                  raise SystemExit('receive-pack session function did not balance')
+              body = text[fn_open:fn_close]
+              expiry = body.find('deadline.expired()')
+              if expiry < 0:
+                  raise SystemExit('receive processing deadline check not found')
+              absolute_expiry = fn_open + expiry
+              line_start = text.rfind('\n', 0, absolute_expiry) + 1
+              indent = re.match(r'[ \t]*', text[line_start:absolute_expiry]).group(0)
+              header = text[function.start():fn_open]
+              if re.search(r'\bdeadline\s*:\s*&', header):
+                  reset = f'''{indent}// The peer-controlled ingress phase has completed; server-owned work gets
+{indent}// the same finite profile from a fresh origin rather than inheriting time
+{indent}// already spent receiving bytes from the client.
+{indent}let processing_deadline = deadline.renewed();
+{indent}let deadline = &processing_deadline;
+'''
+              elif re.search(r'\bdeadline\s*:', header):
+                  reset = f'''{indent}// The peer-controlled ingress phase has completed; server-owned work gets
+{indent}// the same finite profile from a fresh origin rather than inheriting time
+{indent}// already spent receiving bytes from the client.
+{indent}let deadline = deadline.renewed();
+'''
+              else:
+                  raise SystemExit('receive deadline parameter shape changed')
+              text = text[:line_start] + reset + text[line_start:]
+
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          if ! git diff --quiet; then
+            changed="$(git diff --name-only)"
+            test "$changed" = 'crates/fgit-node/src/lib.rs' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+            cargo check -p fgit-node --all-targets
+            cargo test -p fgit-node --lib --test git_daemon_deadline --test git_daemon_receive_transport --no-fail-fast
+            cargo clippy -p fgit-node --all-targets -- -D warnings
+            git config user.name CobaltKite
+            git config user.email cobaltkite@invalid.example
+            git add crates/fgit-node/src/lib.rs
+            git commit -m 'fix(node): canonicalize phase-separated receive deadlines [frankengit-asb8]'
+            git push origin HEAD:main
+          else
+            echo 'receive deadline phase boundary already canonical'
+          fi
+
+      - name: Reconcile agent-facing documentation and implementation status
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          cat > docs/AGENT_CONTEXT_SNAPSHOT.md <<'DOC'
+          # Revision-bound agent context snapshots
+
+          `scripts/agent_context_snapshot.sh` gives humans and coding agents one
+          stable, read-only entry point for establishing what they are actually
+          looking at before they plan or mutate anything.
+
+          ```bash
+          scripts/agent_context_snapshot.sh /tmp/frankengit-context
+          FGIT_AGENT_SNAPSHOT_SOURCE=1 \
+            scripts/agent_context_snapshot.sh /tmp/frankengit-context-with-source
+          ```
+
+          The command observes dirty state before it creates its staging path,
+          then captures the exact Git revision and branch, worktree/index
+          summaries, the 50 most recent commits, hashes of the governing files,
+          toolchain and platform identity, and authoritative ready/open/
+          in-progress/batch-pending bead views when `br` is available. The ready
+          view also produces `beads-next-work.json` through the deterministic
+          selection contract in `docs/AGENT_NEXT_WORK.md`.
+
+          The optional source archive is produced by `git archive`, so it
+          contains exactly the tracked tree selected by the recorded revision.
+          Untracked files and the snapshot's own staging path cannot leak into
+          that archive.
+
+          `manifest.json` is written last, after `SUMMARY.md`, and SHA-256 binds
+          every other regular payload file in the directory. An existing
+          destination is never replaced, and the sibling staging directory is
+          removed after any failed capture. The command never updates a bead,
+          checks out another ref, or writes into the repository unless the caller
+          deliberately chooses a destination there.
+
+          This is an observation artifact, not another authority plane. The Git
+          ref and `.beads/issues.jsonl` remain authoritative in their respective
+          domains; a snapshot merely makes their observed state cheap to hand to
+          another agent without losing revision provenance.
+
+          ## Contract verification
+
+          `scripts/tests/agent_context_snapshot.sh` exercises clean and dirty
+          disclosure, the in-worktree default, immutable-destination refusal,
+          root-last hash binding, operation without `br`, and exclusion of
+          untracked files from the optional tracked-source archive. The hosted
+          snapshot lane runs this test before publishing an artifact.
+          DOC
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          readme = Path('README.md')
+          text = readme.read_text()
+          if '## Agent context bootstrap' not in text:
+              marker = '## Current one-node integration boundary\n'
+              note = '''## Agent context bootstrap
+
+Before planning or mutating a checkout, run
+[`scripts/agent_context_snapshot.sh`](scripts/agent_context_snapshot.sh) to bind
+its revision, pre-capture dirty state, recent history, toolchain,
+governing-file hashes, and authoritative bead queues into one root-last
+observation artifact. See
+[`docs/AGENT_CONTEXT_SNAPSHOT.md`](docs/AGENT_CONTEXT_SNAPSHOT.md). A
+deterministic read-only shortlist of unassigned ready work is available through
+[`scripts/agent_next_work.sh`](scripts/agent_next_work.sh); see
+[`docs/AGENT_NEXT_WORK.md`](docs/AGENT_NEXT_WORK.md). These artifacts are
+explicitly non-authoritative.
+
+'''
+              if marker not in text:
+                  raise SystemExit('README agent bootstrap insertion point changed')
+              text = text.replace(marker, note + marker, 1)
+          text = text.replace('### Reality snapshot: 2026-08-29', '### Reality snapshot: 2026-09-04', 1)
+          readme.write_text(text)
+
+          agents = Path('AGENTS.md')
+          a = agents.read_text()
+          if '## Agent context bootstrap helper' not in a:
+              a = a.rstrip() + '''
+
+## Agent context bootstrap helper
+
+`scripts/agent_context_snapshot.sh` is the canonical read-only bootstrap helper
+for revision provenance, pre-capture dirty-state disclosure, recent history,
+governing-file hashes, authoritative bead queues, and deterministic next-work
+shortlists. Its `manifest.json` is a root-last observation marker, not
+repository authority. See `docs/AGENT_CONTEXT_SNAPSHOT.md` and
+`docs/AGENT_NEXT_WORK.md`.
+'''
+              agents.write_text(a + '\n')
+
+          changelog = Path('CHANGELOG.md')
+          if not changelog.exists():
+              changelog.write_text('# Changelog\n\n## Unreleased\n')
+          c = changelog.read_text()
+          entries = [
+              '- Exposed a strict finite git-daemon session timeout profile through `fg serve`.\n',
+              '- Separated peer-controlled receive ingress from the fresh finite deadline used for server-owned validation and sealing.\n',
+              '- Added atomic, root-last revision-bound agent context snapshots with adversarial contract tests.\n',
+              '- Added deterministic, replayable next-work shortlists derived from the authoritative unassigned ready queue.\n',
+              '- Added a zero-dependency gate that keeps Rust bootstrap URLs synchronized with `rust-toolchain.toml`.\n',
+          ]
+          if '## Unreleased' not in c:
+              c = '# Changelog\n\n## Unreleased\n\n' + c
+          marker = '## Unreleased\n'
+          insertion = ''.join(entry for entry in entries if entry not in c)
+          if insertion:
+              c = c.replace(marker, marker + '\n' + insertion, 1)
+          changelog.write_text(c)
+
+          status_candidates = sorted(Path('.').glob('**/*IMPLEMENTATION*STATUS*.md'))
+          status_path = status_candidates[0] if status_candidates else Path('docs/IMPLEMENTATION_STATUS.md')
+          section = '''## 2026-09-04 mainline reality
+
+- Raw git-daemon receive-pack is opt-in through an explicit operator principal and reaches quarantine, validation, sealed admission, authority-head publication, and report-status.
+- `fg serve` accepts a strict non-zero finite timeout override through `FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS`; malformed and zero values fail closed.
+- Peer-controlled receive ingress and server-owned processing use distinct origins for the same finite profile. Automatic byte/work-proportional scaling is not claimed complete.
+- The large first-push drill selects its finite timeout explicitly instead of depending on build-profile speed.
+- Revision-bound context snapshots, deterministic next-work shortlists, and Rust-pin consistency checks form a read-only agent bootstrap layer without creating a new authority plane.
+- Smart HTTP, production SSH, the native API gateway, projections, search, full forge product surfaces, and release publication remain incomplete.
+'''
+          if status_path.exists():
+              s = status_path.read_text()
+              if '## 2026-09-04 mainline reality' not in s:
+                  if s.startswith('# '):
+                      pos = s.find('\n') + 1
+                      s = s[:pos] + '\n' + section + '\n' + s[pos:]
+                  else:
+                      s = '# Implementation status\n\n' + section + '\n' + s
+                  status_path.write_text(s)
+          else:
+              status_path.parent.mkdir(parents=True, exist_ok=True)
+              status_path.write_text('# Implementation status\n\n' + section)
+          PY
+
+          scripts/check_toolchain_bootstrap_links.sh
+          scripts/tests/toolchain_bootstrap_links.sh
+          scripts/tests/agent_context_snapshot.sh
+          scripts/tests/agent_next_work.sh
+          cargo fmt --all --check
+          git diff --check
+          if ! git diff --quiet; then
+            git config user.name CobaltKite
+            git config user.email cobaltkite@invalid.example
+            git add README.md AGENTS.md CHANGELOG.md docs
+            git commit -m 'docs: reconcile the agent bootstrap and receive deadline contracts'
+            git push origin HEAD:main
+          else
+            echo 'agent-facing documentation already reconciled'
+          fi
+
+      - name: Final focused reconciliation verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B verify origin/main
+          cargo fmt --all --check
+          cargo check -p fgit-cli -p fgit-node --all-targets
+          cargo test -p fgit-cli --all-targets --no-fail-fast
+          cargo test -p fgit-node --lib --test git_daemon_deadline --test git_daemon_receive_transport --no-fail-fast
+          cargo clippy -p fgit-cli -p fgit-node --all-targets -- -D warnings
+          scripts/check_toolchain_bootstrap_links.sh
+          scripts/tests/toolchain_bootstrap_links.sh
+          scripts/tests/agent_context_snapshot.sh
+          scripts/tests/agent_next_work.sh
+          bash -n scripts/e2e/suites/node/first_push.sh
+          test -s docs/AGENT_CONTEXT_SNAPSHOT.md
+          test -s docs/AGENT_NEXT_WORK.md
+          test -f .github/workflows/toolchain-pin-consistency.yml
+          grep -q '^name: agent-context-snapshot$' .github/workflows/agent-source-snapshot.yml
+          test ! -e .github/workflows/gpt56pro-asb8-diagnostic.yml
+          test ! -e .github/workflows/gpt56pro-asb8-hosted.yml
+          git status --short
