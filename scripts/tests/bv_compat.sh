@@ -130,7 +130,7 @@ expect_failure 'malformed tracker row' env \
   BV_TEST_CAPTURE="$WORK/capture" BV_BIN="$WORK/fake-bv" FGIT_REPO_ROOT="$WORK/repo" TMPDIR="$WORK/tmp" \
   "$SUBJECT" --robot-alerts
 grep -q 'malformed tracker JSON at line 2' "$WORK/failure.stderr" || fail 'malformed-row refusal does not name the line'
-[ "$malformed_hash" = "$(sha256sum "$WORK/repo/.beads/issues.jsonl" | awk '{print $1}'" ] || fail 'malformed source changed'
+[ "$malformed_hash" = "$(sha256sum "$WORK/repo/.beads/issues.jsonl" | awk '{print $1}')" ] || fail 'malformed source changed'
 [ ! -e "$WORK/capture/cwd" ] || fail 'bv ran on a malformed projection'
 assert_no_compat_tempdirs
 mv "$WORK/repo/.beads/issues.valid.jsonl" "$WORK/repo/.beads/issues.jsonl"
