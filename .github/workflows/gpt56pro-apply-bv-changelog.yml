@@ -34,7 +34,7 @@ jobs:
           test "$(git -C repo rev-parse HEAD)" = "$EXPECTED_MAIN"
           test "$(git -C repo rev-parse origin/main)" = "$EXPECTED_MAIN"
           fragment="$GITHUB_WORKSPACE/control/.github/fragments/bv-changelog.md"
-          test "$(sha256sum "$fragment" | awk '{print $1}')" = "524996677e8a5f08fe9b6bfaa683e41d90c2dce83717a88624f574273fa094d8"
+          test "$(sha256sum "$fragment" | awk '{print $1}')" = "7d5db099de95b222b3aed405b3b5ffefe5d3978d948893d2e20f8bc52706f6ce"
           python3 - "$fragment" <<'PY'
           from pathlib import Path
           import sys
