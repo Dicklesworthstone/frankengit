@@ -9,8 +9,27 @@
 **Lifecycle continuity:** [`AGENT_CONTROL_PLANE_LIFECYCLE_CONTINUITY.md`](AGENT_CONTROL_PLANE_LIFECYCLE_CONTINUITY.md)  
 **Handoff ancestry:** [`AGENT_CONTROL_PLANE_HANDOFF_ANCESTRY.md`](AGENT_CONTROL_PLANE_HANDOFF_ANCESTRY.md)  
 **Owning crate:** `crates/fgit-agent`  
-**Last reconciled:** 2026-09-02  
-**Verification state:** implementation and focused source tests are present; the current execution environment has no local FrankenGit checkout or Rust toolchain, so no formatter, compiler, test, Clippy, repository-lane, or independent batch result is claimed for the latest revisions
+**Last reconciled:** 2026-09-04  
+**Verification state:** the `fgit-agent` implementation and its focused source tests remain present; this reconciliation makes no new formatter, compiler, test, Clippy, repository-lane, or independent batch claim for that Rust crate. The separate repository-side `bv` compatibility launcher was verified at `c42cd2cd` by its hermetic shell suite and by pinned `bv` v0.22.0 plus authoritative `br` v0.5.7 over the complete current tracker graph.
+
+## 0. Repository-side operational triage
+
+This document primarily tracks the product control plane owned by
+`crates/fgit-agent`. The repository also needs a much smaller bootstrap surface
+for coding agents working *on FrankenGit itself*. That operational layer is
+intentionally outside the product protocol and grants no authority.
+
+| Surface | Landed behavior | Explicit boundary |
+|---|---|---|
+| `scripts/bv_compat.sh` | validates every `.beads/issues.jsonl` row; projects only exact `batch_pending` status fields to `review` in a private ephemeral JSONL; invokes pinned `bv` robot modes through its explicit `--db` override; preserves `bv` stdout; verifies the authoritative source hash is unchanged; reaps staging on success, refusal, and signals | read-only compatibility view; never mutates Beads; refuses non-robot modes and caller-owned `--db`; graph rankings and generated commands do not authorize claims |
+| `scripts/tests/bv_compat.sh` | hermetic fake-`bv` coverage for exact projection, source immutability, record-count preservation, cwd and argument forwarding, stdout/stderr ownership, cleanup, malformed input, missing tools, non-robot modes, and separate/joined `--db` refusals | fixture coverage is not evidence about a real `bv` release or current tracker generation |
+| pinned live-graph regression | `bv` v0.22.0 consumed all 555 non-tombstone records from 580 authoritative rows after exactly 21 pending-review projections; status counts matched exactly; source hashes before/after matched; authoritative `br ready --unassigned --no-db --json` was empty and no claim command was emitted | one revision-bound compatibility result, not a permanent guarantee about future `bv`, `br`, or tracker schemas |
+
+The governing workflow is therefore two-stage: use `scripts/bv_compat.sh` for
+advisory dependency ranking, then require the exact candidate ID to appear in
+`br ready --unassigned --no-db --json` before any claim. Completed
+implementation work moves to `batch_pending`; only independent batch
+verification closes it.
 
 ## 1. Current executable tower
 

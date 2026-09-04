@@ -59,17 +59,17 @@ one explicitly named native object; it is not yet a complete replay, fabric,
 repair, or causal-diagnosis suite. `export` writes an authority-selected pack
 to a previously absent path.
 
-`serve` accepts a bounded raw git-daemon **upload-pack** service run, drains
-every admitted session, and reports accepted/completed/refused counts before
-it exits. Its compatibility default remains one session and one in-flight
-client; callers explicitly opt into larger non-zero `--max-sessions` and
-`--max-in-flight` bounds. The bring-up transcript below deliberately names the
-one-session bound. The daemon does not serve receive-pack, smart HTTP, SSH, or
-a native API. Receive parsing, quarantine, validation, and durable admission
-exist as lower-level and loopback composition slices, but ordinary network
-push remains unsupported until those slices are connected to a production
-transport (tracked by `frankengit-hh37`). No command treats local object
-placement, a routing hint, or a connection-local ref map as canonical state.
+`serve` accepts a bounded raw git-daemon service run, drains every admitted
+session, and reports accepted/completed/refused counts before it exits. The
+upload-pack lane is enabled by default. The receive-pack lane is available only
+when the operator explicitly supplies `--receive-principal
+<principal-id-hex>`; without that binding, a push is refused and publishes
+nothing. Receive-pack reuses the bounded framing, quarantine, validation,
+policy, sealed-admission, and exact-predecessor authority-CAS path rather than
+making socket-local refs authoritative. Its compatibility default remains one
+session and one in-flight client; callers explicitly opt into larger non-zero
+`--max-sessions` and `--max-in-flight` bounds. Smart HTTP, production SSH, and
+a native API are still absent.
 
 [`scripts/one_node_bringup.sh`](scripts/one_node_bringup.sh) exercises the
 intended empty-repository lifecycle end to end — verified at `be60ac19`,
@@ -88,12 +88,23 @@ The script records the exact `fg init` → `fg doctor` → one explicitly bounde
 `fg serve` session → `fg export` commands and their observed output in
 `bring-up.transcript` below the supplied storage directory. Set `FG_BIN` to a
 prebuilt `fg` binary to avoid its default `cargo run -p fgit-cli --` launcher.
-It intentionally exercises an empty repository and does not claim a complete
-clone, fetch, or push workflow; the non-empty clone campaign is pinned by the
-`first_clone.sh` E2E suite, which passes 19/19 assertions against a real `git`
-client over protocol v1 and v2 at this revision.
+It intentionally exercises an empty repository and does not claim the full Git
+compatibility matrix. The non-empty clone campaign is pinned by
+`first_clone.sh`; the raw receive campaign is pinned separately by
+`first_push.sh`, including the disabled-by-default refusal twin, initial and
+incremental pushes, retry behavior, and clone-back identity.
 
-### Reality snapshot: 2026-08-29
+### Repository-side agent triage
+
+The checked-in `scripts/bv_compat.sh` launcher is an operational compatibility
+surface, not part of the future `fgit-agent` product plane. It gives pinned
+`bv` versions a complete read-only graph by projecting the repository-owned
+`batch_pending` state to non-claimable `review` in a private temporary file,
+then verifies that the authoritative tracker hash did not change. Graph scores
+remain advisory: an agent may claim a bead only when the exact ID appears in
+`br ready --unassigned --no-db --json`.
+
+### Reality snapshot: 2026-09-04
 
 The implementation has moved well beyond an architecture-only repository, but
 most of the product vision remains ahead:
@@ -105,8 +116,9 @@ most of the product vision remains ahead:
 - The clean-room Git substrate now includes bounded object parsing, owned
   DEFLATE, pack/delta read and write paths, pkt-line, upload-pack, receive-pack
   parsing, quarantine/admission, authority-selected pack materialization, local
-  loose-plus-idx/pack source reconstruction, and raw git-daemon upload-pack
-  composition. All 17 cases of the focused pack-import target — including the
+  loose-plus-idx/pack source reconstruction, and bounded raw git-daemon
+  upload-pack plus explicitly enabled receive-pack composition. All 17 cases
+  of the focused pack-import target — including the
   resource-bound expansion — and the full `fgit-node` test set pass in local
   runs at `e296eb3f` (the verified-read defect named by the 2026-08-25
   snapshot was fixed in `7ccaf8b`); orchestrated batch verification remains
@@ -117,8 +129,9 @@ most of the product vision remains ahead:
   hostile-runner policy, recovery, and release attempts have bounded vertical
   slices. Several are internal libraries or refusal-bounded compositions rather
   than deployable product surfaces.
-- Network receive-pack/push, smart HTTP, production SSH, the native REST/API
-  gateway, projections, search, issues/notifications, the web UI, the TUI, MCP,
+- Raw git-daemon receive-pack/push has landed behind an explicit operator
+  principal, but smart HTTP, production SSH, the native REST/API gateway,
+  projections, search, issues/notifications, the web UI, the TUI, MCP,
   production hostile-execution isolation, and the actual release publication
   path are not complete. The sealed-merge admission path through the real
   store+projection reaches head CAS correctly at HEAD `1b8561c1`
@@ -646,9 +659,10 @@ Machine-validated registries live under [`registries/`](registries/README.md).
 The next integration work will prioritize capability gaps rather than crate
 count:
 
-1. The node will expose receive-pack through a production transport and close
-   the pinned-client clone/fetch/push campaign, including incremental-transfer
-   and restart/fault evidence.
+1. The raw git-daemon receive-pack slice will be extended into smart HTTP and
+   production SSH, while the pinned-client compatibility campaign grows its
+   restart, fault, and larger-repository evidence without weakening finite
+   resource bounds.
 2. The snapshot engine will be connected to authenticated decision/capsule
    history, project both requested diff endpoints, enforce latest-state
    consistency, and render through the actual `fg` binary before `fg at` is
