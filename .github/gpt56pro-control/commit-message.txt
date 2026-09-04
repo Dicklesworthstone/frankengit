@@ -1,0 +1,5 @@
+fix(node): split receive ingress from processing deadline [frankengit-asb8]
+
+Start a fresh, independently bounded server-processing phase only after the complete receive-pack command section and pack trailer arrive. Give report-status its own finite network phase so a processing timeout remains a typed unpack/ng refusal instead of degrading into a socket hangup.
+
+Preserve any ambiguous authority outcome beneath the timeout wrapper, never overwrite an authenticated success with a local deadline inference, expose explicit NodeConfig receive limits, and add deterministic deadline/refusal coverage.
