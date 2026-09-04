@@ -1,0 +1,1 @@
+Patch transport verified by Git blob identity; retry after replacing part03 with the exact 4,800-byte blob.
