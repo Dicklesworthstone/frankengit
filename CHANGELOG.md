@@ -320,3 +320,5 @@ The initial FrankenGit architecture and execution plan was published at [`1c05cf
 - Update Beads through `br`; do not replace `.beads/issues.jsonl` by hand.
 - Preserve rejected ideas and failed experiments in the negative-evidence ledger and registry.
 - A source file, test case, closed Bead, local scenario, or confident summary is not by itself proof of a public claim.
+
+- Added a zero-dependency gate that keeps transport-only Rust bootstrap URLs synchronized with `rust-toolchain.toml`.
