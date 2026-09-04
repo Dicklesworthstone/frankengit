@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 15
     env:
       EXPECTED_MAIN: df41b7fa2e7823e43f6b37d56a1c4153b335c236
-      PATCH_SHA256: b82b5385d9181485a46157e725ded4dcbf6e56c100d97ab1927753eab336a7f7
+      PATCH_SHA256: c544c985a87bf6eccec116268a7b8f57f6694f6ace698a32cae2977103c0632c
     steps:
       - name: Check out patch carrier
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
