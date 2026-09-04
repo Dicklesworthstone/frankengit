@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      EXPECTED_MAIN: 693925a69869071cd3a1cd47c63247fce8c8164e
+      EXPECTED_MAIN: cd5fd6290ceea99992af948c8986fc71c3b19706
       ISSUE_ID: frankengit-bv-batch-pending-compat-1e3q
       ACTOR: IndigoHeron
       BV_VERSION: 0.22.0
