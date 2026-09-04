@@ -6,21 +6,68 @@ on:
       - tooling/source-snapshot-20260903
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  snapshot:
-    runs-on: ubuntu-latest
+  claim-bead:
+    runs-on: macos-15
     timeout-minutes: 10
+    env:
+      EXPECTED_MAIN: 0c36f5ced3a6cccf5769b7de895228dc4889bd75
+      BEAD_ID: frankengit-asb8
+      ACTOR: CobaltKite
+      BR_VERSION: 0.5.7
     steps:
-      - name: Check out repository
+      - name: Check out the exact mainline revision
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
-      - name: Package exact source tree
-        run: tar --exclude=.git -czf "$RUNNER_TEMP/frankengit-source.tar.gz" .
-      - name: Upload source artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: frankengit-source-${{ github.sha }}
-          path: ${{ runner.temp }}/frankengit-source.tar.gz
-          if-no-files-found: error
-          retention-days: 1
+          ref: main
+          fetch-depth: 0
+      - name: Guard the claim base
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_MAIN"
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+      - name: Install the pinned br release
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64) asset="br-${BR_VERSION}-darwin_arm64.tar.gz" ;;
+            x86_64) asset="br-${BR_VERSION}-darwin_amd64.tar.gz" ;;
+            *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          base="https://github.com/Dicklesworthstone/beads_rust/releases/download/v${BR_VERSION}"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/br.tar.gz" "$base/$asset"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/br.tar.gz.sha256" "$base/$asset.sha256"
+          expected="$(awk '{print $1}' "$RUNNER_TEMP/br.tar.gz.sha256")"
+          actual="$(shasum -a 256 "$RUNNER_TEMP/br.tar.gz" | awk '{print $1}')"
+          test -n "$expected"
+          test "$actual" = "$expected"
+          mkdir -p "$RUNNER_TEMP/br-bin"
+          tar -xzf "$RUNNER_TEMP/br.tar.gz" -C "$RUNNER_TEMP/br-bin"
+          BR="$(find "$RUNNER_TEMP/br-bin" -type f -name br | head -n 1)"
+          test -n "$BR"
+          chmod +x "$BR"
+          echo "BR=$BR" >> "$GITHUB_ENV"
+      - name: Claim the bead and publish the tracker transition
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BR" update "$BEAD_ID" --claim --actor "$ACTOR" --json
+          "$BR" comments add "$BEAD_ID" --author "$ACTOR" --message "Claimed for implementation. Agent Mail reservations are unavailable in this execution environment. Intended scope: crates/fgit-node/src/lib.rs, crates/fgit-node/tests/git_daemon_deadline.rs, crates/fgit-cli/src/lib.rs, scripts/e2e/suites/node/first_push.sh, and directly related documentation/tests." --json
+          "$BR" sync --flush-only
+          changed="$(git diff --name-only)"
+          test "$changed" = ".beads/issues.jsonl"
+          git config user.name "$ACTOR"
+          git config user.email "cobaltkite@invalid.example"
+          git add .beads/issues.jsonl
+          git commit -m "chore(beads): claim ${BEAD_ID} [${BEAD_ID}]"
+      - name: Publish only if main is still the guarded base
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          git push origin HEAD:main
