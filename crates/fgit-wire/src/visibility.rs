@@ -24,7 +24,7 @@
 //! Every guard here therefore reuses the exact error variants and payloads
 //! the unfiltered paths already produce for absent objects.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::{AdvertisedRef, AnyGitOid, UploadPackRepository, WireError, WireLimits};
 
@@ -110,9 +110,10 @@ impl RefVisibility {
 
 /// Filters advertised refs down to the visible subset, preserving order.
 ///
-/// Advertisement construction must run through this (or the wrapping
-/// repository view) *before* encoding, so the wire form can never carry a
-/// hidden ref regardless of which transport adapter builds the packet list.
+/// This name-only filter also covers peeled records. It has no symbolic-ref
+/// metadata: adapters that expose aliases or unborn `HEAD` must use
+/// [`VisibleUploadPackRepository`] (or an equivalent authority-bound view)
+/// before encoding, rather than treating name filtering as full authorization.
 #[must_use]
 pub fn filter_advertised_refs(
     refs: &[AdvertisedRef],
@@ -136,6 +137,9 @@ pub fn filter_advertised_refs(
 pub struct VisibleUploadPackRepository<'a, R: ?Sized + UploadPackRepository> {
     inner: &'a R,
     visible: Vec<AdvertisedRef>,
+    /// Symbolic metadata selected with the same policy as `visible`.
+    symref_targets: BTreeMap<Vec<u8>, Vec<u8>>,
+    unborn_target: Option<Vec<u8>>,
     visible_tips: HashSet<AnyGitOid>,
     /// Tips reachable only through hidden refs; existence must stay deniable.
     hidden_only_tips: HashSet<AnyGitOid>,
@@ -147,12 +151,59 @@ impl<'a, R: ?Sized + UploadPackRepository> VisibleUploadPackRepository<'a, R> {
     /// An object that is simultaneously a visible and a hidden tip stays
     /// disclosed: a client can obtain it through the visible path anyway, so
     /// refusing it would leak nothing while breaking legitimate fetches.
+    ///
+    /// A symbolic alias cannot disclose a hidden target, even through another
+    /// advertised alias. Snapshot each alias edge once and propagate hiding
+    /// backwards; every name enters the worklist at most once, including cycles.
+    /// Output retains the inner advertisement order, not map or worklist order.
     pub fn new(inner: &'a R, visibility: &RefVisibility) -> Self {
+        let mut targets = BTreeMap::new();
+        let mut dependents: BTreeMap<&[u8], Vec<&[u8]>> = BTreeMap::new();
+        let mut hidden_names: HashSet<&[u8]> = HashSet::new();
+        let mut pending = Vec::new();
+        for reference in inner.advertised_refs() {
+            let name = reference.name.as_slice();
+            if visibility.hides(name) && hidden_names.insert(name) {
+                pending.push(name);
+            }
+            if let Some(target) = inner.symref_target(name) {
+                targets.insert(name, target);
+                dependents.entry(target).or_default().push(name);
+                if visibility.hides(target) && hidden_names.insert(target) {
+                    pending.push(target);
+                }
+            }
+        }
+        while let Some(hidden) = pending.pop() {
+            if let Some(aliases) = dependents.get(hidden) {
+                for &alias in aliases {
+                    if hidden_names.insert(alias) {
+                        pending.push(alias);
+                    }
+                }
+            }
+        }
+        let symref_targets = targets
+            .into_iter()
+            .filter(|(name, _)| !hidden_names.contains(*name))
+            .map(|(name, target)| (name.to_vec(), target.to_vec()))
+            .collect();
+        // Never infer unbornness from an empty filtered advertisement. Only
+        // the canonical inner snapshot may supply an unborn target.
+        let unborn_target = inner
+            .unborn_symref_target()
+            .filter(|target| {
+                !visibility.hides(b"HEAD")
+                    && !visibility.hides(target)
+                    && !hidden_names.contains(b"HEAD".as_slice())
+                    && !hidden_names.contains(*target)
+            })
+            .map(|target| target.to_vec());
         let mut visible = Vec::new();
         let mut visible_tips = HashSet::new();
         let mut hidden_tips = HashSet::new();
         for reference in inner.advertised_refs() {
-            if visibility.hides(&reference.name) {
+            if hidden_names.contains(reference.name.as_slice()) {
                 hidden_tips.insert(reference.oid);
             } else {
                 visible_tips.insert(reference.oid);
@@ -163,6 +214,8 @@ impl<'a, R: ?Sized + UploadPackRepository> VisibleUploadPackRepository<'a, R> {
         Self {
             inner,
             visible,
+            symref_targets,
+            unborn_target,
             visible_tips,
             hidden_only_tips: hidden_tips,
         }
@@ -200,11 +253,11 @@ impl<R: ?Sized + UploadPackRepository> UploadPackRepository for VisibleUploadPac
     }
 
     fn symref_target(&self, name: &[u8]) -> Option<&[u8]> {
-        if self.visible_ref(name).is_some() {
-            self.inner.symref_target(name)
-        } else {
-            None
-        }
+        self.symref_targets.get(name).map(Vec::as_slice)
+    }
+
+    fn unborn_symref_target(&self) -> Option<&[u8]> {
+        self.unborn_target.as_deref()
     }
 
     fn peeled(&self, oid: AnyGitOid) -> Option<AnyGitOid> {
