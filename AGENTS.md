@@ -1,6 +1,8 @@
 # AGENTS.md — FrankenGit Contributor and Coding-Agent Contract
 
-This file is normative for humans and software agents working in this repository. It applies even when a task appears small. FrankenGit is pre-implementation; the principal risk is creating a convenient early abstraction that contradicts the final system and becomes expensive technical debt.
+This file is normative for humans and software agents working in this repository. It applies even when a task appears small. FrankenGit is in active implementation and pre-release integration. Existing code contains bounded final-abstraction slices, not a completed forge; creating a convenient abstraction that contradicts the final system remains an architectural risk.
+
+Use the README's dated reality snapshot to locate implemented slices and known gaps, then inspect the owning code, current authoritative bead, and exact revision-bound evidence before deciding what to build. A historical test result is not a current gate result. Follow the constitutional hierarchy below for semantics and §16 for ownership, verification, and handoff.
 
 ## 1. Mission
 
