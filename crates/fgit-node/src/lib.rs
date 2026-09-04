@@ -4231,7 +4231,7 @@ impl<'stream> DeadlineTcpStream<'stream> {
         Self { stream, deadline }
     }
 
-    const fn restart_deadline(&mut self, deadline: GitDaemonSessionDeadline) {
+    fn restart_deadline(&mut self, deadline: GitDaemonSessionDeadline) {
         self.deadline = deadline;
     }
 
@@ -7667,7 +7667,7 @@ impl OneNode {
                     self.git_daemon_session_timeout,
                     self.git_daemon_session_work_scaling,
                 );
-                writer.restart_deadline(report_deadline);
+                writer.restart_deadline(report_deadline.clone());
                 report_deadline
                     .check("prepare receive-pack rejection report")
                     .map_err(NodeGitDaemonServeRefusal::from)?;
@@ -7700,7 +7700,7 @@ impl OneNode {
                     self.git_daemon_session_timeout,
                     self.git_daemon_session_work_scaling,
                 );
-        writer.restart_deadline(report_deadline);
+        writer.restart_deadline(report_deadline.clone());
         report_deadline
             .check("prepare receive-pack report-status")
             .map_err(NodeGitDaemonServeRefusal::from)?;
