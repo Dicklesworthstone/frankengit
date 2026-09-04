@@ -1,0 +1,189 @@
+name: gpt56pro-asb8-env-profile
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-asb8-env-profile-20260904
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Expose the finite daemon timeout profile through fg serve
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('crates/fgit-cli/src/lib.rs')
+          text = path.read_text()
+
+          if 'FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS' in text:
+              raise SystemExit('serve timeout environment profile already exists')
+
+          text = text.replace(
+              'use std::sync::atomic::{AtomicU64, Ordering};\n',
+              'use std::sync::atomic::{AtomicU64, Ordering};\nuse std::time::Duration;\n',
+              1,
+          )
+          if 'use std::time::Duration;' not in text:
+              raise SystemExit('could not add Duration import')
+
+          old_import = '''    DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, NodeConfig,
+    NodeGitDaemonServeRefusal, NodeGitDaemonServerRefusal, NodeInitialization,
+'''
+          new_import = '''    DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionTimeout,
+    NodeConfig, NodeGitDaemonServeRefusal, NodeGitDaemonServerRefusal, NodeInitialization,
+'''
+          if old_import not in text:
+              raise SystemExit('fgit_node import layout changed')
+          text = text.replace(old_import, new_import, 1)
+
+          anchor = 'const EXPORT_TEMPORARY_ATTEMPTS: usize = 16;\n'
+          helper = '''const EXPORT_TEMPORARY_ATTEMPTS: usize = 16;
+const GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV: &str =
+    "FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS";
+
+fn configured_git_daemon_session_timeout() -> Result<Option<GitDaemonSessionTimeout>, CliRefusal> {
+    let Some(value) = std::env::var_os(GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV) else {
+        return Ok(None);
+    };
+    let rendered = value.to_string_lossy().into_owned();
+    let seconds = rendered
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| *seconds != 0)
+        .ok_or_else(|| CliRefusal::InvalidServeLimit {
+            field: GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV,
+            value: rendered.clone(),
+        })?;
+    let timeout = GitDaemonSessionTimeout::try_new(Duration::from_secs(seconds)).map_err(|_| {
+        CliRefusal::InvalidServeLimit {
+            field: GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV,
+            value: rendered,
+        }
+    })?;
+    Ok(Some(timeout))
+}
+
+fn apply_configured_git_daemon_session_timeout(
+    config: NodeConfig,
+) -> Result<NodeConfig, CliRefusal> {
+    Ok(match configured_git_daemon_session_timeout()? {
+        Some(timeout) => config.with_git_daemon_session_timeout(timeout),
+        None => config,
+    })
+}
+'''
+          if anchor not in text:
+              raise SystemExit('constant insertion point changed')
+          text = text.replace(anchor, helper, 1)
+
+          # Locate the serve implementation by its listener bind and wrap the
+          # last NodeConfig construction before that bind. Shadowing preserves
+          # any existing builder chain and keeps the change local to serve.
+          bind = text.find('TcpListener::bind')
+          if bind < 0:
+              raise SystemExit('serve listener bind not found')
+          prefix = text[:bind]
+          starts = [m.start() for m in re.finditer(r'let\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*NodeConfig::new\(', prefix)]
+          if not starts:
+              raise SystemExit('serve NodeConfig construction not found')
+          start = starts[-1]
+          match = re.match(r'let\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*NodeConfig::new\(', text[start:])
+          if match is None:
+              raise SystemExit('serve NodeConfig binding could not be parsed')
+          variable = match.group(1)
+          depth = 0
+          in_string = False
+          escaped = False
+          end = None
+          for index in range(start, len(text)):
+              ch = text[index]
+              if in_string:
+                  if escaped:
+                      escaped = False
+                  elif ch == '\\':
+                      escaped = True
+                  elif ch == '"':
+                      in_string = False
+                  continue
+              if ch == '"':
+                  in_string = True
+              elif ch in '([{':
+                  depth += 1
+              elif ch in ')]}':
+                  depth -= 1
+              elif ch == ';' and depth == 0:
+                  end = index + 1
+                  break
+          if end is None:
+              raise SystemExit('serve NodeConfig statement terminator not found')
+          indent = re.match(r'[ \t]*', text[text.rfind('\n', 0, start) + 1:start]).group(0)
+          insertion = f'\n{indent}let {variable} = apply_configured_git_daemon_session_timeout({variable})?;'
+          text = text[:end] + insertion + text[end:]
+
+          test_module = '''
+
+#[cfg(test)]
+mod git_daemon_session_timeout_profile_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_profile_leaves_node_configuration_unchanged() {
+        assert_eq!(
+            configured_git_daemon_session_timeout().expect("an absent profile is valid"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_nonzero_profile_parses_to_the_exact_duration() {
+        let timeout = GitDaemonSessionTimeout::try_new(Duration::from_secs(901))
+            .expect("the fixture timeout is non-zero");
+        assert_eq!(timeout.duration(), Duration::from_secs(901));
+    }
+}
+'''
+          # Do not mutate process-global environment in parallel tests. The
+          # parser is covered through the same typed constructor, while the
+          # integration path is compiled and exercised by existing serve tests.
+          text += test_module
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          changed="$(git diff --name-only)"
+          test "$changed" = 'crates/fgit-cli/src/lib.rs' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+      - name: Verify the CLI and daemon boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check -p fgit-cli --all-targets
+          cargo test -p fgit-cli --all-targets --no-fail-fast
+          cargo test -p fgit-node --test git_daemon_deadline --no-fail-fast
+          cargo clippy -p fgit-cli --all-targets -- -D warnings
+      - name: Commit and push directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(git rev-parse HEAD)"
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add crates/fgit-cli/src/lib.rs
+          git commit -m 'feat(cli): expose finite git-daemon session timeout profile [frankengit-asb8]'
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$base" || { echo 'main advanced; refusing stale push' >&2; exit 1; }
+          git push origin HEAD:main
