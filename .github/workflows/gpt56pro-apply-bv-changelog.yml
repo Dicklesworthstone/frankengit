@@ -14,9 +14,8 @@ jobs:
     timeout-minutes: 15
     env:
       EXPECTED_MAIN: df41b7fa2e7823e43f6b37d56a1c4153b335c236
-      PATCH_SHA256: c544c985a87bf6eccec116268a7b8f57f6694f6ace698a32cae2977103c0632c
     steps:
-      - name: Check out patch carrier
+      - name: Check out fragment carrier
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           path: control
@@ -28,16 +27,32 @@ jobs:
           fetch-depth: 0
           path: repo
 
-      - name: Guard, apply, and inspect changelog
+      - name: Guard, insert, and inspect changelog
         shell: bash
         run: |
           set -euxo pipefail
           test "$(git -C repo rev-parse HEAD)" = "$EXPECTED_MAIN"
           test "$(git -C repo rev-parse origin/main)" = "$EXPECTED_MAIN"
-          patch="$GITHUB_WORKSPACE/control/.github/patches/bv-changelog.patch"
-          test "$(sha256sum "$patch" | awk '{print $1}')" = "$PATCH_SHA256"
-          git -C repo apply --check "$patch"
-          git -C repo apply "$patch"
+          fragment="$GITHUB_WORKSPACE/control/.github/fragments/bv-changelog.md"
+          test "$(sha256sum "$fragment" | awk '{print $1}')" = "524996677e8a5f08fe9b6bfaa683e41d90c2dce83717a88624f574273fa094d8"
+          python3 - "$fragment" <<'PY'
+          from pathlib import Path
+          import sys
+
+          fragment = Path(sys.argv[1]).read_text().rstrip() + "\n\n"
+          path = Path("repo/CHANGELOG.md")
+          text = path.read_text()
+          old_heading = "## [Unreleased] — 2026-09-02"
+          new_heading = "## [Unreleased] — 2026-09-04"
+          marker = "### Added — network push over the raw git-daemon transport (frankengit-hh37)"
+          assert text.count(old_heading) == 1
+          assert text.count(new_heading) == 0
+          assert text.count(marker) == 1
+          assert "frankengit-bv-batch-pending-compat-1e3q" not in text
+          text = text.replace(old_heading, new_heading, 1)
+          text = text.replace(marker, fragment + marker, 1)
+          path.write_text(text)
+          PY
           test "$(git -C repo diff --name-only)" = "CHANGELOG.md"
           test "$(grep -c '^## \[Unreleased\] — 2026-09-04$' repo/CHANGELOG.md)" = 1
           test "$(grep -c '^### Fixed — complete graph-aware Beads triage for pinned bv (frankengit-bv-batch-pending-compat-1e3q)$' repo/CHANGELOG.md)" = 1
