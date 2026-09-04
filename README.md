@@ -429,12 +429,14 @@ verifying client will trust the head chain rather than the serving cell. (Plan
 Because canonical state will remain an immutable decision stream, “the entire
 forge at decision N” will be a well-defined object rather than a reconstruction
 heuristic over mutable tables. `fg at <decision>` will open a complete read-only
-forge snapshot, and bisection will generalize from commits to forge state. A
-bounded in-memory projector and library-level command parser/report surface now
-exist, but authority-history loading, checkpoint use in the production call
-path, two-ended diff projection, continuous-consistency enforcement, binary
-rendering, and non-empty durable CLI evidence are still missing. No finished
-time-travel CLI experience exists yet. (Plan §31.8, backlog FG-038.)
+forge snapshot, and bisection will generalize from commits to forge state.
+The [dated reality snapshot](#reality-snapshot-2026-09-04) above identifies the
+bounded implementation and its historical evidence. It records history loading,
+two-ended diff projection, consistency checks, and binary rendering as landed.
+The remaining historical projection work requires non-empty durable-history
+coverage and verification of the production checkpoint path, not just parser
+coverage or an older passing revision. A complete time-travel product is not yet
+claimed. (Plan §31.8, backlog FG-038.)
 
 ### The evidence economy
 
@@ -680,10 +682,11 @@ count:
    production SSH, while the pinned-client compatibility campaign grows its
    restart, fault, and larger-repository evidence without weakening finite
    resource bounds.
-2. The snapshot engine will be connected to authenticated decision/capsule
-   history, project both requested diff endpoints, enforce latest-state
-   consistency, and render through the actual `fg` binary before `fg at` is
-   described as a product capability.
+2. The existing snapshot/history and two-ended diff paths will gain non-empty
+   durable-history coverage through the actual `fg` binary, including authority
+   consistency and refusal cases. Production checkpoint behavior and the wider
+   snapshot contract must have revision-bound evidence before `fg at` is
+   described as a complete product capability.
 3. Forge merges will move from real computation plus an incomplete durable
    composition to the same asynchronous materialization and exactly-one-head-CAS
    path used by admitted receive operations.
