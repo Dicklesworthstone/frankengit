@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   claim-bead:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       EXPECTED_MAIN: 0c36f5ced3a6cccf5769b7de895228dc4889bd75
@@ -34,15 +34,15 @@ jobs:
         run: |
           set -euo pipefail
           case "$(uname -m)" in
-            arm64) asset="br-${BR_VERSION}-darwin_arm64.tar.gz" ;;
-            x86_64) asset="br-${BR_VERSION}-darwin_amd64.tar.gz" ;;
+            x86_64) asset="br-${BR_VERSION}-linux_amd64.tar.gz" ;;
+            aarch64|arm64) asset="br-${BR_VERSION}-linux_arm64.tar.gz" ;;
             *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
           esac
           base="https://github.com/Dicklesworthstone/beads_rust/releases/download/v${BR_VERSION}"
           curl --fail --location --retry 3 --output "$RUNNER_TEMP/br.tar.gz" "$base/$asset"
           curl --fail --location --retry 3 --output "$RUNNER_TEMP/br.tar.gz.sha256" "$base/$asset.sha256"
           expected="$(awk '{print $1}' "$RUNNER_TEMP/br.tar.gz.sha256")"
-          actual="$(shasum -a 256 "$RUNNER_TEMP/br.tar.gz" | awk '{print $1}')"
+          actual="$(sha256sum "$RUNNER_TEMP/br.tar.gz" | awk '{print $1}')"
           test -n "$expected"
           test "$actual" = "$expected"
           mkdir -p "$RUNNER_TEMP/br-bin"
