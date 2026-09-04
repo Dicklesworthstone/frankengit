@@ -141,7 +141,7 @@ fn filtered_wire_output_contains_neither_the_private_tag_nor_its_peeled_oid() {
         let repository = Repository::new(format, false);
         let output = V1Advertisement::new(
             filter_advertised_refs(&repository.refs, &visibility),
-            Capabilities::parse_v1(b"", &limits).expect("empty capabilities"),
+            Capabilities::default(),
             format,
             &limits,
         )
