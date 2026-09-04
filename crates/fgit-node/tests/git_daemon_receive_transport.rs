@@ -16,7 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest};
-use fgit_node::{NodeConfig, OneNode};
+use fgit_node::{GitDaemonReceiveProcessingTimeout, NodeConfig, OneNode};
 use fgit_types::cell::{CellState, CellTransitionCause};
 use fgit_types::numeric::HeadGeneration;
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
@@ -61,6 +61,18 @@ const fn receive_principal() -> PrincipalId {
 /// Initializes the repository when asked, then reopens it with the receive
 /// lane configured (or not) and brings it into service.
 fn serving_node(scratch: &ScratchDirectory, receive: bool, initialize: bool) -> OneNode {
+    serving_node_with_configuration(scratch, receive, initialize, |configuration| configuration)
+}
+
+fn serving_node_with_configuration<Configure>(
+    scratch: &ScratchDirectory,
+    receive: bool,
+    initialize: bool,
+    configure: Configure,
+) -> OneNode
+where
+    Configure: FnOnce(NodeConfig) -> NodeConfig,
+{
     let base = config(scratch.0.clone());
     if initialize {
         let (created, _) = OneNode::init(base.clone()).expect("the genesis configuration persists");
@@ -71,7 +83,7 @@ fn serving_node(scratch: &ScratchDirectory, receive: bool, initialize: bool) -> 
     } else {
         base
     };
-    let mut node = OneNode::open_existing(opened).expect("the published head opens");
+    let mut node = OneNode::open_existing(configure(opened)).expect("the published head opens");
     node.bring_into_service(HeadGeneration::FIRST)
         .expect("the reopened node enters service");
     node
@@ -209,7 +221,26 @@ fn run_session(
     body_bytes: Vec<u8>,
     extra_bytes: &[u8],
 ) -> ServedPush {
-    let node = serving_node(&scratch, true, initialize);
+    run_session_with_configuration(
+        scratch,
+        initialize,
+        body_bytes,
+        extra_bytes,
+        |configuration| configuration,
+    )
+}
+
+fn run_session_with_configuration<Configure>(
+    scratch: ScratchDirectory,
+    initialize: bool,
+    body_bytes: Vec<u8>,
+    extra_bytes: &[u8],
+    configure: Configure,
+) -> ServedPush
+where
+    Configure: FnOnce(NodeConfig) -> NodeConfig,
+{
+    let node = serving_node_with_configuration(&scratch, true, initialize, configure);
     let repository_path = node.git_daemon_repository_path().as_bytes().to_vec();
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
     let address = listener.local_addr().expect("listener reports its address");
@@ -518,5 +549,48 @@ fn a_publication_refusal_is_reported_not_hung_up() {
     assert!(
         refs.is_empty(),
         "a refused publication publishes nothing, got {refs:?}"
+    );
+}
+
+/// Once the pack trailer is present, exhausting server-side processing is a
+/// report-status rejection rather than a transport hangup. The one-nanosecond
+/// profile is deliberately impossible to satisfy after the processing timer is
+/// created, making the refusal deterministic without a large fixture.
+#[test]
+fn a_receive_processing_deadline_refusal_is_reported_not_hung_up() {
+    let processing_timeout = GitDaemonReceiveProcessingTimeout::try_new(Duration::from_nanos(1))
+        .expect("one nanosecond is finite and non-zero");
+    let outcome = run_session_with_configuration(
+        ScratchDirectory::new(),
+        true,
+        push_request(),
+        &[],
+        |configuration| {
+            configuration.with_git_daemon_receive_processing_timeout(processing_timeout)
+        },
+    );
+
+    outcome
+        .server
+        .as_ref()
+        .expect("the session completes by reporting the processing refusal");
+    let report = String::from_utf8_lossy(&outcome.report);
+    assert!(
+        report.contains("receive processing deadline exceeded"),
+        "the report names the exhausted compatibility limit, got {report:?}"
+    );
+    assert!(
+        report.contains("ng "),
+        "the ref receives a report-status rejection, got {report:?}"
+    );
+    assert!(
+        !report.contains("hung up"),
+        "a complete push never degrades to a socket-hangup diagnostic"
+    );
+
+    let refs = materialized_refs(&outcome.scratch);
+    assert!(
+        refs.is_empty(),
+        "an over-budget receive publishes no ref when admission reports refusal, got {refs:?}"
     );
 }

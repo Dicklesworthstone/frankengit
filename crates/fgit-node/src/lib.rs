@@ -3551,6 +3551,18 @@ pub enum NodeReceiveTransportRefusal {
         /// Advised wait, in seconds.
         expires_secs: u64,
     },
+    /// The complete push reached its pack trailer, but the independently
+    /// bounded server-processing phase exhausted its wall-clock budget.
+    ///
+    /// `source` preserves the canonical admission result at the cancellation
+    /// boundary, including an ambiguous post-transmission authority outcome;
+    /// this wrapper must never downgrade that state to proof of non-commit.
+    ReceiveProcessingDeadlineExceeded {
+        /// The finite operator-selected server-processing budget.
+        timeout: GitDaemonReceiveProcessingTimeout,
+        /// The precise refusal returned when cancellation became observable.
+        source: Box<Self>,
+    },
     /// The authenticated request was refused by canonical admission.
     Admission(Box<AdmissionError>),
     /// The cell's state does not admit taking receive work in at all.
@@ -3582,6 +3594,11 @@ impl Display for NodeReceiveTransportRefusal {
                 formatter,
                 "push rate limit exceeded ({code}); contained reversibly, retry after {expires_secs}s"
             ),
+            Self::ReceiveProcessingDeadlineExceeded { timeout, source } => write!(
+                formatter,
+                "git-daemon receive processing deadline exceeded after {:?}: {source}",
+                timeout.duration()
+            ),
             Self::Admission(error) => Display::fmt(error, formatter),
             Self::CellState(refusal) => Display::fmt(refusal, formatter),
             Self::StagedWithoutPublication { state } => write!(
@@ -3604,6 +3621,7 @@ impl Error for NodeReceiveTransportRefusal {
             | Self::QuotaContained { .. }
             | Self::CellState(_)
             | Self::StagedWithoutPublication { .. } => None,
+            Self::ReceiveProcessingDeadlineExceeded { source, .. } => Some(source.as_ref()),
             Self::Admission(error) => Some(error.as_ref()),
         }
     }
@@ -3768,6 +3786,58 @@ impl Display for GitDaemonSessionTimeoutRefusal {
 }
 
 impl Error for GitDaemonSessionTimeoutRefusal {}
+
+/// A finite wall-clock budget for server-side processing after a receive-pack
+/// client has supplied a complete command section and pack trailer.
+///
+/// This budget starts at the server-work boundary, not at connection accept.
+/// Keeping it distinct from [`GitDaemonSessionTimeout`] prevents a slow but
+/// still-admissible upload from consuming the time reserved for quarantine,
+/// delta resolution, policy evaluation, and authority publication. The two
+/// limits remain independently finite and operator-selected; no untrusted pack
+/// declaration can enlarge either one automatically.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GitDaemonReceiveProcessingTimeout(Duration);
+
+impl GitDaemonReceiveProcessingTimeout {
+    /// Bounded default for one complete receive-pack processing phase.
+    pub const DEFAULT: Self = Self(Duration::from_secs(300));
+
+    /// Constructs a non-zero receive processing budget.
+    pub const fn try_new(
+        timeout: Duration,
+    ) -> Result<Self, GitDaemonReceiveProcessingTimeoutRefusal> {
+        if timeout.is_zero() {
+            return Err(GitDaemonReceiveProcessingTimeoutRefusal::Zero);
+        }
+        Ok(Self(timeout))
+    }
+
+    /// Returns the configured processing budget.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+}
+
+/// Why a receive-pack server-processing budget could not be configured.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitDaemonReceiveProcessingTimeoutRefusal {
+    /// A zero duration cannot bound server-side receive work.
+    Zero,
+}
+
+impl Display for GitDaemonReceiveProcessingTimeoutRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Zero => {
+                formatter.write_str("git-daemon receive processing timeout must be non-zero")
+            }
+        }
+    }
+}
+
+impl Error for GitDaemonReceiveProcessingTimeoutRefusal {}
 
 /// Explicit bounds for one node-owned legacy git-daemon service run.
 ///
@@ -3967,6 +4037,28 @@ fn check_session_deadline(
     deadline.map_or(Ok(()), |deadline| deadline.check(operation))
 }
 
+/// Absolute elapsed-time accounting for the server-work phase of one received
+/// push. It is created only after the command section and complete pack trailer
+/// have arrived, so client upload time cannot consume the processing budget.
+#[derive(Clone, Copy, Debug)]
+struct GitDaemonReceiveProcessingDeadline {
+    started: Instant,
+    timeout: GitDaemonReceiveProcessingTimeout,
+}
+
+impl GitDaemonReceiveProcessingDeadline {
+    fn new(timeout: GitDaemonReceiveProcessingTimeout) -> Self {
+        Self {
+            started: Instant::now(),
+            timeout,
+        }
+    }
+
+    fn expired(self) -> bool {
+        self.started.elapsed() >= self.timeout.duration()
+    }
+}
+
 /// A socket half whose every operation observes a shared absolute deadline.
 struct DeadlineTcpStream<'stream> {
     stream: &'stream mut TcpStream,
@@ -3976,6 +4068,10 @@ struct DeadlineTcpStream<'stream> {
 impl<'stream> DeadlineTcpStream<'stream> {
     const fn new(stream: &'stream mut TcpStream, deadline: GitDaemonSessionDeadline) -> Self {
         Self { stream, deadline }
+    }
+
+    const fn restart_deadline(&mut self, deadline: GitDaemonSessionDeadline) {
+        self.deadline = deadline;
     }
 
     fn prepare_read(&self) -> io::Result<()> {
@@ -5135,6 +5231,8 @@ pub struct NodeConfig {
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
+    git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout,
+    git_daemon_receive_limits: ReceiveLimits,
     /// The principal the git-daemon receive-pack lane publishes as, or `None`
     /// to keep the compatibility default: receive-pack refused as an
     /// unsupported service.
@@ -5186,6 +5284,8 @@ impl NodeConfig {
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             segment_limits: SegmentLimits::default(),
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
+            git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout::DEFAULT,
+            git_daemon_receive_limits: ReceiveLimits::default(),
             git_daemon_receive_principal: None,
         }
     }
@@ -5283,13 +5383,12 @@ impl NodeConfig {
         self
     }
 
-    /// Selects the absolute resource budget for one accepted git-daemon session.
-    #[must_use]
     /// Name the cell this process is.
     ///
     /// The identity is carried as a hint because a cell's claim about its own
     /// name is a claim (§5.1). It labels answers so an operator can find the
     /// cell that drifted; it grants nothing.
+    #[must_use]
     pub const fn with_serving_cell(mut self, serving_cell: ServingCell) -> Self {
         self.serving_cell = serving_cell;
         self
@@ -5307,12 +5406,42 @@ impl NodeConfig {
         self
     }
 
+    /// Selects the absolute network-facing budget for a git-daemon session.
+    ///
+    /// Upload-pack uses this as one whole-session deadline. Receive-pack uses
+    /// it for the ingress phase from accept through the complete pack trailer,
+    /// and restarts the same finite budget once for the bounded report-status
+    /// response. Server-side receive processing is governed independently by
+    /// [`Self::with_git_daemon_receive_processing_timeout`].
     #[must_use]
     pub const fn with_git_daemon_session_timeout(
         mut self,
         session_timeout: GitDaemonSessionTimeout,
     ) -> Self {
         self.git_daemon_session_timeout = session_timeout;
+        self
+    }
+
+    /// Selects the server-work budget that begins after a complete push has
+    /// reached its pack trailer.
+    #[must_use]
+    pub const fn with_git_daemon_receive_processing_timeout(
+        mut self,
+        processing_timeout: GitDaemonReceiveProcessingTimeout,
+    ) -> Self {
+        self.git_daemon_receive_processing_timeout = processing_timeout;
+        self
+    }
+
+    /// Selects the receive-pack wire, quarantine, pack, and diagnostic bounds.
+    ///
+    /// These limits are compatibility semantics. Callers that enlarge one
+    /// dimension remain responsible for selecting every other independently
+    /// relevant dimension; no size declared by an untrusted peer auto-scales
+    /// memory, decompression, delta-work, or wall-clock budgets.
+    #[must_use]
+    pub const fn with_git_daemon_receive_limits(mut self, receive_limits: ReceiveLimits) -> Self {
+        self.git_daemon_receive_limits = receive_limits;
         self
     }
 }
@@ -5404,6 +5533,8 @@ pub struct OneNode {
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
+    git_daemon_receive_processing_timeout: GitDaemonReceiveProcessingTimeout,
+    git_daemon_receive_limits: ReceiveLimits,
     git_daemon_receive_principal: Option<PrincipalId>,
     /// Which cell this process is, stamped onto answers it serves.
     serving_cell: ServingCell,
@@ -5701,6 +5832,8 @@ impl OneNode {
             max_object_bytes: config.max_object_bytes,
             segment_limits: config.segment_limits,
             git_daemon_session_timeout: config.git_daemon_session_timeout,
+            git_daemon_receive_processing_timeout: config.git_daemon_receive_processing_timeout,
+            git_daemon_receive_limits: config.git_daemon_receive_limits,
             git_daemon_receive_principal: config.git_daemon_receive_principal,
             serving_cell: config.serving_cell,
             service_config,
@@ -6999,16 +7132,15 @@ impl OneNode {
     /// The client retry identity is the digest of the exact command section,
     /// so an identical retried push resolves to the same sealed transaction
     /// while any semantic change selects a fresh identity.
-    fn serve_git_daemon_receive_pack_session<R, W>(
+    fn serve_git_daemon_receive_pack_session<R>(
         &self,
         reader: &mut R,
-        writer: &mut W,
+        writer: &mut DeadlineTcpStream<'_>,
         inputs: ReceivePackSessionInputs<'_>,
         limits: &WireLimits,
     ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal>
     where
         R: Read,
-        W: Write,
     {
         let ReceivePackSessionInputs {
             deadline,
@@ -7017,10 +7149,8 @@ impl OneNode {
             request,
             greeting,
         } = inputs;
-        let receive_limits = ReceiveLimits {
-            wire: limits.clone(),
-            ..ReceiveLimits::default()
-        };
+        let mut receive_limits = self.git_daemon_receive_limits.clone();
+        receive_limits.wire = limits.clone();
         let format_name = match self.object_format {
             GitHashAlgorithm::Sha1 => "sha1",
             GitHashAlgorithm::Sha256 => "sha256",
@@ -7158,10 +7288,15 @@ impl OneNode {
             .map_err(NodeGitDaemonServeRefusal::from)?;
         let session = LoopbackReceiveSession::authenticated(principal, retry_key);
 
-        let admission_deadline_expired = AtomicBool::new(false);
+        // Client-controlled ingress is complete. Start an independent finite
+        // server-work budget now, so time spent uploading cannot consume time
+        // reserved for quarantine, resolution, policy, and publication.
+        let processing_timeout = self.git_daemon_receive_processing_timeout;
+        let processing_deadline = GitDaemonReceiveProcessingDeadline::new(processing_timeout);
+        let processing_deadline_expired = AtomicBool::new(false);
         let mut cancellation = || {
-            if deadline.expired() {
-                admission_deadline_expired.store(true, Ordering::Relaxed);
+            if processing_deadline.expired() {
+                processing_deadline_expired.store(true, Ordering::Relaxed);
                 return false;
             }
             true
@@ -7178,23 +7313,24 @@ impl OneNode {
         )) {
             Ok(outcome) => outcome,
             Err(refusal) => {
-                // A deadline that fired during admission is a transport-level
-                // fault, not a push the client can be told about; keep it as a
-                // typed serve error.
-                if admission_deadline_expired.load(Ordering::Relaxed) {
-                    return Err(NodeGitDaemonServeRefusal::from(
-                        GitDaemonTransportRefusal::SessionDeadlineExceeded {
-                            operation: "admit receive-pack request",
-                        },
-                    ));
-                }
-                // Every other refusal here is a decision about a push whose
-                // pack the boundary scanner already read to its trailer, so the
-                // client has finished sending and is reading the response. It
-                // must be told through report-status `unpack`/`ng` — the way
-                // upstream receive-pack reports an unpack failure — rather than
-                // by closing the socket, which leaves `git push` printing only
-                // "the remote end hung up unexpectedly" (frankengit-xefn).
+                let refusal = if processing_deadline_expired.load(Ordering::Relaxed) {
+                    NodeReceiveTransportRefusal::ReceiveProcessingDeadlineExceeded {
+                        timeout: processing_timeout,
+                        source: Box::new(refusal),
+                    }
+                } else {
+                    refusal
+                };
+                // The complete pack is already present and the client is now
+                // reading. Give report-status its own fresh, finite network
+                // phase so an elapsed ingress deadline can never turn a typed
+                // processing refusal into a socket hangup (frankengit-xefn).
+                let report_deadline =
+                    GitDaemonSessionDeadline::new(self.git_daemon_session_timeout);
+                writer.restart_deadline(report_deadline);
+                report_deadline
+                    .check("prepare receive-pack rejection report")
+                    .map_err(NodeGitDaemonServeRefusal::from)?;
                 Self::write_receive_rejection_report(
                     writer,
                     &ready,
@@ -7208,14 +7344,16 @@ impl OneNode {
                 }));
             }
         };
-        if admission_deadline_expired.load(Ordering::Relaxed) {
-            return Err(NodeGitDaemonServeRefusal::from(
-                GitDaemonTransportRefusal::SessionDeadlineExceeded {
-                    operation: "admit receive-pack request",
-                },
-            ));
-        }
 
+        // An authenticated success is canonical even when a cancellation probe
+        // fired near the commit boundary. Report that success; never overwrite
+        // it with a local timeout inference. The response itself receives one
+        // new finite network phase, exactly like the rejection path above.
+        let report_deadline = GitDaemonSessionDeadline::new(self.git_daemon_session_timeout);
+        writer.restart_deadline(report_deadline);
+        report_deadline
+            .check("prepare receive-pack report-status")
+            .map_err(NodeGitDaemonServeRefusal::from)?;
         let report = outcome
             .report_packets(&ready, &receive_limits)
             .map_err(NodeReceiveTransportRefusal::from)

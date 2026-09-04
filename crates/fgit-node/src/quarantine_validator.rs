@@ -1010,6 +1010,16 @@ mod tests {
                 NodeReceiveTransportRefusal::QuotaContained { code, expires_secs } => panic!(
                     "a receive-core refusal must not be reported as quota containment ({code}, {expires_secs}s)"
                 ),
+                // The processing-deadline wrapper is added only by the outer
+                // git-daemon transport after this conversion has returned. A
+                // direct ReceiveError conversion cannot synthesize it.
+                NodeReceiveTransportRefusal::ReceiveProcessingDeadlineExceeded {
+                    timeout,
+                    source,
+                } => panic!(
+                    "a receive-core refusal must not be pre-wrapped as a processing timeout ({:?}): {source}",
+                    timeout.duration()
+                ),
             }
         }
     }

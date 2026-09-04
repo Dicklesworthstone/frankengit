@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fgit_node::{
+    GitDaemonReceiveProcessingTimeout, GitDaemonReceiveProcessingTimeoutRefusal,
     GitDaemonServeError, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
     GitDaemonSessionTimeoutRefusal, GitDaemonTransportRefusal, serve_git_daemon_tcp_once,
 };
@@ -599,5 +600,13 @@ fn zero_session_deadline_is_a_typed_configuration_refusal() {
     assert_eq!(
         GitDaemonSessionTimeout::try_new(Duration::ZERO),
         Err(GitDaemonSessionTimeoutRefusal::Zero)
+    );
+}
+
+#[test]
+fn zero_receive_processing_deadline_is_a_typed_configuration_refusal() {
+    assert_eq!(
+        GitDaemonReceiveProcessingTimeout::try_new(Duration::ZERO),
+        Err(GitDaemonReceiveProcessingTimeoutRefusal::Zero)
     );
 }
