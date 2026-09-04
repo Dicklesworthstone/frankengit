@@ -21,7 +21,7 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Guard and patch AGENTS.md
+      - name: Guard and replace the Beads agent contract
         shell: bash
         run: |
           set -euo pipefail
@@ -32,102 +32,65 @@ jobs:
 
           path = Path("AGENTS.md")
           text = path.read_text()
+          start_marker = "<!-- bv-agent-instructions-v3 -->"
+          end_marker = "<!-- end-bv-agent-instructions -->"
+          assert text.count(start_marker) == 1
+          assert text.count(end_marker) == 1
+          start = text.index(start_marker)
+          end = text.index(end_marker, start) + len(end_marker)
+          replacement = """<!-- bv-agent-instructions-v3 -->
 
-          old = """This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking and [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) (`bv`) for graph-aware triage. Issues are stored in `.beads/` and tracked in git. Current `br` workspaces normally export `.beads/issues.jsonl`; older `bd`/legacy workspaces may use `.beads/beads.jsonl`. `bv` auto-discovers the supported JSONL files, so agents should use `br`/`bv` commands instead of hard-coding a single filename.
-"""
-          new = """This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for authoritative issue state and [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) (`bv`) for advisory graph-aware triage. Issues are stored in `.beads/` and tracked in git. The current repository export is `.beads/issues.jsonl`.
+---
+
+## Beads Workflow Integration
+
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for authoritative issue state and [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) (`bv`) for advisory graph-aware triage. Issues are stored in `.beads/` and tracked in git. The current repository export is `.beads/issues.jsonl`.
 
 Pinned `bv` v0.22.0 predates FrankenGit's repository-owned `batch_pending` state. Invoking that binary directly rejects and omits those records before ranking, so **all `bv` robot-mode calls in this repository must go through [`scripts/bv_compat.sh`](scripts/bv_compat.sh)**. The launcher validates every source row, maps only the exact `batch_pending` status field to `review` in a private ephemeral projection, invokes `bv` through its explicit `--db` override, verifies that the authoritative source hash did not change, and reaps the projection. It refuses non-robot modes and caller-supplied `--db` paths. This is a read-only compatibility view; `br` remains the source of truth for readiness, claims, transitions, and closure.
-"""
-          assert text.count(old) == 1
-          text = text.replace(old, new)
 
-          old = """**Scope boundary:** bv handles *what to work on* (triage, priority, planning). `br` handles creating, modifying, and closing beads.
+### Using bv as an AI sidecar
 
-**CRITICAL: Use ONLY --robot-* flags. Bare bv launches an interactive TUI that blocks your session.**
-"""
-          new = """**Scope boundary:** `scripts/bv_compat.sh`/`bv` rank and explain the dependency graph; they never authorize work. `br` alone handles authoritative readiness and every mutation. A recommendation, score, or generated claim command is not evidence that a bead is claimable.
+`bv` is a graph-aware triage engine. `scripts/bv_compat.sh`/`bv` rank and explain the dependency graph; they never authorize work. A recommendation, score, or generated claim command is not evidence that a bead is claimable.
 
-**CRITICAL: Use ONLY `scripts/bv_compat.sh --robot-*` invocations. Bare `bv` both bypasses the status compatibility layer and launches an interactive TUI that blocks your session.**
-"""
-          assert text.count(old) == 1
-          text = text.replace(old, new)
+**CRITICAL: Use only `scripts/bv_compat.sh --robot-*` invocations. Bare `bv` bypasses the status compatibility layer and launches an interactive TUI that blocks the session.**
 
-          old = """**`bv --robot-triage` is your single entry point.** It returns everything you need in one call:
-"""
-          new = """**`scripts/bv_compat.sh --robot-triage` is your single graph-analysis entry point.** It returns everything needed for advisory triage in one call:
-"""
-          assert text.count(old) == 1
-          text = text.replace(old, new)
+#### Start with complete-graph triage
 
-          old = """```bash
-bv --robot-triage        # THE MEGA-COMMAND: start here
-bv --robot-next          # Minimal: just the single top pick + claim command
-
-# Token-optimized output (TOON) for lower LLM context usage:
-bv --robot-triage --format toon
-```
-
-Before claiming, verify current state with `br show <id> --json` or `br ready --json`. `recommendations` can include graph-important blocked or assigned work; only `quick_ref.top_picks` and non-empty `claim_command` fields represent claimable work.
-"""
-          new = """```bash
+```bash
 scripts/bv_compat.sh --robot-triage        # Complete advisory graph analysis
 scripts/bv_compat.sh --robot-next          # Minimal advisory top pick
-
-# Token-optimized output (TOON) for lower LLM context usage:
 scripts/bv_compat.sh --robot-triage --format toon
 ```
 
-Before claiming, run `br ready --unassigned --no-db --json` and require the exact candidate ID to appear in that authoritative result. If the result is empty, there is no claimable work, even when `recommendations`, `blockers_to_clear`, or another graph section names important blocked or assigned work. Never execute a generated `claim_top`/`claim_command` without this cross-check.
-"""
-          assert text.count(old) == 1
-          text = text.replace(old, new)
+`--robot-triage` returns `quick_ref`, ranked `recommendations`, `quick_wins`, `blockers_to_clear`, project-health metrics, and suggested commands. Those sections may intentionally name blocked or assigned work because it is graph-important.
 
-          replacements = {
-              "| `--robot-plan` | Parallel execution tracks with unblocks lists |": "| `scripts/bv_compat.sh --robot-plan` | Parallel execution tracks with unblocks lists |",
-              "| `--robot-priority` | Priority misalignment detection with confidence |": "| `scripts/bv_compat.sh --robot-priority` | Priority misalignment detection with confidence |",
-              "| `--robot-insights` | Full metrics: PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core |": "| `scripts/bv_compat.sh --robot-insights` | Full metrics: PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core |",
-              "| `--robot-alerts` | Stale issues, blocking cascades, priority mismatches |": "| `scripts/bv_compat.sh --robot-alerts` | Stale issues, blocking cascades, priority mismatches |",
-              "| `--robot-suggest` | Hygiene: duplicates, missing deps, label suggestions, cycle breaks |": "| `scripts/bv_compat.sh --robot-suggest` | Hygiene: duplicates, missing deps, label suggestions, cycle breaks |",
-              "| `--robot-diff --diff-since <ref>` | Changes since ref: new/closed/modified issues |": "| `scripts/bv_compat.sh --robot-diff --diff-since <ref>` | Changes since ref: new/closed/modified issues |",
-              "| `--robot-graph [--graph-format=json\\|dot\\|mermaid]` | Dependency graph export |": "| `scripts/bv_compat.sh --robot-graph [--graph-format=json\\|dot\\|mermaid]` | Dependency graph export |",
-          }
-          for source, target in replacements.items():
-              assert text.count(source) == 1, source
-              text = text.replace(source, target)
+Before claiming, run `br ready --unassigned --no-db --json` and require the exact candidate ID to appear in that authoritative result. If the result is empty, there is no claimable work. Never execute a generated `claim_top` or `claim_command` without this cross-check.
 
-          old = """```bash
-bv --robot-plan --label backend              # Scope to label's subgraph
-bv --robot-insights --as-of HEAD~30          # Historical point-in-time
-bv --recipe actionable --robot-plan          # Pre-filter: ready to work (no blockers)
-bv --recipe high-impact --robot-triage       # Pre-filter: top PageRank scores
-```
-"""
-          new = """```bash
-scripts/bv_compat.sh --robot-plan --label backend              # Scope to label's subgraph
-scripts/bv_compat.sh --robot-insights --as-of HEAD~30          # Historical point-in-time
-scripts/bv_compat.sh --recipe actionable --robot-plan          # Advisory actionable recipe
-scripts/bv_compat.sh --recipe high-impact --robot-triage       # Pre-filter: top PageRank scores
-```
-"""
-          assert text.count(old) == 1
-          text = text.replace(old, new)
+#### Other graph commands
 
-          old = """```bash
-br ready --json                       # Show issues ready to work (no blockers)
-br list --status=open --json          # All open issues
-br show <id> --json                   # Full issue details with dependencies
-br create --title="..." --type=task --priority=2 --json
-br update <id> --status=in_progress --json
-br close <id> --reason="Completed" --json
-br close <id1> <id2> --reason="Completed" --json
-br sync --flush-only                  # Export DB to JSONL after Beads mutations
+| Command | Returns |
+|---|---|
+| `scripts/bv_compat.sh --robot-plan` | Parallel execution tracks and unblock relationships |
+| `scripts/bv_compat.sh --robot-priority` | Priority-misalignment findings with confidence |
+| `scripts/bv_compat.sh --robot-insights` | PageRank, betweenness, HITS, eigenvector, critical path, cycles, and k-core |
+| `scripts/bv_compat.sh --robot-alerts` | Stale issues, blocking cascades, and priority mismatches |
+| `scripts/bv_compat.sh --robot-suggest` | Duplicate, dependency, label, and cycle hygiene |
+| `scripts/bv_compat.sh --robot-diff --diff-since <ref>` | Tracker changes since a revision |
+| `scripts/bv_compat.sh --robot-graph [--graph-format=json\\|dot\\|mermaid]` | Dependency-graph export |
+
+```bash
+scripts/bv_compat.sh --robot-plan --label backend
+scripts/bv_compat.sh --robot-insights --as-of HEAD~30
+scripts/bv_compat.sh --recipe actionable --robot-plan
+scripts/bv_compat.sh --recipe high-impact --robot-triage
 ```
-"""
-          new = """```bash
+
+### br commands for authoritative issue management
+
+```bash
 br ready --unassigned --no-db --json              # Authoritative claimable work
 br list --status open --unassigned --no-db --json # Unassigned open records, including blocked work
-br show <id> --no-db --json                       # Full authoritative record and dependencies
+br show <id> --no-db --json                       # Full record and dependencies
 br create --title="..." --type task --priority 2 --json
 br update <id> --claim --actor <AgentName> --json
 br update <id> --status batch_pending --actor <AgentName> \\
@@ -136,27 +99,26 @@ br sync --flush-only                              # Export DB mutations to track
 ```
 
 Implementers do not call `br close` in this repository. Under §16.2, only the batch orchestrator closes a bead after independent revision-bound verification; implementers hand completed work to that gate as `batch_pending`.
-"""
-          assert text.count(old) == 1
-          text = text.replace(old, new)
 
-          old = """1. **Triage**: Run `bv --robot-triage` to find the highest-impact actionable work
-2. **Claim**: Use `br update <id> --status=in_progress --json`
-3. **Work**: Implement the task
-4. **Complete**: Use `br close <id> --reason="Completed" --json`
-5. **Sync**: Run `br sync --flush-only` after Beads mutations so the JSONL export is current
-"""
-          new = """1. **Triage**: Run `scripts/bv_compat.sh --robot-triage` for graph-aware advisory ranking.
-2. **Authorize**: Run `br ready --unassigned --no-db --json`; proceed only when the exact candidate is present.
-3. **Claim**: Use `br update <id> --claim --actor <AgentName> --json`.
-4. **Work**: Implement the complete task and its mapped tests under the crate/file ownership rules.
-5. **Hand off**: After the sanctioned focused test, move the bead to `batch_pending` with a revision-bound transition comment. Do not self-close.
-6. **Sync**: Run `br sync --flush-only` after every Beads mutation so the tracked JSONL export is current.
-"""
-          assert text.count(old) == 1
-          text = text.replace(old, new)
+### Claim-safe workflow
 
-          path.write_text(text)
+1. **Triage:** Run `scripts/bv_compat.sh --robot-triage` for graph-aware advisory ranking.
+2. **Authorize:** Run `br ready --unassigned --no-db --json`; proceed only when the exact candidate is present.
+3. **Claim:** Use `br update <id> --claim --actor <AgentName> --json`.
+4. **Work:** Implement the complete task and its mapped tests under the crate/file ownership rules.
+5. **Hand off:** After the sanctioned focused test, move the bead to `batch_pending` with a revision-bound transition comment. Do not self-close.
+6. **Sync:** Run `br sync --flush-only` after every Beads mutation so the tracked JSONL export is current.
+
+### Key boundaries
+
+- Dependencies can block otherwise-open work; only `br ready` authorizes a claim.
+- Priorities are P0 through P4, encoded as integers 0 through 4.
+- Bead types include task, bug, feature, epic, chore, docs, and question.
+- Use `br dep add <issue> <depends-on>` for dependency edges.
+- `br` never commits or pushes. Follow this repository's shared-worktree and git rules.
+
+<!-- end-bv-agent-instructions -->"""
+          path.write_text(text[:start] + replacement + text[end:])
           PY
           grep -q 'scripts/bv_compat.sh --robot-triage' AGENTS.md
           grep -q 'Implementers do not call `br close`' AGENTS.md
