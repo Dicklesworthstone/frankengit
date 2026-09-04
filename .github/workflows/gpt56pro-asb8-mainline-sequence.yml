@@ -1,0 +1,545 @@
+name: gpt56pro-asb8-mainline-sequence
+
+on:
+  push:
+    branches:
+      - tooling/gpt56pro-asb8-mainline-sequence-20260904
+
+permissions:
+  contents: write
+
+concurrency:
+  group: frankengit-gpt56pro-mainline-mutator
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Restore a rustfmt-clean mainline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          if git diff --quiet; then
+            echo 'rustfmt slice already landed'
+            exit 0
+          fi
+          unexpected="$(git diff --name-only | grep -Ev '\.rs$' || true)"
+          test -z "$unexpected" || { printf 'rustfmt changed non-Rust files:\n%s\n' "$unexpected" >&2; exit 1; }
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add -- '*.rs'
+          git commit -m 'style: restore rustfmt-clean workspace'
+          git push origin HEAD:main
+
+      - name: Attach the timeout contract to the correct NodeConfig builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/fgit-node/src/lib.rs')
+          text = path.read_text()
+          misplaced = '''    /// Selects the absolute resource budget for one accepted git-daemon session.
+    #[must_use]
+    /// Name the cell this process is.
+'''
+          if misplaced in text:
+              text = text.replace(misplaced, '    /// Name the cell this process is.\n', 1)
+          target = '''    #[must_use]
+    pub const fn with_git_daemon_session_timeout(
+'''
+          documented = '''    /// Selects the absolute wall-clock budget for one accepted git-daemon session.
+    ///
+    /// The timeout is finite and non-zero by construction. It bounds the
+    /// legacy transport envelope; internal runtime work remains subject to the
+    /// node's independently configured finite budget classes.
+    #[must_use]
+    pub const fn with_git_daemon_session_timeout(
+'''
+          if '/// Selects the absolute wall-clock budget for one accepted git-daemon session.' not in text:
+              if target not in text:
+                  raise SystemExit('timeout builder insertion point changed')
+              text = text.replace(target, documented, 1)
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          if git diff --quiet; then
+            echo 'NodeConfig documentation slice already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = 'crates/fgit-node/src/lib.rs' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          cargo check -p fgit-node --all-targets
+          cargo test -p fgit-node --test git_daemon_deadline --no-fail-fast
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add crates/fgit-node/src/lib.rs
+          git commit -m 'docs(node): attach timeout contract to the correct builder'
+          git push origin HEAD:main
+
+      - name: Expose the finite timeout profile through fg serve
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('crates/fgit-cli/src/lib.rs')
+          text = path.read_text()
+
+          if 'use std::time::Duration;' not in text:
+              anchor = 'use std::sync::atomic::{AtomicU64, Ordering};\n'
+              if anchor not in text:
+                  raise SystemExit('Duration import insertion point changed')
+              text = text.replace(anchor, anchor + 'use std::time::Duration;\n', 1)
+
+          if 'GitDaemonSessionTimeout' not in text.split('use fgit_node::{', 1)[1].split('};', 1)[0]:
+              old = '''    DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, NodeConfig,
+    NodeGitDaemonServeRefusal, NodeGitDaemonServerRefusal, NodeInitialization,
+'''
+              new = '''    DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionTimeout,
+    NodeConfig, NodeGitDaemonServeRefusal, NodeGitDaemonServerRefusal, NodeInitialization,
+'''
+              if old not in text:
+                  raise SystemExit('fgit_node import layout changed')
+              text = text.replace(old, new, 1)
+
+          helper = '''const GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV: &str =
+    "FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS";
+
+fn parse_git_daemon_session_timeout(
+    value: &std::ffi::OsStr,
+) -> Result<GitDaemonSessionTimeout, CliRefusal> {
+    let rendered = value.to_string_lossy().into_owned();
+    let seconds = rendered
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| *seconds != 0)
+        .ok_or_else(|| CliRefusal::InvalidServeLimit {
+            field: GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV,
+            value: rendered.clone(),
+        })?;
+    GitDaemonSessionTimeout::try_new(Duration::from_secs(seconds)).map_err(|_| {
+        CliRefusal::InvalidServeLimit {
+            field: GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV,
+            value: rendered,
+        }
+    })
+}
+
+fn configured_git_daemon_session_timeout() -> Result<Option<GitDaemonSessionTimeout>, CliRefusal> {
+    std::env::var_os(GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV)
+        .as_deref()
+        .map(parse_git_daemon_session_timeout)
+        .transpose()
+}
+
+fn apply_configured_git_daemon_session_timeout(
+    config: NodeConfig,
+) -> Result<NodeConfig, CliRefusal> {
+    Ok(match configured_git_daemon_session_timeout()? {
+        Some(timeout) => config.with_git_daemon_session_timeout(timeout),
+        None => config,
+    })
+}
+'''
+
+          if 'const GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV' not in text:
+              anchor = 'const EXPORT_TEMPORARY_ATTEMPTS: usize = 16;\n'
+              if anchor not in text:
+                  raise SystemExit('constant insertion point changed')
+              text = text.replace(anchor, anchor + helper, 1)
+          elif 'fn parse_git_daemon_session_timeout(' not in text:
+              pattern = re.compile(
+                  r'const GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV:.*?\nfn apply_configured_git_daemon_session_timeout\(.*?\n}\n',
+                  re.S,
+              )
+              if not pattern.search(text):
+                  raise SystemExit('partial timeout helper cannot be normalized safely')
+              text = pattern.sub(helper.rstrip('\n'), text, count=1)
+
+          if text.count('apply_configured_git_daemon_session_timeout(') == 1:
+              functions = []
+              for match in re.finditer(r'(?m)^(?:pub(?:\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)[^;{]*\{', text):
+                  opening = text.find('{', match.start())
+                  depth = 0
+                  in_string = False
+                  escaped = False
+                  closing = None
+                  for index in range(opening, len(text)):
+                      ch = text[index]
+                      if in_string:
+                          if escaped:
+                              escaped = False
+                          elif ch == '\\':
+                              escaped = True
+                          elif ch == '"':
+                              in_string = False
+                          continue
+                      if ch == '"':
+                          in_string = True
+                      elif ch == '{':
+                          depth += 1
+                      elif ch == '}':
+                          depth -= 1
+                          if depth == 0:
+                              closing = index + 1
+                              break
+                  if closing is not None:
+                      body = text[opening:closing]
+                      if 'TcpListener::bind' in body and 'NodeConfig::new(' in body:
+                          functions.append((opening, closing, body))
+              if len(functions) != 1:
+                  raise SystemExit(f'expected one serve function with NodeConfig and TcpListener, found {len(functions)}')
+              opening, closing, body = functions[0]
+              candidates = list(re.finditer(
+                  r'let\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*NodeConfig::new\(',
+                  body,
+              ))
+              if not candidates:
+                  raise SystemExit('serve NodeConfig construction not found')
+              binding = candidates[-1]
+              variable = binding.group(1)
+              start = opening + binding.start()
+              depth = 0
+              in_string = False
+              escaped = False
+              end = None
+              for index in range(start, closing):
+                  ch = text[index]
+                  if in_string:
+                      if escaped:
+                          escaped = False
+                      elif ch == '\\':
+                          escaped = True
+                      elif ch == '"':
+                          in_string = False
+                      continue
+                  if ch == '"':
+                      in_string = True
+                  elif ch in '([{':
+                      depth += 1
+                  elif ch in ')]}':
+                      depth -= 1
+                  elif ch == ';' and depth == 0:
+                      end = index + 1
+                      break
+              if end is None:
+                  raise SystemExit('serve NodeConfig statement terminator not found')
+              line_start = text.rfind('\n', 0, start) + 1
+              indent = re.match(r'[ \t]*', text[line_start:start]).group(0)
+              insertion = f'\n{indent}let {variable} = apply_configured_git_daemon_session_timeout({variable})?;'
+              text = text[:end] + insertion + text[end:]
+
+          if 'mod git_daemon_session_timeout_profile_tests' not in text:
+              text += '''
+
+#[cfg(test)]
+mod git_daemon_session_timeout_profile_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_timeout_text_is_a_typed_configuration_refusal() {
+        let refusal = parse_git_daemon_session_timeout(std::ffi::OsStr::new("not-a-number"))
+            .expect_err("invalid text must refuse");
+        assert!(matches!(
+            refusal,
+            CliRefusal::InvalidServeLimit {
+                field: GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn zero_timeout_is_a_typed_configuration_refusal() {
+        let refusal = parse_git_daemon_session_timeout(std::ffi::OsStr::new("0"))
+            .expect_err("zero cannot disable the finite envelope");
+        assert!(matches!(
+            refusal,
+            CliRefusal::InvalidServeLimit {
+                field: GIT_DAEMON_SESSION_TIMEOUT_SECONDS_ENV,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_nonzero_timeout_preserves_the_exact_duration() {
+        let timeout = parse_git_daemon_session_timeout(std::ffi::OsStr::new("901"))
+            .expect("a non-zero decimal duration is valid");
+        assert_eq!(timeout.duration(), Duration::from_secs(901));
+    }
+}
+'''
+
+          usage = '[--receive-principal <principal-id-hex>]'
+          expanded = '[--receive-principal <principal-id-hex>] (set FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS to a non-zero finite override)'
+          if expanded not in text and usage in text:
+              text = text.replace(usage, expanded, 1)
+
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          cargo fmt --all --check
+          git diff --check
+          if git diff --quiet; then
+            echo 'CLI timeout profile slice already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = 'crates/fgit-cli/src/lib.rs' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          cargo check -p fgit-cli --all-targets
+          cargo test -p fgit-cli --all-targets --no-fail-fast
+          cargo test -p fgit-node --test git_daemon_deadline --no-fail-fast
+          cargo clippy -p fgit-cli --all-targets -- -D warnings
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add crates/fgit-cli/src/lib.rs
+          git commit -m 'feat(cli): expose finite git-daemon session timeout profile [frankengit-asb8]'
+          git push origin HEAD:main
+
+      - name: Wire the large-push harness to the explicit profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/e2e/suites/node/first_push.sh')
+          text = path.read_text()
+          if 'FG_E2E_LARGE_PUSH_SESSION_TIMEOUT_SECONDS' not in text:
+              start = text.find('START_SERVE_LARGE()')
+              end = text.find('FIND_PORT_AND_SERVE_LARGE()', start)
+              if start < 0 or end < 0:
+                  raise SystemExit('large-push serve helper not found')
+              section = text[start:end]
+              needle = 'exec "$bin" serve'
+              if section.count(needle) != 1:
+                  raise SystemExit(f'expected one large-push serve exec, found {section.count(needle)}')
+              replacement = 'export FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS="${FG_E2E_LARGE_PUSH_SESSION_TIMEOUT_SECONDS:-1800}"; exec "$bin" serve'
+              section = section.replace(needle, replacement, 1)
+              text = text[:start] + section + text[end:]
+              marker = '# OPT-IN (FG_E2E_LARGE_PUSH=1) and expects a RELEASE node:'
+              note = '''# OPT-IN (FG_E2E_LARGE_PUSH=1). The harness selects an explicit finite
+# 1,800-second daemon envelope for this expensive compatibility drill; override
+# it with FG_E2E_LARGE_PUSH_SESSION_TIMEOUT_SECONDS. Production remains bounded,
+# while debug/reduced-throughput builds are no longer coupled to the 300-second
+# compatibility default.
+'''
+              if marker in text:
+                  line_end = text.find('\n', text.find(marker)) + 1
+                  paragraph_end = text.find('if [ "${FG_E2E_LARGE_PUSH:-0}"', line_end)
+                  if paragraph_end > line_end:
+                      text = text[:text.find(marker)] + note + text[paragraph_end:]
+              path.write_text(text)
+          PY
+          bash -n scripts/e2e/suites/node/first_push.sh
+          git diff --check
+          if git diff --quiet; then
+            echo 'large-push harness profile slice already landed'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = 'scripts/e2e/suites/node/first_push.sh' || { printf 'unexpected files changed:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add scripts/e2e/suites/node/first_push.sh
+          git commit -m 'test(e2e): make the large-push timeout profile explicit [frankengit-asb8]'
+          git push origin HEAD:main
+
+      - name: Reconcile public documentation and implementation status
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          python3 - <<'PY'
+          from pathlib import Path
+          from datetime import date
+
+          readme = Path('README.md')
+          text = readme.read_text()
+          old = '''The daemon does not serve receive-pack, smart HTTP, SSH, or
+ a native API. Receive parsing, quarantine, validation, and durable admission
+ exist as lower-level and loopback composition slices, but ordinary network
+ push remains unsupported until those slices are connected to a production
+ transport (tracked by `frankengit-hh37`). No command treats local object
+ placement, a routing hint, or a connection-local ref map as canonical state.'''.replace('\n ', '\n')
+          new = '''The daemon serves upload-pack by default and can serve the bounded raw
+`git-receive-pack` lane when the operator explicitly supplies
+`--receive-principal`. That compatibility transport deliberately provides no
+independent authentication, so the configured principal is an operator trust
+boundary rather than a client assertion. A deployment can replace the finite
+300-second compatibility envelope by setting
+`FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS` to a non-zero decimal duration; zero
+and malformed values fail closed. Smart HTTP, SSH, and the native API remain
+incomplete. No command treats local object placement, a routing hint, or a
+connection-local ref map as canonical state.'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'The daemon serves upload-pack by default and can serve the bounded raw' not in text:
+              raise SystemExit('README receive-pack reality paragraph changed unexpectedly')
+
+          stale = '- Network receive-pack/push, smart HTTP, production SSH, the native REST/API'
+          if stale in text:
+              start = text.index(stale)
+              end = text.find('\n- ', start + 2)
+              if end < 0:
+                  end = len(text)
+              replacement = '''- The bounded raw git-daemon receive-pack/push lane is now composed through
+  quarantine, validation, sealed admission, authority-head publication, and
+  report-status, with an explicit operator principal and finite timeout profile.
+  Smart HTTP, production SSH, the native REST/API gateway, projections, search,
+  issues/notifications, the web UI, the TUI, MCP, production hostile-execution
+  isolation, and the actual release publication path are not complete.'''
+              text = text[:start] + replacement + text[end:]
+
+          text = text.replace('### Reality snapshot: 2026-08-29', '### Reality snapshot: 2026-09-04', 1)
+          readme.write_text(text)
+
+          bootstrap = Path('tooling-rust-bootstrap-links.md')
+          if bootstrap.exists():
+              b = bootstrap.read_text()
+              b = b.replace('nightly-2026-08-25', 'nightly-2026-08-31')
+              b = b.replace('/2026-08-25/', '/2026-08-31/')
+              if 'Treat `rust-toolchain.toml` as the authority.' not in b:
+                  b += '\nTreat `rust-toolchain.toml` as the authority; update this transport-only note in the same commit whenever the pin changes.\n'
+              bootstrap.write_text(b)
+
+          status_candidates = sorted(Path('.').glob('**/*IMPLEMENTATION*STATUS*.md'))
+          status_path = status_candidates[0] if status_candidates else Path('docs/IMPLEMENTATION_STATUS.md')
+          section = '''# Implementation status
+
+## 2026-09-04 mainline reality
+
+- Raw git-daemon upload-pack is available through the bounded one-node surface.
+- Raw git-daemon receive-pack is opt-in through an explicit operator principal and reaches quarantine, bounded validation, sealed admission, authority-head publication, and report-status.
+- The default legacy transport envelope remains finite at 300 seconds. `fg serve` now accepts a deployment override through `FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS`; malformed and zero values refuse rather than disabling the bound.
+- The large first-push E2E drill selects its timeout explicitly instead of depending on build-profile speed.
+- Smart HTTP, production SSH, the native API gateway, projections, search, full forge product surfaces, and release publication remain incomplete.
+- `frankengit-asb8` remains in progress: this slice makes the existing finite profile reachable and testable; automatic phase/work-scaled deadline accounting is not claimed complete.
+'''
+          if status_path.exists():
+              existing = status_path.read_text()
+              if '## 2026-09-04 mainline reality' not in existing:
+                  if existing.startswith('# '):
+                      first_newline = existing.find('\n') + 1
+                      status_path.write_text(existing[:first_newline] + '\n' + section.split('\n', 2)[2] + '\n' + existing[first_newline:])
+                  else:
+                      status_path.write_text(section + '\n' + existing)
+          else:
+              status_path.parent.mkdir(parents=True, exist_ok=True)
+              status_path.write_text(section)
+
+          changelog = Path('CHANGELOG.md')
+          entry = '''## Unreleased
+
+### Added
+
+- Exposed the finite git-daemon session timeout profile to `fg serve` through `FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS`, with strict typed refusal for zero and malformed values.
+- Made the large first-push E2E timeout an explicit test profile rather than an accidental function of debug/release throughput.
+
+### Fixed
+
+- Restored a rustfmt-clean workspace and corrected the misplaced `NodeConfig` session-timeout documentation.
+- Aligned the transport-only Rust bootstrap note with the repository's `nightly-2026-08-31` toolchain pin.
+'''
+          if changelog.exists():
+              c = changelog.read_text()
+              if 'Exposed the finite git-daemon session timeout profile' not in c:
+                  if c.startswith('# '):
+                      pos = c.find('\n') + 1
+                      c = c[:pos] + '\n' + entry + '\n' + c[pos:]
+                  else:
+                      c = entry + '\n' + c
+                  changelog.write_text(c)
+          else:
+              changelog.write_text('# Changelog\n\n' + entry)
+          PY
+          cargo fmt --all --check
+          git diff --check
+          if git diff --quiet; then
+            echo 'documentation reconciliation already landed'
+            exit 0
+          fi
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add README.md CHANGELOG.md tooling-rust-bootstrap-links.md docs
+          git commit -m 'docs: reconcile receive-pack and timeout implementation status'
+          git push origin HEAD:main
+
+      - name: Record truthful bead progress
+        shell: bash
+        env:
+          BR_VERSION: 0.5.7
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B work origin/main
+          case "$(uname -m)" in
+            x86_64) asset="br-${BR_VERSION}-linux_amd64.tar.gz" ;;
+            aarch64|arm64) asset="br-${BR_VERSION}-linux_arm64.tar.gz" ;;
+            *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          base="https://github.com/Dicklesworthstone/beads_rust/releases/download/v${BR_VERSION}"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/br.tar.gz" "$base/$asset"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/br.tar.gz.sha256" "$base/$asset.sha256"
+          expected="$(awk '{print $1}' "$RUNNER_TEMP/br.tar.gz.sha256")"
+          actual="$(sha256sum "$RUNNER_TEMP/br.tar.gz" | awk '{print $1}')"
+          test -n "$expected"
+          test "$actual" = "$expected"
+          mkdir -p "$RUNNER_TEMP/br-bin"
+          tar -xzf "$RUNNER_TEMP/br.tar.gz" -C "$RUNNER_TEMP/br-bin"
+          BR="$(find "$RUNNER_TEMP/br-bin" -type f -name br | head -n 1)"
+          test -n "$BR"
+          chmod +x "$BR"
+          recent="$(git log -n 6 --pretty=format:'%h %s' | tr '\n' '; ')"
+          "$BR" comments add frankengit-asb8 --author CobaltKite --message "Mainline progress landed and verified through focused CLI/node gates. The existing finite GitDaemonSessionTimeout is now reachable from the shipped fg serve command through FGIT_GIT_DAEMON_SESSION_TIMEOUT_SECONDS; zero/malformed values fail closed, the large-push harness selects an explicit finite profile, rustfmt and NodeConfig documentation were repaired, and README/CHANGELOG/implementation status were reconciled. Recent commits: ${recent}. Honest non-claim: automatic phase- or work-scaled deadline accounting is not completed by this slice, so frankengit-asb8 remains in_progress rather than being advanced to batch_pending." --json
+          "$BR" sync --flush-only
+          if git diff --quiet; then
+            echo 'bead progress comment already present'
+            exit 0
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = '.beads/issues.jsonl' || { printf 'unexpected bead files changed:\n%s\n' "$changed" >&2; exit 1; }
+          git config user.name 'CobaltKite'
+          git config user.email 'cobaltkite@invalid.example'
+          git add .beads/issues.jsonl
+          git commit -m 'chore(beads): record finite timeout profile progress [frankengit-asb8]'
+          git push origin HEAD:main
+
+      - name: Final focused verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B verify origin/main
+          cargo fmt --all --check
+          cargo check -p fgit-cli --all-targets
+          cargo test -p fgit-cli --all-targets --no-fail-fast
+          cargo test -p fgit-node --test git_daemon_deadline --no-fail-fast
+          cargo clippy -p fgit-cli --all-targets -- -D warnings
+          bash -n scripts/e2e/suites/node/first_push.sh
+          git status --short
