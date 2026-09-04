@@ -1,0 +1,66 @@
+diff --git a/crates/fgit-crypto/src/forge_position.rs b/crates/fgit-crypto/src/forge_position.rs
+index c5b9614..f93fdca 100644
+--- a/crates/fgit-crypto/src/forge_position.rs
++++ b/crates/fgit-crypto/src/forge_position.rs
+@@ -15,7 +15,9 @@ use core::cmp::Ordering;
+ use fgit_types::hash::{Digest, DigestBytes};
+ use fgit_types::label::{AsciiSlug, SchemaFamily, SchemaId};
+ 
+-use crate::merkle::{MerkleProof, MerkleRefusal, merkle_leaf, merkle_proof, merkle_root, verify_merkle_proof};
++use crate::merkle::{
++    MerkleProof, MerkleRefusal, merkle_leaf, merkle_proof, merkle_root, verify_merkle_proof,
++};
+ use crate::registry::IdentityDomain;
+ 
+ /// Why a forge-position commitment or proof could not be produced.
+@@ -38,7 +40,10 @@ impl core::fmt::Display for ForgePositionRefusal {
+             Self::StreamNotPresent => {
+                 formatter.write_str("the requested forge stream is absent from the offered state")
+             }
+-            Self::Merkle(source) => write!(formatter, "forge-position Merkle operation refused: {source}"),
++            Self::Merkle(source) => write!(
++                formatter,
++                "forge-position Merkle operation refused: {source}"
++            ),
+         }
+     }
+ }
+@@ -145,9 +150,7 @@ pub fn forge_position_membership_proof(
+     let position = ordered[index].1;
+     let leaves = ordered
+         .into_iter()
+-        .map(|(candidate, candidate_position)| {
+-            forge_position_leaf(candidate, *candidate_position)
+-        })
++        .map(|(candidate, candidate_position)| forge_position_leaf(candidate, *candidate_position))
+         .collect::<Vec<_>>();
+     Ok((
+         position,
+diff --git a/crates/fgit-crypto/tests/forge_position_layout.rs b/crates/fgit-crypto/tests/forge_position_layout.rs
+index 6381519..350c93d 100644
+--- a/crates/fgit-crypto/tests/forge_position_layout.rs
++++ b/crates/fgit-crypto/tests/forge_position_layout.rs
+@@ -4,9 +4,8 @@
+ //! so a verifier that simply rejects every input cannot satisfy this suite.
+ 
+ use fgit_crypto::{
+-    ForgePositionRefusal, MerkleProof, forge_position_leaf,
+-    forge_position_membership_proof, forge_position_merkle_root,
+-    verify_forge_position_membership,
++    ForgePositionRefusal, MerkleProof, forge_position_leaf, forge_position_membership_proof,
++    forge_position_merkle_root, verify_forge_position_membership,
+ };
+ use fgit_types::hash::{Digest, DigestAlgorithmId};
+ use fgit_types::label::AsciiSlug;
+@@ -90,9 +89,8 @@ fn every_stream_proves_the_exact_position_the_root_commits_to() {
+ fn a_real_path_cannot_be_relabelled_as_another_stream() {
+     let entries = state();
+     let root = forge_position_merkle_root(&entries).expect("root");
+-    let (position, proof) =
+-        forge_position_membership_proof(&entries, &stream("pull-request/17"))
+-            .expect("membership proof");
++    let (position, proof) = forge_position_membership_proof(&entries, &stream("pull-request/17"))
++        .expect("membership proof");
+ 
+     assert!(verify_forge_position_membership(
+         &root,
