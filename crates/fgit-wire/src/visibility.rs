@@ -24,7 +24,7 @@
 //! Every guard here therefore reuses the exact error variants and payloads
 //! the unfiltered paths already produce for absent objects.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{AdvertisedRef, AnyGitOid, UploadPackRepository, WireError, WireLimits};
 
@@ -141,8 +141,10 @@ pub struct VisibleUploadPackRepository<'a, R: ?Sized + UploadPackRepository> {
     /// Symbolic metadata selected with the same policy as `visible`.
     symref_targets: BTreeMap<Vec<u8>, Vec<u8>>,
     unborn_target: Option<Vec<u8>>,
+    /// Canonical peeled attributes of visible advertised objects, snapshotted once.
+    peeled_targets: HashMap<AnyGitOid, AnyGitOid>,
     visible_tips: HashSet<AnyGitOid>,
-    /// Tips reachable only through hidden refs; existence must stay deniable.
+    /// Advertised or peeled tips with no visible ref/peeled path in this view.
     hidden_only_tips: HashSet<AnyGitOid>,
 }
 
@@ -212,11 +214,26 @@ impl<'a, R: ?Sized + UploadPackRepository> VisibleUploadPackRepository<'a, R> {
         let mut visible = Vec::new();
         let mut visible_tips = HashSet::new();
         let mut hidden_tips = HashSet::new();
+        let mut canonical_peeled = HashMap::new();
+        let mut peeled_targets = HashMap::new();
         for reference in advertised {
+            // Protocol v2 carries peeling as metadata, not a separate ^{}
+            // advertisement. Account for that identity in the same projection.
+            // Shared OIDs use one canonical lookup, including a cached None.
+            let peeled = *canonical_peeled
+                .entry(reference.oid)
+                .or_insert_with(|| inner.peeled(reference.oid));
             if hidden_names.contains(reference.name.as_slice()) {
                 hidden_tips.insert(reference.oid);
+                if let Some(target) = peeled {
+                    hidden_tips.insert(target);
+                }
             } else {
                 visible_tips.insert(reference.oid);
+                if let Some(target) = peeled {
+                    visible_tips.insert(target);
+                    peeled_targets.insert(reference.oid, target);
+                }
                 visible.push(reference.clone());
             }
         }
@@ -226,6 +243,7 @@ impl<'a, R: ?Sized + UploadPackRepository> VisibleUploadPackRepository<'a, R> {
             visible,
             symref_targets,
             unborn_target,
+            peeled_targets,
             visible_tips,
             hidden_only_tips: hidden_tips,
         }
@@ -271,10 +289,6 @@ impl<R: ?Sized + UploadPackRepository> UploadPackRepository for VisibleUploadPac
     }
 
     fn peeled(&self, oid: AnyGitOid) -> Option<AnyGitOid> {
-        if self.visible_tips.contains(&oid) {
-            self.inner.peeled(oid)
-        } else {
-            None
-        }
+        self.peeled_targets.get(&oid).copied()
     }
 }
