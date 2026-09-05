@@ -1376,14 +1376,26 @@ pub enum ReceiveCommandStatus {
 }
 
 /// Generates deterministic report-status packets without publishing any ref.
+///
+/// With `side-band-64k`, channel 1 carries the complete inner pkt-line stream,
+/// including its flush; a separate outer flush terminates the multiplexed
+/// stream. Without report-status, only that negotiated outer flush is emitted.
+/// Every framing byte is charged to the same outbound budget.
 pub fn report_status(
     request: &ReceiveRequest,
     unpack: UnpackStatus,
     statuses: &[ReceiveCommandStatus],
     limits: &ReceiveLimits,
 ) -> Result<Vec<Packet>, ReceiveError> {
+    let sideband = request.has_capability(b"side-band-64k");
     if request.report_status_mode() == ReportStatusMode::Disabled {
-        return Ok(Vec::new());
+        let mut output = Vec::new();
+        if sideband {
+            let mut used = 0;
+            add_output_packet(&mut output, Packet::Flush, 4, &mut used, &limits.wire)
+                .map_err(ReceiveError::Wire)?;
+        }
+        return Ok(output);
     }
     if statuses.len() != request.commands.len() {
         return Err(ReceiveError::StatusCountMismatch {
@@ -1392,7 +1404,6 @@ pub fn report_status(
         });
     }
     let statuses = apply_atomic_status(request, statuses);
-    let sideband = request.has_capability(b"side-band-64k");
     let mut output = Vec::new();
     let mut used = 0_usize;
     append_report_packet(
@@ -1411,8 +1422,11 @@ pub fn report_status(
             limits,
         )?;
     }
-    add_output_packet(&mut output, Packet::Flush, 4, &mut used, &limits.wire)
-        .map_err(ReceiveError::Wire)?;
+    append_report_packet(&mut output, Packet::Flush, sideband, &mut used, limits)?;
+    if sideband {
+        add_output_packet(&mut output, Packet::Flush, 4, &mut used, &limits.wire)
+            .map_err(ReceiveError::Wire)?;
+    }
     Ok(output)
 }
 
@@ -1517,14 +1531,24 @@ fn append_report_packet(
     used: &mut usize,
     limits: &ReceiveLimits,
 ) -> Result<(), ReceiveError> {
-    let Packet::Data(line) = packet else {
-        return Err(ReceiveError::UnexpectedPacket {
-            state: ReceivePhase::Complete,
-            packet: packet_name(&packet),
-        });
+    let encoded_len = match &packet {
+        Packet::Data(line) => line
+            .len()
+            .checked_add(4)
+            .ok_or(ReceiveError::AllocationFailure)?,
+        Packet::Flush => 4,
+        Packet::Delimiter | Packet::ResponseEnd => {
+            return Err(ReceiveError::UnexpectedPacket {
+                state: ReceivePhase::Complete,
+                packet: packet_name(&packet),
+            });
+        }
     };
     if sideband {
-        for packet in encode_sideband_64k(SidebandBand::PackData, &line, &limits.wire)
+        // Sideband wraps a pkt-line byte stream, not the bare status text.
+        // Encode one bounded inner packet at a time; outer chunks may split it.
+        let framed = crate::encode_packet(&packet, &limits.wire).map_err(ReceiveError::Wire)?;
+        for packet in encode_sideband_64k(SidebandBand::PackData, &framed, &limits.wire)
             .map_err(ReceiveError::Wire)?
         {
             let Packet::Data(data) = packet else {
@@ -1542,11 +1566,7 @@ fn append_report_packet(
         }
         return Ok(());
     }
-    let encoded = line
-        .len()
-        .checked_add(4)
-        .ok_or(ReceiveError::AllocationFailure)?;
-    add_output_packet(output, Packet::Data(line), encoded, used, &limits.wire)
+    add_output_packet(output, packet, encoded_len, used, &limits.wire)
         .map_err(ReceiveError::Wire)
 }
 
