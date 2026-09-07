@@ -44,6 +44,7 @@ use fgit_types::{
     TxId,
 };
 use fgit_wire::GitObjectFormat;
+use fgit_wire::visibility::RefVisibility;
 
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
@@ -155,6 +156,15 @@ impl CanonicalAdmissionStore for Store {
     ) -> Result<(), RefusalCode> {
         self.0.closures.borrow_mut().insert(root, closure);
         Ok(())
+    }
+
+    fn resolve_hidden_ref_policy(
+        &self,
+        _configuration_root: Digest,
+    ) -> Result<RefVisibility, RefusalCode> {
+        // This fixture stages no hidden-ref policy; empty is its honest
+        // content.
+        Ok(RefVisibility::new())
     }
 }
 

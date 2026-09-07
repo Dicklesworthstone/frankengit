@@ -75,6 +75,7 @@ use fgit_wire::receive::{
     QuarantineReceipt, ReceiveContext, ReceiveEvent, ReceiveLimits, ReceivePack, ReceiveRequest,
     SignedPushProfile,
 };
+use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, WireLimits};
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
@@ -312,6 +313,15 @@ impl CanonicalAdmissionStore for StagingStore {
             .expect("fixture staging mutex")
             .insert(root, closure);
         Ok(())
+    }
+
+    fn resolve_hidden_ref_policy(
+        &self,
+        _configuration_root: Digest,
+    ) -> Result<RefVisibility, RefusalCode> {
+        // This fixture stages no hidden-ref policy; an empty policy is the
+        // honest content of this store.
+        Ok(RefVisibility::new())
     }
 }
 

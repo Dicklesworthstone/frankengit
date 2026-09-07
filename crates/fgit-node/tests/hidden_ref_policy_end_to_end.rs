@@ -90,11 +90,13 @@ use fgit_node::{
     serve_git_daemon_upload_pack,
 };
 use fgit_runtime::{BudgetClass, RuntimeProfile};
+use fgit_types::cell::ReadLabel;
 use fgit_types::{
     DecisionOutcome, DigestAlgorithmId, DigestBytes, GitHashAlgorithm, GitOid, PrincipalId,
     RefusalCode, RefusalRecordId, RepositoryId, TenantId, TxId,
 };
 use fgit_wire::receive::{ReceiveContext, ReceiveLimits, SignedPushProfile};
+use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{
     Capabilities, GitObjectFormat, PackPayloadSource, Packet, UploadPackRepository, WireError,
     WireLimits, encode_packets,
@@ -548,6 +550,7 @@ struct Observed {
     hides_hidden: bool,
     hides_visible: bool,
     advertised: Vec<Vec<u8>>,
+    receive_advertised: Vec<Vec<u8>>,
     served: Vec<u8>,
 }
 
@@ -604,8 +607,28 @@ fn observe(rules: Option<&[&[u8]]>) -> Observed {
             &WireLimits::default(),
         ))
         .expect("the materialized snapshot becomes an upload-pack view");
-    let advertised = repository
+    let advertised: Vec<Vec<u8>> = repository
         .advertised_refs()
+        .iter()
+        .map(|reference| reference.name.clone())
+        .collect();
+
+    // The push advertisement through the production labelled-read entrypoint,
+    // which composes the materialized snapshot with the receive-side
+    // advertisement type exactly as the daemon's receive lane does. The
+    // caller supplies no additional hiding view, so what remains is precisely
+    // the repository's stored policy.
+    let receive_advertisement = node
+        .runtime()
+        .block_on(node.labelled_advertisement_in(
+            &node.request_context(),
+            &RefVisibility::new(),
+            &WireLimits::default(),
+            ReadLabel::current(),
+        ))
+        .expect("a serving cell answers a current labelled read");
+    let receive_advertised = receive_advertisement
+        .refs()
         .iter()
         .map(|reference| reference.name.clone())
         .collect();
@@ -633,6 +656,7 @@ fn observe(rules: Option<&[&[u8]]>) -> Observed {
         hides_hidden,
         hides_visible,
         advertised,
+        receive_advertised,
         served,
     }
 }
@@ -706,6 +730,31 @@ fn a_stored_policy_reaches_the_snapshot_and_removes_exactly_that_ref_from_the_ad
         names(&with.advertised),
         names(&expected),
         "the stored policy must remove the hidden ref from the production fetch \
+         advertisement and change nothing else"
+    );
+
+    // Acceptance line 3, push-advertisement half, through the production
+    // labelled receive entrypoint: the same stored policy must remove the
+    // hidden ref there too, and change nothing else.
+    assert!(
+        without
+            .receive_advertised
+            .iter()
+            .any(|name| name.as_slice() == HIDDEN_REF),
+        "the twin's push advertisement must name the hidden ref, or the \
+         omission proves nothing; got {:?}",
+        names(&without.receive_advertised)
+    );
+    let expected_receive: Vec<Vec<u8>> = without
+        .receive_advertised
+        .iter()
+        .filter(|name| name.as_slice() != HIDDEN_REF)
+        .cloned()
+        .collect();
+    assert_eq!(
+        names(&with.receive_advertised),
+        names(&expected_receive),
+        "the stored policy must remove the hidden ref from the production push \
          advertisement and change nothing else"
     );
 }

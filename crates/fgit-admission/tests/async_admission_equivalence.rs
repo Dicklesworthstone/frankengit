@@ -85,6 +85,7 @@ use fgit_wire::receive::{
     QuarantineReceipt, ReceiveContext, ReceiveEvent, ReceiveLimits, ReceivePack, ReceiveRequest,
     SignedPushProfile,
 };
+use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, WireLimits};
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
@@ -369,6 +370,7 @@ struct CommitmentStore {
     refs: Mutex<BTreeMap<Digest, CanonicalRefState>>,
     closures: Mutex<BTreeMap<Digest, PermittedObjectClosure>>,
     forge_events: Mutex<BTreeMap<Digest, fgit_forge::ForgeEventBatch>>,
+    policies: Mutex<BTreeMap<Digest, RefVisibility>>,
 }
 
 #[derive(Clone, Default)]
@@ -408,6 +410,7 @@ impl Default for CommitmentStore {
             refs: Mutex::new(BTreeMap::new()),
             closures: Mutex::new(BTreeMap::new()),
             forge_events: Mutex::new(BTreeMap::new()),
+            policies: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -456,6 +459,20 @@ impl CanonicalAdmissionStore for StagingStore {
             .expect("fixture staging mutex")
             .insert(root, closure);
         Ok(())
+    }
+
+    fn resolve_hidden_ref_policy(
+        &self,
+        configuration_root: Digest,
+    ) -> Result<RefVisibility, RefusalCode> {
+        Ok(self
+            .0
+            .policies
+            .lock()
+            .expect("fixture staging mutex")
+            .get(&configuration_root)
+            .cloned()
+            .unwrap_or_else(RefVisibility::new))
     }
 }
 

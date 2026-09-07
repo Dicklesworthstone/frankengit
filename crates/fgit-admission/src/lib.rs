@@ -1539,6 +1539,24 @@ pub trait CanonicalAdmissionStore {
         root: Digest,
         closure: PermittedObjectClosure,
     ) -> Result<(), RefusalCode>;
+
+    /// Resolves the hidden-ref visibility policy the authenticated head
+    /// selects through its configuration root (frankengit-jkbo).
+    ///
+    /// The store owns the carrier dispatch — an inline rule list on a legacy
+    /// configuration body, or a `policy_root` indirection into a separate
+    /// `HiddenRefPolicyBody` — so the projection consumes the built policy and
+    /// never learns which carrier served it. A store that holds a policy
+    /// under this root but cannot resolve or parse it refuses (fail closed);
+    /// a store that holds no policy under this root answers an empty policy.
+    ///
+    /// There is deliberately no default implementation: every store decides
+    /// explicitly, because a default empty answer is how "this repository
+    /// hides nothing" silently becomes a served lie.
+    fn resolve_hidden_ref_policy(
+        &self,
+        configuration_root: Digest,
+    ) -> Result<RefVisibility, RefusalCode>;
 }
 
 /// Immutable non-ref evidence consumed by admission materialization.
@@ -1776,8 +1794,6 @@ impl Display for CanonicalGenesisFailure {
     }
 }
 
-impl Error for CanonicalGenesisFailure {}
-
 impl<Store, Evidence> AdmissionSnapshotProjection for CanonicalAdmissionProjection<Store, Evidence>
 where
     Store: CanonicalAdmissionStore,
@@ -1794,27 +1810,20 @@ where
             return Err(RefusalCode::AuthorityReceiptStale);
         }
         let state = self.resolve_ref_state(authenticated_body.ref_root)?;
+        // The visibility policy is resolved from the configuration the
+        // authenticated head selects, through the store's carrier dispatch
+        // (frankengit-jkbo). A store that holds an unresolvable policy refuses
+        // the whole snapshot rather than serving an unfiltered view.
+        let hidden_refs = self
+            .store
+            .resolve_hidden_ref_policy(authenticated_body.configuration_root)?;
         Ok(AdmissionSnapshot {
             refs: state.refs,
             head_target: state.head_target,
             forge_positions: BTreeMap::new(),
             retention: BTreeSet::new(),
             outbox: BTreeMap::new(),
-            // Empty because this projection CANNOT reach a hide policy, not
-            // because the repository has none. `CanonicalAdmissionStore` exposes
-            // ref state and object closures and no way to resolve an arbitrary
-            // immutable body, so the configuration the authenticated head selects
-            // is out of reach from here -- `PublicationBasis::body()` yields
-            // `configuration_root` as a Digest with nothing to resolve it
-            // against. The node's `DurableAdmissionMaterializer` populates this
-            // properly because it has authority-store access at materialization.
-            //
-            // Said explicitly because an unexplained `RefVisibility::new()` reads
-            // as "this repository hides nothing", and a reader who believes that
-            // will not go looking for the missing capability. Closing it needs a
-            // resolve method on the store trait, which is a seven-implementor
-            // change and an open question on `frankengit-jkbo`.
-            hidden_refs: RefVisibility::new(),
+            hidden_refs,
             tag_peels: BTreeMap::new(),
         })
     }
@@ -4328,12 +4337,19 @@ mod tests {
     struct FailOnceCanonicalStore {
         refs: Rc<RefCell<BTreeMap<Digest, CanonicalRefState>>>,
         closures: Rc<RefCell<BTreeMap<Digest, PermittedObjectClosure>>>,
+        policies: Rc<RefCell<BTreeMap<Digest, RefVisibility>>>,
         fail_next_ref_stage: Rc<Cell<bool>>,
     }
 
     impl FailOnceCanonicalStore {
         fn fail_next_ref_stage(&self) {
             self.fail_next_ref_stage.set(true);
+        }
+
+        fn stage_hidden_ref_policy(&self, configuration_root: Digest, policy: RefVisibility) {
+            self.policies
+                .borrow_mut()
+                .insert(configuration_root, policy);
         }
     }
 
@@ -4376,6 +4392,19 @@ mod tests {
         ) -> Result<(), RefusalCode> {
             self.closures.borrow_mut().insert(root, closure);
             Ok(())
+        }
+        fn resolve_hidden_ref_policy(
+            &self,
+            configuration_root: Digest,
+        ) -> Result<RefVisibility, RefusalCode> {
+            // A root the fixture never staged a policy under honestly has no
+            // policy; a staged policy is served exactly as stored.
+            Ok(self
+                .policies
+                .borrow()
+                .get(&configuration_root)
+                .cloned()
+                .unwrap_or_else(RefVisibility::new))
         }
     }
 
@@ -4583,6 +4612,122 @@ mod tests {
             .expect("canonical projection accepts its authenticated basis");
         assert_eq!(snapshot.head_target.as_ref(), Some(&main));
         assert_eq!(snapshot.refs.get(&main), Some(&oid(35)));
+    }
+
+    #[test]
+    fn canonical_projection_resolves_the_hidden_ref_policy_the_head_selects() {
+        let context = context();
+        let main = RefName::try_new(b"refs/heads/main").expect("main is a valid branch ref");
+        let state = CanonicalRefState::new_with_head_target(
+            BTreeMap::from([(main.clone(), oid(35))]),
+            main.clone(),
+        )
+        .expect("a populated branch HEAD is canonical");
+        let ref_root = canonical_ref_state_root(&state).expect("canonical state has a root");
+        let staging = FailOnceCanonicalStore::default();
+        staging
+            .stage_ref_state(ref_root, state)
+            .expect("HEAD-bearing state stages");
+
+        // The genesis head selects configuration_root digest(20); stage the
+        // policy beneath exactly that root, the way the head-selected
+        // configuration names it in production.
+        let mut policy = RefVisibility::new();
+        policy
+            .push_rule(b"refs/private", &fgit_wire::WireLimits::default())
+            .expect("a fixed valid hide rule");
+        let configuration_root = digest(20);
+        staging.stage_hidden_ref_policy(configuration_root, policy);
+
+        let mut head = genesis(&context);
+        head.ref_root = ref_root;
+        let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(80));
+        initialize_repository(&store, &context.head_key, &head)
+            .expect("canonical genesis initializes");
+        let projection = CanonicalAdmissionProjection::new(staging, CanonicalFixtureEvidence);
+        let (basis, _receipt, authenticated) =
+            read_basis(&store, &context.head_key).expect("head reads at one authenticated basis");
+
+        let snapshot = projection
+            .snapshot(&basis, &authenticated)
+            .expect("the projection resolves the selected policy");
+        assert!(
+            snapshot.hidden_refs.hides(b"refs/private/secret"),
+            "the stored policy hides its target through the projection"
+        );
+        assert!(
+            !snapshot.hidden_refs.hides(b"refs/heads/main"),
+            "the permitted twin stays visible"
+        );
+    }
+
+    /// A store whose policy cannot be resolved fails the snapshot closed
+    /// rather than serving an unfiltered view.
+    #[test]
+    fn canonical_projection_fails_closed_when_the_policy_is_unresolvable() {
+        struct PolicyRefusingStore(FailOnceCanonicalStore);
+
+        impl CanonicalAdmissionStore for PolicyRefusingStore {
+            fn resolve_ref_state(&self, root: Digest) -> Result<CanonicalRefState, RefusalCode> {
+                self.0.resolve_ref_state(root)
+            }
+            fn stage_ref_state(
+                &self,
+                root: Digest,
+                state: CanonicalRefState,
+            ) -> Result<(), RefusalCode> {
+                self.0.stage_ref_state(root, state)
+            }
+            fn resolve_permitted_object_closure(
+                &self,
+                root: Digest,
+            ) -> Result<PermittedObjectClosure, RefusalCode> {
+                self.0.resolve_permitted_object_closure(root)
+            }
+            fn stage_permitted_object_closure(
+                &self,
+                root: Digest,
+                closure: PermittedObjectClosure,
+            ) -> Result<(), RefusalCode> {
+                self.0.stage_permitted_object_closure(root, closure)
+            }
+            fn resolve_hidden_ref_policy(
+                &self,
+                _configuration_root: Digest,
+            ) -> Result<RefVisibility, RefusalCode> {
+                Err(RefusalCode::EvidenceInvalid)
+            }
+        }
+
+        let context = context();
+        let main = RefName::try_new(b"refs/heads/main").expect("main is a valid branch ref");
+        let state = CanonicalRefState::new_with_head_target(
+            BTreeMap::from([(main.clone(), oid(35))]),
+            main,
+        )
+        .expect("a populated branch HEAD is canonical");
+        let ref_root = canonical_ref_state_root(&state).expect("canonical state has a root");
+        let staging = FailOnceCanonicalStore::default();
+        staging
+            .stage_ref_state(ref_root, state)
+            .expect("HEAD-bearing state stages");
+
+        let mut head = genesis(&context);
+        head.ref_root = ref_root;
+        let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(81));
+        initialize_repository(&store, &context.head_key, &head)
+            .expect("canonical genesis initializes");
+        let projection = CanonicalAdmissionProjection::new(
+            PolicyRefusingStore(staging),
+            CanonicalFixtureEvidence,
+        );
+        let (basis, _receipt, authenticated) =
+            read_basis(&store, &context.head_key).expect("head reads at one authenticated basis");
+
+        let Err(code) = projection.snapshot(&basis, &authenticated) else {
+            panic!("an unresolvable policy must refuse the snapshot, not serve it unfiltered");
+        };
+        assert_eq!(code, RefusalCode::EvidenceInvalid);
     }
 
     #[test]

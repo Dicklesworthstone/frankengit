@@ -2090,6 +2090,41 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
     ) -> Result<(), RefusalCode> {
         Err(RefusalCode::DurabilityProfileUnavailable)
     }
+
+    /// Serves the hidden-ref policy of the cached materialization, bound to
+    /// the configuration root the way the ref-state resolve above binds to
+    /// the ref root: a permit mismatch discards the cache, a configuration
+    /// mismatch is stale, and the answer is the policy the authenticated
+    /// materialization already resolved (possibly empty) — never a fresh
+    /// guess.
+    fn resolve_hidden_ref_policy(
+        &self,
+        configuration_root: Digest,
+    ) -> Result<RefVisibility, RefusalCode> {
+        let mut guard = self
+            .materialized
+            .write()
+            .map_err(|_| RefusalCode::InternalInvariantBreach)?;
+        let Some(materialized) = guard.as_ref() else {
+            return Err(RefusalCode::EvidenceMissing);
+        };
+        let binding = CacheBinding::new(
+            materialized.basis.body().repository_id,
+            materialized.basis.id(),
+            materialized.basis.generation(),
+            self.cache_scope,
+        );
+        if CachePermit::require_matching(Some(&materialized.cache_permit), binding).is_err() {
+            *guard = None;
+            return Err(RefusalCode::EvidenceMissing);
+        }
+        if materialized.basis.body().configuration_root != configuration_root {
+            return Err(RefusalCode::AuthorityReceiptStale);
+        }
+        let hidden_refs = materialized.hidden_refs.clone();
+        drop(guard);
+        Ok(hidden_refs)
+    }
 }
 
 /// # This surface is unavailable, exactly like its two siblings
@@ -7697,9 +7732,9 @@ impl OneNode {
         // it with a local timeout inference. The response itself receives one
         // new finite network phase, exactly like the rejection path above.
         let report_deadline = GitDaemonSessionDeadline::new(
-                    self.git_daemon_session_timeout,
-                    self.git_daemon_session_work_scaling,
-                );
+            self.git_daemon_session_timeout,
+            self.git_daemon_session_work_scaling,
+        );
         writer.restart_deadline(report_deadline.clone());
         report_deadline
             .check("prepare receive-pack report-status")
