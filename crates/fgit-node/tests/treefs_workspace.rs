@@ -7,8 +7,11 @@ use fgit_crypto::{GitObjectKind, Sha1, Sha256, git_object_id};
 use fgit_node::{NodeConfig, NodeWorkspaceRefusal, OneNode};
 use fgit_resource::{LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId};
 use fgit_runner::sparse_workspace::{SparseWorkspace, SparseWorkspacePlan};
-use fgit_treefs::{SparseLimits, TreeCapability, TreeEditIntent, TreePath, WorkspaceId};
-use fgit_types::numeric::HeadGeneration;
+use fgit_treefs::{
+    CapabilityRefusal, SparseLimits, SparseRefusal, TreeCapability, TreeEditIntent, TreePath,
+    WorkspaceId,
+};
+use fgit_types::numeric::{ByteCount, HeadGeneration};
 use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName, RepositoryId, TenantId};
 use fgit_wire::WireLimits;
 use fgit_wire::visibility::RefVisibility;
@@ -78,22 +81,25 @@ fn loose(root: &Path, kind: GitObjectKind, label: &str, body: &[u8]) -> GitOid {
     oid
 }
 fn import(node: &OneNode, root: &Path) {
+    import_with_message(node, root, "workspace source\n");
+}
+fn import_with_message(node: &OneNode, root: &Path, message: &str) -> [u64; 3] {
     let source = root.join("source");
     fs::create_dir_all(source.join("refs/heads")).unwrap();
     fs::write(source.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
-    let blob = loose(
-        &source,
-        GitObjectKind::Blob,
-        "blob",
-        b"authority-selected bytes\n",
+    let blob_body = b"authority-selected bytes\n";
+    let blob = loose(&source, GitObjectKind::Blob, "blob", blob_body);
+    let tree_body = [b"100644 file.txt\0".as_slice(), blob.as_bytes()].concat();
+    let tree = loose(&source, GitObjectKind::Tree, "tree", &tree_body);
+    let commit_body = format!(
+        "tree {tree}\nauthor Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\n{message}"
     );
-    let tree = loose(
+    let commit = loose(
         &source,
-        GitObjectKind::Tree,
-        "tree",
-        &[b"100644 file.txt\0".as_slice(), blob.as_bytes()].concat(),
+        GitObjectKind::Commit,
+        "commit",
+        commit_body.as_bytes(),
     );
-    let commit=loose(&source,GitObjectKind::Commit,"commit",format!("tree {tree}\nauthor Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\nworkspace source\n").as_bytes());
     fs::write(source.join("refs/heads/main"), format!("{commit}\n")).unwrap();
     let request = node.request_context();
     node.runtime()
@@ -104,6 +110,127 @@ fn import(node: &OneNode, root: &Path) {
             b"treefs-host-source-import",
         ))
         .unwrap();
+    [
+        commit_body.len() as u64,
+        tree_body.len() as u64,
+        blob_body.len() as u64,
+    ]
+}
+
+#[test]
+fn commit_discovery_consumes_the_same_fetch_quota_as_tree_and_blob_reads() {
+    let s = Scratch::new();
+    let (mut node, _) = OneNode::init(config(&s.0)).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let [commit_bytes, tree_bytes, blob_bytes] =
+        import_with_message(&node, &s.0, &"large commit metadata\n".repeat(400));
+    let total = commit_bytes + tree_bytes + blob_bytes;
+    let request = node.request_context();
+    let read = |capability: &mut TreeCapability| {
+        node.runtime()
+            .block_on(node.sparse_workspace_manifest_in::<Sha1>(
+                &request,
+                &reference(),
+                &RefVisibility::new(),
+                capability,
+                0,
+                SparseLimits::default(),
+            ))
+    };
+
+    // This allowance funded the whole manifest when commit discovery was
+    // omitted. Real commit metadata must now refuse before tree traversal.
+    let mut short = cap().with_fetch_budget(
+        ByteCount::try_new("fetch_budget", tree_bytes + blob_bytes, u64::MAX).unwrap(),
+    );
+    assert!(matches!(read(&mut short),
+        Err(NodeWorkspaceRefusal::Manifest(SparseRefusal::Capability(
+            CapabilityRefusal::FetchBudgetExceeded { consumed: 0, requested, .. }
+        ))) if requested == commit_bytes));
+    assert_eq!((short.fetched_bytes(), short.fetched_files()), (0, 0));
+
+    let mut no_objects = cap().with_file_budget(0);
+    assert!(matches!(
+        read(&mut no_objects),
+        Err(NodeWorkspaceRefusal::Manifest(SparseRefusal::Capability(
+            CapabilityRefusal::FileBudgetExceeded {
+                consumed: 0,
+                budget: 0
+            }
+        )))
+    ));
+
+    // A single missing byte refuses the blob after charging the commit/tree.
+    let mut almost =
+        cap().with_fetch_budget(ByteCount::try_new("fetch_budget", total - 1, u64::MAX).unwrap());
+    assert!(matches!(read(&mut almost),
+        Err(NodeWorkspaceRefusal::Manifest(SparseRefusal::Capability(
+            CapabilityRefusal::FetchBudgetExceeded { requested, .. }
+        ))) if requested == blob_bytes));
+    assert_eq!(
+        (almost.fetched_bytes(), almost.fetched_files()),
+        (commit_bytes + tree_bytes, 2)
+    );
+
+    let mut two_objects = cap().with_file_budget(2);
+    assert!(matches!(
+        read(&mut two_objects),
+        Err(NodeWorkspaceRefusal::Manifest(SparseRefusal::Capability(
+            CapabilityRefusal::FileBudgetExceeded {
+                consumed: 2,
+                budget: 2
+            }
+        )))
+    ));
+
+    // The exact byte and object allowance admits the identical real source.
+    let mut exact = cap()
+        .with_fetch_budget(ByteCount::try_new("fetch_budget", total, u64::MAX).unwrap())
+        .with_file_budget(3);
+    let manifest = read(&mut exact).unwrap();
+    assert_eq!(
+        manifest.entries()[0].kind().body().unwrap(),
+        b"authority-selected bytes\n"
+    );
+    assert_eq!((exact.fetched_bytes(), exact.fetched_files()), (total, 3));
+    assert_eq!(manifest.receipt().payload_bytes() as u64, blob_bytes);
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn delegated_workspace_fetches_cannot_reuse_the_commit_allowance() {
+    let s = Scratch::new();
+    let (mut node, _) = OneNode::init(config(&s.0)).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let sizes = import_with_message(&node, &s.0, &"shared commit budget\n".repeat(400));
+    let total = sizes.into_iter().sum::<u64>();
+    let parent =
+        cap().with_fetch_budget(ByteCount::try_new("fetch_budget", total, u64::MAX).unwrap());
+    let path = TreePath::parse_default(b"file.txt").unwrap();
+    let mut first = parent
+        .attenuate(vec![path.clone()], vec![path.clone()])
+        .unwrap();
+    let mut sibling = parent.attenuate(vec![path.clone()], vec![path]).unwrap();
+    let request = node.request_context();
+    let read = |capability: &mut TreeCapability| {
+        node.runtime()
+            .block_on(node.sparse_workspace_manifest_in::<Sha1>(
+                &request,
+                &reference(),
+                &RefVisibility::new(),
+                capability,
+                0,
+                SparseLimits::default(),
+            ))
+    };
+    assert!(read(&mut first).is_ok());
+    assert_eq!(first.fetched_bytes(), total);
+    assert!(matches!(read(&mut sibling),
+        Err(NodeWorkspaceRefusal::Manifest(SparseRefusal::Capability(
+            CapabilityRefusal::FetchBudgetExceeded { consumed: 0, requested, budget }
+        ))) if requested == sizes[0] && budget == total));
+    assert_eq!((sibling.fetched_bytes(), sibling.fetched_files()), (0, 0));
+    node.shutdown().unwrap();
 }
 
 #[test]
