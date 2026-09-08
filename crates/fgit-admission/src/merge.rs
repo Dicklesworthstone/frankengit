@@ -48,6 +48,9 @@ use crate::{
     AuthorityStore, CommitEvidence, ProjectionFailure, ValidatedClosure,
 };
 
+mod native;
+pub use native::{NativeMergeBasis, PreparedNativeMerge, prepare_native_merge};
+
 /// The forge event body a merge stages, re-exported for implementors.
 ///
 /// [`ForgeBodyStore`] names this type in its signatures, so anything that
@@ -76,6 +79,18 @@ pub use fgit_forge::ForgeEventBatch;
 /// `TargetRefMoved` because the resulting ref state had never been staged. The
 /// forge half owed exactly the same staging and was not doing it.
 pub trait ForgeBodyStore {
+    /// Resolves all native merge inputs from the exact authenticated basis.
+    fn resolve_native_merge_basis(
+        &self,
+        _basis: &fgit_chronicle::PublicationBasis,
+    ) -> Result<NativeMergeBasis, RefusalCode> {
+        Err(RefusalCode::DurabilityProfileUnavailable)
+    }
+
+    /// Stages every body in a prepared native merge before publication.
+    fn stage_native_merge(&self, _merge: &PreparedNativeMerge) -> Result<(), RefusalCode> {
+        Err(RefusalCode::DurabilityProfileUnavailable)
+    }
     /// Stages one forge event batch under its canonical root.
     ///
     /// # Errors
@@ -291,6 +306,11 @@ fn check_parts_describe_one_merge(sealed: &SealedMerge<'_>) -> Result<(), Admiss
             field: "created objects outside the validated closure",
         });
     }
+    if !sealed.closure.objects.contains(&sealed.package.ref_intent.new_tip) {
+        return Err(AdmissionError::MergeIncoherent {
+            field: "new tip outside the validated closure",
+        });
+    }
     // The closure's own commitment is RECOMPUTED, not believed. Containment
     // above says the package's objects are in the list; it says nothing about
     // whether the root travelling with that list is the root OF that list. A
@@ -326,6 +346,27 @@ fn check_parts_describe_one_merge(sealed: &SealedMerge<'_>) -> Result<(), Admiss
 ///
 /// [`AdmissionError::MergeIncoherent`] naming the part that disagreed.
 fn check_event_describes_this_merge(sealed: &SealedMerge<'_>) -> Result<(), AdmissionError> {
+    if let fgit_forge::ForgeEventPayload::MergeCommittedNative(event) = &sealed.package.event.payload {
+        if sealed.package.event.aggregate
+            != fgit_forge::AggregateId::PullRequest(sealed.attempt.pull_request)
+        {
+            return Err(AdmissionError::MergeIncoherent { field: "event aggregate" });
+        }
+        let coordinates = [
+            (event.source_ref.as_bytes() == sealed.attempt.source_ref, "event source ref"),
+            (event.source_tip == sealed.attempt.source_tip, "event source tip"),
+            (event.base_tip == sealed.attempt.base_tip, "event base tip"),
+            (event.target_ref.as_bytes() == sealed.attempt.target_ref, "event target ref"),
+            (event.target_tip_before == sealed.attempt.target_tip, "event target before"),
+            (event.merge_commit == sealed.package.ref_intent.new_tip, "event merge commit"),
+        ];
+        for (matches, field) in coordinates {
+            if !matches {
+                return Err(AdmissionError::MergeIncoherent { field });
+            }
+        }
+        return Ok(());
+    }
     // A merge package carries a merge. An event of any other kind under a
     // MergeEffectPackage is not a coherent request, whatever else agrees.
     let fgit_forge::ForgeEventPayload::MergeCommitted {
@@ -507,6 +548,11 @@ pub(crate) fn decide_from_snapshot(
     sealed: &SealedMerge<'_>,
     snapshot: AdmissionSnapshot,
 ) -> MergePlan {
+    for name in [&sealed.attempt.source_ref, &sealed.attempt.target_ref] {
+        if snapshot.hidden_refs.is_hidden(name) {
+            return MergePlan::Refuse(RefusalCode::PublicationPolicyRefused);
+        }
+    }
     if let Err(staleness) = check_against_snapshot(sealed, &snapshot) {
         return MergePlan::Refuse(staleness.refusal_code());
     }
@@ -515,7 +561,14 @@ pub(crate) fn decide_from_snapshot(
     };
     let mut refs = snapshot.refs;
     refs.insert(name, sealed.package.ref_intent.new_tip);
-    MergePlan::Commit(Box::new(crate::CanonicalRefState::new(refs)))
+    let next = match snapshot.head_target {
+        Some(target) => match crate::CanonicalRefState::new_with_head_target(refs, target) {
+            Ok(state) => state,
+            Err(code) => return MergePlan::Refuse(code),
+        },
+        None => crate::CanonicalRefState::new(refs),
+    };
+    MergePlan::Commit(Box::new(next))
 }
 
 /// Decides one attempt against one basis, reading the snapshot synchronously.
