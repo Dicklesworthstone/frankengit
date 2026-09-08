@@ -21,6 +21,7 @@
 //! registry signal at all, which is the drift this gate exists to refuse.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
@@ -73,6 +74,8 @@ impl SurfaceState {
 pub struct EnabledSurface {
     pub(crate) triple: String,
     pub(crate) build_scripts: BTreeSet<String>,
+    /// Exact custom-build source paths from the enabled Cargo package IDs.
+    pub(crate) build_script_sources: BTreeMap<String, BTreeSet<String>>,
     pub(crate) proc_macros: BTreeSet<String>,
     /// Packages that emit `cargo:rustc-link-lib` / `rustc-link-search`, keyed by
     /// package name. Populated only for packages whose build script has already
@@ -125,7 +128,10 @@ fn host_triple() -> Result<String, String> {
 /// own dev-dependencies are never built, so counting them would inflate the
 /// audited surface with packages that cannot run at all.
 pub fn resolve_enabled_surface(root: &Path) -> Result<EnabledSurface, String> {
-    let triple = host_triple()?;
+    let host = host_triple()?;
+    let configured_target = std::env::var("CARGO_BUILD_TARGET").ok();
+    let triple = configured_target.clone().unwrap_or(host);
+    let profile = std::env::var("FGIT_LINKAGE_PROFILE").unwrap_or_else(|_| "debug".to_owned());
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
         .args([
@@ -149,7 +155,14 @@ pub fn resolve_enabled_surface(root: &Path) -> Result<EnabledSurface, String> {
     let text = String::from_utf8(output.stdout)
         .map_err(|error| format!("cargo metadata emitted non-UTF-8 JSON: {error}"))?;
     let mut surface = parse_enabled_surface(&text, triple)?;
-    let (linkage, observed) = collect_native_linkage(&cargo_target_root(root));
+    let build_root = linkage_build_root(
+        &cargo_target_root(root),
+        configured_target.as_deref(),
+        &profile,
+    )?;
+    let linkage = collect_native_linkage(&build_root, &surface.build_scripts)?;
+    let linkage = bind_linkage_instances(&build_root, &surface.build_script_sources, linkage)?;
+    let observed = !linkage.is_empty();
     surface.native_linkage = linkage;
     surface.linkage_is_observed = observed;
     Ok(surface)
@@ -157,8 +170,31 @@ pub fn resolve_enabled_surface(root: &Path) -> Result<EnabledSurface, String> {
 
 /// Where cargo leaves build-script output for this workspace.
 fn cargo_target_root(root: &Path) -> std::path::PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| root.join("target"), std::path::PathBuf::from)
+    root.join(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()))
+}
+
+fn linkage_build_root(
+    target_root: &Path,
+    target: Option<&str>,
+    profile: &str,
+) -> Result<std::path::PathBuf, String> {
+    // An explicit target puts even a host build below target/<triple>. Never
+    // scan sibling target/profile directories and attribute them to this run.
+    for value in target.into_iter().chain(std::iter::once(profile)) {
+        if value.is_empty()
+            || value == "."
+            || value == ".."
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        {
+            return Err(format!(
+                "invalid native-linkage target/profile component `{value}`"
+            ));
+        }
+    }
+    let root = target.map_or_else(|| target_root.to_owned(), |triple| target_root.join(triple));
+    Ok(root.join(profile).join("build"))
 }
 
 /// Harvest `cargo:rustc-link-lib` / `rustc-link-search` emissions from the
@@ -170,43 +206,191 @@ fn cargo_target_root(root: &Path) -> std::path::PathBuf {
 /// someone has already built, and the second return value records whether any
 /// was found. Callers must not read an empty map as "nothing links".
 ///
-/// Both cargo layouts are handled: `build/<pkg>-<hash>/output` and the newer
-/// `build/<pkg>/<hash>/output`.
-fn collect_native_linkage(target_root: &Path) -> (BTreeMap<String, BTreeSet<String>>, bool) {
+/// Read all supported Cargo layouts within one selected target/profile:
+/// `build/<pkg>-<hash>/output`, `build/<pkg>/<hash>/output`, and the pinned
+/// nightly's `build/<pkg>/<hash>/run/stdout`. These are cached observations,
+/// not a current-build or release attestation. In particular, a matching name
+/// does not prove that the package version, features or source revision match.
+fn collect_native_linkage(
+    build_root: &Path,
+    enabled: &BTreeSet<String>,
+) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
     let mut linkage: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut observed = false;
-    let Ok(profiles) = std::fs::read_dir(target_root) else {
-        return (linkage, observed);
-    };
-    for profile in profiles.flatten() {
-        let build = profile.path().join("build");
-        let Ok(entries) = std::fs::read_dir(&build) else {
+    for entry in read_build_directory(build_root)? {
+        let path = entry.path();
+        let Some(dir_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(dir_name) = path.file_name().and_then(|name| name.to_str()) else {
+        if enabled.contains(dir_name) {
+            for hash_dir in read_build_directory(&path)? {
+                if hash_dir
+                    .file_type()
+                    .map_err(|error| error.to_string())?
+                    .is_dir()
+                {
+                    absorb_output(&hash_dir.path().join("output"), dir_name, &mut linkage)?;
+                    absorb_output(&hash_dir.path().join("run/stdout"), dir_name, &mut linkage)?;
+                }
+            }
+        } else {
+            let package = strip_build_hash(dir_name);
+            if package != dir_name && enabled.contains(package) {
+                absorb_output(&path.join("output"), package, &mut linkage)?;
+            }
+        }
+    }
+    Ok(linkage)
+}
+
+fn read_build_directory(path: &Path) -> Result<Vec<std::fs::DirEntry>, String> {
+    match std::fs::read_dir(path) {
+        Ok(entries) => {
+            let entries = entries
+                .take(100_001)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    format!(
+                        "cannot enumerate native-linkage evidence at {}: {error}",
+                        path.display()
+                    )
+                })?;
+            if entries.len() > 100_000 {
+                return Err(format!(
+                    "native-linkage directory limit exceeded at {}",
+                    path.display()
+                ));
+            }
+            Ok(entries)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!(
+            "cannot read native-linkage evidence at {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+/// Resolve a run fingerprint back to the compiled build script and its exact
+/// Cargo metadata source path. A stale version with the same package name is
+/// not evidence about the enabled package instance. This checks Cargo's pinned
+/// cache format, not build freshness or the authenticity of a release artifact.
+fn bind_linkage_instances(
+    build_root: &Path,
+    sources: &BTreeMap<String, BTreeSet<String>>,
+    candidates: BTreeMap<String, BTreeSet<String>>,
+) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+    let mut bound = BTreeMap::new();
+    for (package, paths) in sources {
+        if !candidates.contains_key(package) {
+            continue;
+        }
+        let instances = package_cache_instances(build_root, package)?;
+        let mut compiled = BTreeSet::new();
+        for (instance, fingerprint) in &instances {
+            let hash_path = fingerprint.join("build-script-build-script-build");
+            let Some(hash) = read_linkage_text(&hash_path)? else {
                 continue;
             };
-            // `build/<pkg>-<hash>/output`
-            let direct = path.join("output");
-            if direct.is_file() {
-                observed = true;
-                absorb_output(&direct, strip_build_hash(dir_name), &mut linkage);
-            }
-            // `build/<pkg>/<hash>/output`
-            if let Ok(nested) = std::fs::read_dir(&path) {
-                for hash_dir in nested.flatten() {
-                    let candidate = hash_dir.path().join("output");
-                    if candidate.is_file() {
-                        observed = true;
-                        absorb_output(&candidate, dir_name, &mut linkage);
+            let Some(hash) = cargo_fingerprint_word(hash.trim()) else {
+                continue;
+            };
+            // The old layout puts .d beside the binary; the pinned layout uses
+            // out/. Check the zero-rule source lines, not substring matches.
+            for directory in [instance.clone(), instance.join("out")] {
+                for file in read_build_directory(&directory)? {
+                    if file.path().extension().is_some_and(|ext| ext == "d") {
+                        let Some(text) = read_linkage_text(&file.path())? else {
+                            continue;
+                        };
+                        if paths.iter().any(|source| {
+                            text.lines()
+                                .any(|line| line == format!("{}:", source.replace(' ', "\\ ")))
+                        }) {
+                            compiled.insert(hash);
+                        }
                     }
                 }
             }
         }
+        for (instance, fingerprint) in &instances {
+            let run = fingerprint.join("run-build-script-build-script-build.json");
+            let Some(run) = read_linkage_text(&run)? else {
+                continue;
+            };
+            if run_build_fingerprint(&run).is_some_and(|hash| compiled.contains(&hash)) {
+                absorb_output(&instance.join("output"), package, &mut bound)?;
+                absorb_output(&instance.join("run/stdout"), package, &mut bound)?;
+            }
+        }
     }
-    (linkage, observed)
+    Ok(bound)
+}
+
+fn package_cache_instances(
+    build_root: &Path,
+    package: &str,
+) -> Result<Vec<(std::path::PathBuf, std::path::PathBuf)>, String> {
+    let mut instances = Vec::new();
+    for entry in read_build_directory(build_root)? {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name == package {
+            for nested in read_build_directory(&entry.path())? {
+                if nested
+                    .file_type()
+                    .map_err(|error| error.to_string())?
+                    .is_dir()
+                {
+                    instances.push((nested.path(), nested.path().join("fingerprint")));
+                }
+            }
+        } else if strip_build_hash(name) == package {
+            let profile = build_root
+                .parent()
+                .ok_or("native linkage build root lacks a profile")?;
+            instances.push((entry.path(), profile.join(".fingerprint").join(name)));
+        }
+    }
+    Ok(instances)
+}
+
+fn cargo_fingerprint_word(text: &str) -> Option<u64> {
+    if text.len() != 16 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut bytes = [0_u8; 8];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(u64::from_le_bytes(bytes))
+}
+
+fn run_build_fingerprint(text: &str) -> Option<u64> {
+    // The pinned run fingerprint contains a single build_script_build tuple:
+    // [package-id-hash, "build_script_build", public, compiled-fingerprint].
+    // Reject duplicates and unknown shapes instead of guessing which compiled
+    // instance an unrecognized Cargo cache format means.
+    let (_, deps) = text.split_once("\"deps\"")?;
+    let deps = deps
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start()
+        .strip_prefix('[')?
+        .trim_start()
+        .strip_prefix('[')?;
+    let (entry, tail) = deps.split_once(']')?;
+    if !tail.trim_start().starts_with(']') {
+        return None;
+    }
+    let fields = entry.split(',').map(str::trim).collect::<Vec<_>>();
+    if fields.len() != 4
+        || fields[1] != "\"build_script_build\""
+        || !matches!(fields[2], "true" | "false")
+    {
+        return None;
+    }
+    fields[0].parse::<u64>().ok()?;
+    fields[3].parse().ok()
 }
 
 /// `serde-1a2b3c4d5e6f7788` -> `serde`. The hash suffix is hex and fixed-width,
@@ -223,13 +407,52 @@ fn strip_build_hash(dir_name: &str) -> &str {
     }
 }
 
-fn absorb_output(path: &Path, package: &str, linkage: &mut BTreeMap<String, BTreeSet<String>>) {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return;
+fn absorb_output(
+    path: &Path,
+    package: &str,
+    linkage: &mut BTreeMap<String, BTreeSet<String>>,
+) -> Result<(), String> {
+    let Some(text) = read_linkage_text(path)? else {
+        return Ok(());
     };
-    for value in parse_linkage_lines(&text) {
-        linkage.entry(package.to_owned()).or_default().insert(value);
+    // Empty output is an observed script, not missing evidence. A malformed or
+    // unreadable file, conversely, must never establish an observed empty set.
+    linkage
+        .entry(package.to_owned())
+        .or_default()
+        .extend(parse_linkage_lines(&text));
+    Ok(())
+}
+
+const MAX_LINKAGE_TEXT_BYTES: u64 = 16 * 1024 * 1024;
+
+fn read_linkage_text(path: &Path) -> Result<Option<String>, String> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "cannot read native-linkage evidence at {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let mut text = String::new();
+    file.take(MAX_LINKAGE_TEXT_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(|error| {
+            format!(
+                "cannot read native-linkage evidence at {}: {error}",
+                path.display()
+            )
+        })?;
+    if text.len() as u64 > MAX_LINKAGE_TEXT_BYTES {
+        return Err(format!(
+            "native-linkage output limit exceeded at {}",
+            path.display()
+        ));
     }
+    Ok(Some(text))
 }
 
 /// Cargo accepts both the `cargo:` and newer `cargo::` emission prefixes, and a
@@ -263,6 +486,7 @@ pub fn parse_enabled_surface(text: &str, triple: String) -> Result<EnabledSurfac
     let mut has_build_script = BTreeMap::new();
     let mut has_proc_macro = BTreeMap::new();
     let mut name_of = BTreeMap::new();
+    let mut script_source_of = BTreeMap::new();
 
     for package in json_array_objects(text, "packages")? {
         let name = json_string_field(package, "name")
@@ -274,6 +498,11 @@ pub fn parse_enabled_surface(text: &str, triple: String) -> Result<EnabledSurfac
         for target in json_array_objects(package, "targets")? {
             let kinds = json_string_array_field(target, "kind")?;
             build_script |= kinds.contains("custom-build");
+            if kinds.contains("custom-build")
+                && let Some(source) = json_string_field(target, "src_path")
+            {
+                script_source_of.insert(id.clone(), source);
+            }
             proc_macro |= kinds.contains("proc-macro");
         }
         has_build_script.insert(id.clone(), build_script);
@@ -329,6 +558,13 @@ pub fn parse_enabled_surface(text: &str, triple: String) -> Result<EnabledSurfac
         };
         if has_build_script.get(id).copied().unwrap_or(false) {
             surface.build_scripts.insert(name.clone());
+            if let Some(source) = script_source_of.get(id) {
+                surface
+                    .build_script_sources
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(source.clone());
+            }
         }
         if has_proc_macro.get(id).copied().unwrap_or(false) {
             surface.proc_macros.insert(name.clone());
@@ -579,6 +815,10 @@ fn check_native_linkage_policy(surface: &EnabledSurface, rows: &[SurfaceRow], re
         ));
         return;
     }
+    report.notes.push(format!(
+        "native-linkage policy evaluated against cached build-script observations for {}; these do not attest the current package instances, features, source revision or release build",
+        surface.triple,
+    ));
     for (package, libraries) in &surface.native_linkage {
         if libraries.is_empty() {
             continue;
@@ -728,6 +968,292 @@ pub fn derive_acquisitions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct LinkageTree(std::path::PathBuf);
+
+    impl LinkageTree {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("fgit-linkage-{}-{sequence}", std::process::id()));
+            std::fs::create_dir(&path).expect("unique linkage test directory");
+            Self(path)
+        }
+
+        fn output(&self, path: &str, text: &[u8]) {
+            let path = self.0.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+
+        fn read(&self, target: Option<&str>, profile: &str) -> BTreeMap<String, BTreeSet<String>> {
+            let root = linkage_build_root(&self.0, target, profile).unwrap();
+            collect_native_linkage(&root, &BTreeSet::from(["crossbeam-utils".to_owned()])).unwrap()
+        }
+    }
+
+    impl Drop for LinkageTree {
+        fn drop(&mut self) {
+            // Each test owns a create-new, process/sequence-specific tree.
+            std::fs::remove_dir_all(&self.0).expect("remove owned linkage fixture");
+        }
+    }
+
+    #[test]
+    fn all_cargo_layouts_reach_the_linkage_policy_with_a_permitted_twin() {
+        for output in [
+            "debug/build/crossbeam-utils-0123456789abcdef/output",
+            "debug/build/crossbeam-utils/0123456789abcdef/output",
+            "debug/build/crossbeam-utils/0123456789abcdef/run/stdout",
+        ] {
+            let tree = LinkageTree::new();
+            tree.output(output, b"cargo::rustc-link-lib=static=forbidden_engine\n");
+            let observed = tree.read(None, "debug");
+            assert_eq!(observed.len(), 1, "{output}");
+            let surface = EnabledSurface {
+                triple: "x86_64-unknown-linux-gnu".to_owned(),
+                build_scripts: BTreeSet::from(["crossbeam-utils".to_owned()]),
+                native_linkage: observed,
+                linkage_is_observed: true,
+                ..EnabledSurface::default()
+            };
+            let mut row = SurfaceRow {
+                id: "DEP-TEST".to_owned(),
+                crate_pattern: "crossbeam-utils".to_owned(),
+                ffi_policy: "no_ffi".to_owned(),
+                build_script: SurfaceState::Enabled,
+                proc_macro: SurfaceState::Absent,
+            };
+            let mut denied = Report::new();
+            check_native_linkage_policy(&surface, &[row.clone()], &mut denied);
+            assert_eq!(denied.errors.len(), 1, "{output}: {:?}", denied.errors);
+            assert!(denied.errors[0].contains("forbidden_engine"));
+            row.ffi_policy = "dependency_reviewed_boundary".to_owned();
+            let mut allowed = Report::new();
+            check_native_linkage_policy(&surface, &[row], &mut allowed);
+            assert!(allowed.errors.is_empty(), "{:?}", allowed.errors);
+            assert!(
+                allowed
+                    .notes
+                    .iter()
+                    .any(|note| note.contains("do not attest"))
+            );
+        }
+    }
+
+    #[test]
+    fn empty_output_is_observed_but_missing_and_unrelated_outputs_are_not() {
+        let tree = LinkageTree::new();
+        assert!(tree.read(None, "debug").is_empty());
+        tree.output("debug/build/unrelated/0123456789abcdef/run/stdout", b"");
+        assert!(tree.read(None, "debug").is_empty());
+        tree.output(
+            "debug/build/crossbeam-utils/0123456789abcdef/run/stdout",
+            b"",
+        );
+        let found = tree.read(None, "debug");
+        assert_eq!(found.len(), 1);
+        assert!(found["crossbeam-utils"].is_empty());
+    }
+
+    #[test]
+    fn selected_target_and_profile_do_not_mix_sibling_builds() {
+        let tree = LinkageTree::new();
+        tree.output(
+            "release/build/crossbeam-utils/0123456789abcdef/run/stdout",
+            b"cargo:rustc-link-lib=release_only\n",
+        );
+        tree.output(
+            "other-target/debug/build/crossbeam-utils/0123456789abcdef/run/stdout",
+            b"cargo:rustc-link-lib=other_target\n",
+        );
+        assert!(tree.read(None, "debug").is_empty());
+        tree.output(
+            "debug/build/crossbeam-utils/0123456789abcdef/run/stdout",
+            b"cargo:rustc-link-lib=host_debug\n",
+        );
+        let selected = tree.read(None, "debug");
+        assert_eq!(
+            selected["crossbeam-utils"],
+            BTreeSet::from(["rustc-link-lib=host_debug".to_owned()])
+        );
+        let cross = tree.read(Some("other-target"), "debug");
+        assert_eq!(
+            cross["crossbeam-utils"],
+            BTreeSet::from(["rustc-link-lib=other_target".to_owned()])
+        );
+        assert!(tree.read(Some("host-target"), "debug").is_empty());
+    }
+
+    #[test]
+    fn invalid_target_and_profile_paths_are_refused() {
+        let tree = LinkageTree::new();
+        for invalid in ["", ".", "..", "../release", "/tmp/other", "a/b", "a\\b"] {
+            assert!(linkage_build_root(&tree.0, None, invalid).is_err());
+            assert!(linkage_build_root(&tree.0, Some(invalid), "debug").is_err());
+        }
+        assert!(linkage_build_root(&tree.0, Some("x86_64-unknown-linux-gnu"), "release").is_ok());
+    }
+
+    #[test]
+    fn corrupt_and_non_file_output_cannot_count_as_empty_evidence() {
+        let tree = LinkageTree::new();
+        let root = linkage_build_root(&tree.0, None, "debug").unwrap();
+        let enabled = BTreeSet::from(["crossbeam-utils".to_owned()]);
+        let output = "debug/build/crossbeam-utils/0123456789abcdef/run/stdout";
+        tree.output(output, &[0xff]);
+        assert!(
+            collect_native_linkage(&root, &enabled)
+                .unwrap_err()
+                .contains("cannot read")
+        );
+        std::fs::remove_file(tree.0.join(output)).unwrap();
+        std::fs::create_dir(tree.0.join(output)).unwrap();
+        assert!(collect_native_linkage(&root, &enabled).is_err());
+    }
+
+    #[test]
+    fn evidence_read_bound_accepts_the_limit_and_refuses_one_more_byte() {
+        let tree = LinkageTree::new();
+        let path = tree.0.join("bounded-output");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_LINKAGE_TEXT_BYTES).unwrap();
+        assert_eq!(
+            read_linkage_text(&path).unwrap().unwrap().len() as u64,
+            MAX_LINKAGE_TEXT_BYTES
+        );
+        file.set_len(MAX_LINKAGE_TEXT_BYTES + 1).unwrap();
+        assert!(
+            read_linkage_text(&path)
+                .unwrap_err()
+                .contains("output limit exceeded")
+        );
+    }
+
+    #[test]
+    fn repeated_observation_is_deterministic_and_never_attests_a_release() {
+        let tree = LinkageTree::new();
+        tree.output(
+            "debug/build/crossbeam-utils/ffffffffffffffff/run/stdout",
+            b"cargo:rustc-link-lib=z\ncargo:rustc-link-lib=a\n",
+        );
+        tree.output(
+            "debug/build/crossbeam-utils/0000000000000000/output",
+            b"cargo::rustc-link-lib=a\n",
+        );
+        let first = tree.read(None, "debug");
+        assert_eq!(first, tree.read(None, "debug"));
+        assert_eq!(first["crossbeam-utils"].len(), 2);
+        let surface = EnabledSurface {
+            triple: "test-target".to_owned(),
+            native_linkage: first,
+            linkage_is_observed: true,
+            ..EnabledSurface::default()
+        };
+        let mut report = Report::new();
+        check_native_linkage_policy(&surface, &[], &mut report);
+        assert!(report.notes[0].contains("cached"));
+        assert!(report.notes[0].contains("do not attest the current package instances"));
+    }
+
+    #[test]
+    fn cached_output_is_bound_to_the_enabled_package_source_in_each_layout() {
+        for layout in 0..3 {
+            let tree = LinkageTree::new();
+            let source = tree.0.join("registry/crossbeam-utils-1.0.0/build.rs");
+            let old_source = tree.0.join("registry/crossbeam-utils-0.9.0/build.rs");
+            let build_root = linkage_build_root(&tree.0, None, "debug").unwrap();
+            let sources = BTreeMap::from([(
+                "crossbeam-utils".to_owned(),
+                BTreeSet::from([source.display().to_string()]),
+            )]);
+            for (version, source, directive) in
+                [(1_u64, &source, "current"), (2_u64, &old_source, "stale")]
+            {
+                let compiled_name = format!("{version:016x}");
+                let run_name = format!("{:016x}", version + 10);
+                let (compiled, run, compiled_fp, run_fp) = if layout == 0 {
+                    (
+                        format!("debug/build/crossbeam-utils-{compiled_name}"),
+                        format!("debug/build/crossbeam-utils-{run_name}"),
+                        format!("debug/.fingerprint/crossbeam-utils-{compiled_name}"),
+                        format!("debug/.fingerprint/crossbeam-utils-{run_name}"),
+                    )
+                } else {
+                    let compiled = format!("debug/build/crossbeam-utils/{compiled_name}");
+                    let run = format!("debug/build/crossbeam-utils/{run_name}");
+                    let compiled_fp = format!("{compiled}/fingerprint");
+                    let run_fp = format!("{run}/fingerprint");
+                    (compiled, run, compiled_fp, run_fp)
+                };
+                let hash = version
+                    .to_le_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                tree.output(
+                    &format!("{compiled_fp}/build-script-build-script-build"),
+                    hash.as_bytes(),
+                );
+                let dep_info = format!("{}:\n", source.display());
+                tree.output(
+                    &format!("{compiled}/out/build_script_build.d"),
+                    dep_info.as_bytes(),
+                );
+                let run_body =
+                    format!("{{\"deps\":[[123,\"build_script_build\",false,{version}]]}}");
+                tree.output(
+                    &format!("{run_fp}/run-build-script-build-script-build.json"),
+                    run_body.as_bytes(),
+                );
+                let output = if layout == 2 { "run/stdout" } else { "output" };
+                tree.output(
+                    &format!("{run}/{output}"),
+                    format!("cargo:rustc-link-lib={directive}\n").as_bytes(),
+                );
+            }
+            let cached = tree.read(None, "debug");
+            assert_eq!(cached["crossbeam-utils"].len(), 2);
+            let bound = bind_linkage_instances(&build_root, &sources, cached.clone()).unwrap();
+            assert_eq!(
+                bound["crossbeam-utils"],
+                BTreeSet::from(["rustc-link-lib=current".to_owned()])
+            );
+            let wrong_source = BTreeMap::from([(
+                "crossbeam-utils".to_owned(),
+                BTreeSet::from(["/unrelated/build.rs".to_owned()]),
+            )]);
+            assert!(
+                bind_linkage_instances(&build_root, &wrong_source, cached)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_or_ambiguous_fingerprints_do_not_bind_a_cached_instance() {
+        assert_eq!(
+            cargo_fingerprint_word("3bcfd4713472b2cc"),
+            Some(14_749_977_299_165_433_659)
+        );
+        for invalid in ["", "ff", "xxxxxxxxxxxxxxxx", "3bcfd4713472b2cc00"] {
+            assert_eq!(cargo_fingerprint_word(invalid), None);
+        }
+        assert_eq!(
+            run_build_fingerprint(r#"{"deps":[[123,"build_script_build",false,42]]}"#),
+            Some(42)
+        );
+        for invalid in [
+            r#"{"deps":[]}"#,
+            r#"{"deps":[[123,"build_script_build",null,42]]}"#,
+            r#"{"deps":[[123,"build_script_build",false,"42"]]}"#,
+            r#"{"deps":[[123,"build_script_build",false,42],[124,"build_script_build",false,43]]}"#,
+        ] {
+            assert_eq!(run_build_fingerprint(invalid), None, "{invalid}");
+        }
+    }
 
     const NORMAL_AND_DEV: &str = r#"{
       "packages": [
