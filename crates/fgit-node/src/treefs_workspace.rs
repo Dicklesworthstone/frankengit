@@ -1,0 +1,215 @@
+//! Authority-selected TreeFS input discovery over the production object fabric.
+
+use crate::{
+    AdmissionMaterializationRefusal, AuthoritySelectedClosure, ClosureSelectionSource,
+    NodeRequestContext, OneNode, PackContextCheckpoint, VerifiedFabricPackSource,
+    checkpoint_pack_context,
+};
+use fgit_crypto::{GitHashAlgorithm, GitObjectKind, GitOid, NativeObjectIdentity};
+use fgit_git_object::{AcceptanceProfile, ObjectType, ParsedObject, parse_object_body};
+use fgit_runtime::Exhaustion;
+use fgit_treefs::{
+    BaseView, ObjectSource, ObjectSourceError, PathPolicy, ReadGrant, SparseLimits, SparseManifest,
+    SparseRefusal, TreeCapability, WorkspaceId,
+};
+use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
+use fgit_types::{GitHashAlgorithm as ObjectFormat, GitOid as AnyOid, RefName};
+use fgit_wire::visibility::RefVisibility;
+use std::cell::Cell;
+
+/// An unavailable/hidden ref is intentionally one indistinguishable outcome.
+#[derive(Debug)]
+pub enum NodeWorkspaceRefusal {
+    Cell(CellRefusal),
+    Authority(Box<AdmissionMaterializationRefusal>),
+    RefUnavailable,
+    RepositoryMismatch,
+    ObjectFormatMismatch,
+    CommitRequired,
+    Object(ObjectSourceError),
+    Manifest(SparseRefusal),
+    Cancelled { exhaustion: Option<Exhaustion> },
+}
+impl std::fmt::Display for NodeWorkspaceRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "node workspace refused: {self:?}")
+    }
+}
+impl std::error::Error for NodeWorkspaceRefusal {}
+
+impl OneNode {
+    /// Select a visible ref from authenticated current authority and derive its
+    /// capability-visible TreeFS manifest using verified admitted objects.
+    /// The caller supplies current disclosure policy from its authentication
+    /// boundary. Neither policy nor a path capability can unhide a canonical
+    /// hidden ref. No caller-computed RCR, commit, tree, or closure is accepted.
+    ///
+    /// This is a synchronous bounded object-read phase after asynchronous
+    /// authority selection, like the node's selected-pack path. It retains
+    /// object-fabric limits and checkpoints before/after reads. Returned source
+    /// coordinates stay pinned even if a later transaction moves the ref.
+    pub async fn sparse_workspace_manifest_in<A: GitHashAlgorithm>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        visibility: &RefVisibility,
+        capability: &mut TreeCapability,
+        now: u64,
+        limits: SparseLimits,
+    ) -> Result<SparseManifest<A>, NodeWorkspaceRefusal> {
+        admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
+        if capability.repository_id() != self.repository_id() {
+            return Err(NodeWorkspaceRefusal::RepositoryMismatch);
+        }
+        let width = match self.object_format {
+            ObjectFormat::Sha1 => 20,
+            ObjectFormat::Sha256 => 32,
+        };
+        if A::DIGEST_LEN != width {
+            return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
+        }
+        // Caller policy is checked before fetching authority or object data.
+        if visibility.hides(reference.as_bytes()) {
+            return Err(NodeWorkspaceRefusal::RefUnavailable);
+        }
+        capability
+            .authorize_root(now)
+            .map_err(|e| NodeWorkspaceRefusal::Manifest(SparseRefusal::Capability(e)))?;
+        let selected = self
+            .materialize_admission_in(request)
+            .await
+            .map_err(|e| NodeWorkspaceRefusal::Authority(Box::new(e)))?;
+        if selected.snapshot().hidden_refs.hides(reference.as_bytes()) {
+            return Err(NodeWorkspaceRefusal::RefUnavailable);
+        }
+        let commit = selected
+            .snapshot()
+            .refs
+            .get(reference)
+            .ok_or(NodeWorkspaceRefusal::RefUnavailable)?;
+        let rcr = match selected.selected_closure().source() {
+            ClosureSelectionSource::RepositoryCommit(rcr)
+            | ClosureSelectionSource::CumulativeHistory { latest: rcr, .. } => rcr,
+            ClosureSelectionSource::EmptyGenesis => {
+                return Err(NodeWorkspaceRefusal::RefUnavailable);
+            }
+        };
+        let exhaustion = Cell::new(None);
+        let source = NodeTreeSource {
+            inner: VerifiedFabricPackSource {
+                fabric: &self.fabric,
+                object_format: self.object_format,
+                maximum_object_bytes: usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX),
+                database_context: request.authority(),
+                database_exhaustion: &exhaustion,
+                session_is_live: None,
+            },
+            selected: selected.selected_closure(),
+            workspace: capability.workspace_id(),
+        };
+        let built = (|| {
+            let commit_oid = A::parse_hex(&commit.to_string())
+                .map_err(|_| NodeWorkspaceRefusal::ObjectFormatMismatch)?;
+            let grant = capability
+                .authorize_root(now)
+                .map_err(|e| NodeWorkspaceRefusal::Manifest(SparseRefusal::Capability(e)))?;
+            let body = source
+                .read_object::<A>(&commit_oid, GitObjectKind::Commit, &grant)
+                .map_err(NodeWorkspaceRefusal::Object)?;
+            let ParsedObject::Commit(parsed) = parse_object_body(
+                ObjectType::Commit,
+                &body,
+                AcceptanceProfile::GitCompatibleImport,
+                &source.inner.parse_limits(),
+            )
+            .map_err(|_| NodeWorkspaceRefusal::CommitRequired)?
+            else {
+                return Err(NodeWorkspaceRefusal::CommitRequired);
+            };
+            let tree = parsed
+                .tree_reference()
+                .ok_or(NodeWorkspaceRefusal::CommitRequired)?;
+            let tree =
+                std::str::from_utf8(tree).map_err(|_| NodeWorkspaceRefusal::CommitRequired)?;
+            let tree = A::parse_hex(tree).map_err(|_| NodeWorkspaceRefusal::CommitRequired)?;
+            let base = BaseView::new(
+                self.repository_id(),
+                rcr,
+                commit_oid,
+                tree,
+                source.inner.parse_limits(),
+                PathPolicy::default(),
+            );
+            SparseManifest::build(&base, &source, capability, now, limits)
+                .map_err(NodeWorkspaceRefusal::Manifest)
+        })();
+        if let PackContextCheckpoint::Stopped { budget_exhaustion } =
+            checkpoint_pack_context(request.authority())
+        {
+            return Err(NodeWorkspaceRefusal::Cancelled {
+                exhaustion: budget_exhaustion.or(exhaustion.get()),
+            });
+        }
+        built
+    }
+}
+
+// This source is deliberately private. External callers cannot pair an
+// arbitrary admitted OID with a grant for a different path: BaseView derives
+// all requested identities while traversing the selected commit's tree.
+struct NodeTreeSource<'a> {
+    inner: VerifiedFabricPackSource<'a>,
+    selected: &'a AuthoritySelectedClosure,
+    workspace: WorkspaceId,
+}
+impl NodeTreeSource<'_> {
+    fn read_object<A: GitHashAlgorithm>(
+        &self,
+        oid: &GitOid<A>,
+        kind: GitObjectKind,
+        grant: &ReadGrant,
+    ) -> Result<Vec<u8>, ObjectSourceError> {
+        if grant.workspace_id() != self.workspace {
+            return Err(refused("workspace grant mismatch"));
+        }
+        let hex: String = oid
+            .digest_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let id = AnyOid::from_hex(self.inner.object_format, &hex)
+            .map_err(|_| refused("object format mismatch"))?;
+        if !self.selected.closure().objects().contains(&id) {
+            return Err(refused("object is outside the authority-selected closure"));
+        }
+        let (actual, body) = self
+            .inner
+            .read_object(&id)
+            .map_err(|e| refused(&e.to_string()))?;
+        let expected = match kind {
+            GitObjectKind::Blob => ObjectType::Blob,
+            GitObjectKind::Tree => ObjectType::Tree,
+            GitObjectKind::Commit => ObjectType::Commit,
+            GitObjectKind::Tag => ObjectType::Tag,
+        };
+        if actual != expected {
+            return Err(refused("object kind mismatch"));
+        }
+        Ok(body)
+    }
+}
+impl<A: GitHashAlgorithm> ObjectSource<A> for NodeTreeSource<'_> {
+    fn read_object(
+        &self,
+        oid: &GitOid<A>,
+        kind: GitObjectKind,
+        grant: &ReadGrant,
+    ) -> Result<Vec<u8>, ObjectSourceError> {
+        self.read_object::<A>(oid, kind, grant)
+    }
+}
+fn refused(reason: &str) -> ObjectSourceError {
+    ObjectSourceError::Refused {
+        reason: reason.to_owned(),
+    }
+}

@@ -362,6 +362,18 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - cancellation/reaping/containment campaign;
 - artifact/provenance/signature policy before canonical check/publication.
 
+The Linux sparse-directory candidate in `fgit-runner::sparse_workspace`
+uses a broker-owned private parent descriptor, no-symlink/no-cross-mount
+resolution, exclusive creates and workspace leases, and manifest-directed
+output import. Hardlinks, special files, unexpected permissions, mutable
+read observations and undeclared input changes refuse beside permitted
+regular-file cases. Root-last staging is local derived state; its marker is
+neither authorization nor a repository commit. Cleanup failures remain
+unsettled obligations. The broker must quiesce trusted tools before import
+and protect the parent from concurrent rename. This adapter does not supply
+the hostile runner boundary; those requirements remain with the registered
+containment substrate and its independent campaign.
+
 ### 7.8 ATP-Git and peer/cache attacks
 
 **Threats**

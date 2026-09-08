@@ -42,12 +42,13 @@ changing it explicit.
    must retain their receipts.  A caller may inspect or persist their bytes,
    but neither result authorizes a ref move, a host write, or a filesystem
    scan.
-3. **No sparse-directory writer is currently advertised.** The manifest is its
-   required input, not a substitute for it.  Until a real writer owns
+3. **Sparse-directory support requires independent host-profile acceptance.**
+   The candidate below consumes the manifest, which is not a substitute for
+   the writer. A supported writer owns
    descriptor-relative creation, generated-parent handling, alias tracking,
    symlink refusal, bounds-before-I/O, output reconciliation through the
-   manifest, cancellation, and cleanup, the host-directory profile remains
-   unavailable.
+   manifest, cancellation, and cleanup. A profile without that acceptance
+   remains unavailable for a release claim.
 4. **No FrankenFS/FUSE mount is currently advertised on any target.** There is
    no first-party unsafe exception, FFI shim, native-library dependency, or
    hidden mount helper.  A missing adapter is not a successful no-op and must
@@ -102,8 +103,8 @@ region, reaps its resources, and leaves canonical repository state untouched.
 
 ## Non-claims
 
-- This ADR does **not** claim that a FUSE mount or sparse-directory writer
-  exists.
+- This ADR does **not** claim that a FUSE mount exists or that the candidate
+  sparse-directory implementation has independent batch acceptance.
 - It does not claim that archive bytes constitute a working tree or prove
   host-path behavior.
 - It does not establish compatibility with a particular kernel, FUSE ABI, or
@@ -118,3 +119,86 @@ profile.  It must retain direct API normativity, pass the admission evidence
 above, and identify the preceding structural-absence test cells that become
 real drills.  A convenience wrapper, feature flag, or undocumented helper
 cannot supersede this matrix.
+
+## Linux sparse-directory implementation candidate (2026-09-08)
+
+The owner-requested bridge work in `frankengit-audit-treefs-host-zb0q` adds
+[`fgit-runner::sparse_workspace`](../crates/fgit-runner/src/sparse_workspace.rs).
+It is a concrete directory writer and importer, pending independent batch
+verification of the full bead. It does not reopen the FUSE decision or grant
+release credit to library tests.
+
+`OneNode::sparse_workspace_manifest_in` supplies the production source
+connection: it selects a currently visible ref from authenticated authority,
+derives its commit/tree/RCR coordinates, restricts reads to the admitted
+closure, and uses the node's existing verified fabric reader and request
+checkpoints. Its private ObjectSource cannot be constructed by callers to
+pair an unrelated OID with a path grant. The host adapter receives the same
+SparseManifest that this method returns. Output remains an ordinary intent
+log for admission, with no local-directory authority shortcut.
+
+| Profile | Candidate behavior | Applicability / acceptance |
+| --- | --- | --- |
+| Direct TreeFS | Existing reference semantics | Host independent |
+| Linux sparse directory v1 | Verified manifest to actual files; declared outputs to ordinary TreeFS intents | Linux openat2 and /proc; byte-preserving local filesystem; tests authored for x86_64-unknown-linux-gnu and nightly-2026-08-31; independent batch acceptance pending |
+| FrankenFS/FUSE | No adapter | No supported target |
+
+The broker supplies a private 0700 parent directory descriptor and a
+`ReservedObligation<SparseDirectoryLease>` from its region. The plan commits
+to repository/RCR/commit/tree coordinates, workspace ID, exact input and
+output paths, native object identities, modes, and limits. The caller must
+reconstruct this plan from authenticated source coordinates when reopening;
+the local marker is only a consistency check. It never grants authority.
+
+Creation uses `openat2(BENEATH | NO_SYMLINKS | NO_XDEV)`, exclusive creates,
+0600 regular files and 0700 executable files, and distinct inode checks.
+Directory creation and cleanup stay relative to owned descriptors. Existing
+final/staging names are never overwritten. Files and descendant directories
+are synced before a no-replace root rename; parent sync then establishes the
+declared durable boundary. A marker-bound interrupted stage can be explicitly
+discarded. A crash before its marker exists is an explicit incomplete root
+requiring the broker's creation receipt, never a successful no-op.
+
+The completed directory has an exclusive advisory lease. Tools are bounded
+trusted processes whose execution/reaping belongs to the runner. Before
+import or close, the broker must quiesce them and prevent other principals
+from renaming the private parent. This is not a hostile execution boundary.
+Import reauthorizes the plan, opens only declared files without following
+symlinks, bounds reads before allocation, checks inode/mode/link counts and
+mutation metadata, and returns the complete edit log only after all reads
+succeed. Read-only input changes refuse. Undeclared outputs never become
+edits; cleanup removes them under the declared entry/depth ceiling or reports
+containment. A failed cleanup leaves the region obligation unsettled.
+
+The profile preserves case and Unicode byte distinctions when the host does;
+exclusive creation/alias checks refuse collisions. Symlink materialization,
+gitlinks, special files, cross-mount traversal, and shared host hardlinks are
+unsupported. The immutable `Arc<SparseManifest>` is shared between runs;
+each host workspace copies its input payloads and has private changes. The
+receipt reports copied bytes and **zero shared host bytes**. This is no claim
+of reflink/FUSE performance or million-workspace scale.
+
+### DEP-118 direct-use admission
+
+The required capability is race-resistant descriptor-relative filesystem
+access, unavailable in safe std path APIs. The inspected FrankenFS checkout
+uses Asupersync 0.3.9 and a local patched fuser edge, and supplies image/VFS
+operations rather than this host-directory contract. Importing that closure
+would conflict with the selected Asupersync 0.4.9 constellation.
+
+The adapter directly uses the already locked rustix 1.1.4 with default
+features disabled, std and fs. DEP-118 is reclassified in place under
+ADR-0003 Amendment 2's single-winning-row rule; no duplicate row can shadow
+it. No package version or checksum is added. The existing runtime closure
+already enables these APIs. Its transitive unsafe OS-ABI implementation and
+compile-probing build script remain ledgered; no proc macro, native engine,
+alternate runtime, network-fetching build script, or first-party unsafe is
+introduced. Licensing is Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT.
+
+The oracle is direct TreeFS export identity plus real host operations and
+fresh-process interruption tests in
+[`sparse_workspace.rs`](../crates/fgit-runner/tests/sparse_workspace.rs).
+Replacing rustix with an admitted FrankenFS descriptor API changes only the
+physical adapter; it does not change canonical repository bytes. Independent
+constitution, target, unsafe/linkage and host tests remain required for
+admission evidence. This paragraph does not assert a new vulnerability audit.

@@ -365,6 +365,24 @@ Test direct API and every supported adapter:
 - materialization corruption/poisoning quarantine;
 - toolchain compatibility matrix for sparse-directory/FUSE profiles.
 
+The Linux sparse-directory candidate's executable cells are in
+`crates/fgit-runner/tests/sparse_workspace.rs`: actual child-process editing,
+disk-backed Git-object export/reopen, delete/rebuild, private concurrent
+workspaces, path/capability/mode/link/budget refusals, case/Unicode byte
+preservation, cancellation before root publication and during import,
+fresh-process crash/reopen, and explicit cleanup-containment failures.
+Its ignored `host_subprocess_driver` is an internal entrypoint executed by
+the parent tests with an exact mode and bounded deadline, not an ignored
+acceptance condition. These cells do not establish live repository-authority
+publication, hostile-process isolation, FUSE, or independent batch acceptance.
+
+`crates/fgit-node/tests/treefs_workspace.rs` additionally drives the production
+source connection after a real durable Git import: authenticated node ref,
+verified fabric, TreeFS manifest, host directory and returned edit intents.
+A fresh process reopens the node and reads the same canonical input. Hidden,
+absent, wrong-format and revoked twins exercise disclosure refusal. The test
+also checks that importing host output has not silently changed the ref.
+
 ## 15. CALM and obligation suites
 
 ### 15.1 CALM registry

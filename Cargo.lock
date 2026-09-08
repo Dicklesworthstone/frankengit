@@ -868,7 +868,9 @@ dependencies = [
  "fgit-pack",
  "fgit-reference",
  "fgit-resource",
+ "fgit-runner",
  "fgit-runtime",
+ "fgit-treefs",
  "fgit-txn",
  "fgit-types",
  "fgit-verified-read",
@@ -997,7 +999,11 @@ dependencies = [
  "fgit-codec",
  "fgit-crypto",
  "fgit-evidence",
+ "fgit-git-object",
  "fgit-resource",
+ "fgit-treefs",
+ "fgit-types",
+ "rustix",
 ]
 
 [[package]]

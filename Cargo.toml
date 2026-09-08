@@ -37,6 +37,9 @@ blake3 = { version = "1.8.7", features = ["pure"] }
 # through HKDF in fgit-crypto, so in-crate key generation is not needed.
 chacha20poly1305 = { version = "0.11.0", default-features = false }
 ed25519-dalek = { version = "2.2.0", default-features = false }
+# Descriptor-relative Linux filesystem operations; DEP-118. The version and
+# enabled APIs are already in the admitted Asupersync closure.
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs"] }
 fgit-admission = { path = "crates/fgit-admission" }
 fgit-agent = { path = "crates/fgit-agent" }
 fgit-atp-git = { path = "crates/fgit-atp-git" }
