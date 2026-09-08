@@ -51,6 +51,16 @@ Security cannot depend on one parser, local repository, cloud provider, model, g
 ### 1.6 Auditability and recoverability
 
 - Seals, prepared evidence, decisions, RCRs, outbox, repairs, deletions, overrides, policy epochs, and releases emit immutable evidence.
+- Native forge delivery accepts a configured capability whose audience must
+  match the canonical outbox entry; repository text cannot select an endpoint.
+  Automated dispatch requires durable downstream idempotency. Recovery validates
+  committed progress order, exact lifecycle predecessors, the original payload,
+  the persisted retry ceiling, and bounded receipt evidence. Staged progress,
+  missing evidence aliases, refused settlements, and corrupt advanced roots
+  authorize no call. A transport adapter remains responsible for honoring its
+  request context and draining acquired responsibility. The embedded profile
+  retains immutable authority bodies; distributed outbox GC and arbitrary
+  webhook transport are not established by this integration.
 - Replay completeness is explicit.
 - Backups/capsules/restores use the same commitments as normal reads.
 - Security incidents can reconstruct actor/capability/input/basis/decision/publication/effect history subject to confidentiality policy.

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_admission::merge::native::{NativeMergeIntent, objects::MergeObjectLimits};
+use fgit_admission::merge::native::settlement::{DeliveryRequest, OutboxDestination};
 use fgit_admission::{AdmissionError, AdmissionLimits};
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_codec::canonical_state::{CanonicalForgePositionState, ForgePositionStateEntry};
@@ -14,6 +15,9 @@ use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::{ForgeEventBatch, ForgeEventPayload, NativeMerge};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, NodeReceiveTransportRefusal, OneNode};
+use fgit_resource::{DownstreamIdempotency, ObligationState, ReconcilePolicy};
+use fgit_resource::settlement::{DeliveryVerdict, ProbeVerdict};
+use fsqlite_types::cx::Cx;
 use fgit_types::{AsciiSlug, DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId, RefName, RefusalCode, RepositoryId, TenantId};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -142,7 +146,9 @@ fn native_merge_publishes_ref_event_and_frontier_together_and_recovers_after_reo
         assert_eq!(after.snapshot().head_target, before.snapshot().head_target);
         assert_ne!(after.basis().body().ref_root, old.ref_root);
         assert_ne!(after.basis().body().forge_position_root, old.forge_position_root);
-        assert_eq!(after.basis().body().outbox_root, old.outbox_root);
+        assert_ne!(after.basis().body().outbox_root, old.outbox_root);
+        assert_eq!(after.snapshot().outbox.len(), 1);
+        assert_eq!(after.snapshot().forge_positions.len(), 1);
         assert_eq!(after.basis().body().retention_root, old.retention_root);
         let history = node.runtime().block_on(node.snapshot_history_in(&request)).unwrap();
         let last = history.last().unwrap();
@@ -256,5 +262,141 @@ fn invalid_parent_shape_and_reused_terminal_aggregate_do_not_move_refs() {
     let history = node.runtime().block_on(node.snapshot_history_in(&request)).unwrap();
     assert_eq!(history.iter().flat_map(|batch| &batch.forge_events)
         .filter(|event| matches!(event.payload, ForgeEventPayload::MergeCommittedNative(_))).count(), 1);
+    node.shutdown().unwrap();
+}
+
+/// A real filesystem destination fixture. Its create-if-absent receipt is
+/// synced before replying, and is the durable idempotency boundary under test.
+struct DiskDestination {
+    root: PathBuf,
+    kill_after_delivery: bool,
+    strong: bool,
+    probes: usize,
+    sends: usize,
+}
+
+impl OutboxDestination<Cx> for DiskDestination {
+    fn destination(&self) -> AsciiSlug { AsciiSlug::from_static("forge-projection") }
+    fn idempotency(&self) -> DownstreamIdempotency {
+        if self.strong { DownstreamIdempotency::Strong } else { DownstreamIdempotency::Weak }
+    }
+    async fn probe<'a>(&'a mut self, _cx: &'a Cx, request: &'a DeliveryRequest<'_>)
+        -> Result<(ProbeVerdict, Vec<u8>), RefusalCode> {
+        self.probes += 1;
+        match fs::read(self.root.join(request.key.to_string())) {
+            Ok(bytes) => {
+                assert_eq!(bytes, fgit_codec::encode_body(request.events).unwrap());
+                Ok((ProbeVerdict::Delivered, b"filesystem destination: committed receipt".to_vec()))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((ProbeVerdict::NotDelivered, Vec::new())),
+            Err(_) => Err(RefusalCode::EvidenceMissing),
+        }
+    }
+    async fn deliver<'a>(&'a mut self, _cx: &'a Cx, request: &'a DeliveryRequest<'_>, _attempt: u32)
+        -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
+        use std::io::Write;
+        self.sends += 1;
+        fs::create_dir_all(&self.root).unwrap();
+        let path = self.root.join(request.key.to_string());
+        let verdict = match fs::OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(&fgit_codec::encode_body(request.events).unwrap()).unwrap();
+                file.sync_all().unwrap();
+                fs::File::open(&self.root).unwrap().sync_all().unwrap();
+                DeliveryVerdict::Accepted
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => DeliveryVerdict::DuplicateSuppressed,
+            Err(_) => return Err(RefusalCode::EvidenceMissing),
+        };
+        if self.kill_after_delivery {
+            // This exits the child process without destructors, AFTER the
+            // destination persisted bytes but BEFORE the node sees a receipt.
+            std::process::exit(81);
+        }
+        Ok((verdict, b"filesystem destination: committed receipt".to_vec()))
+    }
+}
+
+fn destination(root: &Path) -> DiskDestination {
+    DiskDestination { root: root.join("destination"), kill_after_delivery: false, strong: true, probes: 0, sends: 0 }
+}
+
+fn delivery_key(node: &OneNode) -> AsciiSlug {
+    let request = node.request_context();
+    let materialized = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+    assert_eq!(materialized.snapshot().outbox.len(), 1);
+    materialized.snapshot().outbox.keys().next().unwrap().label()
+}
+
+fn deliver(node: &OneNode, key: AsciiSlug, destination: &mut DiskDestination)
+    -> Result<fgit_codec::CanonicalOutboxEffectState, NodeReceiveTransportRefusal> {
+    let request = node.request_context();
+    node.runtime().block_on(node.deliver_forge_outbox_in(&request, &session(b"delivery-worker"), key,
+        destination, ReconcilePolicy::new(std::num::NonZeroU32::new(4).unwrap()), AdmissionLimits::default()))
+}
+
+#[test]
+fn canonical_outbox_delivers_once_and_refuses_weak_capability_before_any_call() {
+    let scratch = Scratch::new();
+    let (mut node, _) = OneNode::init(config(&scratch.0, GitHashAlgorithm::Sha1)).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let f = fixture(&node, &scratch.0, GitHashAlgorithm::Sha1, true);
+    apply(&node, &intent(&f, 1, ExpectedVersion::NewStream), b"outbox-merge").unwrap();
+    let key = delivery_key(&node);
+    let mut consumer = destination(&scratch.0);
+    consumer.strong = false;
+    assert!(matches!(deliver(&node, key, &mut consumer), Err(NodeReceiveTransportRefusal::Admission(error))
+        if matches!(*error, AdmissionError::AsyncProjectionUnavailable(RefusalCode::PublicationPolicyRefused))));
+    assert_eq!((consumer.probes, consumer.sends), (0, 0));
+    consumer.strong = true;
+    let acknowledged = deliver(&node, key, &mut consumer).unwrap();
+    assert_eq!(acknowledged.state(), ObligationState::Acknowledged);
+    assert_eq!((consumer.probes, consumer.sends), (1, 1));
+    assert_eq!(deliver(&node, key, &mut consumer).unwrap(), acknowledged);
+    assert_eq!((consumer.probes, consumer.sends), (1, 1));
+    assert_eq!(refs(&node)[&main_ref()], f.candidate);
+    let request = node.request_context();
+    let history = node.runtime().block_on(node.snapshot_history_in(&request)).unwrap();
+    assert_eq!(history.iter().flat_map(|batch| &batch.forge_events).count(), 1);
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn canonical_outbox_recovers_after_process_death_after_delivery() {
+    const CHILD_ROOT: &str = "FGIT_ASA3_DELIVERY_CRASH_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let (mut node, _) = OneNode::init(config(&root, GitHashAlgorithm::Sha256)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let f = fixture(&node, &root, GitHashAlgorithm::Sha256, true);
+        apply(&node, &intent(&f, 1, ExpectedVersion::NewStream), b"crash-merge").unwrap();
+        let key = delivery_key(&node);
+        let mut consumer = destination(&root);
+        consumer.kill_after_delivery = true;
+        let result = deliver(&node, key, &mut consumer);
+        panic!("child must exit at the delivery boundary: {result:?}");
+    }
+    let scratch = Scratch::new();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact").arg("canonical_outbox_recovers_after_process_death_after_delivery")
+        .arg("--nocapture").env(CHILD_ROOT, &scratch.0).status().unwrap();
+    assert_eq!(status.code(), Some(81), "child reached the exact persisted-delivery boundary");
+    let mut node = OneNode::open_existing(config(&scratch.0, GitHashAlgorithm::Sha256)).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let request = node.request_context();
+    let before = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+    let history = node.runtime().block_on(node.snapshot_history_in(&request)).unwrap();
+    assert!(history.last().unwrap().ref_updates.is_empty(), "the last pre-crash decision only transferred delivery responsibility");
+    let key = delivery_key(&node);
+    let mut consumer = destination(&scratch.0);
+    let acknowledged = deliver(&node, key, &mut consumer).unwrap();
+    assert_eq!(acknowledged.state(), ObligationState::Acknowledged);
+    assert_eq!((consumer.probes, consumer.sends), (1, 0), "restart probes the durable receipt and does not resend");
+    let request = node.request_context();
+    let after = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+    assert_eq!(before.basis().body().ref_root, after.basis().body().ref_root);
+    assert_eq!(before.basis().body().forge_position_root, after.basis().body().forge_position_root);
+    assert_ne!(before.basis().body().outbox_root, after.basis().body().outbox_root);
+    assert_eq!(fs::read_dir(&consumer.root).unwrap().count(), 1);
     node.shutdown().unwrap();
 }

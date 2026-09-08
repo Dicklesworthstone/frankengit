@@ -1072,6 +1072,58 @@ pub static HIDDEN_REF_POLICY: SchemaDescriptor = SchemaDescriptor {
     )],
 };
 
+/// Exact downstream observation bound to the obligation that authorized it.
+pub static OUTBOX_DELIVERY_RECEIPT: SchemaDescriptor = SchemaDescriptor {
+    family: "outbox-delivery-receipt",
+    major: 1,
+    minor: 0,
+    domain: "frankengit/generation/v1",
+    doc: "Bounded immutable downstream evidence for a canonical outbox lifecycle transition; a receipt alone does not authenticate or publish an effect.",
+    fields: &[
+        opaque("repository_id", "Repository namespace."),
+        FieldDescriptor {
+            name: "delivery_key",
+            ty: FieldType::Bytes {
+                min_len: 1,
+                max_len: 64,
+            },
+            cardinality: Cardinality::Required,
+            doc: "Stable delivery identity as a bounded lowercase ASCII slug.",
+        },
+        FieldDescriptor {
+            name: "destination",
+            ty: FieldType::Bytes {
+                min_len: 1,
+                max_len: 64,
+            },
+            cardinality: Cardinality::Required,
+            doc: "Exact destination identity as a bounded lowercase ASCII slug.",
+        },
+        root("payload_root", "Original immutable delivery payload."),
+        root(
+            "predecessor_effect_state_root",
+            "Exact canonical obligation state that authorized the observation.",
+        ),
+        FieldDescriptor {
+            name: "disposition",
+            ty: FieldType::CodePoint {
+                vocabulary: "OutboxDeliveryDispositionV1",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Closed u16 vocabulary: acknowledged=0, terminally-refused=1, indeterminate=2.",
+        },
+        FieldDescriptor {
+            name: "evidence",
+            ty: FieldType::Bytes {
+                min_len: 0,
+                max_len: 4096,
+            },
+            cardinality: Cardinality::Required,
+            doc: "Destination observation bytes. Acknowledged and terminally-refused dispositions require at least one byte; only indeterminate may carry none.",
+        },
+    ],
+};
+
 /// Persisted outbox state delegates transition legality to the shared resource
 /// lifecycle. The descriptor records the exact canonical field order.
 pub static OUTBOX_EFFECT_STATE: SchemaDescriptor = SchemaDescriptor {
@@ -1146,6 +1198,7 @@ pub static DESCRIBED: &[&SchemaDescriptor] = &[
     &VERIFIED_READ_ENVELOPE,
     &REPOSITORY_CREATION_ATTEMPT,
     &HIDDEN_REF_POLICY,
+    &OUTBOX_DELIVERY_RECEIPT,
     &OUTBOX_EFFECT_STATE,
 ];
 

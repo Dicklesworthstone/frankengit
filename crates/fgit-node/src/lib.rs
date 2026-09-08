@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+// Nested authority and canonical-state futures exceed the default trait depth.
+#![recursion_limit = "256"]
 #![feature(random)]
 
 //! One-process `FrankenGit` node assembly.
@@ -65,8 +67,8 @@ use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body,
 };
 use fgit_crypto::{
-    DigestHasher, GitHashAlgorithm as CryptoDigestAlgorithm, GitObjectKind, IdentityDomain,
-    Sha256 as CryptoSha256, git_object_id, git_payload_commitment,
+    DigestHasher, GitHashAlgorithm as CryptoDigestAlgorithm, GitObjectKind, Sha256 as CryptoSha256,
+    git_object_id, git_payload_commitment,
 };
 use fgit_forge::{ForgeEventBatch as CanonicalForgeEventBatch, HistoricalBatch};
 use fgit_git_object::{
@@ -730,7 +732,7 @@ impl AdmissionEvidence for DurableAdmissionEvidence {
 
 #[derive(Clone, Debug)]
 struct MaterializedAdmissionState {
-    delivery: merge_delivery::DeliveryState,
+    delivery: fgit_admission::merge::native::delivery::DeliveryState,
     authenticated: AuthenticatedHead,
     basis: PublicationBasis,
     cache_permit: CachePermit,
@@ -1071,6 +1073,8 @@ fn checkpoint_pack_context(context: &FsqliteCx) -> PackContextCheckpoint {
 /// durable async authority surface.
 #[derive(Debug)]
 pub enum AdmissionMaterializationRefusal {
+    /// A selected forge/outbox body or its authenticated history is invalid.
+    Delivery(Box<AdmissionError>),
     /// The repository head has not been initialized.
     HeadAbsent,
     /// The materializer catch-up scope was cancelled before it could install
@@ -1138,6 +1142,7 @@ pub enum AdmissionMaterializationRefusal {
 impl Display for AdmissionMaterializationRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Delivery(error) => Display::fmt(error, formatter),
             Self::HeadAbsent => formatter.write_str("canonical admission head is absent"),
             Self::Cancelled => {
                 formatter.write_str("canonical admission materialization was cancelled")
@@ -1196,6 +1201,7 @@ impl Display for AdmissionMaterializationRefusal {
 impl Error for AdmissionMaterializationRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Delivery(error) => Some(error.as_ref()),
             Self::Authority(error) => Some(error),
             Self::HeadBody(error) => Some(error),
             Self::DecisionHistory(error) => Some(error.as_ref()),
@@ -1899,7 +1905,14 @@ impl DurableAdmissionMaterializer {
                 closure,
                 source: selection_source,
             };
-            let delivery = merge_delivery::read_in(authority, cx, repository_id, body, is_cancelled).await?;
+            let delivery = fgit_admission::merge::native::delivery::read_in(
+                authority,
+                cx,
+                basis,
+                is_cancelled,
+            )
+            .await
+            .map_err(|error| AdmissionMaterializationRefusal::Delivery(Box::new(error)))?;
             let snapshot = AdmissionSnapshot {
                 refs: ref_state.refs().clone(),
                 head_target: ref_state.head_target().cloned(),
@@ -2251,8 +2264,11 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
             let prepared = AsyncMaterializedBasis {
                 basis: basis.clone(),
                 ref_state: match materialized.snapshot().head_target.clone() {
-                    Some(target) => CanonicalRefState::new_with_head_target(materialized.snapshot().refs.clone(), target)
-                        .map_err(AsyncProjectionFailure::Unavailable)?,
+                    Some(target) => CanonicalRefState::new_with_head_target(
+                        materialized.snapshot().refs.clone(),
+                        target,
+                    )
+                    .map_err(AsyncProjectionFailure::Unavailable)?,
                     None => CanonicalRefState::new(materialized.snapshot().refs.clone()),
                 },
                 root_layout: materialized.root_layout(),
@@ -2386,6 +2402,10 @@ fn async_projection_unavailable(
     refusal: AdmissionMaterializationRefusal,
 ) -> AsyncProjectionFailure {
     let code = match refusal {
+        AdmissionMaterializationRefusal::Delivery(error) => match *error {
+            AdmissionError::AsyncProjectionUnavailable(code) => code,
+            _ => RefusalCode::EvidenceInvalid,
+        },
         AdmissionMaterializationRefusal::Cancelled => RefusalCode::CancellationInProgress,
         AdmissionMaterializationRefusal::CanonicalRoot(code) => code,
         AdmissionMaterializationRefusal::CanonicalFrame(_) => RefusalCode::CanonicalFramingInvalid,
@@ -2441,8 +2461,14 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
             return Err(AsyncProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
         }
         let is_cancelled = || cx.checkpoint().is_err();
-        let delivery = merge_delivery::read_in(authority, cx, context.repository_id, basis.body(), &is_cancelled)
-            .await.map_err(async_projection_unavailable)?;
+        let delivery = fgit_admission::merge::native::delivery::read_in(
+            authority,
+            cx,
+            basis,
+            &is_cancelled,
+        )
+        .await
+        .map_err(|error| async_projection_unavailable(AdmissionMaterializationRefusal::Delivery(Box::new(error))))?;
         let prepared = fgit_admission::merge::prepare_native_merge(context, sealed, tx_id, attempt, basis,
             &fgit_admission::merge::NativeMergeBasis {
                 refs: prepared_basis.ref_state, root_layout: prepared_basis.root_layout,
@@ -2457,10 +2483,19 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
             prepared.root_layout, prepared.refs).await.map_err(async_projection_unavailable)?;
         self.materializer.stage_permitted_object_closure_in(authority, cx, context.repository_id,
             prepared.closure).await.map_err(async_projection_unavailable)?;
-        merge_delivery::stage_in(authority, cx,
-            &merge_delivery::DeliveryState { forge: prepared.forge, outbox: prepared.outbox },
-            &prepared.event, &prepared.effect, &is_cancelled)
-            .await.map_err(async_projection_unavailable)?;
+        fgit_admission::merge::native::delivery::stage_in(
+            authority,
+            cx,
+            &fgit_admission::merge::native::delivery::DeliveryState {
+                forge: prepared.forge,
+                outbox: prepared.outbox,
+            },
+            &prepared.event,
+            &prepared.effect,
+            &is_cancelled,
+        )
+        .await
+        .map_err(|error| async_projection_unavailable(AdmissionMaterializationRefusal::Delivery(Box::new(error))))?;
         Ok(prepared.materialization)
     }
 }
@@ -6645,6 +6680,15 @@ impl OneNode {
             let is_cancelled = || request.authority().checkpoint().is_err();
             let mut forge_events = Vec::new();
             for record in &batch.committed_rcrs {
+                fgit_admission::merge::native::history::verify_record_evidence(
+                    &self.authority,
+                    request.authority(),
+                    self.repository_id,
+                    record,
+                    &is_cancelled,
+                )
+                .await
+                .map_err(|error| AdmissionMaterializationRefusal::Delivery(Box::new(error)))?;
                 match read_evidence_body_in::<_, CanonicalForgeEventBatch, _>(
                     &self.authority,
                     request.authority(),
@@ -8557,14 +8601,7 @@ fn genesis_head(
 }
 
 fn genesis_root(repository_id: RepositoryId, label: &[u8]) -> Digest {
-    let mut bytes = Vec::with_capacity(label.len() + repository_id.as_bytes().len());
-    bytes.extend_from_slice(label);
-    bytes.extend_from_slice(repository_id.as_bytes());
-    let commitment = git_payload_commitment(GitObjectKind::Blob, &bytes, CANONICAL_CODEC_VERSION);
-    Digest::new(
-        IdentityDomain::GitPayloadCommitment.algorithm().id(),
-        *commitment.digest(),
-    )
+    fgit_admission::merge::native::legacy_genesis_root(repository_id, label)
 }
 
 const fn fabric_object_kind(object_type: ObjectType) -> ObjectKind {

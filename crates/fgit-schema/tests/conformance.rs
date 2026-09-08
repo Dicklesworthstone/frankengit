@@ -208,6 +208,55 @@ fn assert_identity<B: CanonicalBody>(schema: &SchemaDescriptor) {
 }
 
 #[test]
+fn outbox_delivery_receipt_descriptor_accounts_for_each_disposition_and_evidence_bound() {
+    use fgit_codec::{
+        CanonicalOutboxDeliveryReceipt, MAX_OUTBOX_DELIVERY_RECEIPT_EVIDENCE_BYTES,
+        OutboxDeliveryDisposition,
+    };
+    use fgit_types::{AsciiSlug, RepositoryId};
+
+    let descriptor = &registry::OUTBOX_DELIVERY_RECEIPT;
+    assert_identity::<CanonicalOutboxDeliveryReceipt>(descriptor);
+    assert_eq!(
+        descriptor
+            .fields
+            .iter()
+            .map(|field| field.name)
+            .collect::<Vec<_>>(),
+        [
+            "repository_id",
+            "delivery_key",
+            "destination",
+            "payload_root",
+            "predecessor_effect_state_root",
+            "disposition",
+            "evidence",
+        ],
+    );
+    for (disposition, length) in [
+        (OutboxDeliveryDisposition::Acknowledged, 1),
+        (OutboxDeliveryDisposition::TerminallyRefused, 1),
+        (OutboxDeliveryDisposition::Indeterminate, 0),
+        (
+            OutboxDeliveryDisposition::Acknowledged,
+            MAX_OUTBOX_DELIVERY_RECEIPT_EVIDENCE_BYTES,
+        ),
+    ] {
+        let receipt = CanonicalOutboxDeliveryReceipt::try_new(
+            RepositoryId::from_bytes([1; 16]),
+            AsciiSlug::from_static("delivery"),
+            AsciiSlug::from_static("forge-events"),
+            support::digest_of(2),
+            support::digest_of(3),
+            disposition,
+            vec![255; length],
+        )
+        .expect("bounded destination evidence");
+        assert_describes(descriptor, &payload_of(&receipt));
+    }
+}
+
+#[test]
 fn the_txn_seal_descriptor_accounts_for_every_byte_the_body_encodes() {
     assert_identity::<fgit_codec::schema::TransactionSealBody>(&registry::TXN_SEAL);
     assert_describes(

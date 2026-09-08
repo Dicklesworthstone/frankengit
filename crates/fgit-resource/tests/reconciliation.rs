@@ -557,3 +557,85 @@ fn a_plan_is_replayable_from_its_transition_list() {
 // Non-production fixture identity: this reserved tag deliberately has no registered digest width.
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
+#[test]
+fn restored_awaited_observations_match_the_blocking_reconciler() {
+    let key = IdempotencyKey::new(digest(0x61));
+    for strength in [DownstreamIdempotency::Strong, DownstreamIdempotency::Weak] {
+        for attempt in [1, 3] {
+            for verdict in [
+                DeliveryVerdict::Accepted,
+                DeliveryVerdict::DuplicateSuppressed,
+                DeliveryVerdict::PermanentRejection,
+                DeliveryVerdict::TransientFailure,
+                DeliveryVerdict::AmbiguousTimeout,
+            ] {
+                let state = ReconcileState::Pending { attempt };
+                let mut blocking =
+                    ReconcilePlan::from_state(key, strength, attempts(3), state).unwrap();
+                let mut awaited = blocking.clone();
+                let mut channel = FixedObservation(Observation::Delivery(verdict));
+                assert_eq!(
+                    blocking.step(&mut channel),
+                    awaited.observe(channel.0).unwrap()
+                );
+                assert_eq!(blocking.transitions(), awaited.transitions());
+                assert!(
+                    awaited
+                        .observe(Observation::Probe(ProbeVerdict::Delivered))
+                        .is_err()
+                        || matches!(verdict, DeliveryVerdict::AmbiguousTimeout)
+                );
+            }
+            for verdict in [
+                ProbeVerdict::Delivered,
+                ProbeVerdict::NotDelivered,
+                ProbeVerdict::Unknown,
+            ] {
+                let state = ReconcileState::Probing { attempt };
+                let mut blocking =
+                    ReconcilePlan::from_state(key, strength, attempts(3), state).unwrap();
+                let mut awaited = blocking.clone();
+                let mut channel = FixedObservation(Observation::Probe(verdict));
+                assert_eq!(
+                    blocking.step(&mut channel),
+                    awaited.observe(channel.0).unwrap()
+                );
+                assert_eq!(blocking.transitions(), awaited.transitions());
+            }
+        }
+    }
+    for invalid in [0, 4, u32::MAX] {
+        assert!(
+            ReconcilePlan::from_state(
+                key,
+                DownstreamIdempotency::Strong,
+                attempts(3),
+                ReconcileState::Probing { attempt: invalid }
+            )
+            .is_err()
+        );
+    }
+    let recovery = ReconcilePlan::recover(key, DownstreamIdempotency::Strong, attempts(3));
+    assert_eq!(recovery.state(), ReconcileState::Probing { attempt: 1 });
+    assert!(
+        recovery.transitions().is_empty(),
+        "restart fabricates no observation"
+    );
+}
+
+struct FixedObservation(Observation);
+impl DownstreamChannel for FixedObservation {
+    fn deliver(&mut self, _: &IdempotencyKey, _: u32) -> DeliveryVerdict {
+        match self.0 {
+            Observation::Delivery(verdict) => verdict,
+            _ => panic!("wrong operation"),
+        }
+    }
+    fn probe(&mut self, _: &IdempotencyKey) -> ProbeVerdict {
+        match self.0 {
+            Observation::Probe(verdict) => verdict,
+            _ => panic!("wrong operation"),
+        }
+    }
+}

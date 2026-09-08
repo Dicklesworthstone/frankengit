@@ -2,6 +2,7 @@
 
 mod candidate;
 mod native_merge;
+mod outbox_delivery;
 mod publication;
 #[cfg(target_os = "linux")]
 mod trusted_tool;
@@ -34,7 +35,9 @@ pub enum NodeWorkspaceRefusal {
     CommitRequired,
     Object(ObjectSourceError),
     Manifest(SparseRefusal),
-    Cancelled { exhaustion: Option<Exhaustion> },
+    Cancelled {
+        exhaustion: Option<Exhaustion>,
+    },
     /// The current ref no longer names the commit the edits were based on.
     StaleWorkspaceBase,
     /// A requested file operation is not supported by this export profile.
@@ -112,7 +115,8 @@ impl OneNode {
             &BaseView<A>,
             &NodeTreeSource<'_>,
             &mut TreeCapability,
-        ) -> Result<T, NodeWorkspaceRefusal> + Send,
+        ) -> Result<T, NodeWorkspaceRefusal>
+        + Send,
     ) -> Result<T, NodeWorkspaceRefusal> {
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         if capability.repository_id() != self.repository_id() {

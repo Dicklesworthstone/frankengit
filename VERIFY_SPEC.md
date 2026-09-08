@@ -211,6 +211,18 @@ Matrix includes:
 
 Fault at every write/CAS/response/outbox point must expose old-complete or new-complete canonical state, never split state.
 
+For native merge/outbox admission, the focused implementation tests are
+`fgit-admission/tests/native_merge_delivery_faults.rs` (explicit model store),
+`fgit-node/tests/native_merge_durable_crashes.rs` (process death around the
+file-backed authority CAS), and `fgit-node/tests/native_merge_publication.rs`
+(real node publication, delivery, and restart). Canonical progress/history tests
+must reject staged-only predecessors, committed forks, missing receipt aliases,
+policy reset, and fabricated terminal observations. A delivery retry after a
+lost reply must probe the same stable key; a refused settlement must authorize
+no external call. Record the exact tested SHA, dated toolchain, RCH terminal
+exit, and store profile. A syntax check is not execution of this matrix, and
+these tests do not establish power-loss or distributed collector correctness.
+
 ## 9. Intent/effect and transaction semantics
 
 Test:

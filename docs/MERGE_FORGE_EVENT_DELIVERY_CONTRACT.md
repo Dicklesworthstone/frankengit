@@ -1,7 +1,7 @@
 # Merge Forge-Event Delivery Contract
 
 **Status:** implementation and verification contract for the remaining durable-delivery gap in merge admission  
-**Primary path:** `crates/fgit-admission/src/merge.rs`  
+**Primary path:** `crates/fgit-admission/src/merge/native.rs`; legacy compatibility facade in `merge.rs`
 **Existing models to reuse:** forge event/merge types in `fgit-forge`; canonical effect/outbox transition machinery in `fgit-reference`; authority-head and RCR publication in `fgit-authority`/`fgit-admission`  
 **Beads relationship:** this document narrows the known remaining defect of the merge task; it is not evidence that the task is implemented, verified, or closed
 
@@ -225,3 +225,58 @@ A source diff, unit test in only the reference crate, staged event body, green m
 This document does not claim that the production state bridge, pure transition, admission wiring, worker adapter, or fault matrix is implemented.
 
 It does not authorize hand-editing the authority head, advancing roots outside the normal CAS, weakening event/outbox canonical encoding, or marking the merge Bead verified or closed without its designated gate.
+## 12. Current implementation boundaries
+
+The native path composes `fgit-reference::merge_delivery` with the normal
+admission evaluator, reference materializer, seal, and authority publication.
+Its stable key uses the fields defined by
+`fgit-codec::OutboxDeliveryIdentityInput`; the configured local audience is
+`forge-projection`, with effect class `forge-event`. The existing legacy
+seal format and its historical event bytes remain distinct compatibility
+inputs. Native object validation reads and hashes the candidate commit, its
+two ordered parents, merge base, and reachable trees before publication.
+
+`merge/native/delivery.rs` reads the selected forge and outbox maps and checks
+payload, aggregate range, stable key, lifecycle predecessors, and receipt
+bindings. An absent old genesis sentinel is accepted only after verifying
+its exact derivation and unchanged authenticated history. A missing advanced
+root is an error. The node materializer uses this same reader for receive,
+merge, and snapshot projections.
+
+`CanonicalOutboxEffectState` uses the existing obligation lifecycle.
+`CanonicalOutboxDeliveryReceipt` binds the original payload, audience, key,
+exact predecessor effect state, disposition, and bounded destination evidence.
+`CanonicalOutboxProgress` records the existing `ReconcileState` and actual
+`Observation` vocabulary, the persisted attempt ceiling, dispatch marker,
+predecessor progress root, and bounded evidence. Its body is selected by
+committed RCR order, not by immutable object existence. Lifecycle and progress
+RCRs carry a typed witness under both ordinary invariant/outbox evidence
+namespaces; `merge/native/history.rs` recognizes and validates these schemas.
+Ordinary transaction-fold evidence continues to use its existing schema.
+
+`deliver_forge_outbox_in` awaits an explicitly configured transport capability.
+It publishes deferral before a call, persists a dispatch marker before send,
+and probes any recovered in-flight dispatch. Completed observations are
+published before terminal lifecycle settlement, so a restart after that
+publication retains the original terminal evidence. The stored policy cannot
+be increased or reset by retry. The initial reconciliation probe occupies
+logical attempt 1; the bounded profile admits ceilings 2 through 16, at most
+64 persisted transitions, and at most 4096 evidence bytes per observation.
+Concurrent callers may repeat transport requests under the same stable key;
+a strong destination must durably suppress duplicate effects. Weak
+idempotency is refused before transport access. This is not a claim of one
+physical request or support for arbitrary webhook destinations.
+
+The embedded authority store is append-only for these immutable bodies and
+exposes no deletion operation. Its retained decision history keeps progress,
+effects, receipts, and payload commitments reachable. This profile does not
+establish a distributed GC or checkpoint-pruning integration; such a collector
+must preserve the complete live outbox and reconciliation closure before it
+can be admitted.
+
+The code and tests in this section do not close `frankengit-asa3`. Native
+sync/async equivalence, the legacy durable-entrypoint integration, supervised
+workspace freshness, and the complete revision-bound batch gate retain their
+original acceptance scope. Model fault tests and file-backed process-death
+tests have different evidence classes; neither implies host power-loss or
+filesystem fault coverage.

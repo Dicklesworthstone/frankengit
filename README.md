@@ -146,6 +146,12 @@ name their own revisions and do not replace an independent batch gate.
   admission race tests cited in the previous snapshot do not establish a
   durable OneNode merge. `frankengit-asa3` retains both this integration and
   coherent forge/outbox delivery; neither is declared complete here.
+  The native implementation candidate now couples the actual merge event,
+  forge position, and canonical outbox state at one authority CAS, with an
+  authenticated delivery reader and persisted reconciliation worker. Its
+  current scope and remaining acceptance are in the
+  [delivery contract](docs/MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md#12-current-implementation-boundaries);
+  this source update does not advance the dated snapshot's verification claim.
 - `fg at` has a real historical path and a nonempty durable-history E2E
   scenario in `scripts/e2e/suites/node/time_travel.sh`. The 2026-09-07
   assessment exercised its 15 acceptance IDs, including both diff endpoints

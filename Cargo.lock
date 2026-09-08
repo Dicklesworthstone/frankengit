@@ -626,6 +626,7 @@ dependencies = [
  "fgit-pack",
  "fgit-policy",
  "fgit-reference",
+ "fgit-resource",
  "fgit-txn",
  "fgit-types",
  "fgit-wire",
@@ -733,6 +734,7 @@ name = "fgit-codec"
 version = "0.0.1"
 dependencies = [
  "fgit-crypto",
+ "fgit-resource",
  "fgit-types",
 ]
 

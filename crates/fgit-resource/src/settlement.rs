@@ -174,6 +174,10 @@ pub enum Observation {
     Probe(ProbeVerdict),
 }
 
+/// An adapter supplied an observation for an operation the plan did not ask for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObservationMismatch;
+
 /// One recorded step of a reconciliation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReconcileTransition {
@@ -217,6 +221,49 @@ pub struct ReconcilePlan {
 }
 
 impl ReconcilePlan {
+    /// Restores an authenticated persisted state without restarting its budget.
+    /// Storage owners must verify the complete predecessor/observation chain;
+    /// this constructor checks the state-local attempt bounds.
+    pub fn from_state(
+        key: IdempotencyKey,
+        idempotency: DownstreamIdempotency,
+        policy: ReconcilePolicy,
+        state: ReconcileState,
+    ) -> Result<Self, ObservationMismatch> {
+        if let ReconcileState::Pending { attempt }
+        | ReconcileState::Probing { attempt }
+        | ReconcileState::Delivered { attempt } = state
+            && (attempt == 0 || attempt > policy.max_attempts())
+        {
+            return Err(ObservationMismatch);
+        }
+        Ok(Self {
+            key,
+            idempotency,
+            policy,
+            state,
+            transitions: Vec::new(),
+        })
+    }
+
+    /// Resumes a durably deferred effect whose last dispatch may have happened.
+    /// The first operation is a probe, including after a crash before dispatch.
+    /// No delivery observation is fabricated to reach this state.
+    #[must_use]
+    pub const fn recover(
+        key: IdempotencyKey,
+        idempotency: DownstreamIdempotency,
+        policy: ReconcilePolicy,
+    ) -> Self {
+        Self {
+            key,
+            idempotency,
+            policy,
+            state: ReconcileState::Probing { attempt: 1 },
+            transitions: Vec::new(),
+        }
+    }
+
     /// Starts a plan for one idempotency key.
     #[must_use]
     pub const fn new(
@@ -259,8 +306,7 @@ impl ReconcilePlan {
 
     /// Takes one step, if the plan is not already terminal.
     pub fn step(&mut self, channel: &mut impl DownstreamChannel) -> ReconcileState {
-        let from = self.state;
-        let (observation, to) = match from {
+        let (observation, next) = match self.state {
             ReconcileState::Pending { attempt } => {
                 let verdict = channel.deliver(&self.key, attempt);
                 (
@@ -277,8 +323,35 @@ impl ReconcilePlan {
             }
             terminal => return terminal,
         };
+        self.record_observation(observation, next)
+    }
+
+    /// Applies one completed observation from an awaited transport adapter.
+    /// This is the same transition core used by the blocking channel driver.
+    pub fn observe(
+        &mut self,
+        observation: Observation,
+    ) -> Result<ReconcileState, ObservationMismatch> {
+        let from = self.state;
+        let to = match (from, observation) {
+            (ReconcileState::Pending { attempt }, Observation::Delivery(verdict)) => {
+                self.after_delivery(attempt, verdict)
+            }
+            (ReconcileState::Probing { attempt }, Observation::Probe(verdict)) => {
+                self.after_probe(attempt, verdict)
+            }
+            _ => return Err(ObservationMismatch),
+        };
+        Ok(self.record_observation(observation, to))
+    }
+
+    fn record_observation(
+        &mut self,
+        observation: Observation,
+        to: ReconcileState,
+    ) -> ReconcileState {
         self.transitions.push(ReconcileTransition {
-            from,
+            from: self.state,
             observation,
             to,
         });
