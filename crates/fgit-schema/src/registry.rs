@@ -1072,6 +1072,68 @@ pub static HIDDEN_REF_POLICY: SchemaDescriptor = SchemaDescriptor {
     )],
 };
 
+/// Persisted outbox state delegates transition legality to the shared resource
+/// lifecycle. The descriptor records the exact canonical field order.
+pub static OUTBOX_EFFECT_STATE: SchemaDescriptor = SchemaDescriptor {
+    family: "outbox-effect-state",
+    major: 1,
+    minor: 0,
+    domain: "frankengit/generation/v1",
+    doc: "One immutable outbox obligation state, bound to its original merge and exact predecessor.",
+    fields: &[
+        opaque("repository_id", "Repository namespace."),
+        FieldDescriptor {
+            name: "delivery_key",
+            ty: FieldType::Bytes {
+                min_len: 1,
+                max_len: 64,
+            },
+            cardinality: Cardinality::Required,
+            doc: "Stable delivery identity as a bounded lowercase ASCII slug.",
+        },
+        derived("tx_id", TXN_DOMAIN, "Original sealed merge transaction."),
+        root("payload_root", "Original immutable merge event payload."),
+        FieldDescriptor {
+            name: "transition_ordinal",
+            ty: FieldType::Scalar(ScalarWidth::U32),
+            cardinality: Cardinality::Required,
+            doc: "Post-commit lifecycle ordinal, bounded to zero through three by the canonical body.",
+        },
+        FieldDescriptor {
+            name: "state",
+            ty: FieldType::CodePoint {
+                vocabulary: "OutboxObligationStateV1",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Shared resource obligation state: reserved=0, committed=1, deferred=2, escalated=3, acknowledged=4, aborted=5, terminally-failed=6, leaked=7. Initial body requires committed.",
+        },
+        root_opt(
+            "predecessor_root",
+            "Exact previous body, absent only for the initial committed state.",
+        ),
+        FieldDescriptor {
+            name: "predecessor_state",
+            ty: FieldType::CodePoint {
+                vocabulary: "OutboxObligationStateV1",
+            },
+            cardinality: Cardinality::Optional,
+            doc: "Previous shared state; must agree with the resolved predecessor body.",
+        },
+        FieldDescriptor {
+            name: "event",
+            ty: FieldType::CodePoint {
+                vocabulary: "OutboxLifecycleEventV1",
+            },
+            cardinality: Cardinality::Optional,
+            doc: "Shared lifecycle event: commit=0, abort=1, acknowledge=2, defer=3, escalate=4, fail-terminally=5, leak=6. Decoder validates predecessor.apply(event) equals state.",
+        },
+        root_opt(
+            "evidence_root",
+            "Immutable observation or reconciliation evidence; acknowledge requires it.",
+        ),
+    ],
+};
+
 pub static DESCRIBED: &[&SchemaDescriptor] = &[
     &AUTHORITY_HEAD,
     &DECISION_BATCH,
@@ -1084,6 +1146,7 @@ pub static DESCRIBED: &[&SchemaDescriptor] = &[
     &VERIFIED_READ_ENVELOPE,
     &REPOSITORY_CREATION_ATTEMPT,
     &HIDDEN_REF_POLICY,
+    &OUTBOX_EFFECT_STATE,
 ];
 
 /// A canonical body that exists and is deliberately not described.

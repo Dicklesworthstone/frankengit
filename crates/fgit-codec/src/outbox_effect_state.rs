@@ -63,7 +63,10 @@ impl CanonicalOutboxEffectState {
         event: LifecycleEvent,
         evidence_root: Option<Digest>,
     ) -> Result<Self, CodecRefusal> {
-        let state = self.state.apply(event).map_err(|_| invalid_transition(self.state, event))?;
+        let state = self
+            .state
+            .apply(event)
+            .map_err(|_| invalid_transition(self.state, event))?;
         let next = Self {
             repository_id: self.repository_id,
             delivery_key: self.delivery_key,
@@ -82,43 +85,63 @@ impl CanonicalOutboxEffectState {
 
     /// Repository namespace.
     #[must_use]
-    pub const fn repository_id(&self) -> RepositoryId { self.repository_id }
+    pub const fn repository_id(&self) -> RepositoryId {
+        self.repository_id
+    }
 
     /// Stable delivery/idempotency identity.
     #[must_use]
-    pub const fn delivery_key(&self) -> AsciiSlug { self.delivery_key }
+    pub const fn delivery_key(&self) -> AsciiSlug {
+        self.delivery_key
+    }
 
     /// Original sealed merge transaction; delivery settlement does not change it.
     #[must_use]
-    pub const fn tx_id(&self) -> TxId { self.tx_id }
+    pub const fn tx_id(&self) -> TxId {
+        self.tx_id
+    }
 
     /// Original immutable event payload.
     #[must_use]
-    pub const fn payload_root(&self) -> Digest { self.payload_root }
+    pub const fn payload_root(&self) -> Digest {
+        self.payload_root
+    }
 
     /// Number of lifecycle transitions since the initial committed obligation.
     #[must_use]
-    pub const fn transition_ordinal(&self) -> u32 { self.transition_ordinal }
+    pub const fn transition_ordinal(&self) -> u32 {
+        self.transition_ordinal
+    }
 
     /// Shared obligation lifecycle state.
     #[must_use]
-    pub const fn state(&self) -> ObligationState { self.state }
+    pub const fn state(&self) -> ObligationState {
+        self.state
+    }
 
     /// Exact immutable predecessor, absent only for the initial body.
     #[must_use]
-    pub const fn predecessor_root(&self) -> Option<Digest> { self.predecessor_root }
+    pub const fn predecessor_root(&self) -> Option<Digest> {
+        self.predecessor_root
+    }
 
     /// Predecessor state to check against the resolved predecessor body.
     #[must_use]
-    pub const fn predecessor_state(&self) -> Option<ObligationState> { self.predecessor_state }
+    pub const fn predecessor_state(&self) -> Option<ObligationState> {
+        self.predecessor_state
+    }
 
     /// Shared lifecycle event producing this successor.
     #[must_use]
-    pub const fn event(&self) -> Option<LifecycleEvent> { self.event }
+    pub const fn event(&self) -> Option<LifecycleEvent> {
+        self.event
+    }
 
     /// Immutable settlement/reconciliation evidence; acknowledgement requires it.
     #[must_use]
-    pub const fn evidence_root(&self) -> Option<Digest> { self.evidence_root }
+    pub const fn evidence_root(&self) -> Option<Digest> {
+        self.evidence_root
+    }
 
     /// Deterministic root named by the canonical outbox index.
     ///
@@ -145,7 +168,10 @@ impl CanonicalOutboxEffectState {
                 || self.event.is_some()
                 || self.evidence_root.is_some()
             {
-                return Err(invalid("outbox_effect_initial_state", state_tag(self.state)));
+                return Err(invalid(
+                    "outbox_effect_initial_state",
+                    state_tag(self.state),
+                ));
             }
             return Ok(());
         }
@@ -160,8 +186,10 @@ impl CanonicalOutboxEffectState {
             ObligationState::Committed => 1,
             ObligationState::DeferredExternally => 2,
             ObligationState::Escalated => 3,
-            ObligationState::Reserved | ObligationState::Acknowledged
-            | ObligationState::Aborted | ObligationState::TerminallyFailed
+            ObligationState::Reserved
+            | ObligationState::Acknowledged
+            | ObligationState::Aborted
+            | ObligationState::TerminallyFailed
             | ObligationState::Leaked => return Err(invalid_transition(previous, event)),
         };
         if self.transition_ordinal != expected_ordinal {
@@ -171,9 +199,14 @@ impl CanonicalOutboxEffectState {
                 offset: 0,
             });
         }
-        let resulting = previous.apply(event).map_err(|_| invalid_transition(previous, event))?;
+        let resulting = previous
+            .apply(event)
+            .map_err(|_| invalid_transition(previous, event))?;
         if resulting != self.state {
-            return Err(invalid("outbox_effect_resulting_state", state_tag(self.state)));
+            return Err(invalid(
+                "outbox_effect_resulting_state",
+                state_tag(self.state),
+            ));
         }
         if event == LifecycleEvent::Acknowledge && self.evidence_root.is_none() {
             return Err(invalid("outbox_effect_acknowledgement_evidence", 0));
@@ -211,12 +244,16 @@ impl CanonicalBody for CanonicalOutboxEffectState {
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         let body = Self {
             repository_id: RepositoryId::from_bytes(input.read_opaque_id("repository_id")?),
-            delivery_key: AsciiSlug::try_new("outbox_delivery_key", input.read_bytes("outbox_delivery_key")?)?,
+            delivery_key: AsciiSlug::try_new(
+                "outbox_delivery_key",
+                input.read_bytes("outbox_delivery_key")?,
+            )?,
             tx_id: TxId::from_internal_object_id(input.read_internal_object_id()?)?,
             payload_root: input.read_digest()?,
             transition_ordinal: input.read_scalar("outbox_effect_transition_ordinal")?,
             state: read_state(input)?,
-            predecessor_root: input.read_option("predecessor_effect_state_root", Decoder::read_digest)?,
+            predecessor_root: input
+                .read_option("predecessor_effect_state_root", Decoder::read_digest)?,
             predecessor_state: input.read_option("predecessor_effect_state", read_state)?,
             event: input.read_option("outbox_lifecycle_event", read_event)?,
             evidence_root: input.read_option("outbox_effect_evidence", Decoder::read_digest)?,
@@ -262,7 +299,11 @@ fn read_state(input: &mut Decoder<'_>) -> Result<ObligationState, CodecRefusal> 
         5 => Ok(ObligationState::Aborted),
         6 => Ok(ObligationState::TerminallyFailed),
         7 => Ok(ObligationState::Leaked),
-        observed => Err(CodecRefusal::VariantUnknown { field: "outbox_effect_state", observed: u32::from(observed), offset }),
+        observed => Err(CodecRefusal::VariantUnknown {
+            field: "outbox_effect_state",
+            observed: u32::from(observed),
+            offset,
+        }),
     }
 }
 
@@ -276,12 +317,20 @@ fn read_event(input: &mut Decoder<'_>) -> Result<LifecycleEvent, CodecRefusal> {
         4 => Ok(LifecycleEvent::Escalate),
         5 => Ok(LifecycleEvent::FailTerminally),
         6 => Ok(LifecycleEvent::Leak),
-        observed => Err(CodecRefusal::VariantUnknown { field: "outbox_lifecycle_event", observed: u32::from(observed), offset }),
+        observed => Err(CodecRefusal::VariantUnknown {
+            field: "outbox_lifecycle_event",
+            observed: u32::from(observed),
+            offset,
+        }),
     }
 }
 
 fn invalid(field: &'static str, observed: u16) -> CodecRefusal {
-    CodecRefusal::VariantUnknown { field, observed: u32::from(observed), offset: 0 }
+    CodecRefusal::VariantUnknown {
+        field,
+        observed: u32::from(observed),
+        offset: 0,
+    }
 }
 
 fn invalid_transition(state: ObligationState, event: LifecycleEvent) -> CodecRefusal {
