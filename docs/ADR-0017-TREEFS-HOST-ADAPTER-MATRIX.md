@@ -18,19 +18,21 @@ also names two optional host-adapter families: a deterministic sparse
 directory for tools which need pathnames, and a FrankenFS/FUSE mount on
 supported systems.
 
-The repository already has two adjacent, deliberately narrower capabilities:
+At the original 2026-08-23 proposal, the repository had two adjacent, narrower
+capabilities:
 `SparseManifest` computes the immutable, capability-checked manifest that a
-future sparse-directory writer must consume, while `UstarArchive` and
+sparse-directory writer must consume, while `UstarArchive` and
 `ZipArchive` return deterministic bytes.  Neither writes a host directory,
 mounts a filesystem, imports host outputs, or gains authority.  Treating
 either as a FUSE or sparse-directory implementation would make fixtures and
 preparation formats look like live host proof.
 
-`fgit-treefs` therefore deliberately exposes no FUSE host adapter today.  Its
-crash matrix records the FUSE read/writeback and host-output/import points as
-structurally absent rather than manufacturing a mock mount.  This ADR makes
-that absence, its consumer-facing support matrix, and the conditions for
-changing it explicit.
+`fgit-treefs` therefore deliberately exposes no FUSE host adapter today. The
+original
+direct-API crash matrix records FUSE and host import as structurally absent.
+The Linux candidate below now has separate real directory/import crash tests
+in fgit-runner; FUSE remains absent. The candidate does not silently promote
+the earlier structural-absence cells to accepted host-profile evidence.
 
 ## Decision (proposed)
 
