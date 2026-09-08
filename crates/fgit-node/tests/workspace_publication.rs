@@ -58,7 +58,7 @@ fn tree(changed: GitOid, untouched: GitOid) -> Vec<u8> {
 }
 fn commit(tree: GitOid, parents: &[GitOid], message: &str) -> Vec<u8> {
     let parents: String = parents.iter().map(|id| format!("parent {id}\n")).collect();
-    format!("tree {tree}\n{parents}author Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\n{message}\n").into_bytes()
+    format!("tree {tree}\n{parents}author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{message}\n").into_bytes()
 }
 fn setup(root: &Path, format: GitHashAlgorithm) -> (OneNode, GitOid, GitOid) {
     let (mut node, _) = OneNode::init(config(root, format)).unwrap();
@@ -155,6 +155,50 @@ fn candidate_publishes_preserves_untouched_objects_and_replays_after_reopen() {
         assert_eq!(retry.commands[0].terminal, result.commands[0].terminal);
         assert_eq!(observed(&reopened), after, "replay must not publish another head");
         reopened.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn epoch_zero_candidate_refuses_before_publication_and_epoch_one_twin_commits() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (node, base, untouched) = setup(&scratch.0, format);
+        let request = node.request_context();
+        let before = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+        let message = "reviewed timestamp";
+        let (valid, tree_id, valid_bundle) = candidate(format, base, untouched, &[base], message);
+        let permitted = String::from_utf8(commit(tree_id, &[base], message)).unwrap();
+        assert_eq!(permitted.matches(" 1 +0000\n").count(), 2);
+        let epoch_zero = permitted.replace(" 1 +0000\n", " 0 +0000\n");
+        assert_eq!(epoch_zero.replace(" 0 +0000\n", " 1 +0000\n"), permitted);
+        let refused_tip = git_object_id(format, GitObjectKind::Commit, epoch_zero.as_bytes());
+        assert_ne!(refused_tip, valid);
+        let blob = format!("{message}\n").into_bytes();
+        let tree = tree(git_object_id(format, GitObjectKind::Blob, &blob), untouched);
+        assert_eq!(git_object_id(format, GitObjectKind::Tree, &tree), tree_id);
+        let packed = pack(format, &[
+            (GitObjectKind::Blob, blob), (GitObjectKind::Tree, tree),
+            (GitObjectKind::Commit, epoch_zero.as_bytes().to_vec()),
+        ]);
+        let refused_bundle = envelope(format, base, refused_tip, &packed);
+        for _ in 0..2 {
+            assert!(matches!(apply(&node, b"epoch-zero", base, refused_tip, &refused_bundle),
+                Err(NodeWorkspaceRefusal::InvalidWorkspaceCandidate("candidate is not a bounded strict Git commit"))));
+            let request = node.request_context();
+            let after = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+            assert_eq!(after.basis().body(), before.basis().body(), "strict refusal cannot publish any root");
+        }
+        // Quarantine accepted and staged the import-compatible native object;
+        // the workspace's additional strict creation profile refused it.
+        assert_eq!(node.read_git_object(refused_tip).unwrap().payload(), epoch_zero.as_bytes());
+        let accepted = apply(&node, b"epoch-one", base, valid, &valid_bundle).unwrap();
+        assert!(matches!(accepted.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
+        let committed = observed(&node);
+        assert_eq!(committed.0, valid);
+        let retried = apply(&node, b"epoch-one", base, valid, &valid_bundle).unwrap();
+        assert_eq!(retried.commands[0].terminal, accepted.commands[0].terminal);
+        assert_eq!(observed(&node), committed);
+        node.shutdown().unwrap();
     }
 }
 

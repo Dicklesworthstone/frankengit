@@ -9371,6 +9371,140 @@ mod tests {
         (context, request, fold)
     }
 
+    /// Materializes fixture ref intents through the production projection so
+    /// the RCR names its staged canonical evidence bodies. Publication remains
+    /// the caller's independently checked plan.
+    pub(super) fn stage_fixture_ref_record(
+        node: &OneNode,
+        authority_request: &NodeRequestContext,
+        basis: &PublicationBasis,
+        refs: &CanonicalRefState,
+        closure: &PermittedObjectClosure,
+    ) -> fgit_codec::RepositoryCommitRecord {
+        let (context, _, _) = evidence_request(node);
+        let semantic = fgit_authority::SemanticRequest::build(
+            fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+            context.object_format,
+            true,
+            refs.refs()
+                .iter()
+                .map(|(name, oid)| fgit_authority::RefCommand {
+                    name: name.clone(),
+                    expected_old: fgit_authority::ExpectedOld::Absent,
+                    proposed_new: fgit_authority::ProposedNew::Update(*oid),
+                    force: false,
+                })
+                .collect(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("fixture ref commands have one canonical semantic request");
+        let sealed = node
+            .runtime()
+            .block_on(fgit_authority::seal_request_async(
+                &node.authority,
+                authority_request.authority(),
+                &fgit_authority::SealAttempt {
+                    tenant_id: context.tenant_id,
+                    repository_id: context.repository_id,
+                    authenticated_principal_id: context.principal_id,
+                    idempotency_key: context.idempotency_key.clone(),
+                    request: semantic.clone(),
+                },
+            ))
+            .expect("fixture transaction seal is retained before publication");
+        let request = TransactionRequest {
+            tx_id: sealed.tx_id(),
+            tenant: context.tenant_id,
+            repository: context.repository_id,
+            principal: context.principal_id,
+            schema: semantic.request_schema(),
+            idempotency_key: ModelIdempotencyKey::new(fgit_types::AsciiSlug::from_static(
+                "receive",
+            )),
+            canonical_request_digest: fgit_authority::canonical_request_digest(&semantic)
+                .expect("fixture request digest derives from the actual commands"),
+            statements: vec![fgit_reference::intent::Statement {
+                intents: refs
+                    .refs()
+                    .iter()
+                    .map(|(name, oid)| {
+                        fgit_reference::intent::Intent::Ref(
+                            fgit_reference::intent::RefIntent::Update {
+                                name: name.clone(),
+                                expected: fgit_reference::refs::ExpectedRefState::Absent,
+                                new: *oid,
+                                force: false,
+                            },
+                        )
+                    })
+                    .collect(),
+                mismatch_policy: fgit_types::MismatchPolicy::TxnAbort,
+            }],
+            promised_closure: closure.objects().clone(),
+            atomic: true,
+            durability: DurabilityProfile::CanonicalSource,
+        };
+        let materialized = node
+            .runtime()
+            .block_on(node.materialize_admission_in(authority_request))
+            .expect("the fixture's exact predecessor materializes");
+        assert_eq!(materialized.basis(), basis);
+        let projection = node
+            .durable_admission_projection(&context)
+            .expect("fixture context is bound to this node");
+        let snapshot = node
+            .runtime()
+            .block_on(projection.snapshot_async(
+                &node.authority,
+                authority_request.authority(),
+                basis,
+                materialized.authenticated(),
+            ))
+            .expect("the production projection reloads the authenticated basis");
+        let fold = fgit_txn::IntentEvaluator::new().evaluate(
+            fgit_reference::effect::FoldBasis {
+                refs: &snapshot.refs,
+                forge_positions: &snapshot.forge_positions,
+                retention: &snapshot.retention,
+                outbox: &snapshot.outbox,
+            },
+            &request,
+        );
+        assert!(fold.effects().is_some(), "fixture ref intents must fold");
+        let validated_closure = ValidatedClosure {
+            objects: closure.objects().clone(),
+            object_closure_root: permitted_object_closure_root(closure)
+                .expect("fixture closure has its canonical commitment"),
+        };
+        let committed = node
+            .runtime()
+            .block_on(projection.materialize_commit_async(
+                &node.authority,
+                authority_request.authority(),
+                basis,
+                &request,
+                &fold,
+                &validated_closure,
+            ))
+            .expect("the actual ref fold and all of its evidence stage together");
+        assert_eq!(
+            committed.roots.ref_root,
+            fgit_admission::ref_state_root(materialized.root_layout(), refs)
+                .expect("fixture ref root uses the selected layout"),
+        );
+        assert_eq!(
+            committed.record.object_closure_root,
+            validated_closure.object_closure_root,
+        );
+        assert_eq!(
+            committed.roots.forge_position_root,
+            basis.body().forge_position_root,
+        );
+        assert_eq!(committed.roots.outbox_root, basis.body().outbox_root);
+        committed.record
+    }
+
     fn assert_published_evidence_body<Body>(
         node: &OneNode,
         request: &NodeRequestContext,
@@ -10963,7 +11097,7 @@ mod tests {
                 &node.authority,
                 request.authority(),
                 node.repository_id(),
-                ref_state,
+                ref_state.clone(),
             ))
             .expect("future RCR ref state stages before head publication");
         let closure = PermittedObjectClosure::new(BTreeSet::from([
@@ -11001,12 +11135,10 @@ mod tests {
             authority_head_id(&genesis_body).expect("genesis head re-identifies"),
             genesis_body,
         );
-        let mut record = commit_record();
-        record.repository_id = node.repository_id();
-        record.resulting_ref_root = ref_root;
-        record.object_closure_root = closure_root;
-        record.resulting_forge_position_root = genesis_basis.body().forge_position_root;
-        record.policy_epoch = genesis_basis.body().policy_epoch;
+        let record =
+            stage_fixture_ref_record(&node, &request, &genesis_basis, &ref_state, &closure);
+        assert_eq!(record.resulting_ref_root, ref_root);
+        assert_eq!(record.object_closure_root, closure_root);
         let mut roots = ResultingRoots::carried_forward(&genesis_basis);
         roots.ref_root = ref_root;
         let mut commit_plan = PublicationPlan::open(genesis_basis).expect("genesis opens a plan");

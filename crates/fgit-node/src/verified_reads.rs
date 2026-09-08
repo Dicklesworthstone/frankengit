@@ -785,8 +785,7 @@ mod tests {
     };
     use fgit_chronicle::{PublicationPlan, PublicationVerdict, ResultingRoots};
     use fgit_codec::{
-        CryptoBodyIdentity, RepositoryIncarnationConfigurationBody, decode_body,
-        harness::{commit_record, digest_of},
+        CryptoBodyIdentity, RepositoryIncarnationConfigurationBody, decode_body, harness::digest_of,
     };
     use fgit_crypto::{
         MerkleProof, ObjectClosureNeighbour, ObjectClosureNonMembershipProof,
@@ -906,7 +905,7 @@ mod tests {
             .put_git_object(ObjectType::Blob, b"verified-read fixture".to_vec())
             .expect("the selected blob enters immutable fabric");
         let name = RefName::try_new(b"refs/heads/proven").expect("fixed fixture ref name is valid");
-        let refs = BTreeMap::from([(name.clone(), stored.identity())]);
+        let refs = CanonicalRefState::new(BTreeMap::from([(name.clone(), stored.identity())]));
         let ref_root = node
             .runtime()
             .block_on(node.admission_materializer.stage_ref_state_for_layout_in(
@@ -914,9 +913,10 @@ mod tests {
                 request.authority(),
                 node.repository_id(),
                 RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
-                CanonicalRefState::new(refs),
+                refs.clone(),
             ))
             .expect("the successor ref state stages before publication");
+        let closure = PermittedObjectClosure::new(BTreeSet::from([stored.identity()]));
         let closure_root = node
             .runtime()
             .block_on(
@@ -925,7 +925,7 @@ mod tests {
                         &node.authority,
                         request.authority(),
                         node.repository_id(),
-                        PermittedObjectClosure::new(BTreeSet::from([stored.identity()])),
+                        closure.clone(),
                     ),
             )
             .expect("the successor object closure stages before publication");
@@ -942,12 +942,9 @@ mod tests {
             authority_head_id(&body).expect("the genesis head re-identifies"),
             body,
         );
-        let mut record = commit_record();
-        record.repository_id = node.repository_id();
-        record.resulting_ref_root = ref_root;
-        record.object_closure_root = closure_root;
-        record.resulting_forge_position_root = basis.body().forge_position_root;
-        record.policy_epoch = basis.body().policy_epoch;
+        let record = crate::tests::stage_fixture_ref_record(node, &request, &basis, &refs, &closure);
+        assert_eq!(record.resulting_ref_root, ref_root);
+        assert_eq!(record.object_closure_root, closure_root);
         let mut roots = ResultingRoots::carried_forward(&basis);
         roots.ref_root = ref_root;
         let mut plan = PublicationPlan::open(basis).expect("the current head opens a plan");

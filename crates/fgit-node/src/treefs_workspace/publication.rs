@@ -329,8 +329,14 @@ mod tests {
             let base = oid(format, '1');
             let tree = oid(format, '2');
             let limits = ParseLimits { tree_reference_bytes: format.digest_len(), ..ParseLimits::default() };
-            let commit = |parents: &str| format!("tree {tree}\n{parents}author Test <t@example.invalid> 0 +0000\ncommitter Test <t@example.invalid> 0 +0000\n\nchange\n");
-            assert!(check_candidate_commit(commit(&format!("parent {base}\n")).as_bytes(), base, limits.clone()).is_ok());
+            let commit = |parents: &str| format!("tree {tree}\n{parents}author Test <t@example.invalid> 1 +0000\ncommitter Test <t@example.invalid> 1 +0000\n\nchange\n");
+            let permitted = commit(&format!("parent {base}\n"));
+            assert!(check_candidate_commit(permitted.as_bytes(), base, limits.clone()).is_ok());
+            // Preserve the existing StrictCreate epoch-zero divergence while
+            // the parent-shape assertions use an otherwise permitted commit.
+            let epoch_zero = permitted.replace(" 1 +0000\n", " 0 +0000\n");
+            assert!(matches!(check_candidate_commit(epoch_zero.as_bytes(), base, limits.clone()),
+                Err(NodeWorkspaceRefusal::InvalidWorkspaceCandidate("candidate is not a bounded strict Git commit"))));
             for parents in [String::new(), format!("parent {}\n", oid(format, '3')),
                 format!("parent {base}\nparent {}\n", oid(format, '3'))] {
                 assert!(check_candidate_commit(commit(&parents).as_bytes(), base, limits.clone()).is_err());
