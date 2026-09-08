@@ -117,6 +117,7 @@ use fgit_wire::{
 use fsqlite_types::cx::Cx as FsqliteCx;
 
 mod loose_import;
+mod merge_delivery;
 mod quarantine_validator;
 mod verified_reads;
 
@@ -729,6 +730,7 @@ impl AdmissionEvidence for DurableAdmissionEvidence {
 
 #[derive(Clone, Debug)]
 struct MaterializedAdmissionState {
+    delivery: merge_delivery::DeliveryState,
     authenticated: AuthenticatedHead,
     basis: PublicationBasis,
     cache_permit: CachePermit,
@@ -1897,12 +1899,13 @@ impl DurableAdmissionMaterializer {
                 closure,
                 source: selection_source,
             };
+            let delivery = merge_delivery::read_in(authority, cx, repository_id, body, is_cancelled).await?;
             let snapshot = AdmissionSnapshot {
                 refs: ref_state.refs().clone(),
                 head_target: ref_state.head_target().cloned(),
-                forge_positions: BTreeMap::new(),
+                forge_positions: delivery.forge_positions(),
                 retention: BTreeSet::new(),
-                outbox: BTreeMap::new(),
+                outbox: delivery.outbox_bindings(),
                 hidden_refs: hidden_refs.clone(),
                 tag_peels: BTreeMap::new(),
             };
@@ -1918,6 +1921,7 @@ impl DurableAdmissionMaterializer {
                 root_layout,
             };
             let state = MaterializedAdmissionState {
+                delivery,
                 authenticated: authenticated.clone(),
                 basis: basis.clone(),
                 cache_permit,
@@ -1994,6 +1998,9 @@ impl DurableAdmissionMaterializer {
             .ref_state;
         let refs = ref_state.refs().clone();
         let head_target = ref_state.head_target().cloned();
+        let delivery = &guard.as_ref().ok_or(RefusalCode::EvidenceMissing)?.delivery;
+        let forge_positions = delivery.forge_positions();
+        let outbox = delivery.outbox_bindings();
         // Cloned from the cache rather than rebuilt: the mismatch check above
         // already discarded this state if its configuration_root disagreed with
         // the authenticated head, so what is cached here is the policy of the
@@ -2007,9 +2014,9 @@ impl DurableAdmissionMaterializer {
         Ok(AdmissionSnapshot {
             refs,
             head_target,
-            forge_positions: BTreeMap::new(),
+            forge_positions,
             retention: BTreeSet::new(),
-            outbox: BTreeMap::new(),
+            outbox,
             hidden_refs,
             tag_peels: BTreeMap::new(),
         })
@@ -2243,7 +2250,11 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
                 .map_err(async_projection_unavailable)?;
             let prepared = AsyncMaterializedBasis {
                 basis: basis.clone(),
-                ref_state: CanonicalRefState::new(materialized.snapshot().refs.clone()),
+                ref_state: match materialized.snapshot().head_target.clone() {
+                    Some(target) => CanonicalRefState::new_with_head_target(materialized.snapshot().refs.clone(), target)
+                        .map_err(AsyncProjectionFailure::Unavailable)?,
+                    None => CanonicalRefState::new(materialized.snapshot().refs.clone()),
+                },
                 root_layout: materialized.root_layout(),
             };
             *self.prepared.lock().map_err(|_| {
@@ -2404,6 +2415,54 @@ fn async_projection_unavailable(
         | AdmissionMaterializationRefusal::CachePoisoned => RefusalCode::EvidenceMissing,
     };
     AsyncProjectionFailure::Unavailable(code)
+}
+
+impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
+    for DurableAsyncAdmissionProjection<'_>
+{
+    async fn materialize_merge_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a FsqliteCx,
+        context: &'a AdmissionContext,
+        sealed: &'a fgit_admission::merge::SealedMerge<'_>,
+        tx_id: TxId,
+        attempt: &'a fgit_authority::SealAttempt,
+        basis: &'a PublicationBasis,
+        next_state: &'a CanonicalRefState,
+    ) -> Result<CommitMaterialization, AsyncProjectionFailure> {
+        if *context != self.context {
+            return Err(AsyncProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
+        }
+        let prepared_basis = self.prepared.lock()
+            .map_err(|_| AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach))?
+            .take().ok_or(AsyncProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+        if prepared_basis.basis != *basis {
+            return Err(AsyncProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
+        }
+        let is_cancelled = || cx.checkpoint().is_err();
+        let delivery = merge_delivery::read_in(authority, cx, context.repository_id, basis.body(), &is_cancelled)
+            .await.map_err(async_projection_unavailable)?;
+        let prepared = fgit_admission::merge::prepare_native_merge(context, sealed, tx_id, attempt, basis,
+            &fgit_admission::merge::NativeMergeBasis {
+                refs: prepared_basis.ref_state, root_layout: prepared_basis.root_layout,
+                forge: delivery.forge, outbox: delivery.outbox,
+            }).map_err(AsyncProjectionFailure::Refuse)?;
+        if prepared.refs != *next_state {
+            return Err(AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach));
+        }
+        self.materializer.stage_evidence_bodies_in(authority, cx, &prepared.evidence, &is_cancelled)
+            .await.map_err(async_projection_unavailable)?;
+        self.materializer.stage_ref_state_for_layout_in(authority, cx, context.repository_id,
+            prepared.root_layout, prepared.refs).await.map_err(async_projection_unavailable)?;
+        self.materializer.stage_permitted_object_closure_in(authority, cx, context.repository_id,
+            prepared.closure).await.map_err(async_projection_unavailable)?;
+        merge_delivery::stage_in(authority, cx,
+            &merge_delivery::DeliveryState { forge: prepared.forge, outbox: prepared.outbox },
+            &prepared.event, &prepared.effect, &is_cancelled)
+            .await.map_err(async_projection_unavailable)?;
+        Ok(prepared.materialization)
+    }
 }
 
 async fn stage_immutable_frame<Authority>(
@@ -6740,7 +6799,7 @@ impl OneNode {
             sealed,
             limits,
             &projection,
-            &self.admission_materializer,
+            &projection,
         )
         .await
     }
