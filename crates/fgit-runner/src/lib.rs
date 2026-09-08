@@ -24,6 +24,10 @@
 //! control plane only; the hostile execution corpus must run against a real
 //! registered substrate.
 
+/// Descriptor-relative sparse workspaces for bounded trusted tools on Linux.
+#[cfg(target_os = "linux")]
+pub mod sparse_workspace;
+
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
