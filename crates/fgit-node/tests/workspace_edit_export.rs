@@ -160,3 +160,89 @@ fn stale_hidden_and_over_budget_exports_never_produce_candidates() {
     ));
     assert!(matches!(limited, Err(NodeWorkspaceRefusal::WorkspaceEditLimit)));
 }
+
+#[cfg(target_os = "linux")]
+fn private_parent(fixture: &Fixture) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = fixture.root.join("private-workspaces");
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    parent
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn trusted_tool_reads_sparse_inputs_and_exports_an_exact_native_commit() {
+    use std::process::Command;
+    use std::time::Duration;
+    let fixture = Fixture::new();
+    let parent = private_parent(&fixture);
+    let node = fixture.node();
+    let request = node.request_context();
+    let reads = vec![b"edit.txt".to_vec(), b"new.txt".to_vec()];
+    let writes = reads.clone();
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "test ! -e keep.txt && printf 'after\n' > edit.txt && printf 'new\n' > new.txt && chmod 755 new.txt"]);
+    let result = node.runtime().block_on(node.run_trusted_workspace_tool_in(
+        &request, &reference(), [0x85; 16], &parent, &reads, &writes,
+        &mut command, Duration::from_secs(10), ("Test <test@example.invalid>", 1, b"tool candidate\n"),
+    )).unwrap();
+    let edit = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"after\n");
+    let new = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"new\n");
+    let expected_tree = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Tree, &[
+        b"100644 edit.txt\0".as_slice(), edit.as_bytes(),
+        b"100644 keep.txt\0".as_slice(), fixture.untouched.as_bytes(),
+        b"100755 new.txt\0".as_slice(), new.as_bytes(),
+    ].concat());
+    assert_eq!(result.root_tree, expected_tree);
+    let expected_commit = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Commit,
+        format!("tree {expected_tree}\nparent {}\nauthor Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\ntool candidate\n", fixture.commit).as_bytes());
+    assert_eq!(result.candidate_commit, expected_commit);
+    assert_eq!(result.source_commit, fixture.commit);
+    assert_eq!(result.changed_paths, writes);
+    assert_eq!(result.object_count, 4);
+    assert_eq!(&result.pack_bytes()[..4], b"PACK");
+    assert_eq!(u32::from_be_bytes(result.pack_bytes()[8..12].try_into().unwrap()), 4);
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "workspace lease reaped");
+    let current = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+    assert_eq!(current.snapshot().refs[&reference()], fixture.commit, "candidate did not publish");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn tool_failure_and_undeclared_input_changes_clean_up_without_candidates() {
+    use std::process::Command;
+    use std::time::Duration;
+    let fixture = Fixture::new();
+    let parent = private_parent(&fixture);
+    let node = fixture.node();
+    let request = node.request_context();
+    for script in ["exit 7", "printf forbidden > keep.txt"] {
+        let mut command = Command::new("/bin/sh"); command.args(["-c", script]);
+        let result = node.runtime().block_on(node.run_trusted_workspace_tool_in(
+            &request, &reference(), [0x86; 16], &parent,
+            &[b"edit.txt".to_vec(), b"keep.txt".to_vec()], &[b"edit.txt".to_vec()],
+            &mut command, Duration::from_secs(10), ("Test <test@example.invalid>", 1, b"refused\n"),
+        ));
+        assert!(result.is_err());
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn timed_out_tool_reports_retained_workspace_instead_of_claiming_descendant_cleanup() {
+    use std::process::Command;
+    use std::time::Duration;
+    let fixture = Fixture::new();
+    let parent = private_parent(&fixture);
+    let node = fixture.node();
+    let request = node.request_context();
+    let mut command = Command::new("/bin/sleep"); command.arg("10");
+    let error = node.runtime().block_on(node.run_trusted_workspace_tool_in(
+        &request, &reference(), [0x87; 16], &parent,
+        &[b"edit.txt".to_vec()], &[b"edit.txt".to_vec()], &mut command,
+        Duration::from_secs(2), ("Test <test@example.invalid>", 1, b"timeout\n"),
+    )).unwrap_err();
+    assert!(error.retained_workspace().expect("containment path survives final checks").is_dir());
+}

@@ -1,9 +1,26 @@
 #![forbid(unsafe_code)]
 
+#[cfg(target_os = "linux")]
+mod workspace;
+
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "workspace") {
+        #[cfg(target_os = "linux")]
+        {
+            return match workspace::run(&arguments[1..]) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            };
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            eprintln!("fg: the trusted sparse workspace host adapter is supported only on Linux");
+            return ExitCode::from(2);
+        }
+    }
     match fgit_cli::run(&arguments) {
         Ok(fgit_cli::CliOutcome::Initialized(fgit_node::NodeInitialization::Created)) => {
             println!("initialized authority head");

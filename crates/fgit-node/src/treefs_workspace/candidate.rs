@@ -58,46 +58,57 @@ impl OneNode {
             capability,
             now,
             |base, source, capability| {
-                if expected_commit.as_bytes() != base.base_commit_oid().digest_bytes() {
-                    return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
-                }
-                let mut existing = BTreeSet::new();
-                let mut paths = BTreeSet::new();
-                for intent in log.intents() {
-                    let path = intent.primary_path();
-                    match base.resolve(source, capability, path, now) {
-                        Ok(BaseEntry::File { .. }) => {
-                            existing.insert(path.clone());
-                        }
-                        Err(BaseError::NotFound { .. }) => {}
-                        Ok(_) => return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit),
-                        Err(error) => {
-                            return Err(NodeWorkspaceRefusal::Manifest(
-                                fgit_treefs::SparseRefusal::Base(error),
-                            ));
-                        }
-                    }
-                    paths.insert(path.clone());
-                }
-                let (overlay, evaluation) = log.evaluate(&|path| existing.contains(path));
-                if !evaluation.errors().is_empty() {
-                    return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit);
-                }
-                require_complete_directories(base, source, capability, &paths, now)?;
-                let cancelled = || !super::workspace_request_live(request);
-                let plan = ExportPlanner::new(limits, source.inner.parse_limits())
-                    .plan(base, source, capability, &overlay, now, &cancelled)
-                    .map_err(NodeWorkspaceRefusal::WorkspaceExport)?;
-                Ok(WorkspaceEditExport {
-                    source_rcr: base.base_rcr_id(),
-                    source_commit: *base.base_commit_oid(),
-                    plan,
-                    changed_paths: paths.into_iter().collect(),
-                })
+                export_from_base(base, source, capability, log, expected_commit, now, limits,
+                    &|| !super::workspace_request_live(request))
             },
         )
         .await
     }
+}
+
+/// Shared by the direct edit API and the trusted host-tool composition. The
+/// caller already selected this exact immutable base through authority.
+pub(super) fn export_from_base<A: GitHashAlgorithm>(
+    base: &BaseView<A>, source: &NodeTreeSource<'_>, capability: &mut TreeCapability,
+    log: &IntentLog, expected_commit: AnyOid, now: u64, limits: ExportLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<WorkspaceEditExport<A>, NodeWorkspaceRefusal> {
+    validate_log(log, capability, now, limits)?;
+    if expected_commit.as_bytes() != base.base_commit_oid().digest_bytes() {
+        return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
+    }
+    let mut existing = BTreeSet::new();
+    let mut paths = BTreeSet::new();
+    for intent in log.intents() {
+        let path = intent.primary_path();
+        match base.resolve(source, capability, path, now) {
+            Ok(BaseEntry::File { .. }) => {
+                existing.insert(path.clone());
+            }
+            Err(BaseError::NotFound { .. }) => {}
+            Ok(_) => return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit),
+            Err(error) => {
+                return Err(NodeWorkspaceRefusal::Manifest(
+                    fgit_treefs::SparseRefusal::Base(error),
+                ));
+            }
+        }
+        paths.insert(path.clone());
+    }
+    let (overlay, evaluation) = log.evaluate(&|path| existing.contains(path));
+    if !evaluation.errors().is_empty() {
+        return Err(NodeWorkspaceRefusal::UnsupportedWorkspaceEdit);
+    }
+    require_complete_directories(base, source, capability, &paths, now)?;
+    let plan = ExportPlanner::new(limits, source.inner.parse_limits())
+        .plan(base, source, capability, &overlay, now, cancelled)
+        .map_err(NodeWorkspaceRefusal::WorkspaceExport)?;
+    Ok(WorkspaceEditExport {
+        source_rcr: base.base_rcr_id(),
+        source_commit: *base.base_commit_oid(),
+        plan,
+        changed_paths: paths.into_iter().collect(),
+    })
 }
 
 fn validate_log(

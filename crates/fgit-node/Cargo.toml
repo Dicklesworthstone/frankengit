@@ -31,6 +31,10 @@ fgit-wire.workspace = true
 # direct edge adds no new dependency surface.
 fsqlite-types = { version = "0.3.7", default-features = false, features = ["native"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Compose the already-admitted descriptor-relative trusted workspace adapter.
+fgit-runner.workspace = true
+
 [dev-dependencies]
 fgit-runner.workspace = true
 

@@ -1,6 +1,8 @@
 //! Authority-selected TreeFS input discovery over the production object fabric.
 
 mod candidate;
+#[cfg(target_os = "linux")]
+mod trusted_tool;
 
 use crate::{
     AdmissionMaterializationRefusal, AuthoritySelectedClosure, ClosureSelectionSource,
