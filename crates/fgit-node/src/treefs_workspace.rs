@@ -1,6 +1,7 @@
 //! Authority-selected TreeFS input discovery over the production object fabric.
 
 mod candidate;
+mod publication;
 #[cfg(target_os = "linux")]
 mod trusted_tool;
 
@@ -44,6 +45,14 @@ pub enum NodeWorkspaceRefusal {
     IncompleteWorkspaceExportScope,
     /// The existing deterministic export engine refused the candidate.
     WorkspaceExport(fgit_treefs::ExportRefusal),
+    /// The untrusted candidate differs from its explicit review expectations
+    /// or is outside the supported bounded single-parent bundle profile.
+    InvalidWorkspaceCandidate(&'static str),
+    /// Candidate verification could not read an immutable native object.
+    WorkspaceCandidateRead(Box<crate::NodeRefusal>),
+    /// The existing receive/admission boundary refused or could not complete.
+    /// This preserves infrastructure ambiguity, not an assertion of non-commit.
+    WorkspacePublication(Box<crate::NodeReceiveTransportRefusal>),
 }
 impl std::fmt::Display for NodeWorkspaceRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
