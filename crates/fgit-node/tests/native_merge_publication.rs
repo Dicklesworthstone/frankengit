@@ -1,13 +1,16 @@
 #![forbid(unsafe_code)]
 //! Real embedded-node native merge publication; no fake authority or Git engine.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_admission::merge::native::settlement::{DeliveryRequest, OutboxDestination};
-use fgit_admission::merge::native::{NativeMergeIntent, objects::MergeObjectLimits};
+use fgit_admission::merge::native::{
+    NativeMergeIntent,
+    objects::{MergeObjectLimits, validate_merge_objects},
+};
 use fgit_admission::{AdmissionError, AdmissionLimits};
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_codec::{
@@ -18,7 +21,10 @@ use fgit_codec::{
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::{ForgeEventBatch, ForgeEventPayload, NativeMerge};
+use fgit_git_object::ObjectType;
 use fgit_node::{LoopbackReceiveSession, NodeConfig, NodeReceiveTransportRefusal, OneNode};
+use fgit_object_fabric::ObjectKind;
+use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, PackWriteError};
 use fgit_resource::settlement::{DeliveryVerdict, ProbeVerdict};
 use fgit_resource::{DownstreamIdempotency, ObligationState, ReconcilePolicy};
 use fgit_types::{
@@ -72,7 +78,7 @@ fn tree(entries: &[(&str, GitOid)]) -> Vec<u8> {
 fn commit(tree: GitOid, parents: &[GitOid], message: &str) -> Vec<u8> {
     let mut body = format!("tree {tree}\n");
     for parent in parents { body.push_str(&format!("parent {parent}\n")); }
-    body.push_str("author Merge Test <merge@example.invalid> 0 +0000\ncommitter Merge Test <merge@example.invalid> 0 +0000\n\n");
+    body.push_str("author Merge Test <merge@example.invalid> 1 +0000\ncommitter Merge Test <merge@example.invalid> 1 +0000\n\n");
     body.push_str(message);
     body.into_bytes()
 }
@@ -80,6 +86,24 @@ struct Fixture {
     base: GitOid, target: GitOid, source: GitOid, merged_tree: GitOid,
     candidate: GitOid, candidate_body: Vec<u8>,
 }
+
+/// Fixture self-checks read the same real fabric objects as native admission.
+struct NodeObjects<'a>(&'a OneNode);
+impl CanonicalObjectSource for NodeObjects<'_> {
+    fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
+        let object = self.0.read_git_object(*id)
+            .map_err(|_| PackWriteError::MissingCanonicalObject(*id))?;
+        let kind = match object.envelope().object_kind() {
+            ObjectKind::Commit => ObjectType::Commit,
+            ObjectKind::Tree => ObjectType::Tree,
+            ObjectKind::Blob => ObjectType::Blob,
+            ObjectKind::Tag => ObjectType::Tag,
+            ObjectKind::Internal => return Err(PackWriteError::MissingCanonicalObject(*id)),
+        };
+        Ok(CanonicalPackObject::new(object.identity(), kind, object.payload().to_vec(), Vec::new(), 0, 0))
+    }
+}
+
 fn fixture(node: &OneNode, root: &Path, format: GitHashAlgorithm, stage_commit: bool) -> Fixture {
     let source = root.join("source"); fs::create_dir_all(source.join("refs/heads")).unwrap();
     fs::write(source.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
@@ -110,7 +134,18 @@ fn fixture(node: &OneNode, root: &Path, format: GitHashAlgorithm, stage_commit: 
     if stage_commit {
         assert_eq!(node.put_git_object(GitObjectKind::Commit, candidate_body.clone()).unwrap().identity(), candidate);
     }
-    Fixture { base, target, source: topic, merged_tree, candidate, candidate_body }
+    let fixture = Fixture { base, target, source: topic, merged_tree, candidate, candidate_body };
+    if stage_commit {
+        let offered = intent(&fixture, 1, ExpectedVersion::NewStream);
+        let closure = validate_merge_objects(
+            &NodeObjects(node), offered.merge().unwrap(), MergeObjectLimits::default(), &mut || true,
+        ).expect("positive publication fixture must pass native validation before admission");
+        assert_eq!(closure.objects, BTreeSet::from([
+            common, ours, theirs, base_tree, target_tree, source_tree,
+            merged_tree, base, target, topic, candidate,
+        ]));
+    }
+    fixture
 }
 fn intent(f: &Fixture, number: u64, version: ExpectedVersion) -> NativeMergeIntent {
     NativeMergeIntent::new(PullRequestNumber::try_new(number).unwrap(), version, NativeMerge {
@@ -261,6 +296,62 @@ fn missing_candidate_is_retryable_and_anonymous_intake_is_refused() {
     assert!(matches!(apply(&node, &offered, b"missing-retry").unwrap().outcome, DecisionOutcome::Committed { .. }));
     assert_eq!(refs(&node)[&main_ref()], f.candidate);
     node.shutdown().unwrap();
+}
+
+#[test]
+fn epoch_zero_candidate_preserves_strict_profile_refusal_beside_permitted_merge() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (mut node, _) = OneNode::init(config(&scratch.0, format)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let mut f = fixture(&node, &scratch.0, format, true);
+        let valid = f.candidate;
+        let request = node.request_context();
+        let before = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+        let original = before.basis().body().clone();
+
+        // This is the existing epoch-zero StrictCreate divergence pinned by
+        // fgit-git-object's adversarial corpus. Only the signature timestamps
+        // differ from the permitted candidate; parents, tree and message match.
+        let permitted = std::str::from_utf8(&f.candidate_body).unwrap();
+        assert_eq!(permitted.matches(" 1 +0000\n").count(), 2);
+        let epoch_zero = permitted.replace(" 1 +0000\n", " 0 +0000\n");
+        assert_eq!(epoch_zero.replace(" 0 +0000\n", " 1 +0000\n"), permitted);
+        f.candidate = node.put_git_object(GitObjectKind::Commit, epoch_zero.into_bytes()).unwrap().identity();
+        assert_ne!(f.candidate, valid);
+        let offered = intent(&f, 1, ExpectedVersion::NewStream);
+        let refused = apply(&node, &offered, b"epoch-zero").unwrap();
+        assert!(matches!(refused.outcome, DecisionOutcome::Refused {
+            code: RefusalCode::EvidenceInvalid, ..
+        }), "the current StrictCreate profile refuses epoch zero: {refused:?}");
+        assert_eq!(apply(&node, &offered, b"epoch-zero").unwrap(), refused);
+        let request = node.request_context();
+        let after = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+        assert_eq!(after.snapshot().refs, before.snapshot().refs);
+        assert_eq!(after.snapshot().head_target, before.snapshot().head_target);
+        assert_eq!(after.basis().body().ref_root, original.ref_root);
+        assert_eq!(after.basis().body().forge_position_root, original.forge_position_root);
+        assert_eq!(after.basis().body().outbox_root, original.outbox_root);
+        assert_eq!(after.basis().body().retention_root, original.retention_root);
+        assert_eq!(after.basis().body().latest_committed_rcr_id, original.latest_committed_rcr_id);
+        let history = node.runtime().block_on(node.snapshot_history_in(&request)).unwrap();
+        assert!(history.last().unwrap().batch.committed_rcrs.is_empty());
+        assert!(history.last().unwrap().forge_events.is_empty());
+
+        f.candidate = valid;
+        let allowed = apply(&node, &intent(&f, 1, ExpectedVersion::NewStream), b"epoch-one").unwrap();
+        assert!(matches!(allowed.outcome, DecisionOutcome::Committed { .. }), "{allowed:?}");
+        assert_eq!(refs(&node)[&main_ref()], valid);
+        let request = node.request_context();
+        let committed = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+        assert_eq!(committed.snapshot().outbox.len(), 1);
+        assert_eq!(committed.snapshot().forge_positions.len(), 1);
+        assert_eq!(apply(&node, &offered, b"epoch-zero").unwrap(), refused);
+        let request = node.request_context();
+        let retried = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+        assert_eq!(retried.basis().body(), committed.basis().body());
+        node.shutdown().unwrap();
+    }
 }
 
 #[test]

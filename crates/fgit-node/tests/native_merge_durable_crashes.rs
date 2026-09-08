@@ -318,7 +318,7 @@ impl Objects {
         let tree = git_object_id(format, GitObjectKind::Tree, b"");
         let commit = |parents: &[GitOid], message: &str| {
             let parents: String = parents.iter().map(|id| format!("parent {id}\n")).collect();
-            format!("tree {tree}\n{parents}author Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\n{message}\n").into_bytes()
+            format!("tree {tree}\n{parents}author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{message}\n").into_bytes()
         };
         let base_body = commit(&[], "base");
         let base = git_object_id(format, GitObjectKind::Commit, &base_body);
@@ -422,6 +422,22 @@ fn prepare(root: &Path, objects: &Objects) -> RepositoryAuthorityHeadBody {
             .unwrap()
             .identity(),
         objects.merged
+    );
+    let intent = objects.intent();
+    let closure = validate_merge_objects(
+        &NodeObjects(&node),
+        intent.merge().unwrap(),
+        MergeObjectLimits::default(),
+        &mut || true,
+    )
+    .expect("positive crash fixture must pass native validation before starting the child");
+    assert_eq!(
+        closure.objects,
+        objects
+            .bodies
+            .iter()
+            .map(|(kind, body)| git_object_id(objects.format, *kind, body))
+            .collect::<std::collections::BTreeSet<_>>()
     );
     let request = node.request_context();
     let selected = node

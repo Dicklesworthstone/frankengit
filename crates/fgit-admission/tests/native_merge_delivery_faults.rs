@@ -398,7 +398,7 @@ impl Objects {
     }
     fn commit(&mut self, tree: GitOid, parents: &[GitOid], message: &str) -> GitOid {
         let parents: String = parents.iter().map(|id| format!("parent {id}\n")).collect();
-        self.insert(GitObjectKind::Commit, format!("tree {tree}\n{parents}author Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\n{message}\n").into_bytes())
+        self.insert(GitObjectKind::Commit, format!("tree {tree}\n{parents}author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{message}\n").into_bytes())
     }
 }
 
@@ -506,6 +506,17 @@ impl Fixture {
             },
         )
         .unwrap();
+        let closure = validate_merge_objects(
+            &objects,
+            intent.merge().unwrap(),
+            MergeObjectLimits::default(),
+            &mut || true,
+        )
+        .expect("positive fault fixture must pass native validation before faults are armed");
+        assert_eq!(
+            closure.objects,
+            objects.0.keys().copied().collect::<std::collections::BTreeSet<_>>()
+        );
         let store = Arc::new(Model::new());
         let refs = CanonicalRefState::new_with_head_target(
             BTreeMap::from([
