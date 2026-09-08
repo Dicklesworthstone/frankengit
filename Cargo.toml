@@ -1,8 +1,9 @@
 # FrankenGit workspace.
 # Engine crates enter only with a real vertical slice; no placeholder crates.
 # Every directory under crates/ is a workspace member via the glob, so it MUST be a complete
-# crate: create src/lib.rs (with #![forbid(unsafe_code)]) BEFORE Cargo.toml, and add the
-# crate's [workspace.dependencies] path entry below in the same commit.
+# crate: prepare Cargo.toml and src/lib.rs (with #![forbid(unsafe_code)]) together
+# outside crates/, then move the complete directory in atomically (AGENTS.md 16.1).
+# Its workspace dependency entry and crate_layers registry row land in the same commit.
 
 [workspace]
 resolver = "3"

@@ -103,17 +103,14 @@ The project uses the claim lattice defined in `registries/claim_classes.tsv`: we
 
 ### 0.3 Constitutional hierarchy
 
-When documents or code disagree, the project resolves the contradiction in this order:
+The owner-supplied [AGENTS.md §2](AGENTS.md#2-constitutional-hierarchy) is the
+single authority for document precedence. In particular, normative protocol
+contracts precede implementation, executable invariants and goldens. Those
+artifacts provide evidence of conformance; they cannot override a contract.
 
-1. executable invariants and accepted canonical-format goldens;
-2. [`docs/NORMATIVE_PROTOCOL_CONTRACTS.md`](docs/NORMATIVE_PROTOCOL_CONTRACTS.md);
-3. checked-in constitutions and machine-validated registries;
-4. accepted ADRs;
-5. this comprehensive plan;
-6. `ARCHITECTURE.md`, `VERIFY_SPEC.md`, and `SECURITY_THREAT_MODEL.md`;
-7. explanatory README prose and implementation comments.
-
-A lower layer cannot silently “choose” a convenient interpretation. The contradiction itself is a release-blocking defect.
+A disagreement is a release-blocking defect. Surface it under AGENTS.md §15
+before changing the affected semantics, rather than selecting the convenient
+implementation or modifying its oracle.
 
 ### 0.4 Companion specifications
 
@@ -386,6 +383,24 @@ A useful v1 MUST include:
 - broad hosted-workflow compatibility beyond the locally executable declared subset;
 - enterprise identity and compliance;
 - migration at very large scale.
+
+### 4.2.1 Unresolved 1.0 scope contradiction
+
+Sections 4.2 and 49 are not yet reconciled: §4.2 places merge queue and
+packages in subsequent scope, while §49.10 includes them in the 1.0 completion
+criteria. The Git compatibility matrix separately marks merge queue
+`required-v1` and package registry `planned`. The owner must choose between:
+
+- retaining both in 1.0 and treating “subsequent” as implementation order
+  after the core, with the compatibility matrix updated accordingly; or
+- deferring one or both beyond 1.0 and explicitly amending the affected
+  completion criteria and compatibility rows.
+
+`frankengit-audit-contract-reconcile-fjsz` tracks this decision; FG-083
+(protection/merge queue) and FG-100 (package phases) are affected. Until the
+owner resolves it, do not remove their work, declare 1.0 scope complete, or
+change their acceptance on the strength of either conflicting paragraph.
+The alternatives here grant no scope reduction or gate exemption.
 
 ### 4.3 Non-goals
 
@@ -3403,7 +3418,19 @@ L3 siblings do not import one another to shortcut ownership; L4 orchestrates thr
 - `sqlmodel_rust` (the `sqlmodel-frankensqlite` backend and its core/query/schema/macros/session/pool crates ONLY): the type-safe substrate for DERIVED PROJECTION read-models over FrankenSQLite — projections only, never canonical authority (the head-CAS decision stream remains the sole source of truth). Its `sqlmodel-sqlite` (C `libsqlite3-sys`), `sqlmodel-postgres`, and `sqlmodel-mysql` backends are EXCLUDED by the closed dependency universe and must never enter the graph;
 - `frankentui` (ftui) kernel crates on the `asupersync-executor` feature: the widget kernel for the terminal TUI, and (via ftui's WASM backend) an OPTIONAL parallel terminal-style web surface — NOT the primary web UI, which is a conventional GitHub-like Rust/WASM app. The demo/showcase crates and their transitive Tokio are excluded.
 
-Dependencies are pinned to one compatible constellation. The adopted web/UI/data siblings currently require owned upstream convergence before they can enter FrankenGit: the reviewed fastapi_rust and ftui revisions target Asupersync 0.3.x, the reviewed sqlmodel_rust revision pins Asupersync 0.4.4 and carries unpublished absolute FrankenSQLite patches, while the reviewed FrankenSQLite revision accepts Asupersync 0.4.x. Cargo resolving two runtime versions is a failure, not reconciliation. The sibling projects must be updated to one selected Asupersync 0.4.x contract, sqlmodel's path patches must be removed in favor of an admitted published FrankenSQLite release, and exact feature/source/audit evidence must pass before integration. Failure blocks the dependent FrankenGit beads pending those sibling updates; it does not reopen the settled adoption decision or authorize a substitute framework.
+Dependencies are pinned to one compatible constellation. The current admitted
+selection is recorded in [`constellation.lock`](constellation.lock), with
+source/checksum/feature evidence and the sibling-integration contract as the
+admission boundary. At source `875fd14b3e79887b07d692e198531fbe810df640`, this
+includes published Asupersync 0.4.9, FrankenSQLite 0.3.7 and sqlmodel 0.4.2;
+the projection crate consumes the published sqlmodel-FrankenSQLite backend.
+Earlier reviews requiring sqlmodel path-patch removal and runtime convergence
+are historical, not a current claim that all these siblings are absent.
+Gateway and TUI integration still require their own exact admitted profiles
+and product implementation. Cargo resolving two runtime versions is a failure,
+not reconciliation. A missing compatible sibling blocks its dependent work;
+it does not reopen the settled adoption decision or authorize a substitute
+framework.
 
 ### 43.4 External dependency policy
 
@@ -3637,8 +3664,8 @@ No task may create an empty crate, placeholder “storage” map, foreign-Git fa
 
 ### R18. License/adoption mismatch
 
-**Risk:** current rider is not OSI open source and conflicts with product promise.  
-**Control:** explicit current wording and decision before first code release; see licensing ADR/doc.
+**Risk:** public claims or release metadata contradict the retained non-OSI rider.
+**Control:** name `LicenseRef-MIT-OpenAI-Anthropic-Rider` consistently and enforce the resolved D14 decision in `docs/LICENSING_DECISION.md`; do not claim OSI-approved open source.
 
 ### R19. Hosted operational burden
 
@@ -3730,7 +3757,12 @@ Resolved by adoption (recorded here and in the implementation beads):
 
 ### D14. License model
 
-Resolve genuine open-source core/client/protocol and hosted-commercial differentiation before implementation release. Current source-available rider must not be marketed as OSI open source.
+Resolved by the repository owner on 2026-08-23: retain
+`LicenseRef-MIT-OpenAI-Anthropic-Rider`, the MIT licence plus the
+OpenAI/Anthropic rider. [`docs/LICENSING_DECISION.md`](docs/LICENSING_DECISION.md)
+records the decision and machine-readable markers. The licence is not
+OSI-approved open source. No implementation or release task may replace it
+or revive the superseded licence-selection process without a new owner decision.
 
 ### D15. Nightly advancement cadence
 
@@ -3824,7 +3856,7 @@ FrankenGit reaches **1.0** only when:
 15. local DSR lanes can build/test/package/sign/reconcile the exact target release without hosted Actions;
 16. observability/doctor/evidence/negative-evidence surfaces support real incidents and replay classifications;
 17. performance/unit economics meet published scope without unsafe or hidden infrastructure assumptions;
-18. final licensing is genuinely compatible with the public “open source” claim;
+18. source, artifacts and public claims consistently state the owner-selected `LicenseRef-MIT-OpenAI-Anthropic-Rider`, satisfy the D14 licence gate, and make no OSI-approved open-source claim while its restrictions hold;
 19. the project hosts and releases itself without privileged correctness exceptions;
 20. at least one external organization independently migrates, operates, backs up, restores, and exports;
 21. claim registries contain no unqualified red/expired critical claims;

@@ -121,66 +121,70 @@ then verifies that the authoritative tracker hash did not change. Graph scores
 remain advisory: an agent may claim a bead only when the exact ID appears in
 `br ready --unassigned --no-db --json`.
 
-### Reality snapshot: 2026-09-04
+### Reality snapshot: 2026-09-07
 
-The implementation has moved well beyond an architecture-only repository, but
-most of the product vision remains ahead:
+FrankenGit has a working bounded Git node and substantial subsystem code;
+the integrated forge, agent service, hosted backend and release product are
+still incomplete. The [reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md)
+binds its broad source and runtime assessment to
+`b74b666dc644c6ed18697f3950690bf289c33114`. Subsequent bridge results below
+name their own revisions and do not replace an independent batch gate.
 
-- The canonical core is real code: typed SHA-1/SHA-256 identities, canonical
-  bodies, transaction seals, intent/effect folding, immutable decision batches,
-  terminal outcomes, authenticated heads, and exact-predecessor CAS publication
-  have reference, laboratory, and durable embedded slices.
-- The clean-room Git substrate now includes bounded object parsing, owned
-  DEFLATE, pack/delta read and write paths, pkt-line, upload-pack, receive-pack
-  parsing, quarantine/admission, authority-selected pack materialization, local
-  loose-plus-idx/pack source reconstruction, and bounded raw git-daemon
-  upload-pack plus explicitly enabled receive-pack composition. All 17 cases
-  of the focused pack-import target — including the
-  resource-bound expansion — and the full `fgit-node` test set pass in local
-  runs at `e296eb3f` (the verified-read defect named by the 2026-08-25
-  snapshot was fixed in `7ccaf8b`); orchestrated batch verification remains
-  the revision-bound gate. Those parts do not yet amount to a completed Git
-  compatibility matrix.
-- Object fabric, ATP-Git, TreeFS, RaptorQ repair, verified-read proofs, forge
-  events and merge computation, graph algorithms, agent/evidence protocols,
-  hostile-runner policy, recovery, and release attempts have bounded vertical
-  slices. Several are internal libraries or refusal-bounded compositions rather
-  than deployable product surfaces.
-- Raw git-daemon receive-pack/push has landed behind an explicit operator
-  principal, but smart HTTP, production SSH, the native REST/API gateway,
-  projections, search, issues/notifications, the web UI, the TUI, MCP,
-  production hostile-execution isolation, and the actual release publication
-  path are not complete. The sealed-merge admission path through the real
-  store+projection reaches head CAS correctly at HEAD `1b8561c1`
-  (`fgit-admission/tests/merge_admission_race.rs` 6/6, exactly-one-winner
-  holds); the remaining half of FG-029a is routing admitted merge's
-  forge events through the existing outbox — neither code path nor a
-  dedicated test exists for that half today, and the bead is in flight
-  (`frankengit-asa3`).
-- The position-addressed forge snapshot projector and the `fg at` command
-  have landed: parser, projection, binary rendering, the second-endpoint
-  diff subcommand, the continuous-consistency check on both endpoints
-  (`verify_continuous_consistency` at fgit-cli/src/lib.rs:1299 and 1374),
-  and the authenticated decision-history read for non-current positions
-  (`fgit-node::snapshot_history_in`, 7dc8b4e8). The 6 `fg at` integration
-  tests pass at HEAD `fe3bb04a`, including `fg_at_diff_projects_both_requested_endpoints`
-  and the `TargetAheadOfAuthority` refusal for a decision index the
-  authority has not reached. The remaining gap is an end-to-end test
-  over non-empty durable history: no test today populates a historical
-  decision and then projects across it, so the historical path is
-  code-anchored but not test-anchored for a real batch.
-- The dependency graph tracks these gaps, including external convergence gates
-  for fastapi_rust, sqlmodel/FrankenSQLite, and FrankenTUI. The smart-HTTP gap is
-  tracked explicitly by FG-105 rather than being hidden inside raw-socket or
-  REST work.
-- The constitution lane currently reports exactly 8 errors, all one root
-  cause: `sqlmodel-core` 0.4.x requests asupersync's `test-internals` feature
-  (which vendors the `visibility` proc-macro) in a *normal* dependency, so
-  feature unification arms the derive guard against every first-party manifest
-  that declares asupersync. The fix is an owned-sibling republish, specified in
-  blocked bead `frankengit-sqlmodel-test-internals-defect-o7qc` and recorded as
-  NEG-032; the 42 pre-admission registry-row drift errors that shared the lane
-  were corrected at `60e57e5e`.
+- The canonical core has real typed identities, seals, intent/effect folding,
+  immutable decisions, authenticated heads and exact-predecessor CAS. The
+  embedded node uses the admitted published FrankenSQLite/runtime stack.
+- The clean-room Git substrate includes owned object, DEFLATE, pack/delta,
+  pkt-line, upload-pack, receive-pack, quarantine and loose/packed import
+  implementations. At the assessed revision, selected real-node E2E suites
+  exercised nonempty clone, raw push, historical state, incremental fetch and
+  SHA-256 repository behavior: 178 acceptance IDs across five suites. The
+  report distinguishes ordinary-client observations from pinned-oracle
+  conformance and records the exact limits. This is not the full Git matrix.
+- Durable forge merge is still blocked in the production composition:
+  `OneNode::admit_merge_durable_in` reaches materializer methods that return
+  `DurabilityProfileUnavailable` before publication. The six synchronous
+  admission race tests cited in the previous snapshot do not establish a
+  durable OneNode merge. `frankengit-asa3` retains both this integration and
+  coherent forge/outbox delivery; neither is declared complete here.
+- `fg at` has a real historical path and a nonempty durable-history E2E
+  scenario in `scripts/e2e/suites/node/time_travel.sh`. The 2026-09-07
+  assessment exercised its 15 acceptance IDs, including both diff endpoints
+  and an ahead-of-authority refusal. Capsule checkpoints and positions inside
+  multi-decision batches remain outside that scenario.
+- TreeFS now has a Linux sparse-directory implementation candidate in
+  `fgit-runner`, connected to authority-selected objects by
+  `OneNode::sparse_workspace_manifest_in`. It materializes actual files,
+  imports declared tool outputs as ordinary edit intents, and explicitly
+  closes or reports containment. The runner and node focused tests passed
+  at `875fd14b3e79887b07d692e198531fbe810df640`; their new cases include real
+  tool editing, disk object export/reopen and fresh-process node recovery.
+  [ADR-0017](docs/ADR-0017-TREEFS-HOST-ADAPTER-MATRIX.md) records the candidate
+  profile and dependency boundary. Independent host-profile acceptance,
+  public agent execution and the optional FUSE adapter remain outstanding.
+- `fgit-projection` implements derived identity/watermark/applied-decision
+  infrastructure using sqlmodel 0.4.2. User-facing issue/PR/search read models
+  and the remaining outcome/close/retry acceptance are still unfinished.
+  The previous snapshot's eight-error sqlmodel feature blocker is historical;
+  the assessed constitution command exited zero, with a separate native
+  build-evidence discovery defect described in the report.
+- The native-linkage checker now recognizes the pinned nightly's build
+  output layout and binds observations to package build instances. Its 105
+  focused tests passed at `e8dbdf17fba5b0e29341e3e966e20e8f2babdd77`.
+  The new real-build positive/negative E2E still requires independent batch
+  execution. Cached build observations are not fresh release attestations.
+- Object fabric, ATP-Git, repair, verified reads, graph algorithms and agent
+  protocols have bounded implementations. Live HTTPS object-store authority,
+  authenticated Git transports, complete agent persistence/collectors/effects,
+  hostile-code isolation, REST/MCP, search, UI and actual release publication
+  remain product gaps. A trusted local process is not a hostile runner.
+- The assessed workspace test command exited zero with 4,590 passed and
+  24 ignored. The canonical fast lane failed formatting and a separate
+  Clippy run failed; full and release exited 3 with explicit dormancy.
+  Those historical results do not assert gate status for later bridge code.
+- [Plan §4.2.1](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md#421-unresolved-10-scope-contradiction)
+  records the unresolved merge-queue/package 1.0 scope contradiction and its
+  owner decision boundary. The settled D14 licence remains
+  `LicenseRef-MIT-OpenAI-Anthropic-Rider`; it is not OSI-approved open source.
 
 The claims registry remains the public proof boundary. Its verified rows cover
 narrow artifact identity and contained Lean-model theorems; they do not prove
