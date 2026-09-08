@@ -1,5 +1,7 @@
 //! Authority-selected TreeFS input discovery over the production object fabric.
 
+mod candidate;
+
 use crate::{
     AdmissionMaterializationRefusal, AuthoritySelectedClosure, ClosureSelectionSource,
     NodeRequestContext, OneNode, PackContextCheckpoint, VerifiedFabricPackSource,
@@ -29,6 +31,17 @@ pub enum NodeWorkspaceRefusal {
     Object(ObjectSourceError),
     Manifest(SparseRefusal),
     Cancelled { exhaustion: Option<Exhaustion> },
+    /// The current ref no longer names the commit the edits were based on.
+    StaleWorkspaceBase,
+    /// A requested file operation is not supported by this export profile.
+    UnsupportedWorkspaceEdit,
+    /// The edit log exceeds the caller's declared construction envelope.
+    WorkspaceEditLimit,
+    /// A filtered listing would omit siblings from a rebuilt directory.
+    /// No undisclosed path is included in this refusal.
+    IncompleteWorkspaceExportScope,
+    /// The existing deterministic export engine refused the candidate.
+    WorkspaceExport(fgit_treefs::ExportRefusal),
 }
 impl std::fmt::Display for NodeWorkspaceRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,6 +72,36 @@ impl OneNode {
         now: u64,
         limits: SparseLimits,
     ) -> Result<SparseManifest<A>, NodeWorkspaceRefusal> {
+        self.with_workspace_base_in(
+            request,
+            reference,
+            visibility,
+            capability,
+            now,
+            |base, source, capability| {
+                SparseManifest::build(base, source, capability, now, limits)
+                    .map_err(NodeWorkspaceRefusal::Manifest)
+            },
+        )
+        .await
+    }
+
+    /// One shared authority-selection and verified-base boundary for workspace
+    /// readers and exporters. The consumer runs synchronously while the exact
+    /// selected closure and request-owned database context remain alive.
+    async fn with_workspace_base_in<A: GitHashAlgorithm, T>(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        visibility: &RefVisibility,
+        capability: &mut TreeCapability,
+        now: u64,
+        consume: impl FnOnce(
+            &BaseView<A>,
+            &NodeTreeSource<'_>,
+            &mut TreeCapability,
+        ) -> Result<T, NodeWorkspaceRefusal> + Send,
+    ) -> Result<T, NodeWorkspaceRefusal> {
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         if capability.repository_id() != self.repository_id() {
             return Err(NodeWorkspaceRefusal::RepositoryMismatch);
@@ -70,7 +113,6 @@ impl OneNode {
         if A::DIGEST_LEN != width {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
         }
-        // Caller policy is checked before fetching authority or object data.
         if visibility.hides(reference.as_bytes()) {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
@@ -145,8 +187,7 @@ impl OneNode {
                 source.inner.parse_limits(),
                 PathPolicy::default(),
             );
-            SparseManifest::build(&base, &source, capability, now, limits)
-                .map_err(NodeWorkspaceRefusal::Manifest)
+            consume(&base, &source, capability)
         })();
         if let PackContextCheckpoint::Stopped { budget_exhaustion } =
             checkpoint_pack_context(request.authority())
@@ -157,6 +198,13 @@ impl OneNode {
         }
         built
     }
+}
+
+fn workspace_request_live(request: &NodeRequestContext) -> bool {
+    !matches!(
+        checkpoint_pack_context(request.authority()),
+        PackContextCheckpoint::Stopped { .. }
+    )
 }
 
 // This source is deliberately private. External callers cannot pair an
