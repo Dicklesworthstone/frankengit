@@ -5,9 +5,7 @@
 
 use fgit_crypto::{GitObjectKind, Sha1, Sha256, git_object_id};
 use fgit_node::{NodeConfig, NodeWorkspaceRefusal, OneNode};
-use fgit_resource::{
-    Grade, LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId, ResourceVector,
-};
+use fgit_resource::{LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId};
 use fgit_runner::sparse_workspace::{SparseWorkspace, SparseWorkspacePlan};
 use fgit_treefs::{SparseLimits, TreeCapability, TreeEditIntent, TreePath, WorkspaceId};
 use fgit_types::numeric::HeadGeneration;
@@ -150,10 +148,7 @@ fn authority_selected_ref_reaches_a_real_host_workspace_and_survives_process_reo
     let l = ObligationLedger::root(
         RegionId::new(91),
         LeakDisposition::RecordAndContinue,
-        ResourceVector::from_grades(&[
-            (Grade::Bytes, 1024 * 1024 * 1024),
-            (Grade::Objects, 100_000),
-        ]),
+        p.budget(),
     );
     let r = l
         .reserve(p.reservation(), l.grant(p.budget()).unwrap())

@@ -328,6 +328,183 @@ fn rebuild_and_parallel_workspaces_share_only_the_immutable_manifest() {
 }
 
 #[test]
+fn repeated_imports_conserve_consumable_bytes_and_entries_through_exact_limits() {
+    let s = Scratch::new();
+    let (_, _, m) = fixture(&s.0, None);
+    let p = SparseWorkspacePlan::new(
+        m,
+        vec![path(b"src/input")],
+        &capability(),
+        0,
+        SparseLimits {
+            max_entries: 6,
+            max_entry_bytes: 27,
+            max_payload_bytes: 27,
+        },
+    )
+    .unwrap();
+    let budget = p.budget();
+    let l = ledger();
+    let mut w = create(&s, &l, p, b"accounting");
+    let marker_bytes = fs::metadata(w.tool_directory().join(".fgit-host-receipt"))
+        .unwrap()
+        .len();
+    assert_eq!(budget.get(Grade::Bytes), 27 + marker_bytes + 27);
+    assert_eq!(budget.get(Grade::Objects), 5 + 6);
+
+    fs::write(w.tool_directory().join("src/input"), b"change-01").unwrap();
+    // A cancelled log never leaves the adapter or consumes its admission allowance.
+    assert_eq!(
+        w.import(&capability(), 0, &|e| e == HostEpoch::Imported),
+        Err(HostRefusal::Cancelled(HostEpoch::Imported))
+    );
+    for body in [b"change-01", b"change-02", b"change-03"] {
+        fs::write(w.tool_directory().join("src/input"), body).unwrap();
+        let log = w.import(&capability(), 0, &|_| false).unwrap();
+        assert!(
+            matches!(log.intents(), [fgit_treefs::TreeEditIntent::Write { content, .. }] if content == body)
+        );
+    }
+    assert_eq!(
+        w.import(&capability(), 0, &|_| false),
+        Err(HostRefusal::ResourceLimit)
+    );
+    // Zero-byte deletions still consume objects. Repeating a deletion cannot
+    // acquire an unlimited number of admitted intents from a finite lease.
+    fs::remove_file(w.tool_directory().join("src/input")).unwrap();
+    for _ in 0..3 {
+        assert!(
+            matches!(w.import(&capability(), 0, &|_| false).unwrap().intents(),
+                         [fgit_treefs::TreeEditIntent::Delete { path: p }] if p == &path(b"src/input"))
+        );
+    }
+    assert_eq!(
+        w.import(&capability(), 0, &|_| false),
+        Err(HostRefusal::ResourceLimit)
+    );
+    // An unchanged read is still permitted after admission credit is spent.
+    fs::write(w.tool_directory().join("src/input"), b"original\n").unwrap();
+    assert!(w.import(&capability(), 0, &|_| false).unwrap().is_empty());
+    let settled = w.close().unwrap();
+    let TerminalEvidence::Acknowledged(receipt, _) = settled.evidence() else {
+        panic!("closed host receipt");
+    };
+    assert_eq!(receipt.copied_bytes, 27);
+    assert_eq!(receipt.metadata_bytes, marker_bytes);
+    assert_eq!(receipt.imported_bytes, 27);
+    assert_eq!(receipt.created_entries, 5);
+    assert_eq!(receipt.imported_entries, 6);
+    assert_eq!(l.snapshot().consumed(), budget);
+    assert!(l.snapshot().is_conserved());
+    quiescent(l);
+}
+
+#[test]
+fn generated_parent_bound_stops_before_visiting_later_outputs() {
+    let s = Scratch::new();
+    let (_, _, m) = fixture(&s.0, None);
+    let outputs = vec![path(b"generated/a/b/c/file"), path(b"zzz-denied/file")];
+    let limits = SparseLimits {
+        max_entries: 7,
+        max_entry_bytes: 27,
+        max_payload_bytes: 27,
+    };
+    // The first permitted output exhausts the parent budget. Traversing a
+    // later forbidden path first would show the bound was enforced too late.
+    assert!(matches!(
+        SparseWorkspacePlan::new(m.clone(), outputs.clone(), &capability(), 0, limits),
+        Err(HostRefusal::ResourceLimit)
+    ));
+    assert!(matches!(
+        SparseWorkspacePlan::new(
+            m.clone(),
+            outputs,
+            &capability(),
+            0,
+            SparseLimits {
+                max_entries: 12,
+                ..limits
+            }
+        ),
+        Err(HostRefusal::Capability(_))
+    ));
+    let p = SparseWorkspacePlan::new(
+        m,
+        vec![path(b"generated/a/b/c/file")],
+        &capability(),
+        0,
+        SparseLimits {
+            max_entries: 10,
+            ..limits
+        },
+    )
+    .unwrap();
+    let l = ledger();
+    let w = create(&s, &l, p, b"parents");
+    assert!(w.tool_directory().join("generated/a/b/c").is_dir());
+    let _ = w.close().unwrap();
+    quiescent(l);
+}
+
+#[test]
+fn legacy_host_marker_is_refused_without_reinterpreting_its_resource_profile() {
+    let s = Scratch::new();
+    let (_, _, m) = fixture(&s.0, None);
+    let p = plan(m);
+    let prior = ledger();
+    let w = create(&s, &prior, p.clone(), b"versioned");
+    let marker_path = w.tool_directory().join(".fgit-host-receipt");
+    let current = fs::read(&marker_path).unwrap();
+    let domain = b"frankengit/sparse-host/linux-openat2/v2\0";
+    assert!(current.starts_with(domain));
+    let mut legacy = current.clone();
+    legacy[domain.len() - 2] = b'1';
+    fs::write(&marker_path, legacy).unwrap();
+    drop(w);
+    assert!(matches!(
+        prior.close(),
+        RegionCloseOutcome::ContainmentFailure(_)
+    ));
+    let l = ledger();
+    assert!(matches!(
+        SparseWorkspace::reopen(
+            p.clone(),
+            s.parent(),
+            path(b"versioned"),
+            reserve(&l, &p),
+            &capability(),
+            0
+        ),
+        Err(HostRefusal::IdentityMismatch)
+    ));
+    assert!(s.0.join("versioned").exists());
+    assert_eq!(l.snapshot().consumed(), ResourceVector::ZERO);
+    // Only the test restores its own injected marker. Production must use
+    // the owning broker's old receipt/adapter to reap and then rebuild v1.
+    fs::write(s.0.join("versioned/.fgit-host-receipt"), current).unwrap();
+    let w = SparseWorkspace::reopen(
+        p.clone(),
+        s.parent(),
+        path(b"versioned"),
+        reserve(&l, &p),
+        &capability(),
+        0,
+    )
+    .unwrap();
+    let settled = w.close().unwrap();
+    let TerminalEvidence::Acknowledged(receipt, _) = settled.evidence() else {
+        panic!("reopened receipt");
+    };
+    assert_eq!(receipt.copied_bytes, 0);
+    assert_eq!(receipt.metadata_bytes, 0);
+    assert_eq!(receipt.created_entries, 0);
+    assert_eq!(receipt.imported_bytes, 0);
+    assert_eq!(receipt.imported_entries, 0);
+    assert_eq!(l.snapshot().consumed(), ResourceVector::ZERO);
+    quiescent(l);
+}
+
+#[test]
 fn traversal_capability_mode_symlink_hardlink_and_budget_refusals_have_positive_twins() {
     let s = Scratch::new();
     let (_, _, m) = fixture(&s.0, None);
@@ -442,7 +619,9 @@ fn cancelled_materialization_and_import_never_return_partial_publication() {
     for epoch in [
         HostEpoch::Reserved,
         HostEpoch::Staging,
+        HostEpoch::CreatingParent(1),
         HostEpoch::Writing(2),
+        HostEpoch::SyncingParent(1),
         HostEpoch::Visible,
         HostEpoch::Durable,
     ] {
@@ -742,13 +921,15 @@ fn cleanup_excess_and_root_replacement_report_containment_without_escaped_deleti
 
 #[test]
 fn fresh_process_crash_windows_recover_complete_or_explicitly_incomplete_roots() {
-    for epoch in ["staging", "writing", "visible", "durable"] {
+    for epoch in [
+        "staging", "parents", "writing", "syncing", "visible", "durable",
+    ] {
         let s = Scratch::new();
         run_child(&s.0, epoch, None);
         let (_, _, m) = fixture(&s.0, None);
         let p = plan(m);
         let l = ledger();
-        if matches!(epoch, "staging" | "writing") {
+        if matches!(epoch, "staging" | "parents" | "writing" | "syncing") {
             assert!(matches!(
                 SparseWorkspace::reopen(
                     p.clone(),
@@ -838,7 +1019,9 @@ fn host_subprocess_driver() {
     let r = reserve(&l, &p);
     let epoch = match mode.as_str() {
         "staging" => HostEpoch::Staging,
+        "parents" => HostEpoch::CreatingParent(1),
         "writing" => HostEpoch::Writing(2),
+        "syncing" => HostEpoch::SyncingParent(1),
         "visible" => HostEpoch::Visible,
         "durable" => HostEpoch::Durable,
         _ => panic!("unknown crash mode"),

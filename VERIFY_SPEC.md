@@ -376,6 +376,14 @@ the parent tests with an exact mode and bounded deadline, not an ignored
 acceptance condition. These cells do not establish live repository-authority
 publication, hostile-process isolation, FUSE, or independent batch acceptance.
 
+The v2 host tests also pin cumulative byte/intent admission and exact ledger
+conservation across repeated writes, zero-byte deletions, cancellation and
+quota exhaustion; early generated-parent refusal before later input traversal;
+and legacy marker refusal beside a permitted v2 reopen. Parent creation and
+sync have real cancellation/fresh-process crash cells. Resource receipts
+separate creation, admitted outputs and cleanup observations; they do not
+claim a persisted broker journal or total hostile-process resource metering.
+
 `crates/fgit-node/tests/treefs_workspace.rs` additionally drives the production
 source connection after a real durable Git import: authenticated node ref,
 verified fabric, TreeFS manifest, host directory and returned edit intents.

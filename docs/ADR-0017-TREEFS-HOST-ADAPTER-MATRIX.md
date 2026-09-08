@@ -142,7 +142,7 @@ log for admission, with no local-directory authority shortcut.
 | Profile | Candidate behavior | Applicability / acceptance |
 | --- | --- | --- |
 | Direct TreeFS | Existing reference semantics | Host independent |
-| Linux sparse directory v1 | Verified manifest to actual files; declared outputs to ordinary TreeFS intents | Linux openat2 and /proc; byte-preserving local filesystem; tests authored for x86_64-unknown-linux-gnu and nightly-2026-08-31; independent batch acceptance pending |
+| Linux sparse directory v2 | Verified manifest to actual files; declared outputs to ordinary TreeFS intents | Linux openat2 and /proc; byte-preserving local filesystem; tests authored for x86_64-unknown-linux-gnu and nightly-2026-08-31; independent batch acceptance pending |
 | FrankenFS/FUSE | No adapter | No supported target |
 
 The broker supplies a private 0700 parent directory descriptor and a
@@ -184,6 +184,48 @@ unsupported. The immutable `Arc<SparseManifest>` is shared between runs;
 each host workspace copies its input payloads and has private changes. The
 receipt reports copied bytes and **zero shared host bytes**. This is no claim
 of reflink/FUSE performance or million-workspace scale.
+
+### Consumable resource accounting and interruption (v2, 2026-09-08)
+
+The v1 candidate incorrectly replaced its import counter on each call and
+settled bytes with `max(copied, imported)`. It also charged objects from the
+remaining cleanup entries, which can omit previously created/deleted files.
+Those are undercounts for the consumable grades in `fgit-resource`, not
+memory-capacity accounting. The host bead was returned from batch_pending
+for correction; earlier functional tests did not establish conservation.
+
+V2 keeps the retained-footprint limits and separately reserves initial writes
+plus a finite import allowance for the entire lease. `SparseWorkspacePlan::budget()`
+is the caller's required reservation: bytes fund input payloads, the local
+plan marker and at most `max_payload_bytes` of returned changed payloads;
+objects fund created entries inside the root (including the marker) and at
+most `max_entries` returned edit intents. Each successful import accumulates
+both counters; a zero-byte deletion still consumes an intent. A cancelled or
+refused import returns no log and admits nothing. Unchanged reads remain
+permitted after import credit is spent. Tool execution has its own runner
+obligation; these counters do not measure total process memory or CPU use.
+
+The close receipt separates copied, marker and admitted payload bytes;
+created and admitted entries; and observed cleanup entries. Settlement sums
+the consumable work, rather than using a maximum or a current footprint.
+Reopening requires a new broker reservation. It does not charge prior
+creation again, erase the previous owner's containment, or reconcile an
+unknown prior import outcome; the broker's durable effect journal owns that
+recovery. Repeated imports and lost returned logs are not automatically
+idempotent. This derived adapter never publishes a repository decision.
+
+The union of input/output paths, generated parents and the marker is checked
+before each new retained entry. Directory creation and child-before-parent
+sync poll `CreatingParent` and `SyncingParent` checkpoints; cancellation
+still drains the owned staging root before returning. The real subprocess
+crash matrix includes both windows.
+
+The local plan/marker domain is now `linux-openat2/v2`. A v1 marker is refused
+with `IdentityMismatch`; it is not silently interpreted with v2 resource
+semantics. Reap an existing v1 derived workspace through its owning broker's
+creation receipt and compatible adapter before rebuilding under v2. There is
+no in-place marker rewrite or canonical Git/ref migration. Both versions are
+pre-release candidates, not independently accepted host profiles.
 
 ### DEP-118 direct-use admission
 
