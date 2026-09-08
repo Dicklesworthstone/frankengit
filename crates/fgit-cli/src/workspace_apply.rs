@@ -57,7 +57,10 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
     let receipt = render_receipt(&options, tx_id, &terminal, cleanup.as_deref());
     // Always attempt to report the canonical decision, including on cleanup
     // failure and for a canonical refusal (which exits nonzero).
-    write_terminal_receipt(&mut std::io::stdout().lock(), &receipt, tx_id, &terminal)?;
+    if let Err(error) = write_terminal_receipt(&mut std::io::stdout().lock(), &receipt, tx_id, &terminal) {
+        return Err(cleanup.as_ref().map_or_else(|| error.clone(),
+            |cleanup| format!("{error}; node shutdown also failed: {cleanup}")));
+    }
     if let Some(error) = cleanup {
         return Err(format!("{}; node shutdown failed: {error}", describe(tx_id, &terminal)));
     }
@@ -193,7 +196,7 @@ fn render_receipt(options: &Options, tx_id: TxId, terminal: &TerminalOutcome, cl
 fn write_terminal_receipt(
     output: &mut impl Write, receipt: &str, tx_id: TxId, terminal: &TerminalOutcome,
 ) -> Result<(), String> {
-    writeln!(output, "{receipt}").map_err(|error|
+    writeln!(output, "{receipt}").and_then(|()| output.flush()).map_err(|error|
         format!("{}; receipt output failed: {error}", describe(tx_id, terminal)))
 }
 
@@ -298,6 +301,15 @@ mod tests {
         let error = write_terminal_receipt(&mut BrokenOutput, &receipt, tx, &committed).unwrap_err();
         assert!(error.contains("is committed as"));
         assert!(error.contains(&rcr.to_string()));
+        struct BrokenFlush;
+        impl Write for BrokenFlush {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { Ok(bytes.len()) }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+        }
+        let error = write_terminal_receipt(&mut BrokenFlush, &receipt, tx, &committed).unwrap_err();
+        assert!(error.contains("is committed as"));
         let refused = TerminalOutcome {
             decision_sequence: DecisionSequence::try_new(3).unwrap(),
             outcome: DecisionOutcome::Refused {
