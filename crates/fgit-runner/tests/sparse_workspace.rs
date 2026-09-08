@@ -15,7 +15,7 @@ use fgit_runner::sparse_workspace::{
 };
 use fgit_treefs::{
     BaseView, ExportLimits, ExportPlanner, ObjectSource, ObjectSourceError, PathPolicy, ReadGrant,
-    SparseLimits, SparseManifest, TreeCapability, TreePath, WorkspaceId,
+    SparseLimits, SparseManifest, SparseRefusal, TreeCapability, TreePath, WorkspaceId,
 };
 use fgit_types::{CodecVersion, DigestAlgorithmId, DigestBytes, RepositoryCommitId, RepositoryId};
 use std::fs::{self, File};
@@ -635,6 +635,75 @@ fn plan_and_host_permissions_refuse_before_io_beside_admitted_inputs() {
     assert!(
         matches!(SparseWorkspacePlan::new(m,vec![],&capability(),0,SparseLimits::default()),Err(HostRefusal::UnsupportedEntry(p)) if p==path(b"src/link"))
     );
+}
+
+#[test]
+fn gitlink_refuses_before_host_creation_beside_a_regular_file_at_the_same_path() {
+    for gitlink in [false, true] {
+        let s = Scratch::new();
+        let (source, _, _) = fixture(&s.0, None);
+        // The foreign commit is deliberately absent. A gitlink must be
+        // refused as a host entry without attempting to read foreign objects.
+        let oid = if gitlink {
+            Oid::of_object(GitObjectKind::Commit, b"foreign repository commit")
+        } else {
+            source.put(GitObjectKind::Blob, b"ordinary file\n")
+        };
+        let mode: &[u8] = if gitlink { b"160000" } else { b"100644" };
+        let tree = source.tree(&[entry(mode, b"src", oid)]);
+        let commit = source.put(
+            GitObjectKind::Commit,
+            format!("tree {}\nauthor Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\nhost profile twin\n", hex(&tree)).as_bytes(),
+        );
+        let rcr = RepositoryCommitId::from_digest(
+            DigestAlgorithmId::try_new(0x8043).unwrap(),
+            CodecVersion::new(1, 0),
+            DigestBytes::try_new(&[5; 32]).unwrap(),
+        );
+        let base = BaseView::new(
+            RepositoryId::from_bytes([9; 16]),
+            rcr,
+            commit,
+            tree,
+            ParseLimits::default(),
+            PathPolicy::default(),
+        );
+        let manifest = SparseManifest::build(
+            &base,
+            &source,
+            &mut capability(),
+            0,
+            SparseLimits::default(),
+        );
+        if gitlink {
+            assert!(
+                matches!(manifest, Err(SparseRefusal::SubmoduleUnsupported { path: p }) if p == path(b"src"))
+            );
+            assert!(!s.0.join("workspace").exists());
+            assert!(!source.0.join(hex(&oid)).exists());
+        } else {
+            let p = SparseWorkspacePlan::new(
+                Arc::new(manifest.unwrap()),
+                vec![],
+                &capability(),
+                0,
+                SparseLimits {
+                    max_entries: 10,
+                    max_entry_bytes: 1024,
+                    max_payload_bytes: 2048,
+                },
+            )
+            .unwrap();
+            let l = ledger();
+            let w = create(&s, &l, p, b"workspace");
+            assert_eq!(
+                fs::read(w.tool_directory().join("src")).unwrap(),
+                b"ordinary file\n"
+            );
+            let _ = w.close().unwrap();
+            quiescent(l);
+        }
+    }
 }
 
 #[test]
