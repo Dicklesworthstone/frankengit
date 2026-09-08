@@ -6,19 +6,26 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fgit_admission::merge::native::{NativeMergeIntent, objects::MergeObjectLimits};
 use fgit_admission::merge::native::settlement::{DeliveryRequest, OutboxDestination};
+use fgit_admission::merge::native::{NativeMergeIntent, objects::MergeObjectLimits};
 use fgit_admission::{AdmissionError, AdmissionLimits};
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
-use fgit_codec::canonical_state::{CanonicalForgePositionState, ForgePositionStateEntry};
+use fgit_codec::{
+    CanonicalForgePositionState, ForgePositionStateEntry, CanonicalOutboxEffectState,
+    CanonicalOutboxState, CanonicalOutboxStateEntry, OutboxDeliveryIdentityInput,
+    derive_outbox_delivery_key,
+};
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::{ForgeEventBatch, ForgeEventPayload, NativeMerge};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, NodeReceiveTransportRefusal, OneNode};
-use fgit_resource::{DownstreamIdempotency, ObligationState, ReconcilePolicy};
 use fgit_resource::settlement::{DeliveryVerdict, ProbeVerdict};
+use fgit_resource::{DownstreamIdempotency, ObligationState, ReconcilePolicy};
+use fgit_types::{
+    AsciiSlug, DecisionOutcome, Digest, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId,
+    RefName, RefusalCode, RepositoryCommitId, RepositoryId, TenantId, TxId,
+};
 use fsqlite_types::cx::Cx;
-use fgit_types::{AsciiSlug, DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId, RefName, RefusalCode, RepositoryId, TenantId};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
@@ -70,12 +77,8 @@ fn commit(tree: GitOid, parents: &[GitOid], message: &str) -> Vec<u8> {
     body.into_bytes()
 }
 struct Fixture {
-    base: GitOid,
-    target: GitOid,
-    source: GitOid,
-    merged_tree: GitOid,
-    candidate: GitOid,
-    candidate_body: Vec<u8>,
+    base: GitOid, target: GitOid, source: GitOid, merged_tree: GitOid,
+    candidate: GitOid, candidate_body: Vec<u8>,
 }
 fn fixture(node: &OneNode, root: &Path, format: GitHashAlgorithm, stage_commit: bool) -> Fixture {
     let source = root.join("source"); fs::create_dir_all(source.join("refs/heads")).unwrap();
@@ -125,9 +128,17 @@ fn refs(node: &OneNode) -> BTreeMap<RefName, GitOid> {
     let request = node.request_context();
     node.runtime().block_on(node.materialize_admission_in(&request)).unwrap().snapshot().refs.clone()
 }
+fn delivery_entry(tx_id: TxId, predecessor: Option<RepositoryCommitId>, payload: Digest) -> CanonicalOutboxStateEntry {
+    let class = AsciiSlug::from_static("forge-event");
+    let destination = AsciiSlug::from_static("forge-projection");
+    let key = derive_outbox_delivery_key(OutboxDeliveryIdentityInput::new(repository(), class,
+        destination, payload, tx_id, predecessor)).unwrap();
+    let effect = CanonicalOutboxEffectState::committed(repository(), key, tx_id, payload);
+    CanonicalOutboxStateEntry::new(key, class, destination, payload, tx_id, predecessor, effect.root().unwrap(), None)
+}
 
 #[test]
-fn native_merge_publishes_ref_event_and_frontier_together_and_recovers_after_reopen() {
+fn native_merge_publishes_ref_event_frontier_and_outbox_together_and_recovers_after_reopen() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
         let (mut node, _) = OneNode::init(config(&scratch.0, format)).unwrap();
@@ -148,7 +159,6 @@ fn native_merge_publishes_ref_event_and_frontier_together_and_recovers_after_reo
         assert_ne!(after.basis().body().forge_position_root, old.forge_position_root);
         assert_ne!(after.basis().body().outbox_root, old.outbox_root);
         assert_eq!(after.snapshot().outbox.len(), 1);
-        assert_eq!(after.snapshot().forge_positions.len(), 1);
         assert_eq!(after.basis().body().retention_root, old.retention_root);
         let history = node.runtime().block_on(node.snapshot_history_in(&request)).unwrap();
         let last = history.last().unwrap();
@@ -160,6 +170,10 @@ fn native_merge_publishes_ref_event_and_frontier_together_and_recovers_after_reo
         assert_eq!(after.basis().body().latest_committed_rcr_id, Some(repository_commit_id));
         let event_root = fgit_admission::evidence::evidence_root(&ForgeEventBatch::of_one(offered.event().clone())).unwrap();
         assert_eq!(record.forge_event_batch_root, event_root);
+        let first_delivery = delivery_entry(record.tx_id, old.latest_committed_rcr_id, event_root);
+        let expected_outbox = CanonicalOutboxState::try_new(repository(), vec![first_delivery]).unwrap();
+        assert_eq!(expected_outbox.root().unwrap(), after.basis().body().outbox_root);
+        assert_eq!(after.snapshot().outbox.values().next(), Some(&event_root));
         let frontier = CanonicalForgePositionState::try_new(repository(), vec![
             ForgePositionStateEntry::try_new(AsciiSlug::from_static("pull-request/1"), 0, 1, event_root).unwrap(),
         ]).unwrap();
@@ -170,8 +184,10 @@ fn native_merge_publishes_ref_event_and_frontier_together_and_recovers_after_reo
         reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
         assert_eq!(apply(&reopened, &offered, b"native-merge-1").unwrap(), terminal);
         assert_eq!(refs(&reopened)[&main_ref()], f.candidate);
-        // A new candidate on a new PR extends the existing frontier instead of
-        // treating it as empty. This also exercises reading its persisted body.
+        let request = reopened.request_context();
+        let retried = reopened.runtime().block_on(reopened.materialize_admission_in(&request)).unwrap();
+        assert_eq!(retried.snapshot().outbox.len(), 1, "same retry cannot enqueue twice");
+        assert_eq!(retried.basis().body().outbox_root, expected_outbox.root().unwrap());
         let next_body = commit(f.merged_tree, &[f.candidate, f.source], "next reviewed merge\n");
         let next_id = reopened.put_git_object(GitObjectKind::Commit, next_body).unwrap().identity();
         let next_fixture = Fixture { target: f.candidate, candidate: next_id, ..f };
@@ -185,6 +201,12 @@ fn native_merge_publishes_ref_event_and_frontier_together_and_recovers_after_reo
             ForgePositionStateEntry::try_new(AsciiSlug::from_static("pull-request/2"), 0, 1, root2).unwrap(),
         ]).unwrap();
         assert_eq!(frontier.root().unwrap(), current.basis().body().forge_position_root);
+        let history = reopened.runtime().block_on(reopened.snapshot_history_in(&next_request)).unwrap();
+        let second_record = &history.last().unwrap().batch.committed_rcrs[0];
+        let expected_outbox2 = CanonicalOutboxState::try_new(repository(), vec![first_delivery,
+            delivery_entry(second_record.tx_id, Some(repository_commit_id), root2)]).unwrap();
+        assert_eq!(expected_outbox2.root().unwrap(), current.basis().body().outbox_root);
+        assert_eq!(current.snapshot().outbox.len(), 2);
         assert_eq!(apply(&reopened, &offered, b"native-merge-1").unwrap(), terminal);
         assert_eq!(refs(&reopened)[&main_ref()], next_id, "retry cannot roll back a later merge");
         reopened.shutdown().unwrap();
@@ -192,7 +214,7 @@ fn native_merge_publishes_ref_event_and_frontier_together_and_recovers_after_reo
 }
 
 #[test]
-fn a_competing_merge_refuses_canonically_without_advancing_forge_state() {
+fn a_competing_merge_refuses_canonically_without_advancing_forge_or_outbox_state() {
     let scratch = Scratch::new();
     let (mut node, _) = OneNode::init(config(&scratch.0, GitHashAlgorithm::Sha1)).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
@@ -210,6 +232,8 @@ fn a_competing_merge_refuses_canonically_without_advancing_forge_state() {
     let after = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
     assert_eq!(before.basis().body().ref_root, after.basis().body().ref_root);
     assert_eq!(before.basis().body().forge_position_root, after.basis().body().forge_position_root);
+    assert_eq!(before.basis().body().outbox_root, after.basis().body().outbox_root);
+    assert_eq!(after.snapshot().outbox.len(), 1);
     let history = node.runtime().block_on(node.snapshot_history_in(&request)).unwrap();
     assert!(history.last().unwrap().forge_events.is_empty());
     node.shutdown().unwrap();
@@ -231,6 +255,8 @@ fn missing_candidate_is_retryable_and_anonymous_intake_is_refused() {
         Err(NodeReceiveTransportRefusal::Admission(error)) if matches!(*error,
             AdmissionError::AsyncProjectionUnavailable(RefusalCode::EvidenceMissing))));
     assert_eq!(refs(&node), original);
+    let request = node.request_context();
+    assert!(node.runtime().block_on(node.materialize_admission_in(&request)).unwrap().snapshot().outbox.is_empty());
     node.put_git_object(GitObjectKind::Commit, f.candidate_body.clone()).unwrap();
     assert!(matches!(apply(&node, &offered, b"missing-retry").unwrap().outcome, DecisionOutcome::Committed { .. }));
     assert_eq!(refs(&node)[&main_ref()], f.candidate);
@@ -262,6 +288,7 @@ fn invalid_parent_shape_and_reused_terminal_aggregate_do_not_move_refs() {
     let history = node.runtime().block_on(node.snapshot_history_in(&request)).unwrap();
     assert_eq!(history.iter().flat_map(|batch| &batch.forge_events)
         .filter(|event| matches!(event.payload, ForgeEventPayload::MergeCommittedNative(_))).count(), 1);
+    assert_eq!(node.runtime().block_on(node.materialize_admission_in(&request)).unwrap().snapshot().outbox.len(), 1);
     node.shutdown().unwrap();
 }
 
@@ -309,8 +336,6 @@ impl OutboxDestination<Cx> for DiskDestination {
             Err(_) => return Err(RefusalCode::EvidenceMissing),
         };
         if self.kill_after_delivery {
-            // This exits the child process without destructors, AFTER the
-            // destination persisted bytes but BEFORE the node sees a receipt.
             std::process::exit(81);
         }
         Ok((verdict, b"filesystem destination: committed receipt".to_vec()))

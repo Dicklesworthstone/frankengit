@@ -1,25 +1,23 @@
-//! Merge admission, with an explicit native durable path and unchanged legacy
-//! contracts. Legacy Digest-valued merge events are not converted into Git OIDs.
+//! Merge admission with byte-preserving legacy event contracts and a native
+//! durable Ref + Forge + Outbox path. No internal Digest is cast to a Git OID.
 //!
-//! Use [`native::NativeMergeIntent`] and [`native::admit_native_merge_async`]
-//! with a real [`native::NativeMergeProjection`] for durable ref/forge publication.
-//! The legacy callbacks remain available for existing integrations; their
-//! synchronous staging contract does not establish durable node capability.
-//!
-//! [`prepare`] folds one native merge onto canonical forge/outbox/effect state
-//! without I/O; durable publication remains on [`native`].
+//! Both asynchronous native APIs derive one complete transaction, await all
+//! immutable dependencies, and publish one RCR/head CAS. The sealed-package API
+//! retains its original workspace-bound request identity. Enqueueing a delivery
+//! never claims that a downstream consumer has acknowledged it.
 
 mod legacy;
 mod prepare;
+mod publication;
+mod staging;
 
 pub use legacy::{
     AsyncMergeMaterializer, ForgeBodyStore, ForgeEventBatch, MergeStaleness, SealedMerge,
-    admit_merge, admit_merge_async, check_against_snapshot, seal_attempt_for,
+    admit_merge, check_against_snapshot, seal_attempt_for,
 };
+pub use publication::admit_merge_async;
 pub use prepare::{NativeMergeBasis, PreparedNativeMerge, prepare_native_merge};
 
-// Preserve the crate-internal legacy planning seam while its implementation
-// and historical contracts live together in the legacy module.
 #[allow(unused_imports)]
 pub(crate) use legacy::{MergePlan, decide_from_snapshot, outcomes_match_basis, plan_attempt};
 

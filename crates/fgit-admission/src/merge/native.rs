@@ -1,11 +1,5 @@
-//! Durable admission of reviewed native branch merges.
-//!
-//! A typed intent, not caller-minted evidence, drives native-object validation
-//! and the existing transaction evaluator's coupled ref/forge intents. The
-//! asynchronous ref materializer handles its own partition; its ref effects
-//! must exactly equal the complete fold. The final RCR carries the COMPLETE
-//! fold's invariant evidence and the actual native event/frontier, published
-//! together by the same authority-head CAS. Ordinary receive gates stay strict.
+//! Durable native merge admission. Source refs, forge frontier and delivery
+//! obligation are one evaluated transaction and one authority-head replacement.
 
 use std::future::Future;
 
@@ -20,23 +14,23 @@ use fgit_forge::event::{ForgeEvent, ForgeEventBatch, ForgeEventPayload, NativeMe
 use fgit_types::{AsciiSlug, RefusalCode};
 
 use crate::{
-    AdmissionContext, AdmissionError, AdmissionLimits, AsyncAdmissionProjection, ProjectionFailure,
-    ValidatedClosure,
+    AdmissionContext, AdmissionError, AdmissionLimits, AsyncAdmissionProjection,
+    ProjectionFailure, ValidatedClosure,
 };
-use prepare::{PreparationFailure, prepare_native_merge};
+use super::{NativeMergeBasis, prepare::prepare_event, staging::stage_prepared};
 use storage::root;
 
 pub mod delivery;
 pub mod history;
 pub mod objects;
-pub(crate) mod prepare;
+pub mod prepare;
 pub mod progress;
 pub mod settlement;
 mod storage;
 pub use storage::{legacy_genesis_root, load_forge_positions};
 
-/// A reviewed two-parent merge. `NewStream` records the first merge receipt
-/// for this PR number; it does not invent an earlier opening or approvals.
+/// A reviewed native merge. A new stream records a merge receipt, not invented
+/// PR opening or approval events. The caller's expected version is immutable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeMergeIntent {
     expected_version: ExpectedVersion,
@@ -49,13 +43,10 @@ impl NativeMergeIntent {
         expected_version: ExpectedVersion,
         merge: NativeMerge,
     ) -> Result<Self, AdmissionError> {
-        merge
-            .validate()
-            .map_err(|_| incoherent("native merge coordinates"))?;
+        merge.validate().map_err(|_| incoherent("native merge coordinates"))?;
         let version = match expected_version {
             ExpectedVersion::NewStream => AggregateVersion::FIRST,
-            ExpectedVersion::Exactly(version) => version
-                .next()
+            ExpectedVersion::Exactly(version) => version.next()
                 .map_err(|_| incoherent("exhausted aggregate version"))?,
         };
         Ok(Self {
@@ -69,14 +60,10 @@ impl NativeMergeIntent {
     }
 
     #[must_use]
-    pub const fn expected_version(&self) -> ExpectedVersion {
-        self.expected_version
-    }
+    pub const fn expected_version(&self) -> ExpectedVersion { self.expected_version }
 
     #[must_use]
-    pub const fn event(&self) -> &ForgeEvent {
-        &self.event
-    }
+    pub const fn event(&self) -> &ForgeEvent { &self.event }
 
     pub fn merge(&self) -> Result<&NativeMerge, AdmissionError> {
         match &self.event.payload {
@@ -85,8 +72,10 @@ impl NativeMergeIntent {
         }
     }
 
-    /// The event root binds the aggregate, version, both branches, every input
-    /// tip and result. The canonical request excludes derived closure/placement.
+    /// The unchanged semantic seal binds every reviewed coordinate. Delivery
+    /// IDs are derived from the winning basis, never from mutable retry state.
+    /// Earlier terminal outcomes remain earlier outcomes, without retroactive
+    /// enqueueing when this implementation is upgraded.
     pub fn seal_attempt(&self, context: &AdmissionContext) -> Result<SealAttempt, AdmissionError> {
         let merge = self.merge()?;
         if merge.merge_commit.algorithm() != context.object_format {
@@ -120,37 +109,38 @@ impl NativeMergeIntent {
     }
 }
 
-/// Native validation is a required additional capability, not a synchronous
-/// staging callback. It validates the exact reviewed commit, its parents/base
-/// and complete object closure at this authenticated basis on EVERY CAS plan.
-/// Unavailable dependencies leave the sealed request undecided and retryable.
+/// Additional capabilities required of a real native-merge projection.
+/// Resolution must verify bodies against this exact authenticated head and
+/// repository configuration, including any explicit legacy genesis sentinels.
+/// It must not substitute an empty frontier for a missing advanced root.
 pub trait NativeMergeProjection<S>: AsyncAdmissionProjection<S>
-where
-    S: AsyncAuthorityStore + ?Sized,
+where S: AsyncAuthorityStore + ?Sized,
 {
-    /// Checks the caller's cancellation and work budget between storage steps.
-    fn merge_checkpoint(&self, cx: &S::Context) -> Result<(), RefusalCode>;
+    fn merge_checkpoint(&self, _cx: &S::Context) -> Result<(), RefusalCode> {
+        Ok(())
+    }
+
+    fn resolve_merge_basis_async<'a>(
+        &'a self, authority: &'a S, cx: &'a S::Context,
+        basis: &'a PublicationBasis, authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<Output = Result<NativeMergeBasis, ProjectionFailure>> + Send + 'a;
+
+    /// Re-read native objects and validate ordered parents, common ancestry
+    /// and full closure on every CAS attempt. Staging is not object authority.
     fn validate_merge_async<'a>(
-        &'a self,
-        authority: &'a S,
-        cx: &'a S::Context,
-        basis: &'a PublicationBasis,
-        authenticated: &'a AuthenticatedHead,
+        &'a self, authority: &'a S, cx: &'a S::Context,
+        basis: &'a PublicationBasis, authenticated: &'a AuthenticatedHead,
         intent: &'a NativeMergeIntent,
     ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a;
 }
 
-/// Publish the ref movement and forge transition as one authority decision.
-/// A retry probes the authenticated terminal outcome before rechecking refs
-/// that its own earlier commit may already have moved. No outbox delivery or
-/// PR-approval policy is inferred from this native merge receipt.
+/// Evaluate and stage the complete Ref + Forge + Outbox fold before one CAS.
+/// The ordinary ref-only publisher is neither called nor weakened. Terminal
+/// recovery precedes staleness checks; all pre-CAS dependency failures leave
+/// the sealed request undecided, never a fabricated permanent refusal.
 pub async fn admit_native_merge_async<S, P>(
-    store: &S,
-    cx: &S::Context,
-    context: &AdmissionContext,
-    intent: &NativeMergeIntent,
-    limits: AdmissionLimits,
-    projection: &P,
+    store: &S, cx: &S::Context, context: &AdmissionContext,
+    intent: &NativeMergeIntent, limits: AdmissionLimits, projection: &P,
 ) -> Result<TerminalOutcome, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
@@ -164,195 +154,72 @@ where
     for _ in 0..limits.max_cas_replans {
         projection.merge_checkpoint(cx).map_err(unavailable)?;
         if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
-            store,
-            cx,
-            &context.head_key,
-            context.tenant_id,
-            context.repository_id,
-            tx_id,
-        )
-        .await?
-        {
-            return Ok(terminal);
-        }
-        let (basis, receipt, authenticated) =
-            crate::read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative =
-            fgit_authority::collect_cumulative_outcomes_async(store, cx, &context.head_key).await?;
-        if cumulative.observed() != receipt.token() {
-            continue;
-        }
+            store, cx, &context.head_key, context.tenant_id, context.repository_id, tx_id,
+        ).await? { return Ok(terminal); }
+        let (basis, receipt, authenticated) = crate::read_basis_async(store, cx, &context.head_key).await?;
+        let cumulative = fgit_authority::collect_cumulative_outcomes_async(store, cx, &context.head_key).await?;
+        if cumulative.observed() != receipt.token() { continue; }
 
-        let prepared: Result<_, PreparationFailure> = async {
-            let snapshot = projection
-                .snapshot_async(store, cx, &basis, &authenticated)
-                .await?;
+        let preparation: Result<_, PreparationFailure> = async {
+            let snapshot = projection.snapshot_async(store, cx, &basis, &authenticated).await?;
             if snapshot.hidden_refs.hides(merge.source_ref.as_bytes())
                 || snapshot.hidden_refs.hides(merge.target_ref.as_bytes())
-            {
-                return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized).into());
-            }
+            { return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized).into()); }
             if snapshot.refs.get(&merge.source_ref) != Some(&merge.source_tip)
                 || snapshot.refs.get(&merge.target_ref) != Some(&merge.target_tip_before)
-            {
-                return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into());
+            { return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into()); }
+            let resolved = projection.resolve_merge_basis_async(store, cx, &basis, &authenticated).await?;
+            if resolved.refs.refs() != &snapshot.refs
+                || resolved.refs.head_target() != snapshot.head_target.as_ref()
+            { return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into()); }
+            let positions = load_forge_positions(store, cx, &basis).await?;
+            if positions != resolved.forge {
+                return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into());
             }
-            let delivery_basis = delivery::read_in(store, cx, &basis, &|| {
-                projection.merge_checkpoint(cx).is_err()
-            })
-            .await?;
-            let positions = &delivery_basis.forge;
-            if let Some(code) = storage::aggregate_refusal(store, cx, positions, intent).await? {
+            if let Some(code) = storage::aggregate_refusal(store, cx, &positions, intent).await? {
                 return Err(ProjectionFailure::Refuse(code).into());
             }
-            let closure = projection
-                .validate_merge_async(store, cx, &basis, &authenticated, intent)
-                .await?;
-            let prepared = prepare_native_merge(
-                context,
-                &basis,
-                tx_id,
-                &attempt,
-                intent.event(),
-                snapshot,
-                &closure,
-                &delivery_basis,
-            )?;
+            let closure = projection.validate_merge_async(store, cx, &basis, &authenticated, intent).await?;
+            let prepared = prepare_event(context, &intent.event, &closure, tx_id, &attempt, &basis, &resolved)
+                .map_err(ProjectionFailure::Refuse)?;
+            Ok(prepared)
+        }.await;
 
-            // This materializer owns only ref/closure placement. Equality of the
-            // ref partition above is mandatory; its subset invariant is NOT the
-            // invariant that the completed merge RCR will publish below.
-            let materialization = projection
-                .materialize_commit_async(
-                    store,
-                    cx,
-                    &basis,
-                    &prepared.ref_request,
-                    &prepared.ref_fold,
-                    &closure,
-                )
-                .await?;
-            crate::validate_commit_materialization(
-                context,
-                &basis,
-                tx_id,
-                &attempt.request,
-                &closure,
-                &materialization,
-            )?;
-            storage::verify_head_target(
-                store,
-                cx,
-                context.repository_id,
-                materialization.roots.ref_root,
-                prepared.head_target.as_ref(),
-            )
-            .await?;
-            prepared.validate_ref_evidence(&materialization)?;
-            Ok((materialization, prepared))
-        }
-        .await;
-
-        let (materialization, prepared) = match prepared {
+        let prepared = match preparation {
             Ok(prepared) => prepared,
             Err(PreparationFailure::Admission(error)) => return Err(*error),
-            Err(PreparationFailure::Projection(ProjectionFailure::Unavailable(code))) => {
-                return Err(unavailable(code));
-            }
+            Err(PreparationFailure::Projection(ProjectionFailure::Unavailable(code))) => return Err(unavailable(code)),
             Err(PreparationFailure::Projection(ProjectionFailure::Refuse(code))) => {
                 if let Some(terminal) = crate::publish_refusal_async(
-                    store,
-                    cx,
-                    context,
-                    &basis,
-                    receipt.token(),
-                    admission.seal_id(),
-                    tx_id,
-                    code,
-                    projection,
-                    &cumulative,
-                )
-                .await?
-                {
-                    return Ok(terminal);
-                }
+                    store, cx, context, &basis, receipt.token(), admission.seal_id(), tx_id,
+                    code, projection, &cumulative,
+                ).await? { return Ok(terminal); }
                 continue;
             }
         };
-        storage::stage_body(
-            store,
-            cx,
-            context.repository_id,
-            storage::EVENT_NAMESPACE,
-            &prepared.events,
-        )
-        .await?;
-        projection.merge_checkpoint(cx).map_err(unavailable)?;
-        storage::stage_body(
-            store,
-            cx,
-            context.repository_id,
-            storage::POSITION_NAMESPACE,
-            prepared.transition.forge_positions(),
-        )
-        .await?;
-        storage::stage_body(
-            store,
-            cx,
-            context.repository_id,
-            delivery::OUTBOX_NAMESPACE,
-            prepared.transition.outbox(),
-        )
-        .await?;
-        storage::stage_body(
-            store,
-            cx,
-            context.repository_id,
-            delivery::EFFECT_NAMESPACE,
-            &prepared.effect,
-        )
-        .await?;
-        storage::stage_body(
-            store,
-            cx,
-            context.repository_id,
-            b"frankengit/admission/outbox-effect-batch/v1/",
-            prepared.evidence.outbox_effect_batch(),
-        )
-        .await?;
-        storage::stage_body(
-            store,
-            cx,
-            context.repository_id,
-            storage::INVARIANT_NAMESPACE,
-            prepared.evidence.invariant_evidence(),
-        )
-        .await?;
-        let materialization = prepared.finish_materialization(materialization)?;
-        projection.merge_checkpoint(cx).map_err(unavailable)?;
+        // The record is constructed from the complete fold, never repaired by
+        // substituting roots into a record whose evidence described fewer effects.
+        stage_prepared(store, cx, &prepared).await?;
         let mut plan = PublicationPlan::open(basis.clone())?;
-        plan.commit(materialization.record);
-        let publication = plan.seal(
-            &CryptoBodyIdentity,
-            materialization.roots,
-            &cumulative,
-            receipt.token(),
-        )?;
-        if let Some(terminal) =
-            crate::outcome_after_publish_async(store, cx, context, receipt.token(), &publication)
-                .await?
-        {
+        plan.commit(prepared.materialization.record);
+        let publication = plan.seal(&CryptoBodyIdentity, prepared.materialization.roots,
+            &cumulative, receipt.token())?;
+        if let Some(terminal) = crate::outcome_after_publish_async(store, cx, context, receipt.token(), &publication).await? {
             return Ok(terminal);
         }
     }
-    Err(AdmissionError::CasReplanLimitExceeded {
-        limit: limits.max_cas_replans,
-    })
+    Err(AdmissionError::CasReplanLimitExceeded { limit: limits.max_cas_replans })
 }
 
-fn unavailable(code: RefusalCode) -> AdmissionError {
-    AdmissionError::AsyncProjectionUnavailable(code)
+enum PreparationFailure {
+    Projection(ProjectionFailure),
+    Admission(Box<AdmissionError>),
 }
-fn incoherent(field: &'static str) -> AdmissionError {
-    AdmissionError::MergeIncoherent { field }
+impl From<ProjectionFailure> for PreparationFailure {
+    fn from(value: ProjectionFailure) -> Self { Self::Projection(value) }
 }
+impl From<AdmissionError> for PreparationFailure {
+    fn from(value: AdmissionError) -> Self { Self::Admission(Box::new(value)) }
+}
+fn unavailable(code: RefusalCode) -> AdmissionError { AdmissionError::AsyncProjectionUnavailable(code) }
+fn incoherent(field: &'static str) -> AdmissionError { AdmissionError::MergeIncoherent { field } }
