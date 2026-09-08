@@ -48,6 +48,8 @@ impl OneNode {
     /// authority selection, like the node's selected-pack path. It retains
     /// object-fabric limits and checkpoints before/after reads. Returned source
     /// coordinates stay pinned even if a later transaction moves the ref.
+    /// Commit discovery consumes the same shared capability fetch quota as
+    /// tree and blob reads, before its body is parsed or traversal begins.
     pub async fn sparse_workspace_manifest_in<A: GitHashAlgorithm>(
         &self,
         request: &NodeRequestContext,
@@ -116,6 +118,9 @@ impl OneNode {
             let body = source
                 .read_object::<A>(&commit_oid, GitObjectKind::Commit, &grant)
                 .map_err(NodeWorkspaceRefusal::Object)?;
+            capability
+                .charge_fetch(body.len() as u64)
+                .map_err(|e| NodeWorkspaceRefusal::Manifest(SparseRefusal::Capability(e)))?;
             let ParsedObject::Commit(parsed) = parse_object_body(
                 ObjectType::Commit,
                 &body,
