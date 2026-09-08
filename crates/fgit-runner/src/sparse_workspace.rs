@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 const MARKER: &[u8] = b".fgit-host-receipt";
-const DOMAIN: &[u8] = b"frankengit/sparse-host/linux-openat2/v1\0";
+const DOMAIN: &[u8] = b"frankengit/sparse-host/linux-openat2/v2\0";
 const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_XDEV);
@@ -45,7 +45,9 @@ const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
 pub enum HostEpoch {
     Reserved,
     Staging,
+    CreatingParent(usize),
     Writing(usize),
+    SyncingParent(usize),
     Visible,
     Durable,
     Importing(usize),
@@ -83,7 +85,7 @@ impl std::fmt::Display for HostRefusal {
 }
 impl std::error::Error for HostRefusal {}
 
-/// Reservation binds the immutable plan and its retained I/O ceilings.
+/// Reservation binds the immutable plan and consumable write/admission ceilings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostReservation {
     pub plan: Commitment,
@@ -97,8 +99,15 @@ pub struct HostReservation {
 pub struct HostClosed {
     pub plan: Commitment,
     pub copied_bytes: u64,
+    /// Bytes written for the local plan marker by this lease, zero on reopen.
+    pub metadata_bytes: u64,
     pub shared_host_bytes: u64,
+    /// Cumulative changed payload bytes returned by successful imports.
     pub imported_bytes: u64,
+    /// Entries created inside the workspace, including its plan marker.
+    pub created_entries: u64,
+    /// Cumulative intents returned by successful imports, including deletions.
+    pub imported_entries: u64,
     pub removed_entries: u64,
 }
 
@@ -126,6 +135,7 @@ pub struct SparseWorkspacePlan<A: GitHashAlgorithm> {
     limits: SparseLimits,
     reservation: HostReservation,
     marker: Vec<u8>,
+    created_entries: u64,
 }
 
 impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
@@ -167,10 +177,10 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
             )?;
             match entry.kind() {
                 SparseEntryKind::Directory => {
-                    directories.insert(entry.path().clone());
+                    retain_path(&mut directories, &files, entry.path(), limits.max_entries)?;
                 }
                 SparseEntryKind::File { body, .. } if body.len() <= limits.max_entry_bytes => {
-                    files.insert(entry.path().clone());
+                    retain_path(&mut files, &directories, entry.path(), limits.max_entries)?;
                 }
                 SparseEntryKind::File { .. } => return Err(HostRefusal::ResourceLimit),
                 SparseEntryKind::Symlink { .. } => {
@@ -178,6 +188,7 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
                 }
             }
         }
+        let input_files = files.len();
         let count = outputs.len();
         let outputs: BTreeSet<_> = outputs.into_iter().collect();
         if outputs.len() != count {
@@ -194,19 +205,12 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
             if directories.contains(path) {
                 return Err(HostRefusal::UnsupportedEntry(path.clone()));
             }
-            directories.extend(path.ancestors());
-            files.insert(path.clone());
-        }
-        if files.iter().any(|path| directories.contains(path)) {
-            return Err(HostRefusal::IdentityMismatch);
-        }
-        if files
-            .len()
-            .saturating_add(directories.len())
-            .saturating_add(1)
-            > limits.max_entries
-        {
-            return Err(HostRefusal::ResourceLimit);
+            retain_path(&mut files, &directories, path, limits.max_entries)?;
+            let mut ancestor = path.parent();
+            while let Some(parent) = ancestor {
+                retain_path(&mut directories, &files, &parent, limits.max_entries)?;
+                ancestor = parent.parent();
+            }
         }
         let mut bytes = Encoder::new();
         bytes.write_raw(DOMAIN);
@@ -249,14 +253,20 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
         bytes.write_scalar(limits.max_entry_bytes as u64);
         bytes.write_scalar(limits.max_payload_bytes as u64);
         let plan = Commitment::of_bytes(bytes.as_bytes());
+        let mut marker = DOMAIN.to_vec();
+        marker.extend_from_slice(plan.digest().bytes().as_bytes());
+        let created_entries = (input_files + directories.len() + 1) as u64;
+        // Retained footprint and consumable work are distinct. Fund the
+        // initial writes plus a finite allowance of returned import payloads
+        // and intents across the whole lease, not once per import call.
         let reservation = HostReservation {
             plan,
             workspace: capability.workspace_id(),
-            max_bytes: limits.max_payload_bytes as u64,
-            max_entries: limits.max_entries as u64,
+            max_bytes: manifest.receipt().payload_bytes() as u64
+                + marker.len() as u64
+                + limits.max_payload_bytes as u64,
+            max_entries: created_entries + limits.max_entries as u64,
         };
-        let mut marker = DOMAIN.to_vec();
-        marker.extend_from_slice(plan.digest().bytes().as_bytes());
         Ok(Self {
             manifest,
             outputs,
@@ -264,6 +274,7 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
             limits,
             reservation,
             marker,
+            created_entries,
         })
     }
 
@@ -322,7 +333,10 @@ pub struct SparseWorkspace<A: GitHashAlgorithm> {
     name: TreePath,
     obligation: ReservedObligation<SparseDirectoryLease>,
     copied_bytes: u64,
+    metadata_bytes: u64,
     imported_bytes: u64,
+    created_entries: u64,
+    imported_entries: u64,
 }
 
 impl<A: GitHashAlgorithm> SparseWorkspace<A> {
@@ -380,7 +394,8 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             )?;
             checkpoint(cancelled, HostEpoch::Staging)?;
             let mut aliases = BTreeSet::new();
-            for path in &plan.directories {
+            for (index, path) in plan.directories.iter().enumerate() {
+                checkpoint(cancelled, HostEpoch::CreatingParent(index))?;
                 let parent = open_parent(&root, path)?;
                 fs::mkdirat(&parent, os(path.file_name()), Mode::RWXU)
                     .map_err(|e| io_error("create generated parent", e))?;
@@ -402,7 +417,8 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             }
             // Children before parents, root last. No path is returned before
             // every body and directory has crossed its selected sync boundary.
-            for path in plan.directories.iter().rev() {
+            for (index, path) in plan.directories.iter().rev().enumerate() {
+                checkpoint(cancelled, HostEpoch::SyncingParent(index))?;
                 sync(&open(
                     &root,
                     path.as_bytes(),
@@ -448,6 +464,8 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             }
         }
         let copied_bytes = plan.manifest.receipt().payload_bytes() as u64;
+        let metadata_bytes = plan.marker.len() as u64;
+        let created_entries = plan.created_entries;
         Ok(Self {
             plan,
             parent,
@@ -455,7 +473,10 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             name,
             obligation,
             copied_bytes,
+            metadata_bytes,
             imported_bytes: 0,
+            created_entries,
+            imported_entries: 0,
         })
     }
 
@@ -489,7 +510,10 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
                 name,
                 obligation,
                 copied_bytes: 0,
+                metadata_bytes: 0,
                 imported_bytes: 0,
+                created_entries: 0,
+                imported_entries: 0,
             }),
             Err(error) => {
                 let _settled = obligation.abort_unused(error.clone());
@@ -547,6 +571,9 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
 
     /// Read a declared output set at quiescence and return an all-or-nothing
     /// semantic edit log. No arbitrary directory walk contributes to import.
+    /// Successful logs consume the lease's cumulative import allowance even
+    /// when a caller repeats the same edit. Refused/cancelled logs are not
+    /// admitted; unchanged reads remain available after the allowance is spent.
     pub fn import(
         &mut self,
         capability: &TreeCapability,
@@ -571,6 +598,10 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         let mut aliases = BTreeSet::new();
         let mut total = 0_usize;
         let mut changed_bytes = 0_u64;
+        let remaining_bytes =
+            (self.plan.limits.max_payload_bytes as u64).saturating_sub(self.imported_bytes);
+        let remaining_entries =
+            (self.plan.limits.max_entries as u64).saturating_sub(self.imported_entries);
         let mut log = IntentLog::new();
         for (index, path) in paths.iter().enumerate() {
             checkpoint(cancelled, HostEpoch::Importing(index))?;
@@ -599,9 +630,16 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
             if !self.plan.outputs.contains(path) {
                 return Err(HostRefusal::UndeclaredChange(path.clone()));
             }
+            if log.len() as u64 >= remaining_entries {
+                return Err(HostRefusal::ResourceLimit);
+            }
             match current {
                 Some((content, mode)) => {
-                    changed_bytes += content.len() as u64;
+                    let next_bytes = changed_bytes + content.len() as u64;
+                    if next_bytes > remaining_bytes {
+                        return Err(HostRefusal::ResourceLimit);
+                    }
+                    changed_bytes = next_bytes;
                     log.push(TreeEditIntent::Write {
                         path: path.clone(),
                         content,
@@ -614,7 +652,8 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         }
         checkpoint(cancelled, HostEpoch::Imported)?;
         self.plan.authorize(capability, now)?;
-        self.imported_bytes = changed_bytes;
+        self.imported_bytes += changed_bytes;
+        self.imported_entries += log.len() as u64;
         Ok(log)
     }
 
@@ -635,21 +674,48 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         let receipt = HostClosed {
             plan: self.plan.reservation.plan,
             copied_bytes: self.copied_bytes,
+            metadata_bytes: self.metadata_bytes,
             shared_host_bytes: 0,
             imported_bytes: self.imported_bytes,
+            created_entries: self.created_entries,
+            imported_entries: self.imported_entries,
             removed_entries: removed as u64,
         };
         let actual = ResourceVector::from_grades(&[
             (
                 Grade::Bytes,
-                receipt.copied_bytes.max(receipt.imported_bytes),
+                receipt.copied_bytes + receipt.metadata_bytes + receipt.imported_bytes,
             ),
-            (Grade::Objects, removed as u64),
+            (
+                Grade::Objects,
+                receipt.created_entries + receipt.imported_entries,
+            ),
         ]);
         self.obligation
             .commit_internal(receipt, &actual)
             .map_err(|_| HostRefusal::ReservationMismatch)
     }
+}
+
+// Reserve one entry for the marker and check the union before every clone or
+// insertion. Many deep outputs cannot first expand to millions of parents.
+fn retain_path(
+    paths: &mut BTreeSet<TreePath>,
+    other: &BTreeSet<TreePath>,
+    path: &TreePath,
+    limit: usize,
+) -> Result<(), HostRefusal> {
+    if other.contains(path) {
+        return Err(HostRefusal::IdentityMismatch);
+    }
+    if paths.contains(path) {
+        return Ok(());
+    }
+    if paths.len().saturating_add(other.len()).saturating_add(1) >= limit {
+        return Err(HostRefusal::ResourceLimit);
+    }
+    paths.insert(path.clone());
+    Ok(())
 }
 
 fn validate_path(path: &TreePath) -> Result<(), HostRefusal> {
