@@ -148,7 +148,93 @@ where
 {
     limits.validate()?;
     let attempt = intent.seal_attempt(context)?;
-    let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
+    admit_merge_attempt_async(store, cx, context, intent, &attempt, false, &[], limits, projection)
+        .await
+}
+
+/// Admit a native event submitted through the original sealed-package API.
+///
+/// The original package seal binds the ref intent and workspace epoch as well
+/// as the event. Rebuilding it with `NativeMergeIntent::seal_attempt` would
+/// change its transaction identity and split recovery into two operations.
+/// Only the event is adapted; the exact original `SealAttempt` reaches the
+/// shared driver. Caller-supplied evidence roots never replace the complete
+/// evidence derived from that driver's authenticated basis and full fold.
+///
+/// The projection must revalidate native objects and their closure. The
+/// supplied workspace observation remains a caller-owned precondition, as in
+/// the original API. Its staleness is evaluated only after recovery of an
+/// already-decided transaction, and becomes a canonical refusal rather than
+/// an infrastructure error for an otherwise undecided request.
+pub async fn admit_sealed_native_merge_async<S, P>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    sealed: &super::SealedMerge<'_>,
+    limits: AdmissionLimits,
+    projection: &P,
+) -> Result<TerminalOutcome, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: NativeMergeProjection<S> + ?Sized,
+{
+    limits.validate()?;
+    let maximum_objects = objects::MergeObjectLimits::default().max_objects;
+    if sealed.package.objects.len() > maximum_objects || sealed.closure.objects.len() > maximum_objects {
+        return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
+    }
+    let ForgeEventPayload::MergeCommittedNative(merge) = &sealed.package.event.payload else {
+        return Err(incoherent("native event kind"));
+    };
+    let fgit_forge::AggregateId::PullRequest(number) = sealed.package.event.aggregate else {
+        return Err(incoherent("event aggregate"));
+    };
+    if merge.merge_commit.algorithm() != context.object_format {
+        return Err(AdmissionError::ObjectFormatMismatch);
+    }
+    let attempt = super::seal_attempt_for(context, sealed)?;
+    let predecessor = sealed.package.event.version.get() - 1;
+    let expected = match AggregateVersion::try_new(predecessor) {
+        Some(version) => ExpectedVersion::Exactly(version),
+        None => ExpectedVersion::NewStream,
+    };
+    let intent = NativeMergeIntent::new(number, expected, merge.clone())?;
+    if intent.event() != &sealed.package.event {
+        return Err(incoherent("native event adaptation"));
+    }
+    admit_merge_attempt_async(
+        store,
+        cx,
+        context,
+        &intent,
+        &attempt,
+        sealed.workspace_epoch_now != sealed.attempt.workspace_epoch,
+        &sealed.package.objects,
+        limits,
+        projection,
+    )
+    .await
+}
+
+/// Shared publication driver. A sealed-package adapter supplies the original
+/// attempt, not a second native-style seal; both entrypoints execute the same
+/// full fold, immutable writes and exact-predecessor CAS.
+async fn admit_merge_attempt_async<S, P>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    intent: &NativeMergeIntent,
+    attempt: &SealAttempt,
+    workspace_stale: bool,
+    required_objects: &[fgit_types::GitOid],
+    limits: AdmissionLimits,
+    projection: &P,
+) -> Result<TerminalOutcome, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: NativeMergeProjection<S> + ?Sized,
+{
+    let admission = fgit_authority::seal_request_async(store, cx, attempt).await?;
     let tx_id = admission.tx_id();
     let merge = intent.merge()?;
     for _ in 0..limits.max_cas_replans {
@@ -168,6 +254,11 @@ where
             if snapshot.refs.get(&merge.source_ref) != Some(&merge.source_tip)
                 || snapshot.refs.get(&merge.target_ref) != Some(&merge.target_tip_before)
             { return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into()); }
+            // Preserve source -> target -> workspace refusal precedence, and
+            // never override the historical terminal resolved above the loop.
+            if workspace_stale {
+                return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
+            }
             let resolved = projection.resolve_merge_basis_async(store, cx, &basis, &authenticated).await?;
             if resolved.refs.refs() != &snapshot.refs
                 || resolved.refs.head_target() != snapshot.head_target.as_ref()
@@ -180,7 +271,12 @@ where
                 return Err(ProjectionFailure::Refuse(code).into());
             }
             let closure = projection.validate_merge_async(store, cx, &basis, &authenticated, intent).await?;
-            let prepared = prepare_event(context, &intent.event, &closure, tx_id, &attempt, &basis, &resolved)
+            // A self-consistent caller-supplied closure is not native-object
+            // evidence. Do not silently omit a package's claimed new objects.
+            if required_objects.iter().any(|object| !closure.objects.contains(object)) {
+                return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete).into());
+            }
+            let prepared = prepare_event(context, &intent.event, &closure, tx_id, attempt, &basis, &resolved)
                 .map_err(ProjectionFailure::Refuse)?;
             Ok(prepared)
         }.await;
@@ -200,10 +296,12 @@ where
         // The record is constructed from the complete fold, never repaired by
         // substituting roots into a record whose evidence described fewer effects.
         stage_prepared(store, cx, &prepared).await?;
+        projection.merge_checkpoint(cx).map_err(unavailable)?;
         let mut plan = PublicationPlan::open(basis.clone())?;
         plan.commit(prepared.materialization.record);
         let publication = plan.seal(&CryptoBodyIdentity, prepared.materialization.roots,
             &cumulative, receipt.token())?;
+        projection.merge_checkpoint(cx).map_err(unavailable)?;
         if let Some(terminal) = crate::outcome_after_publish_async(store, cx, context, receipt.token(), &publication).await? {
             return Ok(terminal);
         }
