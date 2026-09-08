@@ -59,6 +59,41 @@ pub use native::{NativeMergeBasis, PreparedNativeMerge, prepare_native_merge};
 /// dependency purely to spell one parameter.
 pub use fgit_forge::ForgeEventBatch;
 
+/// Awaited staging boundary for all immutable bodies of one merge.
+///
+/// A storage failure leaves the seal undecided and retryable. Implementations
+/// return only after reaching the store's canonical-source durability boundary.
+pub trait AsyncMergeMaterializer<S: fgit_authority::AsyncAuthorityStore + ?Sized>: Sync {
+    /// Prepares from the exact basis and stages the complete successor.
+    fn materialize_merge_async<'a>(
+        &'a self,
+        store: &'a S,
+        cx: &'a S::Context,
+        context: &'a AdmissionContext,
+        sealed: &'a SealedMerge<'_>,
+        tx_id: TxId,
+        attempt: &'a SealAttempt,
+        basis: &'a fgit_chronicle::PublicationBasis,
+        next_state: &'a crate::CanonicalRefState,
+    ) -> impl std::future::Future<Output = Result<crate::CommitMaterialization, ProjectionFailure>> + Send + 'a;
+}
+
+impl<S, T> AsyncMergeMaterializer<S> for T
+where
+    S: fgit_authority::AsyncAuthorityStore + ?Sized,
+    T: crate::CanonicalAdmissionStore + ForgeBodyStore + Sync + ?Sized,
+{
+    fn materialize_merge_async<'a>(
+        &'a self, _store: &'a S, _cx: &'a S::Context,
+        context: &'a AdmissionContext, sealed: &'a SealedMerge<'_>, tx_id: TxId,
+        attempt: &'a SealAttempt, basis: &'a fgit_chronicle::PublicationBasis,
+        next_state: &'a crate::CanonicalRefState,
+    ) -> impl std::future::Future<Output = Result<crate::CommitMaterialization, ProjectionFailure>> + Send + 'a {
+        std::future::ready(materialize(context, sealed, tx_id, attempt, basis, next_state, self)
+            .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing)))
+    }
+}
+
 /// Where a merge's forge event body is staged so a later reader can resolve it.
 ///
 /// # Why this is separate from `CanonicalAdmissionStore`
@@ -549,7 +584,7 @@ pub(crate) fn decide_from_snapshot(
     snapshot: AdmissionSnapshot,
 ) -> MergePlan {
     for name in [&sealed.attempt.source_ref, &sealed.attempt.target_ref] {
-        if snapshot.hidden_refs.is_hidden(name) {
+        if snapshot.hidden_refs.hides(name) {
             return MergePlan::Refuse(RefusalCode::PublicationPolicyRefused);
         }
     }
@@ -737,7 +772,7 @@ where
     // pair needs no such bound only because AsyncAdmissionProjection already
     // requires Sync; the commitments store is this driver's extra parameter and
     // carries its own obligation.
-    Commitments: crate::CanonicalAdmissionStore + ForgeBodyStore + Sync + ?Sized,
+    Commitments: AsyncMergeMaterializer<S> + ?Sized,
 {
     let attempt = seal_attempt_for(context, sealed)?;
     let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
@@ -831,15 +866,30 @@ where
                 .await?
             }
             MergePlan::Commit(next_state) => {
-                let materialization = materialize(
+                let materialization = match commitments.materialize_merge_async(
+                    store,
+                    cx,
                     context,
                     sealed,
                     tx_id,
                     &attempt,
                     &basis,
                     &next_state,
-                    commitments,
-                )?;
+                ).await {
+                    Ok(materialization) => materialization,
+                    Err(ProjectionFailure::Unavailable(code)) => {
+                        return Err(AdmissionError::AsyncProjectionUnavailable(code));
+                    }
+                    Err(ProjectionFailure::Refuse(code)) => {
+                        if let Some(terminal) = crate::publish_refusal_async(
+                            store, cx, context, &basis, receipt.token(), admission.seal_id(),
+                            tx_id, code, projection, &cumulative,
+                        ).await? {
+                            return Ok(terminal);
+                        }
+                        continue;
+                    }
+                };
                 crate::publish_commit_async(
                     store,
                     cx,
@@ -917,6 +967,18 @@ fn materialize(
     next_state: &crate::CanonicalRefState,
     commitments: &(impl crate::CanonicalAdmissionStore + ForgeBodyStore + ?Sized),
 ) -> Result<crate::CommitMaterialization, AdmissionError> {
+    if matches!(sealed.package.event.payload, fgit_forge::ForgeEventPayload::MergeCommittedNative(_)) {
+        let resolved = commitments.resolve_native_merge_basis(basis)
+            .map_err(|_| AdmissionError::MaterializationMismatch("native merge basis"))?;
+        let prepared = prepare_native_merge(context, sealed, tx_id, attempt, basis, &resolved)
+            .map_err(|_| AdmissionError::MaterializationMismatch("native merge preparation"))?;
+        if prepared.refs != *next_state {
+            return Err(AdmissionError::MaterializationMismatch("native merge ref fold"));
+        }
+        commitments.stage_native_merge(&prepared)
+            .map_err(|_| AdmissionError::MaterializationMismatch("native merge staging"))?;
+        return Ok(prepared.materialization);
+    }
     let ref_root = crate::canonical_ref_state_root(next_state)
         .map_err(|_| AdmissionError::MaterializationMismatch("merge resulting ref root"))?;
     let ref_delta_root = merge_ref_delta_root(sealed)?;
