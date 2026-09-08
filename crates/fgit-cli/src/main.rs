@@ -2,6 +2,8 @@
 
 #[cfg(target_os = "linux")]
 mod workspace;
+#[cfg(target_os = "linux")]
+mod workspace_apply;
 
 use std::process::ExitCode;
 
@@ -10,7 +12,12 @@ fn main() -> ExitCode {
     if arguments.first().is_some_and(|argument| argument == "workspace") {
         #[cfg(target_os = "linux")]
         {
-            return match workspace::run(&arguments[1..]) {
+            let outcome = if arguments.get(1).is_some_and(|argument| argument == "apply") {
+                workspace_apply::run(&arguments[1..])
+            } else {
+                workspace::run(&arguments[1..])
+            };
+            return match outcome {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
             };
