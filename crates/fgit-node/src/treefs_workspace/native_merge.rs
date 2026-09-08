@@ -1,12 +1,13 @@
 //! Production composition for reviewed native merge publication.
-//! The local authenticated caller supplies an intent. Git closure and evidence
-//! are derived here, never accepted as arbitrary roots from that caller.
+//! The local authenticated caller supplies an intent. Native objects and all
+//! predecessor state are resolved here, never accepted as caller-minted roots.
 
 use std::cell::Cell;
 use std::future::Future;
 
 use fgit_admission::merge::native::{NativeMergeIntent, NativeMergeProjection, admit_native_merge_async};
 use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_objects};
+use fgit_admission::merge::NativeMergeBasis;
 use fgit_admission::{
     AdmissionContext, AdmissionLimits, AdmissionSnapshot, AsyncAdmissionProjection,
     CanonicalRefState, CommitMaterialization, ProjectionFailure, RefusalMaterialization, ValidatedClosure,
@@ -26,20 +27,17 @@ use crate::{
 };
 
 impl OneNode {
-    /// Publish a reviewed two-parent merge, its forge event and stream position
-    /// in one canonical RCR/head transition on the real embedded authority.
+    /// Publish a reviewed two-parent merge, its forge transition and pending
+    /// delivery obligation in one RCR/head CAS on the embedded authority.
     ///
-    /// The candidate's objects must already be staged in this repository's
-    /// object fabric. They are re-read, hashed and traversed before publication;
-    /// staging alone does not establish validity or commit. Source/target/base
-    /// must be authority-selected, and the candidate's ordered parents must
-    /// be target-before and source. No Git process or alternative database is
-    /// used. This accepts a reviewed result, not an unreviewed conflict solver.
+    /// Candidate objects are re-read, hashed and traversed before publication.
+    /// Source, target and base must be authority-selected; ordered parents must
+    /// be target-before and source. All preparation and staging uses the
+    /// caller's request context. No Git process or alternative database is used.
     ///
-    /// This is the local authenticated composition boundary, like the existing
-    /// loopback receive API. The principal and retry key must originate at the
-    /// caller's authentication boundary. It is not a network login endpoint,
-    /// an assertion that PR approvals exist, or an outbox-delivery worker.
+    /// Authentication remains the caller's responsibility at this local
+    /// composition boundary. An enqueued delivery is not a delivery receipt,
+    /// PR approval or assertion that an external consumer has processed it.
     pub async fn admit_native_merge_durable_in(
         &self,
         request: &NodeRequestContext,
@@ -68,8 +66,6 @@ impl OneNode {
     }
 }
 
-/// The existing asynchronous projection plus real native-object validation.
-/// This deliberately does not implement synchronous staging callbacks.
 struct NodeNativeMergeProjection<'node> {
     node: &'node OneNode,
     inner: DurableAsyncAdmissionProjection<'node>,
@@ -84,8 +80,6 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
     ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
         async move {
             let snapshot = self.inner.snapshot_async(authority, cx, basis, authenticated).await?;
-            // Preserve symbolic HEAD from THIS authenticated snapshot when the
-            // shared materializer prepares its direct-ref partition.
             let state = match snapshot.head_target.as_ref() {
                 Some(target) => CanonicalRefState::new_with_head_target(snapshot.refs.clone(), target.clone())
                     .map_err(ProjectionFailure::Unavailable)?,
@@ -117,6 +111,36 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
 }
 
 impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
+    #[expect(clippy::manual_async_fn, reason = "explicit Send is the resolution contract")]
+    fn resolve_merge_basis_async<'a>(
+        &'a self, authority: &'a FsqliteAuthorityStore, cx: &'a Cx,
+        basis: &'a PublicationBasis, authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<Output = Result<NativeMergeBasis, ProjectionFailure>> + Send + 'a {
+        async move {
+            if authenticated.body().map_err(|_| ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptInvalid))?
+                != *basis.body()
+            {
+                return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
+            }
+            let prepared = self.inner.prepared.lock()
+                .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach))?
+                .take().ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+            if prepared.basis != *basis {
+                return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
+            }
+            // This resolver checks exact root/repository bindings, all payload
+            // references and effect predecessor chains. Only the two declared
+            // legacy genesis sentinels may omit their empty-state bodies.
+            let delivery = crate::merge_delivery::read_in(authority, cx, self.node.repository_id,
+                basis.body(), &|| cx.checkpoint().is_err())
+                .await.map_err(async_projection_unavailable)?;
+            Ok(NativeMergeBasis {
+                refs: prepared.ref_state, root_layout: prepared.root_layout,
+                forge: delivery.forge, outbox: delivery.outbox,
+            })
+        }
+    }
+
     #[expect(clippy::manual_async_fn, reason = "explicit Send is the native validator's cross-thread contract")]
     fn validate_merge_async<'a>(
         &'a self, authority: &'a FsqliteAuthorityStore, cx: &'a Cx,
@@ -130,9 +154,6 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
             ).await.map_err(async_projection_unavailable)?;
             let merge = intent.merge()
                 .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?;
-            // Staged but unselected objects are not authority for the inputs.
-            // Only the exact proposed candidate and its newly created objects
-            // may be outside the prior closure, and their bytes are verified.
             if [merge.source_tip, merge.target_tip_before, merge.base_tip].iter()
                 .any(|oid| !selected.selected_closure().closure().objects().contains(oid))
             { return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete)); }
