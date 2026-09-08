@@ -822,10 +822,18 @@ fn read_regular(
     if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile || before.st_nlink != 1 {
         return Err(HostRefusal::UnsupportedEntry(path.clone()));
     }
-    let mode = match before.st_mode & 0o7777 {
-        0o600 | 0o644 => FileMode::Regular,
-        0o700 | 0o755 => FileMode::Executable,
-        _ => return Err(HostRefusal::UnsupportedEntry(path.clone())),
+    // Git records the owner's executable bit, not the host's umask-derived
+    // group/other read-write permissions. Those ordinary permissions do not
+    // widen access through the broker's private 0700 parent. Privilege bits
+    // and an unreadable owner mode remain outside this profile.
+    let permissions = before.st_mode & 0o7777;
+    if permissions & 0o7000 != 0 || permissions & 0o400 == 0 {
+        return Err(HostRefusal::UnsupportedEntry(path.clone()));
+    }
+    let mode = if permissions & 0o100 == 0 {
+        FileMode::Regular
+    } else {
+        FileMode::Executable
     };
     let size = usize::try_from(before.st_size).map_err(|_| HostRefusal::ResourceLimit)?;
     if size > limit {

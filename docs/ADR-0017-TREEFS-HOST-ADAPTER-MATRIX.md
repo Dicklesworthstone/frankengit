@@ -170,6 +170,11 @@ succeed. Read-only input changes refuse. Undeclared outputs never become
 edits; cleanup removes them under the declared entry/depth ceiling or reports
 containment. A failed cleanup leaves the region obligation unsettled.
 
+Tool output modes map the owner's executable bit to Git's regular/executable
+mode. Ordinary umask-dependent group/other permissions are not Git metadata;
+the private broker parent still prevents disclosure. Setuid, setgid, sticky
+and owner-unreadable modes remain refused.
+
 The profile preserves case and Unicode byte distinctions when the host does;
 exclusive creation/alias checks refuse collisions. Symlink materialization,
 gitlinks, special files, cross-mount traversal, and shared host hardlinks are
