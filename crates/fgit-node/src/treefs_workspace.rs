@@ -1,6 +1,7 @@
 //! Authority-selected TreeFS input discovery over the production object fabric.
 
 mod candidate;
+mod native_merge;
 mod publication;
 #[cfg(target_os = "linux")]
 mod trusted_tool;
