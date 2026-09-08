@@ -7,6 +7,7 @@ pub mod bridge;
 pub mod canonical_state;
 pub mod error;
 pub mod harness;
+pub mod outbox_effect_state;
 pub mod outbox_identity;
 pub mod reader;
 pub mod repository_configuration;
@@ -25,6 +26,7 @@ pub use canonical_state::{
     ForgePositionStateEntry, MAX_FORGE_POSITION_STATE_ENTRIES, MAX_OUTBOX_STATE_ENTRIES,
 };
 pub use error::CodecRefusal;
+pub use outbox_effect_state::{CanonicalOutboxEffectState, MAX_OUTBOX_EFFECT_TRANSITIONS};
 pub use outbox_identity::{OutboxDeliveryIdentityInput, derive_outbox_delivery_key};
 pub use reader::Decoder;
 pub use repository_configuration::RepositoryIncarnationConfigurationBodyV2_2;
