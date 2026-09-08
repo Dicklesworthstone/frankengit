@@ -375,7 +375,7 @@ fn traversal_capability_mode_symlink_hardlink_and_budget_refusals_have_positive_
         w.import(&capability(), 0, &|_| false),
         Err(HostRefusal::UnsupportedEntry(_))
     ));
-    fs::set_permissions(&input, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&input, fs::Permissions::from_mode(0o664)).unwrap();
     assert_eq!(w.import(&capability(), 0, &|_| false).unwrap().len(), 1);
     fs::write(&input, vec![0; 65537]).unwrap();
     assert_eq!(
@@ -529,8 +529,18 @@ fn live_lease_wrong_plan_and_dropped_workspace_are_not_successful_reopens() {
         RegionCloseOutcome::ContainmentFailure(_)
     ));
     let l = ledger();
-    let wrong =
-        SparseWorkspacePlan::new(m, vec![], &capability(), 0, SparseLimits::default()).unwrap();
+    let wrong = SparseWorkspacePlan::new(
+        m,
+        vec![],
+        &capability(),
+        0,
+        SparseLimits {
+            max_entries: 100,
+            max_entry_bytes: 65536,
+            max_payload_bytes: 131072,
+        },
+    )
+    .unwrap();
     assert!(matches!(
         SparseWorkspace::reopen(
             wrong.clone(),
