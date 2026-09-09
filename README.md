@@ -140,17 +140,20 @@ name their own revisions and do not replace an independent batch gate.
   SHA-256 repository behavior: 178 acceptance IDs across five suites. The
   report distinguishes ordinary-client observations from pinned-oracle
   conformance and records the exact limits. This is not the full Git matrix.
-- Durable forge merge is still blocked in the production composition:
-  `OneNode::admit_merge_durable_in` reaches materializer methods that return
-  `DurabilityProfileUnavailable` before publication. The six synchronous
+- The dated snapshot found durable forge merge blocked in the production
+  composition: `OneNode::admit_merge_durable_in` reached materializer methods
+  that returned `DurabilityProfileUnavailable` before publication. The six synchronous
   admission race tests cited in the previous snapshot do not establish a
   durable OneNode merge. `frankengit-asa3` retains both this integration and
   coherent forge/outbox delivery; neither is declared complete here.
   The native implementation candidate now couples the actual merge event,
   forge position, and canonical outbox state at one authority CAS, with an
-  authenticated delivery reader and persisted reconciliation worker. Its
+  authenticated delivery reader and persisted reconciliation worker. Native
+  packages through the original sealed API now enter that same driver with
+  their original transaction identity and node-owned object revalidation.
+  Historical Digest-valued packages retain the unavailable legacy route. Its
   current scope and remaining acceptance are in the
-  [delivery contract](docs/MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md#12-current-implementation-boundaries);
+  [delivery contract](docs/MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md#13-current-implementation-boundaries);
   this source update does not advance the dated snapshot's verification claim.
 - `fg at` has a real historical path and a nonempty durable-history E2E
   scenario in `scripts/e2e/suites/node/time_travel.sh`. The 2026-09-07

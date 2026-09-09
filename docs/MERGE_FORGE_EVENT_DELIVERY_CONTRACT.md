@@ -222,10 +222,11 @@ A source diff, unit test in only the reference crate, staged event body, green m
 
 ## 12. Explicit non-claims
 
-This document does not claim that the production state bridge, pure transition, admission wiring, worker adapter, or fault matrix is implemented.
+The source boundaries below do not establish completion of the production paths
+or the fault matrix. Completion requires the revision-bound evidence in §11.
 
 It does not authorize hand-editing the authority head, advancing roots outside the normal CAS, weakening event/outbox canonical encoding, or marking the merge Bead verified or closed without its designated gate.
-## 12. Current implementation boundaries
+## 13. Current implementation boundaries
 
 The native path composes `fgit-reference::merge_delivery` with the normal
 admission evaluator, reference materializer, seal, and authority publication.
@@ -235,6 +236,13 @@ Its stable key uses the fields defined by
 seal format and its historical event bytes remain distinct compatibility
 inputs. Native object validation reads and hashes the candidate commit, its
 two ordered parents, merge base, and reachable trees before publication.
+Native `MergeEffectPackage` inputs at `admit_merge_durable_in` enter this same
+driver with their original seal. Supplied closure and evidence are checked
+against node-owned object validation and the complete fold. Historical
+Digest-valued packages retain their previous route. The original interface's
+caller-supplied workspace epoch is only an asserted precondition: it cannot
+authenticate a current workspace session because it carries no workspace or
+snapshot identity.
 
 `merge/native/delivery.rs` reads the selected forge and outbox maps and checks
 payload, aggregate range, stable key, lifecycle predecessors, and receipt
@@ -255,6 +263,11 @@ namespaces; `merge/native/history.rs` recognizes and validates these schemas.
 Ordinary transaction-fold evidence continues to use its existing schema.
 
 `deliver_forge_outbox_in` awaits an explicitly configured transport capability.
+`outbox_delivery_context` selects the operator's finite background-controller
+budget for the whole invocation, which may publish several transactions. A
+shorter request context is also accepted; exhaustion preserves published
+progress for a subsequent invocation. No operation extends its live budget or
+substitutes a detached context to complete publication.
 It publishes deferral before a call, persists a dispatch marker before send,
 and probes any recovered in-flight dispatch. Completed observations are
 published before terminal lifecycle settlement, so a restart after that
@@ -275,8 +288,8 @@ must preserve the complete live outbox and reconciliation closure before it
 can be admitted.
 
 The code and tests in this section do not close `frankengit-asa3`. Native
-sync/async equivalence, the legacy durable-entrypoint integration, supervised
-workspace freshness, and the complete revision-bound batch gate retain their
+sync/async equivalence, supervised workspace freshness, and the complete
+revision-bound batch gate retain their
 original acceptance scope. Model fault tests and file-backed process-death
 tests have different evidence classes; neither implies host power-loss or
 filesystem fault coverage.

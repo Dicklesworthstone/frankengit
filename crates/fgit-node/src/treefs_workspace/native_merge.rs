@@ -5,12 +5,16 @@
 use std::cell::Cell;
 use std::future::Future;
 
-use fgit_admission::merge::native::{NativeMergeIntent, NativeMergeProjection, admit_native_merge_async};
 use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_objects};
+use fgit_admission::merge::native::{
+    NativeMergeIntent, NativeMergeProjection, admit_native_merge_async,
+    admit_sealed_native_merge_async,
+};
 use fgit_admission::merge::NativeMergeBasis;
 use fgit_admission::{
-    AdmissionContext, AdmissionLimits, AdmissionSnapshot, AsyncAdmissionProjection,
-    CanonicalRefState, CommitMaterialization, ProjectionFailure, RefusalMaterialization, ValidatedClosure,
+    AdmissionContext, AdmissionError, AdmissionLimits, AdmissionSnapshot, AsyncAdmissionProjection,
+    CanonicalRefState, CommitMaterialization, ProjectionFailure, RefusalMaterialization,
+    ValidatedClosure,
 };
 use fgit_authority::{AuthenticatedHead, TerminalOutcome};
 use fgit_authority_fsqlite::FsqliteAuthorityStore;
@@ -27,6 +31,32 @@ use crate::{
 };
 
 impl OneNode {
+    /// Original sealed-package identity with the same node-owned validator used
+    /// by the reviewed-native API. The public legacy entrypoint dispatches here
+    /// only for native Git events; Digest-valued events keep their old route.
+    pub(crate) async fn admit_sealed_native_merge_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        context: &AdmissionContext,
+        sealed: &fgit_admission::merge::SealedMerge<'_>,
+        limits: AdmissionLimits,
+    ) -> Result<TerminalOutcome, AdmissionError> {
+        let projection = NodeNativeMergeProjection {
+            node: self,
+            inner: self.durable_admission_projection(context)?,
+            object_limits: MergeObjectLimits::default(),
+        };
+        admit_sealed_native_merge_async(
+            &self.authority,
+            request.authority(),
+            context,
+            sealed,
+            limits,
+            &projection,
+        )
+        .await
+    }
+
     /// Publish a reviewed two-parent merge, its forge transition and pending
     /// delivery obligation in one RCR/head CAS on the embedded authority.
     ///

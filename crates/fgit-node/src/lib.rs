@@ -2160,7 +2160,9 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
 /// it, and inventing one that wrote somewhere else would stage a merge's bodies
 /// where the node does not read them back from.
 ///
-/// See [`Node::admit_merge_durable_in`] for what that currently costs.
+/// Historical Digest-valued merge packages still use this unavailable route.
+/// Native packages at [`OneNode::admit_merge_durable_in`] use the asynchronous
+/// native projection instead.
 impl fgit_admission::merge::ForgeBodyStore for DurableAdmissionMaterializer {
     fn stage_forge_event_batch(
         &self,
@@ -6783,51 +6785,28 @@ impl OneNode {
         .await
     }
 
-    /// Admits one sealed merge through the node-owned durable asynchronous
-    /// materialization boundary.
+    /// Admit a sealed merge without changing its original transaction identity.
     ///
-    /// The `OneNode` composition for `frankengit-asa3`, and the pair of
-    /// [`Self::admit_validated_receive_durable_in`] rather than a second
-    /// composition style: same projection, same request-context authority, same
-    /// shape. A lab schedule can therefore drive two concurrent merge attempts
-    /// against one head through the surface the node actually exposes.
+    /// Native Git merge events use the same asynchronous driver and node-owned
+    /// object validation as [`Self::admit_native_merge_durable_in`]. The node
+    /// re-reads the candidate and complete closure, verifies its ordered parents
+    /// and base ancestry, and publishes ref, forge and outbox effects together.
+    /// Supplied closure and evidence must match the independently validated
+    /// objects and complete fold at the selected authority basis.
     ///
-    /// # Why there is no `commitments` parameter
+    /// The caller supplies the authenticated principal and idempotency key in
+    /// `context`. Its workspace epoch is checked as an asserted precondition;
+    /// this interface does not authenticate a supervisor-owned workspace session.
+    /// Terminal retries recover the original result before freshness checks.
     ///
-    /// [`fgit_admission::merge::admit_merge_async`] takes the store its
-    /// resulting bodies are staged into, and the node supplies its own rather
-    /// than making every caller find one. Leaking it into this signature would
-    /// let a caller stage a merge's bodies somewhere the node does not read them
-    /// back from, which is precisely the defect the race drill found in the
-    /// blocking path.
-    ///
-    /// # KNOWN DEFECT: this composition cannot yet commit a permitted merge
-    ///
-    /// The store it supplies is [`DurableAdmissionMaterializer`], and every
-    /// SYNCHRONOUS staging method on that type refuses with
-    /// [`RefusalCode::DurabilityProfileUnavailable`]. The merge driver stages
-    /// through exactly those methods, so a merge that is fresh, coherent and
-    /// admissible still fails with `MaterializationMismatch` BEFORE it reaches
-    /// the head CAS. A stale merge is unaffected, because it refuses earlier.
-    ///
-    /// The earlier version of this comment reasoned that the node "already owns
-    /// one -- `DurableAdmissionMaterializer` implements that trait". It does
-    /// implement it. Implementing a trait is not providing the capability, and
-    /// that gap is the whole defect: the type checker was satisfied by a set of
-    /// methods that unconditionally refuse. Reported by `BlackOx` on
-    /// `frankengit-asa3`, confirmed here.
-    ///
-    /// The fix is not another staging method. Durable staging is asynchronous
-    /// and authority-backed (`stage_ref_state_in` and its siblings), so a merge
-    /// has to reach it the way a receive does -- through the projection's
-    /// asynchronous materialization -- which in turn needs the admission fold to
-    /// accept a forge effect instead of refusing one. That work is tracked on
-    /// the bead; it is not a wiring change.
+    /// Historical Digest-valued events retain the legacy route, whose
+    /// synchronous node staging remains unavailable for permitted merges.
     ///
     /// # Errors
     ///
-    /// [`AdmissionError`] for faults. A stale merge is not a fault: it returns a
-    /// terminal decision carrying the typed staleness refusal.
+    /// [`AdmissionError`] for faults. Evaluated staleness, invalid native
+    /// objects and mismatched evidence return typed terminal refusals. Missing
+    /// object dependencies leave the sealed request undecided and retryable.
     pub async fn admit_merge_durable_in(
         &self,
         request: &NodeRequestContext,
@@ -6835,6 +6814,14 @@ impl OneNode {
         sealed: &fgit_admission::merge::SealedMerge<'_>,
         limits: AdmissionLimits,
     ) -> Result<fgit_authority::TerminalOutcome, AdmissionError> {
+        if matches!(
+            &sealed.package.event.payload,
+            fgit_forge::ForgeEventPayload::MergeCommittedNative(_)
+        ) {
+            return self
+                .admit_sealed_native_merge_durable_in(request, context, sealed, limits)
+                .await;
+        }
         let projection = self.durable_admission_projection(context)?;
         fgit_admission::merge::admit_merge_async(
             &self.authority,
@@ -8307,9 +8294,8 @@ impl OneNode {
     /// still has exactly one fabric.
     ///
     /// It stays crate-private deliberately. A public form would let a caller
-    /// place objects into a fabric the node never reads back from — the same
-    /// defect `admit_merge_durable_in` documents for its commitment store — and
-    /// the containment guard below is the only thing that needs the seam.
+    /// place objects into a fabric the node never reads back from. The
+    /// containment guard below is the only thing that needs the seam.
     ///
     /// # Errors
     ///

@@ -383,14 +383,81 @@ fn invalid_parent_shape_and_reused_terminal_aggregate_do_not_move_refs() {
     node.shutdown().unwrap();
 }
 
-/// A real filesystem destination fixture. Its create-if-absent receipt is
-/// synced before replying, and is the durable idempotency boundary under test.
+/// A real filesystem destination fixture. A complete synced staging file is
+/// linked into its final name without overwrite, then the directory is synced.
+/// Only that final name is the durable idempotency boundary under test.
 struct DiskDestination {
     root: PathBuf,
     kill_after_delivery: bool,
     strong: bool,
     probes: usize,
     sends: usize,
+}
+
+impl DiskDestination {
+    fn request_bytes(&self, request: &DeliveryRequest<'_>) -> Result<Vec<u8>, RefusalCode> {
+        if request.destination != self.destination() {
+            return Err(RefusalCode::PublicationPolicyRefused);
+        }
+        if fgit_admission::evidence::evidence_root(request.events)? != request.payload_root {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        fgit_codec::encode_body(request.events).map_err(|_| RefusalCode::CanonicalFramingInvalid)
+    }
+
+    fn probe_receipt(&self, key: AsciiSlug, expected: &[u8]) -> Result<ProbeVerdict, RefusalCode> {
+        match fs::read(self.root.join(key.to_string())) {
+            Ok(bytes) if bytes == expected => {
+                fs::File::open(&self.root).and_then(|directory| directory.sync_all())
+                    .map_err(|_| RefusalCode::EvidenceMissing)?;
+                Ok(ProbeVerdict::Delivered)
+            }
+            Ok(_) => Err(RefusalCode::EvidenceInvalid),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ProbeVerdict::NotDelivered),
+            Err(_) => Err(RefusalCode::EvidenceMissing),
+        }
+    }
+
+    fn publish_receipt(&self, key: AsciiSlug, expected: &[u8]) -> Result<DeliveryVerdict, RefusalCode> {
+        use std::io::Write;
+        fs::create_dir_all(&self.root).map_err(|_| RefusalCode::EvidenceMissing)?;
+        // The test owns a single destination directory under its scratch root.
+        fs::File::open(self.root.parent().ok_or(RefusalCode::EvidenceMissing)?)
+            .and_then(|parent| parent.sync_all()).map_err(|_| RefusalCode::EvidenceMissing)?;
+        let mut staging = None;
+        for _ in 0..64 {
+            let path = self.root.join(format!(".pending-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            match fs::OpenOptions::new().create_new(true).write(true).open(&path) {
+                Ok(file) => { staging = Some((path, file)); break; }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(RefusalCode::EvidenceMissing),
+            }
+        }
+        let (staged, mut file) = staging.ok_or(RefusalCode::ResourceBudgetExceeded)?;
+        let final_path = self.root.join(key.to_string());
+        let result = (|| {
+            file.write_all(expected).map_err(|_| RefusalCode::EvidenceMissing)?;
+            file.sync_all().map_err(|_| RefusalCode::EvidenceMissing)?;
+            drop(file);
+            match fs::hard_link(&staged, &final_path) {
+                Ok(()) => Ok(DeliveryVerdict::Accepted),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let existing = fs::read(&final_path).map_err(|_| RefusalCode::EvidenceMissing)?;
+                    if existing == expected { Ok(DeliveryVerdict::DuplicateSuppressed) }
+                    else { Err(RefusalCode::EvidenceInvalid) }
+                }
+                Err(_) => Err(RefusalCode::EvidenceMissing),
+            }
+        })();
+        // Reap only this call's staging name, including on write/link/refusal
+        // errors. Orphans left by a killed process never count as receipts.
+        let removed = fs::remove_file(&staged).map_err(|_| RefusalCode::EvidenceMissing);
+        let synced = fs::File::open(&self.root).and_then(|directory| directory.sync_all())
+            .map_err(|_| RefusalCode::EvidenceMissing);
+        removed?;
+        synced?;
+        result
+    }
 }
 
 impl OutboxDestination<Cx> for DiskDestination {
@@ -401,31 +468,18 @@ impl OutboxDestination<Cx> for DiskDestination {
     async fn probe<'a>(&'a mut self, _cx: &'a Cx, request: &'a DeliveryRequest<'_>)
         -> Result<(ProbeVerdict, Vec<u8>), RefusalCode> {
         self.probes += 1;
-        match fs::read(self.root.join(request.key.to_string())) {
-            Ok(bytes) => {
-                assert_eq!(bytes, fgit_codec::encode_body(request.events).unwrap());
-                Ok((ProbeVerdict::Delivered, b"filesystem destination: committed receipt".to_vec()))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((ProbeVerdict::NotDelivered, Vec::new())),
-            Err(_) => Err(RefusalCode::EvidenceMissing),
-        }
+        let bytes = self.request_bytes(request)?;
+        let verdict = self.probe_receipt(request.key, &bytes)?;
+        let evidence = if verdict == ProbeVerdict::Delivered {
+            b"filesystem destination: committed receipt".to_vec()
+        } else { Vec::new() };
+        Ok((verdict, evidence))
     }
     async fn deliver<'a>(&'a mut self, _cx: &'a Cx, request: &'a DeliveryRequest<'_>, _attempt: u32)
         -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
-        use std::io::Write;
         self.sends += 1;
-        fs::create_dir_all(&self.root).unwrap();
-        let path = self.root.join(request.key.to_string());
-        let verdict = match fs::OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(&fgit_codec::encode_body(request.events).unwrap()).unwrap();
-                file.sync_all().unwrap();
-                fs::File::open(&self.root).unwrap().sync_all().unwrap();
-                DeliveryVerdict::Accepted
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => DeliveryVerdict::DuplicateSuppressed,
-            Err(_) => return Err(RefusalCode::EvidenceMissing),
-        };
+        let bytes = self.request_bytes(request)?;
+        let verdict = self.publish_receipt(request.key, &bytes)?;
         if self.kill_after_delivery {
             std::process::exit(81);
         }
@@ -437,6 +491,46 @@ fn destination(root: &Path) -> DiskDestination {
     DiskDestination { root: root.join("destination"), kill_after_delivery: false, strong: true, probes: 0, sends: 0 }
 }
 
+#[test]
+fn disk_destination_ignores_partial_staging_and_binds_duplicate_payloads() {
+    use fgit_forge::aggregate::AggregateId;
+    use fgit_forge::event::ForgeEvent;
+    let scratch = Scratch::new();
+    let receiver = destination(&scratch.0);
+    let key = AsciiSlug::from_static("recipient-retry");
+    let events = |withdrawn| ForgeEventBatch::of_one(ForgeEvent {
+        aggregate: AggregateId::PullRequest(PullRequestNumber::try_new(1).unwrap()),
+        version: AggregateVersion::FIRST,
+        payload: ForgeEventPayload::PullRequestClosed { withdrawn },
+    });
+    let original = events(false);
+    let request = DeliveryRequest {
+        key, destination: receiver.destination(),
+        payload_root: fgit_admission::evidence::evidence_root(&original).unwrap(),
+        events: &original,
+    };
+    let first = receiver.request_bytes(&request).unwrap();
+    let second = fgit_codec::encode_body(&events(true)).unwrap();
+    assert_ne!(first, second);
+    fs::create_dir_all(&receiver.root).unwrap();
+    let orphan = receiver.root.join(".pending-999999-0");
+    fs::write(&orphan, &first[..first.len() / 2]).unwrap();
+    assert_eq!(receiver.probe_receipt(key, &first), Ok(ProbeVerdict::NotDelivered));
+    assert_eq!(receiver.publish_receipt(key, &first), Ok(DeliveryVerdict::Accepted));
+    assert_eq!(receiver.probe_receipt(key, &first), Ok(ProbeVerdict::Delivered));
+    assert_eq!(receiver.publish_receipt(key, &first), Ok(DeliveryVerdict::DuplicateSuppressed));
+    assert_eq!(receiver.publish_receipt(key, &second), Err(RefusalCode::EvidenceInvalid));
+    assert_eq!(receiver.probe_receipt(key, &second), Err(RefusalCode::EvidenceInvalid));
+    let final_path = receiver.root.join(key.to_string());
+    assert_eq!(fs::read(&final_path).unwrap(), first, "different parameters cannot overwrite the receipt");
+    assert_eq!(fs::read(&orphan).unwrap(), first[..first.len() / 2], "another call's staging is not reaped");
+    let names: BTreeSet<_> = fs::read_dir(&receiver.root).unwrap()
+        .map(|entry| entry.unwrap().file_name()).collect();
+    assert_eq!(names, BTreeSet::from([
+        orphan.file_name().unwrap().to_owned(), final_path.file_name().unwrap().to_owned(),
+    ]), "each completed call reaps its own staging file, including duplicate refusal");
+}
+
 fn delivery_key(node: &OneNode) -> AsciiSlug {
     let request = node.request_context();
     let materialized = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
@@ -446,7 +540,7 @@ fn delivery_key(node: &OneNode) -> AsciiSlug {
 
 fn deliver(node: &OneNode, key: AsciiSlug, destination: &mut DiskDestination)
     -> Result<fgit_codec::CanonicalOutboxEffectState, NodeReceiveTransportRefusal> {
-    let request = node.request_context();
+    let request = node.outbox_delivery_context();
     node.runtime().block_on(node.deliver_forge_outbox_in(&request, &session(b"delivery-worker"), key,
         destination, ReconcilePolicy::new(std::num::NonZeroU32::new(4).unwrap()), AdmissionLimits::default()))
 }
@@ -474,6 +568,44 @@ fn canonical_outbox_delivers_once_and_refuses_weak_capability_before_any_call() 
     let request = node.request_context();
     let history = node.runtime().block_on(node.snapshot_history_in(&request)).unwrap();
     assert_eq!(history.iter().flat_map(|batch| &batch.forge_events).count(), 1);
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn exhausted_background_budget_refuses_before_effect_and_fresh_worker_reconciles() {
+    use fgit_runtime::{BudgetClass, BudgetPolicy, ClassLimits};
+    let scratch = Scratch::new();
+    let format = GitHashAlgorithm::Sha1;
+    let budgets = BudgetPolicy::finite_defaults().with_class_limits(
+        BudgetClass::BackgroundController,
+        ClassLimits::finite(std::time::Duration::ZERO, 50_000, 1_000_000),
+    ).unwrap();
+    let (mut node, _) = OneNode::init(config(&scratch.0, format).with_runtime_budgets(budgets)).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let f = fixture(&node, &scratch.0, format, true);
+    let merged = apply(&node, &intent(&f, 1, ExpectedVersion::NewStream), b"bounded-worker-merge").unwrap();
+    assert!(matches!(merged.outcome, DecisionOutcome::Committed { .. }));
+    let key = delivery_key(&node);
+    let request = node.request_context();
+    let before = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+    let mut consumer = destination(&scratch.0);
+    assert!(matches!(deliver(&node, key, &mut consumer),
+        Err(NodeReceiveTransportRefusal::Admission(error))
+        if matches!(*error, AdmissionError::AsyncProjectionUnavailable(RefusalCode::ResourceBudgetExceeded))));
+    assert_eq!((consumer.probes, consumer.sends), (0, 0));
+    let request = node.request_context();
+    let after = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+    assert_eq!(after.basis().body(), before.basis().body());
+    node.shutdown().unwrap();
+
+    // A new operator-selected bounded worker can reconcile the SAME retained
+    // obligation. No live context is extended, detached, or replaced mid-call.
+    let mut node = OneNode::open_existing(config(&scratch.0, format)).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let acknowledged = deliver(&node, key, &mut consumer).unwrap();
+    assert_eq!(acknowledged.state(), ObligationState::Acknowledged);
+    assert_eq!((consumer.probes, consumer.sends), (1, 1));
+    assert_eq!(refs(&node)[&main_ref()], f.candidate);
     node.shutdown().unwrap();
 }
 
