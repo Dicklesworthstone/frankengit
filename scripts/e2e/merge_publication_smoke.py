@@ -67,11 +67,12 @@ def pack(algorithm, objects):
     return bytes(data)
 
 
-def inspect_fixture_bundle(data, algorithm, old, candidate):
+def inspect_fixture_bundle(data, algorithm, old, candidate, additional=()):
     """Check our full-object fixture encoding; this is not a general pack reader."""
     header, packed = data.split(b"\n\n", 1)
+    frontier = "".join(f"-{oid} additional prerequisite\n" for oid in additional)
     expected = (f"# v3 git bundle\n@object-format={algorithm}\n-{old} target prerequisite\n"
-                f"{candidate} {TARGET}").encode()
+                f"{frontier}{candidate} {TARGET}").encode()
     require(header == expected, "fixture review envelope drift")
     width = hashlib.new(algorithm).digest_size
     require(hashlib.new(algorithm, packed[:-width]).digest() == packed[-width:], "fixture pack checksum")
@@ -132,10 +133,12 @@ def make_candidate(path, algorithm, history, old, label, parents=None):
     body = commit(root, [old, history["source"]] if parents is None else parents, label)
     candidate = identity(algorithm, "commit", body)
     packed = pack(algorithm, [("blob", blob), ("tree", tree_body), ("commit", body)])
+    additional = [history["base"]] if history["base"] != old else []
+    frontier = "".join(f"-{oid} additional prerequisite\n" for oid in additional)
     header = (f"# v3 git bundle\n@object-format={algorithm}\n-{old} target prerequisite\n"
-              f"{candidate} {TARGET}\n\n").encode()
+              f"{frontier}{candidate} {TARGET}\n\n").encode()
     data = header + packed
-    require(inspect_fixture_bundle(data, algorithm, old, candidate) == {
+    require(inspect_fixture_bundle(data, algorithm, old, candidate, additional) == {
         changed: ("blob", blob), root: ("tree", tree_body), candidate: ("commit", body)},
         "independent fixture inspection failed")
     path.write_bytes(data)
@@ -217,6 +220,15 @@ def run_format(binary, algorithm):
         data[-1] ^= 1
         corrupt.write_bytes(data)
         invoke(binary, arguments(node, corrupt, history, history["target"], winner, "corrupt"), success=False)
+        header, packed = first.read_bytes().split(b"\n\n", 1)
+        unknown = identity(algorithm, "commit", b"not selected by authority")
+        for index, prerequisite in enumerate([unknown, history["common"], history["target"]]):
+            invalid = root / f"bad-prerequisite-{index}.bundle"
+            advertised = f"{winner} {TARGET}".encode()
+            bad_header = header.replace(advertised, f"-{prerequisite} invalid prerequisite\n".encode() + advertised)
+            invalid.write_bytes(bad_header + b"\n\n" + packed)
+            invoke(binary, arguments(node, invalid, history, history["target"], winner,
+                                     f"bad-prerequisite-{index}"), success=False)
         require(state(binary, node) == initial, "pre-admission refusal changed canonical state")
         accepted = terminal(invoke(binary, first_args), history, history["target"], winner)
         after = state(binary, node)
