@@ -108,8 +108,18 @@ impl OneNode {
         let tree_body = read(tree, ObjectType::Tree)?;
         let entries = parse_tree(&tree_body, AcceptanceProfile::GitCompatibleImport, &parse)
             .map_err(|_| search_error(SearchError::Budget("invalid root tree")))?;
-        let prefixes: Vec<_> = entries.iter().map(|entry| TreePath::parse_default(&entry.name))
-            .collect::<Result<_, _>>().map_err(|_| search_error(SearchError::InvalidQuery))?;
+        // Keep the operator's grants at top-level containers so existing
+        // TreeFS traversal remains authorized, but avoid scanning unrelated
+        // root scopes for a path-restricted query. This is not a delegation.
+        let prefixes: Vec<_> = entries.iter().filter(|entry| {
+            query.prefixes().is_empty() || query.prefixes().iter()
+                .any(|prefix| prefix.components().next() == Some(entry.name.as_slice()))
+        }).map(|entry| TreePath::parse_default(&entry.name))
+            .collect::<Result<_, _>>().map_err(|_| NodeWorkspaceRefusal::Object(
+                ObjectSourceError::Refused { reason: "unsupported source root path".to_owned() }))?;
+        // TreeCapability's prefix evaluator is linear in grant count. Bound
+        // this separately instead of allowing a quadratic 50,000-root scan.
+        if prefixes.len() > 4096 { return Err(search_error(SearchError::Budget("root scopes; narrow the query"))); }
         if !workspace_request_live(request) { return Err(search_error(SearchError::Cancelled)); }
         if prefixes.is_empty() {
             return Ok(SourceSearchReport { repository: self.repository_id, source_rcr: rcr,
