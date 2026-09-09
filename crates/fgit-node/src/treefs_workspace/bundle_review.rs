@@ -222,7 +222,9 @@ struct OriginalSource<'a> {
 }
 impl OriginalSource<'_> {
     fn live(&self) -> Result<(), MergeSourceError> {
-        if self.budget.exhausted.get() { return Err(MergeSourceError::BudgetExceeded); }
+        if self.budget.exhausted.get() || self.inner.database_exhaustion.get().is_some() {
+            return Err(MergeSourceError::BudgetExceeded);
+        }
         match checkpoint_pack_context(self.inner.database_context) {
             PackContextCheckpoint::Live => Ok(()),
             PackContextCheckpoint::Stopped { budget_exhaustion: Some(_) } => Err(MergeSourceError::BudgetExceeded),
