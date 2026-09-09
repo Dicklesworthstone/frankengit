@@ -64,7 +64,15 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
     let mut trusted = false;
     let mut cursor = if action == "list" { 4 } else { 5 };
     while cursor < arguments.len() {
-        let flag = arguments[cursor].as_str(); cursor += 1;
+        let supplied = arguments[cursor].as_str(); cursor += 1;
+        // The saved CLI patch used these shorter spellings. Normalize option
+        // names only, before duplicate detection; never normalize their values
+        // or let two aliases supply conflicting semantic expectations.
+        let flag = match supplied {
+            "--source-tip" => "--expected-source",
+            "--target-tip" => "--expected-target",
+            other => other,
+        };
         if flag == "--trusted-local" {
             if trusted { return Err("duplicate --trusted-local".to_owned()); }
             trusted = true; continue;
@@ -74,8 +82,8 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--target-ref" | "--target-ref-hex" | "--expected-source" | "--expected-target"
                 | "--expected-version" | "--title" | "--body" | "--body-file")
         } else { flag == "--expected-head" || (action == "list" && matches!(flag, "--after" | "--limit")) };
-        if !allowed { return Err(format!("unknown or inapplicable PR option {flag:?}")); }
-        let value = arguments.get(cursor).ok_or_else(|| format!("missing value for {flag}"))?;
+        if !allowed { return Err(format!("unknown or inapplicable PR option {supplied:?}")); }
+        let value = arguments.get(cursor).ok_or_else(|| format!("missing value for {supplied}"))?;
         cursor += 1;
         if flags.insert(flag, value.as_str()).is_some() { return Err(format!("duplicate {flag}")); }
     }
@@ -172,7 +180,11 @@ pub(super) fn head_token(head: RepositoryAuthorityHeadId) -> String {
     format!("alg:{}:{}", id.algorithm().code_point(), hex(id.digest().as_bytes()))
 }
 pub(super) fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
-    let (algorithm, digest) = text.strip_prefix("alg:").and_then(|value| value.split_once(':'))
+    // The saved patch emitted head:alg:... . Accept its explicit head label
+    // too, while preserving the existing canonical output spelling. This is
+    // an equality precondition, not an authority proof or a generic ID parser.
+    let encoded = text.strip_prefix("head:").unwrap_or(text);
+    let (algorithm, digest) = encoded.strip_prefix("alg:").and_then(|value| value.split_once(':'))
         .ok_or("--expected-head requires the exact algorithm-qualified snapshot_token")?;
     let algorithm = u16::try_from(decimal(algorithm)?).map_err(|_| "head algorithm overflow")?;
     let algorithm = DigestAlgorithmId::try_new(algorithm).map_err(|_| "invalid head algorithm")?;
@@ -184,4 +196,86 @@ pub(super) fn hex(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);
     for byte in bytes { text.push(char::from(HEX[usize::from(byte >> 4)])); text.push(char::from(HEX[usize::from(byte & 15)])); }
     text
+}
+
+#[cfg(test)]
+mod saved_patch_tests {
+    use super::*;
+
+    fn arguments(verb: &str, width: usize) -> Vec<String> {
+        vec![verb.into(), "unopened-node".into(), "11".repeat(16), "22".repeat(16),
+            "7".into(), "--trusted-local".into(), "--principal".into(), "33".repeat(16),
+            "--idempotency-key".into(), "same-logical-command".into(),
+            "--expected-version".into(), if verb == "open" { "0".into() } else { "1".into() },
+            "--source-ref".into(), "refs/heads/topic".into(), "--target-ref".into(), "refs/heads/main".into(),
+            "--expected-source".into(), "a".repeat(width), "--expected-target".into(), "b".repeat(width),
+            "--title".into(), "Reviewed title".into(), "--body".into(), "Exact body\né".into()]
+    }
+
+    #[test]
+    fn saved_tip_spellings_preserve_every_mutation_field() {
+        for width in [40, 64] {
+            for verb in ["open", "update", "close"] {
+                let canonical = arguments(verb, width);
+                let mut saved = canonical.clone();
+                for argument in &mut saved {
+                    if argument == "--expected-source" { *argument = "--source-tip".into(); }
+                    else if argument == "--expected-target" { *argument = "--target-tip".into(); }
+                }
+                let left = parse(&canonical).unwrap();
+                let right = parse(&saved).unwrap();
+                assert_eq!(left.format, right.format);
+                assert_eq!(left.tenant, right.tenant);
+                assert_eq!(left.repository, right.repository);
+                let (Operation::Mutate(left), Operation::Mutate(right)) = (left.operation, right.operation)
+                    else { panic!("both spellings must be mutations"); };
+                assert_eq!(left.command, right.command);
+                assert_eq!(left.principal, right.principal);
+                assert_eq!(left.key, right.key);
+                assert_eq!(left.body_file, right.body_file);
+            }
+        }
+    }
+
+    #[test]
+    fn aliases_share_duplicate_guards_and_cannot_enter_read_commands() {
+        for (canonical, alias) in [("--expected-source", "--source-tip"), ("--expected-target", "--target-tip")] {
+            for reversed in [false, true] {
+                for changed in [false, true] {
+                    let mut args = arguments("open", 40);
+                    let at = args.iter().position(|argument| argument == canonical).unwrap();
+                    let value = if changed { "c".repeat(40) } else { args[at + 1].clone() };
+                    args[at] = if reversed { alias } else { canonical }.into();
+                    args.extend([if reversed { canonical } else { alias }.into(), value]);
+                    assert!(parse(&args).unwrap_err().contains("duplicate"));
+                }
+            }
+            for verb in ["list", "show"] {
+                let mut args = vec![verb.into(), "unopened-node".into(), "11".repeat(16), "22".repeat(16)];
+                if verb == "show" { args.push("7".into()); }
+                args.extend(["--trusted-local".into(), alias.into(), "a".repeat(40)]);
+                assert!(parse(&args).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn saved_head_tokens_keep_domain_and_exact_continuation_identity() {
+        let token = format!("alg:1:{}", "ab".repeat(32));
+        let saved = format!("head:{token}");
+        let head = parse_head(&token).unwrap();
+        assert_eq!(parse_head(&saved).unwrap(), head);
+        assert_eq!(head_token(head), token);
+        let mut args = vec!["list".into(), "unopened-node".into(), "11".repeat(16), "22".repeat(16),
+            "--trusted-local".into(), "--after".into(), "7".into()];
+        assert!(parse(&args).is_err());
+        args.extend(["--expected-head".into(), saved]);
+        let Operation::Read(read) = parse(&args).unwrap().operation else { panic!("read expected"); };
+        assert_eq!(read.expected_head, Some(head));
+        assert_eq!(read.after(), 7);
+        for token in [format!("commit:{token}"), format!("head:head:{token}"),
+            format!("head:alg:01:{}", "ab".repeat(32)), format!("head:alg:0:{}", "ab".repeat(32)),
+            format!("head:alg:1:{}", "AB".repeat(32)), "latest".to_owned()]
+        { assert!(parse_head(&token).is_err(), "must refuse {token}"); }
+    }
 }
