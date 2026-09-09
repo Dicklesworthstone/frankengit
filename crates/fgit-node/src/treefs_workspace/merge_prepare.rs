@@ -1,6 +1,9 @@
 //! Native merge preparation over one authenticated source snapshot. Unlike
 //! merge admission, this path performs NO object staging, seal or head write.
 
+#[path = "source_review.rs"]
+mod source_review;
+
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -273,9 +276,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    struct Scratch(std::path::PathBuf);
+    pub(super) struct Scratch(std::path::PathBuf);
     impl Drop for Scratch { fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); } }
-    fn metadata() -> MergeMetadata {
+    pub(super) fn metadata() -> MergeMetadata {
         MergeMetadata { author: "Test <test@example.invalid>".into(), committer: "Test <test@example.invalid>".into(), timestamp: 1, message: b"reviewable merge\n".to_vec() }
     }
     fn object(node: &OneNode, kind: ObjectType, bytes: Vec<u8>, ids: &mut BTreeSet<GitOid>) -> GitOid {
@@ -292,7 +295,7 @@ mod tests {
         body.push_str(&format!("author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}"));
         object(node, ObjectType::Commit, body.into_bytes(), ids)
     }
-    fn fixture(format: GitHashAlgorithm, conflict: bool) -> (Scratch, OneNode, GitOid, GitOid) {
+    pub(super) fn fixture(format: GitHashAlgorithm, conflict: bool) -> (Scratch, OneNode, GitOid, GitOid) {
         let root = std::env::temp_dir().join(format!("fg-merge-prepare-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         let (mut node, _) = OneNode::init(crate::NodeConfig::new(root.clone(), TenantId::from_bytes([0x71; 16]), RepositoryId::from_bytes([0x72; 16])).with_object_format(format)).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
