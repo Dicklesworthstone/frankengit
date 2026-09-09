@@ -48,7 +48,7 @@ pub(super) fn read_bundle(path: &Path, limit: usize) -> Result<Vec<u8>, String> 
         if n > limit.saturating_sub(bytes.len()) {
             return Err("candidate bundle grew beyond its input limit".to_owned());
         }
-        bytes.try_reserve(n).map_err(|_| "candidate bundle allocation refused".to_owned())?;
+        bytes.try_reserve(n).map_err(|_| "candidate bundle allocation refused")?;
         bytes.extend_from_slice(&chunk[..n]);
     }
     if bytes.is_empty() { return Err("candidate bundle is empty".to_owned()); }
@@ -77,7 +77,12 @@ pub(super) fn quote(value: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            // Keep untrusted text lossless after JSON decoding without letting
+            // control or bidi-formatting characters alter terminal presentation.
+            // Ordinary multilingual text is preserved, not normalized or stripped.
+            c if c.is_control() || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}'
+                | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
+                out.push_str(&format!("\\u{:04x}", u32::from(c))),
             c => out.push(c),
         }
     }
@@ -92,6 +97,21 @@ mod tests {
     #[test]
     fn json_strings_preserve_unicode_and_escape_controls() {
         assert_eq!(quote("quoted\"\n\t\\é"), "\"quoted\\\"\\u000a\\u0009\\\\é\"");
+    }
+
+    #[test]
+    fn saved_pr_bidi_and_c1_escapes_do_not_change_metadata() {
+        assert_eq!(quote("é\n\t\r\"\\\u{009b}\u{202e}"),
+            "\"é\\u000a\\u0009\\u000d\\\"\\\\\\u009b\\u202e\"");
+        for scalar in [0x061c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202b,
+            0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069]
+        {
+            let character = char::from_u32(scalar).unwrap();
+            assert_eq!(quote(&format!("before{character}after")),
+                format!("\"before\\u{scalar:04x}after\""));
+        }
+        assert_eq!(quote("العربية עברית é 🦀"), "\"العربية עברית é 🦀\"");
+        assert_eq!(quote("literal \\u202e"), "\"literal \\\\u202e\"");
     }
 
     #[cfg(unix)]
