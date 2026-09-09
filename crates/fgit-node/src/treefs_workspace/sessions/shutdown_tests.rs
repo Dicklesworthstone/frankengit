@@ -67,7 +67,7 @@ fn insert_owner(node: &OneNode, byte: u8) -> (WorkspaceId, Arc<AsyncMutex<Sessio
             CodecVersion::new(1, 0),
             DigestBytes::try_new(&[byte; 32]).expect("fixture base digest"),
         ),
-        TypedGitOid::of_object(GitObjectKind::Commit, commit.as_bytes()),
+        TypedGitOid::<Sha1>::of_object(GitObjectKind::Commit, commit.as_bytes()),
         tree,
         ParseLimits::default(),
         PathPolicy::default(),

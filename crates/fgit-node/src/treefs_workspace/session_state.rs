@@ -509,7 +509,9 @@ mod tests {
             kind: GitObjectKind,
             _: &ReadGrant,
         ) -> Result<Vec<u8>, ObjectSourceError> {
-            if kind == GitObjectKind::Tree && *oid == GitOid::of_object(GitObjectKind::Tree, b"") {
+            if kind == GitObjectKind::Tree
+                && *oid == GitOid::<Sha1>::of_object(GitObjectKind::Tree, b"")
+            {
                 Ok(Vec::new())
             } else {
                 Err(ObjectSourceError::NotFound {
@@ -541,7 +543,7 @@ mod tests {
         let base = BaseView::new(
             repository,
             rcr(),
-            GitOid::of_object(GitObjectKind::Commit, commit.as_bytes()),
+            GitOid::<Sha1>::of_object(GitObjectKind::Commit, commit.as_bytes()),
             tree,
             ParseLimits::default(),
             PathPolicy::default(),
