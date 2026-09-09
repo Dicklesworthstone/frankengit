@@ -138,10 +138,10 @@ impl ForgeStreamPosition {
 
 /// A canonical forge transition.
 ///
-/// The variants are deliberately few. What the reference model has to capture
-/// is §7's atomicity rule — "an RCR classified as a PR merge cannot move the
-/// ref without the corresponding forge event batch", and its converse — not a
-/// complete forge product surface.
+/// The variants capture §7's merge/ref coupling and the versioned lifecycle
+/// of native PR metadata. An update has its own kind: it is neither another
+/// opening nor a closure. Detailed event bytes are separately bound by the
+/// sealed request and canonical forge-event batch.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ForgeEventKind {
     /// A pull request was opened against a target ref.
@@ -166,6 +166,14 @@ pub enum ForgeEventKind {
         /// The pull request.
         pull_request: ForgeEntityId,
     },
+    /// Existing metadata or compared tips changed without moving a Git ref.
+    /// Appended so ordering of the established variants remains unchanged.
+    PullRequestUpdated {
+        /// The existing pull request.
+        pull_request: ForgeEntityId,
+        /// Its unchanged target branch identity.
+        target: RefName,
+    },
 }
 
 impl ForgeEventKind {
@@ -174,7 +182,8 @@ impl ForgeEventKind {
     pub const fn required_ref_effect(&self) -> Option<&RefName> {
         match self {
             Self::PullRequestMerged { target, .. } => Some(target),
-            Self::PullRequestOpened { .. } | Self::PullRequestClosed { .. } => None,
+            Self::PullRequestOpened { .. } | Self::PullRequestClosed { .. }
+            | Self::PullRequestUpdated { .. } => None,
         }
     }
 
@@ -184,7 +193,8 @@ impl ForgeEventKind {
         match self {
             Self::PullRequestOpened { pull_request, .. }
             | Self::PullRequestMerged { pull_request, .. }
-            | Self::PullRequestClosed { pull_request } => *pull_request,
+            | Self::PullRequestClosed { pull_request }
+            | Self::PullRequestUpdated { pull_request, .. } => *pull_request,
         }
     }
 }
