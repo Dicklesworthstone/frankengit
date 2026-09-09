@@ -7,6 +7,7 @@ mod outbox_delivery;
 mod publication;
 mod session_state;
 mod sessions;
+mod source_search;
 pub use session_state::WorkspaceSessionRefusal;
 pub use sessions::{MergeWorkspaceReceipt, WorkspaceShutdownBlocked};
 pub(crate) use sessions::NodeWorkspaceSessions;
@@ -51,6 +52,8 @@ pub enum NodeWorkspaceRefusal {
     CommitRequired,
     Object(ObjectSourceError),
     Manifest(SparseRefusal),
+    /// An immutable source search failed; this is not a no-match result.
+    SourceSearch(Box<fgit_forge::source_search::SearchError>),
     Cancelled {
         exhaustion: Option<Exhaustion>,
     },

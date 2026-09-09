@@ -1,16 +1,16 @@
 #![forbid(unsafe_code)]
 
-//! Canonical forge state: events, aggregates, and the atomic merge path.
+//! Forge events, aggregates, merge preparation and immutable source reads.
 //!
 //! # What is canonical here and what is not
 //!
-//! Everything in this crate is canonical-side. A forge event is a body whose
-//! identity is derived from its bytes, an aggregate version is admitted by
-//! conditional replacement of an exact expected version, and a merge publishes
-//! as one sealed transaction. None of it reads a projection, and nothing here
-//! may become a second source of truth for repository state (`AGENTS.md` 5.1).
-//! Web and API projections of forge state are rebuildable read models that live
-//! elsewhere and carry the head position they were built from.
+//! A forge event is a body whose identity is derived from its bytes, an
+//! aggregate version is admitted by conditional replacement of an exact
+//! expected version, and a merge publishes as one sealed transaction.
+//! Snapshot and source-search results are derived reads of caller-selected
+//! immutable state; neither grants authority or becomes another source of
+//! truth (`AGENTS.md` 5.1). Persistent API indexes live elsewhere and must carry
+//! the authority position they were built from.
 //!
 //! # The one transaction
 //!
@@ -36,6 +36,7 @@ pub mod event;
 pub mod merge;
 pub mod preparation;
 pub mod snapshot;
+pub mod source_search;
 
 use core::fmt;
 

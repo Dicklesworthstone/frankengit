@@ -2,6 +2,7 @@
 
 mod merge_apply;
 mod publication_support;
+mod source_search;
 #[cfg(target_os = "linux")]
 mod workspace;
 #[cfg(target_os = "linux")]
@@ -11,6 +12,12 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "search") {
+        return match source_search::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "merge") {
         return match merge_apply::run(&arguments[1..]) {
             Ok(()) => ExitCode::SUCCESS,
