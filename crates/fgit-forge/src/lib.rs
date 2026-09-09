@@ -33,6 +33,7 @@
 pub mod aggregate;
 pub mod bisection;
 pub mod event;
+pub mod history;
 pub mod merge;
 pub mod preparation;
 pub mod review;
