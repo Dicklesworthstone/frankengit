@@ -15,9 +15,9 @@ use fgit_types::{AsciiSlug, RefusalCode};
 
 use crate::{
     AdmissionContext, AdmissionError, AdmissionLimits, AsyncAdmissionProjection,
-    ProjectionFailure, ValidatedClosure,
+    CommitEvidence, ProjectionFailure, ValidatedClosure,
 };
-use super::{NativeMergeBasis, prepare::prepare_event, staging::stage_prepared};
+use super::{NativeMergeBasis, SealedMerge, prepare::prepare_event, staging::stage_prepared};
 use storage::root;
 
 pub mod delivery;
@@ -148,7 +148,7 @@ where
 {
     limits.validate()?;
     let attempt = intent.seal_attempt(context)?;
-    admit_merge_attempt_async(store, cx, context, intent, &attempt, false, &[], limits, projection)
+    admit_merge_attempt_async(store, cx, context, intent, &attempt, None, limits, projection)
         .await
 }
 
@@ -158,19 +158,20 @@ where
 /// as the event. Rebuilding it with `NativeMergeIntent::seal_attempt` would
 /// change its transaction identity and split recovery into two operations.
 /// Only the event is adapted; the exact original `SealAttempt` reaches the
-/// shared driver. Caller-supplied evidence roots never replace the complete
-/// evidence derived from that driver's authenticated basis and full fold.
+/// shared driver. The supplied closure and all six evidence identities are
+/// checked preconditions, never replacements for independently validated
+/// objects or the complete fold's derived evidence. An extra claimed closure
+/// object is refused even when it is absent from the package's new-object list.
 ///
-/// The projection must revalidate native objects and their closure. The
-/// supplied workspace observation remains a caller-owned precondition, as in
-/// the original API. Its staleness is evaluated only after recovery of an
-/// already-decided transaction, and becomes a canonical refusal rather than
-/// an infrastructure error for an otherwise undecided request.
+/// The supplied workspace observation remains a caller-owned precondition,
+/// as in the original API. Basis-dependent checks run only after recovery of
+/// an already-decided transaction. Missing native objects leave an undecided
+/// seal retryable; closure or evidence mismatches become canonical refusals.
 pub async fn admit_sealed_native_merge_async<S, P>(
     store: &S,
     cx: &S::Context,
     context: &AdmissionContext,
-    sealed: &super::SealedMerge<'_>,
+    sealed: &SealedMerge<'_>,
     limits: AdmissionLimits,
     projection: &P,
 ) -> Result<TerminalOutcome, AdmissionError>
@@ -208,8 +209,7 @@ where
         context,
         &intent,
         &attempt,
-        sealed.workspace_epoch_now != sealed.attempt.workspace_epoch,
-        &sealed.package.objects,
+        Some(sealed),
         limits,
         projection,
     )
@@ -218,15 +218,15 @@ where
 
 /// Shared publication driver. A sealed-package adapter supplies the original
 /// attempt, not a second native-style seal; both entrypoints execute the same
-/// full fold, immutable writes and exact-predecessor CAS.
+/// full fold, immutable writes and exact-predecessor CAS. Additional package
+/// preconditions travel together so neither closure nor evidence is dropped.
 async fn admit_merge_attempt_async<S, P>(
     store: &S,
     cx: &S::Context,
     context: &AdmissionContext,
     intent: &NativeMergeIntent,
     attempt: &SealAttempt,
-    workspace_stale: bool,
-    required_objects: &[fgit_types::GitOid],
+    sealed: Option<&SealedMerge<'_>>,
     limits: AdmissionLimits,
     projection: &P,
 ) -> Result<TerminalOutcome, AdmissionError>
@@ -256,7 +256,7 @@ where
             { return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into()); }
             // Preserve source -> target -> workspace refusal precedence, and
             // never override the historical terminal resolved above the loop.
-            if workspace_stale {
+            if sealed.is_some_and(|package| package.workspace_epoch_now != package.attempt.workspace_epoch) {
                 return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
             }
             let resolved = projection.resolve_merge_basis_async(store, cx, &basis, &authenticated).await?;
@@ -271,13 +271,30 @@ where
                 return Err(ProjectionFailure::Refuse(code).into());
             }
             let closure = projection.validate_merge_async(store, cx, &basis, &authenticated, intent).await?;
-            // A self-consistent caller-supplied closure is not native-object
-            // evidence. Do not silently omit a package's claimed new objects.
-            if required_objects.iter().any(|object| !closure.objects.contains(object)) {
+            // A self-consistent caller-supplied set is not native-object
+            // evidence. Require the exact independently verified closure and
+            // retain explicit containment of every package-declared object.
+            if sealed.is_some_and(|package| package.closure != &closure
+                || package.package.objects.iter().any(|object| !closure.objects.contains(object)))
+            {
                 return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete).into());
             }
             let prepared = prepare_event(context, &intent.event, &closure, tx_id, attempt, &basis, &resolved)
                 .map_err(ProjectionFailure::Refuse)?;
+            if let Some(package) = sealed {
+                let record = &prepared.materialization.record;
+                let expected = CommitEvidence {
+                    principal_snapshot_id: record.principal_snapshot_id,
+                    forge_event_batch_root: record.forge_event_batch_root,
+                    policy_decision_root: record.policy_decision_root,
+                    invariant_evidence_root: record.invariant_evidence_root,
+                    outbox_effect_root: record.outbox_effect_root,
+                    retention_delta_root: record.retention_delta_root,
+                };
+                if package.evidence != expected {
+                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into());
+                }
+            }
             Ok(prepared)
         }.await;
 

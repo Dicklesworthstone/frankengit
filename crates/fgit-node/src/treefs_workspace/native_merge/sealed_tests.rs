@@ -2,12 +2,13 @@
 //! fixture uses real immutable objects, the embedded authority and normal
 //! imports. It neither substitutes a map for authority nor invokes Git.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fgit_admission::evidence::{DecisionEvidenceBodies, OutboxEffectBatch, evidence_root};
-use fgit_admission::merge::{prepare_native_merge, seal_attempt_for};
+use fgit_admission::evidence::{DecisionEvidenceBodies, OutboxEffectBatch, evidence_root, principal_snapshot_id};
+use fgit_admission::merge::{SealedMerge, prepare_native_merge, seal_attempt_for};
 use fgit_admission::merge::native::delivery::{self, EFFECT_NAMESPACE, OUTBOX_NAMESPACE};
 use fgit_admission::{CanonicalRefState, CommitEvidence, PermittedObjectClosure, permitted_object_closure_root};
 use fgit_authority::{AsyncAuthorityStore, IdempotencyKey, OutcomeLookup, PutOutcome};
@@ -129,7 +130,7 @@ fn loose(root: &Path, format: GitHashAlgorithm, kind: GitObjectKind, label: &str
 fn commit_body(tree: GitOid, parents: &[GitOid], message: &str) -> Vec<u8> {
     let mut body = format!("tree {tree}\n");
     for parent in parents { body.push_str(&format!("parent {parent}\n")); }
-    body.push_str("author Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\n");
+    body.push_str("author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n");
     body.push_str(message);
     body.into_bytes()
 }
@@ -171,7 +172,24 @@ fn fixture(node: &OneNode, scratch: &Scratch, stage_candidate: bool) -> Fixture 
     if stage_candidate {
         assert_eq!(node.put_git_object(GitObjectKind::Commit, body.clone()).unwrap().identity(), candidate);
     }
-    Fixture { base, target, source, tree, candidate, body }
+    let fixture = Fixture { base, target, source, tree, candidate, body };
+    if stage_candidate {
+        let exhaustion = Cell::new(None);
+        let limits = MergeObjectLimits::default();
+        let source = VerifiedFabricPackSource {
+            fabric: &node.fabric,
+            object_format: format,
+            maximum_object_bytes: limits.max_object_bytes,
+            database_context: request.authority(),
+            database_exhaustion: &exhaustion,
+            session_is_live: None,
+        };
+        let offered = intent(&fixture, 1, target, candidate);
+        let verified = validate_merge_objects(&source, offered.merge().unwrap(), limits, &mut || true)
+            .expect("positive fixture passes real native validation before admission");
+        assert_eq!(verified.objects, BTreeSet::from([blob, tree, base, target, fixture.source, candidate]));
+    }
+    fixture
 }
 
 fn intent(f: &Fixture, number: u64, target: GitOid, candidate: GitOid) -> NativeMergeIntent {
@@ -182,20 +200,49 @@ fn intent(f: &Fixture, number: u64, target: GitOid, candidate: GitOid) -> Native
 }
 
 fn new_node(scratch: &Scratch, format: GitHashAlgorithm) -> OneNode {
-    let (mut node, _) = OneNode::init(scratch.config(format)).unwrap();
+    // Source import does not set canonical HEAD. Establish a real authenticated
+    // unborn HEAD at genesis so preservation is tested, not assumed from a
+    // source-directory file or injected into the materializer's cache.
+    let mut node = OneNode::open_components(scratch.config(format)).unwrap();
+    let request = node.request_context();
+    let configuration = fgit_codec::schema::RepositoryIncarnationConfigurationBodyV2_1 {
+        root_layout: node.service_config.root_layout,
+        object_format: format,
+        repository_incarnation_id: node.repository_incarnation_id,
+        policy_root: None,
+    };
+    let configuration_root = node.runtime().block_on(
+        fgit_authority::stage_latest_repository_incarnation_configuration_async(
+            &node.authority, request.authority(), &configuration,
+        ),
+    ).unwrap();
+    let refs = CanonicalRefState::new_with_head_target(Default::default(), target_ref()).unwrap();
+    let ref_root = node.runtime().block_on(node.admission_materializer.stage_ref_state_for_layout_in(
+        &node.authority, request.authority(), node.repository_id, configuration.root_layout, refs,
+    )).unwrap();
+    node.runtime().block_on(node.admission_materializer.stage_permitted_object_closure_in(
+        &node.authority, request.authority(), node.repository_id, PermittedObjectClosure::default(),
+    )).unwrap();
+    let genesis = crate::genesis_head(node.repository_id, ref_root, configuration_root).unwrap();
+    assert!(matches!(crate::initialize_embedded_repository(
+        node.runtime(), &node.authority, request.authority(), &node.head_key, &genesis,
+    ).unwrap(), fgit_authority::HeadInit::Created(_)));
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     node
 }
 
 
-/// Deliberately non-authoritative placeholders. A durable native admission
-/// must derive its own evidence from its real full fold, not trust these roots.
+/// A structurally valid placeholder used only while deriving the real evidence.
+/// It never reaches a positive admission and is useful for negative tests.
 fn unrelated_evidence() -> CommitEvidence {
     let digest = fgit_codec::harness::digest_of(0xe1);
     CommitEvidence {
-        principal_snapshot_id: PrincipalSnapshotId::from_digest(
-            digest.algorithm(), fgit_types::CANONICAL_CODEC_VERSION, *digest.bytes(),
-        ),
+        principal_snapshot_id: PrincipalSnapshotId::from_internal_object_id(
+            fgit_types::InternalObjectId::new(
+                digest.algorithm(), PrincipalSnapshotId::DOMAIN_TAG,
+                fgit_types::CANONICAL_CODEC_VERSION, *digest.bytes(),
+            ),
+        ).unwrap(),
         forge_event_batch_root: digest,
         policy_decision_root: digest,
         invariant_evidence_root: digest,
@@ -209,6 +256,7 @@ struct OfferedPackage {
     package: MergeEffectPackage,
     attempt: MergeAttempt,
     closure: ValidatedClosure,
+    evidence: CommitEvidence,
 }
 
 impl OfferedPackage {
@@ -217,17 +265,18 @@ impl OfferedPackage {
             package: &self.package,
             attempt: &self.attempt,
             closure: &self.closure,
-            evidence: unrelated_evidence(),
+            evidence: self.evidence,
             workspace_epoch_now: observed_epoch,
         }
     }
 }
 
-fn offered(node: &OneNode, f: &Fixture, number: u64, epoch: u64) -> OfferedPackage {
+fn offered(node: &OneNode, f: &Fixture, number: u64, epoch: u64, key: &[u8]) -> OfferedPackage {
     let mut objects = snapshot(node).selected_closure().closure().objects().clone();
     objects.insert(f.candidate);
     let event = intent(f, number, f.target, f.candidate).event().clone();
-    OfferedPackage {
+    let mut offer = OfferedPackage {
+        evidence: unrelated_evidence(),
         package: MergeEffectPackage {
             objects: vec![f.candidate],
             ref_intent: ForgeRefIntent {
@@ -247,7 +296,19 @@ fn offered(node: &OneNode, f: &Fixture, number: u64, epoch: u64) -> OfferedPacka
             object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(objects.clone())).unwrap(),
             objects,
         },
-    }
+    };
+    let before = snapshot(node);
+    let (entry, _) = expected_entry(node, &before, &offer, key);
+    let evidence = complete_evidence(node, &before, &offer, key, entry);
+    offer.evidence = CommitEvidence {
+        principal_snapshot_id: principal_snapshot_id(evidence.principal_snapshot()).unwrap(),
+        forge_event_batch_root: entry.payload_root(),
+        policy_decision_root: evidence_root(evidence.policy_decision()).unwrap(),
+        invariant_evidence_root: evidence_root(evidence.invariant_evidence()).unwrap(),
+        outbox_effect_root: evidence_root(evidence.outbox_effect_batch()).unwrap(),
+        retention_delta_root: evidence_root(evidence.retention_delta()).unwrap(),
+    };
+    offer
 }
 
 fn apply(node: &OneNode, offer: &OfferedPackage, key: &[u8], observed: u64)
@@ -330,7 +391,7 @@ fn original_node_api_publishes_the_full_transaction_under_its_original_seal() {
         let scratch = Scratch::new();
         let node = new_node(&scratch, format);
         let f = fixture(&node, &scratch, true);
-        let offer = offered(&node, &f, 1, 7);
+        let offer = offered(&node, &f, 1, 7, b"original-seal");
         let before = snapshot(&node);
         let (entry, expected_effect) = expected_entry(&node, &before, &offer, b"original-seal");
         let expected = complete_evidence(&node, &before, &offer, b"original-seal", entry);
@@ -367,6 +428,7 @@ fn original_node_api_publishes_the_full_transaction_under_its_original_seal() {
         assert_eq!(record.invariant_evidence_root, evidence_root(expected.invariant_evidence()).unwrap());
         assert_eq!(record.outbox_effect_root, evidence_root(expected.outbox_effect_batch()).unwrap());
         assert_eq!(record.forge_event_batch_root, entry.payload_root());
+        assert_eq!(record.policy_decision_root, offer.evidence.policy_decision_root);
         assert_ne!(record.policy_decision_root, unrelated_evidence().policy_decision_root);
         let actual: OutboxEffectBatch = read_body(&node,
             crate::ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX, record.outbox_effect_root);
@@ -383,7 +445,7 @@ fn reopened_original_retry_survives_workspace_movement_and_later_native_publicat
     let format = GitHashAlgorithm::Sha256;
     let node = new_node(&scratch, format);
     let f = fixture(&node, &scratch, true);
-    let offer = offered(&node, &f, 1, 7);
+    let offer = offered(&node, &f, 1, 7, b"recovery");
     let terminal = committed(apply(&node, &offer, b"recovery", 7).unwrap());
     let first_entry = selected_outbox(&node, &snapshot(&node)).entries()[0];
     node.shutdown().unwrap();
@@ -416,7 +478,7 @@ fn workspace_staleness_is_a_terminal_refusal_but_not_an_identity_change() {
     let scratch = Scratch::new();
     let node = new_node(&scratch, GitHashAlgorithm::Sha1);
     let f = fixture(&node, &scratch, true);
-    let offer = offered(&node, &f, 1, 7);
+    let offer = offered(&node, &f, 1, 7, b"stale-workspace");
     let before = snapshot(&node);
     let refused = apply(&node, &offer, b"stale-workspace", 8).unwrap();
     assert!(matches!(refused.outcome, DecisionOutcome::Refused { code: RefusalCode::EvidenceStale, .. }));
@@ -426,7 +488,8 @@ fn workspace_staleness_is_a_terminal_refusal_but_not_an_identity_change() {
     assert_eq!(after.basis().body().outbox_root, before.basis().body().outbox_root);
     assert_eq!(apply(&node, &offer, b"stale-workspace", 7).unwrap(), refused);
     assert_eq!(snapshot(&node).basis(), after.basis());
-    committed(apply(&node, &offer, b"new-reviewed-attempt", 7).unwrap());
+    let reviewed = offered(&node, &f, 1, 7, b"new-reviewed-attempt");
+    committed(apply(&node, &reviewed, b"new-reviewed-attempt", 7).unwrap());
     node.shutdown().unwrap();
 }
 
@@ -435,7 +498,7 @@ fn original_epoch_stays_in_the_seal_and_changed_semantics_cannot_reuse_its_key()
     let scratch = Scratch::new();
     let node = new_node(&scratch, GitHashAlgorithm::Sha1);
     let f = fixture(&node, &scratch, true);
-    let offer = offered(&node, &f, 1, 7);
+    let offer = offered(&node, &f, 1, 7, b"epoch-binding");
     committed(apply(&node, &offer, b"epoch-binding", 7).unwrap());
     let before = snapshot(&node);
     let mut changed = offer.clone();
@@ -454,7 +517,7 @@ fn missing_native_object_remains_retryable_and_is_not_laundered_by_package_evide
     let scratch = Scratch::new();
     let node = new_node(&scratch, GitHashAlgorithm::Sha256);
     let f = fixture(&node, &scratch, false);
-    let offer = offered(&node, &f, 1, 7);
+    let offer = offered(&node, &f, 1, 7, b"missing-object");
     let before = snapshot(&node);
     assert!(matches!(apply(&node, &offer, b"missing-object", 7),
         Err(AdmissionError::AsyncProjectionUnavailable(RefusalCode::EvidenceMissing))));
@@ -472,7 +535,7 @@ fn invalid_native_parents_refuse_even_with_self_consistent_claimed_closure() {
     let mut f = fixture(&node, &scratch, true);
     f.candidate = node.put_git_object(GitObjectKind::Commit,
         commit_body(f.tree, &[f.source, f.target], "reversed parents\n")).unwrap().identity();
-    let offer = offered(&node, &f, 1, 7);
+    let offer = offered(&node, &f, 1, 7, b"wrong-parent-order");
     let before = snapshot(&node);
     let refused = apply(&node, &offer, b"wrong-parent-order", 7).unwrap();
     assert!(matches!(refused.outcome, DecisionOutcome::Refused { code: RefusalCode::EvidenceInvalid, .. }));
@@ -488,8 +551,8 @@ fn stale_competitor_never_adds_a_forge_event_or_delivery() {
     let scratch = Scratch::new();
     let node = new_node(&scratch, GitHashAlgorithm::Sha1);
     let f = fixture(&node, &scratch, true);
-    let winner = offered(&node, &f, 1, 7);
-    let loser = offered(&node, &f, 2, 7);
+    let winner = offered(&node, &f, 1, 7, b"winner");
+    let loser = offered(&node, &f, 2, 7, b"loser");
     committed(apply(&node, &winner, b"winner", 7).unwrap());
     let before = snapshot(&node);
     // Ref movement precedes workspace staleness in the established contract.
@@ -512,7 +575,7 @@ fn immutable_staging_failure_never_publishes_a_partial_original_api_merge() {
         let scratch = Scratch::new();
         let node = new_node(&scratch, GitHashAlgorithm::Sha256);
         let f = fixture(&node, &scratch, true);
-        let offer = offered(&node, &f, 1, 7);
+        let offer = offered(&node, &f, 1, 7, b"failed-stage");
         let before = snapshot(&node);
         let request = node.request_context();
         let delivery = node.runtime().block_on(delivery::read_in(
@@ -556,7 +619,7 @@ fn package_objects_must_belong_to_the_independently_validated_commit_closure() {
     let scratch = Scratch::new();
     let node = new_node(&scratch, GitHashAlgorithm::Sha1);
     let f = fixture(&node, &scratch, true);
-    let mut offer = offered(&node, &f, 1, 7);
+    let mut offer = offered(&node, &f, 1, 7, b"invented-object");
     let invented = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"unrelated missing object");
     offer.package.objects.push(invented);
     offer.closure.objects.insert(invented);
@@ -577,4 +640,38 @@ fn package_objects_must_belong_to_the_independently_validated_commit_closure() {
     assert_eq!(after.basis().body().forge_position_root, before.basis().body().forge_position_root);
     assert_eq!(after.basis().body().outbox_root, before.basis().body().outbox_root);
     node.shutdown().unwrap();
+}
+
+#[test]
+fn every_supplied_evidence_identity_is_checked_before_coupled_publication() {
+    for field in 0..6 {
+        let scratch = Scratch::new();
+        let node = new_node(&scratch, GitHashAlgorithm::Sha1);
+        let f = fixture(&node, &scratch, true);
+        let valid = offered(&node, &f, 1, 7, b"checked-evidence");
+        let mut forged = valid.clone();
+        let unrelated = unrelated_evidence();
+        match field {
+            0 => forged.evidence.principal_snapshot_id = unrelated.principal_snapshot_id,
+            1 => forged.evidence.forge_event_batch_root = unrelated.forge_event_batch_root,
+            2 => forged.evidence.policy_decision_root = unrelated.policy_decision_root,
+            3 => forged.evidence.invariant_evidence_root = unrelated.invariant_evidence_root,
+            4 => forged.evidence.outbox_effect_root = unrelated.outbox_effect_root,
+            _ => forged.evidence.retention_delta_root = unrelated.retention_delta_root,
+        }
+        assert_ne!(forged.evidence, valid.evidence);
+        let before = snapshot(&node);
+        let refused = apply(&node, &forged, b"checked-evidence", 7).unwrap();
+        assert!(matches!(refused.outcome, DecisionOutcome::Refused {
+            code: RefusalCode::EvidenceInvalid, ..
+        }), "evidence field {field}: {refused:?}");
+        let after = snapshot(&node);
+        assert_eq!(after.basis().body().ref_root, before.basis().body().ref_root);
+        assert_eq!(after.basis().body().forge_position_root, before.basis().body().forge_position_root);
+        assert_eq!(after.basis().body().outbox_root, before.basis().body().outbox_root);
+        assert_eq!(after.basis().body().retention_root, before.basis().body().retention_root);
+        assert_eq!(apply(&node, &valid, b"checked-evidence", 7).unwrap(), refused);
+        assert_eq!(snapshot(&node).basis(), after.basis());
+        node.shutdown().unwrap();
+    }
 }
