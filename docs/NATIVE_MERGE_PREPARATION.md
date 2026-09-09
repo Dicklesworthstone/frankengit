@@ -151,7 +151,7 @@ the reviewed bundle. If either branch moved, the earlier preparation does not
 authorize overwriting it. Identical retries recover the original canonical
 outcome. A version of zero explicitly creates a merge-receipt stream; it does
 not invent earlier PR opening, review or approval events. See
-[`MERGE_BUNDLE_PUBLICATION.md`](MERGE_BUNDLE_PUBLICATION.md) and the
+[`MERGE_BUNDLE_COMMAND.md`](MERGE_BUNDLE_COMMAND.md) and the
 [merge delivery contract](MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md) for publication
 and recovery semantics.
 
@@ -159,12 +159,13 @@ and recovery semantics.
 
 The initial profile admits at most 4,096 ancestor commits, 16,384 graph edges,
 100,000 cumulatively decoded tree entries, depth 64 and 4,096-byte paths.
-It limits content merges to 64, each with a 1 MiB combined input/output ceiling
-and explicit diff/merge work limits. There are at most 128 reported conflicts,
-10,000 constructed objects and 32 MiB of constructed object bytes. The node's
-selected-source reads also have a 128 MiB cumulative byte ceiling and retain the
-node's per-object limit, capped at 32 MiB. Runtime cancellation and finite
-request budgets remain additional limits; none are silently extended.
+It limits content merges to 64, each with a 1 MiB combined-input ceiling,
+a separate 1 MiB output ceiling and explicit diff/merge work limits. There
+are at most 128 reported conflicts, 10,000 constructed objects and 32 MiB
+of constructed object bytes. The node's selected-source reads also have a
+128 MiB cumulative byte ceiling and retain the node's per-object limit,
+capped at 32 MiB. Runtime cancellation and finite request budgets remain
+additional limits; none are silently extended.
 
 These are acceptance ceilings, not a peak-memory or performance guarantee.
 Programmatic callers may narrow `PreparationLimits`, not exceed its v1 maxima.
