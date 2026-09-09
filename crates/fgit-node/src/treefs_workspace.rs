@@ -5,6 +5,7 @@ mod merge_prepare;
 mod native_merge;
 mod outbox_delivery;
 mod publication;
+mod pull_request;
 mod session_state;
 mod sessions;
 mod source_search;
