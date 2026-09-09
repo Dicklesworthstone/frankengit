@@ -454,7 +454,16 @@ fn package(
         atomic: true,
         durability: DurabilityProfile::CanonicalSource,
     };
-    let fold = IntentEvaluator::new().evaluate(before.snapshot().as_fold_basis(), &request);
+    let snapshot = before.snapshot();
+    let fold = IntentEvaluator::new().evaluate(
+        fgit_reference::effect::FoldBasis {
+            refs: &snapshot.refs,
+            forge_positions: &snapshot.forge_positions,
+            retention: &snapshot.retention,
+            outbox: &snapshot.outbox,
+        },
+        &request,
+    );
     let bodies = DecisionEvidenceBodies::derive(context, before.basis(), &request, &fold).unwrap();
     package.evidence = CommitEvidence {
         principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot()).unwrap(),
