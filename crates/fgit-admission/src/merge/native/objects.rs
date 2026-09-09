@@ -1,4 +1,4 @@
-//! Bounded native merge-object validation over a real object source.
+//! Bounded native commit and merge validation over a real object source.
 //! Caller-supplied edge metadata is not closure evidence: outgoing edges and
 //! their required kinds are parsed from independently verified native bytes.
 
@@ -46,13 +46,45 @@ pub fn validate_merge_objects(
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
     merge.validate().map_err(|_| invalid())?;
+    validate_candidate_objects(source, merge.merge_commit,
+        &[merge.target_tip_before, merge.source_tip], Some(merge.base_tip), limits, deadline)
+}
+
+/// Verify a single-parent workspace commit with the SAME identity, required
+/// object-kind, parser, traversal and budget checks used by merge admission.
+/// This operation only reads its supplied source. It does not stage objects,
+/// authorize the source, admit a transaction or prove a particular edit log.
+/// The caller must independently bind the expected parent and source access.
+pub fn validate_workspace_objects(
+    source: &impl CanonicalObjectSource,
+    candidate: GitOid,
+    expected_parent: GitOid,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    validate_candidate_objects(source, candidate, &[expected_parent], None, limits, deadline)
+}
+
+fn validate_candidate_objects(
+    source: &impl CanonicalObjectSource,
+    candidate: GitOid,
+    expected_parents: &[GitOid],
+    merge_base: Option<GitOid>,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    let format = candidate.algorithm();
+    if candidate.is_zero() || expected_parents.is_empty() || expected_parents.len() > 2
+        || expected_parents.iter().any(|id| id.is_zero() || id.algorithm() != format || *id == candidate)
+        || (expected_parents.len() == 2 && expected_parents[0] == expected_parents[1])
+        || merge_base.is_some_and(|id| id.is_zero() || id.algorithm() != format || expected_parents.len() != 2)
+    { return Err(invalid()); }
     let maximum = MergeObjectLimits::default();
     if limits.max_objects == 0 || limits.max_objects > maximum.max_objects
         || limits.max_edges == 0 || limits.max_edges > maximum.max_edges
         || limits.max_object_bytes == 0 || limits.max_object_bytes > maximum.max_object_bytes
         || limits.max_total_bytes == 0 || limits.max_total_bytes > maximum.max_total_bytes
     { return Err(budget()); }
-    let format = merge.merge_commit.algorithm();
     let parse_limits = ParseLimits {
         max_object_bytes: limits.max_object_bytes,
         max_tree_entries: limits.max_edges,
@@ -63,7 +95,7 @@ pub fn validate_merge_objects(
     let mut pending = BTreeSet::new();
     let mut visited = BTreeSet::new();
     let mut parents = BTreeMap::<GitOid, Vec<GitOid>>::new();
-    require_object(merge.merge_commit, ObjectType::Commit, &mut required, &mut pending, limits)?;
+    require_object(candidate, ObjectType::Commit, &mut required, &mut pending, limits)?;
     let mut total_bytes = 0_usize;
     let mut edges = 0_usize;
 
@@ -77,7 +109,7 @@ pub fn validate_merge_objects(
         if object.body().len() > limits.max_object_bytes { return Err(budget()); }
         total_bytes = total_bytes.checked_add(object.body().len())
             .filter(|bytes| *bytes <= limits.max_total_bytes).ok_or_else(budget)?;
-        let profile = if id == merge.merge_commit {
+        let profile = if id == candidate {
             AcceptanceProfile::StrictCreate
         } else {
             AcceptanceProfile::GitCompatibleImport
@@ -98,10 +130,9 @@ pub fn validate_merge_objects(
                     push_edge(&mut outgoing, &mut edges, limits.max_edges, parent, ObjectType::Commit)?;
                     parent_ids.push(parent);
                 }
-                if id == merge.merge_commit
-                    && (parent_ids.as_slice() != [merge.target_tip_before, merge.source_tip].as_slice()
-                        || merge.target_tip_before == merge.source_tip)
-                { return Err(invalid()); }
+                if id == candidate && parent_ids.as_slice() != expected_parents {
+                    return Err(invalid());
+                }
                 parents.insert(id, parent_ids);
             }
             ParsedObject::Tree(entries) => {
@@ -131,10 +162,12 @@ pub fn validate_merge_objects(
             require_object(target, kind, &mut required, &mut pending, limits)?;
         }
     }
-    if !parents.contains_key(&merge.base_tip)
-        || !is_ancestor(merge.base_tip, merge.source_tip, &parents, deadline)?
-        || !is_ancestor(merge.base_tip, merge.target_tip_before, &parents, deadline)?
-    { return Err(invalid()); }
+    if let Some(base) = merge_base {
+        if !parents.contains_key(&base)
+            || !is_ancestor(base, expected_parents[1], &parents, deadline)?
+            || !is_ancestor(base, expected_parents[0], &parents, deadline)?
+        { return Err(invalid()); }
+    }
     checkpoint(deadline)?;
     let closure = PermittedObjectClosure::new(visited);
     let object_closure_root = permitted_object_closure_root(&closure)
