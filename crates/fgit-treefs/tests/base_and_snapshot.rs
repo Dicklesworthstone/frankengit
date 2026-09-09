@@ -16,7 +16,7 @@ use fgit_treefs::capability::{
 use fgit_treefs::overlay::{ContentRef, EntryClass, FileMode, Overlay, OverlayEntry};
 use fgit_treefs::path::{PathPolicy, TreePath};
 use fgit_treefs::snapshot::{
-    AntiRollbackRefusal, EpochSet, OverlayRoot, SessionRecord, WorkspaceEpoch,
+    AntiRollbackRefusal, EpochRefusal, EpochSet, OverlayRoot, SessionRecord, WorkspaceEpoch,
     WorkspaceSnapshotBody,
 };
 use fgit_types::identity::RepositoryCommitId;
@@ -555,6 +555,104 @@ fn session_refuses_rollback_but_accepts_advance() {
         Err(AntiRollbackRefusal::NotNewer { .. })
     ));
     assert_eq!(session.adopted_count(), 2);
+}
+
+fn epoch_set([staged, visible, durable]: [u64; 3]) -> EpochSet {
+    EpochSet::try_new(
+        WorkspaceEpoch::from_u64(staged),
+        WorkspaceEpoch::from_u64(visible),
+        WorkspaceEpoch::from_u64(durable),
+    )
+    .expect("each snapshot separately satisfies staged >= visible >= durable")
+}
+
+#[test]
+fn session_refuses_lower_visible_despite_higher_staged_and_preserves_its_snapshot() {
+    let (_, root) = fixture();
+    let overlay = Overlay::new();
+    let mut edited = overlay.clone();
+    edited.put(path(b"src/new.rs"), OverlayEntry::Whiteout);
+
+    for (current, proposed) in [([1, 1, 1], [2, 0, 0]), ([3, 2, 1], [4, 1, 1])] {
+        let initial = snapshot_at(root, &overlay, epoch_set(current));
+        let mut session = SessionRecord::open(initial);
+        let before = session.clone();
+        let rollback = snapshot_at(root, &edited, epoch_set(proposed));
+        assert_ne!(rollback.overlay_root(), session.latest().overlay_root());
+
+        assert_eq!(
+            session.adopt(rollback),
+            Err(AntiRollbackRefusal::Epoch(EpochRefusal::NonMonotone {
+                current: WorkspaceEpoch::from_u64(current[1]),
+                proposed: WorkspaceEpoch::from_u64(proposed[1]),
+            })),
+        );
+        assert_eq!(session, before, "refusal preserves the snapshot and count");
+
+        let permitted = snapshot_at(
+            root,
+            &edited,
+            epoch_set([proposed[0], current[1], current[2]]),
+        );
+        session
+            .adopt(permitted.clone())
+            .expect("higher staged may preserve the acknowledged visible and durable epochs");
+        assert_eq!(session.latest(), &permitted);
+        assert_eq!(session.adopted_count(), before.adopted_count() + 1);
+    }
+}
+
+#[test]
+fn session_refuses_lower_durable_despite_higher_staged_and_preserves_its_snapshot() {
+    let (_, root) = fixture();
+    let overlay = Overlay::new();
+    let mut edited = overlay.clone();
+    edited.put(path(b"src/new.rs"), OverlayEntry::Whiteout);
+
+    for (current, proposed) in [([1, 1, 1], [2, 1, 0]), ([3, 2, 2], [4, 3, 1])] {
+        let initial = snapshot_at(root, &overlay, epoch_set(current));
+        let mut session = SessionRecord::open(initial);
+        let before = session.clone();
+        let rollback = snapshot_at(root, &edited, epoch_set(proposed));
+        assert_ne!(rollback.overlay_root(), session.latest().overlay_root());
+
+        assert_eq!(
+            session.adopt(rollback),
+            Err(AntiRollbackRefusal::Epoch(EpochRefusal::NonMonotone {
+                current: WorkspaceEpoch::from_u64(current[2]),
+                proposed: WorkspaceEpoch::from_u64(proposed[2]),
+            })),
+        );
+        assert_eq!(session, before, "refusal preserves the snapshot and count");
+
+        let permitted = snapshot_at(
+            root,
+            &edited,
+            epoch_set([proposed[0], proposed[1], current[2]]),
+        );
+        session
+            .adopt(permitted.clone())
+            .expect("preserving durability permits the same staged and visible advances");
+        assert_eq!(session.latest(), &permitted);
+        assert_eq!(session.adopted_count(), before.adopted_count() + 1);
+    }
+}
+
+#[test]
+fn session_accepts_monotone_epochs_without_conflating_publication_boundaries() {
+    let (_, root) = fixture();
+    let overlay = Overlay::new();
+    let mut session = SessionRecord::open(snapshot_at(root, &overlay, epoch_set([1, 1, 1])));
+
+    for epochs in [[2, 1, 1], [3, 3, 1], [4, 3, 3], [5, 5, 5]] {
+        let proposed = snapshot_at(root, &overlay, epoch_set(epochs));
+        let before_count = session.adopted_count();
+        session
+            .adopt(proposed.clone())
+            .expect("staged advances while visible and durable independently stay or advance");
+        assert_eq!(session.latest(), &proposed);
+        assert_eq!(session.adopted_count(), before_count + 1);
+    }
 }
 
 /// A session refuses a snapshot from another workspace or another base.

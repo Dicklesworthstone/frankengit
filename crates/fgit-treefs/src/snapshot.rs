@@ -17,10 +17,10 @@
 //!
 //! # Anti-rollback
 //!
-//! A session advances to a strictly newer snapshot or refuses. Silently
-//! accepting an older-but-valid snapshot is the rollback failure AGENTS.md §5.5
-//! forbids: the snapshot would verify perfectly and still lose acknowledged
-//! work.
+//! A session advances its staged epoch while preserving or advancing its
+//! visible and durable epochs, or refuses. Silently accepting an otherwise
+//! valid snapshot that lowers an acknowledged epoch would lose acknowledged
+//! work, the rollback failure AGENTS.md §5.5 forbids.
 
 use crate::capability::WorkspaceId;
 use crate::overlay::Overlay;
@@ -81,24 +81,9 @@ pub enum EpochRefusal {
     },
     /// An epoch would move backwards.
     ///
-    /// UNREACHABLE BY CONSTRUCTION, caller-independent (frankengit-duo3), and
-    /// constructed at zero sites -- unlike its two siblings, which are raised
-    /// at five. This is NOT a check that was forgotten: `EpochSet` offers no
-    /// backwards transition to guard. `stage` advances with
-    /// `WorkspaceEpoch::next`; `publish` assigns `visible := staged` under an
-    /// invariant that already guarantees `staged >= visible`; `sync` assigns
-    /// `durable := visible` likewise. `EpochSet` is `Copy` and every method
-    /// takes `self` by value, so "this epoch moved backwards" is not
-    /// expressible on a value, and `try_new` builds a fresh set without
-    /// comparing against any predecessor.
-    ///
-    /// KEPT DELIBERATELY, and the distinction is the point. AGENTS.md 5.5 says
-    /// never silently roll back. Today that assurance comes from the ABSENCE of
-    /// a backwards operation, not from this refusal -- a reader who sees the
-    /// variant and concludes the guard is wired would be right about the
-    /// outcome and wrong about the mechanism. The two stop being equivalent the
-    /// moment an absolute setter (`with_visible(epoch)` or similar) is added,
-    /// which is when this variant becomes load-bearing and must be raised.
+    /// [`EpochSet`] mutators only advance, but two independently constructed
+    /// sets can each satisfy their internal ordering while one lowers a visible
+    /// or durable epoch. [`SessionRecord::adopt`] refuses that regression.
     NonMonotone {
         /// The epoch it holds now.
         current: WorkspaceEpoch,
@@ -476,26 +461,9 @@ pub enum AntiRollbackRefusal {
     WorkspaceMismatch,
     /// The proposed snapshot is pinned to a different base.
     BaseMismatch,
-    /// The proposed snapshot violates the epoch invariant.
-    ///
-    /// DELIBERATELY UNREACHABLE TODAY, and recorded as such so it is not mistaken
-    /// for an oversight. An `EpochSet` cannot be built in a violating state
-    /// through the public API: `try_new` refuses one, `stage` only ever advances
-    /// `staged`, and `publish`/`sync` refuse to overtake the epoch above them. So
-    /// no caller in this crate can hand `adopt` a body that fails
-    /// `invariant_holds`.
-    ///
-    /// It is kept because that guarantee is structural, not eternal. The moment a
-    /// snapshot body can arrive DECODED — from `fgit-codec` bytes on disk or over
-    /// a wire — the invariant stops being enforced by construction and starts
-    /// depending on whoever produced those bytes. Checking it at adopt time is
-    /// the difference between trusting a decoder and verifying it.
-    ///
-    /// Two other refusal variants in this crate looked like this and were not
-    /// defensive at all: `ExportRefusal::PathTypeConflict` and
-    /// `CapabilityRefusal::RepositoryMismatch` were both reachable conditions
-    /// with no check behind them. This one was checked against the public API
-    /// before being left alone; the distinction is the point.
+    /// The proposed snapshot violates the epoch ordering or lowers the session's
+    /// visible or durable epoch. Regression checks compare visible first, then
+    /// durable, after the staged epoch has been checked for strict advancement.
     Epoch(EpochRefusal),
 }
 
@@ -553,7 +521,10 @@ impl<A: GitHashAlgorithm> SessionRecord<A> {
         self.adopted_count
     }
 
-    /// Adopts a strictly newer snapshot of the same workspace and base.
+    /// Adopts a snapshot of the same workspace and base with a strictly newer
+    /// staged epoch and nondecreasing visible and durable epochs.
+    ///
+    /// A refusal leaves the latest snapshot and adoption count unchanged.
     pub fn adopt(&mut self, proposed: WorkspaceSnapshotBody<A>) -> Result<(), AntiRollbackRefusal> {
         if proposed.workspace_id != self.workspace_id {
             return Err(AntiRollbackRefusal::WorkspaceMismatch);
@@ -576,6 +547,17 @@ impl<A: GitHashAlgorithm> SessionRecord<A> {
                 current_staged: self.latest.epochs.staged(),
                 proposed_staged: proposed.epochs.staged(),
             });
+        }
+        for (current_epoch, proposed_epoch) in [
+            (self.latest.epochs.visible(), proposed.epochs.visible()),
+            (self.latest.epochs.durable(), proposed.epochs.durable()),
+        ] {
+            if proposed_epoch < current_epoch {
+                return Err(AntiRollbackRefusal::Epoch(EpochRefusal::NonMonotone {
+                    current: current_epoch,
+                    proposed: proposed_epoch,
+                }));
+            }
         }
         self.latest = proposed;
         self.adopted_count = self.adopted_count.saturating_add(1);
