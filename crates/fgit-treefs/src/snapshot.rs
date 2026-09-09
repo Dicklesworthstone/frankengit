@@ -459,7 +459,7 @@ pub enum AntiRollbackRefusal {
     },
     /// The proposed snapshot belongs to a different workspace.
     WorkspaceMismatch,
-    /// The proposed snapshot is pinned to a different base.
+    /// The proposed snapshot names a different repository, base RCR, commit, or tree.
     BaseMismatch,
     /// The proposed snapshot violates the epoch ordering or lowers the session's
     /// visible or durable epoch. Regression checks compare visible first, then
@@ -529,7 +529,9 @@ impl<A: GitHashAlgorithm> SessionRecord<A> {
         if proposed.workspace_id != self.workspace_id {
             return Err(AntiRollbackRefusal::WorkspaceMismatch);
         }
-        if proposed.base_rcr_id != self.latest.base_rcr_id
+        if proposed.repository_id != self.latest.repository_id
+            || proposed.base_rcr_id != self.latest.base_rcr_id
+            || proposed.base_commit_oid != self.latest.base_commit_oid
             || proposed.base_tree_oid != self.latest.base_tree_oid
         {
             return Err(AntiRollbackRefusal::BaseMismatch);

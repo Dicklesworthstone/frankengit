@@ -8,7 +8,7 @@
 //! parser.
 
 use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1};
-use fgit_git_object::{AcceptanceProfile, ParseLimits, TreeEntry, emit_tree};
+use fgit_git_object::{AcceptanceProfile, ParseLimits, TreeEntry, emit_tree, parse_commit};
 use fgit_treefs::base::{BaseEntry, BaseError, BaseView, ObjectSource, ObjectSourceError};
 use fgit_treefs::capability::{
     CapabilityRefusal, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId,
@@ -695,6 +695,77 @@ fn session_refuses_foreign_workspace_and_base() {
     // Permitted counterpart: same workspace, same base, strictly newer.
     let good = snapshot_at(root, &overlay, EpochSet::new().stage().stage());
     assert!(session.adopt(good).is_ok());
+}
+
+#[test]
+fn session_refuses_repository_or_commit_substitution_even_when_rcr_and_tree_match() {
+    let mut source = MemorySource::default();
+    let tree = source.tree(&[]);
+    let tree_hex = hex(tree.digest_bytes());
+    let [base_commit, other_commit] = ["base", "other commit, same tree"].map(|message| {
+        let body = format!(
+            "tree {tree_hex}\nauthor Snapshot <snapshot@example.com> 1700000000 +0000\ncommitter Snapshot <snapshot@example.com> 1700000000 +0000\n\n{message}\n"
+        );
+        let parsed = parse_commit(body.as_bytes(), AcceptanceProfile::StrictCreate, &limits())
+            .expect("each distinct commit is valid and names the same real tree");
+        assert_eq!(parsed.tree_reference(), Some(tree_hex.as_bytes()));
+        source.insert(GitObjectKind::Commit, body.into_bytes())
+    });
+    assert_ne!(base_commit, other_commit);
+
+    let overlay = Overlay::new();
+    let mut edited = overlay.clone();
+    edited.put(path(b"src/new.rs"), OverlayEntry::Whiteout);
+    let workspace = WorkspaceId::from_bytes([1; 16]);
+    let initial = WorkspaceSnapshotBody::<Sha1>::new(
+        workspace,
+        repository_id(),
+        rcr_id(),
+        base_commit,
+        tree,
+        OverlayRoot::of(&overlay),
+        epoch_set([1, 1, 1]),
+    );
+    let permitted = WorkspaceSnapshotBody::<Sha1>::new(
+        workspace,
+        repository_id(),
+        rcr_id(),
+        base_commit,
+        tree,
+        OverlayRoot::of(&edited),
+        epoch_set([2, 1, 1]),
+    );
+
+    for (repository, commit) in [
+        (RepositoryId::from_bytes([8; 16]), base_commit),
+        (repository_id(), other_commit),
+    ] {
+        let mut session = SessionRecord::open(initial.clone());
+        let before = session.clone();
+        let substituted = WorkspaceSnapshotBody::<Sha1>::new(
+            workspace,
+            repository,
+            rcr_id(),
+            commit,
+            tree,
+            permitted.overlay_root(),
+            permitted.epochs(),
+        );
+        assert_eq!(
+            session.adopt(substituted),
+            Err(AntiRollbackRefusal::BaseMismatch)
+        );
+        assert_eq!(
+            session, before,
+            "refusal preserves the complete snapshot and count"
+        );
+
+        session
+            .adopt(permitted.clone())
+            .expect("the same overlay and epochs may advance with every base coordinate preserved");
+        assert_eq!(session.latest(), &permitted);
+        assert_eq!(session.adopted_count(), before.adopted_count() + 1);
+    }
 }
 
 /// Epoch accessors on a snapshot report the three facts separately.
