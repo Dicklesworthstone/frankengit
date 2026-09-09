@@ -412,10 +412,13 @@ also checks that importing host output has not silently changed the ref.
 
 The workspace child suite in `sealed_native_merge_publication.rs` exercises
 node-owned edit/export and native merge publication for both Git object formats:
-current/stale snapshot pairs, exact candidate-tree binding, owner/opaque-handle
-refusals, original terminal retries, and dropping real admission after observing
-its staged seal. Busy edit/close must refuse while the driver lives; subsequent
-reuse requires same-store drain and authenticated reconciliation. These sessions
+current/stale snapshot pairs, candidate-tree and target-base binding,
+owner/opaque-handle refusals, expiry and intake/quota terminal-retry pairs,
+and dropping real admission after observing its staged seal. Busy edit/close
+must refuse while the driver lives; subsequent reuse or immediate shutdown
+requires same-store drain and authenticated reconciliation. Shutdown's private
+custody tests also require a failed drain to return the live node for retry and
+remove an earlier closed entry before retaining a later busy owner. These sessions
 have durable epoch zero; this suite does not establish a restartable workspace
 journal or host power-loss persistence. Admission's workspace binding tests
 also pin unchanged unbound request bytes and revalidation on every CAS replan.

@@ -3,11 +3,15 @@
 //! these tests do not claim control over the database worker's SQL schedule.
 
 use super::*;
-use fgit_node::{MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal};
+use fgit_node::{
+    MergeWorkspaceReceipt, NodeReceiveTransportRefusal, NodeWorkspaceRefusal,
+    WorkspaceSessionRefusal,
+};
 use fgit_treefs::{
     EntryClass, ExportLimits, FileMode, IntentLog, TreeCapability, TreeEditIntent, TreePath,
     WorkspaceId,
 };
+use fgit_types::cell::{CellRefusal, CellState, CellTransitionCause};
 use fgit_wire::visibility::RefVisibility;
 
 fn capability(id: u8) -> TreeCapability {
@@ -691,6 +695,149 @@ fn retained_capability_expiry_refuses_new_merge_but_preserves_terminal_retry() {
 }
 
 #[test]
+fn terminal_workspace_retries_survive_cell_isolation_and_exhausted_quota() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for commit in [false, true] {
+            let scratch = Scratch::new();
+            let (mut node, _) = OneNode::init(config(&scratch.0, format)).unwrap();
+            node.bring_into_service(HeadGeneration::FIRST).unwrap();
+            let fixture = fixture(&node, &scratch.0, format, true);
+            let owner = session(b"workspace-gated-terminal");
+            let terminal_context = context(format, b"workspace-gated-terminal");
+            let initial = open(&node, &owner, 0x9a);
+            let exported = edit(&node, &owner, &initial, b"theirs\n").unwrap();
+            let offered = if commit {
+                fixture.clone()
+            } else {
+                let empty = node
+                    .put_git_object(GitObjectKind::Tree, Vec::new())
+                    .unwrap()
+                    .identity();
+                candidate_for_tree(&node, &fixture, empty)
+            };
+            let terminal_package = workspace_package(&node, &offered, &terminal_context, &exported);
+
+            // A separate editable session owns a distinct, never-admitted seal.
+            // Both packages are prepared while their native refs are current.
+            let new_owner = session(b"workspace-gated-undecided");
+            let new_context = context(format, b"workspace-gated-undecided");
+            let new_initial = open(&node, &new_owner, 0x9b);
+            let new_export = edit(&node, &new_owner, &new_initial, b"theirs\n").unwrap();
+            let new_package = workspace_package(&node, &fixture, &new_context, &new_export);
+            let new_tx_id = fgit_admission::merge::native::workspace_seal_attempt_for(
+                &new_context,
+                &new_package.sealed(),
+                new_export.snapshot_digest(),
+            )
+            .unwrap()
+            .derive()
+            .unwrap()
+            .0;
+            let before = snapshot(&node);
+            let terminal = admit(&node, &owner, &exported, &terminal_package).unwrap();
+            if commit {
+                assert_one_merge(
+                    &node,
+                    &fixture,
+                    &terminal_context,
+                    &exported,
+                    &terminal_package,
+                    terminal,
+                );
+            } else {
+                assert_eq!(
+                    terminal.outcome,
+                    DecisionOutcome::Refused {
+                        code: RefusalCode::EvidenceStale
+                    }
+                );
+                assert_unchanged_effects(&before, &snapshot(&node));
+            }
+            let selected = snapshot(&node);
+
+            for state in [CellState::VerifiedReadOnly, CellState::Draining] {
+                node.transition_cell_state(
+                    state,
+                    CellTransitionCause::Operator,
+                    selected.basis().body().generation,
+                )
+                .unwrap();
+                assert_eq!(
+                    admit(&node, &owner, &exported, &terminal_package).unwrap(),
+                    terminal
+                );
+                assert!(matches!(
+                    admit(&node, &new_owner, &new_export, &new_package),
+                    Err(NodeWorkspaceRefusal::WorkspacePublication(error))
+                        if matches!(*error, NodeReceiveTransportRefusal::CellState(
+                            CellRefusal::StateAdmitsNoStaging { state: observed }
+                        ) if observed == state)
+                ));
+                assert_eq!(snapshot(&node).basis(), selected.basis());
+            }
+
+            // There is no public quota override. Actual authenticated attempts
+            // on the reviewed-native route consume the default 120-event window
+            // before its intake refusal, without staging or publishing bytes.
+            let quota_owner = session(b"workspace-quota-intake");
+            let quota_intent = intent(&fixture, 99, ExpectedVersion::NewStream);
+            let mut contained = false;
+            for _ in 0..=120 {
+                let request = node.request_context();
+                match node.runtime().block_on(node.admit_native_merge_durable_in(
+                    &request,
+                    &quota_owner,
+                    &quota_intent,
+                    AdmissionLimits::default(),
+                    MergeObjectLimits::default(),
+                )) {
+                    Err(NodeReceiveTransportRefusal::CellState(
+                        CellRefusal::StateAdmitsNoStaging {
+                            state: CellState::Draining,
+                        },
+                    )) => {}
+                    Err(NodeReceiveTransportRefusal::QuotaContained { code, expires_secs }) => {
+                        assert_eq!(code, "rate_exceeded");
+                        assert_eq!(expires_secs, 60);
+                        contained = true;
+                        break;
+                    }
+                    other => {
+                        panic!("unexpected real intake result while exhausting quota: {other:?}")
+                    }
+                }
+            }
+            assert!(
+                contained,
+                "bounded real requests must reach the configured quota"
+            );
+            assert_eq!(
+                admit(&node, &owner, &exported, &terminal_package).unwrap(),
+                terminal
+            );
+            assert!(matches!(
+                admit(&node, &new_owner, &new_export, &new_package),
+                Err(NodeWorkspaceRefusal::WorkspacePublication(error))
+                    if matches!(*error, NodeReceiveTransportRefusal::QuotaContained {
+                        code: "rate_exceeded", expires_secs: 60,
+                    })
+            ));
+            assert_eq!(snapshot(&node).basis(), selected.basis());
+            let request = node.request_context();
+            assert_eq!(
+                node.runtime()
+                    .block_on(node.resolve_outcome_in(&request, new_tx_id))
+                    .unwrap(),
+                fgit_authority::OutcomeLookup::Undecided,
+            );
+            close(&node, &owner, &exported);
+            close(&node, &new_owner, &new_export);
+            node.shutdown().unwrap();
+        }
+    }
+}
+
+#[test]
 fn owner_and_opaque_handle_are_checked_across_close_and_same_id_reopen() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
@@ -737,62 +884,63 @@ fn owner_and_opaque_handle_are_checked_across_close_and_same_id_reopen() {
 #[test]
 fn dropped_real_admission_keeps_workspace_blocked_until_drain_and_reconciliation() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let scratch = Scratch::new();
-        let (mut node, _) = OneNode::init(config(&scratch.0, format)).unwrap();
-        node.bring_into_service(HeadGeneration::FIRST).unwrap();
-        let fixture = fixture(&node, &scratch.0, format, true);
-        let owner = session(b"workspace-drop");
-        let context = context(format, b"workspace-drop");
-        let initial = open(&node, &owner, 0x96);
-        let exported = edit(&node, &owner, &initial, b"theirs\n").unwrap();
-        let package = workspace_package(&node, &fixture, &context, &exported);
-        let before = snapshot(&node);
-        let tx_id = fgit_admission::merge::native::workspace_seal_attempt_for(
-            &context,
-            &package.sealed(),
-            exported.snapshot_digest(),
-        )
-        .unwrap()
-        .derive()
-        .unwrap()
-        .0;
-        let inspection_cx = fsqlite_types::cx::Cx::new();
-        inspection_cx.set_native_cx(
-            node.runtime()
-                .request_cx(fgit_runtime::meter::BudgetClass::Database),
-        );
-        let mut inspector = node
-            .runtime()
-            .block_on(fgit_authority_fsqlite::FsqliteAuthorityStore::open(
-                &inspection_cx,
-                scratch.0.join("node/authority.fsqlite").to_str().unwrap(),
-                fgit_authority::StoreInstanceId::from_raw(1),
-                fgit_authority::AuthorityLimits::default(),
-            ))
-            .unwrap();
-        let request = node.request_context();
-        let sealed = package.sealed();
-        let mut admission = Box::pin(node.admit_workspace_merge_durable_in(
-            &request,
-            &owner,
-            &exported,
-            &sealed,
-            AdmissionLimits::default(),
-            MergeObjectLimits::default(),
-        ));
-        let new_probe = || {
-            Box::pin(fgit_authority::read_seal_async(
-                &inspector,
-                &inspection_cx,
-                context.tenant_id,
-                context.repository_id,
-                tx_id,
-            ))
-        };
-        let mut probe = new_probe();
-        let mut polls = 0;
-        let mut admission_pending = false;
-        node.runtime().block_on(poll_fn(|cx| {
+        for shutdown_immediately in [false, true] {
+            let scratch = Scratch::new();
+            let (mut node, _) = OneNode::init(config(&scratch.0, format)).unwrap();
+            node.bring_into_service(HeadGeneration::FIRST).unwrap();
+            let fixture = fixture(&node, &scratch.0, format, true);
+            let owner = session(b"workspace-drop");
+            let context = context(format, b"workspace-drop");
+            let initial = open(&node, &owner, 0x96);
+            let exported = edit(&node, &owner, &initial, b"theirs\n").unwrap();
+            let package = workspace_package(&node, &fixture, &context, &exported);
+            let before = snapshot(&node);
+            let tx_id = fgit_admission::merge::native::workspace_seal_attempt_for(
+                &context,
+                &package.sealed(),
+                exported.snapshot_digest(),
+            )
+            .unwrap()
+            .derive()
+            .unwrap()
+            .0;
+            let inspection_cx = fsqlite_types::cx::Cx::new();
+            inspection_cx.set_native_cx(
+                node.runtime()
+                    .request_cx(fgit_runtime::meter::BudgetClass::Database),
+            );
+            let mut inspector = node
+                .runtime()
+                .block_on(fgit_authority_fsqlite::FsqliteAuthorityStore::open(
+                    &inspection_cx,
+                    scratch.0.join("node/authority.fsqlite").to_str().unwrap(),
+                    fgit_authority::StoreInstanceId::from_raw(1),
+                    fgit_authority::AuthorityLimits::default(),
+                ))
+                .unwrap();
+            let request = node.request_context();
+            let sealed = package.sealed();
+            let mut admission = Box::pin(node.admit_workspace_merge_durable_in(
+                &request,
+                &owner,
+                &exported,
+                &sealed,
+                AdmissionLimits::default(),
+                MergeObjectLimits::default(),
+            ));
+            let new_probe = || {
+                Box::pin(fgit_authority::read_seal_async(
+                    &inspector,
+                    &inspection_cx,
+                    context.tenant_id,
+                    context.repository_id,
+                    tx_id,
+                ))
+            };
+            let mut probe = new_probe();
+            let mut polls = 0;
+            let mut admission_pending = false;
+            node.runtime().block_on(poll_fn(|cx| {
             polls += 1;
             assert!(polls <= 4096, "bounded real seal observation exhausted");
             match probe.as_mut().poll(cx) {
@@ -811,69 +959,126 @@ fn dropped_real_admission_keeps_workspace_blocked_until_drain_and_reconciliation
             }
             Poll::Pending
         }));
-        drop(probe);
-        let close_cx = fsqlite_types::cx::Cx::new();
-        close_cx.set_native_cx(
-            node.runtime()
-                .request_cx(fgit_runtime::meter::BudgetClass::Database),
-        );
-        node.runtime().block_on(inspector.close(&close_cx)).unwrap();
-        assert!(matches!(
-            edit(&node, &owner, &exported, b"after drop\n"),
-            Err(NodeWorkspaceRefusal::WorkspaceBusy)
-        ));
-        let close_request = node.request_context();
-        assert!(matches!(
-            node.runtime().block_on(node.close_merge_workspace_in(
-                &close_request,
-                &owner,
-                &exported
-            )),
-            Err(NodeWorkspaceRefusal::WorkspaceBusy)
-        ));
-        drop(admission);
-        // This invokes the real same-store drain and authenticated outcome
-        // recovery; dropping the response itself is never the success oracle.
-        let edited = edit(&node, &owner, &exported, b"after drop\n");
-        let recovered = snapshot(&node);
-        match edited {
-            Ok(next) => {
-                assert_eq!(
-                    recovered.basis(),
-                    before.basis(),
-                    "an editable recovery proved that the old admission did not commit"
-                );
-                assert_eq!(
-                    next.epochs().staged().get(),
-                    exported.epochs().staged().get() + 1
-                );
-                let refused = admit(&node, &owner, &exported, &package).unwrap();
-                assert_eq!(
-                    refused.outcome,
-                    DecisionOutcome::Refused {
-                        code: RefusalCode::EvidenceStale
+            drop(probe);
+            let close_cx = fsqlite_types::cx::Cx::new();
+            close_cx.set_native_cx(
+                node.runtime()
+                    .request_cx(fgit_runtime::meter::BudgetClass::Database),
+            );
+            node.runtime().block_on(inspector.close(&close_cx)).unwrap();
+            assert!(matches!(
+                edit(&node, &owner, &exported, b"after drop\n"),
+                Err(NodeWorkspaceRefusal::WorkspaceBusy)
+            ));
+            let close_request = node.request_context();
+            assert!(matches!(
+                node.runtime().block_on(node.close_merge_workspace_in(
+                    &close_request,
+                    &owner,
+                    &exported
+                )),
+                Err(NodeWorkspaceRefusal::WorkspaceBusy)
+            ));
+            drop(admission);
+            if shutdown_immediately {
+                // No edit, explicit outcome lookup, or other recovery operation
+                // gets to clear the retained pending marker before node shutdown.
+                node.shutdown()
+                    .expect("shutdown drains the pending real authority worker");
+                let mut reopened = OneNode::open_existing(config(&scratch.0, format)).unwrap();
+                reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+                let request = reopened.request_context();
+                let outcome = reopened
+                    .runtime()
+                    .block_on(reopened.resolve_outcome_in(&request, tx_id))
+                    .unwrap();
+                let selected = snapshot(&reopened);
+                match outcome {
+                    fgit_authority::OutcomeLookup::Undecided => {
+                        assert_eq!(selected.basis(), before.basis());
+                        assert_unchanged_effects(&before, &selected);
+                        let request = reopened.request_context();
+                        let history = reopened
+                            .runtime()
+                            .block_on(reopened.snapshot_history_in(&request))
+                            .unwrap();
+                        assert_eq!(
+                            history
+                                .iter()
+                                .map(|batch| batch.forge_events.len())
+                                .sum::<usize>(),
+                            0
+                        );
                     }
-                );
-                assert_unchanged_effects(&before, &snapshot(&node));
-                close(&node, &owner, &next);
-            }
-            Err(
-                NodeWorkspaceRefusal::WorkspaceSession(WorkspaceSessionRefusal::Retired)
-                | NodeWorkspaceRefusal::StaleWorkspaceBase,
-            ) => {
-                let terminal = admit(&node, &owner, &exported, &package).unwrap();
-                assert_one_merge(&node, &fixture, &context, &exported, &package, terminal);
+                    fgit_authority::OutcomeLookup::Decided(terminal) => {
+                        assert_one_merge(
+                            &reopened, &fixture, &context, &exported, &package, terminal,
+                        );
+                        assert_eq!(
+                            selected.basis().body().generation,
+                            before.basis().body().generation.next().unwrap()
+                        );
+                        assert_eq!(
+                            selected.basis().body().retention_root,
+                            before.basis().body().retention_root
+                        );
+                    }
+                }
+                let request = reopened.request_context();
                 assert_eq!(
-                    snapshot(&node).basis(),
-                    recovered.basis(),
-                    "recovery cannot append another merge"
+                    reopened
+                        .runtime()
+                        .block_on(reopened.resolve_outcome_in(&request, tx_id))
+                        .unwrap(),
+                    outcome
                 );
-                close(&node, &owner, &exported);
+                assert_eq!(snapshot(&reopened).basis(), selected.basis());
+                reopened.shutdown().unwrap();
+                continue;
             }
-            Err(error) => panic!(
-                "same-store recovery must either resume the workspace or recover its committed retirement: {error:?}"
-            ),
+            // This invokes the real same-store drain and authenticated outcome
+            // recovery; dropping the response itself is never the success oracle.
+            let edited = edit(&node, &owner, &exported, b"after drop\n");
+            let recovered = snapshot(&node);
+            match edited {
+                Ok(next) => {
+                    assert_eq!(
+                        recovered.basis(),
+                        before.basis(),
+                        "an editable recovery proved that the old admission did not commit"
+                    );
+                    assert_eq!(
+                        next.epochs().staged().get(),
+                        exported.epochs().staged().get() + 1
+                    );
+                    let refused = admit(&node, &owner, &exported, &package).unwrap();
+                    assert_eq!(
+                        refused.outcome,
+                        DecisionOutcome::Refused {
+                            code: RefusalCode::EvidenceStale
+                        }
+                    );
+                    assert_unchanged_effects(&before, &snapshot(&node));
+                    close(&node, &owner, &next);
+                }
+                Err(
+                    NodeWorkspaceRefusal::WorkspaceSession(WorkspaceSessionRefusal::Retired)
+                    | NodeWorkspaceRefusal::StaleWorkspaceBase,
+                ) => {
+                    let terminal = admit(&node, &owner, &exported, &package).unwrap();
+                    assert_one_merge(&node, &fixture, &context, &exported, &package, terminal);
+                    assert_eq!(
+                        snapshot(&node).basis(),
+                        recovered.basis(),
+                        "recovery cannot append another merge"
+                    );
+                    close(&node, &owner, &exported);
+                }
+                Err(error) => panic!(
+                    "same-store recovery must either resume the workspace or recover its committed retirement: {error:?}"
+                ),
+            }
+            node.shutdown().unwrap();
         }
-        node.shutdown().unwrap();
     }
 }

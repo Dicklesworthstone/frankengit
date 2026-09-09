@@ -146,11 +146,13 @@ equals that session's actual export. The observed workspace epoch comes from
 the same record; this profile requires the workspace base commit to equal the
 merge's expected target tip. Missing ownership refuses; stale observations produce
 `EvidenceStale`. Source/target freshness still comes from authenticated refs.
-Terminal retries resolve before these currentness checks.
+Terminal retries resolve before these currentness checks and new-publication
+intake/quota gates. They still require the authenticated owner, a live bounded
+request context, and the original immutable idempotency-key/seal validation.
 
-Before the first admission write, the node retains the exact seal attempt and
-`TxId` in its session entry. Dropping a response future releases physical lock
-ownership but does not clear this pending publication. A subsequent edit,
+Before an undecided attempt's first admission write, the node retains the exact
+seal attempt and `TxId` in its session entry. Dropping a response future releases
+physical lock ownership but does not clear this pending publication. A subsequent edit,
 retry or close must acquire that same exclusive owner, drain the same authority
 worker and authenticate the exact transaction outcome. Failure preserves the
 pending state and refuses reuse. Busy sessions refuse immediately, with no

@@ -451,11 +451,6 @@ impl OneNode {
         let entry = self
             .workspaces
             .lookup(expected, authenticated.principal_id())?;
-        self.push_quota
-            .evaluate(&authenticated.principal_id())
-            .map_err(|e| NodeWorkspaceRefusal::WorkspacePublication(Box::new(e.into())))?;
-        self.receive_publication_admitted()
-            .map_err(|e| NodeWorkspaceRefusal::WorkspacePublication(Box::new(e)))?;
         let context = AdmissionContext {
             head_key: self.head_key.clone(),
             tenant_id: self.tenant_id,
@@ -522,18 +517,27 @@ impl OneNode {
         let attempt = workspace_seal_attempt_for(context, &held, expected.snapshot_digest)
             .map_err(admission_error)?;
         let (tx_id, _) = attempt.derive().map_err(|e| admission_error(e.into()))?;
-        // Terminal retry precedes current workspace/ref checks, including when
-        // this workspace's own earlier merge has retired its edit lease.
-        if state.is_retired() {
-            if let OutcomeLookup::Decided(outcome) = self
-                .resolve_outcome_in(request, tx_id)
+        // Terminal recovery is not new publication. Preserve the core's exact
+        // immutable key/seal validation, but do not charge another push or hide
+        // an existing outcome because the cell has stopped accepting writes.
+        if let OutcomeLookup::Decided(outcome) = self
+            .resolve_outcome_in(request, tx_id)
+            .await
+            .map_err(authority_error)?
+        {
+            fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
                 .await
-                .map_err(authority_error)?
-            {
-                return Ok(outcome);
-            }
+                .map_err(|e| admission_error(e.into()))?;
+            return Ok(outcome);
+        }
+        if state.is_retired() {
             return Err(state_error(super::WorkspaceSessionRefusal::Retired));
         }
+        self.push_quota
+            .evaluate(&context.principal_id)
+            .map_err(|e| NodeWorkspaceRefusal::WorkspacePublication(Box::new(e)))?;
+        self.receive_publication_admitted()
+            .map_err(|e| NodeWorkspaceRefusal::WorkspacePublication(Box::new(e)))?;
         let projection = NodeNativeMergeProjection {
             node: self,
             inner: self
