@@ -12,7 +12,7 @@ use fgit_codec::canonical_state::{
 use fgit_codec::{CanonicalBody, CryptoBodyIdentity, DecodeLimits, decode_body, encode_body};
 use fgit_forge::aggregate::{AggregateHead, AggregateId, AggregateVersion};
 use fgit_forge::event::{ForgeEventBatch, ForgeEventPayload};
-use fgit_types::{AsciiSlug, Digest, RefName, RefusalCode, RepositoryId};
+use fgit_types::{AsciiSlug, Digest, RefusalCode, RepositoryId};
 
 use super::{NativeMergeIntent, unavailable};
 use crate::AdmissionError;
@@ -212,30 +212,6 @@ pub(super) fn advance_positions(
 pub(super) fn aggregate_label(aggregate: AggregateId) -> Result<AsciiSlug, AdmissionError> {
     AsciiSlug::try_new("forge_stream", aggregate.to_string().as_bytes())
         .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))
-}
-
-pub(super) async fn verify_head_target<S: AsyncAuthorityStore + ?Sized>(
-    store: &S,
-    cx: &S::Context,
-    repository: RepositoryId,
-    ref_root: Digest,
-    expected: Option<&RefName>,
-) -> Result<(), AdmissionError> {
-    let frame = read_frame(
-        store,
-        cx,
-        repository,
-        b"frankengit/admission/ref-state/v1/",
-        ref_root,
-    )
-    .await?
-    .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
-    let state = decode_body::<crate::CanonicalRefState>(&frame, DecodeLimits::DEFAULT)
-        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
-    if state.head_target() != expected {
-        return Err(unavailable(RefusalCode::EvidenceInvalid));
-    }
-    Ok(())
 }
 
 pub(super) async fn read_events<S: AsyncAuthorityStore + ?Sized>(

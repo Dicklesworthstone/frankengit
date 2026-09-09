@@ -136,7 +136,7 @@ impl OneNode {
             .with_fetch_budget(bytes).with_file_budget((READ_OBJECTS - 2) as u64);
         let commit_oid = A::parse_hex(&commit.to_string()).map_err(|_| search_error(SearchError::InvalidObjectFormat))?;
         let tree_oid = A::parse_hex(&tree.to_string()).map_err(|_| search_error(SearchError::InvalidObjectFormat))?;
-        let base = BaseView::new(self.repository_id, rcr, commit_oid, tree_oid, parse, PathPolicy::default());
+        let base = BaseView::<A>::new(self.repository_id, rcr, commit_oid, tree_oid, parse, PathPolicy::default());
         let original = NodeTreeSource { inner, selected: selected.selected_closure(), workspace };
         let source = bounded_source(&original, request, limits);
         let result = search_source(&base, &source, &mut capability, 0, query, limits,

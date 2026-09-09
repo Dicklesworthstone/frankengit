@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_objects};
-use fgit_crypto::{GitObjectKind, git_object_id};
+use fgit_crypto::git_object_id;
 use fgit_forge::event::NativeMerge;
 use fgit_forge::preparation::{
     CommitInput, MergeEntry, MergeMetadata, MergeObjectSource, MergePreparation,
