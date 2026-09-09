@@ -36,6 +36,7 @@ fsqlite-types = { version = "0.3.7", default-features = false, features = ["nati
 fgit-runner.workspace = true
 
 [dev-dependencies]
+fgit-lab.workspace = true
 fgit-runner.workspace = true
 
 [lints]

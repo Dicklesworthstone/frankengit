@@ -7,7 +7,7 @@
 
 ## 1. Problem statement
 
-The original incomplete merge path could stage the immutable forge event batch and commit its root into the Repository Commit Record. By itself, that proves which event body the decision intended. It does not make the event durably observable by a forge stream consumer or create a durable delivery obligation. Section 13 describes the implementation that addresses this gap.
+The incomplete merge path that motivated this contract could stage the immutable forge event batch and commit its root into the Repository Commit Record. That proved which event body the decision intended. It did not make the event durably observable by a forge stream consumer or create a durable delivery obligation. Section 13 records the current implementation boundaries; section 11 defines the evidence required to complete this contract.
 
 A complete merge transition must publish, through the same exact-predecessor authority-head CAS:
 
@@ -239,10 +239,22 @@ two ordered parents, merge base, and reachable trees before publication.
 Native `MergeEffectPackage` inputs at `admit_merge_durable_in` enter this same
 driver with their original seal. Supplied closure and evidence are checked
 against node-owned object validation and the complete fold. Historical
-Digest-valued packages retain their previous route. The original interface's
-caller-supplied workspace epoch is only an asserted precondition: it cannot
+Digest-valued packages retain their previous route. The authenticated-context
+caller owns service-intake and quota authorization, like the node's lower-level
+validated-receive primitive; this is not a session wrapper. Its caller-supplied
+workspace epoch is only an asserted precondition: it cannot
 authenticate a current workspace session because it carries no workspace or
 snapshot identity.
+
+The synchronous native and original-seal facades use private adapters whose
+storage and projection operations finish before returning `Ready`. A single
+poll enters the same async driver; no second seal, replan, or CAS loop exists.
+Only synchronous capabilities can enter this facade. The durable node remains
+asynchronous. Equivalence tests compare terminal outcomes and selected canonical
+bytes, while explicit model schedules drive two candidates to the same CAS
+token. The node's separate schedule test controls caller-future polling over
+the real file-backed store and requires observed overlap; it does not claim
+control over the store's internal disk-thread schedule.
 
 `merge/native/delivery.rs` reads the selected forge and outbox maps and checks
 payload, aggregate range, stable key, lifecycle predecessors, and receipt
@@ -298,9 +310,9 @@ establish a distributed GC or checkpoint-pruning integration; such a collector
 must preserve the complete live outbox and reconciliation closure before it
 can be admitted.
 
-The code and tests in this section do not close `frankengit-asa3`. Native
-sync/async equivalence, supervised workspace freshness, and the complete
-revision-bound batch gate retain their
+The code and tests in this section do not close `frankengit-asa3`. The new
+sync/async and scheduled-concurrency tests require revision-bound execution.
+Supervised workspace freshness and the complete batch gate retain their
 original acceptance scope. Model fault tests and file-backed process-death
 tests have different evidence classes; neither implies host power-loss or
 filesystem fault coverage.

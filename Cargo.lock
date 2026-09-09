@@ -866,6 +866,7 @@ dependencies = [
  "fgit-crypto",
  "fgit-forge",
  "fgit-git-object",
+ "fgit-lab",
  "fgit-object-fabric",
  "fgit-pack",
  "fgit-reference",

@@ -215,8 +215,14 @@ Fault at every write/CAS/response/outbox point must expose old-complete or new-c
 For native merge/outbox admission, the focused implementation tests are
 `fgit-admission/tests/native_merge_delivery_faults.rs` (explicit model store),
 `fgit-node/tests/native_merge_durable_crashes.rs` (process death around the
-file-backed authority CAS), and `fgit-node/tests/native_merge_publication.rs`
-(real node publication, delivery, and restart). Canonical progress/history tests
+file-backed authority CAS), `fgit-node/tests/native_merge_publication.rs`
+(real node publication, delivery, and restart), and
+`fgit-node/tests/sealed_native_merge_publication.rs` (original seal identity,
+independent closure/evidence checks, scheduled concurrent caller futures, and
+real node retry/reopen). Sync/async equivalence compares selected canonical
+bytes; the model schedule fixes actual pre-CAS interleavings, while the real
+node schedule controls caller polls and requires observed pending overlap.
+Canonical progress/history tests
 must reject staged-only predecessors, committed forks, missing receipt aliases,
 policy reset, and fabricated terminal observations. A delivery retry after a
 lost reply must probe the same stable key; a refused settlement must authorize

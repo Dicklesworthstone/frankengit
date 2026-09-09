@@ -6795,7 +6795,10 @@ impl OneNode {
     /// objects and complete fold at the selected authority basis.
     ///
     /// The caller supplies the authenticated principal and idempotency key in
-    /// `context`. Its workspace epoch is checked as an asserted precondition;
+    /// `context` and owns service-intake and quota authorization, as for
+    /// [`Self::admit_validated_receive_durable_in`]. This is the lower-level
+    /// admission primitive; it does not perform the session wrapper's gates.
+    /// Its workspace epoch is checked as an asserted precondition;
     /// this interface does not authenticate a supervisor-owned workspace session.
     /// Terminal retries recover the original result before freshness checks.
     ///

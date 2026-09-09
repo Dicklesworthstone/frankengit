@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 //! Original sealed-package API against real embedded authority and native objects.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::future::{Future, poll_fn};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::Poll;
 
 use fgit_admission::evidence::{DecisionEvidenceBodies, evidence_root, principal_snapshot_id};
 use fgit_admission::merge::native::{
@@ -23,6 +25,7 @@ use fgit_forge::aggregate::{ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::{ForgeEventBatch, NativeMerge};
 use fgit_forge::{MergeAttempt, MergeEffectPackage, RefIntent as ForgeRefIntent, WorkspaceEpoch};
 use fgit_git_object::ObjectType;
+use fgit_lab::{LabSchedule, StepId};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
 use fgit_object_fabric::ObjectKind;
 use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, PackWriteError};
@@ -509,6 +512,84 @@ fn snapshot(node: &OneNode) -> fgit_node::MaterializedAdmission {
         .unwrap()
 }
 
+#[derive(Debug)]
+struct CallerPoll {
+    schedule_position: usize,
+    caller: usize,
+    pending: bool,
+    other_pending: bool,
+}
+
+/// Schedule caller-future polls over the real node/store. The file-backed
+/// authority and its runtime own their internal I/O interleaving and wakes.
+/// A round polls each unfinished future once and never self-wakes or spins.
+fn poll_original_merges(
+    node: &OneNode,
+    contexts: &[AdmissionContext; 2],
+    packages: &[Package; 2],
+    schedule: &LabSchedule,
+) -> ([TerminalOutcome; 2], Vec<CallerPoll>) {
+    let requests = [node.request_context(), node.request_context()];
+    let sealed = [packages[0].sealed(), packages[1].sealed()];
+    let mut futures = [
+        Box::pin(node.admit_merge_durable_in(
+            &requests[0],
+            &contexts[0],
+            &sealed[0],
+            AdmissionLimits::default(),
+        )),
+        Box::pin(node.admit_merge_durable_in(
+            &requests[1],
+            &contexts[1],
+            &sealed[1],
+            AdmissionLimits::default(),
+        )),
+    ];
+    let mut cursor = schedule.cursor();
+    let mut outcomes = [None, None];
+    let mut observed_pending = [false; 2];
+    let mut polls = Vec::new();
+    let results = node.runtime().block_on(poll_fn(|cx| {
+        for _ in 0..2 {
+            let schedule_position = cursor.position();
+            let caller = match cursor
+                .next_step()
+                .expect("bounded caller-poll schedule exhausted")
+                .as_str()
+            {
+                "merge-a" => 0,
+                "merge-b" => 1,
+                _ => unreachable!("closed two-caller schedule"),
+            };
+            if outcomes[caller].is_some() {
+                continue;
+            }
+            let other = 1 - caller;
+            let other_pending = observed_pending[other] && outcomes[other].is_none();
+            let result = futures[caller].as_mut().poll(cx);
+            let pending = result.is_pending();
+            polls.push(CallerPoll {
+                schedule_position,
+                caller,
+                pending,
+                other_pending,
+            });
+            match result {
+                Poll::Pending => observed_pending[caller] = true,
+                Poll::Ready(result) => outcomes[caller] = Some(result),
+            }
+        }
+        if outcomes.iter().all(Option::is_some) {
+            Poll::Ready([outcomes[0].take().unwrap(), outcomes[1].take().unwrap()])
+        } else {
+            Poll::Pending
+        }
+    }));
+    let terminals =
+        results.map(|result| result.expect("real concurrent admission returns a terminal outcome"));
+    (terminals, polls)
+}
+
 fn assert_unchanged_effects(
     before: &fgit_node::MaterializedAdmission,
     after: &fgit_node::MaterializedAdmission,
@@ -531,6 +612,271 @@ fn assert_unchanged_effects(
         before.basis().body().retention_root,
         after.basis().body().retention_root
     );
+}
+
+#[test]
+fn lab_scheduled_original_merges_overlap_on_real_authority_and_recover_one_winner() {
+    const MAX_POLL_ROUNDS: usize = 4096;
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for order in [["merge-a", "merge-b"], ["merge-b", "merge-a"]] {
+            let schedule = LabSchedule::round_robin(
+                order.into_iter().map(StepId::new).collect(),
+                MAX_POLL_ROUNDS,
+            )
+            .unwrap();
+            let scratch = Scratch::new();
+            let (mut node, _) = OneNode::init(config(&scratch.0, format)).unwrap();
+            node.bring_into_service(HeadGeneration::FIRST).unwrap();
+            let first = fixture(&node, &scratch.0, format, true);
+            let second_body = commit(
+                first.merged_tree,
+                &[first.target, first.source],
+                "competing reviewed merge\n",
+            );
+            let second_id = node
+                .put_git_object(GitObjectKind::Commit, second_body.clone())
+                .unwrap()
+                .identity();
+            let second = Fixture {
+                candidate: second_id,
+                candidate_body: second_body,
+                ..first.clone()
+            };
+            assert_ne!(first.candidate, second.candidate);
+            let fixtures = [first, second];
+            let contexts = [
+                context(format, b"concurrent-original-a"),
+                context(format, b"concurrent-original-b"),
+            ];
+            let before = snapshot(&node);
+            let request = node.request_context();
+            let earlier = node
+                .runtime()
+                .block_on(node.snapshot_history_in(&request))
+                .unwrap();
+            let packages = [
+                exact_package(&node, &fixtures[0], &contexts[0]),
+                exact_package(&node, &fixtures[1], &contexts[1]),
+            ];
+            assert_eq!(
+                packages[0].effect.event.aggregate,
+                packages[1].effect.event.aggregate
+            );
+            assert_eq!(
+                packages[0].attempt.source_tip,
+                packages[1].attempt.source_tip
+            );
+            assert_eq!(
+                packages[0].attempt.target_tip,
+                packages[1].attempt.target_tip
+            );
+            assert_eq!(
+                snapshot(&node).basis(),
+                before.basis(),
+                "both packages use one real predecessor"
+            );
+            let originals = [
+                seal_attempt_for(&contexts[0], &packages[0].sealed()).unwrap(),
+                seal_attempt_for(&contexts[1], &packages[1].sealed()).unwrap(),
+            ];
+            let transactions = originals
+                .each_ref()
+                .map(|attempt| attempt.derive().unwrap().0);
+            assert_ne!(transactions[0], transactions[1]);
+            let (terminals, polls) = poll_original_merges(&node, &contexts, &packages, &schedule);
+            for caller in 0..2 {
+                assert!(
+                    polls
+                        .iter()
+                        .any(|poll| poll.caller == caller && poll.pending),
+                    "caller {caller} never suspended; this run cannot establish overlap: {format:?} {order:?} {polls:?}"
+                );
+                assert!(
+                    polls
+                        .iter()
+                        .any(|poll| poll.caller == caller && poll.other_pending),
+                    "caller {caller} was never polled beside a pending peer: {format:?} {order:?} {polls:?}"
+                );
+            }
+            for poll in &polls {
+                let expected = if poll.caller == 0 {
+                    "merge-a"
+                } else {
+                    "merge-b"
+                };
+                assert_eq!(schedule.order()[poll.schedule_position].as_str(), expected);
+                assert!(poll.schedule_position < 2 * MAX_POLL_ROUNDS);
+            }
+            // Caller polling order does not choose physical disk-thread order.
+            // Observe the winner from the real authority's terminal outcomes.
+            let winner = match (&terminals[0].outcome, &terminals[1].outcome) {
+                (
+                    DecisionOutcome::Committed { .. },
+                    DecisionOutcome::Refused {
+                        code: RefusalCode::TargetRefMoved,
+                        ..
+                    },
+                ) => 0,
+                (
+                    DecisionOutcome::Refused {
+                        code: RefusalCode::TargetRefMoved,
+                        ..
+                    },
+                    DecisionOutcome::Committed { .. },
+                ) => 1,
+                _ => panic!(
+                    "expected one real commit and one typed loser: {format:?} {order:?} {terminals:?}"
+                ),
+            };
+            let loser = 1 - winner;
+            assert!(terminals[winner].decision_sequence < terminals[loser].decision_sequence);
+            let DecisionOutcome::Committed {
+                repository_commit_id,
+            } = terminals[winner].outcome
+            else {
+                unreachable!("winner classified above");
+            };
+            let after = snapshot(&node);
+            let head = after.basis().body();
+            assert_eq!(
+                head.generation,
+                before
+                    .basis()
+                    .body()
+                    .generation
+                    .next()
+                    .unwrap()
+                    .next()
+                    .unwrap()
+            );
+            assert_eq!(
+                after.snapshot().refs[&main_ref()],
+                fixtures[winner].candidate
+            );
+            assert_eq!(after.snapshot().refs[&topic_ref()], fixtures[winner].source);
+            assert_eq!(after.snapshot().head_target, before.snapshot().head_target);
+            assert_eq!(head.retention_root, before.basis().body().retention_root);
+            assert_ne!(head.ref_root, before.basis().body().ref_root);
+            assert_ne!(
+                head.forge_position_root,
+                before.basis().body().forge_position_root
+            );
+            assert_ne!(head.outbox_root, before.basis().body().outbox_root);
+            assert_eq!(head.latest_committed_rcr_id, Some(repository_commit_id));
+            let event_root = evidence_root(&ForgeEventBatch::of_one(
+                packages[winner].effect.event.clone(),
+            ))
+            .unwrap();
+            let delivery_key = derive_outbox_delivery_key(OutboxDeliveryIdentityInput::new(
+                repository(),
+                AsciiSlug::from_static("forge-event"),
+                AsciiSlug::from_static("forge-projection"),
+                event_root,
+                transactions[winner],
+                before.basis().body().latest_committed_rcr_id,
+            ))
+            .unwrap();
+            assert_eq!(
+                after.snapshot().outbox,
+                BTreeMap::from([(OutboxDeliveryKey::new(delivery_key), event_root)])
+            );
+            assert_eq!(
+                after.snapshot().forge_positions,
+                BTreeMap::from([(
+                    ForgeStreamId::new(AsciiSlug::from_static("pull-request/1")),
+                    ForgeStreamPosition::new(1)
+                ),])
+            );
+            let request = node.request_context();
+            let history = node
+                .runtime()
+                .block_on(node.snapshot_history_in(&request))
+                .unwrap();
+            assert_eq!(&history[..earlier.len()], earlier.as_slice());
+            let published = &history[earlier.len()..];
+            assert_eq!(
+                published.len(),
+                2,
+                "only the winning merge and losing refusal advance authority"
+            );
+            assert_eq!(
+                published[0].forge_events,
+                vec![packages[winner].effect.event.clone()]
+            );
+            assert_eq!(published[0].batch.committed_rcrs.len(), 1);
+            assert!(published[1].forge_events.is_empty());
+            assert!(published[1].ref_updates.is_empty());
+            assert!(published[1].batch.committed_rcrs.is_empty());
+            let record = &published[0].batch.committed_rcrs[0];
+            assert_eq!(record.tx_id, transactions[winner]);
+            assert_eq!(
+                record.canonical_request_digest,
+                fgit_authority::canonical_request_digest(&originals[winner].request).unwrap()
+            );
+            assert_eq!(record.resulting_ref_root, head.ref_root);
+            assert_eq!(
+                record.resulting_forge_position_root,
+                head.forge_position_root
+            );
+            assert_eq!(record.forge_event_batch_root, event_root);
+            assert_eq!(
+                record.invariant_evidence_root,
+                packages[winner].evidence.invariant_evidence_root
+            );
+            assert_eq!(
+                record.outbox_effect_root,
+                packages[winner].evidence.outbox_effect_root
+            );
+            for batch in published {
+                assert_eq!(batch.batch.resulting_outbox_root, head.outbox_root);
+            }
+            let decisions: Vec<_> = published
+                .iter()
+                .flat_map(|entry| &entry.batch.decisions)
+                .collect();
+            assert_eq!(decisions.len(), 2);
+            for caller in 0..2 {
+                let decision = decisions
+                    .iter()
+                    .find(|decision| decision.tx_id == transactions[caller])
+                    .unwrap();
+                assert_eq!(decision.outcome, terminals[caller].outcome);
+                assert_eq!(
+                    decision.decision_sequence,
+                    terminals[caller].decision_sequence
+                );
+                assert_eq!(
+                    seal_attempt_for(&contexts[caller], &packages[caller].sealed()).unwrap(),
+                    originals[caller]
+                );
+                assert_eq!(
+                    apply(&node, &contexts[caller], &packages[caller]).unwrap(),
+                    terminals[caller]
+                );
+            }
+            assert_eq!(snapshot(&node).basis(), after.basis());
+            node.shutdown().unwrap();
+
+            let mut reopened = OneNode::open_existing(config(&scratch.0, format)).unwrap();
+            reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
+            for caller in 0..2 {
+                assert_eq!(
+                    apply(&reopened, &contexts[caller], &packages[caller]).unwrap(),
+                    terminals[caller]
+                );
+            }
+            assert_eq!(snapshot(&reopened).basis(), after.basis());
+            let request = reopened.request_context();
+            assert_eq!(
+                reopened
+                    .runtime()
+                    .block_on(reopened.snapshot_history_in(&request))
+                    .unwrap(),
+                history
+            );
+            reopened.shutdown().unwrap();
+        }
+    }
 }
 
 #[test]
