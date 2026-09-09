@@ -280,6 +280,17 @@ a strong destination must durably suppress duplicate effects. Weak
 idempotency is refused before transport access. This is not a claim of one
 physical request or support for arbitrary webhook destinations.
 
+The file-backed process-death matrix interrupts native admission before its
+first authority write and after awaited event, forge-position, obligation and
+outbox-state writes, in both Git object formats. It checks the intercepted
+bytes after reopening, their exact reuse on retry, and publication through one
+coupled RCR. Candidate Git objects are already staged before this matrix starts;
+the first-write case concerns admission, not upload. Separate cases exit before
+and after the authority CAS. Receiver tests exit after persisted dispatch but
+before any receiver filesystem effect, and after the receiver's durable effect
+but before acknowledgement publication. Recovery verifies committed dispatch
+history and probes the destination before deciding whether to send.
+
 The embedded authority store is append-only for these immutable bodies and
 exposes no deletion operation. Its retained decision history keeps progress,
 effects, receipts, and payload commitments reachable. This profile does not

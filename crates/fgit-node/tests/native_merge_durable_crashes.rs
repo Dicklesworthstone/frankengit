@@ -10,7 +10,7 @@ use std::{fs, process};
 
 use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_objects};
 use fgit_admission::merge::native::{
-    NativeMergeIntent, NativeMergeProjection, admit_native_merge_async,
+    NativeMergeIntent, NativeMergeProjection, admit_native_merge_async, delivery,
 };
 use fgit_admission::{
     AdmissionContext, AdmissionLimits, AdmissionSnapshot, AsyncAdmissionProjection,
@@ -23,7 +23,10 @@ use fgit_authority::{
     TerminalOutcome,
 };
 use fgit_chronicle::PublicationBasis;
-use fgit_codec::RepositoryAuthorityHeadBody;
+use fgit_codec::{
+    CanonicalForgePositionState, CanonicalOutboxEffectState, CanonicalOutboxState, DecodeLimits,
+    RepositoryAuthorityHeadBody, decode_body,
+};
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::aggregate::{ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::{ForgeEventBatch, NativeMerge};
@@ -46,29 +49,91 @@ use fsqlite_types::cx::Cx;
 use fgit_authority_fsqlite::FsqliteAuthorityStore;
 
 const CHILD_ROOT: &str = "FGIT_ASA3_NATIVE_CAS_CRASH_ROOT";
+const CHILD_POINT: &str = "FGIT_ASA3_NATIVE_CRASH_POINT";
+const CHILD_FORMAT: &str = "FGIT_ASA3_NATIVE_CRASH_FORMAT";
 const MERGE_KEY: &[u8] = b"native-durable-crash-merge";
 const STORE_INSTANCE: StoreInstanceId = StoreInstanceId::from_raw(203);
+// These two production namespaces are private to native::storage.
+const EVENT_NAMESPACE: &[u8] = b"frankengit/admission/forge-event-batch/v1/";
+const POSITION_NAMESPACE: &[u8] = b"frankengit/admission/forge-position-state/v1/";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CrashPoint {
+    BeforeAdmissionStaging,
+    AfterEvent,
+    AfterPosition,
+    AfterOutboxEffect,
+    AfterOutboxState,
     BeforeCas,
     AfterCas,
 }
 impl CrashPoint {
+    const STAGING: [Self; 5] = [
+        Self::BeforeAdmissionStaging,
+        Self::AfterEvent,
+        Self::AfterPosition,
+        Self::AfterOutboxEffect,
+        Self::AfterOutboxState,
+    ];
+
     const fn exit_code(self) -> i32 {
         match self {
             Self::BeforeCas => 82,
             Self::AfterCas => 83,
+            Self::BeforeAdmissionStaging => 84,
+            Self::AfterEvent => 85,
+            Self::AfterPosition => 86,
+            Self::AfterOutboxEffect => 87,
+            Self::AfterOutboxState => 88,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::BeforeAdmissionStaging => "before-admission-staging",
+            Self::AfterEvent => "after-event",
+            Self::AfterPosition => "after-position",
+            Self::AfterOutboxEffect => "after-outbox-effect",
+            Self::AfterOutboxState => "after-outbox-state",
+            Self::BeforeCas => "before-cas",
+            Self::AfterCas => "after-cas",
+        }
+    }
+
+    fn matches_staged_body(self, key: &ImmutableKey, body: &[u8]) -> bool {
+        match self {
+            Self::AfterEvent => {
+                key.as_bytes().starts_with(EVENT_NAMESPACE)
+                    && decode_body::<ForgeEventBatch>(body, DecodeLimits::DEFAULT).is_ok()
+            }
+            Self::AfterPosition => key.as_bytes().starts_with(POSITION_NAMESPACE),
+            Self::AfterOutboxEffect => key.as_bytes().starts_with(delivery::EFFECT_NAMESPACE),
+            Self::AfterOutboxState => key.as_bytes().starts_with(delivery::OUTBOX_NAMESPACE),
+            Self::BeforeAdmissionStaging | Self::BeforeCas | Self::AfterCas => false,
         }
     }
 }
 
-/// Abruptly exits at the actual async authority boundary, after every candidate
-/// body has been awaited by the production native driver. AfterCas exits only
-/// when the real backend returned its successful atomic publication receipt.
+/// Abruptly exits before the first admission write, after selected successful
+/// immutable writes, or around the actual atomic publication operation.
 struct CrashAuthority {
     inner: FsqliteAuthorityStore,
     point: CrashPoint,
+    observation_root: PathBuf,
+}
+
+impl CrashAuthority {
+    fn exit_at_write(&self, key: &ImmutableKey, body: &[u8]) -> ! {
+        // The parent consumes these exact intercepted arguments to check the
+        // reopened database. They are test observations, never publication input.
+        fs::write(
+            self.observation_root.join("interrupted-key"),
+            key.as_bytes(),
+        )
+        .unwrap();
+        fs::write(self.observation_root.join("interrupted-body"), body).unwrap();
+        process::exit(self.point.exit_code());
+    }
 }
 
 impl AsyncAuthorityStore for CrashAuthority {
@@ -85,7 +150,25 @@ impl AsyncAuthorityStore for CrashAuthority {
         key: &ImmutableKey,
         body: &[u8],
     ) -> Result<PutOutcome, AuthorityFailure> {
-        AsyncAuthorityStore::put_if_absent(&self.inner, cx, key, body).await
+        if self.point == CrashPoint::BeforeAdmissionStaging {
+            // Candidate Git objects were imported by the parent. This is the
+            // FIRST authority write of this admission, before binding or sealing.
+            assert!(
+                key.as_bytes()
+                    .starts_with(fgit_authority::IDEMPOTENCY_BINDING_KEY_PREFIX)
+            );
+            self.exit_at_write(key, body);
+        }
+        let result = AsyncAuthorityStore::put_if_absent(&self.inner, cx, key, body).await;
+        if self.point.matches_staged_body(key, body)
+            && matches!(
+                &result,
+                Ok(PutOutcome::Created | PutOutcome::IdenticalRetry)
+            )
+        {
+            self.exit_at_write(key, body);
+        }
+        result
     }
     async fn read_immutable(
         &self,
@@ -141,7 +224,7 @@ impl AsyncAuthorityStore for CrashAuthority {
             witness,
         )
         .await;
-        if matches!(&result, Ok(CasOutcome::Committed(_))) {
+        if self.point == CrashPoint::AfterCas && matches!(&result, Ok(CasOutcome::Committed(_))) {
             process::exit(self.point.exit_code());
         }
         result
@@ -451,11 +534,14 @@ fn prepare(root: &Path, objects: &Objects) -> RepositoryAuthorityHeadBody {
     head
 }
 
-fn child(root: &Path, format: GitHashAlgorithm, point: CrashPoint) -> ! {
-    let mut node = OneNode::open_existing(config(root, format)).unwrap();
-    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+fn database_context(node: &OneNode) -> Cx {
     let cx = Cx::new();
     cx.set_native_cx(node.runtime().request_cx(BudgetClass::Database));
+    cx
+}
+
+fn open_authority(node: &OneNode, root: &Path) -> (FsqliteAuthorityStore, Cx) {
+    let cx = database_context(node);
     let inner = node
         .runtime()
         .block_on(FsqliteAuthorityStore::open(
@@ -465,7 +551,18 @@ fn child(root: &Path, format: GitHashAlgorithm, point: CrashPoint) -> ! {
             AuthorityLimits::default(),
         ))
         .unwrap();
-    let authority = CrashAuthority { inner, point };
+    (inner, cx)
+}
+
+fn child(root: &Path, format: GitHashAlgorithm, point: CrashPoint) -> ! {
+    let mut node = OneNode::open_existing(config(root, format)).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let (inner, cx) = open_authority(&node, root);
+    let authority = CrashAuthority {
+        inner,
+        point,
+        observation_root: root.to_path_buf(),
+    };
     let materializer = DurableAdmissionMaterializer::new(CacheScope::new(
         OpaqueHandle::new(b"native-durable-crash").unwrap(),
     ));
@@ -485,6 +582,23 @@ fn child(root: &Path, format: GitHashAlgorithm, point: CrashPoint) -> ! {
         &projection,
     ));
     panic!("native admission did not reach requested process-crash boundary {point:?}: {result:?}");
+}
+
+fn run_selected_child() {
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let label = std::env::var(CHILD_POINT).unwrap();
+        let point = CrashPoint::STAGING
+            .into_iter()
+            .chain([CrashPoint::BeforeCas, CrashPoint::AfterCas])
+            .find(|point| point.label() == label)
+            .expect("parent selects one known crash boundary");
+        let format = match std::env::var(CHILD_FORMAT).unwrap().as_str() {
+            "sha1" => GitHashAlgorithm::Sha1,
+            "sha256" => GitHashAlgorithm::Sha256,
+            _ => panic!("parent selects one supported object format"),
+        };
+        child(&PathBuf::from(root), format, point);
+    }
 }
 
 fn apply(node: &OneNode, intent: &NativeMergeIntent) -> TerminalOutcome {
@@ -524,9 +638,10 @@ impl Drop for Scratch {
 }
 
 fn run_case(test: &str, point: CrashPoint, format: GitHashAlgorithm) {
-    if let Some(root) = std::env::var_os(CHILD_ROOT) {
-        child(&PathBuf::from(root), format, point);
-    }
+    assert!(
+        std::env::var_os(CHILD_ROOT).is_none(),
+        "child must not enter the parent matrix"
+    );
     let scratch = Scratch::new();
     let objects = Objects::new(format);
     let intent = objects.intent();
@@ -536,12 +651,20 @@ fn run_case(test: &str, point: CrashPoint, format: GitHashAlgorithm) {
         .arg(test)
         .arg("--nocapture")
         .env(CHILD_ROOT, &scratch.0)
+        .env(CHILD_POINT, point.label())
+        .env(
+            CHILD_FORMAT,
+            match format {
+                GitHashAlgorithm::Sha1 => "sha1",
+                GitHashAlgorithm::Sha256 => "sha256",
+            },
+        )
         .status()
         .unwrap();
     assert_eq!(
         status.code(),
         Some(point.exit_code()),
-        "the child must reach the exact real CAS boundary"
+        "the child must reach the exact real authority boundary: {point:?} {format:?}"
     );
     let mut node = OneNode::open_existing(config(&scratch.0, format)).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
@@ -550,8 +673,39 @@ fn run_case(test: &str, point: CrashPoint, format: GitHashAlgorithm) {
         .runtime()
         .block_on(node.materialize_admission_in(&request))
         .unwrap();
+    let (mut inspection_store, inspection_cx) = open_authority(&node, &scratch.0);
+    let interrupted_write = if CrashPoint::STAGING.contains(&point) {
+        let key = ImmutableKey::new(fs::read(scratch.0.join("interrupted-key")).unwrap()).unwrap();
+        let body = fs::read(scratch.0.join("interrupted-body")).unwrap();
+        let stored = node
+            .runtime()
+            .block_on(inspection_store.read_immutable(&inspection_cx, &key))
+            .unwrap();
+        if point == CrashPoint::BeforeAdmissionStaging {
+            assert_eq!(
+                stored,
+                ImmutableRead::Absent,
+                "first admission write did not run"
+            );
+        } else {
+            assert!(point.matches_staged_body(&key, &body));
+            assert_eq!(
+                stored,
+                ImmutableRead::Present(body.clone()),
+                "the awaited body survives process death unchanged"
+            );
+        }
+        Some((key, body))
+    } else {
+        None
+    };
     match point {
-        CrashPoint::BeforeCas => {
+        CrashPoint::BeforeAdmissionStaging
+        | CrashPoint::AfterEvent
+        | CrashPoint::AfterPosition
+        | CrashPoint::AfterOutboxEffect
+        | CrashPoint::AfterOutboxState
+        | CrashPoint::BeforeCas => {
             assert_eq!(
                 recovered.basis().body(),
                 &before,
@@ -640,6 +794,69 @@ fn run_case(test: &str, point: CrashPoint, format: GitHashAlgorithm) {
             .collect::<Vec<_>>(),
         vec![event_root]
     );
+    if let Some((key, body)) = interrupted_write {
+        let inspection_cx = database_context(&node);
+        assert_eq!(
+            node.runtime()
+                .block_on(inspection_store.read_immutable(&inspection_cx, &key))
+                .unwrap(),
+            ImmutableRead::Present(body.clone()),
+            "retry reuses the exact interrupted write's key and bytes"
+        );
+        let delivery = node
+            .runtime()
+            .block_on(delivery::read_in(
+                &inspection_store,
+                &inspection_cx,
+                selected.basis(),
+                &|| false,
+            ))
+            .unwrap();
+        assert_eq!(delivery.outbox.entries().len(), 1);
+        let entry = &delivery.outbox.entries()[0];
+        assert_eq!(entry.tx_id(), last.batch.decisions[0].tx_id);
+        assert_eq!(entry.payload_root(), event_root);
+        match point {
+            CrashPoint::BeforeAdmissionStaging => {
+                assert!(
+                    key.as_bytes()
+                        .starts_with(fgit_authority::IDEMPOTENCY_BINDING_KEY_PREFIX)
+                );
+            }
+            CrashPoint::AfterEvent => {
+                let staged: ForgeEventBatch = decode_body(&body, DecodeLimits::DEFAULT).unwrap();
+                assert_eq!(staged.events, vec![intent.event().clone()]);
+                assert_eq!(
+                    fgit_admission::evidence::evidence_root(&staged).unwrap(),
+                    event_root
+                );
+            }
+            CrashPoint::AfterPosition => {
+                let staged: CanonicalForgePositionState =
+                    decode_body(&body, DecodeLimits::DEFAULT).unwrap();
+                assert_eq!(staged, delivery.forge);
+                assert_eq!(staged.root().unwrap(), after.forge_position_root);
+            }
+            CrashPoint::AfterOutboxEffect => {
+                let staged: CanonicalOutboxEffectState =
+                    decode_body(&body, DecodeLimits::DEFAULT).unwrap();
+                assert_eq!(staged.repository_id(), repository());
+                assert_eq!(staged.tx_id(), entry.tx_id());
+                assert_eq!(staged.payload_root(), event_root);
+                assert_eq!(staged.delivery_key(), entry.delivery_key());
+                assert_eq!(staged.root().unwrap(), entry.effect_state_root());
+            }
+            CrashPoint::AfterOutboxState => {
+                let staged: CanonicalOutboxState =
+                    decode_body(&body, DecodeLimits::DEFAULT).unwrap();
+                assert_eq!(staged, delivery.outbox);
+                assert_eq!(staged.root().unwrap(), after.outbox_root);
+            }
+            CrashPoint::BeforeCas | CrashPoint::AfterCas => {
+                unreachable!("only staging points record writes")
+            }
+        }
+    }
     assert_eq!(apply(&node, &intent), committed);
     let request = node.request_context();
     assert_eq!(
@@ -650,11 +867,16 @@ fn run_case(test: &str, point: CrashPoint, format: GitHashAlgorithm) {
             .body(),
         &after
     );
+    let close_cx = database_context(&node);
+    node.runtime()
+        .block_on(inspection_store.close(&close_cx))
+        .unwrap();
     node.shutdown().unwrap();
 }
 
 #[test]
 fn native_merge_file_backed_prepare_crash_retries_without_half_publication() {
+    run_selected_child();
     run_case(
         "native_merge_file_backed_prepare_crash_retries_without_half_publication",
         CrashPoint::BeforeCas,
@@ -664,9 +886,26 @@ fn native_merge_file_backed_prepare_crash_retries_without_half_publication() {
 
 #[test]
 fn native_merge_file_backed_post_cas_crash_recovers_exact_outcome() {
+    run_selected_child();
     run_case(
         "native_merge_file_backed_post_cas_crash_recovers_exact_outcome",
         CrashPoint::AfterCas,
         GitHashAlgorithm::Sha256,
     );
+}
+
+#[test]
+fn native_merge_file_backed_staging_crashes_reuse_exact_bodies_and_publish_once() {
+    // Dispatch once BEFORE entering the parent matrix: every subprocess runs
+    // exactly its selected point and format, never another subprocess or matrix.
+    run_selected_child();
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        for point in CrashPoint::STAGING {
+            run_case(
+                "native_merge_file_backed_staging_crashes_reuse_exact_bodies_and_publish_once",
+                point,
+                format,
+            );
+        }
+    }
 }

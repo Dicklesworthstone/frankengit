@@ -388,6 +388,7 @@ fn invalid_parent_shape_and_reused_terminal_aggregate_do_not_move_refs() {
 /// Only that final name is the durable idempotency boundary under test.
 struct DiskDestination {
     root: PathBuf,
+    kill_before_delivery: bool,
     kill_after_delivery: bool,
     strong: bool,
     probes: usize,
@@ -477,6 +478,11 @@ impl OutboxDestination<Cx> for DiskDestination {
     }
     async fn deliver<'a>(&'a mut self, _cx: &'a Cx, request: &'a DeliveryRequest<'_>, _attempt: u32)
         -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
+        if self.kill_before_delivery {
+            // The real worker has published its dispatch marker. Exit before
+            // this receiver performs any filesystem effect or observes data.
+            std::process::exit(80);
+        }
         self.sends += 1;
         let bytes = self.request_bytes(request)?;
         let verdict = self.publish_receipt(request.key, &bytes)?;
@@ -488,7 +494,7 @@ impl OutboxDestination<Cx> for DiskDestination {
 }
 
 fn destination(root: &Path) -> DiskDestination {
-    DiskDestination { root: root.join("destination"), kill_after_delivery: false, strong: true, probes: 0, sends: 0 }
+    DiskDestination { root: root.join("destination"), kill_before_delivery: false, kill_after_delivery: false, strong: true, probes: 0, sends: 0 }
 }
 
 #[test]
@@ -606,6 +612,145 @@ fn exhausted_background_budget_refuses_before_effect_and_fresh_worker_reconciles
     assert_eq!(acknowledged.state(), ObligationState::Acknowledged);
     assert_eq!((consumer.probes, consumer.sends), (1, 1));
     assert_eq!(refs(&node)[&main_ref()], f.candidate);
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn canonical_outbox_recovers_after_dispatch_crash_before_receiver_effect() {
+    use fgit_authority::{AuthorityLimits, StoreInstanceId};
+    use fgit_authority_fsqlite::FsqliteAuthorityStore;
+    use fgit_resource::ReconcileState;
+    use fgit_runtime::BudgetClass;
+
+    const CHILD_ROOT: &str = "FGIT_ASA3_BEFORE_DELIVERY_CRASH_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let (mut node, _) = OneNode::init(config(&root, GitHashAlgorithm::Sha1)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let f = fixture(&node, &root, GitHashAlgorithm::Sha1, true);
+        apply(
+            &node,
+            &intent(&f, 1, ExpectedVersion::NewStream),
+            b"before-delivery-crash",
+        )
+        .unwrap();
+        let key = delivery_key(&node);
+        let mut consumer = destination(&root);
+        consumer.kill_before_delivery = true;
+        let result = deliver(&node, key, &mut consumer);
+        panic!("child must exit after dispatch publication and before receiver effect: {result:?}");
+    }
+    let scratch = Scratch::new();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("canonical_outbox_recovers_after_dispatch_crash_before_receiver_effect")
+        .arg("--nocapture")
+        .env(CHILD_ROOT, &scratch.0)
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(80),
+        "child reached the receiver entry before any effect"
+    );
+    let mut node = OneNode::open_existing(config(&scratch.0, GitHashAlgorithm::Sha1)).unwrap();
+    node.bring_into_service(HeadGeneration::FIRST).unwrap();
+    let request = node.request_context();
+    let before = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&request))
+        .unwrap();
+    let key = delivery_key(&node);
+    let mut consumer = destination(&scratch.0);
+    assert!(
+        !consumer.root.exists(),
+        "the killed receiver performed no filesystem effect"
+    );
+
+    // Independently read the actual committed progress from the same database,
+    // using its authenticated basis rather than assuming the exit code proves
+    // that dispatch responsibility survived the crash.
+    let cx = Cx::new();
+    cx.set_native_cx(node.runtime().request_cx(BudgetClass::Database));
+    let mut authority = node
+        .runtime()
+        .block_on(FsqliteAuthorityStore::open(
+            &cx,
+            scratch.0.join("node/authority.fsqlite").to_str().unwrap(),
+            StoreInstanceId::from_raw(1),
+            AuthorityLimits::default(),
+        ))
+        .unwrap();
+    let progress = node
+        .runtime()
+        .block_on(fgit_admission::merge::native::history::latest_progress(
+            &authority,
+            &cx,
+            before.basis(),
+            key,
+            &|| cx.checkpoint().is_err(),
+        ))
+        .unwrap()
+        .expect("canonical dispatch progress survives process death");
+    assert!(progress.dispatch_in_flight());
+    // Recovery begins with the shared machine's attempt-one absence probe;
+    // its NotDelivered observation advances the first dispatch to attempt two.
+    assert_eq!(progress.state(), ReconcileState::Pending { attempt: 2 });
+    assert_eq!(progress.attempt(), 2);
+    assert!(progress.observation().is_none());
+    node.runtime().block_on(authority.close(&cx)).unwrap();
+
+    let acknowledged = deliver(&node, key, &mut consumer).unwrap();
+    assert_eq!(acknowledged.state(), ObligationState::Acknowledged);
+    assert_eq!(
+        (consumer.probes, consumer.sends),
+        (1, 1),
+        "restart probes absence before exactly one physical delivery"
+    );
+    let request = node.request_context();
+    let after = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&request))
+        .unwrap();
+    assert_eq!(
+        before.basis().body().ref_root,
+        after.basis().body().ref_root
+    );
+    assert_eq!(
+        before.basis().body().forge_position_root,
+        after.basis().body().forge_position_root
+    );
+    assert_eq!(
+        before.basis().body().retention_root,
+        after.basis().body().retention_root
+    );
+    assert_ne!(
+        before.basis().body().outbox_root,
+        after.basis().body().outbox_root
+    );
+    assert_eq!(fs::read_dir(&consumer.root).unwrap().count(), 1);
+    let history = node
+        .runtime()
+        .block_on(node.snapshot_history_in(&request))
+        .unwrap();
+    assert_eq!(
+        history.iter().flat_map(|batch| &batch.forge_events).count(),
+        1
+    );
+    assert_eq!(deliver(&node, key, &mut consumer).unwrap(), acknowledged);
+    assert_eq!(
+        (consumer.probes, consumer.sends),
+        (1, 1),
+        "terminal retry performs no transport work"
+    );
+    let request = node.request_context();
+    assert_eq!(
+        node.runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap()
+            .basis(),
+        after.basis()
+    );
     node.shutdown().unwrap();
 }
 
