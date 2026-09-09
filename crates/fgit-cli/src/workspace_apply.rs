@@ -6,11 +6,13 @@
 
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_node::{NodeConfig, OneNode};
-use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId,
+use fgit_types::{DecisionOutcome, GitOid, HeadGeneration, PrincipalId,
     RefName, RepositoryId, TenantId, TxId};
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(test)]
+use std::{fs, io::Write};
+
+use super::publication_support::{describe, parse_oid, quote, read_bundle, set_once, write_terminal_receipt};
 
 const MAX_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
 const USAGE: &str = "usage: fg workspace apply <storage-root> <tenant-id> <repository-id> <ref> <bundle-path> --trusted-local --principal <principal-id> --idempotency-key <key> --expected-base <native-oid> --expected-commit <reviewed-native-oid>";
@@ -55,8 +57,6 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
         }
     };
     let receipt = render_receipt(&options, tx_id, &terminal, cleanup.as_deref());
-    // Always attempt to report the canonical decision, including on cleanup
-    // failure and for a canonical refusal (which exits nonzero).
     if let Err(error) = write_terminal_receipt(&mut std::io::stdout().lock(), &receipt, tx_id, &terminal) {
         return Err(cleanup.as_ref().map_or_else(|| error.clone(),
             |cleanup| format!("{error}; node shutdown also failed: {cleanup}")));
@@ -97,7 +97,6 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "--principal" => set_once(&mut principal,
                 PrincipalId::from_hex(value).map_err(|error| error.to_string())?, flag)?,
             "--idempotency-key" => {
-                // Use the identity owner's bound; never print the key back.
                 IdempotencyKey::new(value.as_bytes().to_vec())
                     .map_err(|_| "invalid bounded idempotency key".to_owned())?;
                 set_once(&mut key, value.as_bytes().to_vec(), flag)?;
@@ -123,63 +122,6 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     })
 }
 
-fn set_once<T>(slot: &mut Option<T>, value: T, field: &str) -> Result<(), String> {
-    if slot.is_some() { return Err(format!("duplicate {field}")); }
-    *slot = Some(value);
-    Ok(())
-}
-
-fn parse_oid(text: &str) -> Result<GitOid, String> {
-    let format = match text.len() {
-        40 => GitHashAlgorithm::Sha1,
-        64 => GitHashAlgorithm::Sha256,
-        _ => return Err("expected a 40- or 64-character native Git object ID".to_owned()),
-    };
-    let id = GitOid::from_hex(format, text).map_err(|error| error.to_string())?;
-    if id.is_zero() { return Err("zero is not a commit ID".to_owned()); }
-    Ok(id)
-}
-
-fn read_bundle(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
-    // This local-operator profile requires a stable regular artifact under the
-    // operator's control. It is not an adversarial host-filesystem boundary.
-    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-    if !metadata.is_file() || metadata.len() > limit as u64 {
-        return Err("candidate bundle must be a bounded regular file, not a symlink or device".to_owned());
-    }
-    let mut file = File::open(path).map_err(|error| error.to_string())?;
-    let opened = file.metadata().map_err(|error| error.to_string())?;
-    if !opened.is_file() || opened.len() > limit as u64 {
-        return Err("candidate bundle changed to a non-regular or oversized file".to_owned());
-    }
-    let mut bytes = Vec::new();
-    let mut chunk = [0u8; 16 * 1024];
-    loop {
-        let n = match file.read(&mut chunk) {
-            Ok(n) => n,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error.to_string()),
-        };
-        if n == 0 { break; }
-        if n > limit.saturating_sub(bytes.len()) {
-            return Err("candidate bundle grew beyond its input limit".to_owned());
-        }
-        bytes.try_reserve(n).map_err(|_| "candidate bundle allocation refused".to_owned())?;
-        bytes.extend_from_slice(&chunk[..n]);
-    }
-    if bytes.is_empty() { return Err("candidate bundle is empty".to_owned()); }
-    Ok(bytes)
-}
-
-fn describe(tx_id: TxId, terminal: &TerminalOutcome) -> String {
-    match terminal.outcome {
-        DecisionOutcome::Committed { repository_commit_id } =>
-            format!("transaction {tx_id} is committed as {repository_commit_id}"),
-        DecisionOutcome::Refused { code, refusal_record_id } =>
-            format!("transaction {tx_id} has canonical refusal {code:?} ({refusal_record_id})"),
-    }
-}
-
 fn render_receipt(options: &Options, tx_id: TxId, terminal: &TerminalOutcome, cleanup: Option<&str>) -> String {
     let (status, published, rcr, code, refusal) = match terminal.outcome {
         DecisionOutcome::Committed { repository_commit_id } =>
@@ -191,27 +133,6 @@ fn render_receipt(options: &Options, tx_id: TxId, terminal: &TerminalOutcome, cl
     let cleanup_text = cleanup.map_or_else(|| "null".to_owned(), quote);
     format!("{{\"type\":\"workspace_publication\",\"outcome\":\"{status}\",\"published_to_repository\":{published},\"tx_id\":{},\"decision_sequence\":{},\"repository_commit_id\":{rcr},\"refusal_code\":{code},\"refusal_record_id\":{refusal},\"expected_base\":\"{}\",\"candidate_commit\":\"{}\",\"reference_hex\":\"{reference}\",\"node_closed\":{},\"cleanup_error\":{cleanup_text}}}",
         quote(&tx_id.to_string()), terminal.decision_sequence.get(), options.base, options.candidate, cleanup.is_none())
-}
-
-fn write_terminal_receipt(
-    output: &mut impl Write, receipt: &str, tx_id: TxId, terminal: &TerminalOutcome,
-) -> Result<(), String> {
-    writeln!(output, "{receipt}").and_then(|()| output.flush()).map_err(|error|
-        format!("{}; receipt output failed: {error}", describe(tx_id, terminal)))
-}
-
-fn quote(value: &str) -> String {
-    let mut out = String::from("\"");
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if c <= '\u{1f}' => out.push_str(&format!("\\u{:04x}", u32::from(c))),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]
