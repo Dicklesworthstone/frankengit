@@ -50,7 +50,7 @@ impl OneNode {
 
     /// Exact same-path line ancestry, including second and later merge parents.
     /// A line range narrows returned data, never object authority. Missing or
-    /// malformed history cannot be reinterpretedted as an attribution boundary.
+    /// malformed history cannot be reinterpreted as an attribution boundary.
     pub async fn blame_source_in(
         &self, request: &NodeRequestContext, reference: &RefName, visibility: &RefVisibility,
         expected_head: Option<RepositoryAuthorityHeadId>, options: &BlameOptions,
@@ -85,7 +85,7 @@ impl OneNode {
             },
             selected: selected.selected_closure(),
             limits: ParseLimits { tree_reference_bytes: self.object_format.digest_len(),
-                max_tree_entries: limits.max_tree_entries, max_header_lines: limits.max_edges,
+                max_tree_entries: limits.max_tree_entries, max_header_lines: HistoryLimits::default().max_edges,
                 max_object_bytes: max_bytes, ..ParseLimits::default() },
             read_bytes: Cell::new(0), budget_failed: Cell::new(false),
         };
@@ -112,6 +112,11 @@ mod tests {
             assert_eq!(head, before.basis().id()); assert_eq!(first.tip, target);
             assert_eq!(first.total_commits, 2); assert_eq!(first.next_after, Some(1));
             assert_eq!(first.commits[0].id, target);
+            // The edge budget counts parent edges, not author/tree headers.
+            let (_, tight) = node.runtime().block_on(node.read_commit_history_in(&request, &reference,
+                &RefVisibility::new(), Some(head), LogOptions { limits: HistoryLimits {
+                    max_edges: 1, ..HistoryLimits::default() }, ..LogOptions::default() })).unwrap();
+            assert_eq!(tight.total_commits, 2);
             let (_, last) = node.runtime().block_on(node.read_commit_history_in(&request, &reference,
                 &RefVisibility::new(), Some(head), LogOptions { after: 1, ..LogOptions::default() })).unwrap();
             let base = last.commits[0].id; assert_ne!(base, incoming); assert_eq!(last.next_after, None);
