@@ -1,5 +1,7 @@
-//! Reviewed artifact -> coupled Ref + Forge + Outbox publication.
-//! No merge algorithm, Git subprocess, implicit approval or force path lives here.
+//! Native merge preparation and independently reviewed artifact publication.
+//! Preparation and Ref + Forge + Outbox publication remain separate commands.
+
+mod preparation;
 
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber};
@@ -28,7 +30,14 @@ struct Options {
 }
 
 pub(super) fn run(arguments: &[String]) -> Result<(), String> {
-    if arguments == ["--help"] || arguments == ["apply", "--help"] {
+    if arguments.first().is_some_and(|argument| argument == "prepare") {
+        return preparation::run(arguments);
+    }
+    if arguments == ["--help"] {
+        println!("{}\n\n{USAGE}", preparation::USAGE);
+        return Ok(());
+    }
+    if arguments == ["apply", "--help"] {
         println!("{USAGE}");
         return Ok(());
     }

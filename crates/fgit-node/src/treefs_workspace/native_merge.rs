@@ -66,11 +66,13 @@ impl OneNode {
 
     /// Apply an independently reviewed merge artifact through native admission.
     ///
-    /// The bundle must advertise exactly the reviewed target branch/candidate
-    /// and have exactly the target-before commit as its sole prerequisite. It
-    /// may include objects already selected by repository history. This bounded
-    /// profile shares the workspace bundle parser; unknown capabilities,
-    /// partial-clone and multi-ref/prerequisite bundles are not supported.
+    /// The bundle must advertise exactly the reviewed target branch/candidate.
+    /// Its prerequisite frontier must include target-before and may contain up
+    /// to 64 unique commits, all verified against authority-selected history.
+    /// This accommodates ordinary Git bundles listing target and base boundary
+    /// commits. Unknown capabilities, partial-clone and multi-ref bundles remain
+    /// unsupported; workspace apply separately retains its one-prerequisite
+    /// profile. Both operations use the same bounded parser and quarantine.
     ///
     /// The caller supplies all review coordinates, PR identity/version and the
     /// authenticated local principal independently of the artifact. A version

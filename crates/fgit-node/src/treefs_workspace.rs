@@ -1,6 +1,7 @@
 //! Authority-selected TreeFS input discovery over the production object fabric.
 
 mod candidate;
+mod merge_prepare;
 mod native_merge;
 mod outbox_delivery;
 mod publication;
@@ -49,6 +50,12 @@ pub enum NodeWorkspaceRefusal {
     IncompleteWorkspaceExportScope,
     /// The existing deterministic export engine refused the candidate.
     WorkspaceExport(fgit_treefs::ExportRefusal),
+    /// Native merge construction refused its bounded inputs or source.
+    MergePreparation(fgit_forge::preparation::PreparationError),
+    /// The independently checked generated merge failed native validation.
+    MergeValidation(fgit_admission::ProjectionFailure),
+    /// Packing a fully validated in-memory merge candidate failed.
+    MergePack(Box<fgit_pack::PackWriteError>),
     /// The untrusted candidate differs from its explicit review expectations
     /// or is outside the supported bounded single-parent bundle profile.
     InvalidWorkspaceCandidate(&'static str),

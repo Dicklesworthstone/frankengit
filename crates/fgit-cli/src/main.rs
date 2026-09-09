@@ -4,6 +4,7 @@ mod merge_apply;
 mod publication_support;
 #[cfg(target_os = "linux")]
 mod workspace;
+#[cfg(target_os = "linux")]
 mod workspace_apply;
 
 use std::process::ExitCode;
