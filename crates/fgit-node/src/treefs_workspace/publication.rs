@@ -4,11 +4,13 @@
 //! names the branch, expected old commit and reviewed new commit. This adapter
 //! binds the envelope to those expectations, then uses the production receive
 //! quarantine and basis-bound admission path. It does not run the tool again.
+//! The shared quarantine helper publishes nothing: a merge must continue into
+//! coupled forge admission, never through the ordinary source-only publisher.
 
 use super::{NodeWorkspaceRefusal, workspace_request_live};
 use crate::quarantine_validator::ProductionReceiveQuarantineHandoff;
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
-use fgit_admission::{AdmissionLimits, AdmissionResult};
+use fgit_admission::{AdmissionLimits, AdmissionResult, BasisBoundValidatedReceive};
 use fgit_authority::IdempotencyKey;
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body};
 use fgit_object_fabric::ObjectKind;
@@ -24,7 +26,7 @@ fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::InvalidWorkspaceCandidate(reason)
 }
 
-fn receive_error(error: impl Into<NodeReceiveTransportRefusal>) -> NodeWorkspaceRefusal {
+pub(super) fn receive_error(error: impl Into<NodeReceiveTransportRefusal>) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::WorkspacePublication(Box::new(error.into()))
 }
 
@@ -158,10 +160,49 @@ impl OneNode {
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
         let key = IdempotencyKey::new(idempotency_key.to_vec())
             .map_err(|_| invalid("invalid bounded idempotency key"))?;
-        // Local input is still re-offerable: reject unavailable publication
-        // before parsing/staging, rather than acting as a staging-only server.
         self.receive_publication_admitted().map_err(receive_error)?;
         self.push_quota.evaluate(&principal_id).map_err(receive_error)?;
+        let (validated, parse_limits) = self.quarantine_reviewed_bundle_in(
+            request, reference, expected_base, expected_candidate, input, &[],
+        ).await?;
+
+        // Quarantine is not permission to change the workspace contract:
+        // merging must use the distinct coupled forge admission continuation.
+        let candidate = self.read_git_object(expected_candidate)
+            .map_err(|error| NodeWorkspaceRefusal::WorkspaceCandidateRead(Box::new(error)))?;
+        if candidate.envelope().object_kind() != ObjectKind::Commit {
+            return Err(invalid("candidate must identify a commit"));
+        }
+        check_candidate_commit(candidate.payload(), expected_base, parse_limits)?;
+        drop(candidate);
+        if !workspace_request_live(request) {
+            return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
+        }
+        let session = LoopbackReceiveSession::authenticated(principal_id, key);
+        // No post-publication cancellation check may replace a known terminal.
+        self.admit_basis_bound_loopback_receive_durable_in(
+            request, &session, &validated, AdmissionLimits::default(),
+        ).await.map_err(receive_error)
+    }
+
+    /// Bind an untrusted bundle and stage verified objects, WITHOUT admitting
+    /// its source request. Callers enforce authentication, intake policy and
+    /// quota before entering. Only the caller's later canonical publication
+    /// chooses whether these objects belong to an ordinary update or a merge.
+    ///
+    /// The target prerequisite must belong to selected history, not just be
+    /// present on disk. Additional refs are disclosure guards, not freshness
+    /// checks: exact old/source conditions belong inside canonical admission
+    /// so terminal retries still recover after the repository advances.
+    pub(super) async fn quarantine_reviewed_bundle_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_base: GitOid,
+        expected_candidate: GitOid,
+        input: &[u8],
+        additional_visible_refs: &[RefName],
+    ) -> Result<(BasisBoundValidatedReceive, ParseLimits), NodeWorkspaceRefusal> {
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
@@ -169,11 +210,12 @@ impl OneNode {
         envelope.bind(self.object_format, reference, expected_base, expected_candidate)?;
         let materialized = self.materialize_admission_in(request).await
             .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
-        if materialized.snapshot().hidden_refs.hides(reference.as_bytes()) {
+        if materialized.snapshot().hidden_refs.hides(reference.as_bytes())
+            || additional_visible_refs.iter().any(|name|
+                materialized.snapshot().hidden_refs.hides(name.as_bytes()))
+        {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
-        // Only authenticated, selected history may supply prerequisite objects.
-        // Merely finding matching bytes in the object fabric is insufficient.
         if !materialized.selected_closure().closure().objects().contains(&expected_base) {
             return Err(invalid("prerequisite is outside the authority-selected history"));
         }
@@ -214,34 +256,16 @@ impl OneNode {
             .map_err(receive_error)?;
         let mut receive = ReceivePack::new(context).map_err(receive_error)?;
         receive.push_bytes(&prefix).map_err(receive_error)?;
-        // No second concatenated copy of the full input pack is constructed.
         receive.push_bytes(envelope.pack).map_err(receive_error)?;
         let mut handoff = ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
         let mut live = || workspace_request_live(request);
         receive.finish_with_handoff(&mut handoff, &mut live).map_err(receive_error)?;
         let validated = handoff.into_validated_receive().map_err(receive_error)?;
         drop(receive);
-
-        // Quarantine verified and staged the requested closure. Enforce the
-        // extra workspace contract BEFORE sealing/publication: this is a real
-        // commit with exactly the reviewed base as its one parent, not a tag,
-        // blob, root commit, unrelated history or caller-invented force move.
-        let candidate = self.read_git_object(expected_candidate)
-            .map_err(|error| NodeWorkspaceRefusal::WorkspaceCandidateRead(Box::new(error)))?;
-        if candidate.envelope().object_kind() != ObjectKind::Commit {
-            return Err(invalid("candidate must identify a commit"));
-        }
-        check_candidate_commit(candidate.payload(), expected_base, parse_limits)?;
-        drop(candidate);
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
-        let session = LoopbackReceiveSession::authenticated(principal_id, key);
-        // No post-publication cancellation check may replace a known terminal
-        // outcome with a misleading request-cancelled/non-commit response.
-        self.admit_basis_bound_loopback_receive_durable_in(
-            request, &session, &validated, AdmissionLimits::default(),
-        ).await.map_err(receive_error)
+        Ok((validated, parse_limits))
     }
 }
 
@@ -332,8 +356,6 @@ mod tests {
             let commit = |parents: &str| format!("tree {tree}\n{parents}author Test <t@example.invalid> 1 +0000\ncommitter Test <t@example.invalid> 1 +0000\n\nchange\n");
             let permitted = commit(&format!("parent {base}\n"));
             assert!(check_candidate_commit(permitted.as_bytes(), base, limits.clone()).is_ok());
-            // Preserve the existing StrictCreate epoch-zero divergence while
-            // the parent-shape assertions use an otherwise permitted commit.
             let epoch_zero = permitted.replace(" 1 +0000\n", " 0 +0000\n");
             assert!(matches!(check_candidate_commit(epoch_zero.as_bytes(), base, limits.clone()),
                 Err(NodeWorkspaceRefusal::InvalidWorkspaceCandidate("candidate is not a bounded strict Git commit"))));
