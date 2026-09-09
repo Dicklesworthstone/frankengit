@@ -2,9 +2,11 @@
 # family<TAB>canonical payload description
 authority-head	Repository identity, monotone generation, optional predecessor and tail positions, current authenticated roots, epochs, and optional checkpoint identity.
 decision-batch	Prepared-against head, first decision position, ordered terminal decisions and committed records, resulting roots and epochs, evidence root, and optional compaction link.
+forge-position-state	Repository identity and at most 16384 unique forge-stream keys in canonical encoded-key order, each binding a predecessor position, nonzero nonoverflowing event count, and event-batch root.
 hidden-ref-policy	Ordered raw hide-rule byte strings; order is semantic because the last matching rule wins.
 outbox-delivery-receipt	Repository, stable delivery key, destination, payload and exact predecessor effect-state roots, closed u16 disposition, and at most 4096 destination-evidence bytes; terminal dispositions require nonempty evidence.
 outbox-effect-state	Repository, stable delivery key, original transaction and payload identities; shared obligation lifecycle state, bounded ordinal, optional predecessor identity/state/event, and settlement evidence.
+outbox-state	Repository identity and at most 16384 unique delivery keys in canonical encoded-key order, each binding effect class, destination, payload root, original transaction, optional predecessor RCR, current effect-state root, and optional predecessor effect-state root.
 rcr	One committed repository transition: repository and transaction positions, principal and request bindings, and all ref, object, forge, policy, invariant, outbox, and retention roots.
 refusal-record	Transaction and seal identities, terminal decision position and code, policy epoch, bounded detail text, and refusal-evidence root.
 repository-configuration	Versioned repository configuration bytes: root-layout and object-format tags; schema 2 adds incarnation, minor 1 adds an optional hidden-ref-policy root, and minor 2 adds an optional exact capability-revocation-generation root.
