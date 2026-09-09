@@ -2,7 +2,7 @@
 //! in-memory test corpus, not a durable authority or a publication substitute.
 use std::collections::{BTreeMap, BTreeSet};
 use fgit_admission::ProjectionFailure;
-use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_objects, validate_workspace_objects};
+use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_commit_closure, validate_merge_objects, validate_workspace_objects};
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::event::NativeMerge;
 use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, PackWriteError};
@@ -101,5 +101,33 @@ fn merge_adapter_keeps_ordered_parents_and_common_ancestor_checks() {
         merge.base_tip = base;
         merge.merge_commit = source.commit(format, tree, &[incoming, target], "reversed");
         assert!(validate_merge_objects(&source, &merge, MergeObjectLimits::default(), &mut || true).is_err());
+    }
+}
+
+#[test]
+fn source_closure_does_not_authorize_unreachable_repository_objects() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (mut source, parent, candidate, tree, blob) = fixture(format);
+        let secret = source.put(format, GitObjectKind::Blob, b"not reachable".to_vec());
+        let closure = validate_commit_closure(&source, parent, MergeObjectLimits::default(), &mut || true).unwrap();
+        assert_eq!(closure.objects, BTreeSet::from([parent, tree, blob]));
+        assert!(!closure.objects.contains(&candidate));
+        assert!(!closure.objects.contains(&secret));
+    }
+}
+
+#[test]
+fn source_graph_rejects_ambiguous_commit_edges_without_reinterpreting_bytes() {
+    let format = GitHashAlgorithm::Sha1;
+    let (mut source, parent, _, tree, _) = fixture(format);
+    let valid = source.commit(format, tree, &[parent], "unambiguous");
+    assert!(validate_commit_closure(&source, valid, MergeObjectLimits::default(), &mut || true).is_ok());
+    let bytes = source.0[&valid].1.clone();
+    let original = String::from_utf8(bytes).unwrap();
+    for altered in [original.replacen(&format!("tree {tree}\n"), &format!("tree {tree}\ntree {tree}\n"), 1),
+        original.replacen(&format!("parent {parent}\n"), &format!("parent {parent}\n continuation\n"), 1)]
+    {
+        let ambiguous = source.put(format, GitObjectKind::Commit, altered.into_bytes());
+        assert!(validate_commit_closure(&source, ambiguous, MergeObjectLimits::default(), &mut || true).is_err());
     }
 }
