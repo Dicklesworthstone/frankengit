@@ -3,6 +3,7 @@
 mod merge_apply;
 mod publication_support;
 mod pull_request;
+mod source_review;
 mod source_search;
 #[cfg(target_os = "linux")]
 mod workspace;
@@ -13,6 +14,14 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let pr_diff = arguments.first().is_some_and(|argument| argument == "pr")
+        && arguments.get(1).is_some_and(|argument| argument == "diff");
+    if pr_diff || arguments.first().is_some_and(|argument| argument == "diff") {
+        return match source_review::run(&arguments[if pr_diff { 2 } else { 1 }..], pr_diff) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "pr") {
         return match pull_request::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
