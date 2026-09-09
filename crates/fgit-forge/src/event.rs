@@ -1,6 +1,6 @@
-//! Canonical forge events. Tags 1 through 4 retain their exact historical
-//! encoding; tag 5 carries native Git identities without reinterpreting a
-//! legacy internal `Digest`. Older readers refuse the new kind explicitly.
+//! Canonical forge events. Tags 1 through 5 retain their exact historical
+//! encoding; tag 6 carries native pull-request lifecycle transitions. Older
+//! readers refuse the new required kind rather than misreading native OIDs.
 
 use fgit_codec::attest::{BodyIdentity, body_id};
 use fgit_codec::wire::CanonicalBody;
@@ -13,11 +13,15 @@ use crate::aggregate::{
     OrganisationNumber, PullRequestNumber, TeamNumber,
 };
 
+pub mod pull_request;
+use pull_request::{NativePullRequestEvent, PullRequestAction};
+
 const KIND_OPENED: u32 = 1;
 const KIND_HEAD_ADVANCED: u32 = 2;
 const KIND_MERGE_COMMITTED: u32 = 3;
 const KIND_CLOSED: u32 = 4;
 const KIND_NATIVE_MERGE_COMMITTED: u32 = 5;
+const KIND_NATIVE_PULL_REQUEST_CHANGED: u32 = 6;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -84,9 +88,8 @@ fn invalid_native(field: &'static str) -> CodecRefusal {
     CodecRefusal::ValueUnrepresentable { field, observed: 0, limit: 1 }
 }
 
-/// Legacy event kinds keep their internal-digest fields and original bytes.
-/// New durable merges use `MergeCommittedNative`, never a bytewise cast of
-/// those fields into a Git identity. Unknown kinds fail closed on old readers.
+/// Legacy kinds retain their original fields and bytes. Native lifecycle data
+/// remains a native typed value; it is never cast into a legacy Digest field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ForgeEventPayload {
     PullRequestOpened {
@@ -103,8 +106,10 @@ pub enum ForgeEventPayload {
         target_tip_after: Digest,
     },
     PullRequestClosed { withdrawn: bool },
-    /// Native branch-merge receipt, wire kind 5. Existing kinds are unchanged.
     MergeCommittedNative(NativeMerge),
+    /// Full-state open/update/close event, wire kind 6. Its expected aggregate
+    /// predecessor is exactly `event.version - 1`, not a mutable latest value.
+    PullRequestChangedNative(NativePullRequestEvent),
 }
 
 impl ForgeEventPayload {
@@ -116,6 +121,7 @@ impl ForgeEventPayload {
             Self::MergeCommitted { .. } => KIND_MERGE_COMMITTED,
             Self::PullRequestClosed { .. } => KIND_CLOSED,
             Self::MergeCommittedNative(_) => KIND_NATIVE_MERGE_COMMITTED,
+            Self::PullRequestChangedNative(_) => KIND_NATIVE_PULL_REQUEST_CHANGED,
         }
     }
 }
@@ -127,7 +133,6 @@ pub struct ForgeEvent {
     pub payload: ForgeEventPayload,
 }
 
-// Preserve the established nonzero PR slot and zero escape for other aggregates.
 fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
     match aggregate {
         AggregateId::PullRequest(number) => out.write_scalar(number.get()),
@@ -164,6 +169,13 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
     }
 }
 
+fn validate_lifecycle(event: &ForgeEvent, change: &NativePullRequestEvent) -> Result<(), CodecRefusal> {
+    if !matches!(event.aggregate, AggregateId::PullRequest(_))
+        || (change.action == PullRequestAction::Open) != (event.version == AggregateVersion::FIRST)
+    { return Err(invalid_native("pull_request.aggregate_version")); }
+    change.data.validate()
+}
+
 fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal> {
     write_aggregate(out, event.aggregate);
     out.write_scalar(event.version.get());
@@ -188,6 +200,10 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
                 return Err(invalid_native("native_merge.aggregate"));
             }
             merge.write(out)?;
+        }
+        ForgeEventPayload::PullRequestChangedNative(change) => {
+            validate_lifecycle(event, change)?;
+            change.write(out)?;
         }
     }
     Ok(())
@@ -219,11 +235,16 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
             }
             ForgeEventPayload::MergeCommittedNative(NativeMerge::read(input)?)
         }
+        KIND_NATIVE_PULL_REQUEST_CHANGED => ForgeEventPayload::PullRequestChangedNative(NativePullRequestEvent::read(input)?),
         unknown => return Err(CodecRefusal::VariantUnknown {
             field: "kind", observed: unknown, offset: kind_offset,
         }),
     };
-    Ok(ForgeEvent { aggregate, version, payload })
+    let event = ForgeEvent { aggregate, version, payload };
+    if let ForgeEventPayload::PullRequestChangedNative(change) = &event.payload {
+        validate_lifecycle(&event, change)?;
+    }
+    Ok(event)
 }
 
 fn counter<T: Counter>(field: &'static str, value: u64) -> Result<T, CodecRefusal> {

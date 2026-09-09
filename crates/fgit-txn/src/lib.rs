@@ -565,6 +565,13 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(3);
             out.write_text("ForgeEntityId", pull_request.label().as_str())?;
         }
+        ForgeEventKind::PullRequestUpdated { pull_request, target } => {
+            // A new required tag, never a reinterpretation of an opening.
+            // Established event tags and their field encodings remain intact.
+            out.write_raw_byte(4);
+            out.write_text("ForgeEntityId", pull_request.label().as_str())?;
+            out.write_ref_name(target)?;
+        }
     }
     Ok(())
 }
@@ -1218,5 +1225,42 @@ mod tests {
                 "invalid normal form for seed {seed}"
             );
         }
+    }
+
+    #[test]
+    fn pull_request_update_is_distinct_and_requires_no_ref_movement() {
+        let entity = ForgeEntityId::new(label("native-pr"));
+        let target = name("refs/heads/main");
+        let events = [
+            ForgeEventKind::PullRequestOpened { pull_request: entity, target: target.clone() },
+            ForgeEventKind::PullRequestMerged { pull_request: entity, target: target.clone() },
+            ForgeEventKind::PullRequestClosed { pull_request: entity },
+            ForgeEventKind::PullRequestUpdated { pull_request: entity, target },
+        ];
+        let mut encodings = BTreeSet::new();
+        for (index, event) in events.iter().enumerate() {
+            let mut encoder = Encoder::new();
+            write_forge_event(&mut encoder, event).unwrap();
+            let bytes = encoder.into_bytes();
+            assert_eq!(bytes[0], u8::try_from(index + 1).unwrap());
+            assert!(encodings.insert(bytes));
+            assert_eq!(event.entity(), entity);
+            assert_eq!(event.required_ref_effect().is_some(), index == 1);
+        }
+        let stream = ForgeStreamId::new(label("native-pr"));
+        let request = request(vec![Statement {
+            mismatch_policy: MismatchPolicy::TxnAbort,
+            intents: vec![Intent::Forge(ForgeIntent {
+                stream, expected_position: ForgeStreamPosition::new(1), event: events[3].clone(),
+            })],
+        }]);
+        let (refs, mut positions, retention, outbox) = empty_basis();
+        positions.insert(stream, ForgeStreamPosition::new(1));
+        let report = IntentEvaluator.evaluate(basis_of(&refs, &positions, &retention, &outbox), &request);
+        IntentEvaluator.validate_report(&request, &report).unwrap();
+        let effects = report.effects().unwrap();
+        assert!(effects.refs.is_empty());
+        assert_eq!(effects.forge.get(&stream), Some(&vec![events[3].clone()]));
+        canonical_fold_bytes(&request, &report).unwrap();
     }
 }

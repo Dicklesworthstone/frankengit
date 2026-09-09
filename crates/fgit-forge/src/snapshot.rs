@@ -1,6 +1,9 @@
 //! Position-addressed snapshot projection over immutable repository history.
 //! Current disclosure policy governs historical reads. Native merge receipts
 //! remain native identities; legacy digest-valued events are never cast to OIDs.
+//! The PR table here is a legacy-digest compatibility view. Native lifecycle
+//! streams have a separate typed frontier view; they are not fabricated into
+//! rows whose required tip fields are internal Digests.
 
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
@@ -93,6 +96,7 @@ pub struct ForgeSnapshot {
     pub forge_position_root: Digest,
     pub historical_policy_epoch: PolicyEpoch,
     pub refs: BTreeMap<Vec<u8>, GitOid>,
+    /// Legacy-digest PR projection only; not a count of native PR streams.
     pub pull_requests: BTreeMap<PullRequestNumber, PullRequestSnapshot>,
     pub check_receipts: Vec<CheckReceiptSnapshot>,
     pub replayed_batches_count: usize,
@@ -102,7 +106,7 @@ impl ForgeSnapshot {
     #[must_use]
     pub fn summary(&self) -> String {
         format!(
-            "Forge Snapshot at {}\n  Repository: {}\n  Head: {} (gen {})\n  Decision Sequence: {}\n  Policy Epoch: {}\n  Refs: {}\n  Pull Requests: {}\n  Replay Batches: {} (capsule: {})",
+            "Forge Snapshot at {}\n  Repository: {}\n  Head: {} (gen {})\n  Decision Sequence: {}\n  Policy Epoch: {}\n  Refs: {}\n  Pull Requests: {} (legacy projection only)\n  Replay Batches: {} (capsule: {})",
             self.target_position, self.repository_id, self.effective_head_id,
             self.effective_head_generation.get(),
             self.effective_decision_sequence.map_or("none".to_string(), |s| s.get().to_string()),
@@ -282,9 +286,9 @@ impl From<AuthorityFailure> for SnapshotRefusal { fn from(value: AuthorityFailur
 impl From<CodecRefusal> for SnapshotRefusal { fn from(value: CodecRefusal) -> Self { Self::Codec(value) } }
 impl From<ChronicleRefusal> for SnapshotRefusal { fn from(value: ChronicleRefusal) -> Self { Self::Chronicle(value) } }
 
-/// Apply canonical events without confusing legacy digests with native OIDs.
-/// As before, a merge-only history is not invented into an opened PR aggregate.
-/// Its receipt remains available in the authenticated `HistoricalBatch` events.
+/// Apply the legacy PR compatibility view without converting native OIDs to
+/// Digests. Native lifecycle events remain available in HistoricalBatch and
+/// the separate native frontier API, never invented as legacy opened rows.
 pub fn apply_forge_event_to_prs(prs: &mut BTreeMap<PullRequestNumber, PullRequestSnapshot>, event: &ForgeEvent) {
     if let AggregateId::PullRequest(num) = event.aggregate {
         match &event.payload {
@@ -317,6 +321,10 @@ pub fn apply_forge_event_to_prs(prs: &mut BTreeMap<PullRequestNumber, PullReques
                     pr.version = event.version;
                 }
             }
+            ForgeEventPayload::PullRequestChangedNative(_) => {
+                // A mixed history cannot leave a misleading legacy row behind.
+                prs.remove(&num);
+            }
         }
     }
 }
@@ -335,7 +343,7 @@ pub fn verify_continuous_consistency(
     }
     if snapshot.effective_head_generation != live_head.generation {
         return Err(SnapshotRefusal::ConsistencyMismatch { detail: format!(
-            "generation mismatch: snapshot={}, live={}", snapshot.effective_head_generation.get(), live_head.generation.get()) });
+            "generation mismatch: snapshot={}, live={}", snapshot.effective_head_generation, live_head.generation) });
     }
     if snapshot.ref_root != live_head.ref_root {
         return Err(SnapshotRefusal::ConsistencyMismatch { detail: format!(
