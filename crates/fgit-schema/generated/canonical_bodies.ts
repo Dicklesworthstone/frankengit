@@ -512,3 +512,53 @@ export interface HiddenRefPolicyV1 {
   /** Ordered raw visibility-rule bytes; the last matching rule wins. */
   rules: string[];
 }
+
+/**
+ * Bounded immutable downstream evidence for a canonical outbox lifecycle transition; a receipt alone does not authenticate or publish an effect.
+ *
+ * schema outbox-delivery-receipt v1.0, domain frankengit/generation/v1
+ */
+export interface OutboxDeliveryReceiptV1 {
+  /** Repository namespace. */
+  repository_id: string;
+  /** Stable delivery identity as a bounded lowercase ASCII slug. */
+  delivery_key: string;
+  /** Exact destination identity as a bounded lowercase ASCII slug. */
+  destination: string;
+  /** Original immutable delivery payload. */
+  payload_root: Digest;
+  /** Exact canonical obligation state that authorized the observation. */
+  predecessor_effect_state_root: Digest;
+  /** Closed u16 vocabulary: acknowledged=0, terminally-refused=1, indeterminate=2. */
+  disposition: number;
+  /** Destination observation bytes. Acknowledged and terminally-refused dispositions require at least one byte; only indeterminate may carry none. */
+  evidence: string;
+}
+
+/**
+ * One immutable outbox obligation state, bound to its original merge and exact predecessor.
+ *
+ * schema outbox-effect-state v1.0, domain frankengit/generation/v1
+ */
+export interface OutboxEffectStateV1 {
+  /** Repository namespace. */
+  repository_id: string;
+  /** Stable delivery identity as a bounded lowercase ASCII slug. */
+  delivery_key: string;
+  /** Original sealed merge transaction. */
+  tx_id: DerivedId;
+  /** Original immutable merge event payload. */
+  payload_root: Digest;
+  /** Post-commit lifecycle ordinal, bounded to zero through three by the canonical body. */
+  transition_ordinal: number;
+  /** Shared resource obligation state: reserved=0, committed=1, deferred=2, escalated=3, acknowledged=4, aborted=5, terminally-failed=6, leaked=7. Initial body requires committed. */
+  state: number;
+  /** Exact previous body, absent only for the initial committed state. */
+  predecessor_root?: Digest;
+  /** Previous shared state; must agree with the resolved predecessor body. */
+  predecessor_state?: number;
+  /** Shared lifecycle event: commit=0, abort=1, acknowledge=2, defer=3, escalate=4, fail-terminally=5, leak=6. Decoder validates predecessor.apply(event) equals state. */
+  event?: number;
+  /** Immutable observation or reconciliation evidence; acknowledge requires it. */
+  evidence_root?: Digest;
+}

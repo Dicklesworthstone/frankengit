@@ -572,6 +572,58 @@ class HiddenRefPolicyV1:
     rules: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class OutboxDeliveryReceiptV1:
+    """Bounded immutable downstream evidence for a canonical outbox lifecycle transition; a receipt alone does not authenticate or publish an effect.
+
+    schema outbox-delivery-receipt v1.0, domain frankengit/generation/v1
+    """
+
+    # Repository namespace.
+    repository_id: str
+    # Stable delivery identity as a bounded lowercase ASCII slug.
+    delivery_key: str
+    # Exact destination identity as a bounded lowercase ASCII slug.
+    destination: str
+    # Original immutable delivery payload.
+    payload_root: Digest
+    # Exact canonical obligation state that authorized the observation.
+    predecessor_effect_state_root: Digest
+    # Closed u16 vocabulary: acknowledged=0, terminally-refused=1, indeterminate=2.
+    disposition: int
+    # Destination observation bytes. Acknowledged and terminally-refused dispositions require at least one byte; only indeterminate may carry none.
+    evidence: str
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxEffectStateV1:
+    """One immutable outbox obligation state, bound to its original merge and exact predecessor.
+
+    schema outbox-effect-state v1.0, domain frankengit/generation/v1
+    """
+
+    # Repository namespace.
+    repository_id: str
+    # Stable delivery identity as a bounded lowercase ASCII slug.
+    delivery_key: str
+    # Original sealed merge transaction.
+    tx_id: DerivedId
+    # Original immutable merge event payload.
+    payload_root: Digest
+    # Post-commit lifecycle ordinal, bounded to zero through three by the canonical body.
+    transition_ordinal: int
+    # Shared resource obligation state: reserved=0, committed=1, deferred=2, escalated=3, acknowledged=4, aborted=5, terminally-failed=6, leaked=7. Initial body requires committed.
+    state: int
+    # Exact previous body, absent only for the initial committed state.
+    predecessor_root: Digest | None = None
+    # Previous shared state; must agree with the resolved predecessor body.
+    predecessor_state: int | None = None
+    # Shared lifecycle event: commit=0, abort=1, acknowledge=2, defer=3, escalate=4, fail-terminally=5, leak=6. Decoder validates predecessor.apply(event) equals state.
+    event: int | None = None
+    # Immutable observation or reconciliation evidence; acknowledge requires it.
+    evidence_root: Digest | None = None
+
+
 # Wire order per schema. The dataclasses above group required fields
 # before optional ones because Python requires it; the canonical
 # encoding does not, and THIS is the order the bytes are in.
@@ -587,4 +639,6 @@ WIRE_ORDER: dict[str, tuple[str, ...]] = {
     "VerifiedReadEnvelopeV1": ("version", "head", "configuration", "answer",),
     "RepositoryCreationAttemptV1": ("tenant_id", "repository_id", "root_layout", "object_format", "idempotency_key_digest", "repository_incarnation_id",),
     "HiddenRefPolicyV1": ("rules",),
+    "OutboxDeliveryReceiptV1": ("repository_id", "delivery_key", "destination", "payload_root", "predecessor_effect_state_root", "disposition", "evidence",),
+    "OutboxEffectStateV1": ("repository_id", "delivery_key", "tx_id", "payload_root", "transition_ordinal", "state", "predecessor_root", "predecessor_state", "event", "evidence_root",),
 }

@@ -767,6 +767,96 @@
           }
         }
       }
+    },
+    "OutboxDeliveryReceiptV1": {
+      "description": "Bounded immutable downstream evidence for a canonical outbox lifecycle transition; a receipt alone does not authenticate or publish an effect.",
+      "x-schema": { "family": "outbox-delivery-receipt", "major": 1, "minor": 0, "domain": "frankengit/generation/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_id", "delivery_key", "destination", "payload_root", "predecessor_effect_state_root", "disposition", "evidence"],
+      "properties": {
+        "repository_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "delivery_key": {
+          "type": "string",
+          "pattern": "^[0-9a-f]*$",
+          "minLength": 2,
+          "maxLength": 128
+        },
+        "destination": {
+          "type": "string",
+          "pattern": "^[0-9a-f]*$",
+          "minLength": 2,
+          "maxLength": 128
+        },
+        "payload_root": { "$ref": "#/$defs/Digest" },
+        "predecessor_effect_state_root": { "$ref": "#/$defs/Digest" },
+        "disposition": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed OutboxDeliveryDispositionV1 vocabulary"
+        },
+        "evidence": {
+          "type": "string",
+          "pattern": "^[0-9a-f]*$",
+          "minLength": 0,
+          "maxLength": 8192
+        }
+      }
+    },
+    "OutboxEffectStateV1": {
+      "description": "One immutable outbox obligation state, bound to its original merge and exact predecessor.",
+      "x-schema": { "family": "outbox-effect-state", "major": 1, "minor": 0, "domain": "frankengit/generation/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_id", "delivery_key", "tx_id", "payload_root", "transition_ordinal", "state"],
+      "properties": {
+        "repository_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "delivery_key": {
+          "type": "string",
+          "pattern": "^[0-9a-f]*$",
+          "minLength": 2,
+          "maxLength": 128
+        },
+        "tx_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/ref-txn/v2"
+        },
+        "payload_root": { "$ref": "#/$defs/Digest" },
+        "transition_ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "state": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed OutboxObligationStateV1 vocabulary"
+        },
+        "predecessor_root": { "$ref": "#/$defs/Digest" },
+        "predecessor_state": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed OutboxObligationStateV1 vocabulary"
+        },
+        "event": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed OutboxLifecycleEventV1 vocabulary"
+        },
+        "evidence_root": { "$ref": "#/$defs/Digest" }
+      }
     }
   }
 }
