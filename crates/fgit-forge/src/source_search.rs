@@ -180,7 +180,7 @@ pub fn search_source<A: GitHashAlgorithm, S: ObjectSource<A>>(
     discover(base, source, capability, now, query, limits, cancelled, None, 0, &mut discovery)?;
     let mut report = SourceSearchReport {
         repository: base.repository_id(), source_rcr: base.base_rcr_id(),
-        source_commit: oid(base.base_commit_oid())?, source_tree: oid(base.base_tree_oid())?,
+        source_commit: oid::<A>(base.base_commit_oid())?, source_tree: oid::<A>(base.base_tree_oid())?,
         matches: Vec::new(), completion: SearchCompletion::Complete,
         files_selected: discovery.files.len(), files_read: 0, bytes_read: 0,
         bytes_searched: 0, non_regular_entries: discovery.excluded,
@@ -196,7 +196,7 @@ pub fn search_source<A: GitHashAlgorithm, S: ObjectSource<A>>(
         report.bytes_read = report.bytes_read.checked_add(body.len())
             .filter(|bytes| *bytes <= limits.max_total_bytes).ok_or(SearchError::Budget("total bytes"))?;
         report.files_read += 1;
-        let blob = oid(&blob)?;
+        let blob = oid::<A>(&blob)?;
         let mut extra = false;
         let consumed = scan(&body, query, cancelled, |start, line, line_start| {
             if report.matches.len() == limits.max_matches { extra = true; return false; }
