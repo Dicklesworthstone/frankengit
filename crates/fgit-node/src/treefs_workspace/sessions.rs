@@ -649,12 +649,13 @@ impl OneNode {
             Session::Sha1(owner) => {
                 let mut state = take(owner, request)?;
                 self.recover_workspace(request, &mut state).await?;
-                state.close().map_err(state_error)?;
+                // SessionState::close returns Ok only after classifying quiescence.
+                let _quiescence = state.close().map_err(state_error)?;
             }
             Session::Sha256(owner) => {
                 let mut state = take(owner, request)?;
                 self.recover_workspace(request, &mut state).await?;
-                state.close().map_err(state_error)?;
+                let _quiescence = state.close().map_err(state_error)?;
             }
         }
         Ok(())

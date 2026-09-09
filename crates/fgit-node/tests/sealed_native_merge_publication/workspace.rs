@@ -410,12 +410,13 @@ fn second_real_edit_refuses_the_old_snapshot_and_permits_the_latest_snapshot() {
         );
         let before = snapshot(&node);
         let refused = admit(&node, &stale_owner, &first, &stale_package).unwrap();
-        assert_eq!(
+        assert!(matches!(
             refused.outcome,
             DecisionOutcome::Refused {
-                code: RefusalCode::EvidenceStale
+                code: RefusalCode::EvidenceStale,
+                ..
             }
-        );
+        ));
         assert_unchanged_effects(&before, &snapshot(&node));
         assert_eq!(
             admit(&node, &stale_owner, &first, &stale_package).unwrap(),
@@ -468,12 +469,13 @@ fn native_candidate_tree_must_equal_the_owned_workspace_export() {
         let wrong_package = workspace_package(&node, &wrong, &wrong_context, &exported);
         let before = snapshot(&node);
         let refused = admit(&node, &owner, &exported, &wrong_package).unwrap();
-        assert_eq!(
+        assert!(matches!(
             refused.outcome,
             DecisionOutcome::Refused {
-                code: RefusalCode::EvidenceStale
+                code: RefusalCode::EvidenceStale,
+                ..
             }
-        );
+        ));
         assert_unchanged_effects(&before, &snapshot(&node));
         let permitted_context = context(format, b"workspace-right-tree");
         let permitted_owner = session(b"workspace-right-tree");
@@ -558,12 +560,13 @@ fn workspace_base_must_equal_the_offered_merge_target_even_when_export_tree_matc
 
         let before = snapshot(&node);
         let refused = admit(&node, &owner, &exported, &inverse).unwrap();
-        assert_eq!(
+        assert!(matches!(
             refused.outcome,
             DecisionOutcome::Refused {
-                code: RefusalCode::EvidenceStale
+                code: RefusalCode::EvidenceStale,
+                ..
             }
-        );
+        ));
         assert_unchanged_effects(&before, &snapshot(&node));
         assert_eq!(admit(&node, &owner, &exported, &inverse).unwrap(), refused);
 
@@ -677,12 +680,13 @@ fn retained_capability_expiry_refuses_new_merge_but_preserves_terminal_retry() {
                 assert_expired(edit(&node, &owner, &exported, b"later\n"));
                 assert_eq!(snapshot(&node).basis(), before.basis());
                 let terminal = admit(&node, &owner, &exported, &package).unwrap();
-                assert_eq!(
+                assert!(matches!(
                     terminal.outcome,
                     DecisionOutcome::Refused {
                         code: RefusalCode::CapabilityExpired,
+                        ..
                     }
-                );
+                ));
                 assert_unchanged_effects(&before, &snapshot(&node));
                 let refused = snapshot(&node);
                 assert_eq!(admit(&node, &owner, &exported, &package).unwrap(), terminal);
@@ -745,12 +749,13 @@ fn terminal_workspace_retries_survive_cell_isolation_and_exhausted_quota() {
                     terminal,
                 );
             } else {
-                assert_eq!(
+                assert!(matches!(
                     terminal.outcome,
                     DecisionOutcome::Refused {
-                        code: RefusalCode::EvidenceStale
+                        code: RefusalCode::EvidenceStale,
+                        ..
                     }
-                );
+                ));
                 assert_unchanged_effects(&before, &snapshot(&node));
             }
             let selected = snapshot(&node);
@@ -1052,12 +1057,13 @@ fn dropped_real_admission_keeps_workspace_blocked_until_drain_and_reconciliation
                         exported.epochs().staged().get() + 1
                     );
                     let refused = admit(&node, &owner, &exported, &package).unwrap();
-                    assert_eq!(
+                    assert!(matches!(
                         refused.outcome,
                         DecisionOutcome::Refused {
-                            code: RefusalCode::EvidenceStale
+                            code: RefusalCode::EvidenceStale,
+                            ..
                         }
-                    );
+                    ));
                     assert_unchanged_effects(&before, &snapshot(&node));
                     close(&node, &owner, &next);
                 }

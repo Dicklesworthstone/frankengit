@@ -182,11 +182,9 @@ impl<A: GitHashAlgorithm> SessionState<A> {
     pub(super) const fn log(&self) -> &IntentLog {
         &self.log
     }
-    pub(super) const fn overlay(&self) -> &Overlay {
+    #[cfg(test)]
+    const fn overlay(&self) -> &Overlay {
         &self.overlay
-    }
-    pub(super) const fn plan(&self) -> Option<&ExportPlan<A>> {
-        self.plan.as_ref()
     }
     pub(super) const fn limits(&self) -> ExportLimits {
         self.limits
