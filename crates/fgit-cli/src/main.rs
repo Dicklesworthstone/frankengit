@@ -3,6 +3,7 @@
 mod merge_apply;
 mod publication_support;
 mod pull_request;
+mod source_history;
 mod source_review;
 mod source_search;
 #[cfg(target_os = "linux")]
@@ -14,6 +15,12 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| matches!(argument.as_str(), "log" | "blame")) {
+        return match source_history::run(&arguments[1..], arguments[0] == "blame") {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+        };
+    }
     // Read-only artifact inspection is independent of the Linux host-tool adapter.
     if arguments.first().is_some_and(|argument| argument == "workspace" || argument == "merge")
         && arguments.get(1).is_some_and(|argument| argument == "inspect")
