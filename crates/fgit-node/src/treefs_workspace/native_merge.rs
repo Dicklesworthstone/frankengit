@@ -15,14 +15,18 @@ use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionLimits, AdmissionSnapshot, AsyncAdmissionProjection,
     CommitMaterialization, ProjectionFailure, RefusalMaterialization, ValidatedClosure,
 };
-use fgit_authority::{AuthenticatedHead, TerminalOutcome};
+use fgit_authority::{AuthenticatedHead, IdempotencyKey, TerminalOutcome};
 use fgit_authority_fsqlite::FsqliteAuthorityStore;
 use fgit_chronicle::PublicationBasis;
+use fgit_forge::aggregate::{ExpectedVersion, PullRequestNumber};
+use fgit_forge::event::NativeMerge;
 use fgit_reference::intent::TransactionRequest;
 use fgit_txn::TransactionFoldReport;
-use fgit_types::{RefusalCode, TxId};
+use fgit_types::{PrincipalId, RefusalCode, TxId};
 use fsqlite_types::cx::Cx;
 
+use super::publication::receive_error;
+use super::{NodeWorkspaceRefusal, workspace_request_live};
 use crate::{
     DurableAsyncAdmissionProjection, LoopbackReceiveSession, NodeReceiveTransportRefusal,
     NodeRequestContext, OneNode, PackContextCheckpoint, VerifiedFabricPackSource,
@@ -58,6 +62,88 @@ impl OneNode {
             &projection,
         )
         .await
+    }
+
+    /// Apply an independently reviewed merge artifact through native admission.
+    ///
+    /// The bundle must advertise exactly the reviewed target branch/candidate
+    /// and have exactly the target-before commit as its sole prerequisite. It
+    /// may include objects already selected by repository history. This bounded
+    /// profile shares the workspace bundle parser; unknown capabilities,
+    /// partial-clone and multi-ref/prerequisite bundles are not supported.
+    ///
+    /// The caller supplies all review coordinates, PR identity/version and the
+    /// authenticated local principal independently of the artifact. A version
+    /// of NewStream records a merge receipt, not fabricated PR opening/approval.
+    /// The reviewed tree is not recomputed or silently changed by this method.
+    ///
+    /// Production quarantine only stages verified native objects. Its ref-only
+    /// proof is NEVER admitted: the native merge driver independently validates
+    /// ordered parents, common ancestry and closure against its current basis,
+    /// then publishes ref, forge position and outbox together. A race between
+    /// quarantine and admission cannot authorize a stale merge. An identical
+    /// retry resolves its original terminal result rather than moving the ref
+    /// back or creating a second delivery. The returned TxId is that native seal.
+    ///
+    /// # Errors
+    /// Envelope/review mismatch and unavailable intake refuse before admission.
+    /// Canonical decisions are returned as terminal outcomes, not inferred from
+    /// staged object existence. Infrastructure failures retain uncertainty;
+    /// cancellation is never interpreted as evidence of non-commit.
+    pub async fn apply_merge_bundle_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        principal: PrincipalId,
+        idempotency_key: &[u8],
+        pull_request: PullRequestNumber,
+        expected_version: ExpectedVersion,
+        merge: &NativeMerge,
+        input: &[u8],
+    ) -> Result<(TxId, TerminalOutcome), NodeWorkspaceRefusal> {
+        let map_admission = |error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)));
+        let key = IdempotencyKey::new(idempotency_key.to_vec())
+            .map_err(|_| NodeWorkspaceRefusal::InvalidWorkspaceCandidate("invalid bounded idempotency key"))?;
+        let intent = NativeMergeIntent::new(pull_request, expected_version, merge.clone())
+            .map_err(map_admission)?;
+        let context = AdmissionContext {
+            head_key: self.head_key.clone(),
+            tenant_id: self.tenant_id,
+            repository_id: self.repository_id,
+            principal_id: principal,
+            idempotency_key: key,
+            object_format: self.object_format,
+        };
+        let attempt = intent.seal_attempt(&context).map_err(map_admission)?;
+        let tx_id = attempt.derive()
+            .map_err(|_| NodeWorkspaceRefusal::InvalidWorkspaceCandidate("native merge identity derivation refused"))?.0;
+        self.receive_publication_admitted().map_err(receive_error)?;
+        self.push_quota.evaluate(&principal).map_err(receive_error)?;
+        let (quarantined, _) = self.quarantine_reviewed_bundle_in(
+            request,
+            &merge.target_ref,
+            merge.target_tip_before,
+            merge.merge_commit,
+            input,
+            std::slice::from_ref(&merge.source_ref),
+        ).await?;
+        // A received ref command is not a merge decision. The native driver
+        // re-reads the staged candidate and authenticates a fresh exact basis;
+        // retaining or admitting this source-only proof would split the effect.
+        drop(quarantined);
+        if !workspace_request_live(request) {
+            return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
+        }
+        let projection = NodeNativeMergeProjection {
+            node: self,
+            inner: self.durable_admission_projection(&context).map_err(map_admission)?,
+            object_limits: MergeObjectLimits::default(),
+        };
+        let terminal = admit_native_merge_async(
+            &self.authority, request.authority(), &context, &intent,
+            AdmissionLimits::default(), &projection,
+        ).await.map_err(map_admission)?;
+        // Preserve known terminal results even if cancellation arrives now.
+        Ok((tx_id, terminal))
     }
 
     /// Publish a reviewed two-parent merge, its forge transition and pending
@@ -186,8 +272,6 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
             if prepared.basis != *basis {
                 return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
             }
-            // Resolve exact root/repository bindings, payloads and effect
-            // predecessor chains through the same reader used after reopen.
             let delivery = fgit_admission::merge::native::delivery::read_in(
                 authority, cx, basis, &|| self.merge_checkpoint(cx).is_err(),
             )
