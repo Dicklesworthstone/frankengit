@@ -135,6 +135,14 @@ command. Do not recompute tips, increase its expected version or change the key
 to recover an uncertain attempt. After a known terminal refusal, a deliberately
 corrected command is a new operation with a new key, not a retry of the old one.
 
+The node API resolves an authenticated exact command's existing terminal result
+before charging push quota or requiring the cell to accept new publications.
+It revalidates the immutable seal and key binding before returning that result.
+This applies to both committed and canonically refused commands, including after
+reopening a cell without bringing it into service. New commands still obey
+intake and quota limits; a changed command cannot recover the old result by
+reusing its key. Request cancellation and authority I/O limits still apply.
+
 JSON is one UTF-8 line. Native refs remain hexadecimal bytes; quotes, backslashes,
 C0/C1 controls and Unicode line/paragraph separators are escaped in text. Decoding
 preserves the original strings. Consumers must use integer-preserving JSON
@@ -165,12 +173,25 @@ than being ignored.
 The eleven CLI tests cover both formats, required fields, duplicates, bounds,
 exact-version and pin semantics, raw ref encodings, numeric pages, non-disclosing
 not-found reads, merge-only rendering, untrusted text, bounded file intake and
-write/flush/cleanup failures. Existing embedded-node PR tests remain unchanged.
+write/flush/cleanup failures. The embedded-node tests exercise the real PR
+lifecycle and retain exact committed/refused outcomes after cancellation of a
+retry, quota containment and reopening without enabling new writes.
+
+The CLI integration target runs the Python campaign below against Cargo's own
+`fg` binary. It requires Python 3.11 or newer; an unavailable driver fails the test. Thus
+the all-targets test includes both command-level assertions and the native
+fresh-process lifecycle/merge path.
+
+The admission fault tests call the PR publisher for all three lifecycle
+actions in both hash formats. They inject checkpoint cancellation, interrupted
+immutable writes, lost CAS requests/responses and a competing successful CAS.
+They check exact retry outcomes and coupled forge/outbox state with unchanged
+refs. Their faultable in-memory authority and fixture projection provide
+driver-level evidence, separate from file-backed node and process tests.
 
 ```bash
-cargo test -p fgit-cli --bin fg pull_request::
+cargo test -p fgit-cli --all-targets
 cargo test -p fgit-node --lib treefs_workspace::pull_request::tests::
-cargo build -p fgit-cli --bin fg
 python3 scripts/e2e/pull_request_smoke.py --fg /absolute/path/to/fg
 ```
 
@@ -183,8 +204,8 @@ output failure after a real commit and verifies idempotent recovery. Whether
 that fault was exercised is explicit in the campaign report. The supplied binary
 is fingerprinted; a missing executable is an error, never a skipped success.
 
-Executed in the editing environment: Python syntax/help checks, both native
-fixture formats and pack checksums, **68 damaged-report/JSON checker cases**, a
+Initial evidence at `524b6d7e` in the editing environment: Python syntax/help
+checks, both native fixture formats and pack checksums, **68 damaged-report/JSON checker cases**, a
 missing-binary refusal, Rust lexical/delimiter inspection, **36 format-template
 argument checks**, and exact Git blob-hash comparisons for all six Rust files.
 The separate `--self-test` mode states `rust_executed: false`; it does not execute

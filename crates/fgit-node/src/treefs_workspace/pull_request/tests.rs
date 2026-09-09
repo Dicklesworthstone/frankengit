@@ -199,6 +199,13 @@ fn terminal_retries_survive_quota_containment_and_stopped_intake() {
         assert!(matches!(refused.1.outcome,
             DecisionOutcome::Refused { code: RefusalCode::EvidenceStale, .. }));
         let settled = snapshot(&node);
+        let cancelled = node.request_context();
+        cancelled.authority().cancel();
+        assert!(node.runtime().block_on(node.admit_pull_request_durable_in(
+            &cancelled, &session("original-open"), &open, AdmissionLimits::default(),
+        )).is_err());
+        assert_eq!(apply(&node, &open, "original-open").unwrap(), committed);
+        assert_eq!(snapshot(&node).basis(), settled.basis());
         // Deterministic operator containment, with no sleeps or clock races.
         node.push_quota.limit.max_events = 0;
         assert_eq!(apply(&node, &open, "original-open").unwrap(), committed);

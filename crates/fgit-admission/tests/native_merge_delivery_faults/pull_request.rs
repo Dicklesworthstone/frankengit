@@ -1,7 +1,10 @@
 //! Native merge admission against canonical, genesis-seeded PR frontiers.
 //! The event bodies and selected head are real; the MemoryAuthorityStore is
-//! deliberately non-durable. Open/Update/Close publication is absent at this
-//! revision, so these fixtures do not claim that lifecycle admission exists.
+//! deliberately non-durable. The nested fault tests exercise the production
+//! Open/Update/Close driver, without claiming filesystem crash durability.
+
+#[path = "pull_request/faults.rs"]
+mod faults;
 
 use fgit_codec::{CanonicalForgePositionState, CanonicalOutboxState, ForgePositionStateEntry};
 use fgit_forge::event::pull_request::{
