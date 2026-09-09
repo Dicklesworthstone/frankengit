@@ -1,13 +1,13 @@
 # Merge Forge-Event Delivery Contract
 
-**Status:** implementation and verification contract for the remaining durable-delivery gap in merge admission  
+**Status:** native implementation present; revision-bound production verification remains required  
 **Primary path:** `crates/fgit-admission/src/merge/native.rs`; legacy compatibility facade in `merge.rs`
 **Existing models to reuse:** forge event/merge types in `fgit-forge`; canonical effect/outbox transition machinery in `fgit-reference`; authority-head and RCR publication in `fgit-authority`/`fgit-admission`  
-**Beads relationship:** this document narrows the known remaining defect of the merge task; it is not evidence that the task is implemented, verified, or closed
+**Beads relationship:** this document defines the remaining verification scope of the merge task; it is not evidence that the task is verified or closed
 
 ## 1. Problem statement
 
-The current merge transaction can stage the immutable forge event batch and commit its root into the Repository Commit Record. That proves which event body the decision intended. It does not make the event durably observable by a forge stream consumer and does not create a durable delivery obligation.
+The original incomplete merge path could stage the immutable forge event batch and commit its root into the Repository Commit Record. By itself, that proves which event body the decision intended. It does not make the event durably observable by a forge stream consumer or create a durable delivery obligation. Section 13 describes the implementation that addresses this gap.
 
 A complete merge transition must publish, through the same exact-predecessor authority-head CAS:
 
@@ -293,3 +293,43 @@ revision-bound batch gate retain their
 original acceptance scope. Model fault tests and file-backed process-death
 tests have different evidence classes; neither implies host power-loss or
 filesystem fault coverage.
+
+### 13.1 Original sealed-package integration
+
+The original node entrypoint dispatches native events to
+`admit_sealed_native_merge_durable_in`, which supplies the node-owned native
+object validator to `admit_sealed_native_merge_async`. Both request forms use
+`admit_merge_attempt_async`; the sealed form passes its original `SealAttempt`
+and keeps its package preconditions together. There is no second native-style
+seal, copied publication loop, alternative object store, or relaxed receive
+materializer.
+
+Commit `b588c0b592b774f426b29d5b97774658e3e66950` restores the checks omitted
+when the shared driver and sealed-node tests were merged: the entire supplied
+closure must equal the independently verified closure, and every declared
+package object must belong to it. All six `CommitEvidence` fields must match
+the complete prepared record: principal snapshot, actual forge event batch,
+policy decision, invariant evidence, outbox effects, and retention delta.
+Supplied roots are compared, never substituted into the published record.
+Closure mismatches return `ObjectClosureIncomplete`; evidence mismatches return
+`EvidenceInvalid`. Already-decided transactions recover before these
+basis-dependent checks. Missing objects and staging failures remain retryable
+infrastructure failures rather than fabricated terminal refusals.
+
+Commits `53c7fdb4ccbd909bb450b286b285b5c1088901f5` and
+`e560c0ac44ecb453a6566dfe99e450f2d6fbac6c` complete and register ten unit
+regressions through the original public node API. They cover both object
+formats, full-fold evidence and original identity, authenticated symbolic-HEAD
+preservation, reopen/retry after later native publication, workspace and ref
+staleness, changed-semantics key conflicts, missing objects, invalid ordered
+parents, unrelated package objects, five immutable-staging conflicts, and
+independent tampering with all six evidence identities. The positive fixtures
+self-check actual native bytes; canonical HEAD is established in authenticated
+genesis rather than assumed from the imported source's `HEAD` file. Existing
+integration and process-death tests are retained.
+
+Verification for these commits is limited to source review, lexical/delimiter
+checks, and remote commit/blob inspection. Cargo, rustc, Rust compilation,
+Clippy, and runtime tests were unavailable in the editing environment. This
+integration is not a passing test report and does not satisfy the revision-bound
+batch gate or close `frankengit-asa3`.
