@@ -35,6 +35,7 @@ pub mod bisection;
 pub mod event;
 pub mod merge;
 pub mod preparation;
+pub mod review;
 pub mod snapshot;
 pub mod source_search;
 
