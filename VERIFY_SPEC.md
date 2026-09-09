@@ -219,7 +219,10 @@ file-backed authority CAS), `fgit-node/tests/native_merge_publication.rs`
 (real node publication, delivery, and restart), and
 `fgit-node/tests/sealed_native_merge_publication.rs` (original seal identity,
 independent closure/evidence checks, scheduled concurrent caller futures, and
-real node retry/reopen). Sync/async equivalence compares selected canonical
+real node retry/reopen). `fgit-node/tests/sealed_merge_publication.rs` also
+requires exact supplied full-fold evidence, refusal of predecessor evidence,
+and authenticated HEAD preservation through publication and reopen.
+Sync/async equivalence compares selected canonical
 bytes; the model schedule fixes actual pre-CAS interleavings, while the real
 node schedule controls caller polls and requires observed pending overlap.
 Canonical progress/history tests
