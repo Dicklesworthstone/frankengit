@@ -6,6 +6,9 @@
 //! The shared quarantine helper publishes nothing: a merge must continue into
 //! coupled forge admission, never through the ordinary source-only publisher.
 
+#[path = "bundle_review.rs"]
+mod bundle_review;
+
 use super::{NodeWorkspaceRefusal, workspace_request_live};
 use crate::quarantine_validator::ProductionReceiveQuarantineHandoff;
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
