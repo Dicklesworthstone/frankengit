@@ -122,6 +122,19 @@ pub(crate) struct NodeWorkspaceSessions {
     slots: Mutex<Slots>,
 }
 
+impl std::fmt::Debug for NodeWorkspaceSessions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let counts = self
+            .slots
+            .lock()
+            .map(|slots| (slots.opening.len(), slots.live.len()))
+            .ok();
+        f.debug_struct("NodeWorkspaceSessions")
+            .field("opening_and_live_counts", &counts)
+            .finish_non_exhaustive()
+    }
+}
+
 /// An opening slot owns no database publication or workspace lease. Dropping
 /// selection releases only this bounded admission slot, never a live session.
 struct Opening<'a> {
@@ -341,7 +354,10 @@ impl OneNode {
         expected: &MergeWorkspaceReceipt,
         append: &IntentLog,
         now: u64,
-    ) -> Result<MergeWorkspaceReceipt, NodeWorkspaceRefusal> {
+    ) -> Result<MergeWorkspaceReceipt, NodeWorkspaceRefusal>
+    where
+        A::Oid: Sync,
+    {
         let mut state = take(owner, request)?;
         self.recover_workspace(request, &mut state).await?;
         let now = now.max(self.runtime.now().as_nanos());
