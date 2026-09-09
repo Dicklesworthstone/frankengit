@@ -3,6 +3,8 @@
 
 #[path = "source_review.rs"]
 mod source_review;
+#[path = "source_history.rs"]
+mod source_history;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
