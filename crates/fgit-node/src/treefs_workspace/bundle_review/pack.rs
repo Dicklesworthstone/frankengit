@@ -16,7 +16,7 @@ impl Unpacked {
     /// only Git-reachable objects and their transitive pack-local delta bases;
     /// the latter are counted separately and never called candidate content.
     pub(super) fn check_coverage(&self, closure: &BTreeSet<GitOid>) -> Result<usize, BundleInspectionRefusal> {
-        let mut pending: BTreeSet<_> = self.objects.keys().filter(|id| closure.contains(id)).copied().collect();
+        let mut pending: BTreeSet<_> = self.objects.keys().filter(|id| closure.contains(*id)).copied().collect();
         let graph_objects = pending.len();
         let mut covered = BTreeSet::new();
         while let Some(id) = pending.pop_first() {
