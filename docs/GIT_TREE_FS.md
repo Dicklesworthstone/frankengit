@@ -113,6 +113,53 @@ staged_epoch >= visible_epoch >= durable_epoch
 
 A write operation is reserve → stage → publish-visible → optionally sync-durable. `flush` and `fsync` semantics are explicit per host adapter. CI and agent effect receipts name the durability boundary they require.
 
+### 6.1 Node-owned native merge session profile
+
+`OneNode::open_merge_workspace_in` selects an authenticated current branch and
+retains its `BaseView`, capability, intent log, evaluated overlay, `SessionRecord`
+and `WorkspaceLease`. The bounded profile admits sixteen simultaneous sessions,
+each with at most 32 MiB of retained edit bodies and 16,384 export objects. It
+supports ordinary file writes/deletions through the existing export engine;
+other edits refuse. Each adopted edit advances staged and visible epochs.
+Durable remains zero: these mutable sessions are process-local, without a
+restartable session journal. Opaque handles cannot reopen a closed session or
+cross node instances, even when the caller reuses a `WorkspaceId`.
+Capability expiry in this node profile uses node-runtime nanoseconds. The
+`now` argument may advance a session's monotone observation floor; it cannot
+rewind runtime time. Fresh publication rechecks the held capability at each
+pinned basis and immediately before CAS. Outcome reconciliation remains
+available after expiry.
+
+The explicit workspace merge profile adds one semantic request entry:
+namespace `treefs`, key `merge.workspace-snapshot-digest`, value the exact
+32-byte `WorkspaceSnapshotBody::snapshot_digest()`. The existing canonical
+request encoder orders this entry together with the original ref/event/epoch
+entries. This is an additive request profile with a distinct `TxId`; unbound
+native and original-package request bytes are unchanged. The expected snapshot
+is fixed across retries and is never rebuilt from a later authority basis.
+
+`admit_workspace_merge_durable_in` holds the actual session exclusively through
+native validation, staging, CAS replans and terminal reconciliation. At every
+pinned basis the shared admission driver compares the expected snapshot digest
+with the held session, and the node verifies that the native candidate's tree
+equals that session's actual export. The observed workspace epoch comes from
+the same record; this profile requires the workspace base commit to equal the
+merge's expected target tip. Missing ownership refuses; stale observations produce
+`EvidenceStale`. Source/target freshness still comes from authenticated refs.
+Terminal retries resolve before these currentness checks.
+
+Before the first admission write, the node retains the exact seal attempt and
+`TxId` in its session entry. Dropping a response future releases physical lock
+ownership but does not clear this pending publication. A subsequent edit,
+retry or close must acquire that same exclusive owner, drain the same authority
+worker and authenticate the exact transaction outcome. Failure preserves the
+pending state and refuses reuse. Busy sessions refuse immediately, with no
+unbounded waiter queue. A canonical commit settles the actual workspace lease;
+a canonical refusal or a drained undecided result permits further editing.
+Node shutdown drains and closes these leases before closing authority. If
+workspace drain fails, `WorkspaceShutdownBlocked` returns ownership of the
+complete node for recovery, without fabricating abort or quiescence.
+
 ## 7. Intent log and net-effect normal form
 
 Every user/tool operation is recorded as a typed `TreeEditIntent` before final commit construction:

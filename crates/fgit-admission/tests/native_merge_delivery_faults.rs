@@ -4,6 +4,9 @@
 //! closure validation are real; only immutable storage and scheduling use the
 //! explicitly non-durable MemoryAuthorityStore lane.
 
+#[path = "native_merge_delivery_faults/workspace.rs"]
+mod workspace;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -1314,6 +1317,13 @@ impl OwnedSealedMerge {
 /// The public reference evaluator supplies real full-fold evidence. The seed
 /// record is used only while deriving the seal, which excludes derived evidence.
 fn sealed_native_fixture(fixture: &Fixture) -> OwnedSealedMerge {
+    sealed_native_fixture_with_workspace(fixture, None)
+}
+
+fn sealed_native_fixture_with_workspace(
+    fixture: &Fixture,
+    workspace: Option<[u8; 32]>,
+) -> OwnedSealedMerge {
     let context = &fixture.context;
     let merge = fixture.intent.merge().unwrap();
     let closure = validate_merge_objects(
@@ -1358,7 +1368,15 @@ fn sealed_native_fixture(fixture: &Fixture) -> OwnedSealedMerge {
         },
         workspace_epoch_now: WorkspaceEpoch::from_u64(9),
     };
-    let attempt = seal_attempt_for(context, &sealed.borrowed()).unwrap();
+    let attempt = match workspace {
+        Some(digest) => fgit_admission::merge::native::workspace_seal_attempt_for(
+            context,
+            &sealed.borrowed(),
+            digest,
+        )
+        .unwrap(),
+        None => seal_attempt_for(context, &sealed.borrowed()).unwrap(),
+    };
     let tx_id = attempt.derive().unwrap().0;
     let head = fixture.head();
     let basis = PublicationBasis::new(

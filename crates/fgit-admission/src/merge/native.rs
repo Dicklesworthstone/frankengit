@@ -21,7 +21,10 @@ use super::{NativeMergeBasis, SealedMerge, prepare::prepare_event, staging::stag
 use storage::root;
 
 mod blocking;
-pub use blocking::{SyncNativeMergeProjection, admit_native_merge, admit_sealed_native_merge};
+pub use blocking::{
+    SyncNativeMergeProjection, admit_native_merge, admit_sealed_native_merge,
+    admit_workspace_sealed_native_merge,
+};
 pub mod delivery;
 pub mod history;
 pub mod objects;
@@ -30,6 +33,8 @@ pub mod progress;
 pub mod settlement;
 mod storage;
 pub use storage::{legacy_genesis_root, load_forge_positions};
+mod workspace;
+pub use workspace::{admit_workspace_sealed_native_merge_async, workspace_seal_attempt_for};
 
 /// A reviewed native merge. A new stream records a merge receipt, not invented
 /// PR opening or approval events. The caller's expected version is immutable.
@@ -37,6 +42,7 @@ pub use storage::{legacy_genesis_root, load_forge_positions};
 pub struct NativeMergeIntent {
     expected_version: ExpectedVersion,
     event: ForgeEvent,
+    workspace_snapshot_digest: Option<[u8; 32]>,
 }
 
 impl NativeMergeIntent {
@@ -58,7 +64,22 @@ impl NativeMergeIntent {
                 version,
                 payload: ForgeEventPayload::MergeCommittedNative(merge),
             },
+            workspace_snapshot_digest: None,
         })
+    }
+
+    /// Require the exact immutable workspace snapshot as an additional semantic
+    /// precondition. Admission must observe it through the projection's owner.
+    /// Requests built without this call retain their original canonical bytes.
+    #[must_use]
+    pub const fn with_workspace_snapshot(mut self, digest: [u8; 32]) -> Self {
+        self.workspace_snapshot_digest = Some(digest);
+        self
+    }
+
+    #[must_use]
+    pub const fn workspace_snapshot_digest(&self) -> Option<[u8; 32]> {
+        self.workspace_snapshot_digest
     }
 
     #[must_use]
@@ -101,13 +122,17 @@ impl NativeMergeIntent {
                 event_root.bytes().as_bytes(),
             )?],
         )?;
-        Ok(SealAttempt {
+        let attempt = SealAttempt {
             tenant_id: context.tenant_id,
             repository_id: context.repository_id,
             authenticated_principal_id: context.principal_id,
             idempotency_key: context.idempotency_key.clone(),
             request,
-        })
+        };
+        match self.workspace_snapshot_digest {
+            Some(digest) => workspace::bind_snapshot(attempt, digest),
+            None => Ok(attempt),
+        }
     }
 }
 
@@ -118,6 +143,7 @@ impl NativeMergeIntent {
 pub trait NativeMergeProjection<S>: AsyncAdmissionProjection<S>
 where S: AsyncAuthorityStore + ?Sized,
 {
+    /// Checks the caller's cancellation and work budget between storage steps.
     fn merge_checkpoint(&self, _cx: &S::Context) -> Result<(), RefusalCode> {
         Ok(())
     }
@@ -126,6 +152,20 @@ where S: AsyncAuthorityStore + ?Sized,
         &'a self, authority: &'a S, cx: &'a S::Context,
         basis: &'a PublicationBasis, authenticated: &'a AuthenticatedHead,
     ) -> impl Future<Output = Result<NativeMergeBasis, ProjectionFailure>> + Send + 'a;
+
+    /// Recheck effect-time liveness immediately before publication. Terminal
+    /// outcome recovery uses only merge_checkpoint, so expiry cannot hide an
+    /// already decided transaction.
+    fn merge_publication_checkpoint(&self, cx: &S::Context) -> Result<(), RefusalCode> {
+        self.merge_checkpoint(cx)
+    }
+    /// Observe the actual snapshot held by the workspace owner through the
+    /// complete publication attempt. A caller-supplied digest is not an owner.
+    /// The driver compares this observation with the sealed precondition.
+    /// Unbound requests do not call this hook.
+    fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
+        Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))
+    }
 
     /// Re-read native objects and validate ordered parents, common ancestry
     /// and full closure on every CAS attempt. Staging is not object authority.
@@ -195,6 +235,9 @@ where
     if merge.merge_commit.algorithm() != context.object_format {
         return Err(AdmissionError::ObjectFormatMismatch);
     }
+    // Preserve every original scoped entry, including the ref-intent root and
+    // workspace epoch. Constructing NativeMergeIntent's seal here would give
+    // the already sealed logical request a different transaction identity.
     let attempt = super::seal_attempt_for(context, sealed)?;
     let predecessor = sealed.package.event.version.get() - 1;
     let expected = match AggregateVersion::try_new(predecessor) {
@@ -249,6 +292,12 @@ where
         if cumulative.observed() != receipt.token() { continue; }
 
         let preparation: Result<_, PreparationFailure> = async {
+            if let Some(expected) = intent.workspace_snapshot_digest() {
+                let observed = projection.workspace_snapshot_digest()?;
+                if observed != expected {
+                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
+                }
+            }
             let snapshot = projection.snapshot_async(store, cx, &basis, &authenticated).await?;
             if snapshot.hidden_refs.hides(merge.source_ref.as_bytes())
                 || snapshot.hidden_refs.hides(merge.target_ref.as_bytes())
@@ -316,6 +365,9 @@ where
         // substituting roots into a record whose evidence described fewer effects.
         stage_prepared(store, cx, &prepared).await?;
         projection.merge_checkpoint(cx).map_err(unavailable)?;
+        projection
+            .merge_publication_checkpoint(cx)
+            .map_err(unavailable)?;
         let mut plan = PublicationPlan::open(basis.clone())?;
         plan.commit(prepared.materialization.record);
         let publication = plan.seal(&CryptoBodyIdentity, prepared.materialization.roots,

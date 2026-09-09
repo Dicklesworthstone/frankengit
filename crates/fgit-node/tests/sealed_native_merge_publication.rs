@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 //! Original sealed-package API against real embedded authority and native objects.
 
+#[path = "sealed_native_merge_publication/workspace.rs"]
+mod workspace;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::future::{Future, poll_fn};
@@ -362,6 +365,16 @@ fn package(
     context: &AdmissionContext,
     supplied: ValidatedClosure,
 ) -> Package {
+    package_with_workspace(node, f, context, supplied, None)
+}
+
+fn package_with_workspace(
+    node: &OneNode,
+    f: &Fixture,
+    context: &AdmissionContext,
+    supplied: ValidatedClosure,
+    workspace: Option<([u8; 32], WorkspaceEpoch)>,
+) -> Package {
     let request_context = node.request_context();
     let before = node
         .runtime()
@@ -393,7 +406,7 @@ fn package(
             source_tip: f.source,
             target_tip: f.target,
             base_tip: f.base,
-            workspace_epoch: WorkspaceEpoch::from_u64(1),
+            workspace_epoch: workspace.map_or(WorkspaceEpoch::from_u64(1), |(_, epoch)| epoch),
         },
         closure: supplied,
         // Evidence is outside request identity. Start with real prior evidence
@@ -406,9 +419,17 @@ fn package(
             outbox_effect_root: prior.outbox_effect_root,
             retention_delta_root: prior.retention_delta_root,
         },
-        workspace_epoch_now: WorkspaceEpoch::from_u64(1),
+        workspace_epoch_now: workspace.map_or(WorkspaceEpoch::from_u64(1), |(_, epoch)| epoch),
     };
-    let attempt = seal_attempt_for(context, &package.sealed()).unwrap();
+    let attempt = match workspace {
+        Some((digest, _)) => fgit_admission::merge::native::workspace_seal_attempt_for(
+            context,
+            &package.sealed(),
+            digest,
+        )
+        .unwrap(),
+        None => seal_attempt_for(context, &package.sealed()).unwrap(),
+    };
     let tx_id = attempt.derive().unwrap().0;
     let event_root = evidence_root(&ForgeEventBatch::of_one(package.effect.event.clone())).unwrap();
     let label = AsciiSlug::from_static("pull-request/1");

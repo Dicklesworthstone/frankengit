@@ -246,6 +246,13 @@ workspace epoch is only an asserted precondition: it cannot
 authenticate a current workspace session because it carries no workspace or
 snapshot identity.
 
+The additive `admit_workspace_merge_durable_in` path obtains that identity and
+epoch from a node-owned session, checks the actual exported tree, and retains
+the session lease through publication and any interrupted-request recovery.
+Its explicit semantic precondition and process-local durability limit are
+defined once in `GIT_TREE_FS.md` §6.1. The lower-level unbound API does not
+acquire those workspace guarantees merely by receiving an epoch scalar.
+
 The synchronous native and original-seal facades use private adapters whose
 storage and projection operations finish before returning `Ready`. A single
 poll enters the same async driver; no second seal, replan, or CAS loop exists.
@@ -312,8 +319,8 @@ can be admitted.
 
 The code and tests in this section do not close `frankengit-asa3`. The new
 sync/async and scheduled-concurrency tests require revision-bound execution.
-Supervised workspace freshness and the complete batch gate retain their
-original acceptance scope. Model fault tests and file-backed process-death
+The new supervised workspace composition and the complete batch gate require
+revision-bound execution before acceptance. Model fault tests and file-backed process-death
 tests have different evidence classes; neither implies host power-loss or
 filesystem fault coverage.
 

@@ -88,8 +88,6 @@ pub enum WorkspaceAbortReason {
     },
     /// The session refused the snapshot as a rollback.
     ///
-    /// SEMANTICS RULED, PRODUCER UNWIRED -- a typed non-claim, deliberately.
-    ///
     /// Per AGENTS.md §5.5, when anti-rollback refuses a lease's basis advance
     /// the lease MUST abort rather than continue on a stale basis. Continuing
     /// silently is precisely the silent rollback to an older valid root that the
@@ -97,10 +95,9 @@ pub enum WorkspaceAbortReason {
     /// basis the session has already rejected, and every one of them would look
     /// legitimate.
     ///
-    /// `AntiRollbackRefusal` already refuses the adoption (snapshot.rs); what is
-    /// missing is the edge that turns that refusal into a lease abort. Same
-    /// disposition as [`Self::IntentErrors`]: wiring is a §5.2 slice for the
-    /// workspace-lease bead.
+    /// The node-owned merge session produces this abort when its generated
+    /// snapshot fails `SessionRecord::adopt`; the prior snapshot remains intact
+    /// and that lease cannot continue producing edits.
     RollbackRefused,
 }
 

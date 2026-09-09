@@ -410,6 +410,16 @@ A fresh process reopens the node and reads the same canonical input. Hidden,
 absent, wrong-format and revoked twins exercise disclosure refusal. The test
 also checks that importing host output has not silently changed the ref.
 
+The workspace child suite in `sealed_native_merge_publication.rs` exercises
+node-owned edit/export and native merge publication for both Git object formats:
+current/stale snapshot pairs, exact candidate-tree binding, owner/opaque-handle
+refusals, original terminal retries, and dropping real admission after observing
+its staged seal. Busy edit/close must refuse while the driver lives; subsequent
+reuse requires same-store drain and authenticated reconciliation. These sessions
+have durable epoch zero; this suite does not establish a restartable workspace
+journal or host power-loss persistence. Admission's workspace binding tests
+also pin unchanged unbound request bytes and revalidation on every CAS replan.
+
 ## 15. CALM and obligation suites
 
 ### 15.1 CALM registry

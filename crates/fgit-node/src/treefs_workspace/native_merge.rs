@@ -52,6 +52,9 @@ impl OneNode {
             node: self,
             inner,
             object_limits: MergeObjectLimits::default(),
+            workspace: None,
+            workspace_capability: None,
+            workspace_clock_floor: 0,
         };
         admit_sealed_native_merge_async(
             &self.authority,
@@ -139,6 +142,9 @@ impl OneNode {
             node: self,
             inner: self.durable_admission_projection(&context).map_err(map_admission)?,
             object_limits: MergeObjectLimits::default(),
+            workspace: None,
+            workspace_capability: None,
+            workspace_clock_floor: 0,
         };
         let terminal = admit_native_merge_async(
             &self.authority, request.authority(), &context, &intent,
@@ -183,7 +189,14 @@ impl OneNode {
         let inner = self
             .durable_admission_projection(&context)
             .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?;
-        let projection = NodeNativeMergeProjection { node: self, inner, object_limits };
+        let projection = NodeNativeMergeProjection {
+            node: self,
+            inner,
+            object_limits,
+            workspace: None,
+            workspace_capability: None,
+            workspace_clock_floor: 0,
+        };
         admit_native_merge_async(
             &self.authority, request.authority(), &context, intent, limits, &projection,
         )
@@ -192,10 +205,35 @@ impl OneNode {
     }
 }
 
-struct NodeNativeMergeProjection<'node> {
-    node: &'node OneNode,
-    inner: DurableAsyncAdmissionProjection<'node>,
-    object_limits: MergeObjectLimits,
+/// The existing asynchronous projection plus real native-object validation.
+/// This deliberately does not implement synchronous staging callbacks.
+pub(super) struct NodeNativeMergeProjection<'node> {
+    pub(super) node: &'node OneNode,
+    pub(super) inner: DurableAsyncAdmissionProjection<'node>,
+    pub(super) object_limits: MergeObjectLimits,
+    /// Derived from the session whose exclusive guard spans this projection.
+    pub(super) workspace: Option<([u8; 32], fgit_types::GitOid, fgit_types::GitOid)>,
+    pub(super) workspace_capability: Option<fgit_treefs::TreeCapability>,
+    pub(super) workspace_clock_floor: u64,
+}
+
+impl NodeNativeMergeProjection<'_> {
+    fn workspace_live(&self) -> Result<(), RefusalCode> {
+        if let Some(capability) = &self.workspace_capability {
+            let now = self
+                .workspace_clock_floor
+                .max(self.node.runtime.now().as_nanos());
+            capability
+                .authorize_root(now)
+                .map_err(|error| match error {
+                    fgit_treefs::CapabilityRefusal::Expired { .. } => {
+                        RefusalCode::CapabilityExpired
+                    }
+                    _ => RefusalCode::CapabilityScopeViolation,
+                })?;
+        }
+        Ok(())
+    }
 }
 
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
@@ -236,6 +274,12 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
 }
 
 impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
+    fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
+        self.workspace_live().map_err(ProjectionFailure::Refuse)?;
+        self.workspace
+            .map(|(digest, _, _)| digest)
+            .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))
+    }
     fn merge_checkpoint(&self, cx: &Cx) -> Result<(), RefusalCode> {
         match checkpoint_pack_context(cx) {
             PackContextCheckpoint::Live => Ok(()),
@@ -246,6 +290,10 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 Err(RefusalCode::CancellationInProgress)
             }
         }
+    }
+    fn merge_publication_checkpoint(&self, cx: &Cx) -> Result<(), RefusalCode> {
+        self.merge_checkpoint(cx)?;
+        self.workspace_live()
     }
 
     #[expect(clippy::manual_async_fn, reason = "explicit Send is the resolution contract")]
@@ -337,7 +385,49 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
             if exhaustion.get().is_some() {
                 return Err(ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded));
             }
-            result
+            let closure = result?;
+            if let Some((_, expected_tree, expected_base)) = self.workspace {
+                if merge.target_tip_before != expected_base {
+                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale));
+                }
+                use fgit_git_object::{
+                    AcceptanceProfile, ObjectType, ParsedObject, parse_object_body,
+                };
+                let read = source.read_object(&merge.merge_commit);
+                if exhaustion.get().is_some() {
+                    return Err(ProjectionFailure::Unavailable(
+                        RefusalCode::ResourceBudgetExceeded,
+                    ));
+                }
+                self.merge_checkpoint(cx)
+                    .map_err(ProjectionFailure::Unavailable)?;
+                let (kind, body) =
+                    read.map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+                let ParsedObject::Commit(commit) = parse_object_body(
+                    ObjectType::Commit,
+                    &body,
+                    AcceptanceProfile::GitCompatibleImport,
+                    &source.parse_limits(),
+                )
+                .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?
+                else {
+                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
+                };
+                let actual_tree = commit
+                    .tree_reference()
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .and_then(|text| {
+                        fgit_types::GitOid::from_hex(
+                            self.node.object_format,
+                            &text.to_ascii_lowercase(),
+                        )
+                        .ok()
+                    });
+                if kind != ObjectType::Commit || actual_tree != Some(expected_tree) {
+                    return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale));
+                }
+            }
+            Ok(closure)
         }
     }
 }

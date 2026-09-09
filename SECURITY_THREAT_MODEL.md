@@ -268,6 +268,7 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - case-folding/Unicode normalization collision;
 - submodule or archive escape;
 - workspace overlay leaks across run/tenant;
+- stale workspace snapshots or recycled handles authorize a native merge, or a dropped response frees edits while its publication can still complete;
 - local file existence mistaken for publication;
 - cancelled tool leaves output/credential/process.
 
@@ -279,6 +280,7 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - explicit symlink/submodule/case/Unicode rules;
 - isolated overlay/cache namespaces;
 - semantic intents/export; local files have no authority;
+- node-owned workspace records/leases, principal and opaque-handle checks, exact sealed snapshot and candidate-tree binding, and pending publication recovery before session reuse;
 - staged/visible/durable output epochs;
 - Asupersync obligation/quiescence checks and forced containment.
 

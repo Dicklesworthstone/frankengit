@@ -5,6 +5,11 @@ mod merge_prepare;
 mod native_merge;
 mod outbox_delivery;
 mod publication;
+mod session_state;
+mod sessions;
+pub use session_state::WorkspaceSessionRefusal;
+pub use sessions::{MergeWorkspaceReceipt, WorkspaceShutdownBlocked};
+pub(crate) use sessions::NodeWorkspaceSessions;
 #[cfg(target_os = "linux")]
 mod trusted_tool;
 
@@ -28,6 +33,16 @@ use std::cell::Cell;
 /// An unavailable/hidden ref is intentionally one indistinguishable outcome.
 #[derive(Debug)]
 pub enum NodeWorkspaceRefusal {
+    /// This workspace is currently owned by another edit/publication/recovery.
+    WorkspaceBusy,
+    /// The node's finite session or export capacity was exceeded.
+    WorkspaceCapacity,
+    /// The opaque handle is absent, belongs to another node, or was closed.
+    WorkspaceHandleUnavailable,
+    /// The authenticated principal does not own this local workspace.
+    WorkspaceOwnerMismatch,
+    /// A mutable session refused an edit or obligation transition.
+    WorkspaceSession(WorkspaceSessionRefusal),
     Cell(CellRefusal),
     Authority(Box<AdmissionMaterializationRefusal>),
     RefUnavailable,

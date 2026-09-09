@@ -858,6 +858,7 @@ dependencies = [
 name = "fgit-node"
 version = "0.0.1"
 dependencies = [
+ "asupersync",
  "fgit-admission",
  "fgit-authority",
  "fgit-authority-fsqlite",

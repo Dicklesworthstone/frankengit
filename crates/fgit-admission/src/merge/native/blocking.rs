@@ -35,6 +35,14 @@ use crate::{
 pub trait SyncNativeMergeProjection: Sync {
     /// Check the caller's cancellation and remaining work budget.
     fn merge_checkpoint(&self) -> Result<(), RefusalCode>;
+    fn merge_publication_checkpoint(&self) -> Result<(), RefusalCode> {
+        self.merge_checkpoint()
+    }
+    /// Observe the snapshot held by the real workspace owner. Unbound requests
+    /// do not call this hook; bound requests require a concrete observation.
+    fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
+        Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))
+    }
     /// Read only the immutable state selected by this authenticated basis.
     fn snapshot(
         &self,
@@ -111,6 +119,33 @@ where
         &(),
         context,
         sealed,
+        limits,
+        &projection,
+    ))
+}
+
+/// Admit an original native package with an explicit workspace snapshot
+/// precondition through the same driver as the asynchronous entrypoint.
+pub fn admit_workspace_sealed_native_merge<S, P>(
+    store: &S,
+    context: &AdmissionContext,
+    sealed: &SealedMerge<'_>,
+    digest: [u8; 32],
+    limits: AdmissionLimits,
+    projection: &P,
+) -> Result<TerminalOutcome, AdmissionError>
+where
+    S: AuthorityStore + Sync + ?Sized,
+    P: SyncNativeMergeProjection + ?Sized,
+{
+    let authority = SyncAuthorityAsAsync(store);
+    let projection = SyncProjectionAsAsync(projection);
+    complete_immediate(super::admit_workspace_sealed_native_merge_async(
+        &authority,
+        &(),
+        context,
+        sealed,
+        digest,
         limits,
         &projection,
     ))
@@ -260,6 +295,12 @@ where
 {
     fn merge_checkpoint(&self, _: &()) -> Result<(), RefusalCode> {
         self.0.merge_checkpoint()
+    }
+    fn merge_publication_checkpoint(&self, _: &()) -> Result<(), RefusalCode> {
+        self.0.merge_publication_checkpoint()
+    }
+    fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
+        self.0.workspace_snapshot_digest()
     }
     fn validate_merge_async<'a>(
         &'a self,

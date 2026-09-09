@@ -45,7 +45,7 @@ use fgit_admission::{
     validate_source_import,
 };
 mod treefs_workspace;
-pub use treefs_workspace::NodeWorkspaceRefusal;
+pub use treefs_workspace::{MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked};
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, HeadInit, HeadKey,
@@ -3322,6 +3322,8 @@ pub enum NodeRefusal {
     Resource(Box<ResourceError>),
     /// A storage effect failed to settle its obligation region.
     ResourceContainment,
+    /// Failed workspace drain retains the node so its lease/worker can recover.
+    WorkspaceShutdownBlocked(Box<WorkspaceShutdownBlocked>),
     /// The node root did not quiesce within its bounded shutdown interval.
     RuntimeContainment,
     /// A publication's basis did not bind the store-authenticated current head.
@@ -3386,6 +3388,7 @@ impl Display for NodeRefusal {
             Self::ResourceContainment => {
                 formatter.write_str("object placement region did not reach quiescence")
             }
+            Self::WorkspaceShutdownBlocked(blocked) => write!(formatter, "workspace shutdown blocked; node retained: {}", blocked.cause()),
             Self::RuntimeContainment => {
                 formatter.write_str("node runtime did not reach quiescence during shutdown")
             }
@@ -3407,6 +3410,7 @@ impl Error for NodeRefusal {
             Self::ExistingOpenCleanup { opening, .. } => Some(opening),
             Self::Fabric(error) => Some(error.as_ref()),
             Self::Resource(error) => Some(error.as_ref()),
+            Self::WorkspaceShutdownBlocked(blocked) => Some(blocked.cause()),
             Self::Identity(error) => Some(error.as_ref()),
             Self::EmptyStorageRoot
             | Self::InvalidWorkerCount
@@ -5980,6 +5984,7 @@ pub struct OneNode {
     /// Abuse-skeleton state (plan 36.6) for push intake.
     pub(crate) push_quota: PushQuota,
     runtime: NodeRuntime,
+    workspaces: treefs_workspace::NodeWorkspaceSessions,
 }
 
 impl OneNode {
@@ -6252,6 +6257,7 @@ impl OneNode {
         Ok(Self {
             readiness: CellReadiness::bootstrapping(),
             runtime,
+            workspaces: treefs_workspace::NodeWorkspaceSessions::default(),
             authority,
             admission_materializer: DurableAdmissionMaterializer::new(admission_cache_scope),
             head_key,
@@ -8194,7 +8200,15 @@ impl OneNode {
     /// Callers that obtain a node must use this before dropping it so a clean
     /// stop has an observed quiescence result instead of relying on the
     /// database driver's drop-time backstop.
-    pub fn shutdown(mut self) -> Result<(), NodeRefusal> {
+    pub fn shutdown(self) -> Result<(), NodeRefusal> {
+        let request = self.request_context();
+        self.shutdown_with_workspace_context(request)
+    }
+
+    fn shutdown_with_workspace_context(mut self, request: NodeRequestContext) -> Result<(), NodeRefusal> {
+        if let Err(cause) = self.runtime.block_on(self.drain_merge_workspaces_in(&request)) {
+            return Err(NodeRefusal::WorkspaceShutdownBlocked(Box::new(WorkspaceShutdownBlocked::new(self, cause))));
+        }
         let shutdown_cx = self.authority_context();
         self.runtime
             .block_on(self.authority.close(&shutdown_cx))

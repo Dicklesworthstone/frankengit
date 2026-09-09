@@ -73,6 +73,17 @@ pub(super) fn export_from_base<A: GitHashAlgorithm>(
     log: &IntentLog, expected_commit: AnyOid, now: u64, limits: ExportLimits,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<WorkspaceEditExport<A>, NodeWorkspaceRefusal> {
+    export_owned_from_base(base, source, capability, log, expected_commit, now, limits, cancelled)
+        .map(|(export, _)| export)
+}
+
+/// Return the actual evaluated overlay to the node's workspace owner. The
+/// direct export API discards it; a session retains this same value and log.
+pub(super) fn export_owned_from_base<A: GitHashAlgorithm>(
+    base: &BaseView<A>, source: &NodeTreeSource<'_>, capability: &mut TreeCapability,
+    log: &IntentLog, expected_commit: AnyOid, now: u64, limits: ExportLimits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(WorkspaceEditExport<A>, fgit_treefs::Overlay), NodeWorkspaceRefusal> {
     validate_log(log, capability, now, limits)?;
     if expected_commit.as_bytes() != base.base_commit_oid().digest_bytes() {
         return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
@@ -103,15 +114,15 @@ pub(super) fn export_from_base<A: GitHashAlgorithm>(
     let plan = ExportPlanner::new(limits, source.inner.parse_limits())
         .plan(base, source, capability, &overlay, now, cancelled)
         .map_err(NodeWorkspaceRefusal::WorkspaceExport)?;
-    Ok(WorkspaceEditExport {
+    Ok((WorkspaceEditExport {
         source_rcr: base.base_rcr_id(),
         source_commit: *base.base_commit_oid(),
         plan,
         changed_paths: paths.into_iter().collect(),
-    })
+    }, overlay))
 }
 
-fn validate_log(
+pub(super) fn validate_log(
     log: &IntentLog,
     capability: &TreeCapability,
     now: u64,
