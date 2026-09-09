@@ -253,6 +253,23 @@ native projection adapters; the original `OneNode` entrypoint dispatches to
 that shared native driver internally. This preserves the existing permitted
 native route without adding a second publication loop to a legacy facade.
 
+For an existing native PR stream, the shared admission guard reads the exact
+event selected by the authenticated forge frontier. A native closure refuses
+with `ProtectedRefTransitionDenied`; a different source or target branch also
+refuses with that code. An open or updated PR must bind the merge's exact source
+and target tips, otherwise admission returns `EvidenceStale`. These checks
+precede staging the merge effects. An earlier terminal outcome is still
+resolved before current-state checks, preserving retry identity. New receipt
+streams and legacy event encodings retain their existing semantics.
+
+The native PR integration regressions in
+`fgit-admission/tests/native_merge_delivery_faults/pull_request.rs` use
+immutable event bodies selected by an initialized model authority head. They
+exercise the production merge driver and canonical publication machinery,
+including permitted merges and refusals without changes to ref/forge/outbox
+roots. They do not establish a production PR open/update/close publication
+API or filesystem crash durability for that API.
+
 The additive `admit_workspace_merge_durable_in` path obtains that identity and
 epoch from a node-owned session, checks the actual exported tree, and retains
 the session lease through publication and any interrupted-request recovery.

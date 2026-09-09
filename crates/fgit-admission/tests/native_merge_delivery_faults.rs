@@ -6,6 +6,8 @@
 
 #[path = "native_merge_delivery_faults/workspace.rs"]
 mod workspace;
+#[path = "native_merge_delivery_faults/pull_request.rs"]
+mod pull_request;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -499,8 +501,13 @@ impl CanonicalObjectSource for Objects {
     }
 }
 impl Objects {
-    fn insert(&mut self, kind: GitObjectKind, body: Vec<u8>) -> GitOid {
-        let id = git_object_id(GitHashAlgorithm::Sha1, kind, &body);
+    fn insert_with_format(
+        &mut self,
+        format: GitHashAlgorithm,
+        kind: GitObjectKind,
+        body: Vec<u8>,
+    ) -> GitOid {
+        let id = git_object_id(format, kind, &body);
         let object_type = match kind {
             GitObjectKind::Tree => ObjectType::Tree,
             GitObjectKind::Commit => ObjectType::Commit,
@@ -516,7 +523,7 @@ impl Objects {
     }
     fn commit(&mut self, tree: GitOid, parents: &[GitOid], message: &str) -> GitOid {
         let parents: String = parents.iter().map(|id| format!("parent {id}\n")).collect();
-        self.insert(GitObjectKind::Commit, format!("tree {tree}\n{parents}author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{message}\n").into_bytes())
+        self.insert_with_format(tree.algorithm(), GitObjectKind::Commit, format!("tree {tree}\n{parents}author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{message}\n").into_bytes())
     }
 }
 
@@ -524,6 +531,7 @@ struct Projection {
     canonical: CanonicalAdmissionProjection<Commitments, DerivedEvidence>,
     store: Arc<Model>,
     objects: Arc<Objects>,
+    object_format: GitHashAlgorithm,
 }
 impl Projection {
     fn resolved_basis(
@@ -551,7 +559,7 @@ impl Projection {
             .map_err(ProjectionFailure::Unavailable)?;
         if refs.refs() != &snapshot.refs
             || refs.head_target() != snapshot.head_target.as_ref()
-            || configuration.object_format != GitHashAlgorithm::Sha1
+            || configuration.object_format != self.object_format
             || fgit_admission::ref_state_root(configuration.root_layout, &refs)
                 .map_err(ProjectionFailure::Unavailable)?
                 != basis.body().ref_root
@@ -715,16 +723,19 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::new_for_format(GitHashAlgorithm::Sha1)
+    }
+    fn new_for_format(format: GitHashAlgorithm) -> Self {
         let context = AdmissionContext {
             head_key: HeadKey::new(b"native-merge-model/head".to_vec()).unwrap(),
             tenant_id: TenantId::from_bytes([1; 16]),
             repository_id: RepositoryId::from_bytes([2; 16]),
             principal_id: PrincipalId::from_bytes([3; 16]),
             idempotency_key: IdempotencyKey::new(b"first-merge".to_vec()).unwrap(),
-            object_format: GitHashAlgorithm::Sha1,
+            object_format: format,
         };
         let mut objects = Objects::default();
-        let tree = objects.insert(GitObjectKind::Tree, Vec::new());
+        let tree = objects.insert_with_format(format, GitObjectKind::Tree, Vec::new());
         let base = objects.commit(tree, &[], "base");
         let target = objects.commit(tree, &[base], "target");
         let source = objects.commit(tree, &[base], "source");
@@ -823,6 +834,7 @@ impl Fixture {
                 },
             ),
             objects: self.objects.clone(),
+            object_format: context.object_format,
         }
     }
     fn run(&self) -> Result<TerminalOutcome, AdmissionError> {
@@ -1584,7 +1596,9 @@ fn sealed_native_fixture_with_workspace(
                 }),
                 Intent::Forge(ForgeIntent {
                     stream: ForgeStreamId::new(label),
-                    expected_position: ForgeStreamPosition::GENESIS,
+                    expected_position: ForgeStreamPosition::new(
+                        fixture.intent.event().version.get() - 1,
+                    ),
                     event: ForgeEventKind::PullRequestMerged {
                         pull_request: ForgeEntityId::new(label),
                         target: merge.target_ref.clone(),

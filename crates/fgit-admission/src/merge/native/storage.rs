@@ -11,6 +11,7 @@ use fgit_codec::canonical_state::{
 };
 use fgit_codec::{CanonicalBody, CryptoBodyIdentity, DecodeLimits, decode_body, encode_body};
 use fgit_forge::aggregate::{AggregateHead, AggregateId, AggregateVersion};
+use fgit_forge::event::pull_request::PullRequestAction;
 use fgit_forge::event::{ForgeEventBatch, ForgeEventPayload};
 use fgit_types::{AsciiSlug, Digest, RefusalCode, RepositoryId};
 
@@ -68,13 +69,28 @@ pub(super) async fn aggregate_refusal<S: AsyncAuthorityStore + ?Sized>(
         if event.version.get() != entry.successor_position() {
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
-        if matches!(
-            event.payload,
+        match &event.payload {
             ForgeEventPayload::MergeCommitted { .. }
-                | ForgeEventPayload::MergeCommittedNative(_)
-                | ForgeEventPayload::PullRequestClosed { .. }
-        ) {
-            return Ok(Some(RefusalCode::ProtectedRefTransitionDenied));
+            | ForgeEventPayload::MergeCommittedNative(_)
+            | ForgeEventPayload::PullRequestClosed { .. } => {
+                return Ok(Some(RefusalCode::ProtectedRefTransitionDenied));
+            }
+            ForgeEventPayload::PullRequestChangedNative(change) => {
+                let merge = intent.merge()?;
+                // The authority-selected full state owns the PR's branch
+                // identities and reviewed tips. Matching live refs alone
+                // cannot authorize a closed or differently bound PR stream.
+                if change.action == PullRequestAction::Close
+                    || change.data.source_ref != merge.source_ref
+                    || change.data.target_ref != merge.target_ref
+                {
+                    return Ok(Some(RefusalCode::ProtectedRefTransitionDenied));
+                }
+                if !change.data.matches_merge(merge) {
+                    return Ok(Some(RefusalCode::EvidenceStale));
+                }
+            }
+            _ => {}
         }
         if let ForgeEventPayload::PullRequestChangedNative(change) = &event.payload {
             if change.action == fgit_forge::event::pull_request::PullRequestAction::Close {
