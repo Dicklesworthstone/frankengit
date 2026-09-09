@@ -1,6 +1,10 @@
 //! Read-only native source review. Input selection and comparison mode are
 //! explicit; all source bytes come from the node's authenticated object owner.
 
+#[path = "bundle_review.rs"]
+mod bundle_review;
+pub(super) use bundle_review::run as inspect_bundle;
+
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::PathBuf;
