@@ -124,6 +124,7 @@ The adopted runtime, storage, gateway, projection, and TUI stack must pass one e
 - FrankenSQLite `default-features = false` with the minimal role-specific feature closure, no C API/native SQLite, no concurrent stock-SQLite access, and no unpublished/absolute path or `[patch]` dependency;
 - asynchronous FrankenSQLite calls receive the runtime-owned `&Cx`; connection/worker count and command queues are bounded; every worker has explicit close/join evidence;
 - awaited transaction commit/rollback, whole-transaction retry over only the registered transient family, fresh-snapshot handling for `SnapshotTooOld`, and refusal when retry budget is exhausted;
+- overlapping calls on one embedded connection: whole-operation ownership, no uncommitted reads, queued-caller cancellation without disturbing the owner, and abandoned transaction recovery before connection reuse;
 - authority CAS history equivalence and exactly one winner under every claimed contender profile; and
 - projection watermark, authority-negative, migration, wipe/rebuild, cancellation, and bounded-writer tests against the exact claimed FrankenSQLite concurrency envelope.
 

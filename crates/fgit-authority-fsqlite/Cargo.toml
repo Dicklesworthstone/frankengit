@@ -7,6 +7,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+asupersync.workspace = true
 fgit-authority.workspace = true
 fgit-codec.workspace = true
 fgit-types.workspace = true
@@ -25,12 +26,8 @@ fsqlite = { version = "0.3.7", default-features = false, features = ["native", "
 # this adds no admission surface.
 fsqlite-types = { version = "0.3.7", default-features = false, features = ["native"] }
 
-# Test-only. The conformance bridge needs a real runtime because fsqlite's
-# async API refuses to run without one, and it needs to name asupersync's Cx to
-# hold the request context alive for the store's lifetime. Neither reaches the
-# production graph.
+# Test-only node runtime composition for the real-engine conformance bridge.
 [dev-dependencies]
-asupersync.workspace = true
 fgit-runtime.workspace = true
 
 [lints]

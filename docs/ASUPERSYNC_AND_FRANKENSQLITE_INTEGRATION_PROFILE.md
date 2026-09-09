@@ -156,6 +156,8 @@ It never becomes an independent repository truth source. A successful SQL commit
 - A raw `Connection` is `!Send + !Sync`. It stays on one owning worker/local lane. `AsyncConnection` owns a dedicated worker and bounded command channel; it is pooled per declared service/lane, not opened without bound per request.
 - Every connection/worker has an owner, capacity limit, shutdown budget, and explicit `close(&Cx)`/join path. Drop-triggered cleanup is a backstop and cannot prove quiescent shutdown.
 - A transaction is finalized by awaited `commit` or `rollback`. Drop rollback is deferred cleanup, not successful abort evidence.
+- One caller owns a connection for an entire authority operation, including every statement and transaction finalization. Reads participate in the same ownership protocol: they must not observe another caller's uncommitted head, outcome, or immutable body. Serializing individual worker commands does not serialize multi-statement transactions.
+- If an operation is abandoned or its finalization is uncertain, retain that condition on the connection. Before admitting another operation, the owner must drain prior queued commands and finish any surviving transaction, or refuse reuse. A subsequent live caller may supply its own finite context for this recovery; it does not change the earlier caller's ambiguous result or prove that caller aborted. No masked or detached context may silently bypass cancellation.
 - Database work inherits the request/service budget and cancellation cause. Cancellation while a command or commit may have executed returns typed ambiguity and performs the required state/outcome lookup.
 
 ### 3.4 Transaction and retry law

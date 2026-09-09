@@ -65,6 +65,10 @@ use crate::retry::{
 use crate::schema::{SCHEMA_VERSION, ddl_statements, operation_statement};
 use crate::token::{TokenMintError, mint_token, next_issuance_after};
 
+#[path = "operation.rs"]
+mod operation;
+use operation::{OperationGate, OperationLease};
+
 /// The number of bytes an opaque version token occupies in storage.
 const TOKEN_BYTES: usize = 16;
 
@@ -209,6 +213,7 @@ impl EngineError {
 #[derive(Debug)]
 pub struct FsqliteAuthorityStore {
     connection: AsyncConnection,
+    operations: OperationGate,
     instance: StoreInstanceId,
     limits: AuthorityLimits,
 }
@@ -242,6 +247,7 @@ impl FsqliteAuthorityStore {
 
         let store = Self {
             connection,
+            operations: OperationGate::new(),
             instance,
             limits,
         };
@@ -360,18 +366,49 @@ impl FsqliteAuthorityStore {
             .map_err(|error| EngineError::from(&error))
     }
 
-    async fn begin<Caps>(&self, cx: &Cx<Caps>) -> Result<(), EngineError>
+    /// Recover a previous unfinished operation before serving any new read or
+    /// write. The discarded query is a FIFO worker barrier: a queued BEGIN
+    /// from a dropped future must finish before in_transaction is consulted.
+    async fn operation<Caps>(&self, cx: &Cx<Caps>) -> Result<OperationLease, EngineError>
     where
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
+        let mut lease = self.operations.acquire(cx).await?;
+        if lease.needs_recovery() {
+            let _ = self.query(cx, "identity.read", &[]).await?;
+            if self.connection.in_transaction() {
+                self.connection
+                    .rollback_transaction(cx)
+                    .await
+                    .map_err(|error| EngineError::from(&error))?;
+            }
+            lease.finalized();
+        }
+        Ok(lease)
+    }
+
+    async fn begin<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        lease: &mut OperationLease,
+    ) -> Result<(), EngineError>
+    where
+        Caps: cap::SubsetOf<cap::All>,
+        cap::None: cap::SubsetOf<Caps>,
+    {
+        lease.begin_attempted();
         self.connection
             .begin_transaction(cx)
             .await
             .map_err(|error| EngineError::from(&error))
     }
 
-    async fn commit<Caps>(&self, cx: &Cx<Caps>) -> Result<(), EngineError>
+    async fn commit<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        lease: &mut OperationLease,
+    ) -> Result<(), EngineError>
     where
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
@@ -379,19 +416,29 @@ impl FsqliteAuthorityStore {
         self.connection
             .commit_transaction(cx)
             .await
-            .map_err(|error| EngineError::from(&error))
+            .map_err(|error| EngineError::from(&error))?;
+        lease.finalized();
+        Ok(())
     }
 
     /// Roll back, preserving the error that caused it.
     ///
-    /// A rollback failure never replaces the original cause: the caller needs
-    /// to know why the transaction failed, not why the cleanup did.
-    async fn rollback_after<Caps>(&self, cx: &Cx<Caps>, cause: EngineError) -> EngineError
+    /// Preserve the original failure, keeping the connection quarantined when
+    /// rollback cannot finish under this caller's context. A later live caller
+    /// must drain and finalize it before receiving any repository state.
+    async fn rollback_after<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        lease: &mut OperationLease,
+        cause: EngineError,
+    ) -> EngineError
     where
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
-        let _ = self.connection.rollback_transaction(cx).await;
+        if self.connection.rollback_transaction(cx).await.is_ok() {
+            lease.finalized();
+        }
         cause
     }
 
@@ -520,13 +567,14 @@ impl FsqliteAuthorityStore {
         cap::None: cap::SubsetOf<Caps>,
     {
         self.admit_body(body)?;
-        self.begin(cx).await?;
+        let mut lease = self.operation(cx).await?;
+        self.begin(cx, &mut lease).await?;
         match self.put_body(cx, key, body).await {
             Ok(outcome) => {
-                self.commit(cx).await?;
+                self.commit(cx, &mut lease).await?;
                 Ok(outcome)
             }
-            Err(cause) => Err(self.rollback_after(cx, cause).await),
+            Err(cause) => Err(self.rollback_after(cx, &mut lease, cause).await),
         }
     }
 
@@ -594,6 +642,7 @@ impl FsqliteAuthorityStore {
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
+        let _lease = self.operation(cx).await?;
         let rows = self.query(cx, "body.read", &[blob(key.as_bytes())]).await?;
         match rows.first() {
             None => Ok(ImmutableRead::Absent),
@@ -615,6 +664,7 @@ impl FsqliteAuthorityStore {
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
+        let _lease = self.operation(cx).await?;
         match self.head_row(cx, key).await? {
             None => Ok(HeadRead::Absent),
             Some((token, generation, body)) => Ok(HeadRead::Present(HeadReadReceipt::new(
@@ -644,13 +694,14 @@ impl FsqliteAuthorityStore {
         cap::None: cap::SubsetOf<Caps>,
     {
         self.admit_body(body)?;
-        self.begin(cx).await?;
+        let mut lease = self.operation(cx).await?;
+        self.begin(cx, &mut lease).await?;
         match self.create_head(cx, key, generation, body).await {
             Ok(outcome) => {
-                self.commit(cx).await?;
+                self.commit(cx, &mut lease).await?;
                 Ok(outcome)
             }
-            Err(cause) => Err(self.rollback_after(cx, cause).await),
+            Err(cause) => Err(self.rollback_after(cx, &mut lease, cause).await),
         }
     }
 
@@ -769,16 +820,17 @@ impl FsqliteAuthorityStore {
         cap::None: cap::SubsetOf<Caps>,
     {
         self.admit_body(new_body)?;
-        self.begin(cx).await?;
+        let mut lease = self.operation(cx).await?;
+        self.begin(cx, &mut lease).await?;
         match self
             .exchange_head(cx, key, expected, new_generation, new_body)
             .await
         {
             Ok(outcome) => {
-                self.commit(cx).await?;
+                self.commit(cx, &mut lease).await?;
                 Ok(outcome)
             }
-            Err(cause) => Err(self.rollback_after(cx, cause).await),
+            Err(cause) => Err(self.rollback_after(cx, &mut lease, cause).await),
         }
     }
 
@@ -924,13 +976,14 @@ impl FsqliteAuthorityStore {
             self.admit_body(bytes)?;
         }
 
-        self.begin(cx).await?;
+        let mut lease = self.operation(cx).await?;
+        self.begin(cx, &mut lease).await?;
         match self
             .publish_atomically(cx, key, expected, new_generation, new_body, outcomes)
             .await
         {
             Ok(outcome @ CasOutcome::Committed(_)) => {
-                self.commit(cx).await?;
+                self.commit(cx, &mut lease).await?;
                 Ok(outcome)
             }
             Ok(CasOutcome::PredecessorMismatch) => {
@@ -945,9 +998,10 @@ impl FsqliteAuthorityStore {
                     .rollback_transaction(cx)
                     .await
                     .map_err(|error| EngineError::from(&error))?;
+                lease.finalized();
                 Ok(CasOutcome::PredecessorMismatch)
             }
-            Err(cause) => Err(self.rollback_after(cx, cause).await),
+            Err(cause) => Err(self.rollback_after(cx, &mut lease, cause).await),
         }
     }
 
@@ -1005,6 +1059,7 @@ impl FsqliteAuthorityStore {
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
+        let _lease = self.operation(cx).await?;
         let rows = self
             .query(
                 cx,
