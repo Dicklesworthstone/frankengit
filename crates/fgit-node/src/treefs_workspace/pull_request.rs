@@ -9,7 +9,7 @@ use fgit_admission::merge::native::objects::MergeObjectLimits;
 use fgit_admission::merge::native::pull_request::{self, PullRequestPage, PullRequestProjection};
 use fgit_admission::merge::native::NativeMergeProjection;
 use fgit_admission::{AdmissionContext, AdmissionError, AdmissionLimits, ProjectionFailure, ValidatedClosure};
-use fgit_authority::{AuthenticatedHead, TerminalOutcome};
+use fgit_authority::{AuthenticatedHead, OutcomeLookup, TerminalOutcome};
 use fgit_authority_fsqlite::FsqliteAuthorityStore;
 use fgit_chronicle::PublicationBasis;
 use fgit_forge::event::pull_request::PullRequestCommand;
@@ -39,8 +39,6 @@ impl OneNode {
     ) -> Result<(TxId, TerminalOutcome), NodeReceiveTransportRefusal> {
         let authenticated = session.authenticated_session()
             .ok_or(NodeReceiveTransportRefusal::Unauthenticated)?;
-        self.receive_publication_admitted()?;
-        self.push_quota.evaluate(&authenticated.principal_id())?;
         let context = AdmissionContext {
             head_key: self.head_key.clone(), tenant_id: self.tenant_id,
             repository_id: self.repository_id, principal_id: authenticated.principal_id(),
@@ -52,6 +50,19 @@ impl OneNode {
         let tx_id = attempt.derive().map_err(|_| map_error(
             AdmissionError::AsyncProjectionUnavailable(RefusalCode::CanonicalFramingInvalid),
         ))?.0;
+        // Recover the exact immutable request before applying gates for new
+        // publication. A stopped cell or exhausted push quota cannot erase an
+        // authenticated terminal outcome. Preserve the core seal/key check.
+        if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+            &self.authority, request.authority(), &self.head_key,
+            self.tenant_id, self.repository_id, tx_id,
+        ).await.map_err(|error| map_error(error.into()))? {
+            fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
+                .await.map_err(|error| map_error(error.into()))?;
+            return Ok((tx_id, terminal));
+        }
+        self.receive_publication_admitted()?;
+        self.push_quota.evaluate(&authenticated.principal_id())?;
         let projection = NodeNativeMergeProjection {
             node: self, inner: self.durable_admission_projection(&context).map_err(map_error)?,
             object_limits: MergeObjectLimits::default(),

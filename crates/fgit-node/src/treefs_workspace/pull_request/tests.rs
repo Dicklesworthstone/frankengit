@@ -161,7 +161,7 @@ fn real_open_update_close_and_reopen_preserve_code_and_original_outcomes() {
 }
 
 #[test]
-fn concurrent_version_competitor_and_reused_key_cannot_overwrite_or_revive() {
+fn stale_version_competitor_and_reused_key_cannot_overwrite_or_revive() {
     let scratch = Scratch::new(); let node = node(&scratch, GitHashAlgorithm::Sha1);
     let f = fixture(&node, &scratch, GitHashAlgorithm::Sha1);
     let open = command(&f, 1); accepted(apply(&node, &open, "open"));
@@ -186,6 +186,42 @@ fn concurrent_version_competitor_and_reused_key_cannot_overwrite_or_revive() {
     assert!(matches!(refused.1.outcome, DecisionOutcome::Refused { code: RefusalCode::ProtectedRefTransitionDenied, .. }));
     assert_eq!(page(&node, 0, 100, None).unwrap().pull_requests[0].data.as_ref().unwrap().title, "Winner");
     node.shutdown().unwrap();
+}
+
+#[test]
+fn terminal_retries_survive_quota_containment_and_stopped_intake() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new(); let mut node = node(&scratch, format);
+        let f = fixture(&node, &scratch, format);
+        let open = command(&f, 1);
+        let committed = accepted(apply(&node, &open, "original-open"));
+        let refused = apply(&node, &open, "stale-open").unwrap();
+        assert!(matches!(refused.1.outcome,
+            DecisionOutcome::Refused { code: RefusalCode::EvidenceStale, .. }));
+        let settled = snapshot(&node);
+        // Deterministic operator containment, with no sleeps or clock races.
+        node.push_quota.limit.max_events = 0;
+        assert_eq!(apply(&node, &open, "original-open").unwrap(), committed);
+        assert_eq!(apply(&node, &open, "stale-open").unwrap(), refused);
+        assert!(matches!(apply(&node, &command(&f, 2), "new-open"),
+            Err(NodeReceiveTransportRefusal::QuotaContained { .. })));
+        let mut changed = open.clone(); changed.data.title = "Different request".into();
+        assert!(apply(&node, &changed, "original-open").is_err());
+        assert_eq!(snapshot(&node).basis(), settled.basis());
+        node.shutdown().unwrap();
+
+        // Reopen without bringing the cell into service: recovery is read-like,
+        // but an uncommitted command must still fail the publication gate.
+        let reopened = OneNode::open_existing(scratch.config(format)).unwrap();
+        assert_eq!(apply(&reopened, &open, "original-open").unwrap(), committed);
+        assert_eq!(apply(&reopened, &open, "stale-open").unwrap(), refused);
+        assert!(matches!(apply(&reopened, &command(&f, 2), "new-open"),
+            Err(NodeReceiveTransportRefusal::CellState(_)
+                | NodeReceiveTransportRefusal::StagedWithoutPublication { .. })));
+        assert!(apply(&reopened, &changed, "original-open").is_err());
+        assert_eq!(snapshot(&reopened).basis(), settled.basis());
+        reopened.shutdown().unwrap();
+    }
 }
 
 #[test]
