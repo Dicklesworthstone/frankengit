@@ -1046,13 +1046,7 @@ impl PlantedDefect {
                         .forge
                         .values()
                         .flatten()
-                        .filter_map(|event| match event {
-                            ForgeEventKind::PullRequestMerged { target, .. } => {
-                                Some(target.clone())
-                            }
-                            ForgeEventKind::PullRequestClosed { .. }
-                            | ForgeEventKind::PullRequestOpened { .. } => None,
-                        })
+                        .filter_map(|event| event.required_ref_effect().cloned())
                         .collect();
                     for target in targets {
                         planted |= record.effects.refs.remove(&target).is_some();

@@ -2505,6 +2505,78 @@ fn refusal_forge_transition_invalid() -> RefusalCode {
     code
 }
 
+#[test]
+fn pr_updates_preserve_namespace_and_forge_permission_checks_without_moving_refs() {
+    for case in ["permitted", "outside-namespace", "no-forge-capability"] {
+        let mut fixture = Fixture::new(29029);
+        let stream = ForgeStreamId::new(label("native-pr"));
+        let entity = ForgeEntityId::new(label("pr-1"));
+        let opened = fixture
+            .request(fixture.author, "open")
+            .statement(
+                MismatchPolicy::TxnAbort,
+                vec![Intent::Forge(ForgeIntent {
+                    stream,
+                    expected_position: ForgeStreamPosition::GENESIS,
+                    event: ForgeEventKind::PullRequestOpened {
+                        pull_request: entity,
+                        target: name("refs/heads/main"),
+                    },
+                })],
+            )
+            .build(&mut fixture.mint);
+        assert!(fixture.publish(&opened, &[]).is_committed());
+        let before = fixture.state.roots().clone();
+        let event = ForgeEventKind::PullRequestUpdated {
+            pull_request: entity,
+            target: if case == "outside-namespace" {
+                RefName::try_new_one_level(b"HEAD").unwrap()
+            } else {
+                name("refs/heads/main")
+            },
+        };
+        let principal = if case == "no-forge-capability" {
+            fixture.narrow
+        } else {
+            fixture.author
+        };
+        let update = fixture
+            .request(principal, "update")
+            .statement(
+                MismatchPolicy::TxnAbort,
+                vec![Intent::Forge(ForgeIntent {
+                    stream,
+                    expected_position: ForgeStreamPosition::new(1),
+                    event: event.clone(),
+                })],
+            )
+            .build(&mut fixture.mint);
+        let report = fixture.publish(&update, &[]);
+        assert_eq!(fixture.state.roots().refs, before.refs);
+        if case == "permitted" {
+            assert!(report.is_committed(), "{report:?}");
+            assert_eq!(
+                fixture.state.roots().forge_positions.get(&stream),
+                Some(&ForgeStreamPosition::new(2))
+            );
+            assert_eq!(
+                fixture.state.commits().last().unwrap().effects.forge.get(&stream),
+                Some(&vec![event])
+            );
+        } else {
+            let expected = if case == "outside-namespace" {
+                RefusalCode::RefNameInvalid
+            } else {
+                RefusalCode::CapabilityScopeViolation
+            };
+            assert_eq!(report.refusal_code(), Some(expected), "{case}: {report:?}");
+            assert_eq!(fixture.state.roots().forge_positions, before.forge_positions);
+            assert_eq!(fixture.state.commits().len(), 1);
+        }
+        fixture.assert_structurally_sound();
+    }
+}
+
 fn refusal_effect_idempotency_reuse() -> RefusalCode {
     let mut fixture = Fixture::new(117);
     let delivery = OutboxDeliveryKey::new(label("webhook-1"));

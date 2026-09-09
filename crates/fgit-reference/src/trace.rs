@@ -328,6 +328,14 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(3);
             write_slug(out, "ForgeEntityId", pull_request.label())?;
         }
+        ForgeEventKind::PullRequestUpdated {
+            pull_request,
+            target,
+        } => {
+            out.write_raw_byte(4);
+            write_slug(out, "ForgeEntityId", pull_request.label())?;
+            out.write_ref_name(target)?;
+        }
     }
     Ok(())
 }
@@ -353,6 +361,14 @@ fn read_forge_event(input: &mut Decoder<'_>) -> Result<ForgeEventKind, CodecRefu
         3 => {
             let pull_request = ForgeEntityId::new(read_slug(input, "ForgeEntityId")?);
             Ok(ForgeEventKind::PullRequestClosed { pull_request })
+        }
+        4 => {
+            let pull_request = ForgeEntityId::new(read_slug(input, "ForgeEntityId")?);
+            let target = input.read_ref_name()?;
+            Ok(ForgeEventKind::PullRequestUpdated {
+                pull_request,
+                target,
+            })
         }
         other => malformed("ForgeEventKind", u64::from(other)),
     }
@@ -1852,12 +1868,17 @@ fn push_json_string(out: &mut String, value: &str) {
 mod tests {
     use super::{
         DivergenceKind, GoldenTrace, ObservedOutcome, TraceRecorder, decode, encode, hex,
-        push_json_string, replay,
+        push_json_string, read_forge_event, replay, write_forge_event,
     };
     use crate::harness::IdentityMint;
+    use crate::intent::{
+        ForgeEntityId, ForgeEventKind, ForgeIntent, ForgeStreamId, ForgeStreamPosition, Intent,
+    };
     use crate::machine::ModelInput;
     use crate::state::{GenesisConfiguration, PolicySnapshot};
     use crate::transition::{CasRequest, SealRequest};
+    use fgit_codec::{bounds::DecodeLimits, error::CodecRefusal, reader::Decoder, writer::Encoder};
+    use fgit_types::RefName;
     use fgit_types::native::GitHashAlgorithm;
     use fgit_types::numeric::{PolicyEpoch, RegistryEpoch};
     use std::collections::{BTreeMap, BTreeSet};
@@ -1888,6 +1909,139 @@ mod tests {
         let decoded = decode(&bytes).expect("decode");
         assert_eq!(decoded, trace);
         assert_eq!(encode(&decoded).expect("re-encode"), bytes);
+    }
+
+    #[test]
+    fn forge_event_literal_bytes_distinguish_variants_and_update_coordinates() {
+        let pull_request = ForgeEntityId::new(crate::harness::label("pr/1"));
+        let target = RefName::try_new(b"refs/heads/main").expect("target");
+        let cases: [(ForgeEventKind, &[u8]); 6] = [
+            (
+                ForgeEventKind::PullRequestOpened {
+                    pull_request,
+                    target: target.clone(),
+                },
+                b"\x01\0\0\0\x04pr/1\0\0\0\x0frefs/heads/main",
+            ),
+            (
+                ForgeEventKind::PullRequestMerged {
+                    pull_request,
+                    target: target.clone(),
+                },
+                b"\x02\0\0\0\x04pr/1\0\0\0\x0frefs/heads/main",
+            ),
+            (
+                ForgeEventKind::PullRequestClosed { pull_request },
+                b"\x03\0\0\0\x04pr/1",
+            ),
+            (
+                ForgeEventKind::PullRequestUpdated {
+                    pull_request,
+                    target: target.clone(),
+                },
+                b"\x04\0\0\0\x04pr/1\0\0\0\x0frefs/heads/main",
+            ),
+            (
+                ForgeEventKind::PullRequestUpdated {
+                    pull_request: ForgeEntityId::new(crate::harness::label("pr/2")),
+                    target,
+                },
+                b"\x04\0\0\0\x04pr/2\0\0\0\x0frefs/heads/main",
+            ),
+            (
+                ForgeEventKind::PullRequestUpdated {
+                    pull_request,
+                    target: RefName::try_new(b"refs/heads/topic").expect("other target"),
+                },
+                b"\x04\0\0\0\x04pr/1\0\0\0\x10refs/heads/topic",
+            ),
+        ];
+        let mut encodings = BTreeSet::new();
+        for (event, literal) in cases {
+            let mut out = Encoder::new();
+            write_forge_event(&mut out, &event).expect("encode forge event");
+            assert_eq!(
+                out.as_bytes(),
+                literal,
+                "literal discriminant and field framing"
+            );
+            assert!(
+                encodings.insert(out.into_bytes()),
+                "each variant or coordinate change has distinct bytes"
+            );
+            let mut input = Decoder::new(literal, DecodeLimits::DEFAULT);
+            assert_eq!(read_forge_event(&mut input).expect("decode literal"), event);
+            input.finish().expect("consume the complete literal");
+        }
+    }
+
+    #[test]
+    fn an_update_intent_survives_complete_trace_encoding_and_reference_replay() {
+        let mut mint = IdentityMint::new(6);
+        let mut recorder = TraceRecorder::new(genesis(6));
+        let request = crate::harness::RequestBuilder::new(
+            recorder.state().tenant(),
+            recorder.state().repository(),
+            mint.principal(),
+            fgit_types::label::SchemaId::new(
+                fgit_types::label::SchemaFamily::from_static("fgit/ref-txn"),
+                2,
+                0,
+            ),
+            crate::intent::IdempotencyKey::new(crate::harness::label("update")),
+        )
+        .statement(
+            fgit_types::MismatchPolicy::TxnAbort,
+            vec![Intent::Forge(ForgeIntent {
+                stream: ForgeStreamId::new(crate::harness::label("pull-request/2")),
+                expected_position: ForgeStreamPosition::new(7),
+                event: ForgeEventKind::PullRequestUpdated {
+                    pull_request: ForgeEntityId::new(crate::harness::label("pr/2")),
+                    target: RefName::try_new(b"refs/heads/topic").expect("target"),
+                },
+            })],
+        )
+        .build(&mut mint);
+        let step = recorder
+            .apply(ModelInput::Seal(Box::new(SealRequest {
+                seal_id: mint.seal(),
+                request,
+            })))
+            .expect("record reference input");
+        // This codec test retains a real pre-seal refusal under the existing
+        // empty policy; it does not claim the update was authorized/published.
+        assert!(matches!(step.observed, ObservedOutcome::SealRejected(_)));
+        let trace = recorder.finish();
+        let bytes = encode(&trace).expect("encode trace with update");
+        let decoded = decode(&bytes).expect("decode trace with update");
+        assert_eq!(decoded, trace);
+        assert_eq!(encode(&decoded).expect("re-encode trace"), bytes);
+        assert!(replay(&decoded).expect("reference replay").is_faithful());
+    }
+
+    #[test]
+    fn update_trace_event_requires_complete_fields_and_a_known_tag() {
+        let literal = b"\x04\0\0\0\x04pr/1\0\0\0\x0frefs/heads/main";
+        for length in 0..literal.len() {
+            let mut input = Decoder::new(&literal[..length], DecodeLimits::DEFAULT);
+            assert!(
+                matches!(
+                    read_forge_event(&mut input),
+                    Err(CodecRefusal::InputTruncated { .. })
+                ),
+                "truncated update at {length} bytes must not become another event"
+            );
+        }
+        let mut input = Decoder::new(&[5], DecodeLimits::DEFAULT);
+        assert!(matches!(
+            read_forge_event(&mut input),
+            Err(CodecRefusal::Type(
+                fgit_types::TypeRefusal::CodePointUnknown {
+                    field: "ForgeEventKind",
+                    observed: 5
+                }
+            ))
+        ));
     }
 
     #[test]
