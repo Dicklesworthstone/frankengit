@@ -47,7 +47,7 @@ pub fn validate_merge_objects(
 ) -> Result<ValidatedClosure, ProjectionFailure> {
     merge.validate().map_err(|_| invalid())?;
     validate_candidate_objects(source, merge.merge_commit,
-        &[merge.target_tip_before, merge.source_tip], Some(merge.base_tip), limits, deadline)
+        Some(&[merge.target_tip_before, merge.source_tip]), Some(merge.base_tip), limits, deadline)
 }
 
 /// Verify a single-parent workspace commit with the SAME identity, required
@@ -62,22 +62,37 @@ pub fn validate_workspace_objects(
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
-    validate_candidate_objects(source, candidate, &[expected_parent], None, limits, deadline)
+    validate_candidate_objects(source, candidate, Some(&[expected_parent]), None, limits, deadline)
+}
+
+/// Verify all native dependencies of an already-authorized source commit.
+/// This supplies a precise reachable allow-list for read-only artifact tooling:
+/// an external delta base must be reachable from an authorized parent, not just
+/// present elsewhere in the repository. The caller owns root authorization.
+pub fn validate_commit_closure(
+    source: &impl CanonicalObjectSource,
+    commit: GitOid,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    validate_candidate_objects(source, commit, None, None, limits, deadline)
 }
 
 fn validate_candidate_objects(
     source: &impl CanonicalObjectSource,
     candidate: GitOid,
-    expected_parents: &[GitOid],
+    expected_parents: Option<&[GitOid]>,
     merge_base: Option<GitOid>,
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
     let format = candidate.algorithm();
-    if candidate.is_zero() || expected_parents.is_empty() || expected_parents.len() > 2
-        || expected_parents.iter().any(|id| id.is_zero() || id.algorithm() != format || *id == candidate)
-        || (expected_parents.len() == 2 && expected_parents[0] == expected_parents[1])
-        || merge_base.is_some_and(|id| id.is_zero() || id.algorithm() != format || expected_parents.len() != 2)
+    if candidate.is_zero() || expected_parents.is_some_and(|parents|
+        parents.is_empty() || parents.len() > 2
+        || parents.iter().any(|id| id.is_zero() || id.algorithm() != format || *id == candidate)
+        || (parents.len() == 2 && parents[0] == parents[1]))
+        || merge_base.is_some_and(|id| id.is_zero() || id.algorithm() != format
+            || expected_parents.is_none_or(|parents| parents.len() != 2))
     { return Err(invalid()); }
     let maximum = MergeObjectLimits::default();
     if limits.max_objects == 0 || limits.max_objects > maximum.max_objects
@@ -109,7 +124,7 @@ fn validate_candidate_objects(
         if object.body().len() > limits.max_object_bytes { return Err(budget()); }
         total_bytes = total_bytes.checked_add(object.body().len())
             .filter(|bytes| *bytes <= limits.max_total_bytes).ok_or_else(budget)?;
-        let profile = if id == candidate {
+        let profile = if id == candidate && expected_parents.is_some() {
             AcceptanceProfile::StrictCreate
         } else {
             AcceptanceProfile::GitCompatibleImport
@@ -121,6 +136,10 @@ fn validate_candidate_objects(
         let mut outgoing = Vec::new();
         match parsed {
             ParsedObject::Commit(commit) => {
+                if commit.headers().iter().filter(|header| header.name == b"tree").count() != 1
+                    || commit.headers().iter().any(|header| (header.name == b"tree" || header.name == b"parent")
+                        && !header.continuations.is_empty())
+                { return Err(invalid()); }
                 let tree = parse_oid(format, commit.tree_reference().ok_or_else(invalid)?)?;
                 push_edge(&mut outgoing, &mut edges, limits.max_edges, tree, ObjectType::Tree)?;
                 let mut parent_ids = Vec::new();
@@ -130,7 +149,7 @@ fn validate_candidate_objects(
                     push_edge(&mut outgoing, &mut edges, limits.max_edges, parent, ObjectType::Commit)?;
                     parent_ids.push(parent);
                 }
-                if id == candidate && parent_ids.as_slice() != expected_parents {
+                if id == candidate && expected_parents.is_some_and(|expected| parent_ids.as_slice() != expected) {
                     return Err(invalid());
                 }
                 parents.insert(id, parent_ids);
@@ -163,6 +182,7 @@ fn validate_candidate_objects(
         }
     }
     if let Some(base) = merge_base {
+        let expected_parents = expected_parents.ok_or_else(invalid)?;
         if !parents.contains_key(&base)
             || !is_ancestor(base, expected_parents[1], &parents, deadline)?
             || !is_ancestor(base, expected_parents[0], &parents, deadline)?
