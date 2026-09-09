@@ -77,7 +77,7 @@ pub(super) fn quote(value: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            c if c <= '\u{1f}' => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => out.push_str(&format!("\\u{:04x}", u32::from(c))),
             c => out.push(c),
         }
     }
