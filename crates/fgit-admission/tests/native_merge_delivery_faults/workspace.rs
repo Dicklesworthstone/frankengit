@@ -48,6 +48,13 @@ impl SyncNativeMergeProjection for WorkspaceProjection {
     ) -> Result<AdmissionSnapshot, ProjectionFailure> {
         SyncNativeMergeProjection::snapshot(&self.inner, basis, authenticated)
     }
+    fn resolve_merge_basis(
+        &self,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+    ) -> Result<NativeMergeBasis, ProjectionFailure> {
+        SyncNativeMergeProjection::resolve_merge_basis(&self.inner, basis, authenticated)
+    }
     fn validate_merge(
         &self,
         basis: &PublicationBasis,
@@ -117,6 +124,16 @@ impl NativeMergeProjection<Model> for WorkspaceProjection {
     }
     fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
         self.observe()
+    }
+    fn resolve_merge_basis_async<'a>(
+        &'a self,
+        store: &'a Model,
+        cx: &'a (),
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<Output = Result<NativeMergeBasis, ProjectionFailure>> + Send + 'a {
+        self.inner
+            .resolve_merge_basis_async(store, cx, basis, authenticated)
     }
     fn validate_merge_async<'a>(
         &'a self,

@@ -21,7 +21,7 @@ use fgit_txn::TransactionFoldReport;
 use fgit_types::{HeadGeneration, RefusalCode, TxId};
 
 use super::{NativeMergeIntent, NativeMergeProjection};
-use crate::merge::SealedMerge;
+use crate::merge::{NativeMergeBasis, SealedMerge};
 use crate::{
     AdmissionContext, AdmissionError, AdmissionLimits, AdmissionSnapshot, AsyncAdmissionProjection,
     CommitMaterialization, ProjectionFailure, RefusalMaterialization, ValidatedClosure,
@@ -49,6 +49,14 @@ pub trait SyncNativeMergeProjection: Sync {
         basis: &PublicationBasis,
         authenticated: &AuthenticatedHead,
     ) -> Result<AdmissionSnapshot, ProjectionFailure>;
+    /// Resolve the exact selected ref/configuration, forge and outbox bodies.
+    /// Missing advanced roots must refuse; a snapshot's derived maps alone
+    /// cannot replace the canonical bodies or their retained dependencies.
+    fn resolve_merge_basis(
+        &self,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+    ) -> Result<NativeMergeBasis, ProjectionFailure>;
     /// Revalidate the exact candidate, ordered parents, base and full native
     /// object closure at each authority basis, including every CAS replan.
     fn validate_merge(
@@ -301,6 +309,15 @@ where
     }
     fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
         self.0.workspace_snapshot_digest()
+    }
+    fn resolve_merge_basis_async<'a>(
+        &'a self,
+        _: &'a SyncAuthorityAsAsync<'store, S>,
+        _: &'a (),
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<Output = Result<NativeMergeBasis, ProjectionFailure>> + Send + 'a {
+        ready(self.0.resolve_merge_basis(basis, authenticated))
     }
     fn validate_merge_async<'a>(
         &'a self,

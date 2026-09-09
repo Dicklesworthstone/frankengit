@@ -8,13 +8,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fs, process};
 
+use fgit_admission::merge::NativeMergeBasis;
 use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_objects};
 use fgit_admission::merge::native::{
     NativeMergeIntent, NativeMergeProjection, admit_native_merge_async, delivery,
 };
 use fgit_admission::{
     AdmissionContext, AdmissionLimits, AdmissionSnapshot, AsyncAdmissionProjection,
-    CommitMaterialization, ProjectionFailure, RefusalMaterialization, ValidatedClosure,
+    CanonicalRefState, CommitMaterialization, ProjectionFailure, RefusalMaterialization,
+    ValidatedClosure,
 };
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
@@ -265,8 +267,8 @@ impl CanonicalObjectSource for NodeObjects<'_> {
 }
 
 /// The public durable projection owns ref/evidence materialization unchanged.
-/// This adapter supplies only the additional native object-validation capability
-/// and forwards the wrapped backend to that projection's actual store contract.
+/// This adapter resolves the same authenticated ref/configuration and delivery
+/// bodies, validates native objects, and forwards the wrapped backend unchanged.
 struct Projection<'a> {
     inner: DurableAsyncAdmissionProjection<'a>,
     materializer: &'a DurableAdmissionMaterializer,
@@ -311,6 +313,43 @@ impl NativeMergeProjection<CrashAuthority> for Projection<'_> {
     fn merge_checkpoint(&self, cx: &Cx) -> Result<(), RefusalCode> {
         cx.checkpoint()
             .map_err(|_| RefusalCode::CancellationInProgress)
+    }
+    async fn resolve_merge_basis_async<'a>(
+        &'a self,
+        authority: &'a CrashAuthority,
+        cx: &'a Cx,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+    ) -> Result<NativeMergeBasis, ProjectionFailure> {
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        let selected = self
+            .materializer
+            .materialize_exact_in(authority, cx, repository(), basis, authenticated, &|| {
+                cx.checkpoint().is_err()
+            })
+            .await;
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        let selected =
+            selected.map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+        let delivery = delivery::read_in(authority, cx, basis, &|| cx.checkpoint().is_err()).await;
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        let delivery =
+            delivery.map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+        let snapshot = selected.snapshot();
+        let refs = match snapshot.head_target.clone() {
+            Some(target) => CanonicalRefState::new_with_head_target(snapshot.refs.clone(), target)
+                .map_err(ProjectionFailure::Unavailable)?,
+            None => CanonicalRefState::new(snapshot.refs.clone()),
+        };
+        Ok(NativeMergeBasis {
+            refs,
+            root_layout: selected.root_layout(),
+            forge: delivery.forge,
+            outbox: delivery.outbox,
+        })
     }
     async fn validate_merge_async<'a>(
         &'a self,

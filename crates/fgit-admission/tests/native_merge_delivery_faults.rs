@@ -20,7 +20,7 @@ use fgit_admission::merge::native::{
     admit_native_merge_async, admit_sealed_native_merge, admit_sealed_native_merge_async, delivery,
     legacy_genesis_root,
 };
-use fgit_admission::merge::{SealedMerge, seal_attempt_for};
+use fgit_admission::merge::{NativeMergeBasis, SealedMerge, seal_attempt_for};
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionProjection,
     AdmissionSnapshot, AdmissionSnapshotProjection, AsyncAdmissionProjection,
@@ -39,7 +39,7 @@ use fgit_authority::{
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::{
     CanonicalBody, DecodeLimits, OutboxDeliveryIdentityInput, RepositoryAuthorityHeadBody,
-    decode_body, derive_outbox_delivery_key, encode_body,
+    RepositoryConfigurationBody, decode_body, derive_outbox_delivery_key, encode_body,
 };
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::aggregate::{ExpectedVersion, PullRequestNumber};
@@ -58,7 +58,7 @@ use fgit_reference::refs::ExpectedRefState;
 use fgit_types::{
     AsciiSlug, DecisionOutcome, Digest, DigestAlgorithmId, DigestBytes, GitHashAlgorithm, GitOid,
     HeadGeneration, MismatchPolicy, PolicyEpoch, PrincipalId, PrincipalSnapshotId, RefName,
-    RefusalCode, RegistryEpoch, RepositoryId, TenantId, TxId,
+    RefusalCode, RegistryEpoch, RepositoryId, RootLayoutVersion, TenantId, TxId,
 };
 use fgit_wire::visibility::RefVisibility;
 
@@ -209,6 +209,21 @@ impl Model {
         };
         let body = decode_body::<B>(&frame, DecodeLimits::DEFAULT)
             .map_err(|_| RefusalCode::EvidenceInvalid)?;
+        if evidence_root(&body)? != root {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        Ok(body)
+    }
+
+    fn configuration(&self, root: Digest) -> Result<RepositoryConfigurationBody, RefusalCode> {
+        let body = fgit_authority::read_repository_configuration(&self.backend, &root).map_err(
+            |error| match error {
+                fgit_authority::OutcomeFailure::ConfigurationUnresolvable => {
+                    RefusalCode::EvidenceMissing
+                }
+                _ => RefusalCode::EvidenceInvalid,
+            },
+        )?;
         if evidence_root(&body)? != root {
             return Err(RefusalCode::EvidenceInvalid);
         }
@@ -389,8 +404,15 @@ impl CanonicalAdmissionStore for Commitments {
         }
         Ok(())
     }
-    fn resolve_hidden_ref_policy(&self, _: Digest) -> Result<RefVisibility, RefusalCode> {
-        Ok(RefVisibility::new()) // This model fixture has no hidden refs.
+    fn resolve_hidden_ref_policy(&self, root: Digest) -> Result<RefVisibility, RefusalCode> {
+        let configuration = self.store.configuration(root)?;
+        let mut policy = RefVisibility::new();
+        for rule in &configuration.hidden_ref_rules {
+            policy
+                .push_rule(rule, &fgit_wire::WireLimits::default())
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+        }
+        Ok(policy)
     }
 }
 
@@ -500,7 +522,62 @@ impl Objects {
 
 struct Projection {
     canonical: CanonicalAdmissionProjection<Commitments, DerivedEvidence>,
+    store: Arc<Model>,
     objects: Arc<Objects>,
+}
+impl Projection {
+    fn resolved_basis(
+        &self,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+    ) -> Result<NativeMergeBasis, ProjectionFailure> {
+        // The canonical projection checks the authenticated basis, ref body
+        // and exact configuration-selected visibility policy first.
+        let snapshot = self
+            .canonical
+            .snapshot(basis, authenticated)
+            .map_err(ProjectionFailure::Unavailable)?;
+        let configuration = self
+            .store
+            .configuration(basis.body().configuration_root)
+            .map_err(ProjectionFailure::Unavailable)?;
+        let refs: CanonicalRefState = self
+            .store
+            .read(
+                basis.body().repository_id,
+                REF_NAMESPACE,
+                basis.body().ref_root,
+            )
+            .map_err(ProjectionFailure::Unavailable)?;
+        if refs.refs() != &snapshot.refs
+            || refs.head_target() != snapshot.head_target.as_ref()
+            || configuration.object_format != GitHashAlgorithm::Sha1
+            || fgit_admission::ref_state_root(configuration.root_layout, &refs)
+                .map_err(ProjectionFailure::Unavailable)?
+                != basis.body().ref_root
+        {
+            return Err(ProjectionFailure::Unavailable(
+                RefusalCode::AuthorityReceiptStale,
+            ));
+        }
+        // Model implements only immediate futures. Reuse the production reader
+        // for exact legacy recognition and all event/effect/payload checks.
+        let delivery = poll_ready(delivery::read_in(self.store.as_ref(), &(), basis, &|| {
+            false
+        }))
+        .map_err(|error| {
+            ProjectionFailure::Unavailable(match error {
+                AdmissionError::AsyncProjectionUnavailable(code) => code,
+                _ => RefusalCode::EvidenceInvalid,
+            })
+        })?;
+        Ok(NativeMergeBasis {
+            refs,
+            root_layout: configuration.root_layout,
+            forge: delivery.forge,
+            outbox: delivery.outbox,
+        })
+    }
 }
 impl SyncNativeMergeProjection for Projection {
     fn merge_checkpoint(&self) -> Result<(), RefusalCode> {
@@ -514,6 +591,13 @@ impl SyncNativeMergeProjection for Projection {
         self.canonical
             .snapshot(basis, authenticated)
             .map_err(ProjectionFailure::Unavailable)
+    }
+    fn resolve_merge_basis(
+        &self,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+    ) -> Result<NativeMergeBasis, ProjectionFailure> {
+        self.resolved_basis(basis, authenticated)
     }
     fn validate_merge(
         &self,
@@ -595,6 +679,15 @@ impl AsyncAdmissionProjection<Model> for Projection {
 impl NativeMergeProjection<Model> for Projection {
     fn merge_checkpoint(&self, _: &()) -> Result<(), RefusalCode> {
         Ok(())
+    }
+    fn resolve_merge_basis_async<'a>(
+        &'a self,
+        _: &'a Model,
+        _: &'a (),
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<Output = Result<NativeMergeBasis, ProjectionFailure>> + Send + 'a {
+        std::future::ready(self.resolved_basis(basis, authenticated))
     }
     fn validate_merge_async<'a>(
         &'a self,
@@ -680,6 +773,15 @@ impl Fixture {
                 .unwrap(),
             ref_root
         );
+        let configuration_root = fgit_authority::stage_repository_configuration(
+            &store.backend,
+            &RepositoryConfigurationBody {
+                root_layout: RootLayoutVersion::LegacyWholeBody,
+                object_format: context.object_format,
+                hidden_ref_rules: Vec::new(),
+            },
+        )
+        .expect("stage the real selected model configuration");
         let genesis = RepositoryAuthorityHeadBody {
             repository_id: context.repository_id,
             generation: HeadGeneration::FIRST,
@@ -693,7 +795,7 @@ impl Fixture {
             outcome_index_root: digest(16),
             retention_root: digest(17),
             outbox_root: legacy_genesis_root(context.repository_id, b"outbox"),
-            configuration_root: digest(18),
+            configuration_root,
             policy_epoch: PolicyEpoch::FIRST,
             format_registry_epoch: RegistryEpoch::FIRST,
             last_checkpoint_id: None,
@@ -709,6 +811,7 @@ impl Fixture {
     }
     fn projection(&self, context: &AdmissionContext) -> Projection {
         Projection {
+            store: self.store.clone(),
             canonical: CanonicalAdmissionProjection::new(
                 Commitments {
                     store: self.store.clone(),
@@ -1200,6 +1303,62 @@ fn assert_same_native_state(left: &Fixture, right: &Fixture) {
                     "committed evidence must exist"
                 );
                 assert_eq!(frame, right.store.backend.read_immutable(&key).unwrap());
+            }
+        }
+    }
+}
+
+#[test]
+fn selected_basis_dependencies_are_required_by_both_resolver_surfaces() {
+    for driver in [NativeDriver::Sync, NativeDriver::Async] {
+        for case in ["missing-configuration", "missing-outbox", "permitted"] {
+            let mut fixture = Fixture::new();
+            if case != "permitted" {
+                // A separate authenticated head selects one absent dependency;
+                // all native objects and other roots are the permitted twin's.
+                fixture.context.head_key =
+                    HeadKey::new(format!("{case}/head").into_bytes()).unwrap();
+                if case == "missing-configuration" {
+                    fixture.genesis.configuration_root = digest(254);
+                } else {
+                    // The valid configuration lets snapshot succeed. Only the
+                    // forwarded resolver's canonical delivery reader rejects
+                    // this missing root instead of inventing an empty outbox.
+                    fixture.genesis.outbox_root = digest(254);
+                    assert_ne!(
+                        fixture.genesis.outbox_root,
+                        legacy_genesis_root(fixture.context.repository_id, b"outbox")
+                    );
+                }
+                initialize_repository(
+                    &fixture.store.backend,
+                    &fixture.context.head_key,
+                    &fixture.genesis,
+                )
+                .unwrap();
+            }
+            let result = driver.run(&fixture, &fixture.context, &fixture.intent);
+            if case == "permitted" {
+                let terminal = result.expect("the complete selected basis permits the merge");
+                let committed = fixture.assert_committed(terminal);
+                assert_eq!(
+                    driver
+                        .other()
+                        .run(&fixture, &fixture.context, &fixture.intent)
+                        .unwrap(),
+                    terminal
+                );
+                assert_eq!(fixture.head(), committed);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(AdmissionError::AsyncProjectionUnavailable(
+                        RefusalCode::EvidenceMissing
+                    ))
+                ));
+                assert_eq!(fixture.head(), fixture.genesis);
+                assert_eq!(fixture.outcome(fixture.tx_id()), OutcomeLookup::Undecided);
+                assert!(fixture.store.publications.lock().unwrap().is_empty());
             }
         }
     }
