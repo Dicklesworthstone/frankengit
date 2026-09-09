@@ -477,7 +477,7 @@ mod tests {
             self.blobs.insert(oid, bytes.to_vec());
             MergeEntry { name: name.to_vec(), mode, oid }
         }
-        fn tree(&mut self, mut entries: Vec<MergeEntry>) -> GitOid {
+        fn store_tree(&mut self, mut entries: Vec<MergeEntry>) -> GitOid {
             entries.sort_by_cached_key(|entry| { let mut key = entry.name.clone(); key.push(if entry.mode == 0o040000 { b'/' } else { 0 }); key });
             let mut body = Vec::new();
             for entry in &entries {
@@ -487,7 +487,7 @@ mod tests {
             let id = git_object_id(self.format, GitObjectKind::Tree, &body);
             self.trees.insert(id, entries); id
         }
-        fn commit(&mut self, tree: GitOid, parents: &[GitOid], label: &str) -> GitOid {
+        fn store_commit(&mut self, tree: GitOid, parents: &[GitOid], label: &str) -> GitOid {
             let mut body = format!("tree {tree}\n");
             for parent in parents { body.push_str(&format!("parent {parent}\n")); }
             body.push_str(&format!("author T <t@x> 1 +0000\ncommitter T <t@x> 1 +0000\n\n{label}"));
@@ -507,9 +507,9 @@ mod tests {
         MergeMetadata { author: "T <t@x>".into(), committer: "T <t@x>".into(), timestamp: 1, message: b"merge\n".to_vec() }
     }
     fn branch_pair(source: &mut Source, b: Vec<MergeEntry>, o: Vec<MergeEntry>, t: Vec<MergeEntry>) -> (GitOid, GitOid) {
-        let bt = source.tree(b); let base = source.commit(bt, &[], "base");
-        let ot = source.tree(o); let ours = source.commit(ot, &[base], "ours");
-        let tt = source.tree(t); let theirs = source.commit(tt, &[base], "theirs");
+        let bt = source.store_tree(b); let base = source.store_commit(bt, &[], "base");
+        let ot = source.store_tree(o); let ours = source.store_commit(ot, &[base], "ours");
+        let tt = source.store_tree(t); let theirs = source.store_commit(tt, &[base], "theirs");
         (ours, theirs)
     }
 
@@ -520,7 +520,7 @@ mod tests {
             let base_file = s.file(b"text", b"one\ntwo\nthree\nfour\nfive\n", 0o100644);
             let our_file = s.file(b"text", b"ONE\ntwo\nthree\nfour\nfive\n", 0o100755);
             let their_file = s.file(b"text", b"one\ntwo\nthree\nfour\nFIVE\n", 0o100644);
-            let bt = s.tree(vec![base_file]); let ot = s.tree(vec![our_file]); let tt = s.tree(vec![their_file]);
+            let bt = s.store_tree(vec![base_file]); let ot = s.store_tree(vec![our_file]); let tt = s.store_tree(vec![their_file]);
             let dir = |oid| MergeEntry { name: b"dir".to_vec(), mode: 0o040000, oid };
             let keep = s.file(b"keep", b"do not copy me\n", 0o100644);
             let (ours, theirs) = branch_pair(&mut s, vec![dir(bt), keep.clone()], vec![dir(ot), keep.clone()], vec![dir(tt), keep.clone()]);
@@ -574,11 +574,11 @@ mod tests {
     #[test]
     fn criss_cross_and_no_common_base_are_refused_without_picking_an_arbitrary_base() {
         let mut s = Source::new(GitHashAlgorithm::Sha1);
-        let tree = s.tree(vec![]); let root = s.commit(tree, &[], "root");
-        let a = s.commit(tree, &[root], "a"); let b = s.commit(tree, &[root], "b");
-        let left = s.commit(tree, &[a, b], "left"); let right = s.commit(tree, &[b, a], "right");
+        let tree = s.store_tree(vec![]); let root = s.store_commit(tree, &[], "root");
+        let a = s.store_commit(tree, &[root], "a"); let b = s.store_commit(tree, &[root], "b");
+        let left = s.store_commit(tree, &[a, b], "left"); let right = s.store_commit(tree, &[b, a], "right");
         assert!(matches!(prepare_merge(&s, s.format, left, right, &metadata(), PreparationLimits::default()), Err(PreparationError::MultipleMergeBases(_))));
-        let other = s.commit(tree, &[], "unrelated");
+        let other = s.store_commit(tree, &[], "unrelated");
         assert!(matches!(prepare_merge(&s, s.format, left, other, &metadata(), PreparationLimits::default()), Err(PreparationError::NoCommonAncestor)));
         assert_eq!(prepare_merge(&s, s.format, left, a, &metadata(), PreparationLimits::default()).unwrap(), MergePreparation::AlreadyUpToDate { target: left });
     }
@@ -586,12 +586,41 @@ mod tests {
     #[test]
     fn cancellation_limits_and_metadata_injection_refuse() {
         let mut s = Source::new(GitHashAlgorithm::Sha1);
-        let tree = s.tree(vec![]); let base = s.commit(tree, &[], "base"); let tip = s.commit(tree, &[base], "tip");
+        let tree = s.store_tree(vec![]); let base = s.store_commit(tree, &[], "base"); let tip = s.store_commit(tree, &[base], "tip");
         let mut bad = metadata(); bad.author = "T <t@x>\nparent forged".into();
         assert!(matches!(prepare_merge(&s, s.format, base, tip, &bad, PreparationLimits::default()), Err(PreparationError::InvalidMetadata)));
         let limits = PreparationLimits { max_commits: 1, ..PreparationLimits::default() };
         assert!(matches!(prepare_merge(&s, s.format, base, tip, &metadata(), limits), Err(PreparationError::Graph(MergeBaseError::CommitLimitExceeded { .. }))));
         s.live.set(false);
         assert!(matches!(prepare_merge(&s, s.format, base, tip, &metadata(), PreparationLimits::default()), Err(PreparationError::Source(MergeSourceError::Cancelled))));
+    }
+
+    #[test]
+    fn one_sided_deletion_and_disjoint_addition_merge_without_resurrecting_the_file() {
+        let mut s = Source::new(GitHashAlgorithm::Sha1);
+        let deleted = s.file(b"deleted", b"gone", 0o100644);
+        let added = s.file(b"added", b"new", 0o100644);
+        let expected_tree = s.store_tree(vec![added.clone()]);
+        let (ours, theirs) = branch_pair(&mut s, vec![deleted.clone()], vec![], vec![added, deleted]);
+        let result = prepare_merge(&s, s.format, ours, theirs, &metadata(), PreparationLimits::default()).unwrap();
+        assert!(matches!(result, MergePreparation::Clean(plan) if plan.tree == expected_tree));
+    }
+
+    #[test]
+    fn fast_forward_capable_input_still_produces_an_explicit_two_parent_candidate() {
+        let mut s = Source::new(GitHashAlgorithm::Sha256);
+        let old_tree = s.store_tree(vec![]);
+        let target = s.store_commit(old_tree, &[], "target");
+        let added = s.file(b"added", b"new", 0o100644);
+        let new_tree = s.store_tree(vec![added]);
+        let incoming = s.store_commit(new_tree, &[target], "incoming");
+        let result = prepare_merge(&s, s.format, target, incoming, &metadata(), PreparationLimits::default()).unwrap();
+        let MergePreparation::Clean(plan) = result else { panic!("candidate required"); };
+        assert_eq!(plan.tree, new_tree);
+        assert_eq!(plan.objects.len(), 1);
+        assert_eq!(plan.objects[0].kind, GitObjectKind::Commit);
+        assert!(String::from_utf8_lossy(&plan.objects[0].body).starts_with(&format!(
+            "tree {new_tree}\nparent {target}\nparent {incoming}\n"
+        )));
     }
 }
