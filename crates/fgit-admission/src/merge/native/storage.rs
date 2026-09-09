@@ -76,6 +76,16 @@ pub(super) async fn aggregate_refusal<S: AsyncAuthorityStore + ?Sized>(
         ) {
             return Ok(Some(RefusalCode::ProtectedRefTransitionDenied));
         }
+        if let ForgeEventPayload::PullRequestChangedNative(change) = &event.payload {
+            if change.action == fgit_forge::event::pull_request::PullRequestAction::Close {
+                return Ok(Some(RefusalCode::ProtectedRefTransitionDenied));
+            }
+            // A PR number cannot authorize a different branch pair or newer
+            // tips. Refresh the compared coordinates through an explicit update.
+            if !change.data.matches_merge(intent.merge()?) {
+                return Ok(Some(RefusalCode::EvidenceStale));
+            }
+        }
     }
     Ok(None)
 }

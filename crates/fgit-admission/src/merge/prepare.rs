@@ -1,5 +1,6 @@
-//! Pure, coupled native merge preparation. Both public admission surfaces use
-//! this same Ref + Forge + Outbox fold; there is no ref-only intermediate RCR.
+//! Pure coupled forge preparation. Native merges and PR lifecycle commands
+//! share the full fold, immutable evidence, delivery identity and RCR builder.
+//! Only merges may move a ref; metadata changes never manufacture ref effects.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,7 +11,8 @@ use fgit_codec::{
     OutboxDeliveryIdentityInput, RepositoryCommitRecord, derive_outbox_delivery_key,
 };
 use fgit_forge::{ForgeEvent, ForgeEventBatch, ForgeEventPayload};
-use fgit_reference::effect::{FoldBasis, FoldOutcome};
+use fgit_forge::event::pull_request::PullRequestAction;
+use fgit_reference::effect::{FoldBasis, FoldOutcome, RefEffect};
 use fgit_reference::intent::{
     ForgeEntityId, ForgeEventKind, ForgeIntent, ForgeStreamId, ForgeStreamPosition, Intent,
     OutboxDeliveryKey, OutboxIntent, TransactionRequest,
@@ -34,8 +36,9 @@ pub struct NativeMergeBasis {
     pub outbox: CanonicalOutboxState,
 }
 
-/// All immutable bodies produced by one evaluated merge. Nothing here is
-/// authoritative until its record and roots win the repository-head CAS.
+/// All immutable bodies produced by one evaluated forge transaction. Nothing
+/// here is authoritative until its record and roots win the repository-head CAS.
+/// The established type name is retained for existing merge callers.
 #[derive(Clone, Debug)]
 pub struct PreparedNativeMerge {
     pub refs: CanonicalRefState,
@@ -72,9 +75,9 @@ pub fn prepare_native_merge(
     prepare_event(context, &sealed.package.event, sealed.closure, tx_id, attempt, basis, resolved)
 }
 
-/// Shared implementation for the sealed-package and reviewed-native APIs.
-/// Only their seal construction differs. Both feed the exact same evaluator,
-/// deterministic delivery identity, evidence derivation, and record builder.
+/// Shared evaluator and evidence builder. Drivers authenticate the predecessor,
+/// enforce the aggregate lifecycle and validate native object bytes first.
+/// This function independently verifies roots, scope and the complete normal form.
 pub(crate) fn prepare_event(
     context: &AdmissionContext,
     event: &ForgeEvent,
@@ -84,17 +87,13 @@ pub(crate) fn prepare_event(
     basis: &PublicationBasis,
     resolved: &NativeMergeBasis,
 ) -> Result<PreparedNativeMerge, RefusalCode> {
-    let ForgeEventPayload::MergeCommittedNative(merge) = &event.payload else {
-        return Err(RefusalCode::EvidenceInvalid);
-    };
-    merge.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
     if !matches!(event.aggregate, fgit_forge::AggregateId::PullRequest(_))
-        || merge.merge_commit.algorithm() != context.object_format
         || attempt.tenant_id != context.tenant_id
         || attempt.repository_id != context.repository_id
         || attempt.authenticated_principal_id != context.principal_id
         || attempt.idempotency_key != context.idempotency_key
         || attempt.derive().map_err(|_| RefusalCode::EvidenceInvalid)?.0 != tx_id
+        || !attempt.request.atomic()
     {
         return Err(RefusalCode::EvidenceInvalid);
     }
@@ -105,21 +104,58 @@ pub(crate) fn prepare_event(
     {
         return Err(RefusalCode::AuthorityReceiptStale);
     }
-    if resolved.refs.refs().get(&merge.source_ref) != Some(&merge.source_tip)
-        || resolved.refs.refs().get(&merge.target_ref) != Some(&merge.target_tip_before)
-    {
-        return Err(RefusalCode::TargetRefMoved);
-    }
+    let label = AsciiSlug::try_new("forge_stream", event.aggregate.to_string().as_bytes())
+        .map_err(|_| RefusalCode::EvidenceInvalid)?;
+    let entity = ForgeEntityId::new(label);
+    let (kind, required_objects, ref_effect) = match &event.payload {
+        ForgeEventPayload::MergeCommittedNative(merge) => {
+            merge.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if merge.merge_commit.algorithm() != context.object_format {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            if resolved.refs.refs().get(&merge.source_ref) != Some(&merge.source_tip)
+                || resolved.refs.refs().get(&merge.target_ref) != Some(&merge.target_tip_before)
+            {
+                return Err(RefusalCode::TargetRefMoved);
+            }
+            (
+                ForgeEventKind::PullRequestMerged { pull_request: entity, target: merge.target_ref.clone() },
+                vec![merge.source_tip, merge.base_tip, merge.target_tip_before, merge.merge_commit],
+                Some((merge.target_ref.clone(), RefEffect::Set(merge.merge_commit))),
+            )
+        }
+        ForgeEventPayload::PullRequestChangedNative(change) => {
+            change.data.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if change.actor != context.principal_id
+                || change.data.source_tip.algorithm() != context.object_format
+                || !attempt.request.ref_commands().is_empty()
+            { return Err(RefusalCode::EvidenceInvalid); }
+            // Closing preserves already recorded coordinates even after a
+            // branch is deleted. Opening/updating must name both current tips.
+            if change.action != PullRequestAction::Close
+                && (resolved.refs.refs().get(&change.data.source_ref) != Some(&change.data.source_tip)
+                    || resolved.refs.refs().get(&change.data.target_ref) != Some(&change.data.target_tip))
+            { return Err(RefusalCode::TargetRefMoved); }
+            let kind = match change.action {
+                PullRequestAction::Open => ForgeEventKind::PullRequestOpened {
+                    pull_request: entity, target: change.data.target_ref.clone(),
+                },
+                PullRequestAction::Update => ForgeEventKind::PullRequestUpdated {
+                    pull_request: entity, target: change.data.target_ref.clone(),
+                },
+                PullRequestAction::Close => ForgeEventKind::PullRequestClosed { pull_request: entity },
+            };
+            (kind, vec![change.data.source_tip, change.data.target_tip], None)
+        }
+        _ => return Err(RefusalCode::EvidenceInvalid),
+    };
     let objects = PermittedObjectClosure::new(closure.objects.clone());
     if crate::permitted_object_closure_root(&objects)? != closure.object_closure_root
         || closure.objects.iter().any(|oid| oid.is_zero() || oid.algorithm() != context.object_format)
-        || [merge.source_tip, merge.base_tip, merge.target_tip_before, merge.merge_commit]
-            .iter().any(|oid| !closure.objects.contains(oid))
+        || required_objects.iter().any(|oid| !closure.objects.contains(oid))
     {
         return Err(RefusalCode::ObjectClosureIncomplete);
     }
-    let label = AsciiSlug::try_new("forge_stream", event.aggregate.to_string().as_bytes())
-        .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let stream = ForgeStreamId::new(label);
     let predecessor = event.version.get() - 1;
     if resolved.forge.entry(label).map_or(0, |entry| entry.successor_position()) != predecessor {
@@ -144,12 +180,7 @@ pub(crate) fn prepare_event(
         .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let statement = request.statements.first_mut().ok_or(RefusalCode::EvidenceInvalid)?;
     statement.intents.extend([
-        Intent::Forge(ForgeIntent {
-            stream, expected_position: position,
-            event: ForgeEventKind::PullRequestMerged {
-                pull_request: ForgeEntityId::new(label), target: merge.target_ref.clone(),
-            },
-        }),
+        Intent::Forge(ForgeIntent { stream, expected_position: position, event: kind.clone() }),
         Intent::Outbox(OutboxIntent { delivery_key: OutboxDeliveryKey::new(key), parameters: event_root }),
     ]);
     let forge_positions = resolved.forge.entries().iter().map(|entry|
@@ -169,12 +200,11 @@ pub(crate) fn prepare_event(
         FoldOutcome::Folded(effects) => effects,
         FoldOutcome::Aborted { code, .. } => return Err(*code),
     };
-    // Exactly one source movement, one forge event and one delivery are owned
-    // by this profile. In particular no unrelated sealed ref command may leak
-    // through the otherwise general model-request lowering helper.
-    if effects.refs.len() != 1
-        || effects.refs.get(&merge.target_ref) != Some(&fgit_reference::effect::RefEffect::Set(merge.merge_commit))
-        || effects.forge.len() != 1 || effects.outbox.len() != 1 || !effects.retention.is_empty()
+    let expected_refs = ref_effect.into_iter().collect::<BTreeMap<_, _>>();
+    if effects.refs != expected_refs
+        || effects.forge != BTreeMap::from([(stream, vec![kind])])
+        || effects.outbox != BTreeMap::from([(OutboxDeliveryKey::new(key), event_root)])
+        || !effects.retention.is_empty()
     {
         return Err(RefusalCode::ConflictingSemanticEffects);
     }

@@ -30,6 +30,7 @@ pub mod history;
 pub mod objects;
 pub mod prepare;
 pub mod progress;
+pub mod pull_request;
 pub mod settlement;
 mod storage;
 pub use storage::{legacy_genesis_root, load_forge_positions};
@@ -148,10 +149,15 @@ where S: AsyncAuthorityStore + ?Sized,
         Ok(())
     }
 
+    /// Default for projections (including the immediate synchronous bridge)
+    /// that do not cache a native basis. The same authority reader resolves
+    /// delivery bodies; ref state must reproduce the exact selected root.
     fn resolve_merge_basis_async<'a>(
         &'a self, authority: &'a S, cx: &'a S::Context,
         basis: &'a PublicationBasis, authenticated: &'a AuthenticatedHead,
-    ) -> impl Future<Output = Result<NativeMergeBasis, ProjectionFailure>> + Send + 'a;
+    ) -> impl Future<Output = Result<NativeMergeBasis, ProjectionFailure>> + Send + 'a {
+        resolve_default_basis(self, authority, cx, basis, authenticated)
+    }
 
     /// Recheck effect-time liveness immediately before publication. Terminal
     /// outcome recovery uses only merge_checkpoint, so expiry cannot hide an
@@ -174,6 +180,38 @@ where S: AsyncAuthorityStore + ?Sized,
         basis: &'a PublicationBasis, authenticated: &'a AuthenticatedHead,
         intent: &'a NativeMergeIntent,
     ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a;
+}
+
+async fn resolve_default_basis<S, P>(
+    projection: &P, store: &S, cx: &S::Context,
+    basis: &PublicationBasis, authenticated: &AuthenticatedHead,
+) -> Result<NativeMergeBasis, ProjectionFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: NativeMergeProjection<S> + ?Sized,
+{
+    projection.merge_checkpoint(cx).map_err(ProjectionFailure::Unavailable)?;
+    if authenticated.body().map_err(|_| ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptInvalid))? != *basis.body() {
+        return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
+    }
+    let snapshot = projection.snapshot_async(store, cx, basis, authenticated).await?;
+    let root_layout = fgit_authority::root_layout_for_verification_async(store, cx, &basis.body().configuration_root)
+        .await.map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid))?;
+    let refs = match snapshot.head_target {
+        Some(target) => crate::CanonicalRefState::new_with_head_target(snapshot.refs, target)
+            .map_err(ProjectionFailure::Unavailable)?,
+        None => crate::CanonicalRefState::new(snapshot.refs),
+    };
+    if crate::ref_state_root(root_layout, &refs).map_err(ProjectionFailure::Unavailable)? != basis.body().ref_root {
+        return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
+    }
+    let state = delivery::read_in(store, cx, basis, &|| projection.merge_checkpoint(cx).is_err()).await
+        .map_err(|error| match error {
+            AdmissionError::AsyncProjectionUnavailable(code) => ProjectionFailure::Unavailable(code),
+            _ => ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid),
+        })?;
+    projection.merge_checkpoint(cx).map_err(ProjectionFailure::Unavailable)?;
+    Ok(NativeMergeBasis { refs, root_layout, forge: state.forge, outbox: state.outbox })
 }
 
 /// Evaluate and stage the complete Ref + Forge + Outbox fold before one CAS.
