@@ -2,8 +2,7 @@
 //!
 //! A bundle is untrusted transport, never authority. The caller independently
 //! names the branch, expected old commit and reviewed new commit. This adapter
-//! binds the envelope to those expectations, then uses the production receive
-//! quarantine and basis-bound admission path. It does not run the tool again.
+//! binds the envelope to those expectations, then uses production quarantine.
 //! The shared quarantine helper publishes nothing: a merge must continue into
 //! coupled forge admission, never through the ordinary source-only publisher.
 
@@ -20,6 +19,7 @@ use fgit_wire::{Capabilities, GitObjectFormat, Packet, encode_packets};
 
 const MAX_BUNDLE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
+const MAX_PREREQUISITES: usize = 64;
 const MAX_CANDIDATE_BYTES: usize = 2 * 1024 * 1024;
 
 fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
@@ -30,18 +30,25 @@ pub(super) fn receive_error(error: impl Into<NodeReceiveTransportRefusal>) -> No
     NodeWorkspaceRefusal::WorkspacePublication(Box::new(error.into()))
 }
 
-/// Only the header is inspected here. The pack remains completely untrusted
-/// until ReceivePack and ProductionQuarantineValidator have validated it.
+/// Header parsing never claims that the pack or its prerequisites are verified.
 struct CandidateEnvelope<'a> {
     format: GitHashAlgorithm,
-    base: GitOid,
+    prerequisites: Vec<GitOid>,
     candidate: GitOid,
     reference: RefName,
     pack: &'a [u8],
 }
 
 impl<'a> CandidateEnvelope<'a> {
+    /// The original workspace contract stays exactly one prerequisite.
     fn parse(input: &'a [u8]) -> Result<Self, NodeWorkspaceRefusal> {
+        Self::parse_bounded(input, 1)
+    }
+
+    fn parse_bounded(input: &'a [u8], maximum_prerequisites: usize) -> Result<Self, NodeWorkspaceRefusal> {
+        if maximum_prerequisites == 0 || maximum_prerequisites > MAX_PREREQUISITES {
+            return Err(invalid("invalid bundle prerequisite limit"));
+        }
         if input.len() > MAX_BUNDLE_BYTES {
             return Err(invalid("bundle exceeds the 128 MiB input limit"));
         }
@@ -55,29 +62,42 @@ impl<'a> CandidateEnvelope<'a> {
             },
             _ => return Err(invalid("expected a Git bundle v2 or v3 signature")),
         };
-        let prerequisite = header_line(input, &mut offset)?;
-        let prerequisite = prerequisite.strip_prefix(b"-")
-            .ok_or_else(|| invalid("exactly one prerequisite commit is required"))?;
-        let (base, _comment) = split_oid(prerequisite, format)?;
-        // Git explicitly gives prerequisite comments no semantic meaning.
-        let advertisement = header_line(input, &mut offset)?;
-        let (candidate, name) = split_oid(advertisement, format)?;
+        let mut prerequisites = Vec::new();
+        let mut record = header_line(input, &mut offset)?;
+        while let Some(prerequisite) = record.strip_prefix(b"-") {
+            if prerequisites.len() == maximum_prerequisites {
+                return Err(invalid("bundle exceeds its prerequisite count limit"));
+            }
+            let (id, _comment) = split_oid(prerequisite, format)?;
+            // Comments have no semantic meaning; identities must be unique.
+            if prerequisites.contains(&id) {
+                return Err(invalid("duplicate bundle prerequisite"));
+            }
+            prerequisites.try_reserve(1)
+                .map_err(|_| invalid("bundle prerequisite allocation refused"))?;
+            prerequisites.push(id);
+            record = header_line(input, &mut offset)?;
+        }
+        if prerequisites.is_empty() {
+            return Err(invalid("at least one prerequisite commit is required"));
+        }
+        let (candidate, name) = split_oid(record, format)?;
         let reference = RefName::try_new(name)
             .map_err(|_| invalid("invalid candidate reference"))?;
         if !reference.as_bytes().starts_with(b"refs/heads/") {
-            return Err(invalid("workspace publication requires a branch reference"));
+            return Err(invalid("candidate publication requires a branch reference"));
         }
         if !header_line(input, &mut offset)?.is_empty() {
-            return Err(invalid("only one prerequisite and one branch are supported"));
+            return Err(invalid("only one advertised branch is supported"));
         }
-        if base == candidate {
-            return Err(invalid("candidate and prerequisite must be different commits"));
+        if prerequisites.contains(&candidate) {
+            return Err(invalid("candidate cannot also be a prerequisite"));
         }
         let pack = &input[offset..];
         if pack.is_empty() {
             return Err(invalid("bundle has no pack"));
         }
-        Ok(Self { format, base, candidate, reference, pack })
+        Ok(Self { format, prerequisites, candidate, reference, pack })
     }
 
     fn bind(
@@ -93,8 +113,8 @@ impl<'a> CandidateEnvelope<'a> {
         if &self.reference != reference {
             return Err(invalid("bundle branch differs from the explicitly requested branch"));
         }
-        if self.base != base {
-            return Err(invalid("bundle prerequisite differs from the expected base commit"));
+        if !self.prerequisites.contains(&base) {
+            return Err(invalid("bundle prerequisites omit the expected target-before commit"));
         }
         if self.candidate != candidate {
             return Err(invalid("bundle tip differs from the reviewed candidate commit"));
@@ -104,7 +124,6 @@ impl<'a> CandidateEnvelope<'a> {
 }
 
 fn header_line<'a>(input: &'a [u8], offset: &mut usize) -> Result<&'a [u8], NodeWorkspaceRefusal> {
-    // Limit the SEARCH, not just the length retained after finding a newline.
     let end = input.len().min(MAX_HEADER_BYTES);
     let remaining = input.get(*offset..end)
         .ok_or_else(|| invalid("bundle header exceeds its byte limit"))?;
@@ -133,21 +152,13 @@ fn split_oid(line: &[u8], format: GitHashAlgorithm) -> Result<(GitOid, &[u8]), N
 impl OneNode {
     /// Publish one independently reviewed, single-parent workspace candidate.
     ///
-    /// This is a local-operator boundary, not a remote authentication service.
-    /// The owner authorizes `principal_id`; it is never read from bundle bytes.
-    /// All three expectations and the idempotency key are explicit. Unknown
-    /// bundle capabilities, partial-clone bundles and multi-ref bundles refuse.
-    ///
-    /// The prerequisite is an EXACT expected-old condition, not a preliminary
-    /// check against a mutable ref. It survives into the seal and is evaluated
-    /// by canonical admission. Consequently an identical retry can resolve its
-    /// original terminal decision after the ref has moved. Another candidate
-    /// with the same key is not allowed to alias that decision.
-    ///
-    /// New objects may be staged before refusal. Only the existing authority
-    /// CAS publishes them; no local file, object presence or SQL projection
-    /// decides success. Return values preserve canonical refusals and uncertain
-    /// infrastructure failures. A non-success is never guessed to be non-commit.
+    /// The local owner authorizes `principal_id`; it is never read from bundle
+    /// bytes. The exactly-one-prerequisite workspace profile is unchanged even
+    /// though the common merge intake helper supports a bounded frontier.
+    /// The exact expected-old condition survives into canonical admission, so
+    /// retries can recover their original decision after the ref has moved.
+    /// Staging is not publication and an infrastructure error is not evidence
+    /// of non-commit.
     pub async fn apply_workspace_bundle_durable_in(
         &self,
         request: &NodeRequestContext,
@@ -162,12 +173,15 @@ impl OneNode {
             .map_err(|_| invalid("invalid bounded idempotency key"))?;
         self.receive_publication_admitted().map_err(receive_error)?;
         self.push_quota.evaluate(&principal_id).map_err(receive_error)?;
+        if !workspace_request_live(request) {
+            return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
+        }
+        // This small header-only check preserves the public workspace profile.
+        // Quarantine below owns all authority and native-object verification.
+        CandidateEnvelope::parse(input)?;
         let (validated, parse_limits) = self.quarantine_reviewed_bundle_in(
             request, reference, expected_base, expected_candidate, input, &[],
         ).await?;
-
-        // Quarantine is not permission to change the workspace contract:
-        // merging must use the distinct coupled forge admission continuation.
         let candidate = self.read_git_object(expected_candidate)
             .map_err(|error| NodeWorkspaceRefusal::WorkspaceCandidateRead(Box::new(error)))?;
         if candidate.envelope().object_kind() != ObjectKind::Commit {
@@ -179,21 +193,20 @@ impl OneNode {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
         let session = LoopbackReceiveSession::authenticated(principal_id, key);
-        // No post-publication cancellation check may replace a known terminal.
         self.admit_basis_bound_loopback_receive_durable_in(
             request, &session, &validated, AdmissionLimits::default(),
         ).await.map_err(receive_error)
     }
 
-    /// Bind an untrusted bundle and stage verified objects, WITHOUT admitting
-    /// its source request. Callers enforce authentication, intake policy and
-    /// quota before entering. Only the caller's later canonical publication
-    /// chooses whether these objects belong to an ordinary update or a merge.
+    /// Stage verified bundle objects WITHOUT admitting its source request.
+    /// Callers enforce authentication, intake policy and quota before entering.
+    /// Every prerequisite (up to 64) must be an authority-selected commit, and
+    /// the reviewed target-before commit must be among them. Ordinary Git merge
+    /// bundles can list both target and common-base boundary commits.
     ///
-    /// The target prerequisite must belong to selected history, not just be
-    /// present on disk. Additional refs are disclosure guards, not freshness
-    /// checks: exact old/source conditions belong inside canonical admission
-    /// so terminal retries still recover after the repository advances.
+    /// Additional named refs are disclosure guards, not freshness checks.
+    /// Exact old/source conditions belong inside canonical admission so a
+    /// terminal retry still recovers after the repository advances.
     pub(super) async fn quarantine_reviewed_bundle_in(
         &self,
         request: &NodeRequestContext,
@@ -206,7 +219,7 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
-        let envelope = CandidateEnvelope::parse(input)?;
+        let envelope = CandidateEnvelope::parse_bounded(input, MAX_PREREQUISITES)?;
         envelope.bind(self.object_format, reference, expected_base, expected_candidate)?;
         let materialized = self.materialize_admission_in(request).await
             .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
@@ -216,16 +229,19 @@ impl OneNode {
         {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
-        if !materialized.selected_closure().closure().objects().contains(&expected_base) {
-            return Err(invalid("prerequisite is outside the authority-selected history"));
+        for prerequisite in &envelope.prerequisites {
+            if !workspace_request_live(request) {
+                return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
+            }
+            if !materialized.selected_closure().closure().objects().contains(prerequisite) {
+                return Err(invalid("prerequisite is outside the authority-selected history"));
+            }
+            let object = self.read_git_object(*prerequisite)
+                .map_err(|error| NodeWorkspaceRefusal::WorkspaceCandidateRead(Box::new(error)))?;
+            if object.envelope().object_kind() != ObjectKind::Commit {
+                return Err(invalid("prerequisite must identify a commit"));
+            }
         }
-        let base = self.read_git_object(expected_base)
-            .map_err(|error| NodeWorkspaceRefusal::WorkspaceCandidateRead(Box::new(error)))?;
-        if base.envelope().object_kind() != ObjectKind::Commit {
-            return Err(invalid("prerequisite must identify a commit"));
-        }
-        drop(base);
-
         let mut limits = ReceiveLimits::default();
         limits.pack.max_input_bytes = MAX_BUNDLE_BYTES;
         limits.pack.max_total_expanded_bytes = MAX_BUNDLE_BYTES;
@@ -309,7 +325,7 @@ mod tests {
             let bytes = bundle(format);
             let envelope = CandidateEnvelope::parse(&bytes).unwrap();
             let reference = RefName::try_new(b"refs/heads/main").unwrap();
-            assert_eq!(envelope.pack, b"PACK", "only the envelope was checked, not pack validity");
+            assert_eq!(envelope.pack, b"PACK");
             assert!(envelope.bind(format, &reference, oid(format, '1'), oid(format, '2')).is_ok());
             assert!(envelope.bind(format, &reference, oid(format, '3'), oid(format, '2')).is_err());
             assert!(envelope.bind(format, &reference, oid(format, '1'), oid(format, '3')).is_err());
@@ -364,5 +380,36 @@ mod tests {
                 assert!(check_candidate_commit(commit(&parents).as_bytes(), base, limits.clone()).is_err());
             }
         }
+    }
+
+    #[test]
+    fn merge_prerequisites_are_bounded_without_widening_the_workspace_profile() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let original = String::from_utf8(bundle(format)).unwrap();
+            let extra = format!("-{} common base\n", oid(format, '3'));
+            let bytes = original.replace(&format!("{} refs/heads/main", oid(format, '2')),
+                &format!("{extra}{} refs/heads/main", oid(format, '2')));
+            assert!(CandidateEnvelope::parse(bytes.as_bytes()).is_err());
+            let merge = CandidateEnvelope::parse_bounded(bytes.as_bytes(), MAX_PREREQUISITES).unwrap();
+            assert_eq!(merge.prerequisites, vec![oid(format, '1'), oid(format, '3')]);
+            assert!(merge.bind(format, &RefName::try_new(b"refs/heads/main").unwrap(),
+                oid(format, '1'), oid(format, '2')).is_ok());
+            assert!(merge.bind(format, &RefName::try_new(b"refs/heads/main").unwrap(),
+                oid(format, '4'), oid(format, '2')).is_err());
+            let duplicate = bytes.replace(&extra, &format!("-{} duplicated target\n", oid(format, '1')));
+            assert!(CandidateEnvelope::parse_bounded(duplicate.as_bytes(), MAX_PREREQUISITES).is_err());
+        }
+    }
+
+    #[test]
+    fn prerequisite_count_refuses_at_n_plus_one_before_unbounded_allocation() {
+        let bytes = |count: usize| {
+            let prerequisites: String = (1..=count).map(|i| format!("-{i:064x} prerequisite\n")).collect();
+            format!("# v3 git bundle\n@object-format=sha256\n{prerequisites}{} refs/heads/main\n\nPACK", "f".repeat(64))
+        };
+        assert_eq!(CandidateEnvelope::parse_bounded(bytes(64).as_bytes(), 64).unwrap().prerequisites.len(), 64);
+        assert!(CandidateEnvelope::parse_bounded(bytes(65).as_bytes(), 64).is_err());
+        assert!(CandidateEnvelope::parse_bounded(bytes(1).as_bytes(), 0).is_err());
+        assert!(CandidateEnvelope::parse_bounded(bytes(1).as_bytes(), 65).is_err());
     }
 }
