@@ -4,7 +4,7 @@
 //! closure validation are real; only immutable storage and scheduling use the
 //! explicitly non-durable MemoryAuthorityStore lane.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
@@ -13,9 +13,11 @@ use fgit_admission::evidence::{
 };
 use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_objects};
 use fgit_admission::merge::native::{
-    NativeMergeIntent, NativeMergeProjection, admit_native_merge_async, delivery,
+    NativeMergeIntent, NativeMergeProjection, SyncNativeMergeProjection, admit_native_merge,
+    admit_native_merge_async, admit_sealed_native_merge, admit_sealed_native_merge_async, delivery,
     legacy_genesis_root,
 };
+use fgit_admission::merge::{SealedMerge, seal_attempt_for};
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionProjection,
     AdmissionSnapshot, AdmissionSnapshotProjection, AsyncAdmissionProjection,
@@ -33,18 +35,27 @@ use fgit_authority::{
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::{
-    CanonicalBody, DecodeLimits, RepositoryAuthorityHeadBody, decode_body, encode_body,
+    CanonicalBody, DecodeLimits, OutboxDeliveryIdentityInput, RepositoryAuthorityHeadBody,
+    decode_body, derive_outbox_delivery_key, encode_body,
 };
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::aggregate::{ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::{ForgeEventBatch, NativeMerge};
+use fgit_forge::{MergeAttempt, MergeEffectPackage, RefIntent as ForgeRefIntent, WorkspaceEpoch};
 use fgit_git_object::ObjectType;
+use fgit_lab::{LabSchedule, StepId};
 use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, PackWriteError};
-use fgit_reference::intent::TransactionRequest;
+use fgit_reference::effect::FoldBasis;
+use fgit_reference::intent::{
+    DurabilityProfile, ForgeEntityId, ForgeEventKind, ForgeIntent, ForgeStreamId,
+    ForgeStreamPosition, IdempotencyKey as ModelKey, Intent, OutboxDeliveryKey, OutboxIntent,
+    RefIntent, Statement, TransactionRequest,
+};
+use fgit_reference::refs::ExpectedRefState;
 use fgit_types::{
-    DecisionOutcome, Digest, DigestAlgorithmId, DigestBytes, GitHashAlgorithm, GitOid,
-    HeadGeneration, PolicyEpoch, PrincipalId, RefName, RefusalCode, RegistryEpoch, RepositoryId,
-    TenantId, TxId,
+    AsciiSlug, DecisionOutcome, Digest, DigestAlgorithmId, DigestBytes, GitHashAlgorithm, GitOid,
+    HeadGeneration, MismatchPolicy, PolicyEpoch, PrincipalId, PrincipalSnapshotId, RefName,
+    RefusalCode, RegistryEpoch, RepositoryId, TenantId, TxId,
 };
 use fgit_wire::visibility::RefVisibility;
 
@@ -99,6 +110,7 @@ struct Model {
     put_fault: Mutex<Option<PutFault>>,
     interrupted_key: Mutex<Option<ImmutableKey>>,
     before_publish: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    publications: Mutex<Vec<(AuthorityVersionToken, CasOutcome)>>,
 }
 
 impl Model {
@@ -108,6 +120,7 @@ impl Model {
             put_fault: Mutex::new(None),
             interrupted_key: Mutex::new(None),
             before_publish: Mutex::new(None),
+            publications: Mutex::new(Vec::new()),
         }
     }
 
@@ -134,6 +147,31 @@ impl Model {
             ]));
         }
         self.backend.put_if_absent(key, body)
+    }
+
+    fn publish(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        generation: HeadGeneration,
+        body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        let interleave = self.before_publish.lock().unwrap().take();
+        if let Some(interleave) = interleave {
+            interleave();
+        }
+        let result = self
+            .backend
+            .publish_head_with_outcomes(key, expected, generation, body, outcomes, witness);
+        if let Ok(outcome) = &result {
+            self.publications
+                .lock()
+                .unwrap()
+                .push((expected, outcome.clone()));
+        }
+        result
     }
 
     fn stage<B: CanonicalBody>(
@@ -239,14 +277,7 @@ impl AsyncAuthorityStore for Model {
         outcomes: &[(ImmutableKey, Vec<u8>)],
         witness: &DuplicateAbsenceWitness,
     ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
-        let interleave = self.before_publish.lock().unwrap().take();
-        if let Some(interleave) = interleave {
-            interleave();
-        }
-        std::future::ready(
-            self.backend
-                .publish_head_with_outcomes(key, expected, generation, body, outcomes, witness),
-        )
+        std::future::ready(self.publish(key, expected, generation, body, outcomes, witness))
     }
     fn authenticate_head_receipt(
         &self,
@@ -254,6 +285,68 @@ impl AsyncAuthorityStore for Model {
         receipt: &HeadReadReceipt,
     ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
         std::future::ready(self.backend.authenticate_head_receipt(receipt))
+    }
+}
+
+/// The synchronous view forwards to the same existing reference store and
+/// fault/scheduling hooks as the asynchronous fixture, without polling futures.
+struct SyncModel<'a>(&'a Model);
+impl AuthorityStore for SyncModel<'_> {
+    fn instance_id(&self) -> StoreInstanceId {
+        self.0.backend.instance_id()
+    }
+    fn limits(&self) -> AuthorityLimits {
+        self.0.backend.limits()
+    }
+    fn put_if_absent(
+        &self,
+        key: &ImmutableKey,
+        body: &[u8],
+    ) -> Result<PutOutcome, AuthorityFailure> {
+        self.0.put(key, body)
+    }
+    fn read_immutable(&self, key: &ImmutableKey) -> Result<ImmutableRead, AuthorityFailure> {
+        self.0.backend.read_immutable(key)
+    }
+    fn initialize_head(
+        &self,
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<HeadInit, AuthorityFailure> {
+        self.0.backend.initialize_head(key, generation, body)
+    }
+    fn read_head(&self, key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
+        self.0.backend.read_head(key)
+    }
+    fn compare_exchange_head(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        self.0
+            .backend
+            .compare_exchange_head(key, expected, generation, body)
+    }
+    fn publish_head_with_outcomes(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        generation: HeadGeneration,
+        body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        self.0
+            .publish(key, expected, generation, body, outcomes, witness)
+    }
+    fn authenticate_head_receipt(
+        &self,
+        receipt: &HeadReadReceipt,
+    ) -> Result<AuthenticatedHead, AuthorityFailure> {
+        self.0.backend.authenticate_head_receipt(receipt)
     }
 }
 
@@ -406,6 +499,53 @@ struct Projection {
     canonical: CanonicalAdmissionProjection<Commitments, DerivedEvidence>,
     objects: Arc<Objects>,
 }
+impl SyncNativeMergeProjection for Projection {
+    fn merge_checkpoint(&self) -> Result<(), RefusalCode> {
+        Ok(())
+    }
+    fn snapshot(
+        &self,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+    ) -> Result<AdmissionSnapshot, ProjectionFailure> {
+        self.canonical
+            .snapshot(basis, authenticated)
+            .map_err(ProjectionFailure::Unavailable)
+    }
+    fn validate_merge(
+        &self,
+        _: &PublicationBasis,
+        _: &AuthenticatedHead,
+        intent: &NativeMergeIntent,
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        validate_merge_objects(
+            self.objects.as_ref(),
+            intent.merge().unwrap(),
+            MergeObjectLimits::default(),
+            &mut || true,
+        )
+    }
+    fn materialize_commit(
+        &self,
+        basis: &PublicationBasis,
+        request: &TransactionRequest,
+        fold: &fgit_txn::TransactionFoldReport,
+        closure: &ValidatedClosure,
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
+        self.canonical
+            .materialize_commit(basis, request, fold, closure)
+    }
+    fn materialize_refusal(
+        &self,
+        basis: &PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+    ) -> Result<RefusalMaterialization, ProjectionFailure> {
+        self.canonical
+            .materialize_refusal(basis, tx_id, code)
+            .map_err(ProjectionFailure::Unavailable)
+    }
+}
 impl AsyncAdmissionProjection<Model> for Projection {
     fn snapshot_async<'a>(
         &'a self,
@@ -515,7 +655,11 @@ impl Fixture {
         .expect("positive fault fixture must pass native validation before faults are armed");
         assert_eq!(
             closure.objects,
-            objects.0.keys().copied().collect::<std::collections::BTreeSet<_>>()
+            objects
+                .0
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
         );
         let store = Arc::new(Model::new());
         let refs = CanonicalRefState::new_with_head_target(
@@ -928,4 +1072,659 @@ fn competing_distinct_merge_replans_after_the_other_drivers_actual_cas() {
     );
     assert_eq!(fixture.run().unwrap(), loser);
     assert_eq!(fixture.head(), head);
+}
+
+#[derive(Clone, Copy)]
+enum NativeDriver {
+    Sync,
+    Async,
+}
+impl NativeDriver {
+    fn other(self) -> Self {
+        match self {
+            Self::Sync => Self::Async,
+            Self::Async => Self::Sync,
+        }
+    }
+    fn run(
+        self,
+        fixture: &Fixture,
+        context: &AdmissionContext,
+        intent: &NativeMergeIntent,
+    ) -> Result<TerminalOutcome, AdmissionError> {
+        let projection = fixture.projection(context);
+        match self {
+            Self::Sync => admit_native_merge(
+                &SyncModel(fixture.store.as_ref()),
+                context,
+                intent,
+                AdmissionLimits::default(),
+                &projection,
+            ),
+            Self::Async => poll_ready(admit_native_merge_async(
+                fixture.store.as_ref(),
+                &(),
+                context,
+                intent,
+                AdmissionLimits::default(),
+                &projection,
+            )),
+        }
+    }
+    fn sealed(
+        self,
+        fixture: &Fixture,
+        package: &OwnedSealedMerge,
+    ) -> Result<TerminalOutcome, AdmissionError> {
+        let projection = fixture.projection(&fixture.context);
+        match self {
+            Self::Sync => admit_sealed_native_merge(
+                &SyncModel(fixture.store.as_ref()),
+                &fixture.context,
+                &package.borrowed(),
+                AdmissionLimits::default(),
+                &projection,
+            ),
+            Self::Async => poll_ready(admit_sealed_native_merge_async(
+                fixture.store.as_ref(),
+                &(),
+                &fixture.context,
+                &package.borrowed(),
+                AdmissionLimits::default(),
+                &projection,
+            )),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NativeAnswer {
+    Terminal(TerminalOutcome),
+    Unavailable(RefusalCode),
+}
+fn native_answer(result: Result<TerminalOutcome, AdmissionError>) -> NativeAnswer {
+    match result {
+        Ok(terminal) => NativeAnswer::Terminal(terminal),
+        Err(AdmissionError::AsyncProjectionUnavailable(code)) => NativeAnswer::Unavailable(code),
+        other => panic!("unexpected native model result: {other:?}"),
+    }
+}
+
+/// Compare selected canonical bytes, not just outcome labels or root counts.
+fn assert_same_native_state(left: &Fixture, right: &Fixture) {
+    let head = left.head();
+    assert_eq!(head, right.head());
+    for (namespace, root) in [
+        (REF_NAMESPACE, head.ref_root),
+        (POSITION_NAMESPACE, head.forge_position_root),
+        (delivery::OUTBOX_NAMESPACE, head.outbox_root),
+    ] {
+        let key = key(namespace, left.context.repository_id, root);
+        assert_eq!(
+            left.store.backend.read_immutable(&key).unwrap(),
+            right.store.backend.read_immutable(&key).unwrap()
+        );
+    }
+    if let Some(tail) = head.decision_tail_id {
+        let left_batch = read_decision_batch_body(&left.store.backend, tail).unwrap();
+        let right_batch = read_decision_batch_body(&right.store.backend, tail).unwrap();
+        assert_eq!(left_batch, right_batch);
+        for record in &left_batch.committed_rcrs {
+            for (namespace, root) in [
+                (CLOSURE_NAMESPACE, record.object_closure_root),
+                (EVENT_NAMESPACE, record.forge_event_batch_root),
+                (
+                    b"frankengit/admission/policy-decision/v1/".as_slice(),
+                    record.policy_decision_root,
+                ),
+                (
+                    b"frankengit/admission/invariant-evidence/v1/".as_slice(),
+                    record.invariant_evidence_root,
+                ),
+                (
+                    b"frankengit/admission/outbox-effect-batch/v1/".as_slice(),
+                    record.outbox_effect_root,
+                ),
+                (
+                    b"frankengit/admission/retention-delta/v1/".as_slice(),
+                    record.retention_delta_root,
+                ),
+            ] {
+                let key = key(namespace, left.context.repository_id, root);
+                let frame = left.store.backend.read_immutable(&key).unwrap();
+                assert!(
+                    matches!(frame, ImmutableRead::Present(_)),
+                    "committed evidence must exist"
+                );
+                assert_eq!(frame, right.store.backend.read_immutable(&key).unwrap());
+            }
+        }
+    }
+}
+
+#[test]
+fn native_sync_and_async_share_exact_commits_refusals_unavailability_and_retries() {
+    for case in ["permitted", "stale-source", "missing-body"] {
+        let mut left = Fixture::new();
+        let mut right = Fixture::new();
+        let mut removed = Vec::new();
+        for fixture in [&mut left, &mut right] {
+            if case == "stale-source" {
+                let mut merge = fixture.intent.merge().unwrap().clone();
+                merge.source_tip = merge.base_tip;
+                fixture.intent = NativeMergeIntent::new(
+                    PullRequestNumber::try_new(1).unwrap(),
+                    ExpectedVersion::NewStream,
+                    merge,
+                )
+                .unwrap();
+            } else if case == "missing-body" {
+                let candidate = fixture.intent.merge().unwrap().merge_commit;
+                let object = Arc::get_mut(&mut fixture.objects)
+                    .unwrap()
+                    .0
+                    .remove(&candidate)
+                    .unwrap();
+                removed.push((candidate, object));
+            }
+        }
+        assert_eq!(
+            left.intent.seal_attempt(&left.context).unwrap(),
+            right.intent.seal_attempt(&right.context).unwrap()
+        );
+        let sync = native_answer(NativeDriver::Sync.run(&left, &left.context, &left.intent));
+        let asynchronous =
+            native_answer(NativeDriver::Async.run(&right, &right.context, &right.intent));
+        assert_eq!(sync, asynchronous, "{case}");
+        match (&sync, case) {
+            (
+                NativeAnswer::Terminal(TerminalOutcome {
+                    outcome: DecisionOutcome::Committed { .. },
+                    ..
+                }),
+                "permitted",
+            ) => {}
+            (
+                NativeAnswer::Terminal(TerminalOutcome {
+                    outcome:
+                        DecisionOutcome::Refused {
+                            code: RefusalCode::TargetRefMoved,
+                            ..
+                        },
+                    ..
+                }),
+                "stale-source",
+            ) => {}
+            (NativeAnswer::Unavailable(RefusalCode::EvidenceMissing), "missing-body") => {}
+            _ => panic!("the native equivalence corpus collapsed: {case}: {sync:?}"),
+        }
+        assert_same_native_state(&left, &right);
+        let head = left.head();
+        assert_eq!(
+            native_answer(NativeDriver::Sync.run(&left, &left.context, &left.intent)),
+            sync
+        );
+        assert_eq!(
+            native_answer(NativeDriver::Async.run(&right, &right.context, &right.intent)),
+            asynchronous
+        );
+        assert_eq!(left.head(), head);
+        assert_same_native_state(&left, &right);
+        if case == "missing-body" {
+            assert_eq!(head, left.genesis);
+            for (fixture, (id, object)) in [&mut left, &mut right].into_iter().zip(removed) {
+                Arc::get_mut(&mut fixture.objects)
+                    .unwrap()
+                    .0
+                    .insert(id, object);
+            }
+            let sync = NativeDriver::Sync
+                .run(&left, &left.context, &left.intent)
+                .unwrap();
+            let asynchronous = NativeDriver::Async
+                .run(&right, &right.context, &right.intent)
+                .unwrap();
+            assert_eq!(sync, asynchronous);
+            left.assert_committed(sync);
+            right.assert_committed(asynchronous);
+            assert_same_native_state(&left, &right);
+        }
+    }
+}
+
+struct OwnedSealedMerge {
+    package: MergeEffectPackage,
+    attempt: MergeAttempt,
+    closure: ValidatedClosure,
+    evidence: CommitEvidence,
+    workspace_epoch_now: WorkspaceEpoch,
+}
+impl OwnedSealedMerge {
+    fn borrowed(&self) -> SealedMerge<'_> {
+        SealedMerge {
+            package: &self.package,
+            attempt: &self.attempt,
+            closure: &self.closure,
+            evidence: self.evidence,
+            workspace_epoch_now: self.workspace_epoch_now,
+        }
+    }
+}
+
+/// The public reference evaluator supplies real full-fold evidence. The seed
+/// record is used only while deriving the seal, which excludes derived evidence.
+fn sealed_native_fixture(fixture: &Fixture) -> OwnedSealedMerge {
+    let context = &fixture.context;
+    let merge = fixture.intent.merge().unwrap();
+    let closure = validate_merge_objects(
+        fixture.objects.as_ref(),
+        merge,
+        MergeObjectLimits::default(),
+        &mut || true,
+    )
+    .unwrap();
+    let seed = digest(27);
+    let mut sealed = OwnedSealedMerge {
+        package: MergeEffectPackage {
+            objects: vec![merge.merge_commit],
+            ref_intent: ForgeRefIntent {
+                name: merge.target_ref.as_bytes().to_vec(),
+                expected_tip: merge.target_tip_before,
+                new_tip: merge.merge_commit,
+            },
+            event: fixture.intent.event().clone(),
+        },
+        attempt: MergeAttempt {
+            pull_request: PullRequestNumber::try_new(1).unwrap(),
+            source_ref: merge.source_ref.as_bytes().to_vec(),
+            target_ref: merge.target_ref.as_bytes().to_vec(),
+            source_tip: merge.source_tip,
+            target_tip: merge.target_tip_before,
+            base_tip: merge.base_tip,
+            workspace_epoch: WorkspaceEpoch::from_u64(9),
+        },
+        closure,
+        evidence: CommitEvidence {
+            principal_snapshot_id: PrincipalSnapshotId::from_digest(
+                seed.algorithm(),
+                fgit_types::CANONICAL_CODEC_VERSION,
+                *seed.bytes(),
+            ),
+            forge_event_batch_root: seed,
+            policy_decision_root: seed,
+            invariant_evidence_root: seed,
+            outbox_effect_root: seed,
+            retention_delta_root: seed,
+        },
+        workspace_epoch_now: WorkspaceEpoch::from_u64(9),
+    };
+    let attempt = seal_attempt_for(context, &sealed.borrowed()).unwrap();
+    let tx_id = attempt.derive().unwrap().0;
+    let head = fixture.head();
+    let basis = PublicationBasis::new(
+        fgit_authority::authority_head_identity(&head).unwrap(),
+        head.clone(),
+    );
+    let refs: CanonicalRefState = fixture
+        .store
+        .read(context.repository_id, REF_NAMESPACE, head.ref_root)
+        .unwrap();
+    let delivery = poll_ready(delivery::read_in(
+        fixture.store.as_ref(),
+        &(),
+        &basis,
+        &|| false,
+    ))
+    .unwrap();
+    let event_root =
+        evidence_root(&ForgeEventBatch::of_one(fixture.intent.event().clone())).unwrap();
+    let label = AsciiSlug::from_static("pull-request/1");
+    let key = derive_outbox_delivery_key(OutboxDeliveryIdentityInput::new(
+        context.repository_id,
+        AsciiSlug::from_static("forge-event"),
+        AsciiSlug::from_static("forge-projection"),
+        event_root,
+        tx_id,
+        head.latest_committed_rcr_id,
+    ))
+    .unwrap();
+    let request = TransactionRequest {
+        tx_id,
+        tenant: context.tenant_id,
+        repository: context.repository_id,
+        principal: context.principal_id,
+        schema: attempt.request.request_schema(),
+        idempotency_key: ModelKey::new(AsciiSlug::from_static("receive")),
+        canonical_request_digest: fgit_authority::canonical_request_digest(&attempt.request)
+            .unwrap(),
+        statements: vec![Statement {
+            intents: vec![
+                Intent::Ref(RefIntent::Update {
+                    name: merge.target_ref.clone(),
+                    expected: ExpectedRefState::Exact(merge.target_tip_before),
+                    new: merge.merge_commit,
+                    force: false,
+                }),
+                Intent::Forge(ForgeIntent {
+                    stream: ForgeStreamId::new(label),
+                    expected_position: ForgeStreamPosition::GENESIS,
+                    event: ForgeEventKind::PullRequestMerged {
+                        pull_request: ForgeEntityId::new(label),
+                        target: merge.target_ref.clone(),
+                    },
+                }),
+                Intent::Outbox(OutboxIntent {
+                    delivery_key: OutboxDeliveryKey::new(key),
+                    parameters: event_root,
+                }),
+            ],
+            mismatch_policy: MismatchPolicy::TxnAbort,
+        }],
+        promised_closure: sealed.closure.objects.clone(),
+        atomic: true,
+        durability: DurabilityProfile::CanonicalSource,
+    };
+    let fold = fgit_txn::IntentEvaluator::new().evaluate(
+        FoldBasis {
+            refs: refs.refs(),
+            forge_positions: &delivery.forge_positions(),
+            retention: &BTreeSet::new(),
+            outbox: &delivery.outbox_bindings(),
+        },
+        &request,
+    );
+    let bodies = DecisionEvidenceBodies::derive(context, &basis, &request, &fold).unwrap();
+    sealed.evidence = CommitEvidence {
+        principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot()).unwrap(),
+        forge_event_batch_root: event_root,
+        policy_decision_root: evidence_root(bodies.policy_decision()).unwrap(),
+        invariant_evidence_root: evidence_root(bodies.invariant_evidence()).unwrap(),
+        outbox_effect_root: evidence_root(bodies.outbox_effect_batch()).unwrap(),
+        retention_delta_root: evidence_root(bodies.retention_delta()).unwrap(),
+    };
+    sealed
+}
+
+#[test]
+fn original_sealed_native_sync_and_async_preserve_identity_evidence_and_stale_retry() {
+    for stale in [false, true] {
+        let left = Fixture::new();
+        let right = Fixture::new();
+        let mut left_package = sealed_native_fixture(&left);
+        let mut right_package = sealed_native_fixture(&right);
+        let original = seal_attempt_for(&left.context, &left_package.borrowed()).unwrap();
+        assert_eq!(
+            original,
+            seal_attempt_for(&right.context, &right_package.borrowed()).unwrap()
+        );
+        assert_ne!(original, left.intent.seal_attempt(&left.context).unwrap());
+        if stale {
+            left_package.workspace_epoch_now = WorkspaceEpoch::from_u64(10);
+            right_package.workspace_epoch_now = WorkspaceEpoch::from_u64(10);
+        }
+        let sync = NativeDriver::Sync.sealed(&left, &left_package).unwrap();
+        let asynchronous = NativeDriver::Async.sealed(&right, &right_package).unwrap();
+        assert_eq!(sync, asynchronous);
+        if stale {
+            assert!(matches!(
+                sync.outcome,
+                DecisionOutcome::Refused {
+                    code: RefusalCode::EvidenceStale,
+                    ..
+                }
+            ));
+        } else {
+            assert!(matches!(sync.outcome, DecisionOutcome::Committed { .. }));
+            let head = left.head();
+            let batch =
+                read_decision_batch_body(&left.store.backend, head.decision_tail_id.unwrap())
+                    .unwrap();
+            assert_eq!(batch.committed_rcrs[0].tx_id, original.derive().unwrap().0);
+            assert_eq!(
+                batch.committed_rcrs[0].invariant_evidence_root,
+                left_package.evidence.invariant_evidence_root
+            );
+        }
+        assert_same_native_state(&left, &right);
+        let head = left.head();
+        left_package.workspace_epoch_now = WorkspaceEpoch::from_u64(11);
+        right_package.workspace_epoch_now = WorkspaceEpoch::from_u64(11);
+        assert_eq!(
+            NativeDriver::Sync.sealed(&left, &left_package).unwrap(),
+            sync
+        );
+        assert_eq!(
+            NativeDriver::Async.sealed(&right, &right_package).unwrap(),
+            asynchronous
+        );
+        assert_eq!(left.head(), head);
+        assert_same_native_state(&left, &right);
+    }
+}
+
+fn scheduled_native_race(
+    schedule: &LabSchedule,
+    delayed_driver: NativeDriver,
+) -> (
+    TerminalOutcome,
+    TerminalOutcome,
+    RepositoryAuthorityHeadBody,
+) {
+    let mut fixture = Fixture::new();
+    let first = fixture.intent.merge().unwrap().clone();
+    let tree = fixture
+        .objects
+        .0
+        .values()
+        .find(|object| object.object_type() == ObjectType::Tree)
+        .unwrap()
+        .id();
+    let mut objects = Objects(fixture.objects.0.clone());
+    let rival_commit = objects.commit(
+        tree,
+        &[first.target_tip_before, first.source_tip],
+        "competing reviewed merge",
+    );
+    fixture.objects = Arc::new(objects);
+    let intents = [
+        fixture.intent.clone(),
+        NativeMergeIntent::new(
+            PullRequestNumber::try_new(1).unwrap(),
+            ExpectedVersion::NewStream,
+            NativeMerge {
+                merge_commit: rival_commit,
+                ..first
+            },
+        )
+        .unwrap(),
+    ];
+    let mut contexts = [fixture.context.clone(), fixture.context.clone()];
+    contexts[0].idempotency_key = IdempotencyKey::new(b"scheduled-native-a".to_vec()).unwrap();
+    contexts[1].idempotency_key = IdempotencyKey::new(b"scheduled-native-b".to_vec()).unwrap();
+    assert_ne!(
+        intents[0].merge().unwrap().merge_commit,
+        intents[1].merge().unwrap().merge_commit
+    );
+    assert_eq!(intents[0].event().aggregate, intents[1].event().aggregate);
+    let participant_index = |id: &StepId| {
+        schedule
+            .participants()
+            .iter()
+            .position(|participant| participant == id)
+            .unwrap()
+    };
+    let delayed = participant_index(&schedule.order()[0]);
+    let rival = participant_index(&schedule.order()[1]);
+    assert_ne!(delayed, rival);
+    let fixture = Arc::new(fixture);
+    let observed = Arc::new(Mutex::new(None));
+    let recorded = observed.clone();
+    let competitor = fixture.clone();
+    let schedule_copy = schedule.clone();
+    let contexts_copy = contexts.clone();
+    let intents_copy = intents.clone();
+    *fixture.store.before_publish.lock().unwrap() = Some(Box::new(move || {
+        let mut cursor = schedule_copy.cursor();
+        assert_eq!(
+            cursor.next_step().unwrap(),
+            &schedule_copy.participants()[delayed],
+            "first native driver reached its actual publication boundary"
+        );
+        let selected = cursor.next_step().unwrap();
+        let rival = schedule_copy
+            .participants()
+            .iter()
+            .position(|id| id == selected)
+            .unwrap();
+        let winner = delayed_driver
+            .other()
+            .run(&competitor, &contexts_copy[rival], &intents_copy[rival])
+            .unwrap();
+        assert!(matches!(winner.outcome, DecisionOutcome::Committed { .. }));
+        assert_eq!(
+            cursor.next_step().unwrap(),
+            &schedule_copy.participants()[delayed],
+            "resume the prepared candidate against its now-stale CAS token"
+        );
+        assert!(cursor.is_exhausted());
+        *recorded.lock().unwrap() =
+            Some((winner, cursor.position(), schedule_copy.canonical_line()));
+    }));
+    let loser = delayed_driver
+        .run(&fixture, &contexts[delayed], &intents[delayed])
+        .unwrap();
+    let (winner, consumed, replay) = observed
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the scheduled publication boundary must actually fire");
+    assert_eq!(consumed, schedule.len());
+    assert_eq!(replay, schedule.canonical_line());
+    assert!(matches!(
+        loser.outcome,
+        DecisionOutcome::Refused {
+            code: RefusalCode::TargetRefMoved,
+            ..
+        }
+    ));
+    let publications = fixture.store.publications.lock().unwrap().clone();
+    assert_eq!(
+        publications.len(),
+        3,
+        "winner CAS, actual stale CAS, then canonical loser refusal"
+    );
+    assert!(matches!(publications[0].1, CasOutcome::Committed(_)));
+    assert!(matches!(publications[1].1, CasOutcome::PredecessorMismatch));
+    assert!(matches!(publications[2].1, CasOutcome::Committed(_)));
+    assert_eq!(
+        publications[0].0, publications[1].0,
+        "both native candidates prepared against the exact same authority token"
+    );
+    assert_ne!(publications[1].0, publications[2].0);
+    let head = fixture.head();
+    let latest =
+        read_decision_batch_body(&fixture.store.backend, head.decision_tail_id.unwrap()).unwrap();
+    assert!(latest.committed_rcrs.is_empty());
+    let predecessor = fgit_authority::read_authority_head_body(
+        &fixture.store.backend,
+        head.predecessor_head_id.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (head.ref_root, head.forge_position_root, head.outbox_root),
+        (
+            predecessor.ref_root,
+            predecessor.forge_position_root,
+            predecessor.outbox_root
+        )
+    );
+    let winning = read_decision_batch_body(
+        &fixture.store.backend,
+        predecessor.decision_tail_id.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(winning.committed_rcrs.len(), 1);
+    let winner_tx = intents[rival]
+        .seal_attempt(&contexts[rival])
+        .unwrap()
+        .derive()
+        .unwrap()
+        .0;
+    let loser_tx = intents[delayed]
+        .seal_attempt(&contexts[delayed])
+        .unwrap()
+        .derive()
+        .unwrap()
+        .0;
+    assert_eq!(winning.committed_rcrs[0].tx_id, winner_tx);
+    assert_eq!(fixture.outcome(winner_tx), OutcomeLookup::Decided(winner));
+    assert_eq!(fixture.outcome(loser_tx), OutcomeLookup::Decided(loser));
+    let basis = PublicationBasis::new(
+        fgit_authority::authority_head_identity(&head).unwrap(),
+        head.clone(),
+    );
+    let selected = poll_ready(delivery::read_in(
+        fixture.store.as_ref(),
+        &(),
+        &basis,
+        &|| false,
+    ))
+    .unwrap();
+    assert_eq!(selected.forge.entries().len(), 1);
+    assert_eq!(selected.outbox.entries().len(), 1);
+    assert_eq!(selected.outbox.entries()[0].tx_id(), winner_tx);
+    assert_eq!(
+        selected.outbox.entries()[0].payload_root(),
+        evidence_root(&ForgeEventBatch::of_one(intents[rival].event().clone())).unwrap()
+    );
+    let refs: CanonicalRefState = fixture
+        .store
+        .read(fixture.context.repository_id, REF_NAMESPACE, head.ref_root)
+        .unwrap();
+    assert_eq!(
+        refs.refs().get(&name(b"refs/heads/main")),
+        Some(&intents[rival].merge().unwrap().merge_commit)
+    );
+    assert_eq!(
+        delayed_driver
+            .run(&fixture, &contexts[delayed], &intents[delayed])
+            .unwrap(),
+        loser
+    );
+    assert_eq!(
+        delayed_driver
+            .other()
+            .run(&fixture, &contexts[rival], &intents[rival])
+            .unwrap(),
+        winner
+    );
+    assert_eq!(fixture.head(), head);
+    (winner, loser, head)
+}
+
+#[test]
+fn lab_schedule_drives_two_distinct_native_candidates_for_one_pr_and_replays_exactly() {
+    for order in [
+        ["merge-a", "merge-b", "merge-a"],
+        ["merge-b", "merge-a", "merge-b"],
+    ] {
+        let schedule = LabSchedule::explicit(
+            vec![StepId::new("merge-a"), StepId::new("merge-b")],
+            order.into_iter().map(StepId::new).collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            schedule.canonical_line(),
+            format!(
+                "fgit-lab-schedule-v1|seed=none|participants=merge-a,merge-b|steps=3|order={}",
+                order.join(",")
+            )
+        );
+        let synchronous = scheduled_native_race(&schedule, NativeDriver::Sync);
+        let asynchronous = scheduled_native_race(&schedule, NativeDriver::Async);
+        assert_eq!(
+            synchronous, asynchronous,
+            "the schedule must replay the same actual native publications through both facades"
+        );
+    }
 }

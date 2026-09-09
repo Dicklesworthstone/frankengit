@@ -20,6 +20,8 @@ use crate::{
 use super::{NativeMergeBasis, SealedMerge, prepare::prepare_event, staging::stage_prepared};
 use storage::root;
 
+mod blocking;
+pub use blocking::{SyncNativeMergeProjection, admit_native_merge, admit_sealed_native_merge};
 pub mod delivery;
 pub mod history;
 pub mod objects;
