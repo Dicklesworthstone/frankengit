@@ -246,6 +246,13 @@ workspace epoch is only an asserted precondition: it cannot
 authenticate a current workspace session because it carries no workspace or
 snapshot identity.
 
+The legacy `admit_merge` and `admit_merge_async` facades reject native payloads
+before acquiring a seal. Their projection and materializer capabilities do
+not establish native-object validation. Native callers use the explicit
+native projection adapters; the original `OneNode` entrypoint dispatches to
+that shared native driver internally. This preserves the existing permitted
+native route without adding a second publication loop to a legacy facade.
+
 The additive `admit_workspace_merge_durable_in` path obtains that identity and
 epoch from a node-owned session, checks the actual exported tree, and retains
 the session lease through publication and any interrupted-request recovery.

@@ -1085,10 +1085,12 @@ fn forged_closure_root_and_incoherent_native_attempt_fail_before_publication() {
     ));
     let mut incoherent = permitted.clone();
     incoherent.attempt.source_tip = f.base;
+    // The common seal validator identifies the mismatched coordinate before
+    // the native driver can acquire responsibility for this request.
     assert!(matches!(
         apply(&node, &context, &incoherent),
         Err(AdmissionError::MergeIncoherent {
-            field: "native event and sealed attempt"
+            field: "event source tip"
         })
     ));
     assert_eq!(snapshot(&node).basis(), before.basis());
