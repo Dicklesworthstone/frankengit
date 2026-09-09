@@ -14,6 +14,15 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    // Read-only artifact inspection is independent of the Linux host-tool adapter.
+    if arguments.first().is_some_and(|argument| argument == "workspace" || argument == "merge")
+        && arguments.get(1).is_some_and(|argument| argument == "inspect")
+    {
+        return match source_review::inspect_bundle(&arguments[2..], arguments[0] == "merge") {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+        };
+    }
     let pr_diff = arguments.first().is_some_and(|argument| argument == "pr")
         && arguments.get(1).is_some_and(|argument| argument == "diff");
     if pr_diff || arguments.first().is_some_and(|argument| argument == "diff") {
