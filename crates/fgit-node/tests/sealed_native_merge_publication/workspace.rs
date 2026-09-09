@@ -155,6 +155,101 @@ fn uppercase_tree_candidate(node: &OneNode, original: &Fixture) -> Fixture {
     candidate
 }
 
+/// Recompute the supplied evidence after changing native merge coordinates.
+/// The real node independently derives and checks these bodies on admission.
+fn rederive_workspace_evidence(
+    node: &OneNode,
+    context: &AdmissionContext,
+    receipt: &MergeWorkspaceReceipt,
+    package: &mut Package,
+) {
+    let before = snapshot(node);
+    let attempt = fgit_admission::merge::native::workspace_seal_attempt_for(
+        context,
+        &package.sealed(),
+        receipt.snapshot_digest(),
+    )
+    .unwrap();
+    let tx_id = attempt.derive().unwrap().0;
+    let event_root = evidence_root(&ForgeEventBatch::of_one(package.effect.event.clone())).unwrap();
+    let label = AsciiSlug::try_new(
+        "forge_stream",
+        package.effect.event.aggregate.to_string().as_bytes(),
+    )
+    .unwrap();
+    let target = RefName::try_new(&package.effect.ref_intent.name).unwrap();
+    let delivery_key = derive_outbox_delivery_key(OutboxDeliveryIdentityInput::new(
+        repository(),
+        AsciiSlug::from_static("forge-event"),
+        AsciiSlug::from_static("forge-projection"),
+        event_root,
+        tx_id,
+        before.basis().body().latest_committed_rcr_id,
+    ))
+    .unwrap();
+    let request = TransactionRequest {
+        tx_id,
+        tenant: context.tenant_id,
+        repository: repository(),
+        principal: context.principal_id,
+        schema: attempt.request.request_schema(),
+        idempotency_key: ModelKey::new(AsciiSlug::from_static("receive")),
+        canonical_request_digest: fgit_authority::canonical_request_digest(&attempt.request)
+            .unwrap(),
+        statements: vec![Statement {
+            intents: vec![
+                Intent::Ref(RefIntent::Update {
+                    name: target.clone(),
+                    expected: ExpectedRefState::Exact(package.effect.ref_intent.expected_tip),
+                    new: package.effect.ref_intent.new_tip,
+                    force: false,
+                }),
+                Intent::Forge(ForgeIntent {
+                    stream: ForgeStreamId::new(label),
+                    expected_position: ForgeStreamPosition::new(
+                        package.effect.event.version.get() - 1,
+                    ),
+                    event: ForgeEventKind::PullRequestMerged {
+                        pull_request: ForgeEntityId::new(label),
+                        target,
+                    },
+                }),
+                Intent::Outbox(OutboxIntent {
+                    delivery_key: OutboxDeliveryKey::new(delivery_key),
+                    parameters: event_root,
+                }),
+            ],
+            mismatch_policy: MismatchPolicy::TxnAbort,
+        }],
+        promised_closure: package.closure.objects.clone(),
+        atomic: true,
+        durability: DurabilityProfile::CanonicalSource,
+    };
+    let selected = before.snapshot();
+    let fold = IntentEvaluator::new().evaluate(
+        fgit_reference::effect::FoldBasis {
+            refs: &selected.refs,
+            forge_positions: &selected.forge_positions,
+            retention: &selected.retention,
+            outbox: &selected.outbox,
+        },
+        &request,
+    );
+    assert!(matches!(
+        fold.outcome,
+        fgit_reference::effect::FoldOutcome::Folded(_)
+    ));
+    let bodies = DecisionEvidenceBodies::derive(context, before.basis(), &request, &fold).unwrap();
+    package.evidence = CommitEvidence {
+        principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot()).unwrap(),
+        forge_event_batch_root: event_root,
+        policy_decision_root: evidence_root(bodies.policy_decision()).unwrap(),
+        invariant_evidence_root: evidence_root(bodies.invariant_evidence()).unwrap(),
+        outbox_effect_root: evidence_root(bodies.outbox_effect_batch()).unwrap(),
+        retention_delta_root: evidence_root(bodies.retention_delta()).unwrap(),
+    };
+}
+
 fn admit(
     node: &OneNode,
     owner: &LoopbackReceiveSession,
@@ -386,6 +481,95 @@ fn native_candidate_tree_must_equal_the_owned_workspace_export() {
         assert_one_merge(
             &node,
             &uppercase,
+            &permitted_context,
+            &exported,
+            &permitted,
+            terminal,
+        );
+        close(&node, &permitted_owner, &exported);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn workspace_base_must_equal_the_offered_merge_target_even_when_export_tree_matches() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (mut node, _) = OneNode::init(config(&scratch.0, format)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let fixture = fixture(&node, &scratch.0, format, true);
+        let owner = session(b"workspace-inverse-target");
+        let context = context(format, b"workspace-inverse-target");
+        let initial = open(&node, &owner, 0x99);
+        let exported = edit(&node, &owner, &initial, b"theirs\n").unwrap();
+        assert_eq!(exported.base_commit(), fixture.target);
+        assert_eq!(exported.tree(), fixture.merged_tree);
+
+        let inverse_commit = node
+            .put_git_object(
+                GitObjectKind::Commit,
+                commit(
+                    fixture.merged_tree,
+                    &[fixture.source, fixture.target],
+                    "inverse workspace merge\n",
+                ),
+            )
+            .unwrap()
+            .identity();
+        let inverse_intent = NativeMergeIntent::new(
+            PullRequestNumber::try_new(1).unwrap(),
+            ExpectedVersion::NewStream,
+            NativeMerge {
+                source_ref: main_ref(),
+                source_tip: fixture.target,
+                base_tip: fixture.base,
+                target_ref: topic_ref(),
+                target_tip_before: fixture.source,
+                merge_commit: inverse_commit,
+            },
+        )
+        .unwrap();
+        let inverse_closure = validate_merge_objects(
+            &NodeObjects(&node),
+            inverse_intent.merge().unwrap(),
+            MergeObjectLimits::default(),
+            &mut || true,
+        )
+        .expect("the reversed branches and ordered parents form a valid native merge");
+        let mut inverse = workspace_package(&node, &fixture, &context, &exported);
+        inverse.effect.objects = vec![inverse_commit, fixture.merged_tree];
+        inverse.effect.ref_intent = ForgeRefIntent {
+            name: topic_ref().as_bytes().to_vec(),
+            expected_tip: fixture.source,
+            new_tip: inverse_commit,
+        };
+        inverse.effect.event = inverse_intent.event().clone();
+        inverse.attempt.source_ref = main_ref().as_bytes().to_vec();
+        inverse.attempt.target_ref = topic_ref().as_bytes().to_vec();
+        inverse.attempt.source_tip = fixture.target;
+        inverse.attempt.target_tip = fixture.source;
+        inverse.closure = inverse_closure;
+        rederive_workspace_evidence(&node, &context, &exported, &mut inverse);
+        assert_ne!(exported.base_commit(), inverse.attempt.target_tip);
+
+        let before = snapshot(&node);
+        let refused = admit(&node, &owner, &exported, &inverse).unwrap();
+        assert_eq!(
+            refused.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::EvidenceStale
+            }
+        );
+        assert_unchanged_effects(&before, &snapshot(&node));
+        assert_eq!(admit(&node, &owner, &exported, &inverse).unwrap(), refused);
+
+        let permitted_context = super::context(format, b"workspace-original-target");
+        let permitted_owner = session(b"workspace-original-target");
+        let permitted = workspace_package(&node, &fixture, &permitted_context, &exported);
+        let terminal = admit(&node, &permitted_owner, &exported, &permitted).unwrap();
+        assert_one_merge(
+            &node,
+            &fixture,
             &permitted_context,
             &exported,
             &permitted,

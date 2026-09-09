@@ -665,3 +665,6 @@ impl OneNode {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod shutdown_tests;

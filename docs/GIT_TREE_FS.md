@@ -127,7 +127,7 @@ cross node instances, even when the caller reuses a `WorkspaceId`.
 Capability expiry in this node profile uses node-runtime nanoseconds. The
 `now` argument may advance a session's monotone observation floor; it cannot
 rewind runtime time. Fresh publication rechecks the held capability at each
-pinned basis and immediately before CAS. Outcome reconciliation remains
+pinned basis and before publication handoff. Outcome reconciliation remains
 available after expiry.
 
 The explicit workspace merge profile adds one semantic request entry:

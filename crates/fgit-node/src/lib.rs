@@ -45,7 +45,9 @@ use fgit_admission::{
     validate_source_import,
 };
 mod treefs_workspace;
-pub use treefs_workspace::{MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked};
+pub use treefs_workspace::{
+    MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
+};
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, HeadInit, HeadKey,
@@ -3388,7 +3390,11 @@ impl Display for NodeRefusal {
             Self::ResourceContainment => {
                 formatter.write_str("object placement region did not reach quiescence")
             }
-            Self::WorkspaceShutdownBlocked(blocked) => write!(formatter, "workspace shutdown blocked; node retained: {}", blocked.cause()),
+            Self::WorkspaceShutdownBlocked(blocked) => write!(
+                formatter,
+                "workspace shutdown blocked; node retained: {}",
+                blocked.cause()
+            ),
             Self::RuntimeContainment => {
                 formatter.write_str("node runtime did not reach quiescence during shutdown")
             }
@@ -8205,9 +8211,17 @@ impl OneNode {
         self.shutdown_with_workspace_context(request)
     }
 
-    fn shutdown_with_workspace_context(mut self, request: NodeRequestContext) -> Result<(), NodeRefusal> {
-        if let Err(cause) = self.runtime.block_on(self.drain_merge_workspaces_in(&request)) {
-            return Err(NodeRefusal::WorkspaceShutdownBlocked(Box::new(WorkspaceShutdownBlocked::new(self, cause))));
+    fn shutdown_with_workspace_context(
+        mut self,
+        request: NodeRequestContext,
+    ) -> Result<(), NodeRefusal> {
+        if let Err(cause) = self
+            .runtime
+            .block_on(self.drain_merge_workspaces_in(&request))
+        {
+            return Err(NodeRefusal::WorkspaceShutdownBlocked(Box::new(
+                WorkspaceShutdownBlocked::new(self, cause),
+            )));
         }
         let shutdown_cx = self.authority_context();
         self.runtime
