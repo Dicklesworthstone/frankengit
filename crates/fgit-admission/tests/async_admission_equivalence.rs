@@ -1280,3 +1280,73 @@ fn the_merge_corpus_does_not_collapse_to_one_answer() {
     assert_eq!(stale, "refused:EvidenceStale");
     assert_ne!(fresh, stale);
 }
+
+/// Original native package seals are valid inputs for the native driver, but
+/// do not grant native-object or coupled-fold capability to either legacy
+/// publisher. These are model-store boundary checks, not native object proof.
+#[test]
+fn a_native_seal_does_not_enable_either_legacy_merge_publisher() {
+    let context = context(b"native-seal-legacy-publisher-boundary");
+    let (store, projection, staging) = merge_setup(&context);
+    let mut package = merge_package();
+    let attempt = merge_attempt(9);
+    package.event.payload =
+        fgit_forge::ForgeEventPayload::MergeCommittedNative(fgit_forge::event::NativeMerge {
+            source_ref: RefName::try_new(&attempt.source_ref).unwrap(),
+            source_tip: attempt.source_tip,
+            base_tip: attempt.base_tip,
+            target_ref: RefName::try_new(&attempt.target_ref).unwrap(),
+            target_tip_before: attempt.target_tip,
+            merge_commit: package.ref_intent.new_tip,
+        });
+    let closure = merge_closure();
+    let sealed = fgit_admission::merge::SealedMerge {
+        package: &package,
+        attempt: &attempt,
+        closure: &closure,
+        evidence: merge_evidence(),
+        workspace_epoch_now: attempt.workspace_epoch,
+    };
+    let original = fgit_admission::merge::seal_attempt_for(&context, &sealed)
+        .expect("coherent native package retains the original seal vocabulary");
+    let tx_id = original.derive().unwrap().0;
+    let before = store.read_head(&context.head_key).unwrap();
+    let blocking = fgit_admission::merge::admit_merge(
+        &store,
+        &context,
+        &sealed,
+        AdmissionLimits::default(),
+        &projection,
+        &staging,
+    );
+    assert!(matches!(
+        blocking,
+        Err(AdmissionError::MergeIncoherent {
+            field: "forge event kind"
+        })
+    ));
+    assert_eq!(store.read_head(&context.head_key).unwrap(), before);
+    let view = AsyncView(store);
+    let asynchronous = poll_ready(fgit_admission::merge::admit_merge_async(
+        &view,
+        &(),
+        &context,
+        &sealed,
+        AdmissionLimits::default(),
+        &projection,
+        &staging,
+    ));
+    assert!(matches!(
+        asynchronous,
+        Err(AdmissionError::MergeIncoherent {
+            field: "forge event kind"
+        })
+    ));
+    assert_eq!(view.0.read_head(&context.head_key).unwrap(), before);
+    assert!(
+        fgit_authority::read_seal(&view.0, context.tenant_id, context.repository_id, tx_id)
+            .unwrap()
+            .is_none(),
+        "legacy drivers must refuse before acquiring a seal"
+    );
+}

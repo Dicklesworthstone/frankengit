@@ -13,6 +13,7 @@ use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber
 use fgit_forge::event::{ForgeEvent, ForgeEventBatch, ForgeEventPayload, NativeMerge};
 use fgit_types::{AsciiSlug, RefusalCode};
 
+use super::SealedMerge;
 use crate::{
     AdmissionContext, AdmissionError, AdmissionLimits, AsyncAdmissionProjection,
     ProjectionFailure, ValidatedClosure,
@@ -148,7 +149,84 @@ where
 {
     limits.validate()?;
     let attempt = intent.seal_attempt(context)?;
-    let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
+    admit_native_attempt_async(
+        store, cx, context, intent, &attempt, None, limits, projection,
+    )
+    .await
+}
+
+/// Admit a native event through the original sealed-package API and identity.
+///
+/// The supplied closure and evidence are checked against native validation and
+/// the complete fold at each authenticated basis. This profile requires the
+/// exact native closure; additional caller-claimed objects are not admitted.
+/// The caller's current workspace epoch remains an asserted precondition, not
+/// proof of a supervisor-owned session. Terminal retries resolve before these
+/// basis-dependent checks, including after the original merge moved its refs.
+pub async fn admit_sealed_native_merge_async<S, P>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    sealed: &SealedMerge<'_>,
+    limits: AdmissionLimits,
+    projection: &P,
+) -> Result<TerminalOutcome, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: NativeMergeProjection<S> + ?Sized,
+{
+    limits.validate()?;
+    // Preserve every original scoped entry, including the ref-intent root and
+    // workspace epoch. Constructing NativeMergeIntent's seal here would give
+    // the already sealed logical request a different transaction identity.
+    let attempt = super::seal_attempt_for(context, sealed)?;
+    let ForgeEventPayload::MergeCommittedNative(merge) = &sealed.package.event.payload else {
+        return Err(incoherent("native event kind"));
+    };
+    let expected_version = match sealed.package.event.version.get() - 1 {
+        0 => ExpectedVersion::NewStream,
+        version => ExpectedVersion::Exactly(
+            AggregateVersion::try_new(version).ok_or_else(|| incoherent("aggregate version"))?,
+        ),
+    };
+    let intent =
+        NativeMergeIntent::new(sealed.attempt.pull_request, expected_version, merge.clone())?;
+    if intent.event() != &sealed.package.event {
+        return Err(incoherent("normalized native event"));
+    }
+    if merge.merge_commit.algorithm() != context.object_format {
+        return Err(AdmissionError::ObjectFormatMismatch);
+    }
+    admit_native_attempt_async(
+        store,
+        cx,
+        context,
+        &intent,
+        &attempt,
+        Some(sealed),
+        limits,
+        projection,
+    )
+    .await
+}
+
+/// Both public request forms enter this one validation/publication loop with
+/// their original seal. The normalized intent is only an evaluation input.
+async fn admit_native_attempt_async<S, P>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    intent: &NativeMergeIntent,
+    attempt: &SealAttempt,
+    sealed: Option<&SealedMerge<'_>>,
+    limits: AdmissionLimits,
+    projection: &P,
+) -> Result<TerminalOutcome, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: NativeMergeProjection<S> + ?Sized,
+{
+    let admission = fgit_authority::seal_request_async(store, cx, attempt).await?;
     let tx_id = admission.tx_id();
     let merge = intent.merge()?;
     for _ in 0..limits.max_cas_replans {
@@ -176,11 +254,18 @@ where
             if positions != resolved.forge {
                 return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into());
             }
+            if let Some(sealed) = sealed {
+                super::check_against_snapshot(sealed, &snapshot)
+                    .map_err(|stale| ProjectionFailure::Refuse(stale.refusal_code()))?;
+            }
             if let Some(code) = storage::aggregate_refusal(store, cx, &positions, intent).await? {
                 return Err(ProjectionFailure::Refuse(code).into());
             }
             let closure = projection.validate_merge_async(store, cx, &basis, &authenticated, intent).await?;
-            let prepared = prepare_event(context, &intent.event, &closure, tx_id, &attempt, &basis, &resolved)
+            if sealed.is_some_and(|sealed| sealed.closure != &closure) {
+                return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete).into());
+            }
+            let prepared = prepare_event(context, &intent.event, &closure, tx_id, attempt, &basis, &resolved)
                 .map_err(ProjectionFailure::Refuse)?;
             Ok(prepared)
         }.await;

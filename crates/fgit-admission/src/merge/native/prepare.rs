@@ -28,8 +28,8 @@ use super::storage::{aggregate_label, root};
 use super::{incoherent, unavailable};
 use crate::evidence::{DecisionEvidenceBodies, principal_snapshot_id};
 use crate::{
-    AdmissionContext, AdmissionError, AdmissionSnapshot, CommitMaterialization, LoweredRequest,
-    ProjectionFailure, PublicationPreparation, ValidatedClosure,
+    AdmissionContext, AdmissionError, AdmissionSnapshot, CommitEvidence, CommitMaterialization,
+    LoweredRequest, ProjectionFailure, PublicationPreparation, ValidatedClosure,
 };
 
 /// The reference partition and the complete coupled transition at one basis.
@@ -53,6 +53,27 @@ pub struct PreparedNativeMerge {
 }
 
 impl PreparedNativeMerge {
+    /// A sealed package's evidence is a checked precondition. It cannot replace
+    /// the independently derived bodies that the native driver publishes.
+    pub fn validate_supplied_evidence(
+        &self,
+        supplied: CommitEvidence,
+    ) -> Result<(), PreparationFailure> {
+        let expected = CommitEvidence {
+            principal_snapshot_id: principal_snapshot_id(self.evidence.principal_snapshot())
+                .map_err(ProjectionFailure::Unavailable)?,
+            forge_event_batch_root: root(&self.events)?,
+            policy_decision_root: root(self.evidence.policy_decision())?,
+            invariant_evidence_root: root(self.evidence.invariant_evidence())?,
+            outbox_effect_root: root(self.evidence.outbox_effect_batch())?,
+            retention_delta_root: root(self.evidence.retention_delta())?,
+        };
+        if supplied != expected {
+            return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid).into());
+        }
+        Ok(())
+    }
+
     /// Check the independently materialized reference partition against the
     /// complete merge's principal, policy, and retention evidence.
     pub fn validate_ref_evidence(

@@ -396,6 +396,11 @@ pub(crate) fn check_parts_describe_one_merge(
 fn check_event_describes_this_merge(sealed: &SealedMerge<'_>) -> Result<(), AdmissionError> {
     if let fgit_forge::ForgeEventPayload::MergeCommittedNative(event) = &sealed.package.event.payload
     {
+        event
+            .validate()
+            .map_err(|_| AdmissionError::MergeIncoherent {
+                field: "native merge coordinates",
+            })?;
         if sealed.package.event.aggregate
             != fgit_forge::AggregateId::PullRequest(sealed.attempt.pull_request)
         {
@@ -590,6 +595,23 @@ pub fn seal_attempt_for(
     })
 }
 
+/// Legacy publishers cannot own native validation or the complete coupled
+/// fold. Enabling the original seal for the native driver must not widen them.
+fn legacy_seal_attempt_for(
+    context: &AdmissionContext,
+    sealed: &SealedMerge<'_>,
+) -> Result<SealAttempt, AdmissionError> {
+    if matches!(
+        &sealed.package.event.payload,
+        fgit_forge::ForgeEventPayload::MergeCommittedNative(_)
+    ) {
+        return Err(AdmissionError::MergeIncoherent {
+            field: "forge event kind",
+        });
+    }
+    seal_attempt_for(context, sealed)
+}
+
 /// One replan's decision: publish the merge, or publish why it cannot be.
 pub(crate) enum MergePlan {
     /// The merge is fresh at this basis, and this is the ref state it results
@@ -688,7 +710,7 @@ where
     Projection: AdmissionProjection + ?Sized,
     Commitments: crate::CanonicalAdmissionStore + ForgeBodyStore + ?Sized,
 {
-    let attempt = seal_attempt_for(context, sealed)?;
+    let attempt = legacy_seal_attempt_for(context, sealed)?;
     let admission = fgit_authority::seal_request(store, &attempt)?;
     let tx_id = admission.tx_id();
     if let fgit_authority::OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome(
@@ -805,7 +827,7 @@ where
     // carries its own obligation.
     Commitments: AsyncMergeMaterializer<S> + ?Sized,
 {
-    let attempt = seal_attempt_for(context, sealed)?;
+    let attempt = legacy_seal_attempt_for(context, sealed)?;
     let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
     let tx_id = admission.tx_id();
     if let fgit_authority::OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
