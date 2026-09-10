@@ -260,7 +260,7 @@ fn render_terminal(options: &Mutation, mode: Mode, tx: TxId, terminal: &Terminal
         "\"tx_id\":{},\"decision_sequence\":{},\"repository_commit_id\":{},",
         "\"refusal_code\":{},\"refusal_record_id\":{},\"node_closed\":{},\"cleanup_error\":{},",
         "\"delivery_acknowledged\":null,\"repository_wide_branch_protection\":false}}"),
-        quote(if mode == Mode::Review { "candidate_review" } else { "reviewed_merge_publication" }),
+        quote(if mode == Mode::Review { "candidate_review_decision" } else { "reviewed_merge_publication" }),
         quote(if mode == Mode::Review { CANDIDATE_REVIEW_PROFILE } else { "named-candidate-reviewers-v1" }),
         scope_fields(&options.scope), subject_fields(&options.command.review.subject,Some(options.command.candidate)),
         quote(&options.principal.to_string()),
