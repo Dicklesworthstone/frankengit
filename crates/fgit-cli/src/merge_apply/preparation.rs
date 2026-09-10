@@ -1,6 +1,9 @@
 //! Explicit PathMergeV1 preparation. This command never publishes repository
 //! authority; a saved candidate must be independently reviewed and applied.
 
+mod resolution;
+pub(super) const RESOLUTION_USAGE: &str = resolution::USAGE;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,6 +29,7 @@ struct Options {
 }
 
 pub(super) fn run(arguments: &[String]) -> Result<(), String> {
+    if arguments.first().is_some_and(|arg| arg == "resolve") { return resolution::run(arguments); }
     if arguments == ["prepare", "--help"] {
         println!("{USAGE}\n\npath-v1 is an explicit bounded path-based merge, not a claim of Git ort equivalence. No rename heuristics, virtual bases, external merge drivers or hooks are run. Conflicts produce JSON and no bundle. Repository state is never changed.");
         return Ok(());

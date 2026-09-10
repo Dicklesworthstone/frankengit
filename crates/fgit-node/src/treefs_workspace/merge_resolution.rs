@@ -13,6 +13,7 @@ pub struct ResolvedMergeBundle {
     pub source_head: RepositoryAuthorityHeadId,
     pub resolved: ResolvedMerge,
     pub bundle: Vec<u8>,
+    pub bundle_sha256: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -96,7 +97,9 @@ impl OneNode {
         // validate the complete constructed closure, including selected subtrees.
         let bundle = bundle_for_plan(&source, target, incoming, &resolved.plan, limits)?;
         source.checkpoint().map_err(ResolutionError::from)?;
-        Ok(ResolvedMergeBundle { source_head: selected.basis().id(), resolved, bundle })
+        let bundle_sha256 = fgit_crypto::sha256_digest(&bundle);
+        source.checkpoint().map_err(ResolutionError::from)?;
+        Ok(ResolvedMergeBundle { source_head: selected.basis().id(), resolved, bundle, bundle_sha256 })
     }
 }
 

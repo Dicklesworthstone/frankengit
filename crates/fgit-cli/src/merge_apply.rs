@@ -30,11 +30,11 @@ struct Options {
 }
 
 pub(super) fn run(arguments: &[String]) -> Result<(), String> {
-    if arguments.first().is_some_and(|argument| argument == "prepare") {
+    if arguments.first().is_some_and(|argument| argument == "prepare" || argument == "resolve") {
         return preparation::run(arguments);
     }
     if arguments == ["--help"] {
-        println!("{}\n\n{USAGE}", preparation::USAGE);
+        println!("{}\n\n{}\n\n{USAGE}", preparation::USAGE, preparation::RESOLUTION_USAGE);
         return Ok(());
     }
     if arguments == ["apply", "--help"] {
