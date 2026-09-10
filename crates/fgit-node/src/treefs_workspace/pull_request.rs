@@ -187,3 +187,6 @@ impl PullRequestProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod policy_store_tests;
