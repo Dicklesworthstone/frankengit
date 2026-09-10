@@ -1,7 +1,7 @@
 //! Native merge preparation and independently reviewed artifact publication.
 //! Preparation and Ref + Forge + Outbox publication remain separate commands.
 
-mod preparation;
+pub(crate) mod preparation;
 
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber};

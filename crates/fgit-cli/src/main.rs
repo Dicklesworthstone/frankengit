@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod commit_replay;
 mod merge_apply;
 mod publication_support;
 mod pull_request;
@@ -17,6 +18,14 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if let Some(command @ ("cherry-pick" | "revert")) = arguments.first().map(String::as_str) {
+        let direction = if command == "revert" { fgit_forge::preparation::replay::ReplayDirection::Revert }
+            else { fgit_forge::preparation::replay::ReplayDirection::CherryPick };
+        return match commit_replay::run(&arguments[1..], direction) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "outcome") {
         return match transaction_outcome::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),

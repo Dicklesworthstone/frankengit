@@ -120,7 +120,7 @@ fn render_entry(entry: Option<&MergeEntry>) -> String {
     entry.map_or_else(|| "null".to_owned(), |entry|
         format!("{{\"mode\":{},\"oid\":\"{}\"}}", entry.mode, entry.oid))
 }
-fn render_conflict(conflict: &MergeConflict) -> String {
+pub(crate) fn render_conflict(conflict: &MergeConflict) -> String {
     format!("{{\"path_hex\":\"{}\",\"kind\":{},\"base\":{},\"ours\":{},\"theirs\":{}}}",
         hex(&conflict.path), quote(&format!("{:?}", conflict.kind)),
         render_entry(conflict.base.as_ref()), render_entry(conflict.ours.as_ref()), render_entry(conflict.theirs.as_ref()))
@@ -185,7 +185,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     Ok(Options { storage: arguments[1].clone().into(), tenant, repository, target, incoming, output, metadata })
 }
 
-fn require_absent(path: &Path) -> Result<(), String> {
+pub(crate) fn require_absent(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(_) => Err("output path already exists; refusing to replace a file, symlink or directory".to_owned()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -197,7 +197,7 @@ fn require_absent(path: &Path) -> Result<(), String> {
 /// the destination directory, synchronized before an atomic create-only hard
 /// link. Unsupported filesystems refuse; there is no overwrite-rename fallback.
 /// This is a trusted local-operator filesystem, not an adversarial host boundary.
-fn publish_new_bundle(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn publish_new_bundle(path: &Path, bytes: &[u8]) -> Result<(), String> {
     require_absent(path)?;
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     let mut selected = None;
