@@ -16,6 +16,8 @@ use fgit_diff::{
 };
 use fgit_types::{GitHashAlgorithm, GitOid};
 
+pub mod resolution;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitInput {
     pub tree: GitOid,
@@ -246,7 +248,7 @@ pub fn prepare_merge<S: MergeObjectSource>(
     let their_tree = source.commit(incoming)?.tree;
     let mut planner = Planner {
         source, format, limits, entries: 0, content_merges: 0, output_bytes: 0,
-        objects: BTreeMap::new(), conflicts: Vec::new(),
+        objects: BTreeMap::new(), conflicts: Vec::new(), resolutions: BTreeMap::new(),
     };
     let tree = planner.directory(Some(base_tree), our_tree, their_tree, &[], 0, false)?;
     source.checkpoint()?;
@@ -255,20 +257,28 @@ pub fn prepare_merge<S: MergeObjectSource>(
         return Ok(MergePreparation::Conflicted { base, conflicts: planner.conflicts });
     }
     let tree = tree.ok_or(PreparationError::InvalidTree)?;
+    finish_merge(planner, base, target, incoming, tree, metadata).map(MergePreparation::Clean)
+}
+
+/// Both automatic and explicit-resolution preparation use these exact commit bytes.
+fn finish_merge<S: MergeObjectSource>(
+    mut planner: Planner<'_, S>, base: GitOid, target: GitOid, incoming: GitOid,
+    tree: GitOid, metadata: &MergeMetadata,
+) -> Result<PreparedMerge, PreparationError> {
     let mut body = format!(
         "tree {tree}\nparent {target}\nparent {incoming}\nauthor {} {} +0000\ncommitter {} {} +0000\n\n",
         metadata.author, metadata.timestamp, metadata.committer, metadata.timestamp,
     ).into_bytes();
-    if body.len().saturating_add(metadata.message.len()) > limits.max_output_bytes {
+    if body.len().saturating_add(metadata.message.len()) > planner.limits.max_output_bytes {
         return Err(PreparationError::Budget("commit bytes"));
     }
     body.extend_from_slice(&metadata.message);
     let commit = planner.emit(GitObjectKind::Commit, body)?;
-    source.checkpoint()?;
-    Ok(MergePreparation::Clean(PreparedMerge {
+    planner.source.checkpoint()?;
+    Ok(PreparedMerge {
         base, target, source: incoming, tree, commit,
         objects: planner.objects.into_values().collect(),
-    }))
+    })
 }
 
 struct Planner<'a, S> {
@@ -280,6 +290,7 @@ struct Planner<'a, S> {
     output_bytes: usize,
     objects: BTreeMap<GitOid, PlannedMergeObject>,
     conflicts: Vec<MergeConflict>,
+    resolutions: BTreeMap<Vec<u8>, resolution::BoundResolution>,
 }
 
 impl<S: MergeObjectSource> Planner<'_, S> {
@@ -384,6 +395,14 @@ impl<S: MergeObjectSource> Planner<'_, S> {
         &mut self, path: &[u8], kind: ConflictKind,
         base: Option<&MergeEntry>, ours: Option<&MergeEntry>, theirs: Option<&MergeEntry>,
     ) -> Result<Option<MergeEntry>, PreparationError> {
+        if let Some(bound) = self.resolutions.remove(path) {
+            // Only the explicit-resolution constructor can install this map.
+            // The second pass must reproduce the exact first-pass conflict.
+            if bound.conflict.kind != kind || bound.conflict.base.as_ref() != base
+                || bound.conflict.ours.as_ref() != ours || bound.conflict.theirs.as_ref() != theirs
+            { return Err(PreparationError::InvalidTree); }
+            return Ok(bound.result);
+        }
         if self.conflicts.len() == self.limits.max_conflicts { return Err(PreparationError::Budget("conflicts")); }
         self.conflicts.push(MergeConflict {
             path: path.to_vec(), kind, base: base.cloned(), ours: ours.cloned(), theirs: theirs.cloned(),
