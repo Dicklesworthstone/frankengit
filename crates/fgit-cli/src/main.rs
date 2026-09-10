@@ -3,6 +3,7 @@
 mod merge_apply;
 mod publication_support;
 mod pull_request;
+mod review_commands;
 mod source_history;
 mod source_review;
 mod source_search;
@@ -15,6 +16,18 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let review_mode = match (arguments.first().map(String::as_str), arguments.get(1).map(String::as_str)) {
+        (Some("pr"), Some("review")) => Some(review_commands::Mode::Review),
+        (Some("pr"), Some("reviews")) => Some(review_commands::Mode::Reviews),
+        (Some("merge"), Some("apply-reviewed")) => Some(review_commands::Mode::Apply),
+        _ => None,
+    };
+    if let Some(mode) = review_mode {
+        return match review_commands::run(&arguments[2..], mode) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+        };
+    }
     if arguments.first().is_some_and(|argument| matches!(argument.as_str(), "log" | "blame")) {
         return match source_history::run(&arguments[1..], arguments[0] == "blame") {
             Ok(()) => ExitCode::SUCCESS,
