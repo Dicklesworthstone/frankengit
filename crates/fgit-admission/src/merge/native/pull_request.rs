@@ -2,6 +2,9 @@
 //! This owns no mutable PR table: event bodies, forge positions and deliveries
 //! are selected together by the same repository authority head as Git refs.
 
+#[path = "reviews.rs"]
+pub mod reviews;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 

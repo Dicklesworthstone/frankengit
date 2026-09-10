@@ -1,6 +1,6 @@
-//! Pure coupled forge preparation. Native merges and PR lifecycle commands
-//! share the full fold, immutable evidence, delivery identity and RCR builder.
-//! Only merges may move a ref; metadata changes never manufacture ref effects.
+//! Pure coupled forge preparation. Native merges, PR lifecycle commands and
+//! reviewer decisions share the full fold, immutable evidence, delivery identity
+//! and RCR builder. Only merges may move a ref; metadata/reviews never do.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,6 +12,7 @@ use fgit_codec::{
 };
 use fgit_forge::{ForgeEvent, ForgeEventBatch, ForgeEventPayload};
 use fgit_forge::event::pull_request::PullRequestAction;
+use fgit_forge::event::review::ReviewDecision;
 use fgit_reference::effect::{FoldBasis, FoldOutcome, RefEffect};
 use fgit_reference::intent::{
     ForgeEntityId, ForgeEventKind, ForgeIntent, ForgeStreamId, ForgeStreamPosition, Intent,
@@ -87,7 +88,11 @@ pub(crate) fn prepare_event(
     basis: &PublicationBasis,
     resolved: &NativeMergeBasis,
 ) -> Result<PreparedNativeMerge, RefusalCode> {
-    if !matches!(event.aggregate, fgit_forge::AggregateId::PullRequest(_))
+    let aggregate_matches = match &event.payload {
+        ForgeEventPayload::PullRequestReviewedNative(review) => event.aggregate == review.aggregate(),
+        _ => matches!(event.aggregate, fgit_forge::AggregateId::PullRequest(_)),
+    };
+    if !aggregate_matches
         || attempt.tenant_id != context.tenant_id
         || attempt.repository_id != context.repository_id
         || attempt.authenticated_principal_id != context.principal_id
@@ -146,6 +151,29 @@ pub(crate) fn prepare_event(
                 PullRequestAction::Close => ForgeEventKind::PullRequestClosed { pull_request: entity },
             };
             (kind, vec![change.data.source_tip, change.data.target_tip], None)
+        }
+        ForgeEventPayload::PullRequestReviewedNative(review) => {
+            review.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
+            let subject = &review.subject;
+            if review.reviewer != context.principal_id
+                || subject.source_tip.algorithm() != context.object_format
+                || !attempt.request.ref_commands().is_empty()
+            { return Err(RefusalCode::EvidenceInvalid); }
+            if review.decision != ReviewDecision::Withdraw {
+                let pr = AsciiSlug::try_new("forge_stream",
+                    fgit_forge::AggregateId::PullRequest(subject.pull_request).to_string().as_bytes())
+                    .map_err(|_| RefusalCode::EvidenceInvalid)?;
+                if subject.policy_epoch != basis.body().policy_epoch
+                    || resolved.forge.entry(pr).map(|entry| entry.successor_position()) != Some(subject.pull_request_version.get())
+                { return Err(RefusalCode::EvidenceStale); }
+                if resolved.refs.refs().get(&subject.source_ref) != Some(&subject.source_tip)
+                    || resolved.refs.refs().get(&subject.target_ref) != Some(&subject.target_tip)
+                { return Err(RefusalCode::TargetRefMoved); }
+            }
+            // Withdrawals preserve the exact old subject even when stale;
+            // the driver has verified the current review-stream predecessor.
+            (ForgeEventKind::PullRequestReviewed { review: entity, target: subject.target_ref.clone() },
+                vec![subject.source_tip, subject.target_tip], None)
         }
         _ => return Err(RefusalCode::EvidenceInvalid),
     };
