@@ -19,6 +19,8 @@
 //! - engine refusals (malformed input for this snapshot) are typed errors,
 //!   never silently treated as allow.
 
+pub mod persisted;
+
 use crate::RefusalCode;
 use fgit_policy::content::PolicySnapshotId;
 use fgit_policy::{Decision, PolicyEvaluation};
@@ -44,7 +46,7 @@ pub enum PolicySourceRefusal {
     /// The stored body failed to decode.
     Undecodable { id: String },
     /// A valid snapshot was returned under the wrong requested identity.
-    IdentityMismatch { requested: PolicySnapshotId, observed: PolicySnapshotId },
+    IdentityMismatch { requested: Box<PolicySnapshotId>, observed: Box<PolicySnapshotId> },
 }
 
 impl std::fmt::Display for PolicySourceRefusal {
@@ -147,7 +149,7 @@ fn checked_snapshot(source: &dyn PolicySnapshotSource, id: &PolicySnapshotId)
     let snapshot = source.snapshot_by_id(id)?;
     if snapshot.id() != *id {
         return Err(PolicySourceRefusal::IdentityMismatch {
-            requested: *id, observed: snapshot.id(),
+            requested: Box::new(*id), observed: Box::new(snapshot.id()),
         });
     }
     Ok(snapshot)
@@ -208,7 +210,7 @@ mod tests {
         assert_ne!(deny.id(), allow.id());
         let source = SubstitutingSource { replacement: allow.clone(), reads: Cell::new(0) };
         assert_eq!(checked_snapshot(&source, &deny.id()).unwrap_err(),
-            PolicySourceRefusal::IdentityMismatch { requested: deny.id(), observed: allow.id() });
+            PolicySourceRefusal::IdentityMismatch { requested: Box::new(deny.id()), observed: Box::new(allow.id()) });
         assert_eq!(source.reads.get(), 1, "no fallback lookup after substitution");
         assert_eq!(checked_snapshot(&source, &allow.id()).unwrap(), allow);
         assert_eq!(source.reads.get(), 2);
