@@ -89,6 +89,7 @@ impl RequestRecovery {
 /// Infrastructure failure never masquerades as an absent key or undecided request.
 #[derive(Debug)]
 pub enum RecoveryFailure {
+    AuthenticationRequired,
     Authority(AuthorityFailure),
     Seal(Box<SealFailure>),
     Outcome(Box<OutcomeFailure>),
@@ -102,6 +103,7 @@ pub enum RecoveryFailure {
 impl std::fmt::Display for RecoveryFailure {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AuthenticationRequired => out.write_str("transaction recovery requires an authenticated principal"),
             Self::Authority(error) => write!(out, "transaction recovery authority: {error}"),
             Self::Seal(error) => write!(out, "transaction recovery seal: {error}"),
             Self::Outcome(error) => write!(out, "transaction recovery outcome: {error}"),

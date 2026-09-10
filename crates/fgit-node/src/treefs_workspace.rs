@@ -9,6 +9,7 @@ mod pull_request;
 mod session_state;
 mod sessions;
 mod source_search;
+mod transaction_recovery;
 pub use session_state::WorkspaceSessionRefusal;
 pub use sessions::{MergeWorkspaceReceipt, WorkspaceShutdownBlocked};
 pub(crate) use sessions::NodeWorkspaceSessions;
