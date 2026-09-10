@@ -17,6 +17,7 @@ use fgit_diff::{
 use fgit_types::{GitHashAlgorithm, GitOid};
 
 pub mod resolution;
+pub mod replay;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitInput {
