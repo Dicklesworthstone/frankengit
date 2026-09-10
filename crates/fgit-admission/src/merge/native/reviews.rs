@@ -1,6 +1,7 @@
-//! Durable exact-subject reviewer streams on the existing forge/outbox path.
-//! This module is a child of pull_request so it reuses the authenticated PR
-//! frontier reader. Neither votes nor query summaries grant merge authority.
+//! Durable reviewer streams share the existing PR frontier, forge/outbox fold
+//! and authority CAS. An approval is not a cached boolean or a second database.
+#[path = "review_gate.rs"]
+pub mod gate;
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -9,30 +10,38 @@ use fgit_authority::{AsyncAuthorityStore, AuthenticatedHead, OutcomeLookup, Scop
 use fgit_chronicle::{PublicationBasis, PublicationPlan};
 use fgit_codec::{CanonicalForgePositionState, CryptoBodyIdentity};
 use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventBatch, ForgeEventPayload, PullRequestNumber};
-use fgit_forge::event::review::{NativeReviewEvent, ReviewCommand, ReviewDecision,
-    ReviewFreshness, review_freshness, validate_review_transition};
+use fgit_forge::event::review::{CandidateBinding, CandidateReviewCommand, NativeReviewEvent,
+    ReviewCommand, ReviewDecision, ReviewFreshness, review_freshness, validate_review_transition};
 use fgit_types::{AsciiSlug, PolicyEpoch, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId};
 use super::super::{NativeMergeProjection, PreparationFailure, delivery, prepare_event,
     stage_prepared, storage, unavailable};
 use crate::{AdmissionContext, AdmissionError, AdmissionLimits, ProjectionFailure, ValidatedClosure};
 
-/// The node authenticates native dependencies at the exact publication basis.
-/// A review command may reference existing commits but cannot upload objects.
+/// The owner validates native dependencies at the exact basis. Candidate
+/// approvals additionally inspect the actual bundle without staging its objects.
 pub trait ReviewProjection<S>: NativeMergeProjection<S>
 where S: AsyncAuthorityStore + ?Sized,
 {
     fn validate_review_async<'a>(
         &'a self, store: &'a S, cx: &'a S::Context, basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead, command: &'a ReviewCommand,
+        candidate: Option<CandidateBinding>,
     ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a;
 }
 
-/// The complete exact-subject vote and session actor define the immutable
-/// semantic request. Head generations and retry counters are not re-sealed.
 pub fn proposal(context: &AdmissionContext, command: &ReviewCommand)
     -> Result<(ForgeEvent, SealAttempt), AdmissionError>
 {
-    let event = command.proposed_event(context.principal_id, context.object_format).map_err(unavailable)?;
+    seal_event(context, command.proposed_event(context.principal_id, context.object_format).map_err(unavailable)?)
+}
+
+pub fn candidate_proposal(context: &AdmissionContext, command: &CandidateReviewCommand)
+    -> Result<(ForgeEvent, SealAttempt), AdmissionError>
+{
+    seal_event(context, command.proposed_event(context.principal_id, context.object_format).map_err(unavailable)?)
+}
+
+fn seal_event(context: &AdmissionContext, event: ForgeEvent) -> Result<(ForgeEvent, SealAttempt), AdmissionError> {
     let root = storage::root(&ForgeEventBatch::of_one(event.clone()))?;
     let request = SemanticRequest::build(fgit_authority::RECEIVE_ADMISSION_SCHEMA,
         context.object_format, true, Vec::new(), Vec::new(), vec![ScopedEntry::new(
@@ -43,21 +52,41 @@ pub fn proposal(context: &AdmissionContext, command: &ReviewCommand)
         authenticated_principal_id: context.principal_id, idempotency_key: context.idempotency_key.clone(), request }))
 }
 
-/// Publish one reviewer-stream successor and one delivery obligation. Native
-/// refs, the PR's metadata position and retention remain unchanged. Every CAS
-/// retry validates the same request against the new authenticated predecessor.
-/// An already terminal outcome is recovered before any current-code checks.
 pub async fn admit_review_async<S, P>(
     store: &S, cx: &S::Context, context: &AdmissionContext,
     command: &ReviewCommand, limits: AdmissionLimits, projection: &P,
 ) -> Result<TerminalOutcome, AdmissionError>
 where S: AsyncAuthorityStore + ?Sized, P: ReviewProjection<S> + ?Sized,
 {
-    limits.validate()?;
     let (event, attempt) = proposal(context, command)?;
+    admit_event(store, cx, context, command, event, attempt, limits, projection).await
+}
+
+pub async fn admit_candidate_review_async<S, P>(
+    store: &S, cx: &S::Context, context: &AdmissionContext,
+    command: &CandidateReviewCommand, limits: AdmissionLimits, projection: &P,
+) -> Result<TerminalOutcome, AdmissionError>
+where S: AsyncAuthorityStore + ?Sized, P: ReviewProjection<S> + ?Sized,
+{
+    let (event, attempt) = candidate_proposal(context, command)?;
+    admit_event(store, cx, context, &command.review, event, attempt, limits, projection).await
+}
+
+/// The single review driver handles both profiles. Replanning retains the exact
+/// event, including candidate identity; a stale vote cannot silently refresh.
+async fn admit_event<S, P>(
+    store: &S, cx: &S::Context, context: &AdmissionContext, command: &ReviewCommand,
+    event: ForgeEvent, attempt: SealAttempt, limits: AdmissionLimits, projection: &P,
+) -> Result<TerminalOutcome, AdmissionError>
+where S: AsyncAuthorityStore + ?Sized, P: ReviewProjection<S> + ?Sized,
+{
+    limits.validate()?;
     projection.merge_checkpoint(cx).map_err(unavailable)?;
     let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
     let tx_id = admission.tx_id();
+    let ForgeEventPayload::PullRequestReviewedNative(review) = &event.payload else {
+        return Err(unavailable(RefusalCode::InternalInvariantBreach));
+    };
     for _ in 0..limits.max_cas_replans {
         projection.merge_checkpoint(cx).map_err(unavailable)?;
         if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
@@ -82,9 +111,6 @@ where S: AsyncAuthorityStore + ?Sized, P: ReviewProjection<S> + ?Sized,
             validate_review_transition(previous.as_ref(), &event).map_err(ProjectionFailure::Refuse)?;
             let pr = super::frontier_event(store, cx, &resolved.forge, subject.pull_request).await?;
             if command.decision != ReviewDecision::Withdraw {
-                let ForgeEventPayload::PullRequestReviewedNative(review) = &event.payload else {
-                    return Err(ProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach).into());
-                };
                 let freshness = review_freshness(review, pr.as_ref(), basis.body().policy_epoch,
                     snapshot.refs.get(&subject.source_ref).copied(), snapshot.refs.get(&subject.target_ref).copied());
                 if freshness != ReviewFreshness::Current {
@@ -96,9 +122,7 @@ where S: AsyncAuthorityStore + ?Sized, P: ReviewProjection<S> + ?Sized,
                     }).into());
                 }
             }
-            // Withdrawal may invalidate an old vote after code/policy moved,
-            // but still requires an existing, exact-version reviewer stream.
-            let closure = projection.validate_review_async(store, cx, &basis, &authenticated, command).await?;
+            let closure = projection.validate_review_async(store, cx, &basis, &authenticated, command, review.candidate).await?;
             let prepared = prepare_event(context, &event, &closure, tx_id, &attempt, &basis, &resolved)
                 .map_err(ProjectionFailure::Refuse)?;
             let pr_label = storage::aggregate_label(AggregateId::PullRequest(subject.pull_request))?;
@@ -152,8 +176,6 @@ pub struct ReviewView {
     pub version: AggregateVersion,
     pub event: NativeReviewEvent,
     pub freshness: ReviewFreshness,
-    /// Equality to a known opener, not a proof of reviewer independence. None
-    /// means opener history is unavailable in the selected native PR profile.
     pub reviewer_is_opener: Option<bool>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -166,10 +188,8 @@ pub struct ReviewPage {
     pub next_after: Option<PrincipalId>,
 }
 
-/// Latest decisions in reviewer-ID order at one authenticated basis. Stale and
-/// withdrawn decisions are retained with explicit applicability. There is no
-/// aggregate approval count over a partial page and no authorization verdict.
-/// None means the PR is absent or hidden, never a successful empty review set.
+/// Latest decisions in reviewer-ID order; never an approval count over a partial
+/// page. Source-only decisions remain distinct from exact candidate approvals.
 pub async fn read_page_at<S, V, C>(
     store: &S, cx: &S::Context, basis: &PublicationBasis, number: PullRequestNumber,
     refs: &std::collections::BTreeMap<RefName, fgit_types::GitOid>,
@@ -195,9 +215,7 @@ where S: AsyncAuthorityStore + ?Sized,
         if storage::aggregate_label(aggregate)? != label { return Err(unavailable(RefusalCode::EvidenceInvalid)); }
         if after.is_none_or(|last| reviewer > last) { reviewers.insert(reviewer); }
     }
-    let mut reviews = Vec::new();
-    let mut next_after = None;
-    let mut bytes = 0usize;
+    let mut reviews = Vec::new(); let mut next_after = None; let mut bytes = 0usize;
     for reviewer in reviewers {
         super::checkpoint(cancelled)?;
         let event = review_frontier(store, cx, &state.forge,
@@ -209,11 +227,10 @@ where S: AsyncAuthorityStore + ?Sized,
         };
         if !visible(&review.subject.source_ref, &review.subject.target_ref) { continue; }
         if reviews.len() == usize::from(limit) {
-            next_after = reviews.last().map(|last: &ReviewView| last.event.reviewer);
-            break;
+            next_after = reviews.last().map(|last: &ReviewView| last.event.reviewer); break;
         }
         bytes = bytes.checked_add(review.reason.len() + review.subject.source_ref.as_bytes().len()
-            + review.subject.target_ref.as_bytes().len() + 256)
+            + review.subject.target_ref.as_bytes().len() + 400)
             .filter(|bytes| *bytes <= 2 * 1024 * 1024)
             .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
         let freshness = review_freshness(&review, Some(&pr.event), basis.body().policy_epoch,
@@ -223,6 +240,5 @@ where S: AsyncAuthorityStore + ?Sized,
     }
     super::checkpoint(cancelled)?;
     Ok(Some(ReviewPage { source_head: basis.id(), pull_request: number,
-        pull_request_version: pr.event.version, policy_epoch: basis.body().policy_epoch,
-        reviews, next_after }))
+        pull_request_version: pr.event.version, policy_epoch: basis.body().policy_epoch, reviews, next_after }))
 }
