@@ -69,6 +69,7 @@ mod head_ancestry;
 pub mod history;
 mod identity;
 mod injection;
+pub mod key_recovery;
 mod keys;
 pub mod lincheck;
 mod outcome;
