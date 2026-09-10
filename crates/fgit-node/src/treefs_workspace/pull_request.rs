@@ -2,6 +2,9 @@
 //! caller-minted object proof is introduced. Both code and metadata mutations
 //! use the node's existing exact-basis projection and verified object fabric.
 
+#[path = "reviews.rs"]
+mod reviews;
+
 use std::cell::Cell;
 use std::future::Future;
 
