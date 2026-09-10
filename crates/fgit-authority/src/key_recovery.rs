@@ -24,7 +24,10 @@ const MAX_BINDING_BYTES: usize = 256;
 const MAX_SEAL_BYTES: usize = 8192;
 const LIMITS: DecodeLimits = DecodeLimits {
     frame_bytes: MAX_SEAL_BYTES as u64,
-    byte_string_bytes: 256,
+    // Canonical framing reads the entire payload as a byte string. Keep that
+    // within the existing frame ceiling; binding_identity separately enforces
+    // the smaller binding limit and typed digest decoders enforce their widths.
+    byte_string_bytes: MAX_SEAL_BYTES as u64,
     elements: 8,
     depth: 8,
 };

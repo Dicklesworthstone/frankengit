@@ -30,6 +30,31 @@ fn fixture() -> (MemoryAuthorityStore, HeadKey, RecoveryScope, SealAttempt) {
 }
 
 #[test]
+fn canonical_head_payload_exceeds_binding_limit_but_remains_recoverable() {
+    let (store, head, scope, attempt) = fixture();
+    let HeadRead::Present(receipt) = AuthorityStore::read_head(&store, &head).unwrap() else {
+        panic!("initialized head");
+    };
+    // The frame's entire payload is a length-prefixed byte string, not just
+    // its individual digests. The former 256-byte limit rejects a valid head.
+    let binding_sized = DecodeLimits { byte_string_bytes: 256, ..LIMITS };
+    assert!(matches!(
+        decode_body::<RepositoryAuthorityHeadBody>(receipt.body(), binding_sized),
+        Err(fgit_codec::CodecRefusal::LengthBoundExceeded {
+            field: "payload", observed, limit: 256,
+        }) if observed > 256
+    ));
+    let decoded: RepositoryAuthorityHeadBody = decode_body(receipt.body(), LIMITS).unwrap();
+    assert_eq!(decoded.repository_id, scope.repository_id);
+    assert_eq!(encode_body(&decoded).unwrap(), receipt.body());
+    assert_eq!(
+        recover_request(&store, &head, scope, &attempt.idempotency_key, &|| Ok(())).unwrap(),
+        RequestRecovery::KeyNotObserved
+    );
+    assert_eq!(AuthorityStore::read_head(&store, &head).unwrap(), HeadRead::Present(receipt));
+}
+
+#[test]
 fn observations_distinguish_binding_from_seal_without_writing_or_replaying_work() {
     let (store, head, scope, attempt) = fixture();
     let before = AuthorityStore::read_head(&store, &head).unwrap();
