@@ -138,12 +138,17 @@ pub enum AggregateId {
     Organisation(OrganisationNumber),
     /// One team.
     Team(TeamNumber),
+    /// One reviewer's decisions about one PR. Independent reviewer streams
+    /// permit concurrent reviewers without mutating the PR's content version.
+    PullRequestReview { pull_request: PullRequestNumber, reviewer: fgit_types::PrincipalId },
 }
 
 /// Wire tag for [`AggregateId::Organisation`], written only after a zero slot.
 pub(crate) const AGGREGATE_KIND_ORGANISATION: u32 = 1;
 /// Wire tag for [`AggregateId::Team`], written only after a zero slot.
 pub(crate) const AGGREGATE_KIND_TEAM: u32 = 2;
+/// New required aggregate kind; established aggregate bytes remain unchanged.
+pub(crate) const AGGREGATE_KIND_PULL_REQUEST_REVIEW: u32 = 3;
 
 impl From<PullRequestNumber> for AggregateId {
     fn from(value: PullRequestNumber) -> Self {
@@ -169,6 +174,7 @@ impl fmt::Display for AggregateId {
             Self::PullRequest(number) => write!(formatter, "pull-request/{number}"),
             Self::Organisation(number) => write!(formatter, "organisation/{number}"),
             Self::Team(number) => write!(formatter, "team/{number}"),
+            Self::PullRequestReview { pull_request, reviewer } => write!(formatter, "review/{pull_request}/{reviewer}"),
         }
     }
 }

@@ -1,6 +1,6 @@
-//! Canonical forge events. Tags 1 through 5 retain their exact historical
-//! encoding; tag 6 carries native pull-request lifecycle transitions. Older
-//! readers refuse the new required kind rather than misreading native OIDs.
+//! Canonical forge events. Tags 1 through 6 retain their exact historical
+//! encoding; tag 7 carries whole-tree native review decisions. Older readers
+//! refuse the new required kind rather than misreading its authority claims.
 
 use fgit_codec::attest::{BodyIdentity, body_id};
 use fgit_codec::wire::CanonicalBody;
@@ -9,12 +9,14 @@ use fgit_types::{Digest, DomainTag, ForgeEventId, GitOid, RefName, SchemaFamily}
 
 use crate::ForgeRefusal;
 use crate::aggregate::{
-    AGGREGATE_KIND_ORGANISATION, AGGREGATE_KIND_TEAM, AggregateId, AggregateVersion,
-    OrganisationNumber, PullRequestNumber, TeamNumber,
+    AGGREGATE_KIND_ORGANISATION, AGGREGATE_KIND_TEAM, AGGREGATE_KIND_PULL_REQUEST_REVIEW,
+    AggregateId, AggregateVersion, OrganisationNumber, PullRequestNumber, TeamNumber,
 };
 
 pub mod pull_request;
+pub mod review;
 use pull_request::{NativePullRequestEvent, PullRequestAction};
+use review::NativeReviewEvent;
 
 const KIND_OPENED: u32 = 1;
 const KIND_HEAD_ADVANCED: u32 = 2;
@@ -22,6 +24,7 @@ const KIND_MERGE_COMMITTED: u32 = 3;
 const KIND_CLOSED: u32 = 4;
 const KIND_NATIVE_MERGE_COMMITTED: u32 = 5;
 const KIND_NATIVE_PULL_REQUEST_CHANGED: u32 = 6;
+const KIND_NATIVE_PULL_REQUEST_REVIEWED: u32 = 7;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -110,6 +113,9 @@ pub enum ForgeEventPayload {
     /// Full-state open/update/close event, wire kind 6. Its expected aggregate
     /// predecessor is exactly `event.version - 1`, not a mutable latest value.
     PullRequestChangedNative(NativePullRequestEvent),
+    /// Full current decision in a distinct PR/reviewer aggregate, wire kind 7.
+    /// It does not advance PR metadata or itself authorize a ref transition.
+    PullRequestReviewedNative(NativeReviewEvent),
 }
 
 impl ForgeEventPayload {
@@ -122,6 +128,7 @@ impl ForgeEventPayload {
             Self::PullRequestClosed { .. } => KIND_CLOSED,
             Self::MergeCommittedNative(_) => KIND_NATIVE_MERGE_COMMITTED,
             Self::PullRequestChangedNative(_) => KIND_NATIVE_PULL_REQUEST_CHANGED,
+            Self::PullRequestReviewedNative(_) => KIND_NATIVE_PULL_REQUEST_REVIEWED,
         }
     }
 }
@@ -146,6 +153,12 @@ fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
             out.write_scalar(AGGREGATE_KIND_TEAM);
             out.write_scalar(number.get());
         }
+        AggregateId::PullRequestReview { pull_request, reviewer } => {
+            out.write_scalar(0_u64);
+            out.write_scalar(AGGREGATE_KIND_PULL_REQUEST_REVIEW);
+            out.write_scalar(pull_request.get());
+            out.write_opaque_id(reviewer.as_bytes());
+        }
     }
 }
 
@@ -163,6 +176,10 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
         AGGREGATE_KIND_TEAM => Ok(AggregateId::Team(counter(
             "aggregate.team", input.read_scalar::<u64>("aggregate.team")?,
         )?)),
+        AGGREGATE_KIND_PULL_REQUEST_REVIEW => Ok(AggregateId::PullRequestReview {
+            pull_request: counter("aggregate.review.pull_request", input.read_scalar::<u64>("aggregate.review.pull_request")?)?,
+            reviewer: fgit_types::PrincipalId::from_bytes(input.read_opaque_id("aggregate.review.reviewer")?),
+        }),
         unknown => Err(CodecRefusal::VariantUnknown {
             field: "aggregate.kind", observed: unknown, offset: kind_offset,
         }),
@@ -176,7 +193,17 @@ fn validate_lifecycle(event: &ForgeEvent, change: &NativePullRequestEvent) -> Re
     change.data.validate()
 }
 
+fn validate_review(event: &ForgeEvent, review: &NativeReviewEvent) -> Result<(), CodecRefusal> {
+    if event.aggregate != review.aggregate()
+        || (review.decision == review::ReviewDecision::Withdraw && event.version == AggregateVersion::FIRST)
+    { return Err(invalid_native("review.aggregate_version")); }
+    review.validate()
+}
+
 fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal> {
+    if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
+        != matches!(event.payload, ForgeEventPayload::PullRequestReviewedNative(_))
+    { return Err(invalid_native("review.aggregate_kind")); }
     write_aggregate(out, event.aggregate);
     out.write_scalar(event.version.get());
     out.write_scalar(event.payload.kind());
@@ -204,6 +231,10 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
         ForgeEventPayload::PullRequestChangedNative(change) => {
             validate_lifecycle(event, change)?;
             change.write(out)?;
+        }
+        ForgeEventPayload::PullRequestReviewedNative(review) => {
+            validate_review(event, review)?;
+            review.write(out)?;
         }
     }
     Ok(())
@@ -236,13 +267,20 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
             ForgeEventPayload::MergeCommittedNative(NativeMerge::read(input)?)
         }
         KIND_NATIVE_PULL_REQUEST_CHANGED => ForgeEventPayload::PullRequestChangedNative(NativePullRequestEvent::read(input)?),
+        KIND_NATIVE_PULL_REQUEST_REVIEWED => ForgeEventPayload::PullRequestReviewedNative(NativeReviewEvent::read(input)?),
         unknown => return Err(CodecRefusal::VariantUnknown {
             field: "kind", observed: unknown, offset: kind_offset,
         }),
     };
     let event = ForgeEvent { aggregate, version, payload };
+    if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
+        != matches!(event.payload, ForgeEventPayload::PullRequestReviewedNative(_))
+    { return Err(invalid_native("review.aggregate_kind")); }
     if let ForgeEventPayload::PullRequestChangedNative(change) = &event.payload {
         validate_lifecycle(&event, change)?;
+    }
+    if let ForgeEventPayload::PullRequestReviewedNative(review) = &event.payload {
+        validate_review(&event, review)?;
     }
     Ok(event)
 }
