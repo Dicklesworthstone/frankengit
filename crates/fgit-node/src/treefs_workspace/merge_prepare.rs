@@ -5,6 +5,8 @@
 mod source_review;
 #[path = "source_history.rs"]
 mod source_history;
+#[path = "merge_resolution.rs"]
+mod merge_resolution;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -14,7 +16,7 @@ use fgit_crypto::git_object_id;
 use fgit_forge::event::NativeMerge;
 use fgit_forge::preparation::{
     CommitInput, MergeEntry, MergeMetadata, MergeObjectSource, MergePreparation,
-    MergeSourceError, PlannedMergeObject, PreparationError, PreparationLimits, prepare_merge,
+    MergeSourceError, PlannedMergeObject, PreparationError, PreparationLimits, PreparedMerge, prepare_merge,
 };
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body};
 use fgit_pack::{
@@ -106,58 +108,66 @@ impl OneNode {
         let outcome = prepare_merge(&source, self.object_format, our_tip, their_tip, metadata, limits)
             .map_err(NodeWorkspaceRefusal::MergePreparation)?;
         let bundle = if let MergePreparation::Clean(plan) = &outcome {
-            let original = &source;
-            let candidate = CandidateSource {
-                original,
-                generated: plan.objects.iter().map(|object| (object.id, object)).collect(),
-            };
-            for object in &plan.objects {
-                original.checkpoint().map_err(source_error)?;
-                verify_native_object(self.object_format, object.kind, &object.body, &object.id,
-                    AcceptanceProfile::StrictCreate, &original.limits)
-                    .map_err(|_| NodeWorkspaceRefusal::InvalidWorkspaceCandidate("constructed object failed strict native validation"))?;
-            }
-            let coordinates = NativeMerge {
-                source_ref: incoming.clone(), source_tip: plan.source,
-                target_ref: target.clone(), target_tip_before: plan.target,
-                base_tip: plan.base, merge_commit: plan.commit,
-            };
-            let mut live = || original.checkpoint().is_ok();
-            let verified = validate_merge_objects(&candidate, &coordinates, MergeObjectLimits::default(), &mut live);
-            // Preserve the source's actual cancellation/budget failure instead
-            // of disguising it as a missing object in the pack-source adapter.
-            original.checkpoint().map_err(source_error)?;
-            verified.map_err(NodeWorkspaceRefusal::MergeValidation)?;
-            let pack_limits = PackLimits {
-                max_total_expanded_bytes: limits.max_output_bytes,
-                max_cached_bytes: limits.max_output_bytes,
-                ..PackLimits::default()
-            };
-            let ids: Vec<_> = plan.objects.iter().map(|object| object.id).collect();
-            let packed = PackPlanner::new(self.object_format, PackWriteProfile::COMPRESSED_NO_DELTA_V1, pack_limits.clone())
-                .plan_selected(&candidate, &ids, &mut live)
-                .map_err(|error| NodeWorkspaceRefusal::MergePack(Box::new(error)))?;
-            let (pack, _) = PackWriter::new(pack_limits).write(&packed, &mut live)
-                .map_err(|error| NodeWorkspaceRefusal::MergePack(Box::new(error)))?;
-            original.checkpoint().map_err(source_error)?;
-            let mut bytes = match self.object_format {
-                GitHashAlgorithm::Sha1 => b"# v2 git bundle\n".to_vec(),
-                GitHashAlgorithm::Sha256 => b"# v3 git bundle\n@object-format=sha256\n".to_vec(),
-            };
-            // Two prerequisites account for every unchanged object reachable
-            // through either parent. Neither parent is silently omitted.
-            bytes.extend_from_slice(format!("-{} target\n-{} source\n{} ", plan.target, plan.source, plan.commit).as_bytes());
-            bytes.extend_from_slice(target.as_bytes());
-            bytes.extend_from_slice(b"\n\n");
-            bytes.try_reserve(pack.len()).map_err(|_| NodeWorkspaceRefusal::WorkspaceEditLimit)?;
-            bytes.extend_from_slice(&pack);
-            Some(bytes)
+            Some(bundle_for_plan(&source, target, incoming, plan, limits)?)
         } else {
             None
         };
         source.checkpoint().map_err(source_error)?;
         Ok(PreparedMergeBundle { source_head: selected.basis().id(), outcome, bundle })
     }
+}
+
+/// Shared strict validation and transport materialization for automatic and
+/// explicitly resolved candidates. Neither path stages objects or grants approval.
+fn bundle_for_plan(
+    original: &SelectedSource<'_>, target: &RefName, incoming: &RefName,
+    plan: &PreparedMerge, limits: PreparationLimits,
+) -> Result<Vec<u8>, NodeWorkspaceRefusal> {
+    let candidate = CandidateSource {
+        original,
+        generated: plan.objects.iter().map(|object| (object.id, object)).collect(),
+    };
+    for object in &plan.objects {
+        original.checkpoint().map_err(source_error)?;
+        verify_native_object(original.inner.object_format, object.kind, &object.body, &object.id,
+            AcceptanceProfile::StrictCreate, &original.limits)
+            .map_err(|_| NodeWorkspaceRefusal::InvalidWorkspaceCandidate("constructed object failed strict native validation"))?;
+    }
+    let coordinates = NativeMerge {
+        source_ref: incoming.clone(), source_tip: plan.source,
+        target_ref: target.clone(), target_tip_before: plan.target,
+        base_tip: plan.base, merge_commit: plan.commit,
+    };
+    let mut live = || original.checkpoint().is_ok();
+    let verified = validate_merge_objects(&candidate, &coordinates, MergeObjectLimits::default(), &mut live);
+    // Preserve the source's actual cancellation/budget failure instead
+    // of disguising it as a missing object in the pack-source adapter.
+    original.checkpoint().map_err(source_error)?;
+    verified.map_err(NodeWorkspaceRefusal::MergeValidation)?;
+    let pack_limits = PackLimits {
+        max_total_expanded_bytes: limits.max_output_bytes,
+        max_cached_bytes: limits.max_output_bytes,
+        ..PackLimits::default()
+    };
+    let ids: Vec<_> = plan.objects.iter().map(|object| object.id).collect();
+    let packed = PackPlanner::new(original.inner.object_format, PackWriteProfile::COMPRESSED_NO_DELTA_V1, pack_limits.clone())
+        .plan_selected(&candidate, &ids, &mut live)
+        .map_err(|error| NodeWorkspaceRefusal::MergePack(Box::new(error)))?;
+    let (pack, _) = PackWriter::new(pack_limits).write(&packed, &mut live)
+        .map_err(|error| NodeWorkspaceRefusal::MergePack(Box::new(error)))?;
+    original.checkpoint().map_err(source_error)?;
+    let mut bytes = match original.inner.object_format {
+        GitHashAlgorithm::Sha1 => b"# v2 git bundle\n".to_vec(),
+        GitHashAlgorithm::Sha256 => b"# v3 git bundle\n@object-format=sha256\n".to_vec(),
+    };
+    // Two prerequisites account for every unchanged object reachable
+    // through either parent. Neither parent is silently omitted.
+    bytes.extend_from_slice(format!("-{} target\n-{} source\n{} ", plan.target, plan.source, plan.commit).as_bytes());
+    bytes.extend_from_slice(target.as_bytes());
+    bytes.extend_from_slice(b"\n\n");
+    bytes.try_reserve(pack.len()).map_err(|_| NodeWorkspaceRefusal::WorkspaceEditLimit)?;
+    bytes.extend_from_slice(&pack);
+    Ok(bytes)
 }
 
 fn source_error(error: MergeSourceError) -> NodeWorkspaceRefusal {
