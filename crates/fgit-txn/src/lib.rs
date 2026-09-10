@@ -572,6 +572,11 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_text("ForgeEntityId", pull_request.label().as_str())?;
             out.write_ref_name(target)?;
         }
+        ForgeEventKind::PullRequestReviewed { review, target } => {
+            out.write_raw_byte(5);
+            out.write_text("ForgeEntityId", review.label().as_str())?;
+            out.write_ref_name(target)?;
+        }
     }
     Ok(())
 }

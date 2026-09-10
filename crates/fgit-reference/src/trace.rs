@@ -336,6 +336,11 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             write_slug(out, "ForgeEntityId", pull_request.label())?;
             out.write_ref_name(target)?;
         }
+        ForgeEventKind::PullRequestReviewed { review, target } => {
+            out.write_raw_byte(5);
+            write_slug(out, "ForgeEntityId", review.label())?;
+            out.write_ref_name(target)?;
+        }
     }
     Ok(())
 }
@@ -369,6 +374,11 @@ fn read_forge_event(input: &mut Decoder<'_>) -> Result<ForgeEventKind, CodecRefu
                 pull_request,
                 target,
             })
+        }
+        5 => {
+            let review = ForgeEntityId::new(read_slug(input, "ForgeEntityId")?);
+            let target = input.read_ref_name()?;
+            Ok(ForgeEventKind::PullRequestReviewed { review, target })
         }
         other => malformed("ForgeEventKind", u64::from(other)),
     }
@@ -2032,13 +2042,13 @@ mod tests {
                 "truncated update at {length} bytes must not become another event"
             );
         }
-        let mut input = Decoder::new(&[5], DecodeLimits::DEFAULT);
+        let mut input = Decoder::new(&[255], DecodeLimits::DEFAULT);
         assert!(matches!(
             read_forge_event(&mut input),
             Err(CodecRefusal::Type(
                 fgit_types::TypeRefusal::CodePointUnknown {
                     field: "ForgeEventKind",
-                    observed: 5
+                    observed: 255
                 }
             ))
         ));

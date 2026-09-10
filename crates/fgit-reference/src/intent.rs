@@ -174,6 +174,15 @@ pub enum ForgeEventKind {
         /// Its unchanged target branch identity.
         target: RefName,
     },
+    /// One reviewer's exact-subject decision changed in its own stream. This
+    /// does not advance PR metadata, grant access, or authorize a ref move.
+    /// The complete decision and subject are bound by the actual event batch.
+    PullRequestReviewed {
+        /// The independent PR/reviewer aggregate, not the parent PR aggregate.
+        review: ForgeEntityId,
+        /// The branch whose compared state the decision names.
+        target: RefName,
+    },
 }
 
 impl ForgeEventKind {
@@ -183,7 +192,7 @@ impl ForgeEventKind {
         match self {
             Self::PullRequestMerged { target, .. } => Some(target),
             Self::PullRequestOpened { .. } | Self::PullRequestClosed { .. }
-            | Self::PullRequestUpdated { .. } => None,
+            | Self::PullRequestUpdated { .. } | Self::PullRequestReviewed { .. } => None,
         }
     }
 
@@ -195,6 +204,7 @@ impl ForgeEventKind {
             | Self::PullRequestMerged { pull_request, .. }
             | Self::PullRequestClosed { pull_request }
             | Self::PullRequestUpdated { pull_request, .. } => *pull_request,
+            Self::PullRequestReviewed { review, .. } => *review,
         }
     }
 }
