@@ -1,0 +1,19 @@
+name: Partial clone implementation workbench
+on:
+  push:
+    branches: [tooling/partial-clone-b9fcbd2d]
+permissions:
+  contents: write
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: /tmp/frankengit-partial-clone-target
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - run: python3 tools/partial-clone-work.py
