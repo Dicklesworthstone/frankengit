@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_commit_closure, validate_workspace_objects};
 use fgit_admission::ProjectionFailure;
 use fgit_forge::preparation::{MergeMetadata, MergeObjectSource, MergeSourceError, PreparationLimits};
-use fgit_forge::preparation::replay::{PreparedReplay, ReplayError, ReplayPreparation, ReplayRequest, prepare_replay};
+use fgit_forge::preparation::replay::{PreparedReplay, ReplayError, ReplayPreparation,
+    ReplayRequest, prepare_replay, prepare_resolved_replay};
+use fgit_forge::preparation::resolution::{ConflictResolution, ResolvedPath, validate_resolutions};
 use fgit_git_object::{AcceptanceProfile, ParseLimits};
 use fgit_pack::{PackLimits, PackPlanner, PackWriteError, PackWriteProfile, PackWriter, verify_native_object};
 use fgit_types::{GitHashAlgorithm, RefName, RepositoryAuthorityHeadId};
@@ -24,6 +26,14 @@ pub struct PreparedReplayBundle {
     pub pack_objects: usize,
     /// Needed native objects borrowed from source history rather than generated.
     pub borrowed_objects: usize,
+}
+
+/// Explicit resolution receipt plus the ordinary, independently validated
+/// single-parent artifact. No artifact means a net no-change resolution.
+#[derive(Debug)]
+pub struct ResolvedReplayBundle {
+    pub artifact: PreparedReplayBundle,
+    pub resolutions: Vec<ResolvedPath>,
 }
 
 #[derive(Debug)]
@@ -69,7 +79,32 @@ impl OneNode {
         expected_head: Option<RepositoryAuthorityHeadId>, metadata: &MergeMetadata,
         limits: PreparationLimits,
     ) -> Result<PreparedReplayBundle, ReplayPreparationRefusal> {
+        self.prepare_replay_bundle_inner_in(request, target, source_ref, inputs, visibility,
+            expected_head, metadata, limits, None).await.map(|result| result.artifact)
+    }
+
+    /// Reproduce conflicts from the same exact historical replay, apply explicit
+    /// choices, and independently validate a complete target-only bundle. Both
+    /// current tips and the optional authority head are checked before planning.
+    /// Choices cannot alter clean paths or authorize objects outside the source.
+    pub async fn prepare_resolved_replay_bundle_in(
+        &self, request: &NodeRequestContext, target: &RefName, source_ref: &RefName,
+        inputs: ReplayRequest, visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>, resolutions: &[ConflictResolution],
+        metadata: &MergeMetadata, limits: PreparationLimits,
+    ) -> Result<ResolvedReplayBundle, ReplayPreparationRefusal> {
+        self.prepare_replay_bundle_inner_in(request, target, source_ref, inputs, visibility,
+            expected_head, metadata, limits, Some(resolutions)).await
+    }
+
+    async fn prepare_replay_bundle_inner_in(
+        &self, request: &NodeRequestContext, target: &RefName, source_ref: &RefName,
+        inputs: ReplayRequest, visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>, metadata: &MergeMetadata,
+        limits: PreparationLimits, resolutions: Option<&[ConflictResolution]>,
+    ) -> Result<ResolvedReplayBundle, ReplayPreparationRefusal> {
         limits.validate().map_err(preparation)?;
+        if let Some(choices) = resolutions { validate_resolutions(choices, limits).map_err(preparation)?; }
         metadata.validate().map_err(preparation)?;
         if [target, source_ref].iter().any(|name| !name.as_bytes().starts_with(b"refs/heads/"))
             || [inputs.target, inputs.source_tip, inputs.selected_commit].iter()
@@ -109,7 +144,15 @@ impl OneNode {
             },
             read_bytes: Cell::new(0), budget_failed: Cell::new(false),
         };
-        let outcome = prepare_replay(&original, self.object_format, inputs, metadata, limits).map_err(preparation)?;
+        let (outcome, resolutions) = match resolutions {
+            Some(choices) => {
+                let result = prepare_resolved_replay(&original, self.object_format, inputs,
+                    choices, metadata, limits).map_err(preparation)?;
+                (result.outcome, result.resolutions)
+            }
+            None => (prepare_replay(&original, self.object_format, inputs, metadata, limits)
+                .map_err(preparation)?, Vec::new()),
+        };
         let (bundle, pack_objects, borrowed_objects) = match &outcome {
             ReplayPreparation::Clean(plan) => {
                 let (bytes, count, borrowed) = replay_bundle(&original, target, plan, limits)?;
@@ -118,7 +161,10 @@ impl OneNode {
             ReplayPreparation::Conflicted { .. } | ReplayPreparation::NoChange { .. } => (None, 0, 0),
         };
         original.checkpoint()?;
-        Ok(PreparedReplayBundle { source_head: selected.basis().id(), outcome, bundle, pack_objects, borrowed_objects })
+        Ok(ResolvedReplayBundle {
+            artifact: PreparedReplayBundle { source_head: selected.basis().id(), outcome, bundle, pack_objects, borrowed_objects },
+            resolutions,
+        })
     }
 }
 
@@ -176,3 +222,6 @@ fn replay_bundle(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod resolution_tests;
