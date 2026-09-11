@@ -48,7 +48,25 @@ fn tiny_thin_pack_cannot_materialize_more_external_bytes_than_its_envelope() {
         Err(RefusalCode::ResourceBudgetExceeded));
     assert!(node.read_git_object(x).is_err() && node.read_git_object(y).is_err(),
         "no uploaded object may be staged after an input-budget refusal");
-    let admitted = validator(&node, &[a, b], 128).validate(&request, Some(&pack), &receipt, &mut || true).unwrap();
+
+    let mut selected = validator(&node, &[a, b], 128);
+    let originals = selected.external_bases(&pack, &mut || true).unwrap();
+    assert_eq!(originals.read_bytes, 128, "the original-input bound is inclusive");
+    assert_eq!(originals.bases.len(), 2);
+    // The resolver independently charges both bases AND the two reconstructed
+    // one-byte outputs. Original-input admission at 128 is not permission to
+    // ignore the existing aggregate reconstruction ceiling of 130 bytes.
+    for expanded in [128, 129] {
+        selected.pack_limits.max_total_expanded_bytes = expanded;
+        assert_eq!(selected.external_read_limit(), 128);
+        assert_eq!(selected.validate(&request, Some(&pack), &receipt, &mut || true),
+            Err(RefusalCode::ResourceBudgetExceeded));
+        assert!(node.read_git_object(x).is_err() && node.read_git_object(y).is_err(),
+            "aggregate refusal must not stage either reconstructed output");
+    }
+    selected.pack_limits.max_total_expanded_bytes = 130;
+    assert_eq!(selected.external_read_limit(), 128, "the original-input cap is not widened");
+    let admitted = selected.validate(&request, Some(&pack), &receipt, &mut || true).unwrap();
     assert_eq!(admitted.objects, BTreeSet::from([x, y]));
     node.shutdown().unwrap();
 }
