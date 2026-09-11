@@ -612,7 +612,11 @@ fn exchange(
     if let Some(have) = have {
         packets.push(Packet::Data(format!("have {have}\n").into_bytes()));
     }
-    packets.push(Packet::Data(b"done\n".to_vec()));
+    // Exercise v2's real acknowledgment branch for haves rather than letting
+    // `done` suppress all ACKs and make the non-disclosure assertion vacuous.
+    if version != 2 || have.is_none() {
+        packets.push(Packet::Data(b"done\n".to_vec()));
+    }
     if version == 2 {
         packets.push(Packet::Flush);
     }
@@ -733,6 +737,36 @@ fn real_daemon_v0_v1_v2_refuses_deleted_wants_and_never_acks_or_subtracts_delete
                 expected_bodies,
                 "a deleted have cannot subtract the still-visible shared ancestor or leak its private tree"
             );
+            // Permitted twin: the visible shared ancestor really IS common.
+            // Require its ACK and removal from the emitted pack, so ignoring
+            // every have cannot masquerade as a working disclosure boundary.
+            let (returned, result, response) = exchange(node, version, public, Some(ancestor));
+            node = returned;
+            assert!(
+                matches!(result, Ok(GitDaemonSessionOutcome::Pack(_))),
+                "visible have: {result:?}"
+            );
+            let public_ack = format!("ACK {ancestor}");
+            assert!(
+                response
+                    .windows(public_ack.len())
+                    .any(|word| word == public_ack.as_bytes())
+            );
+            let pack_bytes = extract_pack(&response, version);
+            let pack = fgit_pack::read_verified_pack(
+                &pack_bytes,
+                format,
+                &PackLimits::default(),
+                &mut || true,
+                &fgit_pack::NativeChecksumVerifier,
+            )
+            .unwrap();
+            assert_eq!(
+                pack.entries().len(),
+                3,
+                "the visible have removes its commit, tree, and blob"
+            );
+
             let (returned, result, response) = exchange(node, version, ancestor, None);
             node = returned;
             assert!(
@@ -752,5 +786,62 @@ fn real_daemon_v0_v1_v2_refuses_deleted_wants_and_never_acks_or_subtracts_delete
         }
         node.shutdown().unwrap();
         drop(scratch);
+    }
+}
+
+#[test]
+fn hidden_ref_rules_select_the_negotiation_scope_before_any_hidden_body_read() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut source = MemorySource::new(format);
+        let blob = source.put(ObjectType::Blob, b"shared".to_vec());
+        let tree = source.tree(&[(b"100644", b"shared", blob)]);
+        let ancestor = source.commit(tree, &[]);
+        let public = source.commit(tree, &[ancestor]);
+        let private_blob = source.put(ObjectType::Blob, b"hidden only".to_vec());
+        let private_tree = source.tree(&[(b"100644", b"private", private_blob)]);
+        let private = source.commit(private_tree, &[ancestor]);
+        let mut hidden_refs = RefVisibility::new();
+        let limits = WireLimits {
+            max_advertised_refs: 1,
+            ..WireLimits::default()
+        };
+        hidden_refs
+            .push_rule(b"refs/heads/private", &limits)
+            .unwrap();
+        let snapshot = AdmissionSnapshot {
+            refs: BTreeMap::from([
+                (RefName::try_new(b"refs/heads/public").unwrap(), public),
+                (RefName::try_new(b"refs/heads/private").unwrap(), private),
+            ]),
+            hidden_refs,
+            ..AdmissionSnapshot::default()
+        };
+        let repository =
+            AdmissionUploadPackRepository::from_snapshot(&snapshot, format, &limits).unwrap();
+        assert_eq!(
+            repository.advertised_refs().len(),
+            1,
+            "hidden ref cannot consume the visible advertisement limit"
+        );
+        let closure = project_visible_closure(
+            &source,
+            &source.admitted(),
+            repository
+                .advertised_refs()
+                .iter()
+                .map(|reference| reference.oid),
+            &PackLimits::default(),
+        )
+        .unwrap();
+        let repository = repository.with_closure_objects(closure.objects().clone());
+        for id in [public, ancestor, tree, blob] {
+            assert!(repository.contains_want(id));
+            assert!(repository.is_common(id));
+        }
+        for id in [private, private_tree, private_blob] {
+            assert!(!repository.contains_want(id));
+            assert!(!repository.is_common(id));
+            assert!(!source.reads.borrow().contains(&id));
+        }
     }
 }
