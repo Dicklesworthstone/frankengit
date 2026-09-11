@@ -26,6 +26,8 @@ jobs:
           mkdir -p "$out"
           git rev-parse HEAD | tee "$out/base.txt"
           git fetch origin "$PAYLOAD_SHA"
+          git show "$PAYLOAD_SHA:.visibility-payload/reference.py" > "$RUNNER_TEMP/fix-reference.py"
+          python "$RUNNER_TEMP/fix-reference.py" | tee "$out/reference-apply.log"
           git show "$PAYLOAD_SHA:.visibility-payload/apply.py" > "$RUNNER_TEMP/apply-visibility.py"
           python "$RUNNER_TEMP/apply-visibility.py" | tee "$out/apply.log"
           git diff --check
@@ -38,15 +40,39 @@ jobs:
           rustfmt --edition 2024 --config skip_children=true crates/fgit-node/src/upload_visibility.rs crates/fgit-node/src/upload_visibility/tests.rs
           rustfmt --edition 2024 --config skip_children=true --emit stdout crates/fgit-node/src/lib.rs > "$out/parsed-lib.rs"
           git diff --check
+      - name: Verify and commit the existing review integration repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/upload-visibility"
+          if timeout 600 cargo test --locked -p fgit-reference --lib reviewed_pr_names_its_ref_without_claiming_a_ref_effect > "$out/reference.log" 2>&1; then
+            echo 0 > "$out/reference.exit"
+          else
+            result=$?
+            echo "$result" > "$out/reference.exit"
+            tail -n 100 "$out/reference.log"
+            exit "$result"
+          fi
+          tail -n 60 "$out/reference.log"
+          git config user.name 'Jeff Emanuel'
+          git config user.email '35050222+Dicklesworthstone@users.noreply.github.com'
+          git add crates/fgit-reference/src/transition.rs
+          test "$(git diff --cached --name-only)" = crates/fgit-reference/src/transition.rs
+          git diff --cached --check
+          git commit -m 'fix(reference): validate the target ref named by native review events' -m 'Handle PullRequestReviewed in the canonical named-ref projection. Reviews name a target branch without requiring a ref effect or advancing the parent PR entity. Add and execute a focused regression for all three distinctions. This fixes the existing non-exhaustive match that prevented downstream node builds.'
+          git rev-parse HEAD | tee "$out/reference-result.txt"
+          result_branch="tooling/upload-visibility-result-${PAYLOAD_SHA:0:12}"
+          git push origin "HEAD:refs/heads/$result_branch"
       - name: Run targeted native regressions and distinguish baseline failures
         shell: bash
         run: |
+          set +e
           set -uo pipefail
           out="$RUNNER_TEMP/upload-visibility"
           timeout 600 cargo test --locked -p fgit-node --lib upload_visibility::tests -- --nocapture > "$out/native.log" 2>&1
           result=$?
           printf '%s\n' "$result" | tee "$out/native.exit"
-          tail -n 100 "$out/native.log"
+          tail -n 120 "$out/native.log"
           if [ "$result" != 0 ]; then
             base="$(cat "$out/base.txt")"
             git worktree add --detach "$RUNNER_TEMP/visibility-baseline" "$base"
@@ -70,8 +96,6 @@ jobs:
           PY
           git diff --cached --check
           git diff --cached --binary > "$out/prepared.patch"
-          git config user.name 'Jeff Emanuel'
-          git config user.email '35050222+Dicklesworthstone@users.noreply.github.com'
           git commit -m 'fix(fetch): bind negotiation and pack selection to exact-head visible graph' -m 'Do not authorize wants or haves from cumulative admission history. Prove the complete bounded typed graph from visible refs, keep the proof at one authenticated basis, and use it in the actual v0/v1/v2 daemon pack path. Preserve explicit local historical export. Prevent hidden HEAD targets reappearing as unborn symrefs. Add eight regression tests, including real durable import, receive deletion, reopen and raw TCP protocol exchanges in both native hash domains. Native verification outcomes are recorded in the preparation workflow, not asserted by this commit. No schema, dependency, lockfile, bead or workflow changes are included.'
           git rev-parse HEAD | tee "$out/result.txt"
           result_branch="tooling/upload-visibility-result-${PAYLOAD_SHA:0:12}"
