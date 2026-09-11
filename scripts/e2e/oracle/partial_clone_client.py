@@ -20,9 +20,9 @@ def refuse(message):
 def main():
     args = sys.argv[1:]
     if len(args) < 3:
-        refuse("usage: RUN clone|read|inventory|fsck CLIENT [ENDPOINT REPOSITORY VERSION FILTER|OID]")
+        refuse("usage: RUN clone|read|checkout|inventory|fsck CLIENT [ENDPOINT REPOSITORY VERSION FILTER|OID]")
     run_arg, operation, client, *extra = args
-    if operation not in {"clone", "read", "inventory", "fsck"}:
+    if operation not in {"clone", "read", "checkout", "inventory", "fsck"}:
         refuse("unsupported client operation")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", client):
         refuse("client directory must be a bounded simple label")
@@ -41,7 +41,7 @@ def main():
             refuse("clone destination must be absent")
     elif destination.is_symlink() or not destination.is_dir():
         refuse("existing client must be a real directory")
-    network = operation in {"clone", "read"}
+    network = operation in {"clone", "read", "checkout"}
     config = [("core.hooksPath", "/home/oracle/empty-hooks"), ("credential.helper", "")]
     if network:
         if len(extra) != 4:
@@ -54,7 +54,7 @@ def main():
             refuse("repository or protocol does not match the fixed Git-daemon profile")
         url = "git://" + endpoint + repository
         config.append(("protocol.version", protocol))
-        if operation == "read":
+        if operation in {"read", "checkout"}:
             config += [("remote.origin.url", url), ("remote.origin.promisor", "true")]
         if operation == "clone":
             if value not in {"blob:none", "tree:0", "tree:1", "blob:limit=21", "combine:tree:1+blob:none"}:
@@ -63,7 +63,7 @@ def main():
         else:
             if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value):
                 refuse("lazy read needs a complete native object identity")
-            command = ["cat-file", "blob", value]
+            command = ["cat-file", "blob", value] if operation == "read" else ["checkout", "--detach", "--force", value]
     else:
         if extra:
             refuse("file-only operation takes no extra arguments")

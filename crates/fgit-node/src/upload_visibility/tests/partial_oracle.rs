@@ -31,13 +31,21 @@ fn live_client(node: OneNode, listener: &TcpListener, mut command: Command) -> (
     let stopping = Arc::clone(&stop);
     let worker = std::thread::spawn(move || {
         let start = std::time::Instant::now();
-        while !stopping.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(90) {
+        let mut results = Vec::new();
+        while !stopping.load(Ordering::Relaxed)
+            && start.elapsed() < Duration::from_secs(90)
+            && results.len() < 32
+        {
             match listener.accept() {
                 Ok((stream, _)) => {
                     stream.set_nonblocking(false).unwrap();
                     let result =
                         node.serve_git_daemon_stream_with_limits(stream, WireLimits::default());
-                    return (node, Some(result));
+                    let failed = result.is_err();
+                    results.push(result);
+                    if failed {
+                        break;
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(5));
@@ -45,11 +53,11 @@ fn live_client(node: OneNode, listener: &TcpListener, mut command: Command) -> (
                 Err(error) => panic!("test listener: {error}"),
             }
         }
-        (node, None)
+        (node, results)
     });
     let output = command.output();
     stop.store(true, Ordering::Relaxed);
-    let (node, result) = worker.join().unwrap();
+    let (node, results) = worker.join().unwrap();
     let output = output.expect("pinned client wrapper launches");
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
     assert!(
@@ -59,8 +67,11 @@ fn live_client(node: OneNode, listener: &TcpListener, mut command: Command) -> (
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        matches!(result, Some(Ok(GitDaemonSessionOutcome::Pack(_)))),
-        "real server must emit its pack: {result:?}"
+        results.iter().all(Result::is_ok)
+            && results
+                .iter()
+                .any(|result| matches!(result, Ok(GitDaemonSessionOutcome::Pack(_)))),
+        "all real sessions must succeed and at least one must emit a pack: {results:?}"
     );
     (node, output)
 }
@@ -98,7 +109,16 @@ fn pinned_git_partial_clone_promisor_and_lazy_read_round_trip() {
             ..
         } = fixture(format);
         delete_private(&node, private);
-        let wanted_blob = git_object_id(format, GitObjectKind::Blob, b"current public content");
+        let checkout_blob = git_object_id(format, GitObjectKind::Blob, b"current public content");
+        let wanted_blob = git_object_id(format, GitObjectKind::Blob, b"common ancestor body");
+        let checkout_tree = git_object_id(
+            format,
+            GitObjectKind::Tree,
+            &tree_bytes(&[
+                (b"100644", b"public", checkout_blob),
+                (b"160000", b"submodule", private),
+            ]),
+        );
         let kinds = visible
             .iter()
             .map(|id| {
@@ -159,6 +179,42 @@ fn pinned_git_partial_clone_promisor_and_lazy_read_round_trip() {
                     "Git marked the received partial pack as promised"
                 );
                 checked(command(&run, "fsck", &client, &[]));
+                // Exercise the ordinary user operation, not just a known-OID
+                // blob request. A treeless clone can need successive lazy
+                // tree and blob fetch sessions while checking out this commit.
+                let (returned, _) = live_client(
+                    node,
+                    &listener,
+                    command(
+                        &run,
+                        "checkout",
+                        &client,
+                        &[&endpoint, &repository, version, &public.to_string()],
+                    ),
+                );
+                node = returned;
+                assert_eq!(
+                    std::fs::read(
+                        PathBuf::from(&run)
+                            .join("work")
+                            .join(&client)
+                            .join("public")
+                    )
+                    .unwrap(),
+                    b"current public content"
+                );
+                let mut hydrated = expected.clone();
+                hydrated.extend([checkout_blob.to_string(), checkout_tree.to_string()]);
+                assert_eq!(
+                    inventory(&run, &client),
+                    hydrated,
+                    "checkout hydrates only its tree and file, not unrelated ancestor contents or gitlinks"
+                );
+                assert!(
+                    !hydrated.contains(&wanted_blob.to_string()),
+                    "the subsequent historical blob read must still require a real lazy fetch"
+                );
+                checked(command(&run, "fsck", &client, &[]));
                 let (returned, output) = live_client(
                     node,
                     &listener,
@@ -170,8 +226,8 @@ fn pinned_git_partial_clone_promisor_and_lazy_read_round_trip() {
                     ),
                 );
                 node = returned;
-                assert_eq!(output.stdout, b"current public content");
-                let mut complete = expected;
+                assert_eq!(output.stdout, b"common ancestor body");
+                let mut complete = hydrated;
                 complete.insert(wanted_blob.to_string());
                 assert_eq!(
                     inventory(&run, &client),
