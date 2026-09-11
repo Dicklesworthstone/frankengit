@@ -9,7 +9,6 @@ use super::*;
 // Bounds on additional verification state, independent of uploaded entry count.
 // A single new tree may legitimately reference many already-selected objects.
 const MAX_GRAPH_EDGES: usize = 4_000_000;
-const MAX_FRONTIER_OBJECTS: usize = 1_000_000;
 
 impl ProductionQuarantineValidator<'_> {
     pub(super) fn reachable_uploaded_closure(
@@ -21,21 +20,16 @@ impl ProductionQuarantineValidator<'_> {
         deadline: &mut impl Deadline,
     ) -> Result<BTreeSet<GitOid>, RefusalCode> {
         let mut pending = BTreeSet::new();
-        let mut closure = BTreeSet::new();
-        let mut frontier_kinds = BTreeMap::new();
-        let mut external_bytes = external_bases.read_bytes;
-        let byte_limit = self.external_read_limit();
-        if external_bytes > byte_limit { return Err(RefusalCode::ResourceBudgetExceeded); }
+        let mut originals = reused_targets::OriginalFrontier::new(self, external_bases)?;
         // Every native edge occupies input bytes. The hard ceiling additionally
         // bounds work when an operator admits a larger expanded-byte envelope.
         let mut edges_left = self.pack_limits.max_total_expanded_bytes.min(MAX_GRAPH_EDGES);
+        let mut closure = originals.reused_roots(request, verified, &mut edges_left, deadline)?;
         for command in &request.commands {
             checkpoint(deadline)?;
-            if command.new.is_zero() { continue; }
-            if !verified.contains_key(&command.new) {
-                return Err(RefusalCode::ObjectClosureIncomplete);
+            if !command.new.is_zero() && verified.contains_key(&command.new) {
+                pending.insert(command.new);
             }
-            pending.insert(command.new);
         }
         while let Some(id) = pending.pop_first() {
             checkpoint(deadline)?;
@@ -63,30 +57,7 @@ impl ProductionQuarantineValidator<'_> {
                     pending.insert(child);
                     continue;
                 }
-                if !self.selected_closure.closure().objects().contains(&child) {
-                    return Err(RefusalCode::ObjectClosureIncomplete);
-                }
-                let actual = if let Some(base) = external_bases.bases.get(&child) {
-                    // This body already passed exact native verification and its
-                    // bytes were charged before delta reconstruction.
-                    base.object_type
-                } else if let Some(kind) = frontier_kinds.get(&child) {
-                    *kind
-                } else {
-                    if frontier_kinds.len() >= MAX_FRONTIER_OBJECTS {
-                        return Err(RefusalCode::ResourceBudgetExceeded);
-                    }
-                    let remaining = byte_limit.checked_sub(external_bytes)
-                        .ok_or(RefusalCode::ResourceBudgetExceeded)?;
-                    let loaded = self.load_selected_external_base(child, remaining, deadline)?
-                        .ok_or(RefusalCode::ObjectClosureIncomplete)?;
-                    external_bytes = external_bytes.checked_add(loaded.body.len())
-                        .filter(|n| *n <= byte_limit).ok_or(RefusalCode::ResourceBudgetExceeded)?;
-                    // Retain only a verified kind, not every original body. This
-                    // is a per-call cache, never a second authority source.
-                    frontier_kinds.insert(child, loaded.object_type);
-                    loaded.object_type
-                };
+                let actual = originals.kind(child, deadline)?;
                 require_kind(actual, expected)?;
             }
         }

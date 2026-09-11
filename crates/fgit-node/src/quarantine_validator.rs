@@ -8,6 +8,7 @@
 //! ref.
 
 mod typed_closure;
+mod reused_targets;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -158,6 +159,8 @@ impl Deadline for ForwardedDeadline<'_> {
 pub struct ProductionQuarantineValidator<'node> {
     node: &'node OneNode,
     selected_closure: AuthoritySelectedClosure,
+    // Only canonical visible refs seed reuse of roots omitted from the pack.
+    visible_roots: BTreeSet<GitOid>,
     pack_limits: PackLimits,
     parse_limits: ParseLimits,
 }
@@ -185,6 +188,7 @@ impl<'node> ProductionQuarantineValidator<'node> {
         Self {
             node,
             selected_closure,
+            visible_roots: BTreeSet::new(),
             pack_limits,
             parse_limits,
         }
@@ -344,6 +348,13 @@ impl<'node> ProductionQuarantineValidator<'node> {
         bases: &ExternalBases,
         deadline: &mut impl Deadline,
     ) -> Result<VerifiedPackObjects, RefusalCode> {
+        checkpoint(deadline)?;
+        // An empty, checksum-verified pack is real wire evidence. It is not a
+        // missing pack or an unresolved thin delta. Root reuse is established
+        // separately from the exact authenticated visible-ref graph below.
+        if pack.entries().is_empty() {
+            return Ok((BTreeMap::new(), BTreeMap::new()));
+        }
         let mut objects = pack
             .clone()
             .into_scalar_objects(|_| None)
@@ -515,12 +526,19 @@ impl OneNode {
         {
             return Err(RefusalCode::HashAlgorithmDomainMismatch);
         }
-        Ok(ProductionQuarantineValidator::new(
+        let mut validator = ProductionQuarantineValidator::new(
             self,
             selected_closure,
             pack_limits,
             parse_limits,
-        ))
+        );
+        // Cumulative admitted membership alone is not disclosure authority:
+        // hidden-only and no-longer-reachable objects cannot seed a new ref.
+        validator.visible_roots = materialized.snapshot().refs.iter()
+            .filter(|(name, _)| !materialized.snapshot().hidden_refs.hides(name.as_bytes()))
+            .map(|(_, id)| *id)
+            .collect();
+        Ok(validator)
     }
 }
 
@@ -583,10 +601,14 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
         // non-authority, but only the fully validated exact closure may
         // acquire that responsibility.
         for id in &closure {
-            let object = verified
-                .remove(id)
-                .ok_or(RefusalCode::ObjectClosureIncomplete)?;
-            self.stage(*id, object.object_type, object.body, deadline)?;
+            checkpoint(deadline)?;
+            if let Some(object) = verified.remove(id) {
+                self.stage(*id, object.object_type, object.body, deadline)?;
+            } else if !self.selected_closure.closure().objects().contains(id) {
+                return Err(RefusalCode::ObjectClosureIncomplete);
+            }
+            // Reused roots were independently verified by the closure walk.
+            // They remain in the admission witness but are never restaged.
         }
         Ok(ValidatedClosure {
             object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
