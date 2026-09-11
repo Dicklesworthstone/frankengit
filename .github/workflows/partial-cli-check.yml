@@ -1,0 +1,23 @@
+name: Partial clone CLI integration check
+on:
+  push:
+    branches: [tooling/partial-cli-cb40dd24]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: /tmp/frankengit-partial-cli-check
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: cb40dd242a53f80a07fa961a27656110568cfc78
+      - name: Check actual command-line package against the pinned partial-clone source
+        run: |
+          test "$(git rev-parse HEAD)" = cb40dd242a53f80a07fa961a27656110568cfc78
+          cargo check --locked -p fgit-cli --all-targets
+          test -z "$(git status --porcelain)"
