@@ -221,7 +221,9 @@ fn replay_bundle(
 }
 
 #[cfg(test)]
+#[path = "commit_replay/tests.rs"]
 mod tests;
 
 #[cfg(test)]
+#[path = "commit_replay/resolution_tests.rs"]
 mod resolution_tests;

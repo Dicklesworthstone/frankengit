@@ -2,8 +2,10 @@
 //! Parent visibility selects the original-object capability before any uploaded
 //! REF_DELTA can request bytes. Nothing in this module stages or publishes.
 
+#[path = "bundle_review/pack.rs"]
 mod pack;
 #[cfg(test)]
+#[path = "bundle_review/tests.rs"]
 mod tests;
 
 use std::cell::Cell;

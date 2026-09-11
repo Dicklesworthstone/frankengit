@@ -219,7 +219,7 @@ impl ReviewProjection<FsqliteAuthorityStore> for ReviewOwner<'_> {
                     let result = self.inner.node.inspect_merge_bundle_in(self.request, &binding.merge(&command.subject),
                         input, &RefVisibility::new(), Some(basis.id()), &options).await;
                     self.merge_checkpoint(cx).map_err(ProjectionFailure::Unavailable)?;
-                    use super::super::bundle_review::BundleInspectionRefusal as E;
+                    use super::super::publication::BundleInspectionRefusal as E;
                     result.map_err(|error| match error {
                         E::Validation(failure) => failure,
                         E::SnapshotMoved | E::ParentMoved => ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale),

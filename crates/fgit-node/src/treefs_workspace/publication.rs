@@ -8,6 +8,7 @@
 
 #[path = "bundle_review.rs"]
 mod bundle_review;
+pub(super) use bundle_review::BundleInspectionRefusal;
 
 use super::{NodeWorkspaceRefusal, workspace_request_live};
 use crate::quarantine_validator::ProductionReceiveQuarantineHandoff;
