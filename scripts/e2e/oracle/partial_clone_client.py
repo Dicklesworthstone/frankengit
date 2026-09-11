@@ -53,7 +53,9 @@ def main():
         if not re.fullmatch(r"/[0-9a-f]{32}\.git", repository) or protocol not in {"0", "1", "2"}:
             refuse("repository or protocol does not match the fixed Git-daemon profile")
         url = "git://" + endpoint + repository
-        config += [("protocol.version", protocol), ("remote.origin.url", url), ("remote.origin.promisor", "true")]
+        config.append(("protocol.version", protocol))
+        if operation == "read":
+            config += [("remote.origin.url", url), ("remote.origin.promisor", "true")]
         if operation == "clone":
             if value not in {"blob:none", "tree:0", "tree:1", "blob:limit=21", "combine:tree:1+blob:none"}:
                 refuse("filter is outside the pinned campaign")

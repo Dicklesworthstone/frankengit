@@ -419,6 +419,7 @@ fn actual_partial_clones_and_lazy_fetches_preserve_native_bytes_current_visibili
         let historical_objects = before.selected_closure().closure().objects().clone();
         node.shutdown().unwrap();
         node = OneNode::open_existing(config).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
         for version in [0, 1, 2] {
             for filter in [
                 None,

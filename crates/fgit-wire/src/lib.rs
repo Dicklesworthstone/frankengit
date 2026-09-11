@@ -15,9 +15,10 @@
 //! `multi_ack` / `multi_ack_detailed`, v2 `ls-refs` and `fetch` command
 //! sections, native SHA-1/SHA-256 object-ID widths, shallow/deepen and the
 //! documented object-filter forms, and side-band-64k packet multiplexing.
-//! V0/v1 wants are required to have appeared in the advertised refs; v2 wants
-//! are instead checked against the repository's canonical permitted closure,
-//! matching the protocol-v2 distinction.
+//! V0/v1 wants must be advertised unless the server explicitly enables
+//! `allow-reachable-sha1-in-want`; that extension also requires repository
+//! permission. V2 wants are checked against the repository's permitted closure.
+//! Neither protocol obtains authority from client text or physical storage.
 //!
 //! The [`receive`] module separately implements bounded v0/v1 receive-pack
 //! request parsing and structural pack quarantine; authoritative ref admission

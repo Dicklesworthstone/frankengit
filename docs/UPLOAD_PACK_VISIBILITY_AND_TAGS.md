@@ -25,6 +25,16 @@ visible graph before advertising and retains the existing finite node, edge,
 byte and deadline envelopes. It is not a streaming large-repository or latency
 optimization. No performance or side-channel-freedom claim is made.
 
+## Partial-clone extension
+
+The current node adds filtered packs and capability-gated lazy retrieval as
+specified in [Partial-clone serving](PARTIAL_CLONE_SERVING.md). In particular,
+it now advertises `allow-reachable-sha1-in-want`; the advertisement-bound legacy
+behavior described below is the earlier implementation's measured baseline,
+not the current production capability set. The strict no-capability refusal
+remains covered in wire tests. Current visibility and historical-retention
+boundaries are unchanged.
+
 ## Native annotated-tag serving
 
 The graph walk retains the already-verified tag edges and derives request-local

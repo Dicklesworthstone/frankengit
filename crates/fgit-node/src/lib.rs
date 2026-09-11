@@ -201,10 +201,10 @@ fn git_daemon_capabilities(object_format: GitHashAlgorithm, head_target: Option<
 /// This view carries no mutable ref map and does not infer object reachability
 /// from the local object fabric.  Its advertised refs come exclusively from a
 /// caller-supplied [`AdmissionSnapshotProjection`] evaluated against an authenticated
-/// authority basis.  The first-clone git-daemon transport serves the legacy
-/// V0/V1 packet grammar, whose wants must name an advertised ref; therefore
-/// this view deliberately refuses every non-advertised want until the
-/// decision-history closure reader is wired as a separate production slice.
+/// authority basis. The production daemon attaches its private exact-head
+/// visible-graph proof before negotiation. That proof authorizes v2 and
+/// explicitly enabled legacy reachable wants, common haves, and partial-clone
+/// follow-ups; cumulative admission alone is not disclosure permission.
 #[derive(Clone, Debug)]
 pub struct AdmissionUploadPackRepository {
     object_format: GitHashAlgorithm,
