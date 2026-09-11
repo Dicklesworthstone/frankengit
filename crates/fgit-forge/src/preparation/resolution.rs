@@ -179,6 +179,21 @@ pub fn prepare_resolved_merge<S: MergeObjectSource>(
     };
     planner.directory(Some(base_tree), target_tree, source_tree, &[], 0, false)?;
     source.checkpoint()?;
+    let (tree, receipts) = resolve_discovered_conflicts(
+        &mut planner, Some(base_tree), target_tree, source_tree, resolutions,
+    )?;
+    let plan = finish_merge(planner, base, inputs.target, inputs.source, tree, metadata)?;
+    Ok(ResolvedMerge { plan, resolutions: receipts })
+}
+
+/// Resolve the conflicts already discovered by this same planner, then rebuild
+/// the exact same three-tree comparison. Both callers validate choices before
+/// source access. Counters, emitted objects, cancellation and source ownership
+/// survive the second pass; replay never starts a fresh merge budget.
+pub(super) fn resolve_discovered_conflicts<S: MergeObjectSource>(
+    planner: &mut Planner<'_, S>, base_tree: Option<GitOid>,
+    target_tree: GitOid, source_tree: GitOid, resolutions: &[ConflictResolution],
+) -> Result<(GitOid, Vec<ResolvedPath>), ResolutionError> {
     if planner.conflicts.is_empty() { return Err(ResolutionError::NoConflicts); }
     let conflicts = std::mem::take(&mut planner.conflicts).into_iter()
         .map(|conflict| (conflict.path.clone(), conflict)).collect::<BTreeMap<_, _>>();
@@ -190,12 +205,12 @@ pub fn prepare_resolved_merge<S: MergeObjectSource>(
     if !unresolved.is_empty() { return Err(ResolutionError::Unresolved(unresolved)); }
     let mut receipts = Vec::new();
     for (path, conflict) in conflicts {
-        source.checkpoint()?;
+        planner.source.checkpoint()?;
         let choice = choices.get(path.as_slice()).ok_or(ResolutionError::ReconstructionMismatch)?;
         let result = match choice {
             ResolutionChoice::Delete => None,
             ResolutionChoice::File { mode, bytes } => {
-                let oid = git_object_id(format, GitObjectKind::Blob, bytes);
+                let oid = git_object_id(planner.format, GitObjectKind::Blob, bytes);
                 let reusable = [&conflict.base, &conflict.ours, &conflict.theirs].iter()
                     .filter_map(|entry| entry.as_ref()).any(|entry|
                         entry.oid == oid && matches!(entry.mode, 0o100644 | 0o100755 | 0o120000));
@@ -221,14 +236,13 @@ pub fn prepare_resolved_merge<S: MergeObjectSource>(
         planner.resolutions.insert(path, BoundResolution { conflict: conflict.clone(), result: result.clone() });
         receipts.push(ResolvedPath { conflict, choice: choice.kind(), result });
     }
-    let tree = planner.directory(Some(base_tree), target_tree, source_tree, &[], 0, false)?;
-    source.checkpoint()?;
+    let tree = planner.directory(base_tree, target_tree, source_tree, &[], 0, false)?;
+    planner.source.checkpoint()?;
     if !planner.conflicts.is_empty() || !planner.resolutions.is_empty() {
         return Err(ResolutionError::ReconstructionMismatch);
     }
     let tree = tree.ok_or(ResolutionError::ReconstructionMismatch)?;
-    let plan = finish_merge(planner, base, inputs.target, inputs.source, tree, metadata)?;
-    Ok(ResolvedMerge { plan, resolutions: receipts })
+    Ok((tree, receipts))
 }
 
 #[cfg(test)]

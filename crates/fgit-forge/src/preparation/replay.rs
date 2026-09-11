@@ -10,6 +10,8 @@ use fgit_types::{GitHashAlgorithm, GitOid};
 
 use super::{CommitInput, MergeConflict, MergeEntry, MergeMetadata, MergeObjectSource,
     MergeSourceError, PlannedMergeObject, Planner, PreparationError, PreparationLimits};
+use super::resolution::{ConflictResolution, ResolvedPath, ResolutionError,
+    resolve_discovered_conflicts, validate_resolutions};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReplayDirection { CherryPick, Revert }
@@ -54,8 +56,18 @@ pub enum ReplayPreparation {
     NoChange { coordinates: ReplayCoordinates },
 }
 
+/// The result of replay with explicit conflict choices. Successful resolution
+/// returns Clean or NoChange, never Conflicted; incomplete choices are errors.
+/// Choosing the target for every conflict can legitimately produce no change.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedReplay {
+    pub outcome: ReplayPreparation,
+    pub resolutions: Vec<ResolvedPath>,
+}
+
 #[derive(Debug)]
 pub enum ReplayError {
+    Resolution(Box<ResolutionError>),
     Preparation(PreparationError),
     MainlineRequired { parents: usize },
     InvalidMainline { requested: u16, parents: usize },
@@ -67,6 +79,9 @@ impl std::fmt::Display for ReplayError {
     }
 }
 impl std::error::Error for ReplayError {}
+impl From<ResolutionError> for ReplayError {
+    fn from(error: ResolutionError) -> Self { Self::Resolution(Box::new(error)) }
+}
 impl From<PreparationError> for ReplayError {
     fn from(error: PreparationError) -> Self { Self::Preparation(error) }
 }
@@ -88,8 +103,30 @@ pub fn prepare_replay<S: MergeObjectSource>(
     source: &S, format: GitHashAlgorithm, request: ReplayRequest,
     metadata: &MergeMetadata, limits: PreparationLimits,
 ) -> Result<ReplayPreparation, ReplayError> {
+    prepare_replay_inner(source, format, request, metadata, limits, None)
+        .map(|result| result.outcome)
+}
+
+/// Resolve a cherry-pick or revert using every and only reproduced conflicts.
+/// Base/Ours/Theirs refer to the actual replay triple, not merge-branch names:
+/// for revert, Base is the selected commit and Theirs is its mainline parent.
+/// Explicit deletion is required when the chosen side is absent. No source
+/// commit is grafted into the resulting history; the target is its only parent.
+pub fn prepare_resolved_replay<S: MergeObjectSource>(
+    source: &S, format: GitHashAlgorithm, request: ReplayRequest,
+    resolutions: &[ConflictResolution], metadata: &MergeMetadata, limits: PreparationLimits,
+) -> Result<ResolvedReplay, ReplayError> {
+    prepare_replay_inner(source, format, request, metadata, limits, Some(resolutions))
+}
+
+fn prepare_replay_inner<S: MergeObjectSource>(
+    source: &S, format: GitHashAlgorithm, request: ReplayRequest,
+    metadata: &MergeMetadata, limits: PreparationLimits,
+    resolutions: Option<&[ConflictResolution]>,
+) -> Result<ResolvedReplay, ReplayError> {
     limits.validate()?;
     metadata.validate()?;
+    if let Some(choices) = resolutions { validate_resolutions(choices, limits)?; }
     if [request.target, request.source_tip, request.selected_commit].iter()
         .any(|id| id.is_zero() || id.algorithm() != format)
     { return Err(PreparationError::ObjectFormat.into()); }
@@ -118,12 +155,22 @@ pub fn prepare_replay<S: MergeObjectSource>(
     };
     let tree = planner.directory(base, target_tree, applied, &[], 0, false)?;
     source.checkpoint()?;
-    if !planner.conflicts.is_empty() {
-        planner.conflicts.sort_by(|a, b| a.path.cmp(&b.path));
-        return Ok(ReplayPreparation::Conflicted { coordinates, conflicts: planner.conflicts });
+    let (tree, receipts) = if let Some(choices) = resolutions {
+        resolve_discovered_conflicts(&mut planner, base, target_tree, applied, choices)?
+    } else {
+        if !planner.conflicts.is_empty() {
+            planner.conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+            return Ok(ResolvedReplay {
+                outcome: ReplayPreparation::Conflicted { coordinates, conflicts: planner.conflicts },
+                resolutions: Vec::new(),
+            });
+        }
+        (tree.ok_or(PreparationError::InvalidTree)?, Vec::new())
+    };
+    source.checkpoint()?;
+    if tree == target_tree {
+        return Ok(ResolvedReplay { outcome: ReplayPreparation::NoChange { coordinates }, resolutions: receipts });
     }
-    let tree = tree.ok_or(PreparationError::InvalidTree)?;
-    if tree == target_tree { return Ok(ReplayPreparation::NoChange { coordinates }); }
     if tree == empty { planner.emit(GitObjectKind::Tree, Vec::new())?; }
     let mut body = format!("tree {tree}\nparent {}\nauthor {} {} +0000\ncommitter {} {} +0000\n\n",
         request.target, metadata.author, metadata.timestamp, metadata.committer, metadata.timestamp).into_bytes();
@@ -133,9 +180,12 @@ pub fn prepare_replay<S: MergeObjectSource>(
     body.extend_from_slice(&metadata.message);
     let commit = planner.emit(GitObjectKind::Commit, body)?;
     source.checkpoint()?;
-    Ok(ReplayPreparation::Clean(PreparedReplay {
-        coordinates, tree, commit, objects: planner.objects.into_values().collect(),
-    }))
+    Ok(ResolvedReplay {
+        outcome: ReplayPreparation::Clean(PreparedReplay {
+            coordinates, tree, commit, objects: planner.objects.into_values().collect(),
+        }),
+        resolutions: receipts,
+    })
 }
 
 fn select_parent(commit: &CommitInput, mainline: Option<u16>) -> Result<(Option<GitOid>, Option<u16>), ReplayError> {
@@ -207,3 +257,6 @@ impl<S: MergeObjectSource> History<'_, S> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod resolution_tests;
