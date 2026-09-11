@@ -535,7 +535,8 @@ const fn named_ref(intent: &Intent) -> Option<&RefName> {
         Intent::Forge(forge) => match &forge.event {
             ForgeEventKind::PullRequestOpened { target, .. }
             | ForgeEventKind::PullRequestMerged { target, .. }
-            | ForgeEventKind::PullRequestUpdated { target, .. } => Some(target),
+            | ForgeEventKind::PullRequestUpdated { target, .. }
+            | ForgeEventKind::PullRequestReviewed { target, .. } => Some(target),
             ForgeEventKind::PullRequestClosed { .. } => None,
         },
         Intent::Retention(_) | Intent::Outbox(_) => None,
@@ -1394,6 +1395,24 @@ mod tests {
     use crate::state::{InvariantBreach, RepositoryRoots};
 
     use super::apply_effects;
+
+    #[test]
+    fn reviewed_pr_names_its_ref_without_claiming_a_ref_effect() {
+        let target = fgit_types::RefName::try_new(b"refs/heads/main").unwrap();
+        let review = ForgeEntityId::new(label("review-stream-entity"));
+        let event = ForgeEventKind::PullRequestReviewed {
+            review,
+            target: target.clone(),
+        };
+        let intent = crate::intent::Intent::Forge(crate::intent::ForgeIntent {
+            stream: ForgeStreamId::new(label("review-stream")),
+            expected_position: ForgeStreamPosition::new(0),
+            event: event.clone(),
+        });
+        assert_eq!(super::named_ref(&intent), Some(&target));
+        assert_eq!(event.required_ref_effect(), None);
+        assert_eq!(event.entity(), review);
+    }
 
     fn closed_event() -> ForgeEventKind {
         ForgeEventKind::PullRequestClosed {
