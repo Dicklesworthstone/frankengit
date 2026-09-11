@@ -39,6 +39,7 @@ use fgit_types::RefName;
 
 /// Bounded shallow-history and partial-clone closure computation.
 pub mod closure;
+mod filter_syntax;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
 /// Hidden-ref authorization policy and visibility-filtered repository views.
@@ -1072,84 +1073,9 @@ pub enum ObjectFilter {
 
 /// Parses one bounded upload-pack `filter` value.
 pub fn parse_filter(
-    text: &[u8],
-    object_format: GitObjectFormat,
-    limits: &WireLimits,
+    text: &[u8], object_format: GitObjectFormat, limits: &WireLimits,
 ) -> Result<ObjectFilter, WireError> {
-    parse_filter_at_depth(text, object_format, limits, 0)
-}
-
-fn parse_filter_at_depth(
-    text: &[u8],
-    object_format: GitObjectFormat,
-    limits: &WireLimits,
-    depth: usize,
-) -> Result<ObjectFilter, WireError> {
-    if text == b"blob:none" {
-        return Ok(ObjectFilter::BlobNone);
-    }
-    if let Some(value) = text.strip_prefix(b"blob:limit=") {
-        return parse_unsigned(value)
-            .map(ObjectFilter::BlobLimit)
-            .map_err(|()| WireError::InvalidFilter {
-                filter: text.to_vec(),
-            });
-    }
-    if let Some(value) = text.strip_prefix(b"tree:") {
-        let depth = parse_unsigned(value).map_err(|()| WireError::InvalidFilter {
-            filter: text.to_vec(),
-        })?;
-        return u32::try_from(depth)
-            .map(ObjectFilter::TreeDepth)
-            .map_err(|_| WireError::InvalidFilter {
-                filter: text.to_vec(),
-            });
-    }
-    if let Some(value) = text.strip_prefix(b"sparse:oid=") {
-        return parse_object_id(value, object_format).map(ObjectFilter::SparseObject);
-    }
-    if let Some(value) = text.strip_prefix(b"sparse:path=") {
-        validate_opaque_path(value, limits)?;
-        return Ok(ObjectFilter::SparsePath(value.to_vec()));
-    }
-    if let Some(value) = text.strip_prefix(b"combine:") {
-        if depth == limits.max_filter_parts {
-            return Err(WireError::TooManyFilterParts {
-                limit: limits.max_filter_parts,
-            });
-        }
-        let mut parts = Vec::new();
-        for part in value.split(|byte| *byte == b'+') {
-            if part.is_empty() {
-                return Err(WireError::InvalidFilter {
-                    filter: text.to_vec(),
-                });
-            }
-            if parts.len() == limits.max_filter_parts {
-                return Err(WireError::TooManyFilterParts {
-                    limit: limits.max_filter_parts,
-                });
-            }
-            parts
-                .try_reserve(1)
-                .map_err(|_| WireError::AllocationFailure)?;
-            parts.push(parse_filter_at_depth(
-                part,
-                object_format,
-                limits,
-                depth + 1,
-            )?);
-        }
-        if parts.is_empty() {
-            return Err(WireError::InvalidFilter {
-                filter: text.to_vec(),
-            });
-        }
-        return Ok(ObjectFilter::Combine(parts));
-    }
-    Err(WireError::InvalidFilter {
-        filter: text.to_vec(),
-    })
+    filter_syntax::parse(text, object_format, limits)
 }
 
 fn validate_opaque_path(path: &[u8], limits: &WireLimits) -> Result<(), WireError> {
@@ -2079,6 +2005,8 @@ impl LegacyUploadPack {
             .advertised_refs()
             .iter()
             .any(|reference| reference.oid == oid)
+            && !(self.server_capabilities.contains(b"allow-reachable-sha1-in-want")
+                && repository.contains_want(oid))
         {
             return Err(WireError::WantNotAdvertised { oid });
         }
