@@ -7,6 +7,8 @@
 //! the exact closure witness for admission; staging itself never publishes a
 //! ref.
 
+mod typed_closure;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_admission::{
@@ -426,63 +428,6 @@ impl<'node> ProductionQuarantineValidator<'node> {
         Ok(())
     }
 
-    /// Computes the uploaded portion of the exact object closure required by
-    /// the requested ref tips.
-    ///
-    /// Every object in `verified` has already passed native identity and
-    /// parser checks.  Traversal nevertheless begins only at non-delete
-    /// command tips: a valid but unrelated uploaded object is not an admitted
-    /// object.  Edges may terminate in the authenticated prior closure, but
-    /// never in merely-present fabric state.
-    fn reachable_uploaded_closure(
-        &self,
-        request: &ReceiveRequest,
-        verified: &BTreeMap<GitOid, VerifiedObject>,
-        in_pack_delta_bases: &BTreeMap<GitOid, BTreeSet<GitOid>>,
-        deadline: &mut impl Deadline,
-    ) -> Result<BTreeSet<GitOid>, RefusalCode> {
-        let mut pending = BTreeSet::new();
-        for command in &request.commands {
-            checkpoint(deadline)?;
-            if command.new.is_zero() {
-                continue;
-            }
-            if !verified.contains_key(&command.new) {
-                return Err(RefusalCode::ObjectClosureIncomplete);
-            }
-            pending.insert(command.new);
-        }
-
-        let mut closure = BTreeSet::new();
-        while let Some(id) = pending.pop_first() {
-            checkpoint(deadline)?;
-            if !closure.insert(id) {
-                continue;
-            }
-            let object = verified
-                .get(&id)
-                .ok_or(RefusalCode::ObjectClosureIncomplete)?;
-            // A delta target is not reconstructable from its Git-object
-            // graph edges alone. Its verified in-pack OFS or REF_DELTA base
-            // is an additional exact closure edge: retain it even for blobs,
-            // which otherwise have no object references. External REF bases
-            // remain selected by the authenticated prior closure and are not
-            // restaged.
-            if let Some(bases) = in_pack_delta_bases.get(&id) {
-                pending.extend(bases.iter().copied());
-            }
-            for child in self.object_references(&object.parsed, deadline)? {
-                checkpoint(deadline)?;
-                if verified.contains_key(&child) {
-                    pending.insert(child);
-                } else if !self.selected_closure.closure().objects().contains(&child) {
-                    return Err(RefusalCode::ObjectClosureIncomplete);
-                }
-            }
-        }
-        Ok(closure)
-    }
-
     /// Maps each reconstructed in-pack object to the verified pack-local
     /// bases required to reconstruct it.
     ///
@@ -531,57 +476,6 @@ impl<'node> ProductionQuarantineValidator<'node> {
                 .insert(base);
         }
         Ok(dependencies)
-    }
-
-    /// Extracts the direct native-object edges from one parser-verified object.
-    fn object_references(
-        &self,
-        parsed: &ParsedObject,
-        deadline: &mut impl Deadline,
-    ) -> Result<Vec<GitOid>, RefusalCode> {
-        match parsed {
-            ParsedObject::Blob(_) => Ok(Vec::new()),
-            ParsedObject::Tree(entries) => {
-                let mut references = Vec::new();
-                references
-                    .try_reserve_exact(entries.len())
-                    .map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
-                for entry in entries {
-                    checkpoint(deadline)?;
-                    // A gitlink names a commit in another repository; it is
-                    // data in this tree, not a required local object edge.
-                    if entry.mode == b"160000" {
-                        continue;
-                    }
-                    references.push(self.native_reference_from_bytes(&entry.object_id)?);
-                }
-                Ok(references)
-            }
-            ParsedObject::Commit(commit) => {
-                let mut references = Vec::new();
-                let tree = commit
-                    .tree_reference()
-                    .ok_or(RefusalCode::ObjectHeaderInvalid)?;
-                references.push(self.native_reference_from_hex(tree)?);
-                for parent in commit.parent_references() {
-                    checkpoint(deadline)?;
-                    references.push(self.native_reference_from_hex(parent)?);
-                }
-                Ok(references)
-            }
-            ParsedObject::Tag(tag) => {
-                let mut targets = tag
-                    .headers()
-                    .iter()
-                    .filter(|header| header.name == b"object")
-                    .map(|header| header.value.as_slice());
-                let target = targets.next().ok_or(RefusalCode::ObjectHeaderInvalid)?;
-                if targets.next().is_some() {
-                    return Err(RefusalCode::ObjectHeaderInvalid);
-                }
-                Ok(vec![self.native_reference_from_hex(target)?])
-            }
-        }
     }
 
     fn native_reference_from_hex(&self, value: &[u8]) -> Result<GitOid, RefusalCode> {
@@ -703,7 +597,7 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
         let (mut verified, ids_at_offset) = self.verified_pack_objects(pack, &bases, deadline)?;
         let in_pack_delta_bases = Self::in_pack_delta_bases(pack, &ids_at_offset, deadline)?;
         let closure =
-            self.reachable_uploaded_closure(request, &verified, &in_pack_delta_bases, deadline)?;
+            self.reachable_uploaded_closure(request, &verified, &in_pack_delta_bases, &bases, deadline)?;
         // This second phase keeps a later malformed delta from leaving earlier
         // reachable objects in fabric.  Immutable placement remains
         // non-authority, but only the fully validated exact closure may
