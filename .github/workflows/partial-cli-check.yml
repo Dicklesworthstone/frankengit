@@ -7,7 +7,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     env:
       RCH_CARGO_WRAPPER_BYPASS: '1'
       CARGO_BUILD_JOBS: '2'
@@ -15,9 +15,13 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: cb40dd242a53f80a07fa961a27656110568cfc78
-      - name: Check actual command-line package against the pinned partial-clone source
+          ref: 7207128f639669b65e2d51eb6ba71b7181751107
+      - name: Check actual command-line package with its required native crypto dependency
         run: |
-          test "$(git rev-parse HEAD)" = cb40dd242a53f80a07fa961a27656110568cfc78
+          test "$(git rev-parse HEAD)" = 7207128f639669b65e2d51eb6ba71b7181751107
           cargo check --locked -p fgit-cli --all-targets
+          test -z "$(git status --porcelain)"
+      - name: Exercise command-line behavior and binary integration
+        run: |
+          cargo test --locked -p fgit-cli --all-targets
           test -z "$(git status --porcelain)"
