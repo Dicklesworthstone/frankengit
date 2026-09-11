@@ -21,7 +21,9 @@ use fgit_pack::{
     CachedResolver, Deadline, ExternalBaseLookup, ObjectId, PackError, PackLimits, PackObject,
     ParsedDeltaBase, QuarantinedPack, ResolutionBudget, verify_native_object,
 };
-use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefusalCode};
+use fgit_types::{GitOid, RefusalCode};
+#[cfg(test)]
+use fgit_types::GitHashAlgorithm;
 use fgit_wire::receive::{
     QuarantineReceipt, ReceiveError, ReceiveQuarantineHandoff, ReceiveRequest,
 };
@@ -478,28 +480,6 @@ impl<'node> ProductionQuarantineValidator<'node> {
         Ok(dependencies)
     }
 
-    fn native_reference_from_hex(&self, value: &[u8]) -> Result<GitOid, RefusalCode> {
-        let value = std::str::from_utf8(value).map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
-        GitOid::from_hex(self.node.object_format, value)
-            .map_err(|_| RefusalCode::ObjectHeaderInvalid)
-    }
-
-    fn native_reference_from_bytes(&self, value: &[u8]) -> Result<GitOid, RefusalCode> {
-        match self.node.object_format {
-            GitHashAlgorithm::Sha1 => {
-                let bytes: [u8; GitOidSha1::LEN] = value
-                    .try_into()
-                    .map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
-                Ok(GitOid::from(GitOidSha1::from_bytes(bytes)))
-            }
-            GitHashAlgorithm::Sha256 => {
-                let bytes: [u8; GitOidSha256::LEN] = value
-                    .try_into()
-                    .map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
-                Ok(GitOid::from(GitOidSha256::from_bytes(bytes)))
-            }
-        }
-    }
 }
 
 impl OneNode {

@@ -5,7 +5,6 @@
 //! to its required kind, including edges ending in the authenticated frontier.
 //! Transport-only delta bases retain their existing closure responsibility.
 use super::*;
-use fgit_git_object::{TagTargetType, parse_annotated_tag};
 
 // Bounds on additional verification state, independent of uploaded entry count.
 // A single new tree may legitimately reference many already-selected objects.
@@ -99,67 +98,12 @@ impl ProductionQuarantineValidator<'_> {
         &self, object: &VerifiedObject, edges_left: &mut usize,
         deadline: &mut impl Deadline,
     ) -> Result<Vec<(GitOid, ObjectType)>, RefusalCode> {
-        let mut edges = Vec::new();
-        match &object.parsed {
-            ParsedObject::Blob(_) => {}
-            ParsedObject::Tree(entries) => {
-                for entry in entries {
-                    checkpoint(deadline)?;
-                    charge_edge(edges_left)?;
-                    let mode = std::str::from_utf8(&entry.mode).ok()
-                        .and_then(|mode| u32::from_str_radix(mode, 8).ok())
-                        .ok_or(RefusalCode::ObjectHeaderInvalid)?;
-                    let kind = match mode & 0o170_000 {
-                        0o040_000 => ObjectType::Tree,
-                        0o100_000 | 0o120_000 => ObjectType::Blob,
-                        // Gitlinks are external-repository references, including
-                        // import-tolerated octal spellings. They consume work,
-                        // but do not authorize a local read or a dependency.
-                        0o160_000 => continue,
-                        _ => return Err(RefusalCode::ObjectHeaderInvalid),
-                    };
-                    push(&mut edges, self.native_reference_from_bytes(&entry.object_id)?, kind)?;
-                }
-            }
-            ParsedObject::Commit(commit) => {
-                let mut tree_count = 0usize;
-                for header in commit.headers() {
-                    checkpoint(deadline)?;
-                    let kind = if header.name == b"tree" {
-                        tree_count += 1;
-                        ObjectType::Tree
-                    } else if header.name == b"parent" {
-                        ObjectType::Commit
-                    } else { continue; };
-                    // Generic import parsing preserves unusual headers. A
-                    // publication walk cannot choose an arbitrary tree or drop
-                    // continuation bytes while inventing an unambiguous edge.
-                    if !header.continuations.is_empty() || tree_count > 1 {
-                        return Err(RefusalCode::ObjectHeaderInvalid);
-                    }
-                    charge_edge(edges_left)?;
-                    push(&mut edges, self.native_reference_from_hex(&header.value)?, kind)?;
-                }
-                if tree_count != 1 { return Err(RefusalCode::ObjectHeaderInvalid); }
-            }
-            ParsedObject::Tag(_) => {
-                checkpoint(deadline)?;
-                let tag = parse_annotated_tag(&object.body, self.node.object_format,
-                    AcceptanceProfile::GitCompatibleImport, &self.parse_limits)
-                    .map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
-                checkpoint(deadline)?;
-                let target = tag.target();
-                let kind = match target.object_type {
-                    TagTargetType::Blob => ObjectType::Blob,
-                    TagTargetType::Tree => ObjectType::Tree,
-                    TagTargetType::Commit => ObjectType::Commit,
-                    TagTargetType::Tag => ObjectType::Tag,
-                };
-                charge_edge(edges_left)?;
-                push(&mut edges, target.oid, kind)?;
-            }
-        }
-        Ok(edges)
+        // Source selection and graph traversal remain distinct. Only native
+        // edge interpretation is shared with complete local-source imports.
+        crate::loose_import::graph::references(
+            self.node.object_format, &object.parsed, &object.body,
+            &self.parse_limits, edges_left, deadline,
+        )
     }
 }
 
@@ -168,12 +112,6 @@ fn require_kind(actual: ObjectType, expected: ObjectType) -> Result<(), RefusalC
 }
 fn charge_edge(remaining: &mut usize) -> Result<(), RefusalCode> {
     *remaining = remaining.checked_sub(1).ok_or(RefusalCode::ResourceBudgetExceeded)?;
-    Ok(())
-}
-fn push(edges: &mut Vec<(GitOid, ObjectType)>, oid: GitOid, kind: ObjectType) -> Result<(), RefusalCode> {
-    if oid.is_zero() { return Err(RefusalCode::ObjectHeaderInvalid); }
-    edges.try_reserve(1).map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
-    edges.push((oid, kind));
     Ok(())
 }
 
