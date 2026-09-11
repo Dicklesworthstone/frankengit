@@ -9,6 +9,8 @@
 //! import request, recorded its admission, and published an RCR through the
 //! authority head's conditional replacement.
 
+pub(crate) mod graph;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -20,7 +22,7 @@ use std::path::{Path, PathBuf};
 use fgit_admission::{CanonicalRefState, PermittedObjectClosure};
 use fgit_git_object::{
     AcceptanceProfile, InflateLimits, LooseObjectDecodeError, ObjectError, ParseLimits,
-    ParsedObject, parse_object_body, parse_zlib_loose,
+    parse_zlib_loose,
 };
 use fgit_pack::{
     CachedResolver, IdxV2, NativeChecksumVerifier, PackError, PackLimits, ResolutionBudget,
@@ -28,7 +30,7 @@ use fgit_pack::{
 };
 use fgit_types::{GitHashAlgorithm, GitOid, MAX_REF_NAME_LEN, RefName, TypeRefusal};
 
-use super::{NodeRefusal, OneNode, crypto_object_kind};
+use super::{NodeRefusal, OneNode};
 
 const MAX_IMPORT_REFS: usize = 65_536;
 const MAX_IMPORT_OBJECTS: usize = 1_000_000;
@@ -191,6 +193,9 @@ pub enum LooseGitImportRefusal {
         /// Identity reproduced from the verified loose body.
         observed: GitOid,
     },
+    /// A native graph edge is ambiguous, has the wrong kind, or exceeds its
+    /// bounded validation work. This is a pre-staging failure, not a decision.
+    ObjectGraph { identity: GitOid, code: fgit_types::RefusalCode },
     /// Bounded zlib/loose decoding refused the source object.
     LooseObject(Box<LooseObjectDecodeError>),
     /// A parsed object could not yield a complete closure edge set.
@@ -346,6 +351,9 @@ impl Display for LooseGitImportRefusal {
                 formatter,
                 "source object named {expected} re-identifies as {observed}"
             ),
+            Self::ObjectGraph { identity, code } => write!(
+                formatter, "source object {identity} has an invalid native graph: {code:?}"
+            ),
             Self::LooseObject(source) => Display::fmt(source, formatter),
             Self::ObjectStructure(source) => Display::fmt(source, formatter),
             Self::CommitTreeMissing(identity) => {
@@ -412,6 +420,7 @@ impl Error for LooseGitImportRefusal {
             | Self::PackedRefContents(_)
             | Self::ObjectMissing(_)
             | Self::ObjectIdentityMismatch { .. }
+            | Self::ObjectGraph { .. }
             | Self::CommitTreeMissing(_)
             | Self::TagObjectMissing(_)
             | Self::RefLimitExceeded { .. }
@@ -434,7 +443,9 @@ impl OneNode {
     /// that can quietly select a different object source.
     ///
     /// Success proves that every returned closure member was native-hash
-    /// verified and immutably placed through this node's fabric.  It does not
+    /// verified with a complete required-kind graph before the first placement.
+    /// Gitlinks remain external and are not fetched. Verified bodies are then
+    /// immutably placed through this node's fabric. It does not
     /// make refs visible and does not publish an authority head.
     pub fn stage_loose_git_import(
         &self,
@@ -461,64 +472,33 @@ impl OneNode {
             PackedObjectSources::open(&git_directory, self.object_format, self.max_object_bytes)?;
         let refs = read_direct_refs(&git_directory, self.object_format, max_refs)?;
         let head_target = read_head_target(&git_directory)?;
-        let mut pending = refs.values().copied().collect::<BTreeSet<_>>();
-        let mut closure = BTreeSet::new();
-        let mut total_object_bytes = 0_u64;
-
-        while let Some(identity) = pending.pop_first() {
-            if closure.len() == MAX_IMPORT_OBJECTS {
-                return Err(LooseGitImportRefusal::ObjectLimitExceeded {
-                    limit: MAX_IMPORT_OBJECTS,
-                });
-            }
-            let object = read_local_object(
-                &git_directory,
-                identity,
-                self.object_format,
-                self.max_object_bytes,
-                &mut packed,
-            )?;
-            let observed = fgit_crypto::git_object_id(
-                self.object_format,
-                crypto_object_kind(object.object_type),
-                &object.body,
-            );
-            if observed != identity {
-                return Err(LooseGitImportRefusal::ObjectIdentityMismatch {
-                    expected: identity,
-                    observed,
-                });
-            }
-            let next_total = total_object_bytes
-                .saturating_add(u64::try_from(object.body.len()).unwrap_or(u64::MAX));
-            if next_total > MAX_IMPORT_TOTAL_OBJECT_BYTES {
-                return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
-                    limit: MAX_IMPORT_TOTAL_OBJECT_BYTES,
-                    observed: next_total,
-                });
-            }
-            let parsed = parse_object_body(
-                object.object_type,
-                &object.body,
-                AcceptanceProfile::GitCompatibleImport,
-                &parse_limits(self.object_format, self.max_object_bytes),
-            )
-            .map_err(|error| LooseGitImportRefusal::ObjectStructure(Box::new(error)))?;
-            let references = referenced_objects(identity, parsed, self.object_format)?;
-            self.put_git_object(object.object_type, object.body)
+        let validated = graph::validate(
+            refs.values().copied(), self.object_format,
+            &parse_limits(self.object_format, self.max_object_bytes), graph::Limits::default(),
+            |identity| read_local_object(&git_directory, identity, self.object_format,
+                self.max_object_bytes, &mut packed),
+        )?;
+        let refs = CanonicalRefState::new_with_head_target(refs, head_target)
+            .map_err(|_| LooseGitImportRefusal::HeadTargetNotBranch(Box::new(git_directory)))?;
+        // Release pack decoding caches before placement. The bounded proof owns
+        // the exact bytes verified above; no mutable source file is reread.
+        drop(packed);
+        let closure = validated.objects.keys().copied().collect::<BTreeSet<_>>();
+        let total_object_bytes = validated.total_bytes;
+        // All required local edges and object bodies have now verified. Only
+        // placement failures can leave a partially staged, noncanonical import.
+        for (identity, object) in validated.objects {
+            let stored = self.put_git_object(object.object_type, object.body)
                 .map_err(|error| LooseGitImportRefusal::Node(Box::new(error)))?;
-            total_object_bytes = next_total;
-            closure.insert(identity);
-            pending.extend(
-                references
-                    .into_iter()
-                    .filter(|child| !closure.contains(child)),
-            );
+            if stored.identity() != identity {
+                return Err(LooseGitImportRefusal::ObjectIdentityMismatch {
+                    expected: identity, observed: stored.identity(),
+                });
+            }
         }
 
         Ok(StagedLooseGitImport {
-            refs: CanonicalRefState::new_with_head_target(refs, head_target)
-                .map_err(|_| LooseGitImportRefusal::HeadTargetNotBranch(Box::new(git_directory)))?,
+            refs,
             object_count: closure.len(),
             closure: PermittedObjectClosure::new(closure),
             total_object_bytes,
@@ -1351,77 +1331,6 @@ fn try_read_loose_object(
     )
     .map(Some)
     .map_err(|error| LooseGitImportRefusal::LooseObject(Box::new(error)))
-}
-
-fn referenced_objects(
-    identity: GitOid,
-    parsed: ParsedObject,
-    object_format: GitHashAlgorithm,
-) -> Result<BTreeSet<GitOid>, LooseGitImportRefusal> {
-    let mut references = BTreeSet::new();
-    match parsed {
-        ParsedObject::Blob(_) => {}
-        ParsedObject::Tree(entries) => {
-            for entry in entries {
-                references.insert(oid_from_native_bytes(
-                    identity,
-                    &entry.object_id,
-                    object_format,
-                )?);
-            }
-        }
-        ParsedObject::Commit(commit) => {
-            let Some(tree) = commit.tree_reference() else {
-                return Err(LooseGitImportRefusal::CommitTreeMissing(identity));
-            };
-            references.insert(oid_from_hex_reference(identity, tree, object_format)?);
-            for parent in commit.parent_references() {
-                references.insert(oid_from_hex_reference(identity, parent, object_format)?);
-            }
-        }
-        ParsedObject::Tag(tag) => {
-            let mut targets = tag
-                .headers()
-                .iter()
-                .filter(|header| header.name == b"object")
-                .map(|header| header.value.as_slice());
-            let Some(target) = targets.next() else {
-                return Err(LooseGitImportRefusal::TagObjectMissing(identity));
-            };
-            if targets.next().is_some() {
-                return Err(LooseGitImportRefusal::TagObjectMissing(identity));
-            }
-            references.insert(oid_from_hex_reference(identity, target, object_format)?);
-        }
-    }
-    Ok(references)
-}
-
-fn oid_from_native_bytes(
-    source: GitOid,
-    bytes: &[u8],
-    object_format: GitHashAlgorithm,
-) -> Result<GitOid, LooseGitImportRefusal> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push(char::from(HEX[usize::from(byte >> 4)]));
-        text.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    oid_from_hex_reference(source, text.as_bytes(), object_format)
-}
-
-fn oid_from_hex_reference(
-    source: GitOid,
-    bytes: &[u8],
-    object_format: GitHashAlgorithm,
-) -> Result<GitOid, LooseGitImportRefusal> {
-    let text =
-        std::str::from_utf8(bytes).map_err(|_| LooseGitImportRefusal::ObjectMissing(source))?;
-    GitOid::from_hex(object_format, text).map_err(|error| LooseGitImportRefusal::ObjectIdentity {
-        path: Box::new(PathBuf::from(format!("reachable from {source}"))),
-        source: Box::new(error),
-    })
 }
 
 fn parse_limits(object_format: GitHashAlgorithm, max_object_bytes: u64) -> ParseLimits {
