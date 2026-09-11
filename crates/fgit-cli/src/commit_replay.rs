@@ -1,5 +1,7 @@
 //! Explicit one-commit cherry-pick/revert preparation. Artifacts use the existing
 //! create-only writer and separate workspace inspection/admission workflow.
+mod resolution;
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -12,34 +14,45 @@ use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, HeadGe
 use crate::merge_apply::preparation::{publish_new_bundle, render_conflict, require_absent};
 use crate::publication_support::{parse_oid, quote, read_bundle};
 
-const USAGE: &str = "usage: fg <cherry-pick|revert> prepare <storage-root> <tenant-id> <repository-id> <target-ref> <output-bundle>\n  --trusted-local --profile path-v1 --source-ref <visible-branch>\n  --expected-target <tip> --expected-source <tip> --commit <selected-historical-commit>\n  --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds>\n  (--message <text> | --message-file <raw-bytes>) [--mainline <one-based-parent>]\n  [--expected-head <snapshot-token>] [--target-ref-hex] [--source-ref-hex <bytes>]\n  [--max-commits <n>] [--max-edges <n>] [--max-output-bytes <n>]\n\nExactly one selected commit, not a range or sequencer. Merge commits require\n--mainline; root commits use the empty tree. Source and target may be the same\nbranch. Conflicts and no-change results create no bundle. Metadata is explicit,\nnot inherited or authenticated. No Git process, hook, rename heuristic or\nexternal driver runs. Independently inspect and apply the saved single-parent\nbundle with workspace inspect/apply. Preparation never mutates the repository.\nExit 0: prepared or no-change; 3: conflicts; 2: input/infrastructure/output error.";
+const USAGE: &str = "usage: fg <cherry-pick|revert> <prepare|resolve> <storage-root> <tenant-id> <repository-id> <target-ref> <output-bundle>\n  --trusted-local --profile path-v1 --source-ref <visible-branch>\n  --expected-target <tip> --expected-source <tip> --commit <selected-historical-commit>\n  --author <name-and-email> [--committer <name-and-email>] --timestamp <unix-seconds>\n  (--message <text> | --message-file <raw-bytes>) [--mainline <one-based-parent>]\n  [--expected-head <snapshot-token>] [--target-ref-hex] [--source-ref-hex <bytes>]\n  [--max-commits <n>] [--max-edges <n>] [--max-output-bytes <n>]\n  resolve choices: --ours <path> | --theirs <path> | --base <path> | --delete <path>\n                   --file <path> <100644|100755> <local-file>\n  Choice flags also accept -hex suffixes for raw repository paths.\n\nresolve requires every and only actual conflicts; it is not a sequencer,\nand it creates no partial candidate. Revert's Theirs means the selected parent.\n\nExactly one selected commit, not a range or sequencer. Merge commits require\n--mainline; root commits use the empty tree. Source and target may be the same\nbranch. Conflicts and no-change results create no bundle. Metadata is explicit,\nnot inherited or authenticated. No Git process, hook, rename heuristic or\nexternal driver runs. Independently inspect and apply the saved single-parent\nbundle with workspace inspect/apply. Preparation never mutates the repository.\nExit 0: prepared or no-change; 3: conflicts; 2: input/infrastructure/output error.";
 
 struct Options {
     storage: PathBuf, tenant: TenantId, repository: RepositoryId,
     target: RefName, source: RefName, output: PathBuf,
     inputs: ReplayRequest, head: Option<RepositoryAuthorityHeadId>,
     metadata: MergeMetadata, message_file: Option<PathBuf>, limits: PreparationLimits,
+    resolutions: Option<Vec<resolution::LocalResolution>>,
 }
 
 pub(super) fn run(args: &[String], direction: ReplayDirection) -> Result<u8, String> {
-    if args == ["--help"] || args == ["prepare", "--help"] {
+    if args == ["--help"] || args == ["prepare", "--help"] || args == ["resolve", "--help"] {
         write_receipt(&mut std::io::stdout().lock(), USAGE, false)?; return Ok(0);
     }
     let mut options = parse(args, direction)?;
     if let Some(path) = &options.message_file { options.metadata.message = read_bundle(path, 64 * 1024)?; }
     options.metadata.validate().map_err(|error| error.to_string())?;
+    // Validate all paths/choices and load bounded exact bytes before opening a
+    // node. An empty resolution file is a valid file, not an implicit deletion.
+    let resolutions = options.resolutions.as_ref().map(|choices|
+        resolution::load(choices, options.limits)).transpose()?;
     require_absent(&options.output)?;
     let mut node = OneNode::open_existing(NodeConfig::new(options.storage.clone(), options.tenant,
         options.repository).with_object_format(options.inputs.target.algorithm())).map_err(|error| error.to_string())?;
     let operation = (|| {
         node.bring_into_service(HeadGeneration::FIRST).map_err(|error| error.to_string())?;
         let request = node.request_context();
-        node.runtime().block_on(node.prepare_replay_bundle_in(&request, &options.target, &options.source,
-            options.inputs, &Default::default(), options.head, &options.metadata, options.limits))
-            .map_err(|error| error.to_string())
+        match resolutions.as_deref() {
+            Some(choices) => node.runtime().block_on(node.prepare_resolved_replay_bundle_in(
+                &request, &options.target, &options.source, options.inputs, &Default::default(),
+                options.head, choices, &options.metadata, options.limits))
+                .map(|result| (result.artifact, result.resolutions)).map_err(|error| error.to_string()),
+            None => node.runtime().block_on(node.prepare_replay_bundle_in(&request, &options.target, &options.source,
+                options.inputs, &Default::default(), options.head, &options.metadata, options.limits))
+                .map(|artifact| (artifact, Vec::new())).map_err(|error| error.to_string()),
+        }
     })();
     let cleanup = node.shutdown().err().map(|error| error.to_string());
-    let artifact = match (operation, cleanup) {
+    let (artifact, resolved_paths) = match (operation, cleanup) {
         (Ok(value), None) => value,
         (Err(error), None) => return Err(error),
         (Ok(_), Some(error)) => return Err(format!("node shutdown failed: {error}; no bundle was published")),
@@ -49,14 +62,25 @@ pub(super) fn run(args: &[String], direction: ReplayDirection) -> Result<u8, Str
     // writer used by merge preparation distinguishes post-link uncertainty.
     let (receipt, exit) = render(&options, artifact.source_head, &artifact.outcome,
         artifact.bundle.as_deref(), artifact.pack_objects, artifact.borrowed_objects)?;
+    let receipt = if let Some(choices) = resolutions.as_deref() {
+        if matches!(artifact.outcome, ReplayPreparation::Conflicted { .. }) {
+            return Err("explicit resolution returned unresolved conflicts; no bundle was published".into());
+        }
+        resolution::decorate_receipt(receipt, choices, &resolved_paths, options.inputs.target.algorithm())?
+    } else {
+        if !resolved_paths.is_empty() { return Err("automatic replay returned unsolicited resolutions".into()); }
+        receipt
+    };
     if let Some(bundle) = &artifact.bundle { publish_new_bundle(&options.output, bundle)?; }
     write_receipt(&mut std::io::stdout().lock(), &receipt, artifact.bundle.is_some())?;
     Ok(exit)
 }
 
 fn parse(args: &[String], direction: ReplayDirection) -> Result<Options, String> {
-    if args.len() < 6 || args[0] != "prepare" { return Err(USAGE.into()); }
-    if args.len() > 48 || args.iter().any(|s| s.len() > 64 * 1024)
+    if args.len() < 6 || !matches!(args[0].as_str(), "prepare" | "resolve") { return Err(USAGE.into()); }
+    let resolving = args[0] == "resolve";
+    let argument_limit = if resolving { 48 + 4 * PreparationLimits::default().max_conflicts } else { 48 };
+    if args.len() > argument_limit || args.iter().any(|s| s.len() > 64 * 1024)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
     { return Err("replay arguments exceed the bounded profile".into()); }
     if [args[1].as_str(), args[5].as_str()].iter().any(|s| s.is_empty() || s.len() > 4096) {
@@ -65,8 +89,15 @@ fn parse(args: &[String], direction: ReplayDirection) -> Result<Options, String>
     let tenant = TenantId::from_hex(&args[2]).map_err(|_| "invalid tenant ID")?;
     let repository = RepositoryId::from_hex(&args[3]).map_err(|_| "invalid repository ID")?;
     let mut flags = BTreeMap::new(); let mut at = 6;
+    let mut choices = Vec::new();
     while at < args.len() {
         let flag = args[at].as_str(); at += 1;
+        if resolution::is_choice(flag) {
+            if !resolving { return Err("conflict choices require the explicit resolve command".into()); }
+            if choices.len() >= PreparationLimits::default().max_conflicts { return Err("too many conflict choices".into()); }
+            choices.push(resolution::parse_choice(flag, args, &mut at)?);
+            continue;
+        }
         let switch = matches!(flag, "--trusted-local" | "--target-ref-hex");
         if !switch && !matches!(flag, "--profile" | "--source-ref" | "--source-ref-hex" | "--expected-source"
             | "--expected-target" | "--commit" | "--author" | "--committer" | "--timestamp" | "--message"
@@ -112,12 +143,17 @@ fn parse(args: &[String], direction: ReplayDirection) -> Result<Options, String>
         if let Some(value) = flags.get(name) { *field = usize::try_from(decimal(value)?).map_err(|_| "limit exceeds target width")?; }
     }
     limits.validate().map_err(|error| error.to_string())?;
+    let resolutions = if resolving {
+        if choices.is_empty() { return Err("resolve requires at least one explicit conflict choice".into()); }
+        resolution::validate_inputs(&choices, limits)?;
+        Some(choices)
+    } else { None };
     let head = flags.get("--expected-head").map(|s| parse_head(s)).transpose()?;
     let output = PathBuf::from(&args[5]);
     if output.file_name().is_none() { return Err("output must name a new file".into()); }
     Ok(Options { storage: args[1].clone().into(), tenant, repository, target, source, output,
         inputs: ReplayRequest { direction, target: expected_target, source_tip, selected_commit, mainline },
-        head, metadata, message_file, limits })
+        head, metadata, message_file, limits, resolutions })
 }
 fn decimal(text: &str) -> Result<u64, String> {
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) || (text.len() > 1 && text.starts_with('0')) {
