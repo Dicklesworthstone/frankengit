@@ -22,7 +22,7 @@ dependency could leave earlier objects placed even though no complete source
 had been validated. It also traversed every tree entry as a local dependency,
 including gitlinks to external repositories.
 
-`graph::validate` now tracks required kinds at enqueue and verifies every new
+`graph::validate_controlled` now tracks required kinds at enqueue and verifies every new
 constraint, including requirements introduced after an object was already read
 as a direct ref target. A root does not escape later parent/tree requirements
 merely because its original kind was unconstrained. Duplicate dependencies are
@@ -80,11 +80,13 @@ input ledger. It passes its live deadline to the common reader. All earlier
 receive tests remain registered; no alternative decoder or object store was
 introduced.
 
-The blocking local-source staging API still has no request-deadline parameter.
-This change does not claim interruptible import I/O or complete import
-cancellation propagation. The shared reader's cancellation test concerns its
-explicit deadline, used by receive; it is not evidence about the whole blocking
-import operation.
+The original standalone staging API retains its explicit hard resource bounds.
+Request-driven source imports now carry the original caller context through
+I/O, native decoding, graph validation, staging and admission, without a fresh
+publication budget. A separate deadline-taking standalone API is also available.
+[Caller-owned source import cancellation](SOURCE_IMPORT_CANCELLATION.md) records
+its cooperative blocking-I/O, outcome and verification boundaries. This does
+not preempt an operating-system call already in progress.
 
 Ref-namespace target rules remain separate from graph integrity. This does not
 activate compiled policies, enforce repository-wide mandatory candidate reviews,
