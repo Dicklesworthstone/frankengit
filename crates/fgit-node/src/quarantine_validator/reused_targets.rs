@@ -1,19 +1,20 @@
-//! Reuse of native ref targets absent from an otherwise valid receive pack.
+//! Visible-source proofs for every original dependency consumed by a receive.
 //!
-//! Prior admission is necessary, not sufficient: each reused root must also
-//! be reachable from a visible ref in the exact materialization that selected
+//! Prior admission is necessary, not sufficient: every reused root and
+//! dependency must be reachable from visible refs at the materialization selecting
 //! this validator. The per-call reader shares its original-input ledger and
 //! verified-kind cache with ordinary uploaded-graph frontier checks.
 
 use super::*;
 
-const MAX_ORIGINAL_OBJECTS: usize = 1_000_000;
+pub(super) const MAX_ORIGINAL_OBJECTS: usize = 1_000_000;
 
 pub(super) struct OriginalFrontier<'a, 'node> {
     validator: &'a ProductionQuarantineValidator<'node>,
     bases: &'a ExternalBases,
     bytes: usize,
     kinds: BTreeMap<GitOid, ObjectType>,
+    authorized: BTreeSet<GitOid>,
 }
 
 impl<'a, 'node> OriginalFrontier<'a, 'node> {
@@ -24,12 +25,20 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
         if bases.read_bytes > validator.external_read_limit() {
             return Err(RefusalCode::ResourceBudgetExceeded);
         }
-        Ok(Self { validator, bases, bytes: bases.read_bytes, kinds: BTreeMap::new() })
+        Ok(Self { validator, bases, bytes: bases.read_bytes, kinds: BTreeMap::new(), authorized: BTreeSet::new() })
     }
 
     pub(super) fn kind(
         &mut self, id: GitOid, deadline: &mut impl Deadline,
     ) -> Result<ObjectType, RefusalCode> {
+        checkpoint(deadline)?;
+        if !self.authorized.contains(&id) { return Err(RefusalCode::ObjectClosureIncomplete); }
+        self.read_kind(id, deadline)
+    }
+
+    fn read_kind(&mut self, id: GitOid, deadline: &mut impl Deadline)
+        -> Result<ObjectType, RefusalCode>
+    {
         checkpoint(deadline)?;
         self.require_selected(id)?;
         if let Some(kind) = self.kinds.get(&id) { return Ok(*kind); }
@@ -75,33 +84,31 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
         result
     }
 
-    /// Return exactly the requested roots missing from this upload. An empty
-    /// result does not touch original objects or add costs to ordinary pushes.
-    pub(super) fn reused_roots(
+    /// Establish all requested original inputs together, before any of their
+    /// kinds can be consumed by admission. Upload edges are never proof paths:
+    /// only previously authenticated visible roots seed this walk. A failed
+    /// proof grants no partial set and cannot publish or stage any upload.
+    pub(super) fn authorize(
         &mut self,
-        request: &ReceiveRequest,
-        uploaded: &BTreeMap<GitOid, VerifiedObject>,
+        required: &BTreeSet<GitOid>,
         edges_left: &mut usize,
         deadline: &mut impl Deadline,
-    ) -> Result<BTreeSet<GitOid>, RefusalCode> {
-        let mut wanted = BTreeSet::new();
-        for command in &request.commands {
-            checkpoint(deadline)?;
-            if command.new.is_zero() || uploaded.contains_key(&command.new) { continue; }
-            self.require_selected(command.new)?;
-            if wanted.len() >= MAX_ORIGINAL_OBJECTS && !wanted.contains(&command.new) {
-                return Err(RefusalCode::ResourceBudgetExceeded);
-            }
-            wanted.insert(command.new);
+    ) -> Result<(), RefusalCode> {
+        self.authorized.clear();
+        checkpoint(deadline)?;
+        if required.len() > MAX_ORIGINAL_OBJECTS {
+            return Err(RefusalCode::ResourceBudgetExceeded);
         }
-        if wanted.is_empty() { return Ok(wanted); }
-        let result = wanted.clone();
-        // Copying a currently advertised tip needs no history traversal. Its
-        // exact body must still exist, hash correctly and fit the same budget.
+        for id in required { checkpoint(deadline)?; self.require_selected(*id)?; }
+        if required.is_empty() { return Ok(()); }
+        let mut wanted = required.clone();
+        // Direct visible roots need no traversal, but their actual bodies
+        // must exist, reproduce their native IDs and fit the shared budget.
         if wanted.iter().all(|id| self.validator.visible_roots.contains(id)) {
-            for id in &wanted { self.kind(*id, deadline)?; }
+            for id in &wanted { self.read_kind(*id, deadline)?; }
             checkpoint(deadline)?;
-            return Ok(result);
+            self.authorized = required.clone();
+            return Ok(());
         }
         let mut pending = Vec::new();
         let mut requirements = BTreeMap::new();
@@ -114,10 +121,17 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
             checkpoint(deadline)?;
             let expected = requirements.get(&id).copied().flatten();
             if wanted.len() == 1 && wanted.contains(&id) {
-                let actual = self.kind(id, deadline)?;
+                let actual = self.read_kind(id, deadline)?;
                 check_kind(actual, expected)?;
-                return Ok(result);
+                checkpoint(deadline)?;
+                self.authorized = required.clone();
+                return Ok(());
             }
+            // Irrelevant file contents cannot lead to a wanted object. Do not
+            // read/copy their bodies just to prove reachability elsewhere.
+            // Their edge constraints still live in `requirements`; no claim
+            // of a complete historical fsck is made by this proof.
+            if expected == Some(ObjectType::Blob) && !wanted.contains(&id) { continue; }
             let format = self.validator.node.object_format;
             let limits = self.validator.parse_limits.clone();
             let (actual, edges) = self.with_object(id, deadline, |kind, body, deadline| {
@@ -138,8 +152,8 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
                 enqueue(child, Some(kind), &mut pending, &mut requirements, &self.kinds, deadline)?;
             }
         }
-        // Membership in the cumulative admitted set cannot revive a hidden-only
-        // or no-longer-reachable object by making it the target of a new ref.
+        // An uploaded wrapper commit/tree or a delta program cannot revive
+        // hidden-only/disconnected input any more than an omitted root can.
         Err(RefusalCode::ObjectClosureIncomplete)
     }
 }
@@ -172,5 +186,52 @@ fn enqueue(
     Ok(())
 }
 
+/// Identify bodies derivable wholly from uploaded bytes, without originals.
+/// Hash equality with an uploaded RESULT alone is insufficient: a delta may
+/// copy its hidden external base verbatim and produce that very same OID.
+/// Full entries seed this dependency walk; unseeded REF cycles do not.
+pub(super) fn independent_uploads(
+    pack: &QuarantinedPack, ids: &BTreeMap<u64, GitOid>, deadline: &mut impl Deadline,
+) -> Result<BTreeSet<GitOid>, RefusalCode> {
+    let mut independent = BTreeSet::new();
+    let mut pending = Vec::new();
+    let mut dependents: BTreeMap<GitOid, Vec<GitOid>> = BTreeMap::new();
+    for entry in pack.entries() {
+        checkpoint(deadline)?;
+        let id = *ids.get(&entry.offset).ok_or(RefusalCode::PackFramingInvalid)?;
+        let base = match entry.delta_base.as_ref() {
+            None => {
+                if independent.insert(id) {
+                    pending.try_reserve(1).map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
+                    pending.push(id);
+                }
+                continue;
+            }
+            Some(ParsedDeltaBase::Ofs { base_offset, .. }) =>
+                *ids.get(base_offset).ok_or(RefusalCode::PackFramingInvalid)?,
+            Some(ParsedDeltaBase::Ref { base, .. }) => *base,
+        };
+        let children = dependents.entry(base).or_default();
+        children.try_reserve(1).map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
+        children.push(id);
+    }
+    while let Some(base) = pending.pop() {
+        checkpoint(deadline)?;
+        if let Some(children) = dependents.remove(&base) {
+            for child in children {
+                checkpoint(deadline)?;
+                if independent.insert(child) {
+                    pending.try_reserve(1).map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
+                    pending.push(child);
+                }
+            }
+        }
+    }
+    checkpoint(deadline)?;
+    Ok(independent)
+}
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod visibility_tests;

@@ -17,6 +17,7 @@ impl ProductionQuarantineValidator<'_> {
         verified: &BTreeMap<GitOid, VerifiedObject>,
         in_pack_delta_bases: &BTreeMap<GitOid, BTreeSet<GitOid>>,
         external_bases: &ExternalBases,
+        independent_uploads: &BTreeSet<GitOid>,
         deadline: &mut impl Deadline,
     ) -> Result<BTreeSet<GitOid>, RefusalCode> {
         let mut pending = BTreeSet::new();
@@ -24,11 +25,25 @@ impl ProductionQuarantineValidator<'_> {
         // Every native edge occupies input bytes. The hard ceiling additionally
         // bounds work when an operator admits a larger expanded-byte envelope.
         let mut edges_left = self.pack_limits.max_total_expanded_bytes.min(MAX_GRAPH_EDGES);
-        let mut closure = originals.reused_roots(request, verified, &mut edges_left, deadline)?;
+        let mut closure = BTreeSet::new();
+        let mut required = BTreeMap::new();
+        // A provided full body (or a delta grounded only in provided bytes)
+        // does not need existing-history permission. A delta RESULT with the
+        // same OID as its original base does: identity is not provenance.
+        for (id, base) in &external_bases.bases {
+            checkpoint(deadline)?;
+            if !independent_uploads.contains(id) {
+                require_original(&mut required, *id, Some(base.object_type))?;
+            }
+        }
         for command in &request.commands {
             checkpoint(deadline)?;
-            if !command.new.is_zero() && verified.contains_key(&command.new) {
+            if command.new.is_zero() { continue; }
+            if verified.contains_key(&command.new) {
                 pending.insert(command.new);
+            } else {
+                require_original(&mut required, command.new, None)?;
+                closure.insert(command.new);
             }
         }
         while let Some(id) = pending.pop_first() {
@@ -57,9 +72,18 @@ impl ProductionQuarantineValidator<'_> {
                     pending.insert(child);
                     continue;
                 }
-                let actual = originals.kind(child, deadline)?;
-                require_kind(actual, expected)?;
+                require_original(&mut required, child, Some(expected))?;
             }
+        }
+        // One proof over the entire original dependency set, not one walk per
+        // tree entry or a check confined to omitted command roots. Originals
+        // used for reconstruction and graph verification share one byte ledger.
+        let identities = required.keys().copied().collect();
+        originals.authorize(&identities, &mut edges_left, deadline)?;
+        for (id, expected) in required {
+            checkpoint(deadline)?;
+            let actual = originals.kind(id, deadline)?;
+            if let Some(expected) = expected { require_kind(actual, expected)?; }
         }
         checkpoint(deadline)?;
         Ok(closure)
@@ -76,6 +100,22 @@ impl ProductionQuarantineValidator<'_> {
             &self.parse_limits, edges_left, deadline,
         )
     }
+}
+
+fn require_original(
+    required: &mut BTreeMap<GitOid, Option<ObjectType>>, id: GitOid, expected: Option<ObjectType>,
+) -> Result<(), RefusalCode> {
+    if id.is_zero() { return Err(RefusalCode::ObjectHeaderInvalid); }
+    if let Some(previous) = required.get_mut(&id) {
+        if let (Some(actual), Some(expected)) = (*previous, expected) { require_kind(actual, expected)?; }
+        if previous.is_none() { *previous = expected; }
+    } else {
+        if required.len() >= reused_targets::MAX_ORIGINAL_OBJECTS {
+            return Err(RefusalCode::ResourceBudgetExceeded);
+        }
+        required.insert(id, expected);
+    }
+    Ok(())
 }
 
 fn require_kind(actual: ObjectType, expected: ObjectType) -> Result<(), RefusalCode> {

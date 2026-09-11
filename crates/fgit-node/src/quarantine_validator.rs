@@ -159,7 +159,7 @@ impl Deadline for ForwardedDeadline<'_> {
 pub struct ProductionQuarantineValidator<'node> {
     node: &'node OneNode,
     selected_closure: AuthoritySelectedClosure,
-    // Only canonical visible refs seed reuse of roots omitted from the pack.
+    // Only canonical visible refs authorize any reused original dependency.
     visible_roots: BTreeSet<GitOid>,
     pack_limits: PackLimits,
     parse_limits: ParseLimits,
@@ -177,9 +177,13 @@ struct VerifiedObject {
 type VerifiedPackObjects = (BTreeMap<GitOid, VerifiedObject>, BTreeMap<u64, GitOid>);
 
 impl<'node> ProductionQuarantineValidator<'node> {
-    /// Binds pack validation to one exact authority-selected object closure.
+    /// Unit-fixture constructor with explicit object-level source permission.
+    /// Production MUST use the authenticated materialization factory below,
+    /// which derives visible roots from real refs even when that set is empty.
+    /// Visibility tests narrow these synthetic roots explicitly.
+    #[cfg(test)]
     #[must_use]
-    pub(crate) const fn new(
+    pub(crate) fn new(
         node: &'node OneNode,
         selected_closure: AuthoritySelectedClosure,
         pack_limits: PackLimits,
@@ -187,8 +191,8 @@ impl<'node> ProductionQuarantineValidator<'node> {
     ) -> Self {
         Self {
             node,
+            visible_roots: selected_closure.closure().objects().clone(),
             selected_closure,
-            visible_roots: BTreeSet::new(),
             pack_limits,
             parse_limits,
         }
@@ -526,19 +530,16 @@ impl OneNode {
         {
             return Err(RefusalCode::HashAlgorithmDomainMismatch);
         }
-        let mut validator = ProductionQuarantineValidator::new(
-            self,
-            selected_closure,
-            pack_limits,
-            parse_limits,
-        );
-        // Cumulative admitted membership alone is not disclosure authority:
-        // hidden-only and no-longer-reachable objects cannot seed a new ref.
-        validator.visible_roots = materialized.snapshot().refs.iter()
+        // This production path never substitutes cumulative membership for
+        // visibility, including the all-hidden/no-visible-ref case. The fixture
+        // constructor is not compiled into the production library.
+        let visible_roots = materialized.snapshot().refs.iter()
             .filter(|(name, _)| !materialized.snapshot().hidden_refs.hides(name.as_bytes()))
             .map(|(_, id)| *id)
             .collect();
-        Ok(validator)
+        Ok(ProductionQuarantineValidator {
+            node: self, selected_closure, visible_roots, pack_limits, parse_limits,
+        })
     }
 }
 
@@ -594,8 +595,10 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
         }
         let (mut verified, ids_at_offset) = self.verified_pack_objects(pack, &bases, deadline)?;
         let in_pack_delta_bases = Self::in_pack_delta_bases(pack, &ids_at_offset, deadline)?;
-        let closure =
-            self.reachable_uploaded_closure(request, &verified, &in_pack_delta_bases, &bases, deadline)?;
+        let independent = reused_targets::independent_uploads(pack, &ids_at_offset, deadline)?;
+        let closure = self.reachable_uploaded_closure(
+            request, &verified, &in_pack_delta_bases, &bases, &independent, deadline,
+        )?;
         // This second phase keeps a later malformed delta from leaving earlier
         // reachable objects in fabric.  Immutable placement remains
         // non-authority, but only the fully validated exact closure may
