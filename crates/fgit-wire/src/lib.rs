@@ -1398,6 +1398,12 @@ impl PackOptions {
     pub const fn ofs_delta(self) -> bool {
         self.contains(Self::OFS_DELTA)
     }
+
+    /// Whether annotated tags pointing at transmitted objects must accompany them.
+    #[must_use]
+    pub const fn include_tag(self) -> bool {
+        self.contains(Self::INCLUDE_TAG)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

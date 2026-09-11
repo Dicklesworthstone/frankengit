@@ -451,6 +451,15 @@ fn fixture(format: GitHashAlgorithm) -> Fixture {
 }
 
 fn delete_private(node: &OneNode, private: GitOid) {
+    delete_named_ref(
+        node,
+        private,
+        b"refs/heads/private",
+        b"delete-private-disclosure-fixture",
+    );
+}
+
+fn delete_named_ref(node: &OneNode, private: GitOid, ref_name: &[u8], retry_key: &[u8]) {
     let format = node.object_format;
     let request = node.request_context();
     let materialized = node
@@ -472,7 +481,13 @@ fn delete_private(node: &OneNode, private: GitOid) {
     let zero = "0".repeat(format.digest_len() * 2);
     let input = encode_packets(
         &[
-            Packet::Data(format!("{private} {zero} refs/heads/private\0{caps}\n").into_bytes()),
+            Packet::Data(
+                format!(
+                    "{private} {zero} {}\0{caps}\n",
+                    String::from_utf8_lossy(ref_name)
+                )
+                .into_bytes(),
+            ),
             Packet::Flush,
         ],
         &receive_limits.wire,
@@ -480,7 +495,7 @@ fn delete_private(node: &OneNode, private: GitOid) {
     .unwrap();
     let session = LoopbackReceiveSession::authenticated(
         PrincipalId::from_bytes([0x64; 16]),
-        IdempotencyKey::new(b"delete-private-disclosure-fixture".to_vec()).unwrap(),
+        IdempotencyKey::new(retry_key.to_vec()).unwrap(),
     );
     let outcome = node
         .runtime()
@@ -586,6 +601,20 @@ fn exchange(
     Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal>,
     Vec<u8>,
 ) {
+    exchange_with_tags(node, version, want, have, false)
+}
+
+fn exchange_with_tags(
+    node: OneNode,
+    version: u8,
+    want: GitOid,
+    have: Option<GitOid>,
+    include_tag: bool,
+) -> (
+    OneNode,
+    Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal>,
+    Vec<u8>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let suffix = if version == 0 {
@@ -605,7 +634,17 @@ fn exchange(
         ));
         packets.push(Packet::Delimiter);
     }
-    packets.push(Packet::Data(format!("want {want}\n").into_bytes()));
+    let tag_capability = if include_tag && version != 2 {
+        " include-tag"
+    } else {
+        ""
+    };
+    packets.push(Packet::Data(
+        format!("want {want}{tag_capability}\n").into_bytes(),
+    ));
+    if include_tag && version == 2 {
+        packets.push(Packet::Data(b"include-tag\n".to_vec()));
+    }
     if version != 2 {
         packets.push(Packet::Flush);
     }
@@ -857,5 +896,281 @@ fn hidden_ref_rules_select_the_negotiation_scope_before_any_hidden_body_read() {
             assert!(!repository.is_common(id));
             assert!(!source.reads.borrow().contains(&id));
         }
+    }
+}
+
+fn publish_tag_fixture(node: &OneNode, target: GitOid) -> (GitOid, GitOid, GitOid) {
+    let inner = node
+        .put_git_object(ObjectType::Tag, tag_bytes(target, "commit"))
+        .unwrap()
+        .identity();
+    let outer = node
+        .put_git_object(ObjectType::Tag, tag_bytes(inner, "tag"))
+        .unwrap()
+        .identity();
+    let mut deleted_body = tag_bytes(target, "commit");
+    deleted_body
+        .extend_from_slice(b"formerly visible tag, never automatically resend after deletion\n");
+    let deleted = node
+        .put_git_object(ObjectType::Tag, deleted_body)
+        .unwrap()
+        .identity();
+    let request = node.request_context();
+    let current = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&request))
+        .unwrap();
+    let mut objects = current.selected_closure().closure().objects().clone();
+    objects.extend([inner, outer, deleted]);
+    let closure = ValidatedClosure {
+        object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
+            objects.clone(),
+        ))
+        .unwrap(),
+        objects,
+    };
+    let zero = GitOid::from_hex(
+        node.object_format,
+        &"0".repeat(node.object_format.digest_len() * 2),
+    )
+    .unwrap();
+    let updates = [
+        (b"refs/tags/inner".as_slice(), inner),
+        (b"refs/tags/outer".as_slice(), outer),
+        (b"refs/tags/deleted".as_slice(), deleted),
+    ]
+    .map(|(name, new)| SourceRefUpdate {
+        old: zero,
+        new,
+        ref_name: name.to_vec(),
+    });
+    let receipt = SourceImportReceipt {
+        object_format: node.object_format,
+        object_count: closure.objects.len().try_into().unwrap(),
+        delete_only: false,
+        origin: SourceImportOrigin::LocalGitDirectory,
+    };
+    let validated = validate_source_import(&updates, &receipt, closure).unwrap();
+    let context = AdmissionContext {
+        head_key: node.head_key.clone(),
+        tenant_id: node.tenant_id(),
+        repository_id: node.repository_id(),
+        principal_id: PrincipalId::from_bytes([0x64; 16]),
+        idempotency_key: IdempotencyKey::new(b"visible-tags-import".to_vec()).unwrap(),
+        object_format: node.object_format,
+    };
+    let imported = node
+        .runtime()
+        .block_on(node.admit_validated_source_import_durable_in(
+            &request,
+            &context,
+            &validated,
+            AdmissionLimits::default(),
+        ))
+        .unwrap();
+    assert!(imported.commands.iter().all(|command| matches!(
+        command.terminal.outcome,
+        fgit_types::DecisionOutcome::Committed { .. }
+    )));
+    delete_named_ref(node, deleted, b"refs/tags/deleted", b"delete-tag-fixture");
+    (inner, outer, deleted)
+}
+
+fn exchange_ls_refs(node: OneNode, peel: bool) -> (OneNode, Vec<u8>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let greeting = format!(
+        "git-upload-pack {}\0host=loopback\0\0version=2\0",
+        String::from_utf8_lossy(node.git_daemon_repository_path().as_bytes())
+    );
+    let mut packets = vec![
+        Packet::Data(greeting.into_bytes()),
+        Packet::Data(b"command=ls-refs\n".to_vec()),
+        Packet::Data(format!("object-format={}\n", node.object_format.as_str()).into_bytes()),
+        Packet::Delimiter,
+    ];
+    if peel {
+        packets.push(Packet::Data(b"peel\n".to_vec()));
+    }
+    packets.push(Packet::Flush);
+    let bytes = encode_packets(&packets, &WireLimits::default()).unwrap();
+    let worker = std::thread::spawn(move || {
+        let result = node.serve_git_daemon_once(&listener);
+        (node, result)
+    });
+    let mut client = TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    client.write_all(&bytes).unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    drop(client);
+    let (node, result) = worker.join().unwrap();
+    assert!(result.is_ok(), "actual ls-refs transport: {result:?}");
+    (node, response)
+}
+
+#[test]
+fn actual_daemon_peels_and_follows_native_tags_without_resurrecting_deleted_tags() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let Fixture {
+            scratch,
+            mut node,
+            config,
+            public,
+            private,
+            visible,
+            ..
+        } = fixture(format);
+        delete_private(&node, private);
+        let (inner, outer, deleted) = publish_tag_fixture(&node, public);
+        // A tag-only repository proves that legacy negotiation accepts the
+        // peeled IDs it actually advertised, without loosening other wants.
+        delete_named_ref(&node, public, b"refs/heads/public", b"tag-only-repository");
+        let mut base_bodies = visible
+            .iter()
+            .map(|id| node.read_git_object(*id).unwrap().payload().to_vec())
+            .collect::<BTreeSet<_>>();
+        let inner_body = node.read_git_object(inner).unwrap().payload().to_vec();
+        let outer_body = node.read_git_object(outer).unwrap().payload().to_vec();
+        let deleted_body = node.read_git_object(deleted).unwrap().payload().to_vec();
+        node.shutdown().unwrap();
+        node = OneNode::open_existing(config).unwrap();
+        for peel in [false, true] {
+            let (returned, response) = exchange_ls_refs(node, peel);
+            node = returned;
+            for (name, id) in [("inner", inner), ("outer", outer)] {
+                let expected = if peel {
+                    format!("{id} refs/tags/{name} peeled:{public}\n")
+                } else {
+                    format!("{id} refs/tags/{name}\n")
+                };
+                assert!(
+                    response
+                        .windows(expected.len())
+                        .any(|bytes| bytes == expected.as_bytes()),
+                    "v2 requested peel={peel}: missing {expected}"
+                );
+            }
+            assert!(
+                !response
+                    .windows(b"refs/tags/deleted".len())
+                    .any(|bytes| bytes == b"refs/tags/deleted")
+            );
+            assert!(!response.windows(3).any(|bytes| bytes == b"^{}"));
+        }
+        for version in [0, 1, 2] {
+            for include_tag in [false, true] {
+                let (returned, result, response) =
+                    exchange_with_tags(node, version, public, None, include_tag);
+                node = returned;
+                assert!(
+                    matches!(result, Ok(GitDaemonSessionOutcome::Pack(_))),
+                    "{format:?} v{version} include-tag={include_tag}: {result:?}"
+                );
+                if version != 2 {
+                    for name in ["inner", "outer"] {
+                        let record = format!("{public} refs/tags/{name}^{{}}\n");
+                        assert!(
+                            response
+                                .windows(record.len())
+                                .any(|bytes| bytes == record.as_bytes()),
+                            "missing legacy peeled record {record}"
+                        );
+                    }
+                }
+                let bytes = extract_pack(&response, version);
+                let pack = fgit_pack::read_verified_pack(
+                    &bytes,
+                    format,
+                    &PackLimits::default(),
+                    &mut || true,
+                    &fgit_pack::NativeChecksumVerifier,
+                )
+                .unwrap();
+                let bodies = pack
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.inflated.clone())
+                    .collect::<BTreeSet<_>>();
+                let mut expected = base_bodies.clone();
+                if include_tag {
+                    expected.extend([inner_body.clone(), outer_body.clone()]);
+                }
+                assert_eq!(
+                    bodies, expected,
+                    "automatic tags are exactly the requested, currently visible chain"
+                );
+                assert!(!bodies.contains(&deleted_body));
+            }
+        }
+        // Even include-tag must not add tags when their referent is excluded
+        // as common. A zero-entry response is still a checksum-verified pack.
+        for version in [0, 1, 2] {
+            let (returned, result, response) =
+                exchange_with_tags(node, version, public, Some(public), true);
+            node = returned;
+            assert!(
+                matches!(result, Ok(GitDaemonSessionOutcome::Pack(_))),
+                "already-common tag referent: {result:?}"
+            );
+            let bytes = extract_pack(&response, version);
+            let pack = fgit_pack::read_verified_pack(
+                &bytes,
+                format,
+                &PackLimits::default(),
+                &mut || true,
+                &fgit_pack::NativeChecksumVerifier,
+            )
+            .unwrap();
+            assert!(pack.entries().is_empty());
+        }
+        base_bodies.clear();
+        node.shutdown().unwrap();
+        drop(scratch);
+    }
+}
+
+#[test]
+fn legacy_peeled_records_are_bounded_and_do_not_duplicate_existing_records() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let tag = git_object_id(format, GitObjectKind::Blob, b"tag-id-fixture");
+        let leaf = git_object_id(format, GitObjectKind::Blob, b"leaf-id-fixture");
+        let snapshot = AdmissionSnapshot {
+            refs: BTreeMap::from([(RefName::try_new(b"refs/tags/release").unwrap(), tag)]),
+            ..AdmissionSnapshot::default()
+        };
+        let mut repository =
+            AdmissionUploadPackRepository::from_snapshot(&snapshot, format, &WireLimits::default())
+                .unwrap();
+        repository.tag_peels.insert(tag, leaf);
+        let two = WireLimits {
+            max_advertised_refs: 2,
+            ..WireLimits::default()
+        };
+        let records = tags::legacy_advertised_refs(&repository, &two).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].name, b"refs/tags/release^{}");
+        assert_eq!(records[1].oid, leaf);
+        assert!(matches!(
+            tags::legacy_advertised_refs(
+                &repository,
+                &WireLimits {
+                    max_advertised_refs: 1,
+                    ..two.clone()
+                }
+            ),
+            Err(WireError::TooManyAdvertisedRefs { limit: 1 })
+        ));
+        repository.refs = records.clone();
+        assert_eq!(
+            tags::legacy_advertised_refs(&repository, &two).unwrap(),
+            records
+        );
     }
 }
