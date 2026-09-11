@@ -170,18 +170,23 @@ limits refuse rather than disabling checks.
 This is one-commit path-v1 replay, not a complete Git sequencer or rebase engine.
 It does not implement ranges, continue/abort state, automatic rename/copy
 inference, custom drivers, attribute interpretation, or automatic conflict
-resolution. Existing `fg merge resolve` is a two-parent merge workflow, not a
-replay-conflict continuation. New candidates require explicit review; neither
-preparation nor artifact inspection authorizes their own publication.
+resolution. Explicit replay conflicts are handled by `fg cherry-pick resolve`
+and `fg revert resolve`, using the same path planner and target-only bundle
+workflow; see [replay conflict resolution](NATIVE_REPLAY_CONFLICT_RESOLUTION.md).
+`fg merge resolve` remains the separate two-parent workflow. None implements
+persistent continue/abort state. New candidates require explicit review;
+neither preparation nor artifact inspection authorizes publication.
 
 ## Verification status
 
-Fifteen Rust test functions are registered: eight core replay tests, three
+The original preparation slice registers fifteen Rust tests: eight core replay tests, three
 embedded-node integration tests, and four CLI tests. They cover both native
 hash formats, historical selection, exact single-parent metadata, root and
 mainline semantics, inverse binary/mode/deletion changes, no-change outcomes,
 conflicts, bounded work, visibility, source-only borrowed objects, inspection,
-publication, reversal, stale snapshots and retry without rollback.
+publication, reversal, stale snapshots and retry without rollback. The explicit
+resolution extension adds seventeen tests and its own smoke campaign, documented
+in [the resolution guide](NATIVE_REPLAY_CONFLICT_RESOLUTION.md#verification-boundary).
 
 ```bash
 python3 scripts/e2e/commit_replay_smoke.py --self-test
