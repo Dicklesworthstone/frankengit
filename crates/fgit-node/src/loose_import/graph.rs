@@ -11,6 +11,7 @@ use fgit_git_object::{
 use fgit_pack::Deadline;
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefusalCode};
 
+use super::control::ImportControl;
 use super::{LooseGitImportRefusal, MAX_IMPORT_OBJECTS, MAX_IMPORT_TOTAL_OBJECT_BYTES};
 
 /// Independent total edge work; repeated references and gitlinks count too.
@@ -43,13 +44,26 @@ pub(super) struct ValidatedImport {
 /// Bodies are retained under the existing aggregate byte bound so subsequent
 /// source-file changes cannot replace bytes between validation and placement.
 /// No fabric write occurs here, even when a late dependency is unavailable.
+#[cfg(test)]
 pub(super) fn validate(
+    roots: impl IntoIterator<Item = GitOid>, format: GitHashAlgorithm,
+    parse_limits: &ParseLimits, limits: Limits,
+    load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
+) -> Result<ValidatedImport, LooseGitImportRefusal> {
+    let mut live = || true;
+    let control = ImportControl::new(&mut live);
+    validate_controlled(roots, format, parse_limits, limits, load, &control)
+}
+
+pub(super) fn validate_controlled(
     roots: impl IntoIterator<Item = GitOid>,
     format: GitHashAlgorithm,
     parse_limits: &ParseLimits,
     limits: Limits,
     mut load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
+    control: &ImportControl<'_>,
 ) -> Result<ValidatedImport, LooseGitImportRefusal> {
+    control.checkpoint()?;
     let maximum = Limits::default();
     if limits.objects > maximum.objects || limits.edges > maximum.edges
         || limits.bytes > maximum.bytes
@@ -60,13 +74,17 @@ pub(super) fn validate(
     let mut pending = BTreeSet::new();
     let mut objects = BTreeMap::<GitOid, LooseObject>::new();
     for root in roots {
+        control.checkpoint()?;
         enqueue(root, None, format, limits.objects, &mut required, &mut pending)?;
     }
     let mut total_bytes = 0_u64;
     let mut edges_left = limits.edges;
     while let Some(identity) = pending.pop_first() {
-        let object = load(identity)?;
+        control.checkpoint()?;
+        let loaded = load(identity);
+        let object = control.after(loaded, |error| error)?;
         let observed = fgit_crypto::git_object_id(format, object.object_type, &object.body);
+        control.checkpoint()?;
         if observed != identity {
             return Err(LooseGitImportRefusal::ObjectIdentityMismatch { expected: identity, observed });
         }
@@ -82,6 +100,7 @@ pub(super) fn validate(
         let parsed = parse_object_body(object.object_type, &object.body,
             AcceptanceProfile::GitCompatibleImport, parse_limits)
             .map_err(|error| LooseGitImportRefusal::ObjectStructure(Box::new(error)))?;
+        control.checkpoint()?;
         // Retain the established import refusal vocabulary for these cases.
         match &parsed {
             ParsedObject::Commit(commit) if commit.tree_reference().is_none() => {
@@ -93,12 +112,13 @@ pub(super) fn validate(
             _ => {}
         }
         let edges = references(format, &parsed, &object.body, parse_limits,
-            &mut edges_left, &mut || true)
-            .map_err(|code| LooseGitImportRefusal::ObjectGraph { identity, code })?;
+            &mut edges_left, &mut || control.is_live());
+        let edges = control.after(edges, |code| LooseGitImportRefusal::ObjectGraph { identity, code })?;
         // Discard parsed copies before retaining the exact original body.
         drop(parsed);
         objects.insert(identity, object);
         for (child, kind) in edges {
+            control.checkpoint()?;
             // Even a previously read root or child must satisfy this new edge.
             // In particular, a root's unconstrained kind cannot hide a later
             // commit/tree/tag requirement.
@@ -108,6 +128,7 @@ pub(super) fn validate(
             enqueue(child, Some(kind), format, limits.objects, &mut required, &mut pending)?;
         }
     }
+    control.checkpoint()?;
     Ok(ValidatedImport { objects, total_bytes })
 }
 

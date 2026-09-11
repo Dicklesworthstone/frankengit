@@ -7105,7 +7105,7 @@ impl OneNode {
     /// caller-supplied closure roots nor a caller-supplied publication basis.
     pub async fn import_loose_git_directory_durable_in(
         &self,
-        _request: &NodeRequestContext,
+        request: &NodeRequestContext,
         source: &Path,
         principal_id: PrincipalId,
         idempotency_key: &[u8],
@@ -7127,7 +7127,7 @@ impl OneNode {
             .map_err(|error| NodeSourceImportRefusal::Idempotency(Box::new(error)))?;
         let limits = AdmissionLimits::default();
         let staged = self
-            .stage_loose_git_import_with_ref_limit(source, limits.max_commands)
+            .stage_loose_git_import_with_ref_limit_in(request, source, limits.max_commands)
             .map_err(|error| NodeSourceImportRefusal::Staging(Box::new(error)))?;
         let object_count = u32::try_from(staged.object_count()).map_err(|_| {
             NodeSourceImportRefusal::ObjectCountOutOfRange {
@@ -7169,9 +7169,12 @@ impl OneNode {
             idempotency_key,
             object_format: self.object_format,
         };
-        let admission_request = self.request_context();
+        // The caller's deadline covers source work AND publication. Do not
+        // detach admission with a fresh budget after expensive preparation.
+        loose_import::checkpoint_request(request)
+            .map_err(|error| NodeSourceImportRefusal::Staging(Box::new(error)))?;
         self.admit_validated_source_import_durable_in(
-            &admission_request,
+            request,
             &context,
             &validated,
             limits,
