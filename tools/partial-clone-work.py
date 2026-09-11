@@ -13,13 +13,24 @@ def run(work,td,label,command,timeout=720,env=None):
             code=124
     lines=log.read_text(errors='replace').splitlines()
     summaries=[line for line in lines if line.startswith('test result:')]
-    item={'label':label,'command':' '.join(command),'revision':BASE,'exit':code,'summaries':summaries}
+    item={'label':label,'command':' '.join(command),'revision':git('rev-parse','HEAD',cwd=work),'exit':code,'summaries':summaries}
     print('VERIFICATION',json.dumps(item),flush=True)
     print('\n'.join(lines[-180:] if code else [line for line in lines if line.startswith('test result:') or 'Finished ' in line or 'PINNED_PARTIAL_CELL' in line or 'FGIT_ORACLE_' in line]),flush=True)
     return item
-with tempfile.TemporaryDirectory(prefix='fg-partial-complete-') as td:
+with tempfile.TemporaryDirectory(prefix='fg-partial-checkout-') as td:
     work=pathlib.Path(td)/'source'
     subprocess.run(['git','worktree','add','--detach',str(work),BASE],check=True)
+    subprocess.run(['python3',str(ROOT/'tools/partial-payload/apply-checkout.py')],cwd=work,check=True)
+    paths=['crates/fgit-node/src/upload_visibility/tests/partial_oracle.rs','scripts/e2e/oracle/partial_clone_client.py']
+    subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',paths[0]],cwd=work,check=True)
+    assert set(git('diff','--name-only',cwd=work).splitlines())==set(paths)
+    git('diff','--check',cwd=work)
+    git('config','user.name','Jeff Emanuel',cwd=work); git('config','user.email','35050222+Dicklesworthstone@users.noreply.github.com',cwd=work)
+    git('add','--',*paths,cwd=work)
+    git('commit','-m','test(fetch): exercise automatic checkout hydration with the pinned Git client','-m','Keep exact initial inventories, promisor markers, strict fsck and one-object lazy fetch assertions. Add normal checkout from blobless and treeless clones, exact worktree bytes and restricted hydrated object sets. Drive bounded real daemon sessions for multi-stage hydration rather than ending the fixture after the first connection. Keep the source/binary receipt and Bubblewrap boundary unchanged.',cwd=work)
+    source=git('rev-parse','HEAD',cwd=work); source_branch='tooling/partial-source-'+os.environ['GITHUB_SHA'][:12]
+    subprocess.run(['git','push','origin',f'{source}:refs/heads/{source_branch}'],cwd=work,check=True)
+    print('PRODUCT_SOURCE',source,source_branch,flush=True)
     evidence=[]
     if not shutil.which('bwrap'):
         for label,cmd in [('sandbox-index',['sudo','apt-get','update','-qq']),('sandbox-install',['sudo','apt-get','install','-y','bubblewrap'])]:
@@ -44,27 +55,26 @@ with tempfile.TemporaryDirectory(prefix='fg-partial-complete-') as td:
         try: evidence.append(oracle.result())
         except Exception as error:
             print('ORACLE_SETUP_EXCEPTION',repr(error),flush=True)
-            evidence.append({'label':'oracle-build','exit':69,'summaries':[],'command':'pinned source/build setup','revision':BASE})
+            evidence.append({'label':'oracle-build','exit':69,'summaries':[],'command':'pinned source/build setup','revision':source})
     if evidence[-1]['exit']==0:
         evidence.append(run(work,td,'pinned-client',['cargo','test','--locked','-p','fgit-node','--lib','pinned_git_partial_clone_promisor_and_lazy_read_round_trip','--','--ignored','--nocapture'],900,env))
     for receipt in sorted((oracle_root/'runs').glob('*/transcripts/*.json')):
         print('PINNED_RECEIPT',receipt.read_text().strip(),flush=True)
     for log in sorted((oracle_root/'runs').glob('*/transcripts/*.packets')):
-        lines=log.read_text(errors='replace').splitlines()
-        print('WIRE_TRACE',log.name,'\n'.join(lines[-80:]),flush=True)
+        print('WIRE_TRACE',log.name,'\n'.join(log.read_text(errors='replace').splitlines()[-80:]),flush=True)
     assert not git('status','--porcelain',cwd=work)
-    print('FINAL_EVIDENCE',json.dumps({'revision':BASE,'commands':evidence}),flush=True)
+    print('FINAL_EVIDENCE',json.dumps({'revision':source,'commands':evidence}),flush=True)
     path=work/'docs/PARTIAL_CLONE_SERVING.md'
-    text=path.read_text()+'\n## Revision-bound verification follow-through\n\nSource: `'+BASE+'`. Runner: Ubuntu 22.04, repository-pinned nightly and locked dependencies.\n\n'
+    text=path.read_text()+'\n## Revision-bound verification follow-through\n\nSource: `'+source+'`. Runner: Ubuntu 22.04, repository-pinned nightly and locked dependencies.\n\n'
     text+='The previous Ubuntu 24.04 attempt at `cb40dd242a53f80a07fa961a27656110568cfc78` completed 235 node library tests, 27 daemon integration tests and 230 wire tests with no failures, but the separate pinned-client campaign stopped with exit 69 because Bubblewrap could not establish its namespace. This run retains the same sandbox requirement; no guard, assertion or isolation check was bypassed.\n\n'
+    text+='The expanded optional oracle test checks ordinary checkout as well as known-object lazy reads. The fixture serves bounded successive real sessions so a treeless checkout can retrieve its trees and blobs independently. Exact inventories require unrelated historical contents and gitlink targets to stay absent.\n\n'
     text+='| Command | Exit | Completed target summaries |\n|---|---:|---|\n'
     for item in evidence:
         text+='| `'+item['command']+'` | '+str(item['exit'])+' | '+'; '.join(item['summaries'])+' |\n'
     text+='\nAn unavailable or timed-out oracle is not a passing campaign. The six existing ignored wire-oracle tests are not covered by a normal all-targets run. These are command observations, not a full workspace, lint, release, security or independent batch gate.\n'
-    path.write_text(text)
-    git('config','user.name','Jeff Emanuel',cwd=work); git('config','user.email','35050222+Dicklesworthstone@users.noreply.github.com',cwd=work)
+    path.write_text(text); git('diff','--check',cwd=work)
     git('add','--','docs/PARTIAL_CLONE_SERVING.md',cwd=work)
-    git('commit','-m','docs(fetch): retain revision-bound partial-clone and pinned-client outcomes',cwd=work)
+    git('commit','-m','docs(fetch): retain measured partial-clone checkout and lazy-fetch outcomes',cwd=work)
     result=git('rev-parse','HEAD',cwd=work); branch='tooling/partial-result-'+os.environ['GITHUB_SHA'][:12]
     subprocess.run(['git','push','origin',f'{result}:refs/heads/{branch}'],cwd=work,check=True)
     print('PRODUCT_RESULT',result,branch,flush=True)
