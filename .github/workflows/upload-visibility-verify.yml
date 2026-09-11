@@ -1,0 +1,96 @@
+name: Verify exact-head upload disclosure
+on:
+  push:
+    branches:
+      - tooling/upload-visibility-e81b6319
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PAYLOAD_SHA: ${{ github.sha }}
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - name: Check out current main without updating it
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply exact source and payload guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/upload-visibility"
+          mkdir -p "$out"
+          git rev-parse HEAD | tee "$out/base.txt"
+          git fetch origin "$PAYLOAD_SHA"
+          git show "$PAYLOAD_SHA:.visibility-payload/apply.py" > "$RUNNER_TEMP/apply-visibility.py"
+          python "$RUNNER_TEMP/apply-visibility.py" | tee "$out/apply.log"
+          git diff --check
+      - name: Parse Rust and format only the new files
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/upload-visibility"
+          rustc -Vv | tee "$out/rustc.txt"
+          rustfmt --edition 2024 --config skip_children=true crates/fgit-node/src/upload_visibility.rs crates/fgit-node/src/upload_visibility/tests.rs
+          rustfmt --edition 2024 --config skip_children=true --emit stdout crates/fgit-node/src/lib.rs > "$out/parsed-lib.rs"
+          git diff --check
+      - name: Run targeted native regressions and distinguish baseline failures
+        shell: bash
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/upload-visibility"
+          timeout 600 cargo test --locked -p fgit-node --lib upload_visibility::tests -- --nocapture > "$out/native.log" 2>&1
+          result=$?
+          printf '%s\n' "$result" | tee "$out/native.exit"
+          tail -n 100 "$out/native.log"
+          if [ "$result" != 0 ]; then
+            base="$(cat "$out/base.txt")"
+            git worktree add --detach "$RUNNER_TEMP/visibility-baseline" "$base"
+            (cd "$RUNNER_TEMP/visibility-baseline" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" timeout 300 cargo test --locked -p fgit-node --lib --no-run) > "$out/baseline.log" 2>&1
+            printf '%s\n' "$?" | tee "$out/baseline.exit"
+            tail -n 80 "$out/baseline.log"
+          fi
+          exit 0
+      - name: Prepare only the intended implementation commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/upload-visibility"
+          git diff --exit-code -- Cargo.toml Cargo.lock .beads .github
+          git add crates/fgit-node/src/lib.rs crates/fgit-node/src/upload_visibility.rs crates/fgit-node/src/upload_visibility/tests.rs
+          python - <<'PY'
+          import subprocess
+          expected={'crates/fgit-node/src/lib.rs','crates/fgit-node/src/upload_visibility.rs','crates/fgit-node/src/upload_visibility/tests.rs'}
+          actual=set(subprocess.check_output(['git','diff','--cached','--name-only']).decode().splitlines())
+          assert actual==expected,(actual,expected)
+          PY
+          git diff --cached --check
+          git diff --cached --binary > "$out/prepared.patch"
+          git config user.name 'Jeff Emanuel'
+          git config user.email '35050222+Dicklesworthstone@users.noreply.github.com'
+          git commit -m 'fix(fetch): bind negotiation and pack selection to exact-head visible graph' -m 'Do not authorize wants or haves from cumulative admission history. Prove the complete bounded typed graph from visible refs, keep the proof at one authenticated basis, and use it in the actual v0/v1/v2 daemon pack path. Preserve explicit local historical export. Prevent hidden HEAD targets reappearing as unborn symrefs. Add eight regression tests, including real durable import, receive deletion, reopen and raw TCP protocol exchanges in both native hash domains. Native verification outcomes are recorded in the preparation workflow, not asserted by this commit. No schema, dependency, lockfile, bead or workflow changes are included.'
+          git rev-parse HEAD | tee "$out/result.txt"
+          result_branch="tooling/upload-visibility-result-${PAYLOAD_SHA:0:12}"
+          git push origin "HEAD:refs/heads/$result_branch"
+          printf '%s\n' "$result_branch" | tee "$out/result-branch.txt"
+          git show --stat --oneline HEAD
+      - name: Retain source and verification evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/upload-visibility"
+          mkdir -p "$out"
+          tar --exclude=.git --exclude=target -czf "$out/source.tar.gz" .
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: upload-visibility-evidence
+          path: ${{ runner.temp }}/upload-visibility
+          retention-days: 1
+          if-no-files-found: error
