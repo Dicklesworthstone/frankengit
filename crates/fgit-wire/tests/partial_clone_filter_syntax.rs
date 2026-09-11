@@ -144,15 +144,15 @@ fn unadvertised_legacy_wants_require_both_server_capability_and_repository_permi
                 };
                 for wanted in [oid(format, 1), oid(format, 2), oid(format, 3)] {
                     repository.checks.set(0);
-                    let caps = Capabilities::parse_v1(
-                        if allow {
-                            b"allow-reachable-sha1-in-want"
-                        } else {
-                            b""
-                        },
-                        &WireLimits::default(),
-                    )
-                    .unwrap();
+                    let caps = if allow {
+                        Capabilities::parse_v1(
+                            b"allow-reachable-sha1-in-want",
+                            &WireLimits::default(),
+                        )
+                        .unwrap()
+                    } else {
+                        Capabilities::default()
+                    };
                     let mut machine =
                         LegacyUploadPack::new(version, caps, WireLimits::default()).unwrap();
                     let result = machine.push_packet(
