@@ -6,6 +6,7 @@
 //! rewrite the canonical per-decision closure or the trusted local exporter.
 use super::*;
 pub(super) mod tags;
+mod partial_clone;
 
 const MAX_DISCLOSURE_EDGES: usize = 4_000_000;
 const DISCLOSURE_OPERATION: &str = "verify visible upload-pack graph";
@@ -17,9 +18,17 @@ pub(super) struct VisibleUploadPack {
     closure: PermittedObjectClosure,
     repository: AdmissionUploadPackRepository,
     pub(super) tags: tags::TagProjection,
+    objects: BTreeMap<GitOid, partial_clone::FilterObject>,
 }
 
 impl VisibleUploadPack {
+    pub(super) fn select_partial(
+        &self, ids: &mut Vec<GitOid>, request: &PackRequest,
+        limits: &PackLimits, live: &mut impl FnMut() -> bool,
+    ) -> Result<(), NodePackMaterializationRefusal> {
+        partial_clone::apply_selection(&self.objects, ids, request, limits, live)
+    }
+
     pub(super) fn repository(&self) -> &AdmissionUploadPackRepository {
         &self.repository
     }
@@ -96,6 +105,7 @@ impl OneNode {
             closure,
             repository,
             tags,
+            objects: graph.objects,
         })
     }
 }
@@ -136,6 +146,7 @@ impl VisibilitySource for VerifiedFabricPackSource<'_> {
 struct VisibleGraph {
     closure: PermittedObjectClosure,
     tag_targets: BTreeMap<GitOid, GitOid>,
+    objects: BTreeMap<GitOid, partial_clone::FilterObject>,
 }
 
 #[cfg(test)]
@@ -160,6 +171,7 @@ fn project_visible_graph(
     let mut pending = BTreeSet::new();
     let mut known = BTreeMap::<GitOid, ObjectType>::new();
     let mut tag_targets = BTreeMap::new();
+    let mut objects = BTreeMap::new();
     // Validate ALL roots before a read. A visible ref outside the authenticated
     // admitted set is inconsistent state, never permission to search storage.
     for root in roots {
@@ -241,7 +253,7 @@ fn project_visible_graph(
             tag_targets.insert(id, *target);
         }
         known.insert(id, kind);
-        for (child, expected) in edges {
+        for &(child, expected) in &edges {
             source.checkpoint()?;
             // Every edge is checked, including one into an already loaded root.
             if let Some(actual) = known.get(&child) {
@@ -257,9 +269,10 @@ fn project_visible_graph(
                 &mut pending,
             )?;
         }
+        objects.insert(id, partial_clone::FilterObject { kind, size: body.len(), edges });
     }
     source.checkpoint()?;
-    Ok(VisibleGraph { closure: PermittedObjectClosure::new(known.into_keys().collect()), tag_targets })
+    Ok(VisibleGraph { closure: PermittedObjectClosure::new(known.into_keys().collect()), tag_targets, objects })
 }
 
 fn enqueue(

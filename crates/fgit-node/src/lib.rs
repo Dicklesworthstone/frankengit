@@ -161,7 +161,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 // progress channel and gives a refused selected-pack build the Fatal band —
 // the difference between a diagnosable client error and an early EOF
 // (frankengit-e6jj). Clients that do not request it keep the raw-pack flow.
-const GIT_DAEMON_CAPABILITIES: &[u8] = b"include-tag side-band-64k agent=frankengit-node";
+const GIT_DAEMON_CAPABILITIES: &[u8] = b"allow-reachable-sha1-in-want filter include-tag side-band-64k agent=frankengit-node";
 
 /// The git-daemon capability advertisement for one repository object format.
 ///
@@ -947,6 +947,8 @@ impl PackPayloadSource for AuthoritySelectedPackPayload {
 /// Refusal while turning an authority-selected closure into a Git pack.
 #[derive(Debug)]
 pub enum NodePackMaterializationRefusal {
+    /// A parsed fetch control has no implemented production pack semantics.
+    UnsupportedFetch(&'static str),
     /// The exact-head visible native graph could not be proved completely.
     /// No partial permission, object identifier, or hidden ref is disclosed.
     DisclosureGraph(RefusalCode),
@@ -983,6 +985,7 @@ pub enum NodePackMaterializationRefusal {
 impl Display for NodePackMaterializationRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedFetch(feature) => write!(formatter, "unsupported fetch feature: {feature}"),
             Self::DisclosureGraph(code) => write!(
                 formatter, "visible upload-pack graph proof refused: {code:?}"
             ),
@@ -1013,7 +1016,8 @@ impl Error for NodePackMaterializationRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Admission(error) => Some(error.as_ref()),
-            Self::DisclosureGraph(_)
+            Self::UnsupportedFetch(_)
+            | Self::DisclosureGraph(_)
             | Self::RequestedWantOutsideClosure(_)
             | Self::RequestedWantObjectFormatMismatch { .. }
             | Self::BudgetClassExhausted { .. } => None,
@@ -4943,6 +4947,7 @@ where
             writer,
             request,
             repository,
+            capabilities.contains(b"filter"),
             limits,
             session_deadline,
             build_pack,
@@ -5058,6 +5063,7 @@ fn serve_v2_upload_pack_after_greeting<R, W, BuildPack, Payload, PackError>(
     writer: &mut W,
     request: GitDaemonRequest,
     repository: &impl UploadPackRepository,
+    supports_filter: bool,
     limits: WireLimits,
     session_deadline: Option<&GitDaemonSessionDeadline>,
     mut build_pack: BuildPack,
@@ -5079,7 +5085,7 @@ where
     let advertisement_packets = vec![
         Packet::Data(b"version 2\n".to_vec()),
         Packet::Data(b"ls-refs\n".to_vec()),
-        Packet::Data(b"fetch\n".to_vec()),
+        Packet::Data(if supports_filter { b"fetch=filter\n".to_vec() } else { b"fetch\n".to_vec() }),
         Packet::Data(format!("object-format={object_format}\n").into_bytes()),
         Packet::Flush,
     ];
@@ -7298,7 +7304,7 @@ impl OneNode {
         &self,
         materialized: &MaterializedAdmission,
         disclosure_closure: &PermittedObjectClosure,
-        include_tags: Option<&upload_visibility::VisibleUploadPack>,
+        fetch: Option<(&upload_visibility::VisibleUploadPack, &PackRequest)>,
         client_wants: Option<&[GitOid]>,
         client_haves: &[GitOid],
         write_profile: PackWriteProfile,
@@ -7325,9 +7331,12 @@ impl OneNode {
             client_haves,
             &limits,
         )?;
-        if let Some(scope) = include_tags {
+        if let Some((scope, request)) = fetch {
             scope.closure_for(materialized)?;
-            scope.tags.extend_selected(&mut ids, &limits, is_live)?;
+            scope.select_partial(&mut ids, request, &limits, is_live)?;
+            if request.options.include_tag() {
+                scope.tags.extend_selected(&mut ids, &limits, is_live)?;
+            }
         }
         let planner = PackPlanner::new(self.object_format, write_profile, limits.clone());
         let plan = planner
@@ -7559,7 +7568,7 @@ impl OneNode {
                     self.materialize_selected_pack_in_scope(
                         &materialized,
                         disclosure.closure_for(&materialized).map_err(GitDaemonServeError::Pack)?,
-                        pack_request.options.include_tag().then_some(&disclosure),
+                        Some((&disclosure, pack_request)),
                         Some(&pack_request.wants),
                         &pack_request.haves,
                         selected_write_profile(pack_request.options.ofs_delta()),
@@ -10140,13 +10149,13 @@ mod tests {
         );
         let mut expected = format!(
             "{:04x}",
-            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta include-tag side-band-64k agent=frankengit-node\n"
+            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta allow-reachable-sha1-in-want filter include-tag side-band-64k agent=frankengit-node\n"
                 .len()
                 + 4
         )
         .into_bytes();
         expected.extend_from_slice(
-            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta include-tag side-band-64k agent=frankengit-node\n0000",
+            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta allow-reachable-sha1-in-want filter include-tag side-band-64k agent=frankengit-node\n0000",
         );
         assert_eq!(
             response, expected,
@@ -10164,7 +10173,7 @@ mod tests {
         let sha1 = git_daemon_capabilities(GitHashAlgorithm::Sha1, None);
         assert_eq!(
             sha1.as_slice(),
-            b"object-format=sha1 ofs-delta include-tag side-band-64k agent=frankengit-node"
+            b"object-format=sha1 ofs-delta allow-reachable-sha1-in-want filter include-tag side-band-64k agent=frankengit-node"
         );
         assert!(
             Capabilities::parse_v1(&sha1, &limits)
@@ -10179,7 +10188,7 @@ mod tests {
         let sha256 = git_daemon_capabilities(GitHashAlgorithm::Sha256, None);
         assert_eq!(
             sha256.as_slice(),
-            b"object-format=sha256 ofs-delta include-tag side-band-64k agent=frankengit-node"
+            b"object-format=sha256 ofs-delta allow-reachable-sha1-in-want filter include-tag side-band-64k agent=frankengit-node"
         );
         let parsed = Capabilities::parse_v1(&sha256, &limits)
             .expect("the SHA-256 daemon capability list is wire-valid");
@@ -10195,7 +10204,7 @@ mod tests {
         let with_head = git_daemon_capabilities(GitHashAlgorithm::Sha1, Some(b"refs/heads/main"));
         assert_eq!(
             with_head.as_slice(),
-            b"object-format=sha1 ofs-delta symref=HEAD:refs/heads/main include-tag side-band-64k agent=frankengit-node"
+            b"object-format=sha1 ofs-delta symref=HEAD:refs/heads/main allow-reachable-sha1-in-want filter include-tag side-band-64k agent=frankengit-node"
         );
         assert!(
             Capabilities::parse_v1(&with_head, &limits)
@@ -10256,7 +10265,7 @@ mod tests {
         // the SHA-1 domain and cannot parse this advertisement.
         let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
         let line = format!(
-            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta include-tag side-band-64k agent=frankengit-node\n"
+            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta allow-reachable-sha1-in-want filter include-tag side-band-64k agent=frankengit-node\n"
         );
         let mut expected = format!("{:04x}", line.len() + 4).into_bytes();
         expected.extend_from_slice(line.as_bytes());
@@ -10319,7 +10328,7 @@ mod tests {
 
         let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
         let advertisement = format!(
-            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta include-tag side-band-64k agent=frankengit-node\n"
+            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta allow-reachable-sha1-in-want filter include-tag side-band-64k agent=frankengit-node\n"
         );
         let packet = |payload: &str| {
             let mut out = format!("{:04x}", payload.len() + 4).into_bytes();
@@ -10447,7 +10456,7 @@ mod tests {
         let response = read_one_daemon_advertisement(node, b"\0host=loopback\0");
 
         let mut expected = packet(&format!(
-            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta include-tag side-band-64k agent=frankengit-node\n"
+            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta allow-reachable-sha1-in-want filter include-tag side-band-64k agent=frankengit-node\n"
         ));
         expected.extend_from_slice(b"0000");
         assert_eq!(
@@ -10465,7 +10474,7 @@ mod tests {
 
         let mut expected = packet("version 1\n");
         expected.extend_from_slice(&packet(&format!(
-            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta include-tag side-band-64k agent=frankengit-node\n"
+            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta allow-reachable-sha1-in-want filter include-tag side-band-64k agent=frankengit-node\n"
         )));
         expected.extend_from_slice(b"0000");
         assert_eq!(
