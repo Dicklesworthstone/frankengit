@@ -769,9 +769,23 @@ fn real_daemon_v0_v1_v2_refuses_deleted_wants_and_never_acks_or_subtracts_delete
 
             let (returned, result, response) = exchange(node, version, ancestor, None);
             node = returned;
+            if version != 2 {
+                // Legacy wants remain advertisement-bound: this node does not
+                // advertise allow-reachable-sha1-in-want. Visibility supplies
+                // common haves, not a new negotiated legacy want capability.
+                assert!(
+                    matches!(result,
+                    Err(NodeGitDaemonServeRefusal::Transport(ref error))
+                    if matches!(error.as_ref(), GitDaemonTransportRefusal::Wire(
+                        WireError::WantNotAdvertised { oid }) if *oid == ancestor)),
+                    "legacy unadvertised ancestor must retain its typed refusal: {result:?}"
+                );
+                assert!(!response.windows(4).any(|word| word == b"PACK"));
+                continue;
+            }
             assert!(
                 matches!(result, Ok(GitDaemonSessionOutcome::Pack(_))),
-                "visible historical commit remains fetchable: {result:?}"
+                "v2 visible historical commit remains fetchable: {result:?}"
             );
             let pack_bytes = extract_pack(&response, version);
             let pack = fgit_pack::read_verified_pack(
