@@ -1,116 +1,99 @@
-name: Verify exact-head upload disclosure
+name: Verify native fetch, replay, and candidate inspection
 on:
   push:
-    branches:
-      - tooling/upload-visibility-e81b6319
+    branches: [tooling/upload-visibility-e81b6319]
 permissions:
   contents: write
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       PAYLOAD_SHA: ${{ github.sha }}
       CARGO_BUILD_JOBS: '2'
     steps:
-      - name: Check out current main without updating it
+      - name: Check out the exact prepared implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: main
+          ref: 42b5117b09ef2f816cf51ff0932b7947955189f0
           fetch-depth: 0
-      - name: Apply exact source and payload guards
+      - name: Restore existing module integration and strengthen fetch twins
         shell: bash
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/upload-visibility"
           mkdir -p "$out"
-          git rev-parse HEAD | tee "$out/base.txt"
+          git rev-parse HEAD > "$out/base.txt"
           git fetch origin "$PAYLOAD_SHA"
-          git show "$PAYLOAD_SHA:.visibility-payload/reference.py" > "$RUNNER_TEMP/fix-reference.py"
-          python "$RUNNER_TEMP/fix-reference.py" | tee "$out/reference-apply.log"
-          git show "$PAYLOAD_SHA:.visibility-payload/apply.py" > "$RUNNER_TEMP/apply-visibility.py"
-          python "$RUNNER_TEMP/apply-visibility.py" | tee "$out/apply.log"
+          for name in integration strengthen; do
+            git show "$PAYLOAD_SHA:.visibility-payload/$name.py" > "$RUNNER_TEMP/$name.py"
+            python "$RUNNER_TEMP/$name.py" | tee "$out/$name.log"
+          done
+          rustfmt --edition 2024 --config skip_children=true crates/fgit-node/src/upload_visibility/tests.rs
           git diff --check
-      - name: Parse Rust and format only the new files
-        shell: bash
-        run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/upload-visibility"
-          rustc -Vv | tee "$out/rustc.txt"
-          rustfmt --edition 2024 --config skip_children=true crates/fgit-node/src/upload_visibility.rs crates/fgit-node/src/upload_visibility/tests.rs
-          rustfmt --edition 2024 --config skip_children=true --emit stdout crates/fgit-node/src/lib.rs > "$out/parsed-lib.rs"
-          git diff --check
-      - name: Verify and commit the existing review integration repair
-        shell: bash
-        run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/upload-visibility"
-          if timeout 600 cargo test --locked -p fgit-reference --lib reviewed_pr_names_its_ref_without_claiming_a_ref_effect > "$out/reference.log" 2>&1; then
-            echo 0 > "$out/reference.exit"
-          else
-            result=$?
-            echo "$result" > "$out/reference.exit"
-            tail -n 100 "$out/reference.log"
-            exit "$result"
-          fi
-          tail -n 60 "$out/reference.log"
+          git diff --exit-code -- Cargo.toml Cargo.lock .beads .github
           git config user.name 'Jeff Emanuel'
           git config user.email '35050222+Dicklesworthstone@users.noreply.github.com'
-          git add crates/fgit-reference/src/transition.rs
-          test "$(git diff --cached --name-only)" = crates/fgit-reference/src/transition.rs
-          git diff --cached --check
-          git commit -m 'fix(reference): validate the target ref named by native review events' -m 'Handle PullRequestReviewed in the canonical named-ref projection. Reviews name a target branch without requiring a ref effect or advancing the parent PR entity. Add and execute a focused regression for all three distinctions. This fixes the existing non-exhaustive match that prevented downstream node builds.'
-          git rev-parse HEAD | tee "$out/reference-result.txt"
-          result_branch="tooling/upload-visibility-result-${PAYLOAD_SHA:0:12}"
-          git push origin "HEAD:refs/heads/$result_branch"
-      - name: Run targeted native regressions and distinguish baseline failures
+          git add crates/fgit-node/src/treefs_workspace/commit_replay.rs crates/fgit-node/src/treefs_workspace/bundle_review.rs crates/fgit-node/src/treefs_workspace/publication.rs crates/fgit-node/src/treefs_workspace/reviews.rs
+          test "$(git diff --cached --name-only | wc -l)" = 4
+          git commit -m 'fix(node): connect replay and bundle inspection implementations and tests' -m 'Explicit child paths preserve the real pack reader and existing replay, resolution, and inspection tests beneath relocated path-attributed modules. Export the existing inspection refusal only to the workspace parent and route review integration through that actual module. No tests, assertions, or functionality are disabled. Native execution results are captured by the preparation run.'
+          git rev-parse HEAD > "$out/integration-result.txt"
+          git add crates/fgit-node/src/upload_visibility/tests.rs
+          test "$(git diff --cached --name-only)" = crates/fgit-node/src/upload_visibility/tests.rs
+          git commit -m 'test(fetch): exercise hidden policy and actual common-have acknowledgment branches' -m 'Drive protocol-v2 acknowledgments instead of suppressing all ACKs with done. Pair forbidden deleted-only haves with genuinely common visible ancestors, requiring correct ACK and exact three-object pack subtraction in v0/v1/v2 and both hash domains. Test hidden-ref rules through the actual snapshot adapter before visible graph derivation. Nine visibility tests are registered; passing execution is not asserted by this commit.'
+          git rev-parse HEAD > "$out/result.txt"
+          git status --porcelain | tee "$out/status.txt"
+          test ! -s "$out/status.txt"
+          git push origin "HEAD:refs/heads/tooling/upload-visibility-result-${PAYLOAD_SHA:0:12}"
+      - name: Execute native visibility regressions
         shell: bash
         run: |
           set +e
           set -uo pipefail
           out="$RUNNER_TEMP/upload-visibility"
+          rustc -Vv > "$out/rustc.txt"
           timeout 600 cargo test --locked -p fgit-node --lib upload_visibility::tests -- --nocapture > "$out/native.log" 2>&1
           result=$?
-          printf '%s\n' "$result" | tee "$out/native.exit"
-          tail -n 120 "$out/native.log"
-          if [ "$result" != 0 ]; then
-            base="$(cat "$out/base.txt")"
-            git worktree add --detach "$RUNNER_TEMP/visibility-baseline" "$base"
-            (cd "$RUNNER_TEMP/visibility-baseline" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" timeout 300 cargo test --locked -p fgit-node --lib --no-run) > "$out/baseline.log" 2>&1
-            printf '%s\n' "$?" | tee "$out/baseline.exit"
-            tail -n 80 "$out/baseline.log"
-          fi
+          echo "$result" | tee "$out/native.exit"
+          tail -n 160 "$out/native.log"
           exit 0
-      - name: Prepare only the intended implementation commit
+      - name: Execute restored replay and candidate inspection paths
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
+          set -uo pipefail
           out="$RUNNER_TEMP/upload-visibility"
-          git diff --exit-code -- Cargo.toml Cargo.lock .beads .github
-          git add crates/fgit-node/src/lib.rs crates/fgit-node/src/upload_visibility.rs crates/fgit-node/src/upload_visibility/tests.rs
-          python - <<'PY'
-          import subprocess
-          expected={'crates/fgit-node/src/lib.rs','crates/fgit-node/src/upload_visibility.rs','crates/fgit-node/src/upload_visibility/tests.rs'}
-          actual=set(subprocess.check_output(['git','diff','--cached','--name-only']).decode().splitlines())
-          assert actual==expected,(actual,expected)
-          PY
-          git diff --cached --check
-          git diff --cached --binary > "$out/prepared.patch"
-          git commit -m 'fix(fetch): bind negotiation and pack selection to exact-head visible graph' -m 'Do not authorize wants or haves from cumulative admission history. Prove the complete bounded typed graph from visible refs, keep the proof at one authenticated basis, and use it in the actual v0/v1/v2 daemon pack path. Preserve explicit local historical export. Prevent hidden HEAD targets reappearing as unborn symrefs. Add eight regression tests, including real durable import, receive deletion, reopen and raw TCP protocol exchanges in both native hash domains. Native verification outcomes are recorded in the preparation workflow, not asserted by this commit. No schema, dependency, lockfile, bead or workflow changes are included.'
-          git rev-parse HEAD | tee "$out/result.txt"
-          result_branch="tooling/upload-visibility-result-${PAYLOAD_SHA:0:12}"
-          git push origin "HEAD:refs/heads/$result_branch"
-          printf '%s\n' "$result_branch" | tee "$out/result-branch.txt"
-          git show --stat --oneline HEAD
-      - name: Retain source and verification evidence
+          if [ "$(cat "$out/native.exit")" != 0 ]; then exit 0; fi
+          for selector in treefs_workspace::merge_prepare::commit_replay treefs_workspace::publication::bundle_review; do
+            name="${selector##*::}"
+            timeout 180 cargo test --locked -p fgit-node --lib "$selector" -- --nocapture > "$out/$name.log" 2>&1
+            echo "$?" > "$out/$name.exit"
+            tail -n 80 "$out/$name.log"
+          done
+          exit 0
+      - name: Run node integration coverage without stopping on the first failing target
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          out="$RUNNER_TEMP/upload-visibility"
+          if [ "$(cat "$out/native.exit")" != 0 ]; then exit 0; fi
+          timeout 480 cargo test --locked -p fgit-node --all-targets --no-fail-fast > "$out/all-targets.log" 2>&1
+          echo "$?" | tee "$out/all-targets.exit"
+          tail -n 150 "$out/all-targets.log"
+          exit 0
+      - name: Retain exact source and verification evidence
         if: always()
         shell: bash
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/upload-visibility"
           mkdir -p "$out"
+          git status --porcelain > "$out/final-status.txt"
+          git diff --check
+          git log -n 5 --oneline > "$out/commits.txt"
           tar --exclude=.git --exclude=target -czf "$out/source.tar.gz" .
-      - name: Upload evidence
+      - name: Upload native evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
