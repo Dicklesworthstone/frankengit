@@ -124,6 +124,7 @@ mod loose_import;
 mod merge_delivery;
 mod quarantine_validator;
 mod verified_reads;
+mod upload_visibility;
 
 pub use loose_import::{LooseGitImportRefusal, StagedLooseGitImport};
 pub use quarantine_validator::ProductionQuarantineValidator;
@@ -236,7 +237,8 @@ impl AdmissionUploadPackRepository {
             .filter(|&(name, _)| !hides(name))
             .collect();
 
-        let head_target = snapshot.head_target.clone();
+        // A hidden target must not survive as a protocol-v2 unborn symref.
+        let head_target = snapshot.head_target.as_ref().filter(|target| !hides(target)).cloned();
         let head_oid = match head_target.as_ref() {
             // A HEAD whose target this principal cannot see must make the
             // repository look UNBORN to them: no HEAD advertised, and no
@@ -300,7 +302,11 @@ impl AdmissionUploadPackRepository {
         })
     }
 
-    /// Attaches the authority-selected closure objects to resolve common haves.
+    /// Attaches a caller-authorized disclosure closure for wants and common haves.
+    ///
+    /// This low-level builder does not grant permission. Production transport
+    /// supplies only its private, exact-head visible-graph proof, never the
+    /// cumulative admitted-history set or a physical object inventory.
     #[must_use]
     pub fn with_closure_objects(mut self, objects: BTreeSet<GitOid>) -> Self {
         self.closure_objects = objects;
@@ -935,6 +941,9 @@ impl PackPayloadSource for AuthoritySelectedPackPayload {
 /// Refusal while turning an authority-selected closure into a Git pack.
 #[derive(Debug)]
 pub enum NodePackMaterializationRefusal {
+    /// The exact-head visible native graph could not be proved completely.
+    /// No partial permission, object identifier, or hidden ref is disclosed.
+    DisclosureGraph(RefusalCode),
     /// The exact-head admission materialization was unavailable or invalid.
     Admission(Box<AdmissionMaterializationRefusal>),
     /// A wire-validated `want` was not in the authority-selected object
@@ -968,6 +977,9 @@ pub enum NodePackMaterializationRefusal {
 impl Display for NodePackMaterializationRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DisclosureGraph(code) => write!(
+                formatter, "visible upload-pack graph proof refused: {code:?}"
+            ),
             Self::Admission(error) => Display::fmt(error, formatter),
             Self::RequestedWantOutsideClosure(id) => write!(
                 formatter,
@@ -995,7 +1007,8 @@ impl Error for NodePackMaterializationRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Admission(error) => Some(error.as_ref()),
-            Self::RequestedWantOutsideClosure(_)
+            Self::DisclosureGraph(_)
+            | Self::RequestedWantOutsideClosure(_)
             | Self::RequestedWantObjectFormatMismatch { .. }
             | Self::BudgetClassExhausted { .. } => None,
             Self::Pack(error) => Some(error.as_ref()),
@@ -7263,6 +7276,27 @@ impl OneNode {
         session_is_live: Option<&dyn Fn() -> bool>,
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
+        // Explicit local authority materialization retains the canonical
+        // historical scope. Network callers must supply their disclosure proof.
+        self.materialize_selected_pack_in_scope(
+            materialized, materialized.selected_closure().closure(), client_wants,
+            client_haves, write_profile, database_context, database_exhaustion,
+            session_is_live, is_live,
+        )
+    }
+
+    fn materialize_selected_pack_in_scope(
+        &self,
+        materialized: &MaterializedAdmission,
+        disclosure_closure: &PermittedObjectClosure,
+        client_wants: Option<&[GitOid]>,
+        client_haves: &[GitOid],
+        write_profile: PackWriteProfile,
+        database_context: &FsqliteCx,
+        database_exhaustion: &Cell<Option<Exhaustion>>,
+        session_is_live: Option<&dyn Fn() -> bool>,
+        is_live: &mut impl FnMut() -> bool,
+    ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
         // The operator-selected write envelope governs (frankengit-e6jj).
         let limits = self.selected_pack_limits.clone();
         let configured_limit = usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX);
@@ -7276,7 +7310,7 @@ impl OneNode {
         };
         let ids = selected_pack_ids(
             &source,
-            materialized.selected_closure().closure(),
+            disclosure_closure,
             client_wants,
             client_haves,
             &limits,
@@ -7458,15 +7492,10 @@ impl OneNode {
             }
             return Ok(served);
         }
-        let repository = AdmissionUploadPackRepository::from_snapshot(
-            materialized.snapshot(),
-            self.object_format,
-            &limits,
-        )
-        .map(|repo| {
-            repo.with_closure_objects(materialized.selected_closure().closure().objects().clone())
-        })
-        .map_err(|error| NodeGitDaemonServeRefusal::from(NodeAdmissionViewRefusal::from(error)))?;
+        let disclosure = self.prepare_visible_upload_pack(
+            &request, &materialized, &limits, &deadline,
+        )?;
+        let repository = disclosure.repository();
         let advertised_capabilities =
             git_daemon_capabilities(self.object_format, repository.symref_target(b"HEAD"));
         let capabilities = Capabilities::parse_v1(&advertised_capabilities, &limits)
@@ -7477,7 +7506,7 @@ impl OneNode {
             &mut reader,
             &mut writer,
             greeting,
-            &repository,
+            repository,
             capabilities,
             limits,
             Some(&deadline),
@@ -7513,8 +7542,9 @@ impl OneNode {
                             }
                         }
                     };
-                    self.materialize_selected_pack(
+                    self.materialize_selected_pack_in_scope(
                         &materialized,
+                        disclosure.closure_for(&materialized).map_err(GitDaemonServeError::Pack)?,
                         Some(&pack_request.wants),
                         &pack_request.haves,
                         selected_write_profile(pack_request.options.ofs_delta()),
