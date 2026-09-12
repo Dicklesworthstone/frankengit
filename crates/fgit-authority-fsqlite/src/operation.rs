@@ -160,6 +160,98 @@ mod tests {
     }
 
     #[test]
+    fn runtime_narrowed_native_context_keeps_authority_operations_and_cancellation() {
+        use std::sync::Arc;
+
+        use asupersync::cx::Cx as NativeCx;
+        use asupersync::cx::cap as native_cap;
+        use asupersync::cx::wrappers::narrow;
+        use asupersync::runtime::SpawnError;
+
+        let (node, mut store, owner) = fixture();
+        let body_key = key(b"restricted-owner");
+        let cancelled_key = key(b"restricted-cancelled");
+        node.block_on(async {
+            let parent = NativeCx::current().expect("owned runtime context");
+            let full = Arc::new(node.request_cx(BudgetClass::Request));
+            let restricted = narrow::<native_cap::All, native_cap::None>(&full);
+            let held = {
+                let _guard = restricted.as_ref().clone().set_current_restricted();
+                NativeCx::current().expect("restricted context")
+            };
+            let guard = NativeCx::set_current(Some(held.clone()));
+            let current = NativeCx::current().expect("reinstalled context");
+            assert!(!current.capabilities().spawn);
+            assert!(!current.capabilities().io);
+            assert!(!current.capabilities().time);
+            assert!(current.timer_driver().is_none());
+            assert_eq!(current.budget(), full.budget());
+            assert_eq!(current.task_id(), full.task_id());
+            assert!(matches!(
+                current.spawn(|_| async { 1 }),
+                Err(SpawnError::RuntimeUnavailable)
+            ));
+
+            // The connection worker is already owned by the store. SQL uses
+            // the caller's explicit cancellation/budget context without
+            // granting that caller general runtime spawn authority.
+            let operation = Cx::new();
+            operation.set_native_cx(current);
+            assert_eq!(
+                store
+                    .put_if_absent(&operation, &body_key, b"committed")
+                    .await
+                    .expect("restricted caller writes through the owned worker"),
+                PutOutcome::Created
+            );
+            assert_eq!(
+                store.read_immutable(&operation, &body_key).await,
+                Ok(ImmutableRead::Present(b"committed".to_vec()))
+            );
+            let after = NativeCx::current().expect("caller survives SQL awaits");
+            assert!(!after.capabilities().spawn);
+            assert!(!after.capabilities().io);
+            assert!(!after.capabilities().time);
+            assert_eq!(after.budget(), held.budget());
+
+            let cancelled_full = Arc::new(node.request_cx(BudgetClass::Request));
+            let cancelled_restricted = narrow::<native_cap::All, native_cap::None>(&cancelled_full);
+            let cancelled_native = {
+                let _guard = cancelled_restricted
+                    .as_ref()
+                    .clone()
+                    .set_current_restricted();
+                NativeCx::current().expect("separate restricted cancellation context")
+            };
+            cancelled_native.set_cancel_requested(true);
+            let cancelled = Cx::new();
+            cancelled.set_native_cx(cancelled_native);
+            assert_eq!(
+                store
+                    .put_if_absent(&cancelled, &cancelled_key, b"absent")
+                    .await,
+                Err(EngineError::Engine(TransientClass::Cancelled))
+            );
+            assert!(!held.is_cancel_requested());
+            assert_eq!(
+                store.read_immutable(&operation, &cancelled_key).await,
+                Ok(ImmutableRead::Absent)
+            );
+            drop(guard);
+            let restored = NativeCx::current().expect("parent restored");
+            assert_eq!(restored.task_id(), parent.task_id());
+            assert_eq!(restored.budget(), parent.budget());
+            assert_eq!(restored.capabilities().spawn, parent.capabilities().spawn);
+            assert_eq!(restored.capabilities().io, parent.capabilities().io);
+            assert_eq!(restored.capabilities().time, parent.capabilities().time);
+        });
+        node.block_on(store.close(&owner))
+            .expect("close owned worker");
+        drop(owner);
+        assert!(node.join_root(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
     fn all_public_reads_wait_until_another_operations_staged_rows_are_rolled_back() {
         let (node, mut store, cx) = fixture();
         let head_key = HeadKey::new(b"head".to_vec()).expect("head key");

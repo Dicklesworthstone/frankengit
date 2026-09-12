@@ -13,7 +13,7 @@ fgit-codec.workspace = true
 fgit-crypto.workspace = true
 fgit-runtime.workspace = true
 fgit-types.workspace = true
-fsqlite-types = { version = "0.3.7", default-features = false, features = ["native"] }
+fsqlite-types = { version = "=0.4.0", default-features = false, features = ["native"] }
 
 [lints]
 workspace = true

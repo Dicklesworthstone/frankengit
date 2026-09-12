@@ -30,7 +30,7 @@ fgit-wire.workspace = true
 # This names the FrankenSQLite context held for the authority store lifetime.
 # It is already in the admitted fsqlite authority closure (DEP-202), so this
 # direct edge adds no new dependency surface.
-fsqlite-types = { version = "0.3.7", default-features = false, features = ["native"] }
+fsqlite-types = { version = "=0.4.0", default-features = false, features = ["native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Compose the already-admitted descriptor-relative trusted workspace adapter.

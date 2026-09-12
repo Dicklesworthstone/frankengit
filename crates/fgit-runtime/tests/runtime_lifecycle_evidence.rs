@@ -70,7 +70,7 @@ fn start_app(app_spec: AppSpec) -> StartedApp {
     let profile = RuntimeProfile::deterministic();
     let identity = profile.identity();
     assert_eq!(identity.class, ProfileClass::Deterministic);
-    assert_eq!(identity.asupersync_version, "0.4.9");
+    assert_eq!(identity.asupersync_version, "0.5.0");
     assert_eq!(identity.worker_threads, 1);
     assert!(!identity.enable_parking);
     assert_eq!(identity.leak_policy, "fail_fast");

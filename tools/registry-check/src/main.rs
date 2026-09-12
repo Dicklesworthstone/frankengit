@@ -89,6 +89,7 @@ impl CheckSet {
         matches!(
             self,
             Self::LedgerPolicy
+                | Self::LedgerFsqlitePolicy
                 | Self::LedgerSqlmodelPolicy
                 | Self::LedgerTuiPolicy
                 | Self::LedgerConstellation
@@ -2699,9 +2700,9 @@ fn generate_admission_ledger(root: &Path, command: CheckSet) -> Result<String, S
         .iter()
         .filter(|package| package.name == "asupersync")
         .collect::<Vec<_>>();
-    if runtime.len() != 1 || runtime[0].version != "0.4.9" {
+    if runtime.len() != 1 || runtime[0].version != "0.5.0" {
         return Err(format!(
-            "expected exactly one asupersync 0.4.9 package before ledger generation, observed {:?}",
+            "expected exactly one asupersync 0.5.0 package before ledger generation, observed {:?}",
             runtime
                 .iter()
                 .map(|package| package.version.as_str())
@@ -2812,19 +2813,19 @@ const fn admission_ledger_config(command: CheckSet) -> Option<AdmissionLedgerCon
     match command {
         CheckSet::LedgerPolicy => Some(AdmissionLedgerConfig {
             root_package: "asupersync",
-            root_version: "0.4.9",
+            root_version: "0.5.0",
             decision: "allow_transitive_admitted_runtime",
             owner: "concurrency",
         }),
         CheckSet::LedgerFsqlitePolicy => Some(AdmissionLedgerConfig {
             root_package: "fsqlite",
-            root_version: "0.3.7",
+            root_version: "0.4.0",
             decision: "allow_transitive_admitted_fsqlite",
             owner: "storage",
         }),
         CheckSet::LedgerSqlmodelPolicy => Some(AdmissionLedgerConfig {
             root_package: "sqlmodel-frankensqlite",
-            root_version: "0.4.1",
+            root_version: "0.5.0",
             decision: "allow_transitive_admitted_sqlmodel",
             owner: "projection",
         }),
@@ -7510,11 +7511,23 @@ impl CanonicalBody for EvidenceRecordBody {
     }
 
     #[test]
+    fn fsqlite_ledger_command_routes_to_generation_instead_of_ordinary_checks() {
+        let invocation = parse_invocation(vec!["ledger-fsqlite-policy".to_owned()])
+            .expect("the documented FSQLite ledger command parses");
+        assert_eq!(invocation.check_set, CheckSet::LedgerFsqlitePolicy);
+        assert!(
+            invocation.check_set.is_ledger(),
+            "main must emit ledger rows instead of reporting ordinary check success"
+        );
+        assert!(!CheckSet::Constitution.is_ledger());
+    }
+
+    #[test]
     fn fsqlite_admission_ledger_configuration_is_exact_and_distinct() {
         let config = admission_ledger_config(CheckSet::LedgerFsqlitePolicy)
             .expect("fsqlite policy generator must have a configuration");
         assert_eq!(config.root_package, "fsqlite");
-        assert_eq!(config.root_version, "0.3.7");
+        assert_eq!(config.root_version, "0.4.0");
         assert_eq!(config.decision, "allow_transitive_admitted_fsqlite");
         assert_eq!(config.owner, "storage");
         assert_ne!(
@@ -7529,7 +7542,7 @@ impl CanonicalBody for EvidenceRecordBody {
         let config = admission_ledger_config(CheckSet::LedgerSqlmodelPolicy)
             .expect("sqlmodel policy generator must have a configuration");
         assert_eq!(config.root_package, "sqlmodel-frankensqlite");
-        assert_eq!(config.root_version, "0.4.1");
+        assert_eq!(config.root_version, "0.5.0");
         assert_eq!(config.decision, "allow_transitive_admitted_sqlmodel");
         assert_eq!(config.owner, "projection");
         assert_ne!(

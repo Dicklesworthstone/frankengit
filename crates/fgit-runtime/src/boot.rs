@@ -37,7 +37,7 @@ use crate::refuse::RuntimeRefusal;
 /// `no_dependency_drift` in `tests/` asserts this matches the version declared
 /// in `Cargo.toml`, so the identity a node reports cannot silently disagree
 /// with the version it actually linked.
-pub const ASUPERSYNC_VERSION: &str = "0.4.9";
+pub const ASUPERSYNC_VERSION: &str = "0.5.0";
 
 /// The exact Asupersync feature set this profile enables.
 ///
@@ -978,7 +978,7 @@ mod tests {
 
         for required in [
             "class=",
-            "asupersync=0.4.9",
+            "asupersync=0.5.0",
             "features=",
             "target=",
             "workers=3",

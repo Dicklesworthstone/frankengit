@@ -5,7 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-asupersync = { version = "0.4.9", default-features = false }
+asupersync = { version = "0.5.0", default-features = false }
 fgit-crypto.workspace = true
 fgit-object-fabric.workspace = true
 fgit-resource.workspace = true
