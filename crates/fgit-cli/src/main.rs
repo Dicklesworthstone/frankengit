@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod commit_replay;
+mod issues;
 mod merge_apply;
 mod publication_support;
 mod pull_request;
@@ -18,6 +19,12 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "issue") {
+        return match issues::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+        };
+    }
     if let Some(command @ ("cherry-pick" | "revert")) = arguments.first().map(String::as_str) {
         let direction = if command == "revert" { fgit_forge::preparation::replay::ReplayDirection::Revert }
             else { fgit_forge::preparation::replay::ReplayDirection::CherryPick };
