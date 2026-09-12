@@ -5127,7 +5127,9 @@ where
             })
         })?;
         if read == 0 {
-            if ls_refs_completed {
+            machine.finish().map_err(|error| GitDaemonServeError::Transport(
+                GitDaemonTransportRefusal::Wire(error)))?;
+            if ls_refs_completed && machine.is_awaiting_command() {
                 // The client obtained everything it needed from ls-refs (the
                 // empty-repository shape) and closed the session cleanly.
                 return Ok(GitDaemonSessionOutcome::EmptyRepository(
@@ -5147,12 +5149,10 @@ where
         write_packet_group(writer, &transition.output, &limits)
             .map_err(GitDaemonServeError::Transport)?;
 
-        let mut next_command = false;
         for event in transition.events {
             match event {
                 WireEvent::LsRefs { .. } => {
                     ls_refs_completed = true;
-                    next_command = true;
                 }
                 WireEvent::PackRequested(pack_request) => {
                     check_session_deadline(session_deadline, "build selected git pack")
@@ -5187,9 +5187,6 @@ where
                 }
                 WireEvent::Common(_) => {}
             }
-        }
-        if next_command {
-            machine = fresh_machine()?;
         }
     }
 }

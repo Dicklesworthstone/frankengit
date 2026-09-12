@@ -2337,6 +2337,13 @@ impl V2UploadPack {
         })
     }
 
+    /// Whether no command is in progress. Pair with `finish` to detect a
+    /// partial next frame; a completed ls-refs response is not a stream reset.
+    #[must_use]
+    pub fn is_awaiting_command(&self) -> bool {
+        self.state == V2State::AwaitCommand
+    }
+
     /// Feeds arbitrary pkt-line fragments and produces pure outputs/events.
     pub fn push_bytes(
         &mut self,
