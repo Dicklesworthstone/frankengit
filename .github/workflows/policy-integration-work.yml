@@ -12,4 +12,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - run: python3 tools/policy-integration-inspect.py
+          fetch-depth: 0
+      - run: |
+          python3 tools/policy-integration-inspect.py
+          git archive --format=tar --output=/tmp/frankengit-policy-base.tar e55985db39808836824a672c96b61d857449d190
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: frankengit-policy-base-e55985db
+          path: /tmp/frankengit-policy-base.tar
+          retention-days: 1
