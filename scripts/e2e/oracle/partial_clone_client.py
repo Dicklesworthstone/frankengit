@@ -20,9 +20,9 @@ def refuse(message):
 def main():
     args = sys.argv[1:]
     if len(args) < 3:
-        refuse("usage: RUN clone|shallow-clone|depth|unshallow|fetch|read|checkout|inventory|history|fsck CLIENT [ENDPOINT REPOSITORY VERSION VALUE]")
+        refuse("usage: RUN clone|shallow-clone|depth|deepen|unshallow|fetch|read|checkout|inventory|history|fsck CLIENT [ENDPOINT REPOSITORY VERSION VALUE]")
     run_arg, operation, client, *extra = args
-    if operation not in {"clone", "shallow-clone", "depth", "unshallow", "fetch", "fetch-private", "read", "checkout", "inventory", "history", "fsck"}:
+    if operation not in {"clone", "shallow-clone", "depth", "deepen", "unshallow", "fetch", "fetch-private", "read", "checkout", "inventory", "history", "fsck"}:
         refuse("unsupported client operation")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", client):
         refuse("client directory must be a bounded simple label")
@@ -42,7 +42,7 @@ def main():
             refuse("clone destination must be absent")
     elif destination.is_symlink() or not destination.is_dir():
         refuse("existing client must be a real directory")
-    network = operation in {"clone", "shallow-clone", "depth", "unshallow", "fetch", "fetch-private", "read", "checkout"}
+    network = operation in {"clone", "shallow-clone", "depth", "deepen", "unshallow", "fetch", "fetch-private", "read", "checkout"}
     config = [("core.hooksPath", "/home/oracle/empty-hooks"), ("credential.helper", "")]
     if network:
         if len(extra) != 4:
@@ -57,7 +57,7 @@ def main():
         config.append(("protocol.version", protocol))
         if operation in {"read", "checkout"}:
             config += [("remote.origin.url", url), ("remote.origin.promisor", "true")]
-        if operation in {"depth", "unshallow", "fetch", "fetch-private"}:
+        if operation in {"depth", "deepen", "unshallow", "fetch", "fetch-private"}:
             config.append(("remote.origin.url", url))
         if operation == "shallow-clone":
             depth = re.fullmatch(r"([1-9][0-9]{0,9})(?:,(blob:none|tree:0))?", value)
@@ -67,10 +67,11 @@ def main():
             if depth[2]:
                 command.append("--filter=" + depth[2])
             command += [url, client]
-        elif operation == "depth":
+        elif operation in {"depth", "deepen"}:
             if not re.fullmatch(r"[1-9][0-9]{0,9}", value) or int(value) > 2147483647:
                 refuse("absolute depth must be a bounded positive integer")
-            command = ["fetch", "--no-tags", "--depth=" + value, "origin"]
+            flag = "--deepen=" if operation == "deepen" else "--depth="
+            command = ["fetch", "--no-tags", flag + value, "origin"]
         elif operation == "fetch-private":
             if value != "1":
                 refuse("multi-branch campaign admits only depth one")

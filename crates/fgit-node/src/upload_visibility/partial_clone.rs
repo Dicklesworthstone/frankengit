@@ -127,7 +127,7 @@ pub(super) fn apply_selection(
         maximum: usize::try_from(limits.max_entries).unwrap_or(usize::MAX),
     };
     work.tick()?;
-    if !request.shallows.is_empty()
+    if request.options.deepen_relative() || !request.shallows.is_empty()
         || request.deepen.is_some()
         || request.deepen_since.is_some()
         || !request.deepen_not.is_empty()

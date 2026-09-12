@@ -37,6 +37,7 @@ impl VisibleUploadPack {
         // History has already been clipped and validated. Reuse the existing
         // partial-clone engine for omission predicates and explicit lazy roots.
         let mut filtered = request.clone();
+        filtered.options = filtered.options.with_deepen_relative(false);
         filtered.shallows.clear();
         filtered.deepen = None;
         filtered.deepen_since = None;

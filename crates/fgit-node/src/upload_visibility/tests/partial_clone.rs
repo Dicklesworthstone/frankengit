@@ -458,7 +458,7 @@ fn actual_partial_clones_and_lazy_fetches_preserve_native_bytes_current_visibili
                 let advertisement = if version == 2 {
                     b"fetch=shallow filter\n".as_slice()
                 } else {
-                    b"allow-reachable-sha1-in-want shallow filter".as_slice()
+                    b"allow-reachable-sha1-in-want shallow deepen-relative filter".as_slice()
                 };
                 assert!(
                     response

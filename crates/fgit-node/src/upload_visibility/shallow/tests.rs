@@ -403,3 +403,6 @@ fn unshallow_supplies_other_visible_histories_but_finite_depth_does_not() {
         );
     }
 }
+
+#[path = "relative_tests.rs"]
+mod relative_tests;
