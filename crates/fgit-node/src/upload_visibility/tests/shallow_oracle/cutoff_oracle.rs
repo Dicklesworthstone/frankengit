@@ -194,17 +194,20 @@ fn pinned_git_cutoffs_clone_widen_checkout_and_unshallow() {
                 );
                 checked(command(&run, "fsck", &client, &[]));
                 let tip = fourth.0.to_string();
-                let (returned, _) = live_client(
-                    node,
-                    &listener,
-                    command(
-                        &run,
-                        "checkout",
-                        &client,
-                        &[&endpoint, &repository, version, &tip],
-                    ),
+                let checkout = command(
+                    &run,
+                    "checkout",
+                    &client,
+                    &[&endpoint, &repository, version, &tip],
                 );
-                node = returned;
+                if profile == "full" {
+                    // The exact initial inventory above already contains every
+                    // checkout object. No daemon session should be necessary.
+                    checked(checkout);
+                } else {
+                    let (returned, _) = live_client(node, &listener, checkout);
+                    node = returned;
+                }
                 assert_eq!(
                     std::fs::read(
                         PathBuf::from(&run)
