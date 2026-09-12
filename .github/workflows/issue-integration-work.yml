@@ -1,15 +1,42 @@
-name: Issue integration workbench
+name: Native issue integration
 on:
   push:
     branches: [tooling/issue-integration-20260912]
 permissions:
   contents: read
 jobs:
-  inspect:
+  prepare:
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.prepare.outputs.source }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          fetch-depth: 0
+      - id: prepare
+        run: python3 tools/issue-integration/prepare.py
+  verify:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: /tmp/fg-issue-integration-target
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: workbench
           persist-credentials: false
-      - run: python3 tools/issue-integration/inspect.py
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          path: source
+          persist-credentials: false
+      - run: python3 workbench/tools/issue-integration/verify.py source
