@@ -17,19 +17,11 @@ jobs:
         with:
           fetch-depth: 0
       - id: prepare
-        shell: python
-        run: |
-          import pathlib
-          path=pathlib.Path('tools/fetch-cutoffs/prepare.py')
-          text=path.read_text()
-          old="edit(node+'lib.rs','shallow deepen-relative filter include-tag','shallow deepen-relative deepen-since deepen-not filter include-tag')"
-          assert text.count(old)==1
-          text=text.replace(old,old[:-1]+',10)')
-          exec(compile(text,str(path),'exec'))
+        run: python3 tools/fetch-cutoffs/oracle_prepare.py
   verify:
     needs: prepare
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       RCH_CARGO_WRAPPER_BYPASS: '1'
       CARGO_BUILD_JOBS: '2'
@@ -37,8 +29,11 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ needs.prepare.outputs.source }}
+          path: workbench
           persist-credentials: false
-      - run: cargo test --locked -p fgit-wire --all-targets
-      - run: cargo test --locked -p fgit-node --lib upload_visibility::shallow
-      - run: cargo check --locked -p fgit-cli --all-targets
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          path: source
+          persist-credentials: false
+      - run: python3 workbench/tools/fetch-cutoffs/verify.py source
