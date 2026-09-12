@@ -3,7 +3,18 @@ use super::*;
 use std::collections::BTreeSet;
 
 pub(super) fn has_controls(request: &PackRequest) -> bool {
-    !request.shallows.is_empty() || changes_boundary(request)
+    request.options.deepen_relative() || !request.shallows.is_empty() || changes_boundary(request)
+}
+
+pub(super) fn validate_relative_depth(request: &PackRequest) -> Result<(), WireError> {
+    if request.options.deepen_relative()
+        && (!matches!(request.deepen, Some(1..=2_147_483_647))
+            || request.deepen_since.is_some()
+            || !request.deepen_not.is_empty())
+    {
+        return Err(WireError::InvalidDepth);
+    }
+    Ok(())
 }
 
 pub(super) fn changes_boundary(request: &PackRequest) -> bool {

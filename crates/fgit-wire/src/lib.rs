@@ -1319,6 +1319,7 @@ impl PackOptions {
     const OFS_DELTA: u8 = 1 << 3;
     const NO_PROGRESS: u8 = 1 << 4;
     const SIDEBAND_ALL: u8 = 1 << 5;
+    const DEEPEN_RELATIVE: u8 = 1 << 6;
 
     const fn with(self, option: u8) -> Self {
         Self(self.0 | option)
@@ -1345,6 +1346,19 @@ impl PackOptions {
     #[must_use]
     pub const fn include_tag(self) -> bool {
         self.contains(Self::INCLUDE_TAG)
+    }
+
+    /// Whether depth is an increment relative to existing shallow history.
+    #[must_use]
+    pub const fn deepen_relative(self) -> bool {
+        self.contains(Self::DEEPEN_RELATIVE)
+    }
+
+    /// Select relative history semantics without changing pack-format flags.
+    #[must_use]
+    pub const fn with_deepen_relative(self, enabled: bool) -> Self {
+        if enabled { self.with(Self::DEEPEN_RELATIVE) }
+        else { Self(self.0 & !Self::DEEPEN_RELATIVE) }
     }
 }
 
@@ -1934,6 +1948,7 @@ impl LegacyUploadPack {
                     return Err(WireError::MissingWant);
                 }
                 let request = self.pack_request();
+                shallow_response::validate_relative_depth(&request)?;
                 let shallow_negotiated = self.automatic_shallow_updates
                     && shallow_response::changes_boundary(&request);
                 let mut output = if self.automatic_shallow_updates
@@ -2147,6 +2162,12 @@ impl LegacyUploadPack {
                 b"include-tag" => self.options = self.options.with(PackOptions::INCLUDE_TAG),
                 b"ofs-delta" => self.options = self.options.with(PackOptions::OFS_DELTA),
                 b"no-progress" => self.options = self.options.with(PackOptions::NO_PROGRESS),
+                b"deepen-relative" => {
+                    if capability.value.is_some() {
+                        return Err(WireError::MalformedRequestLine { line: capability.encoded()? });
+                    }
+                    self.options = self.options.with_deepen_relative(true);
+                }
                 b"no-done" => self.no_done = true,
                 _ => {}
             }
@@ -2574,6 +2595,11 @@ impl V2UploadPack {
             )?);
             return Ok(Transition::empty());
         }
+        if line == b"deepen-relative" {
+            self.require_fetch_feature(b"shallow")?;
+            self.options = self.options.with_deepen_relative(true);
+            return Ok(Transition::empty());
+        }
         if line == b"sideband-all" {
             if !self.server_capabilities.contains(b"sideband-all") {
                 return Err(WireError::UnknownCapability {
@@ -2788,6 +2814,7 @@ impl V2UploadPack {
             filter: self.filter.clone(),
             options: self.options.with(PackOptions::SIDE_BAND_64K.0),
         };
+        shallow_response::validate_relative_depth(&request)?;
         if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
             output.extend(shallow_response::response(repository, &request, &self.limits)?);
         }

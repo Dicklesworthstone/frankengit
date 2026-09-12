@@ -3,6 +3,7 @@
 use super::partial_clone::FilterObject;
 use super::*;
 use fgit_wire::closure::ShallowUpdate;
+mod relative;
 
 /// Shared only with the repository view for the lifetime of this connection.
 /// This is a derived proof, not a persisted promise or an authority root.
@@ -35,7 +36,8 @@ impl ShallowProof {
 }
 
 pub(crate) fn requested(request: &PackRequest) -> bool {
-    !request.shallows.is_empty()
+    request.options.deepen_relative()
+        || !request.shallows.is_empty()
         || request.deepen.is_some()
         || request.deepen_since.is_some()
         || !request.deepen_not.is_empty()
@@ -144,6 +146,7 @@ fn history(
             work.insert(&mut old, id)?;
         }
     }
+    let effective_depth = relative::effective_depth(objects, request, &old, work)?;
     let mut depths = BTreeMap::new();
     let mut pending = BTreeSet::new();
     for &id in &request.wants {
@@ -166,9 +169,10 @@ fn history(
             }
             ObjectType::Commit => {
                 work.insert(&mut commits, id)?;
-                let boundary = request
-                    .deepen
-                    .map_or_else(|| old.contains(&id), |maximum| depth >= maximum);
+                let boundary = effective_depth.map_or_else(
+                    || old.contains(&id),
+                    |maximum| maximum != relative::INFINITE_DEPTH && depth >= maximum,
+                );
                 if boundary {
                     // Git also marks a natural root at the exact requested
                     // depth. Do not substitute "has an omitted parent" here.

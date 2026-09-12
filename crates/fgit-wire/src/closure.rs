@@ -380,6 +380,8 @@ pub enum ClosureError {
     InvalidLimit,
     /// A requested deepening depth was zero.
     InvalidDeepenDepth,
+    /// Relative deepening requires the native connection-owned graph provider.
+    UnsupportedRelativeDeepening,
     /// A repository returned an OID from the wrong hash-format domain.
     ObjectFormatMismatch {
         /// Expected repository object format.
@@ -426,6 +428,7 @@ impl Display for ClosureError {
         match self {
             Self::InvalidLimit => formatter.write_str("invalid closure limit"),
             Self::InvalidDeepenDepth => formatter.write_str("deepen depth must be positive"),
+            Self::UnsupportedRelativeDeepening => formatter.write_str("relative deepening requires a native shallow provider"),
             Self::ObjectFormatMismatch { expected, observed } => {
                 write!(
                     formatter,
@@ -473,6 +476,9 @@ pub fn compute_pack_closure(
     limits: &ClosureLimits,
 ) -> Result<PackClosure, ClosureError> {
     limits.validate()?;
+    if request.options.deepen_relative() {
+        return Err(ClosureError::UnsupportedRelativeDeepening);
+    }
     let shallow_request = ShallowRequest::from_pack_request(request);
     if shallow_request.deepen == Some(0) {
         return Err(ClosureError::InvalidDeepenDepth);

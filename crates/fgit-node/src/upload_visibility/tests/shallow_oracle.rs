@@ -436,3 +436,6 @@ fn pinned_git_unshallow_completes_all_visible_client_branch_boundaries() {
         drop(scratch);
     }
 }
+
+#[path = "relative_oracle.rs"]
+mod relative_oracle;
