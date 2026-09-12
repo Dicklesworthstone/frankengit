@@ -10,11 +10,13 @@ use fgit_types::{Digest, DomainTag, ForgeEventId, GitOid, RefName, SchemaFamily}
 use crate::ForgeRefusal;
 use crate::aggregate::{
     AGGREGATE_KIND_ORGANISATION, AGGREGATE_KIND_TEAM, AGGREGATE_KIND_PULL_REQUEST_REVIEW,
-    AggregateId, AggregateVersion, OrganisationNumber, PullRequestNumber, TeamNumber,
+    AggregateId, AggregateVersion, OrganisationNumber, PullRequestNumber, TeamNumber, IssueNumber, AGGREGATE_KIND_ISSUE,
 };
 
 pub mod pull_request;
 pub mod review;
+pub mod issue;
+use issue::{NativeIssueEvent, IssueAction};
 use pull_request::{NativePullRequestEvent, PullRequestAction};
 use review::NativeReviewEvent;
 
@@ -25,6 +27,7 @@ const KIND_CLOSED: u32 = 4;
 const KIND_NATIVE_MERGE_COMMITTED: u32 = 5;
 const KIND_NATIVE_PULL_REQUEST_CHANGED: u32 = 6;
 const KIND_NATIVE_PULL_REQUEST_REVIEWED: u32 = 7;
+const KIND_NATIVE_ISSUE_CHANGED: u32 = 8;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -116,6 +119,8 @@ pub enum ForgeEventPayload {
     /// Full current decision in a distinct PR/reviewer aggregate, wire kind 7.
     /// It does not advance PR metadata or itself authorize a ref transition.
     PullRequestReviewedNative(NativeReviewEvent),
+    /// Required issue event, retaining explicit changes rather than mutable latest state.
+    IssueChangedNative(NativeIssueEvent),
 }
 
 impl ForgeEventPayload {
@@ -129,6 +134,7 @@ impl ForgeEventPayload {
             Self::MergeCommittedNative(_) => KIND_NATIVE_MERGE_COMMITTED,
             Self::PullRequestChangedNative(_) => KIND_NATIVE_PULL_REQUEST_CHANGED,
             Self::PullRequestReviewedNative(_) => KIND_NATIVE_PULL_REQUEST_REVIEWED,
+            Self::IssueChangedNative(_) => KIND_NATIVE_ISSUE_CHANGED,
         }
     }
 }
@@ -142,6 +148,7 @@ pub struct ForgeEvent {
 
 fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
     match aggregate {
+        AggregateId::Issue(number) => { out.write_scalar(0_u64); out.write_scalar(AGGREGATE_KIND_ISSUE); out.write_scalar(number.get()); }
         AggregateId::PullRequest(number) => out.write_scalar(number.get()),
         AggregateId::Organisation(number) => {
             out.write_scalar(0_u64);
@@ -170,6 +177,7 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
     let kind_offset = input.offset();
     let kind = input.read_scalar::<u32>("aggregate.kind")?;
     match kind {
+        AGGREGATE_KIND_ISSUE => Ok(AggregateId::Issue(counter("aggregate.issue", input.read_scalar::<u64>("aggregate.issue")?)?)),
         AGGREGATE_KIND_ORGANISATION => Ok(AggregateId::Organisation(counter(
             "aggregate.organisation", input.read_scalar::<u64>("aggregate.organisation")?,
         )?)),
@@ -200,7 +208,17 @@ fn validate_review(event: &ForgeEvent, review: &NativeReviewEvent) -> Result<(),
     review.validate()
 }
 
+fn validate_issue(event: &ForgeEvent) -> Result<(), CodecRefusal> {
+    if matches!(event.aggregate, AggregateId::Issue(_)) != matches!(event.payload, ForgeEventPayload::IssueChangedNative(_)) { return Err(invalid_native("issue.aggregate_kind")); }
+    if let ForgeEventPayload::IssueChangedNative(change) = &event.payload {
+        change.action.validate()?;
+        if matches!(change.action, IssueAction::Open { .. }) != (event.version == AggregateVersion::FIRST) { return Err(invalid_native("issue.aggregate_version")); }
+    }
+    Ok(())
+}
+
 fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal> {
+    validate_issue(event)?;
     if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
         != matches!(event.payload, ForgeEventPayload::PullRequestReviewedNative(_))
     { return Err(invalid_native("review.aggregate_kind")); }
@@ -232,6 +250,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
             validate_lifecycle(event, change)?;
             change.write(out)?;
         }
+        ForgeEventPayload::IssueChangedNative(change) => change.write(out)?,
         ForgeEventPayload::PullRequestReviewedNative(review) => {
             validate_review(event, review)?;
             review.write(out)?;
@@ -268,11 +287,13 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         }
         KIND_NATIVE_PULL_REQUEST_CHANGED => ForgeEventPayload::PullRequestChangedNative(NativePullRequestEvent::read(input)?),
         KIND_NATIVE_PULL_REQUEST_REVIEWED => ForgeEventPayload::PullRequestReviewedNative(NativeReviewEvent::read(input)?),
+        KIND_NATIVE_ISSUE_CHANGED => ForgeEventPayload::IssueChangedNative(NativeIssueEvent::read(input)?),
         unknown => return Err(CodecRefusal::VariantUnknown {
             field: "kind", observed: unknown, offset: kind_offset,
         }),
     };
     let event = ForgeEvent { aggregate, version, payload };
+    validate_issue(&event)?;
     if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
         != matches!(event.payload, ForgeEventPayload::PullRequestReviewedNative(_))
     { return Err(invalid_native("review.aggregate_kind")); }
@@ -289,6 +310,7 @@ fn counter<T: Counter>(field: &'static str, value: u64) -> Result<T, CodecRefusa
     T::build(value).ok_or(CodecRefusal::ValueUnrepresentable { field, observed: value, limit: 1 })
 }
 trait Counter: Sized { fn build(value: u64) -> Option<Self>; }
+impl Counter for IssueNumber { fn build(value: u64) -> Option<Self> { Self::try_new(value) } }
 impl Counter for PullRequestNumber { fn build(value: u64) -> Option<Self> { Self::try_new(value) } }
 impl Counter for AggregateVersion { fn build(value: u64) -> Option<Self> { Self::try_new(value) } }
 impl Counter for OrganisationNumber { fn build(value: u64) -> Option<Self> { Self::try_new(value) } }

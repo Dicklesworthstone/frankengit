@@ -325,7 +325,7 @@ pub fn apply_forge_event_to_prs(prs: &mut BTreeMap<PullRequestNumber, PullReques
                 // A mixed history cannot leave a misleading legacy row behind.
                 prs.remove(&num);
             }
-            ForgeEventPayload::PullRequestReviewedNative(_) => {
+            ForgeEventPayload::IssueChangedNative(_) | ForgeEventPayload::PullRequestReviewedNative(_) => {
                 // Reviews belong to their own aggregate and do not fabricate
                 // or mutate a row in the legacy PR compatibility view.
             }

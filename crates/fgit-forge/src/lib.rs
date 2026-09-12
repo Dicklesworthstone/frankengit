@@ -44,7 +44,7 @@ use core::fmt;
 
 pub use aggregate::{
     AggregateHead, AggregateId, AggregateVersion, ExpectedVersion, OrganisationNumber,
-    PullRequestNumber, TeamNumber,
+    PullRequestNumber, TeamNumber, IssueNumber,
 };
 pub use bisection::{
     BisectionContext, BisectionPredicate, BisectionRange, BisectionReceipt, BisectionRefusal,

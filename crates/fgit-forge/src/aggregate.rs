@@ -69,6 +69,7 @@ forge_counter!(
     PullRequestNumber,
     "Repository-scoped number identifying one pull request aggregate."
 );
+forge_counter!(IssueNumber, "Repository-scoped issue identity, distinct from a pull request number.");
 forge_counter!(
     OrganisationNumber,
     "Tenant-scoped number identifying one organisation aggregate."
@@ -141,6 +142,8 @@ pub enum AggregateId {
     /// One reviewer's decisions about one PR. Independent reviewer streams
     /// permit concurrent reviewers without mutating the PR's content version.
     PullRequestReview { pull_request: PullRequestNumber, reviewer: fgit_types::PrincipalId },
+    /// A canonical repository issue. Existing aggregate encodings are unchanged.
+    Issue(IssueNumber),
 }
 
 /// Wire tag for [`AggregateId::Organisation`], written only after a zero slot.
@@ -149,6 +152,9 @@ pub(crate) const AGGREGATE_KIND_ORGANISATION: u32 = 1;
 pub(crate) const AGGREGATE_KIND_TEAM: u32 = 2;
 /// New required aggregate kind; established aggregate bytes remain unchanged.
 pub(crate) const AGGREGATE_KIND_PULL_REQUEST_REVIEW: u32 = 3;
+/// Required issue aggregate discriminator, appended without reusing a code point.
+pub(crate) const AGGREGATE_KIND_ISSUE: u32 = 4;
+impl From<IssueNumber> for AggregateId { fn from(number: IssueNumber) -> Self { Self::Issue(number) } }
 
 impl From<PullRequestNumber> for AggregateId {
     fn from(value: PullRequestNumber) -> Self {
@@ -171,6 +177,7 @@ impl From<TeamNumber> for AggregateId {
 impl fmt::Display for AggregateId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Issue(number) => write!(formatter, "issue/{number}"),
             Self::PullRequest(number) => write!(formatter, "pull-request/{number}"),
             Self::Organisation(number) => write!(formatter, "organisation/{number}"),
             Self::Team(number) => write!(formatter, "team/{number}"),
