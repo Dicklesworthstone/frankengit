@@ -1,0 +1,19 @@
+name: Read-only shallow regression diagnosis
+on:
+  push:
+    branches: [tooling/shallow-diagnostic-20260912]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: /tmp/fg-shallow-diagnostic-target
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: python3 tools/shallow-diagnostic-readonly.py
