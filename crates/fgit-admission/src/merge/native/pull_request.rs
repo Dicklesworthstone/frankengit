@@ -8,15 +8,15 @@ pub mod reviews;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
-use fgit_authority::{AsyncAuthorityStore, AuthenticatedHead, OutcomeLookup, ScopedEntry, SealAttempt, SemanticRequest, TerminalOutcome};
-use fgit_chronicle::{PublicationBasis, PublicationPlan};
-use fgit_codec::{CanonicalForgePositionState, CryptoBodyIdentity};
+use fgit_authority::{AsyncAuthorityStore, AuthenticatedHead, ScopedEntry, SealAttempt, SemanticRequest, TerminalOutcome};
+use fgit_chronicle::PublicationBasis;
+use fgit_codec::CanonicalForgePositionState;
 use fgit_forge::aggregate::{AggregateId, AggregateVersion, PullRequestNumber};
 use fgit_forge::event::{ForgeEvent, ForgeEventBatch, ForgeEventPayload};
 use fgit_forge::event::pull_request::{NativePullRequestEvent, PullRequestAction, PullRequestCommand, PullRequestData, validate_transition};
 use fgit_types::{AsciiSlug, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId};
 
-use super::{NativeMergeProjection, PreparationFailure, delivery, prepare_event, stage_prepared, storage, unavailable};
+use super::{NativeMergeProjection, PreparationFailure, delivery, storage, unavailable};
 use crate::{AdmissionContext, AdmissionError, AdmissionLimits, ProjectionFailure, ValidatedClosure};
 
 /// The node supplies independently verified, already authority-selected
@@ -62,75 +62,39 @@ pub async fn admit_pull_request_async<S, P>(
     store: &S, cx: &S::Context, context: &AdmissionContext,
     command: &PullRequestCommand, limits: AdmissionLimits, projection: &P,
 ) -> Result<TerminalOutcome, AdmissionError>
-where
-    S: AsyncAuthorityStore + ?Sized,
-    P: PullRequestProjection<S> + ?Sized,
+where S: AsyncAuthorityStore + ?Sized, P: PullRequestProjection<S> + ?Sized,
 {
     limits.validate()?;
     let (event, attempt) = proposal(context, command)?;
-    projection.merge_checkpoint(cx).map_err(unavailable)?;
-    let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
-    let tx_id = admission.tx_id();
-    for _ in 0..limits.max_cas_replans {
-        projection.merge_checkpoint(cx).map_err(unavailable)?;
-        if let OutcomeLookup::Decided(outcome) = fgit_authority::resolve_outcome_async(
-            store, cx, &context.head_key, context.tenant_id, context.repository_id, tx_id,
-        ).await? { return Ok(outcome); }
-        let (basis, receipt, authenticated) = crate::read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative = fgit_authority::collect_cumulative_outcomes_async(store, cx, &context.head_key).await?;
-        if cumulative.observed() != receipt.token() { continue; }
-        let prepared: Result<_, PreparationFailure> = async {
-            let snapshot = projection.snapshot_async(store, cx, &basis, &authenticated).await?;
-            if snapshot.hidden_refs.hides(command.data.source_ref.as_bytes())
-                || snapshot.hidden_refs.hides(command.data.target_ref.as_bytes())
-            { return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized).into()); }
-            let resolved = projection.resolve_merge_basis_async(store, cx, &basis, &authenticated).await?;
-            if resolved.refs.refs() != &snapshot.refs
-                || resolved.refs.head_target() != snapshot.head_target.as_ref()
-                || storage::load_forge_positions(store, cx, &basis).await? != resolved.forge
-            { return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale).into()); }
-            projection.merge_checkpoint(cx).map_err(ProjectionFailure::Unavailable)?;
+    super::metadata::admit_metadata_async(store, cx, context, event, attempt,
+        limits, projection, &PullRequestValidation(command)).await
+}
+struct PullRequestValidation<'a>(&'a PullRequestCommand);
+impl<S, P> super::metadata::MetadataValidation<S, P> for PullRequestValidation<'_>
+where S: AsyncAuthorityStore + ?Sized, P: PullRequestProjection<S> + ?Sized,
+{
+    fn precheck(&self, snapshot: &crate::AdmissionSnapshot) -> Result<(), ProjectionFailure> {
+        if snapshot.hidden_refs.hides(self.0.data.source_ref.as_bytes())
+            || snapshot.hidden_refs.hides(self.0.data.target_ref.as_bytes())
+        { return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized)); }
+        Ok(())
+    }
+    fn validate<'a>(&'a self, store: &'a S, cx: &'a S::Context,
+        basis: &'a PublicationBasis, authenticated: &'a AuthenticatedHead,
+        snapshot: &'a crate::AdmissionSnapshot, resolved: &'a super::super::NativeMergeBasis,
+        event: &'a ForgeEvent, projection: &'a P,
+    ) -> impl Future<Output = Result<ValidatedClosure, PreparationFailure>> + Send + 'a {
+        async move {
+            let command = self.0;
             let previous = frontier_event(store, cx, &resolved.forge, command.number).await?;
-            validate_transition(previous.as_ref(), &event).map_err(ProjectionFailure::Refuse)?;
+            validate_transition(previous.as_ref(), event).map_err(ProjectionFailure::Refuse)?;
             if command.action != PullRequestAction::Close
                 && (snapshot.refs.get(&command.data.source_ref) != Some(&command.data.source_tip)
                     || snapshot.refs.get(&command.data.target_ref) != Some(&command.data.target_tip))
             { return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into()); }
-            let closure = projection.validate_pull_request_async(
-                store, cx, &basis, &authenticated, command,
-            ).await?;
-            let prepared = prepare_event(context, &event, &closure, tx_id, &attempt, &basis, &resolved)
-                .map_err(ProjectionFailure::Refuse)?;
-            if prepared.materialization.roots.ref_root != basis.body().ref_root
-                || prepared.refs != resolved.refs
-                || !prepared.fold.effects().is_some_and(|effects| effects.refs.is_empty())
-            { return Err(ProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach).into()); }
-            Ok(prepared)
-        }.await;
-        let prepared = match prepared {
-            Ok(prepared) => prepared,
-            Err(PreparationFailure::Admission(error)) => return Err(*error),
-            Err(PreparationFailure::Projection(ProjectionFailure::Unavailable(code))) => return Err(unavailable(code)),
-            Err(PreparationFailure::Projection(ProjectionFailure::Refuse(code))) => {
-                projection.merge_publication_checkpoint(cx).map_err(unavailable)?;
-                if let Some(outcome) = crate::publish_refusal_async(
-                    store, cx, context, &basis, receipt.token(), admission.seal_id(), tx_id,
-                    code, projection, &cumulative,
-                ).await? { return Ok(outcome); }
-                continue;
-            }
-        };
-        stage_prepared(store, cx, &prepared).await?;
-        projection.merge_publication_checkpoint(cx).map_err(unavailable)?;
-        let mut plan = PublicationPlan::open(basis.clone())?;
-        plan.commit(prepared.materialization.record);
-        let publication = plan.seal(&CryptoBodyIdentity, prepared.materialization.roots, &cumulative, receipt.token())?;
-        projection.merge_publication_checkpoint(cx).map_err(unavailable)?;
-        if let Some(outcome) = crate::outcome_after_publish_async(store, cx, context, receipt.token(), &publication).await? {
-            return Ok(outcome);
+            Ok(projection.validate_pull_request_async(store, cx, basis, authenticated, command).await?)
         }
     }
-    Err(AdmissionError::CasReplanLimitExceeded { limit: limits.max_cas_replans })
 }
 
 /// Read the exact event selected for one aggregate. Both callers first resolve

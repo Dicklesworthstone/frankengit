@@ -90,6 +90,7 @@ pub(crate) fn prepare_event(
 ) -> Result<PreparedNativeMerge, RefusalCode> {
     let aggregate_matches = match &event.payload {
         ForgeEventPayload::PullRequestReviewedNative(review) => event.aggregate == review.aggregate(),
+        ForgeEventPayload::IssueChangedNative(_) => matches!(event.aggregate, fgit_forge::AggregateId::Issue(_)),
         _ => matches!(event.aggregate, fgit_forge::AggregateId::PullRequest(_)),
     };
     if !aggregate_matches
@@ -113,6 +114,13 @@ pub(crate) fn prepare_event(
         .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let entity = ForgeEntityId::new(label);
     let (kind, required_objects, ref_effect) = match &event.payload {
+        ForgeEventPayload::IssueChangedNative(change) => {
+            change.action.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if change.actor != context.principal_id || !attempt.request.ref_commands().is_empty()
+                || !closure.objects.is_empty()
+            { return Err(RefusalCode::EvidenceInvalid); }
+            (ForgeEventKind::IssueChanged { issue: entity }, Vec::new(), None)
+        }
         ForgeEventPayload::MergeCommittedNative(merge) => {
             merge.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
             if merge.merge_commit.algorithm() != context.object_format {
