@@ -4,6 +4,8 @@ on:
     branches: [tooling/fetch-cutoffs-e55985db]
 permissions:
   contents: read
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
 jobs:
   prepare:
     runs-on: ubuntu-22.04
