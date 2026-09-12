@@ -1,0 +1,19 @@
+name: Shallow serving integration workbench
+on:
+  push:
+    branches: [tooling/shallow-integration-eafff245]
+permissions:
+  contents: write
+jobs:
+  work:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: /tmp/frankengit-shallow-integration-target
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - run: python3 tools/shallow-work.py
