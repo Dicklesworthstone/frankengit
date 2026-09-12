@@ -2,7 +2,7 @@ use super::*;
 use std::process::{Command, Output};
 use std::sync::Arc;
 
-fn command(run: &str, operation: &str, client: &str, extra: &[&str]) -> Command {
+pub(super) fn command(run: &str, operation: &str, client: &str, extra: &[&str]) -> Command {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../scripts/e2e/oracle/partial_clone_client.py");
     let mut command = Command::new("python3");
@@ -14,7 +14,7 @@ fn command(run: &str, operation: &str, client: &str, extra: &[&str]) -> Command 
         .args(extra);
     command
 }
-fn checked(mut command: Command) -> Vec<u8> {
+pub(super) fn checked(mut command: Command) -> Vec<u8> {
     let output = command.output().expect("run pinned client wrapper");
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
     assert!(
@@ -24,7 +24,11 @@ fn checked(mut command: Command) -> Vec<u8> {
     );
     output.stdout
 }
-fn live_client(node: OneNode, listener: &TcpListener, mut command: Command) -> (OneNode, Output) {
+pub(super) fn live_client(
+    node: OneNode,
+    listener: &TcpListener,
+    mut command: Command,
+) -> (OneNode, Output) {
     let listener = listener.try_clone().unwrap();
     listener.set_nonblocking(true).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
@@ -75,7 +79,7 @@ fn live_client(node: OneNode, listener: &TcpListener, mut command: Command) -> (
     );
     (node, output)
 }
-fn inventory(run: &str, client: &str) -> BTreeSet<String> {
+pub(super) fn inventory(run: &str, client: &str) -> BTreeSet<String> {
     String::from_utf8(checked(command(run, "inventory", client, &[])))
         .unwrap()
         .lines()

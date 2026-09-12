@@ -20,9 +20,9 @@ def refuse(message):
 def main():
     args = sys.argv[1:]
     if len(args) < 3:
-        refuse("usage: RUN clone|read|checkout|inventory|fsck CLIENT [ENDPOINT REPOSITORY VERSION FILTER|OID]")
+        refuse("usage: RUN clone|shallow-clone|depth|unshallow|fetch|read|checkout|inventory|history|fsck CLIENT [ENDPOINT REPOSITORY VERSION VALUE]")
     run_arg, operation, client, *extra = args
-    if operation not in {"clone", "read", "checkout", "inventory", "fsck"}:
+    if operation not in {"clone", "shallow-clone", "depth", "unshallow", "fetch", "read", "checkout", "inventory", "history", "fsck"}:
         refuse("unsupported client operation")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", client):
         refuse("client directory must be a bounded simple label")
@@ -36,12 +36,13 @@ def main():
             refuse("oracle workspace and home must be real directories")
     work = run / "work"
     destination = work / client
-    if operation == "clone":
+    cloning = operation in {"clone", "shallow-clone"}
+    if cloning:
         if destination.exists() or destination.is_symlink():
             refuse("clone destination must be absent")
     elif destination.is_symlink() or not destination.is_dir():
         refuse("existing client must be a real directory")
-    network = operation in {"clone", "read", "checkout"}
+    network = operation in {"clone", "shallow-clone", "depth", "unshallow", "fetch", "read", "checkout"}
     config = [("core.hooksPath", "/home/oracle/empty-hooks"), ("credential.helper", "")]
     if network:
         if len(extra) != 4:
@@ -56,7 +57,28 @@ def main():
         config.append(("protocol.version", protocol))
         if operation in {"read", "checkout"}:
             config += [("remote.origin.url", url), ("remote.origin.promisor", "true")]
-        if operation == "clone":
+        if operation in {"depth", "unshallow", "fetch"}:
+            config.append(("remote.origin.url", url))
+        if operation == "shallow-clone":
+            depth = re.fullmatch(r"([1-9][0-9]{0,9})(?:,(blob:none|tree:0))?", value)
+            if not depth or int(depth[1]) > 2147483647:
+                refuse("shallow clone needs a bounded positive depth and optional campaign filter")
+            command = ["clone", "--no-local", "--no-checkout", "--single-branch", "--branch=public", "--depth=" + depth[1]]
+            if depth[2]:
+                command.append("--filter=" + depth[2])
+            command += [url, client]
+        elif operation == "depth":
+            if not re.fullmatch(r"[1-9][0-9]{0,9}", value) or int(value) > 2147483647:
+                refuse("absolute depth must be a bounded positive integer")
+            command = ["fetch", "--no-tags", "--depth=" + value, "origin"]
+        elif operation in {"unshallow", "fetch"}:
+            if value != "-":
+                refuse("this fetch operation takes only the fixed no-value marker")
+            command = ["fetch", "--no-tags"]
+            if operation == "unshallow":
+                command.append("--unshallow")
+            command.append("origin")
+        elif operation == "clone":
             if value not in {"blob:none", "tree:0", "tree:1", "blob:limit=21", "combine:tree:1+blob:none"}:
                 refuse("filter is outside the pinned campaign")
             command = ["clone", "--no-local", "--no-checkout", "--filter=" + value, url, client]
@@ -67,7 +89,9 @@ def main():
     else:
         if extra:
             refuse("file-only operation takes no extra arguments")
-        command = ["cat-file", "--batch-all-objects", "--batch-check=%(objectname)"] if operation == "inventory" else ["fsck", "--strict"]
+        command = {"inventory": ["cat-file", "--batch-all-objects", "--batch-check=%(objectname)"],
+                   "history": ["rev-list", "refs/remotes/origin/public"],
+                   "fsck": ["fsck", "--strict"]}[operation]
     subprocess.run([str(HERE / "oracle.sh"), "verify", PIN], check=True, stdout=sys.stderr, timeout=60)
     install = root / "installs" / PIN
     receipt = (install / "receipt.tsv").read_text()
@@ -84,7 +108,7 @@ def main():
                 "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/home",
                 "--bind", str(run / "home"), "/home/oracle", "--bind", str(work), "/work",
                 "--bind", str(transcript_dir), "/transcripts", "--ro-bind", str(install), "/oracle",
-                "--chdir", "/work" if operation == "clone" else "/work/" + client]
+                "--chdir", "/work" if cloning else "/work/" + client]
     environment = {
         "HOME": "/home/oracle", "PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TEMPLATE_DIR": "/home/oracle/template",

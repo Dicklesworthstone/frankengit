@@ -1165,3 +1165,5 @@ fn legacy_peeled_records_are_bounded_and_do_not_duplicate_existing_records() {
 mod partial_clone;
 
 mod partial_oracle;
+#[cfg(target_os = "linux")]
+mod shallow_oracle;
