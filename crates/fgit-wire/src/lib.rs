@@ -2711,6 +2711,7 @@ impl V2UploadPack {
         };
         self.ref_prefixes.clear();
         self.ls_refs = LsRefsOptions::default();
+        self.request_capabilities = Capabilities::default();
         self.state = V2State::AwaitCommand;
         Ok(Transition {
             output,
