@@ -17,7 +17,15 @@ jobs:
         with:
           fetch-depth: 0
       - id: prepare
-        run: python3 tools/fetch-cutoffs/prepare.py
+        shell: python
+        run: |
+          import pathlib
+          path=pathlib.Path('tools/fetch-cutoffs/prepare.py')
+          text=path.read_text()
+          old="edit(node+'lib.rs','shallow deepen-relative filter include-tag','shallow deepen-relative deepen-since deepen-not filter include-tag')"
+          assert text.count(old)==1
+          text=text.replace(old,old[:-1]+',10)')
+          exec(compile(text,str(path),'exec'))
   verify:
     needs: prepare
     runs-on: ubuntu-22.04
