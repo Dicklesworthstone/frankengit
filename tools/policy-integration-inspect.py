@@ -1,32 +1,21 @@
-import json, pathlib, re, shutil, subprocess
-root = pathlib.Path.cwd()
-print('TRACKER_TOOLS', {name: shutil.which(name) for name in ['br','bv']})
-if shutil.which('br'):
-    subprocess.run(['br','ready','--unassigned','--no-db','--json'], check=True, timeout=30)
-else:
-    print('TRACKER_READ_ONLY: br unavailable; no readiness, claim, transition or closure inferred')
-for i,line in enumerate((root/'.beads/issues.jsonl').read_text().splitlines(),1):
-    item=json.loads(line)
-    if item.get('id') in ['frankengit-fg043r','frankengit-asa3'] or ('policy' in item.get('title','').lower() and item.get('status') != 'closed'):
-        print('BEAD_RECORD', i, json.dumps(item))
-for rel, needles in {
-    'COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md':['## 32.','### 32.','## 25.','## 18.'],
-    'docs/NORMATIVE_PROTOCOL_CONTRACTS.md':['policy_epoch','configuration_root','policy_root','PolicySnapshot','promotion','protection'],
-    'crates/fgit-node/src/lib.rs':['pub struct OneNodeConfig','pub struct NodeConfig','struct NodeAdmission','struct DurableAdmission','impl AdmissionEvidence','fn commit_evidence','ProtectionRule','policy_root','configuration_root','impl AsyncAdmissionProjection'],
-    'crates/fgit-admission/src/lib.rs':['pub struct ProtectionRule','protection','policy_epoch','fn evaluate_lowered'],
-    'crates/fgit-codec/src/lib.rs':['struct RepositoryIncarnation','configuration_root','struct RepositoryConfiguration'],
-    'crates/fgit-chronicle/src/lib.rs':['configuration_root','policy_epoch','struct ResultingRoots'],
-}.items():
+import pathlib, re
+root=pathlib.Path.cwd()
+needles=['pub struct Publication','pub struct ResultingRoots','pub enum Intent','pub enum Lowered','pub struct ProtectionRule','pub fn read_repository_incarnation_configuration','pub async fn read_repository_incarnation_configuration','struct NormalizedRepository','pub struct RepositoryConfiguration','configuration_root:', 'fn evaluate_lowered','fn admit_sealed','fn prepare_native_merge']
+for dirname in ['fgit-authority','fgit-txn','fgit-reference','fgit-admission']:
+    for path in sorted((root/'crates'/dirname/'src').rglob('*.rs')):
+        if 'tests' in str(path):continue
+        lines=path.read_text().splitlines()
+        for i,line in enumerate(lines):
+            match=next((needle for needle in needles if needle in line),None)
+            if not match:continue
+            print('LOCATION',path.relative_to(root),i+1,line)
+            if match != 'configuration_root:':
+                print('\n'.join(f'{j+1}: {lines[j]}' for j in range(i+1,min(i+65,len(lines)))))
+for rel in ['crates/fgit-reference/src/state.rs','crates/fgit-authority/src/capability_revocation.rs']:
     path=root/rel
     if not path.exists():continue
     lines=path.read_text().splitlines()
     for i,line in enumerate(lines):
-        if any(needle in line for needle in needles):
-            print('MATCH',rel,i+1,line)
-            if any(needle in line for needle in ['pub struct','struct NodeAdmission','struct DurableAdmission','fn commit_evidence','impl AdmissionEvidence','impl AsyncAdmissionProjection','## 32.','### 32.']):
-                print('\n'.join(f'{j+1}: {lines[j]}' for j in range(i+1,min(i+45,len(lines)))))
-for path in sorted((root/'crates').glob('*/src/**/*.rs')):
-    if 'fgit-node' not in str(path) and 'fgit-codec' not in str(path):continue
-    text=path.read_text()
-    if any(needle in text for needle in ['pub struct RepositoryIncarnation','pub struct ProtectionRule','struct IncarnationConfiguration']):
-        print('DEFINITION_FILE',path.relative_to(root))
+        if ('pub ' in line or 'pub(' in line) and any(word in line.lower() for word in ['policy','activat','publish','change','update','config','revok']):
+            print('API',rel,i+1,line)
+            print('\n'.join(f'{j+1}: {lines[j]}' for j in range(i+1,min(i+28,len(lines)))))
