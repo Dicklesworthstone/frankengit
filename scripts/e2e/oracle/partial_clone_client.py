@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import time
+from cutoff_client import cutoff_arguments
 
 HERE = Path(__file__).resolve().parent
 PIN = "git-2.54.0"
@@ -22,7 +23,7 @@ def main():
     if len(args) < 3:
         refuse("usage: RUN clone|shallow-clone|depth|deepen|unshallow|fetch|read|checkout|inventory|history|fsck CLIENT [ENDPOINT REPOSITORY VERSION VALUE]")
     run_arg, operation, client, *extra = args
-    if operation not in {"clone", "shallow-clone", "depth", "deepen", "unshallow", "fetch", "fetch-private", "read", "checkout", "inventory", "history", "fsck"}:
+    if operation not in {"cutoff-clone", "cutoff-fetch", "clone", "shallow-clone", "depth", "deepen", "unshallow", "fetch", "fetch-private", "read", "checkout", "inventory", "history", "fsck"}:
         refuse("unsupported client operation")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", client):
         refuse("client directory must be a bounded simple label")
@@ -36,13 +37,13 @@ def main():
             refuse("oracle workspace and home must be real directories")
     work = run / "work"
     destination = work / client
-    cloning = operation in {"clone", "shallow-clone"}
+    cloning = operation in {"clone", "shallow-clone", "cutoff-clone"}
     if cloning:
         if destination.exists() or destination.is_symlink():
             refuse("clone destination must be absent")
     elif destination.is_symlink() or not destination.is_dir():
         refuse("existing client must be a real directory")
-    network = operation in {"clone", "shallow-clone", "depth", "deepen", "unshallow", "fetch", "fetch-private", "read", "checkout"}
+    network = operation in {"cutoff-clone", "cutoff-fetch", "clone", "shallow-clone", "depth", "deepen", "unshallow", "fetch", "fetch-private", "read", "checkout"}
     config = [("core.hooksPath", "/home/oracle/empty-hooks"), ("credential.helper", "")]
     if network:
         if len(extra) != 4:
@@ -57,9 +58,13 @@ def main():
         config.append(("protocol.version", protocol))
         if operation in {"read", "checkout"}:
             config += [("remote.origin.url", url), ("remote.origin.promisor", "true")]
-        if operation in {"depth", "deepen", "unshallow", "fetch", "fetch-private"}:
+        if operation in {"cutoff-fetch", "depth", "deepen", "unshallow", "fetch", "fetch-private"}:
             config.append(("remote.origin.url", url))
-        if operation == "shallow-clone":
+        if operation == "cutoff-clone":
+            command = ["clone", "--no-local", "--no-checkout", "--single-branch", "--branch=public", "--no-tags", *cutoff_arguments(value), url, client]
+        elif operation == "cutoff-fetch":
+            command = ["fetch", "--no-tags", *cutoff_arguments(value), "origin"]
+        elif operation == "shallow-clone":
             depth = re.fullmatch(r"([1-9][0-9]{0,9})(?:,(blob:none|tree:0))?", value)
             if not depth or int(depth[1]) > 2147483647:
                 refuse("shallow clone needs a bounded positive depth and optional campaign filter")

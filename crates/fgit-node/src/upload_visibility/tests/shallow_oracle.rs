@@ -1,4 +1,5 @@
 //! Optional real-client campaign; no upstream Git in production.
+mod cutoff_oracle;
 use super::partial_oracle::{checked, command, inventory, live_client};
 use super::*;
 use std::process::Command;
