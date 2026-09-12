@@ -1,21 +1,23 @@
-import pathlib, re
+import pathlib
 root=pathlib.Path.cwd()
-needles=['pub struct Publication','pub struct ResultingRoots','pub enum Intent','pub enum Lowered','pub struct ProtectionRule','pub fn read_repository_incarnation_configuration','pub async fn read_repository_incarnation_configuration','struct NormalizedRepository','pub struct RepositoryConfiguration','configuration_root:', 'fn evaluate_lowered','fn admit_sealed','fn prepare_native_merge']
-for dirname in ['fgit-authority','fgit-txn','fgit-reference','fgit-admission']:
-    for path in sorted((root/'crates'/dirname/'src').rglob('*.rs')):
-        if 'tests' in str(path):continue
-        lines=path.read_text().splitlines()
-        for i,line in enumerate(lines):
-            match=next((needle for needle in needles if needle in line),None)
-            if not match:continue
-            print('LOCATION',path.relative_to(root),i+1,line)
-            if match != 'configuration_root:':
-                print('\n'.join(f'{j+1}: {lines[j]}' for j in range(i+1,min(i+65,len(lines)))))
-for rel in ['crates/fgit-reference/src/state.rs','crates/fgit-authority/src/capability_revocation.rs']:
-    path=root/rel
-    if not path.exists():continue
-    lines=path.read_text().splitlines()
-    for i,line in enumerate(lines):
-        if ('pub ' in line or 'pub(' in line) and any(word in line.lower() for word in ['policy','activat','publish','change','update','config','revok']):
-            print('API',rel,i+1,line)
-            print('\n'.join(f'{j+1}: {lines[j]}' for j in range(i+1,min(i+28,len(lines)))))
+for name, needles, width in [
+ ('crates/fgit-admission/src/lib.rs',['fn prepare_publication_from_snapshot','impl CanonicalAdmissionStore','resolve_hidden_ref_policy','fn snapshot_from','struct RefIntentEvaluator'],80),
+ ('crates/fgit-node/src/lib.rs',['pub struct NodeConfig','fn snapshot_for','fn materialize_selected_in','let configuration = read_repository','hidden_refs:','record_creation_attempt_async','pub enum NodeRefusal','pub struct AsyncMaterializedBasis'],30),
+ ('crates/fgit-cli/src/main.rs',['fn run_init','fn parse_init','init-protected','Command::Init','enum Command'],35),
+ ('crates/fgit-authority/src/lib.rs',['repository_configuration','CreationAttempt'],15),
+ ('crates/fgit-codec/src/lib.rs',['repository_configuration','CreationAttempt'],12),
+ ('crates/fgit-admission/src/evidence.rs',['fn principal_snapshot_id'],18),
+]:
+ path=root/name
+ if not path.exists():continue
+ lines=path.read_text().splitlines()
+ for i,line in enumerate(lines):
+  if any(n in line for n in needles):
+   print('SOURCE',name,i+1,'\n'+'\n'.join(f'{j+1}: {lines[j]}' for j in range(i,min(i+width,len(lines)))))
+for name in ['fgit-authority','fgit-codec','fgit-node']:
+ for path in sorted((root/'crates'/name/'src').rglob('*.rs')):
+  if any(word in str(path) for word in ['/tests/']):continue
+  for i,line in enumerate(path.read_text().splitlines()):
+   if any(n in line for n in ['struct CreationAttemptBody','fn record_creation_attempt','enum CreationAttempt','fn prepare_publication_from_snapshot']):
+    print('LOCATE',path.relative_to(root),i+1,line)
+print('CLI_FILES', [str(p.relative_to(root)) for p in (root/'crates/fgit-cli/src').glob('*.rs')])
