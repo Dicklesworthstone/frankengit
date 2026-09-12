@@ -2473,11 +2473,10 @@ impl V2UploadPack {
                     });
                 };
                 let prefix = parse_ref_prefix(prefix, &self.limits)?;
-                if self.ref_prefixes.contains(&prefix) {
-                    return Err(WireError::MalformedRequestLine {
-                        line: line.to_vec(),
-                    });
-                }
+                // Prefixes are an OR-query, not conflicting declarations.
+                // Git can repeat one while expanding fetch refspecs. Keep
+                // every argument bounded by the existing request ceiling;
+                // matching still visits each advertised ref exactly once.
                 if self.ref_prefixes.len() == self.limits.max_ref_prefixes {
                     return Err(WireError::TooManyObjectIds {
                         field: "ref-prefix",
