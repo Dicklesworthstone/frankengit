@@ -207,7 +207,12 @@ fn history(
         }
         for &id in &old {
             work.tick()?;
-            if commits.contains(&id) && !boundaries.contains(&id) {
+            // Git's INFINITE_DEPTH removes every supplied boundary present
+            // in the server's complete repository, not only wanted ancestry.
+            // Here membership is narrowed to the authenticated visible graph.
+            if (request.deepen == Some(2_147_483_647) || commits.contains(&id))
+                && !boundaries.contains(&id)
+            {
                 update.unshallow.push(id);
             }
         }
@@ -308,9 +313,34 @@ pub(super) fn select(
 ) -> Result<Vec<GitOid>, NodePackMaterializationRefusal> {
     let mut work = Work::new(limits, live);
     let history = history(objects, request, &mut work)?;
+    let mut roots = BTreeSet::new();
+    for &id in &request.wants {
+        work.insert(&mut roots, id)?;
+    }
+    // Removing an old boundary is a promise to deliver its missing parents,
+    // including visible shallow histories on other client branches. Starting
+    // at parents avoids retransmitting a natural root solely for unshallow.
+    // All lookups remain inside the same verified graph and work ledger.
+    for &boundary in &history.update.unshallow {
+        work.tick()?;
+        for &(parent, kind) in &object(objects, boundary)?.edges {
+            work.tick()?;
+            if kind == ObjectType::Commit {
+                work.insert(&mut roots, parent)?;
+            }
+        }
+    }
+    let mut desired_roots = Vec::new();
+    desired_roots
+        .try_reserve_exact(roots.len())
+        .map_err(|_| budget())?;
+    for root in roots {
+        work.tick()?;
+        desired_roots.push(root);
+    }
     let desired = walk(
         objects,
-        &request.wants,
+        &desired_roots,
         &history.boundaries,
         false,
         &mut work,

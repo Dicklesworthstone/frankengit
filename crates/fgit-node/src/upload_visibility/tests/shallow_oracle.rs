@@ -349,3 +349,90 @@ fn pinned_git_shallow_clone_deepen_incremental_fetch_and_unshallow() {
         drop(scratch);
     }
 }
+
+#[test]
+#[ignore = "requires source/binary-verified Git 2.54.0 and Bubblewrap via FGIT_ORACLE_ROOT"]
+fn pinned_git_unshallow_completes_all_visible_client_branch_boundaries() {
+    let oracle =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/e2e/oracle/oracle.sh");
+    let output = Command::new(&oracle)
+        .args(["create-run", "git-2.54.0", "shallow-multiple-branches"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "verified oracle unavailable: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let Fixture {
+            scratch,
+            mut node,
+            public,
+            private,
+            ancestor,
+            ..
+        } = fixture(format);
+        // Both branches are deliberately visible. Do not let historical-only
+        // storage authorize the extra boundary selected by --unshallow.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let repository =
+            String::from_utf8(node.git_daemon_repository_path().as_bytes().to_vec()).unwrap();
+        for version in ["0", "1", "2"] {
+            let client = format!("multi-{}-{version}", format.as_str());
+            let (returned, _) = live_client(
+                node,
+                &listener,
+                command(
+                    &run,
+                    "shallow-clone",
+                    &client,
+                    &[&endpoint, &repository, version, "1"],
+                ),
+            );
+            node = returned;
+            assert_eq!(markers(&run, &client), BTreeSet::from([public]));
+            let (returned, _) = live_client(
+                node,
+                &listener,
+                command(
+                    &run,
+                    "fetch-private",
+                    &client,
+                    &[&endpoint, &repository, version, "1"],
+                ),
+            );
+            node = returned;
+            assert_eq!(markers(&run, &client), BTreeSet::from([public, private]));
+            let (returned, _) = live_client(
+                node,
+                &listener,
+                command(
+                    &run,
+                    "unshallow",
+                    &client,
+                    &[&endpoint, &repository, version, "-"],
+                ),
+            );
+            node = returned;
+            assert!(
+                markers(&run, &client).is_empty(),
+                "infinite depth clears both visible boundaries, not only the fetched public branch"
+            );
+            assert_eq!(
+                history(&run, &client),
+                BTreeSet::from([public.to_string(), ancestor.to_string()])
+            );
+            checked(command(&run, "fsck", &client, &[]));
+            eprintln!(
+                "PINNED_SHALLOW_MULTI format={} protocol={} all_visible_boundaries=passed",
+                format.as_str(),
+                version
+            );
+        }
+        node.shutdown().unwrap();
+        drop(scratch);
+    }
+}

@@ -114,7 +114,7 @@ fn a_have_at_the_old_boundary_does_not_subtract_the_ancestors_being_deepened() {
 }
 
 #[test]
-fn unshallow_supplies_missing_history_and_removes_only_crossed_client_boundaries() {
+fn unshallow_also_removes_an_authorized_natural_root_outside_the_wanted_history() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut graph = Graph::new(format);
         let root = graph.commit(&[]);
@@ -135,7 +135,7 @@ fn unshallow_supplies_missing_history_and_removes_only_crossed_client_boundaries
             update(&graph, &request),
             ShallowUpdate {
                 shallow: vec![],
-                unshallow: vec![middle.0]
+                unshallow: vec![middle.0, unrelated.0]
             }
         );
     }
@@ -351,4 +351,55 @@ fn bounds_and_unsupported_controls_fail_before_returning_a_selection() {
             RefusalCode::EvidenceInvalid
         ))
     ));
+}
+
+#[test]
+fn unshallow_supplies_other_visible_histories_but_finite_depth_does_not() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let mut graph = Graph::new(format);
+        let root = graph.commit(&[]);
+        let middle = graph.commit(&[root.0]);
+        let tip = graph.commit(&[middle.0]);
+        let other_root = graph.commit(&[]);
+        let other_tip = graph.commit(&[other_root.0]);
+        let unknown = GitOid::from_hex(format, &"f".repeat(format.digest_len() * 2)).unwrap();
+        let mut request = request(
+            tip.0,
+            Some(2_147_483_647),
+            vec![middle.0, other_tip.0, unknown],
+            vec![tip.0, other_tip.0],
+        );
+        assert_eq!(
+            update(&graph, &request),
+            ShallowUpdate {
+                shallow: vec![],
+                unshallow: vec![middle.0, other_tip.0],
+            }
+        );
+        assert_eq!(
+            ids(&graph, &request),
+            BTreeSet::from([
+                root.0,
+                root.1,
+                root.2,
+                other_root.0,
+                other_root.1,
+                other_root.2,
+            ]),
+            "every removed visible boundary receives its complete missing parent history"
+        );
+        request.deepen = Some(4);
+        assert_eq!(
+            update(&graph, &request),
+            ShallowUpdate {
+                shallow: vec![],
+                unshallow: vec![middle.0],
+            }
+        );
+        assert_eq!(
+            ids(&graph, &request),
+            BTreeSet::from([root.0, root.1, root.2]),
+            "a finite depth change does not remove a separate client's boundary"
+        );
+    }
 }
