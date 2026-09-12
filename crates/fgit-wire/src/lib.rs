@@ -41,6 +41,7 @@ use fgit_types::RefName;
 /// Bounded shallow-history and partial-clone closure computation.
 pub mod closure;
 mod filter_syntax;
+mod shallow_response;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
 /// Hidden-ref authorization policy and visibility-filtered repository views.
@@ -1266,6 +1267,20 @@ pub trait UploadPackRepository {
     fn contains_want(&self, oid: AnyGitOid) -> bool;
     /// Whether a client `have` is already common with the advertised closure.
     fn is_common(&self, oid: AnyGitOid) -> bool;
+    /// Whether this immutable repository view can resolve actual shallow updates.
+    /// A transport must not advertise shallow serving from parser support alone.
+    fn supports_shallow(&self) -> bool {
+        false
+    }
+    /// Resolve shallow changes at the same authorized basis as wants and ACKs.
+    ///
+    /// Called before have negotiation in v0/v1 and before the shallow-info
+    /// section in v2 by machines using `with_shallow_updates`. The provider
+    /// owns bounded graph work and cancellation; the wire machine validates
+    /// identity, authorization, ordering, counts and unshallow membership.
+    fn shallow_update(&self, _request: &PackRequest) -> Result<closure::ShallowUpdate, WireError> {
+        Err(WireError::PackSourceRefused)
+    }
     /// Resolves one canonical advertised ref for a `deepen-not` control.
     fn resolve_ref(&self, name: &[u8]) -> Option<AnyGitOid> {
         self.advertised_refs()
@@ -1727,6 +1742,8 @@ pub struct LegacyUploadPack {
     no_done: bool,
     last_common: Option<AnyGitOid>,
     saw_want_capabilities: bool,
+    automatic_shallow_updates: bool,
+    shallow_negotiated: bool,
 }
 
 /// Bounded stateless-RPC envelope adapter for a legacy upload-pack request.
@@ -1819,6 +1836,16 @@ impl StatelessRpcUploadPack {
 }
 
 impl LegacyUploadPack {
+    /// Ask the repository to resolve and frame shallow changes before haves.
+    ///
+    /// Without this opt-in the machine retains its low-level parser contract:
+    /// the enclosing adapter is responsible for the shallow exchange itself.
+    #[must_use]
+    pub fn with_shallow_updates(mut self) -> Self {
+        self.automatic_shallow_updates = true;
+        self
+    }
+
     /// Creates a v0 or v1 request machine.  V2 has a distinct command grammar.
     pub fn new(
         version: UploadPackVersion,
@@ -1850,6 +1877,8 @@ impl LegacyUploadPack {
             no_done: false,
             last_common: None,
             saw_want_capabilities: false,
+            automatic_shallow_updates: false,
+            shallow_negotiated: false,
         })
     }
 
@@ -1904,15 +1933,25 @@ impl LegacyUploadPack {
                 if self.wants.is_empty() {
                     return Err(WireError::MissingWant);
                 }
-                self.state = LegacyState::AwaitHave;
-                let output = match self.ack_mode {
-                    AckMode::MultiAck | AckMode::MultiAckDetailed => vec![line_packet(b"NAK\n")],
-                    AckMode::None => Vec::new(),
+                let request = self.pack_request();
+                let shallow_negotiated = self.automatic_shallow_updates
+                    && shallow_response::changes_boundary(&request);
+                let mut output = if self.automatic_shallow_updates
+                    && shallow_response::has_controls(&request)
+                {
+                    shallow_response::response(repository, &request, &self.limits)?
+                } else {
+                    Vec::new()
                 };
-                Ok(Transition {
-                    output,
-                    events: Vec::new(),
-                })
+                if !shallow_negotiated && self.ack_mode != AckMode::None {
+                    output.push(line_packet(b"NAK\n"));
+                }
+                if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
+                    let _ = encode_packets(&output, &self.limits)?;
+                }
+                self.shallow_negotiated = shallow_negotiated;
+                self.state = LegacyState::AwaitHave;
+                Ok(Transition { output, events: Vec::new() })
             }
             Packet::Data(line) => self.accept_want_line(line, repository),
             Packet::Delimiter | Packet::ResponseEnd => Err(WireError::IllegalTransition {
@@ -2151,10 +2190,13 @@ impl LegacyUploadPack {
                     format!("ACK {oid_hex}\n", oid_hex = oid_hex(oid)).into_bytes(),
                 )],
             },
-            None => match self.ack_mode {
-                AckMode::None => vec![line_packet(b"NAK\n")],
-                AckMode::MultiAck | AckMode::MultiAckDetailed => Vec::new(),
-            },
+            None => {
+                if self.shallow_negotiated || self.ack_mode == AckMode::None {
+                    vec![line_packet(b"NAK\n")]
+                } else {
+                    Vec::new()
+                }
+            }
         };
         Transition {
             output,
@@ -2259,9 +2301,18 @@ pub struct V2UploadPack {
     done: bool,
     ref_prefixes: Vec<Vec<u8>>,
     ls_refs: LsRefsOptions,
+    automatic_shallow_updates: bool,
 }
 
 impl V2UploadPack {
+    /// Resolve and frame shallow-info before the packfile section.
+    /// The default remains a parser-only handoff for existing low-level users.
+    #[must_use]
+    pub fn with_shallow_updates(mut self) -> Self {
+        self.automatic_shallow_updates = true;
+        self
+    }
+
     /// Creates a v2 command machine that accepts exactly one complete request.
     pub fn new(server_capabilities: Capabilities, limits: WireLimits) -> Result<Self, WireError> {
         let decoder = PktLineDecoder::new(limits.clone())?;
@@ -2282,6 +2333,7 @@ impl V2UploadPack {
             done: false,
             ref_prefixes: Vec::new(),
             ls_refs: LsRefsOptions::default(),
+            automatic_shallow_updates: false,
         })
     }
 
@@ -2718,22 +2770,26 @@ impl V2UploadPack {
             output.push(line_packet(b"ready\n"));
             output.push(Packet::Delimiter);
         }
+        let request = PackRequest {
+            version: UploadPackVersion::V2,
+            wants: self.wants.clone(),
+            haves: self.haves.clone(),
+            shallows: self.shallows.clone(),
+            deepen: self.deepen,
+            deepen_since: self.deepen_since,
+            deepen_not: self.deepen_not.clone(),
+            filter: self.filter.clone(),
+            options: self.options.with(PackOptions::SIDE_BAND_64K.0),
+        };
+        if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
+            output.extend(shallow_response::response(repository, &request, &self.limits)?);
+        }
         output.push(line_packet(b"packfile\n"));
+        if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
+            let _ = encode_packets(&output, &self.limits)?;
+        }
         self.state = V2State::Complete;
-        Ok(Transition {
-            output,
-            events: vec![WireEvent::PackRequested(PackRequest {
-                version: UploadPackVersion::V2,
-                wants: self.wants.clone(),
-                haves: self.haves.clone(),
-                shallows: self.shallows.clone(),
-                deepen: self.deepen,
-                deepen_since: self.deepen_since,
-                deepen_not: self.deepen_not.clone(),
-                filter: self.filter.clone(),
-                options: self.options.with(PackOptions::SIDE_BAND_64K.0),
-            })],
-        })
+        Ok(Transition { output, events: vec![WireEvent::PackRequested(request)] })
     }
 }
 
