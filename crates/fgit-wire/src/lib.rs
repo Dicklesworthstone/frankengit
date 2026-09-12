@@ -41,6 +41,7 @@ use fgit_types::RefName;
 /// Bounded shallow-history and partial-clone closure computation.
 pub mod closure;
 mod filter_syntax;
+mod cutoff_ref;
 mod shallow_response;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
@@ -2013,10 +2014,7 @@ impl LegacyUploadPack {
         }
         if let Some(rest) = line.strip_prefix(b"deepen-not ") {
             self.require_capability(b"shallow")?;
-            let name = parse_ref_name(rest, &self.limits)?;
-            let oid = repository
-                .resolve_ref(&name)
-                .ok_or(WireError::UnknownDeepenNotRef { name })?;
+            let oid = cutoff_ref::resolve(repository, rest, &self.limits)?;
             push_deduplicated_oid(
                 "deepen-not",
                 oid,
@@ -2569,10 +2567,7 @@ impl V2UploadPack {
         }
         if let Some(rest) = line.strip_prefix(b"deepen-not ") {
             self.require_fetch_feature(b"shallow")?;
-            let name = parse_ref_name(rest, &self.limits)?;
-            let oid = repository
-                .resolve_ref(&name)
-                .ok_or(WireError::UnknownDeepenNotRef { name })?;
+            let oid = cutoff_ref::resolve(repository, rest, &self.limits)?;
             push_deduplicated_oid(
                 "deepen-not",
                 oid,

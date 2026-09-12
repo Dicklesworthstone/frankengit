@@ -233,6 +233,7 @@ fn project_visible_graph(
             require_kind(kind, *expected)?;
         }
         // Blobs have no local edges. Avoid a second full-body parsed copy.
+        let mut commit_time = None;
         let edges = if kind == ObjectType::Blob {
             Vec::new()
         } else {
@@ -245,6 +246,7 @@ fn project_visible_graph(
             source.checkpoint()?;
             let parsed =
                 parsed.map_err(|_| disclosure_refusal(RefusalCode::ObjectHeaderInvalid))?;
+            commit_time = shallow::cutoffs::committer_time(&parsed);
             let mut stopped = None;
             let edges = crate::loose_import::graph::references(
                 source.format(),
@@ -298,6 +300,7 @@ fn project_visible_graph(
         objects.insert(
             id,
             partial_clone::FilterObject {
+                commit_time,
                 kind,
                 size: body.len(),
                 edges,

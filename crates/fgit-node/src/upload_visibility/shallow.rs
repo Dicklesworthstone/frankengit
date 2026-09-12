@@ -3,6 +3,7 @@
 use super::partial_clone::FilterObject;
 use super::*;
 use fgit_wire::closure::ShallowUpdate;
+pub(super) mod cutoffs;
 mod relative;
 
 /// Shared only with the repository view for the lifetime of this connection.
@@ -121,11 +122,6 @@ fn history(
             "zero shallow depth",
         ));
     }
-    if request.deepen_since.is_some() || !request.deepen_not.is_empty() {
-        return Err(NodePackMaterializationRefusal::UnsupportedFetch(
-            "time/ref shallow boundaries",
-        ));
-    }
     for &id in &request.wants {
         work.tick()?;
         if !objects.contains_key(&id) {
@@ -145,6 +141,9 @@ fn history(
             }
             work.insert(&mut old, id)?;
         }
+    }
+    if cutoffs::requested(request) {
+        return cutoffs::history(objects, request, old, work);
     }
     let effective_depth = relative::effective_depth(objects, request, &old, work)?;
     let mut depths = BTreeMap::new();

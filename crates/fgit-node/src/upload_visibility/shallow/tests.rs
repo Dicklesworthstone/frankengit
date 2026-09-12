@@ -22,6 +22,7 @@ impl Graph {
         self.objects.insert(
             id,
             FilterObject {
+                commit_time: None,
                 kind,
                 size: 4,
                 edges,
@@ -335,7 +336,7 @@ fn bounds_and_unsupported_controls_fail_before_returning_a_selection() {
             &mut || true
         ),
         Err(NodePackMaterializationRefusal::UnsupportedFetch(
-            "time/ref shallow boundaries"
+            "depth and time/ref cutoffs cannot be combined"
         ))
     ));
     request.deepen_since = None;

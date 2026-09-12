@@ -6,6 +6,7 @@ use fgit_wire::ObjectFilter;
 #[derive(Debug)]
 pub(super) struct FilterObject {
     pub(super) kind: ObjectType,
+    pub(super) commit_time: Option<i64>,
     pub(super) size: usize,
     pub(super) edges: Vec<(GitOid, ObjectType)>,
 }
@@ -127,7 +128,8 @@ pub(super) fn apply_selection(
         maximum: usize::try_from(limits.max_entries).unwrap_or(usize::MAX),
     };
     work.tick()?;
-    if request.options.deepen_relative() || !request.shallows.is_empty()
+    if request.options.deepen_relative()
+        || !request.shallows.is_empty()
         || request.deepen.is_some()
         || request.deepen_since.is_some()
         || !request.deepen_not.is_empty()
