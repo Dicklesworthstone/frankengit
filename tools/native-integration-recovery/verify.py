@@ -1,19 +1,7 @@
-import json, os, pathlib, re, shutil, signal, subprocess, sys, tempfile
+import json, os, pathlib, re, signal, subprocess, sys, tempfile
 work=pathlib.Path(sys.argv[1]).resolve()
 revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=work,text=True).strip()
-for name in ['br','bv']:
-    print('TRACKER_AVAILABLE',name,bool(shutil.which(name)),flush=True)
-for name,headings in [('COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md',['## 25.','## 32.']),('docs/NORMATIVE_PROTOCOL_CONTRACTS.md',['## 10.','## 20.'])]:
-    lines=(work/name).read_text().splitlines()
-    selected=False
-    for i,line in enumerate(lines):
-        if line.startswith('## '):selected=any(line.startswith(heading) for heading in headings)
-        if selected:print('CONTRACT',name,i+1,line,flush=True)
-for line in (work/'.beads/issues.jsonl').read_text().splitlines():
-    item=json.loads(line)
-    if item.get('id') in ['frankengit-fg043r','frankengit-asa3'] or ('protection' in item.get('title','').lower() and item.get('status')!='closed'):
-        print('BEAD_READ_ONLY',json.dumps(item),flush=True)
-commands=[('cli-check',['cargo','check','--locked','-p','fgit-cli','--all-targets']),('reference-tests',['cargo','test','--locked','-p','fgit-reference','--all-targets']),('forge-tests',['cargo','test','--locked','-p','fgit-forge','--all-targets'])]
+commands=[('cli-check',['cargo','check','--locked','-p','fgit-cli','--all-targets']),('canonical-tests',['cargo','test','--locked','-p','fgit-reference','-p','fgit-txn','-p','fgit-forge','--all-targets','--no-fail-fast']),('issue-admission',['cargo','test','--locked','-p','fgit-admission','--all-targets','issue','--','--nocapture']),('issue-node',['cargo','test','--locked','-p','fgit-node','--lib','issue','--','--nocapture'])]
 evidence=[]
 with tempfile.TemporaryDirectory(prefix='fg-recovery-logs-') as td:
     for label,args in commands:
@@ -31,7 +19,7 @@ with tempfile.TemporaryDirectory(prefix='fg-recovery-logs-') as td:
         item={'label':label,'revision':revision,'command':' '.join(args),'exit':code,'summaries':summaries}
         evidence.append(item)
         print('VERIFICATION',json.dumps(item),flush=True)
-        print('\n'.join(lines[-180:] if code else [line for line in lines if line.startswith('test result:') or 'Finished ' in line]),flush=True)
+        print('\n'.join(lines[-200:] if code else [line for line in lines if line.startswith('test result:') or 'Finished ' in line or 'issue' in line]),flush=True)
         if code:break
     print('FINAL_EVIDENCE',json.dumps(evidence),flush=True)
     assert not subprocess.check_output(['git','status','--porcelain'],cwd=work,text=True).strip()
