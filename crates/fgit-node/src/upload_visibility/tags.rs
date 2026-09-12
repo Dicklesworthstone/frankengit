@@ -280,6 +280,15 @@ impl<R: UploadPackRepository> UploadPackRepository for LegacyTagRepository<'_, R
     fn is_common(&self, oid: AnyGitOid) -> bool {
         self.source.is_common(oid)
     }
+    fn supports_shallow(&self) -> bool {
+        self.source.supports_shallow()
+    }
+    fn shallow_update(
+        &self,
+        request: &PackRequest,
+    ) -> Result<fgit_wire::closure::ShallowUpdate, WireError> {
+        self.source.shallow_update(request)
+    }
     fn symref_target(&self, name: &[u8]) -> Option<&[u8]> {
         self.source.symref_target(name)
     }

@@ -456,9 +456,9 @@ fn actual_partial_clones_and_lazy_fetches_preserve_native_bytes_current_visibili
                     "native filtered body set {format:?} v{version} {filter:?}"
                 );
                 let advertisement = if version == 2 {
-                    b"fetch=filter\n".as_slice()
+                    b"fetch=shallow filter\n".as_slice()
                 } else {
-                    b"allow-reachable-sha1-in-want filter".as_slice()
+                    b"allow-reachable-sha1-in-want shallow filter".as_slice()
                 };
                 assert!(
                     response

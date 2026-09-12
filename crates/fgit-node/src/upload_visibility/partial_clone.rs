@@ -3,6 +3,7 @@
 use super::*;
 use fgit_wire::ObjectFilter;
 
+#[derive(Debug)]
 pub(super) struct FilterObject {
     pub(super) kind: ObjectType,
     pub(super) size: usize,

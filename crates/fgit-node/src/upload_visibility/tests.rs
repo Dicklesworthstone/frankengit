@@ -1,5 +1,6 @@
 use super::*;
 use std::cell::RefCell;
+mod shallow_transport;
 use std::io::{Read, Write};
 
 struct MemorySource {

@@ -5,8 +5,9 @@
 //! same private proof for wants, ACKs, and pack selection. Never narrow or
 //! rewrite the canonical per-decision closure or the trusted local exporter.
 use super::*;
-pub(super) mod tags;
 mod partial_clone;
+pub(super) mod shallow;
+pub(super) mod tags;
 
 const MAX_DISCLOSURE_EDGES: usize = 4_000_000;
 const DISCLOSURE_OPERATION: &str = "verify visible upload-pack graph";
@@ -18,15 +19,31 @@ pub(super) struct VisibleUploadPack {
     closure: PermittedObjectClosure,
     repository: AdmissionUploadPackRepository,
     pub(super) tags: tags::TagProjection,
-    objects: BTreeMap<GitOid, partial_clone::FilterObject>,
+    objects: Arc<BTreeMap<GitOid, partial_clone::FilterObject>>,
 }
 
 impl VisibleUploadPack {
     pub(super) fn select_partial(
-        &self, ids: &mut Vec<GitOid>, request: &PackRequest,
-        limits: &PackLimits, live: &mut impl FnMut() -> bool,
+        &self,
+        ids: &mut Vec<GitOid>,
+        request: &PackRequest,
+        limits: &PackLimits,
+        live: &mut impl FnMut() -> bool,
     ) -> Result<(), NodePackMaterializationRefusal> {
-        partial_clone::apply_selection(&self.objects, ids, request, limits, live)
+        if !shallow::requested(request) {
+            return partial_clone::apply_selection(&self.objects, ids, request, limits, live);
+        }
+        let mut selected = shallow::select(&self.objects, request, limits, live)?;
+        // History has already been clipped and validated. Reuse the existing
+        // partial-clone engine for omission predicates and explicit lazy roots.
+        let mut filtered = request.clone();
+        filtered.shallows.clear();
+        filtered.deepen = None;
+        filtered.deepen_since = None;
+        filtered.deepen_not.clear();
+        partial_clone::apply_selection(&self.objects, &mut selected, &filtered, limits, live)?;
+        *ids = selected;
+        Ok(())
     }
 
     pub(super) fn repository(&self) -> &AdmissionUploadPackRepository {
@@ -82,8 +99,10 @@ impl OneNode {
             &self.selected_pack_limits,
         );
         let derived = graph.and_then(|graph| {
-            tags::TagProjection::new(&graph.tag_targets, repository.advertised_refs(), || source.checkpoint())
-                .map(|tags| (graph, tags))
+            tags::TagProjection::new(&graph.tag_targets, repository.advertised_refs(), || {
+                source.checkpoint()
+            })
+            .map(|tags| (graph, tags))
         });
         // Preserve the established outer-session > Database > object-refusal
         // precedence, including a deadline crossed inside an immutable read.
@@ -100,12 +119,18 @@ impl OneNode {
         let closure = graph.closure;
         let mut repository = repository.with_closure_objects(closure.objects().clone());
         repository.tag_peels = tags.peels.clone();
+        let objects = Arc::new(graph.objects);
+        repository.shallow_proof = Some(shallow::ShallowProof::new(
+            Arc::clone(&objects),
+            self.selected_pack_limits.clone(),
+            deadline.clone(),
+        ));
         Ok(VisibleUploadPack {
             basis: materialized.basis().clone(),
             closure,
             repository,
             tags,
-            objects: graph.objects,
+            objects,
         })
     }
 }
@@ -269,10 +294,21 @@ fn project_visible_graph(
                 &mut pending,
             )?;
         }
-        objects.insert(id, partial_clone::FilterObject { kind, size: body.len(), edges });
+        objects.insert(
+            id,
+            partial_clone::FilterObject {
+                kind,
+                size: body.len(),
+                edges,
+            },
+        );
     }
     source.checkpoint()?;
-    Ok(VisibleGraph { closure: PermittedObjectClosure::new(known.into_keys().collect()), tag_targets, objects })
+    Ok(VisibleGraph {
+        closure: PermittedObjectClosure::new(known.into_keys().collect()),
+        tag_targets,
+        objects,
+    })
 }
 
 fn enqueue(
