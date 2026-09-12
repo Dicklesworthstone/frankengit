@@ -45,6 +45,7 @@ use fgit_admission::{
     validate_source_import,
 };
 mod treefs_workspace;
+pub use treefs_workspace::IssueReadRefusal;
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
