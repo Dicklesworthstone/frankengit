@@ -177,6 +177,8 @@ pub enum ForgeEventKind {
     /// One reviewer's exact-subject decision changed in its own stream. This
     /// does not advance PR metadata, grant access, or authorize a ref move.
     /// The complete decision and subject are bound by the actual event batch.
+    /// Issue lifecycle or discussion changed; detailed action/text are sealed in its event batch.
+    IssueChanged { issue: ForgeEntityId },
     PullRequestReviewed {
         /// The independent PR/reviewer aggregate, not the parent PR aggregate.
         review: ForgeEntityId,
