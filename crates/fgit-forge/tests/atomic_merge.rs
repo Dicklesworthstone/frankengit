@@ -467,7 +467,7 @@ fn an_unknown_event_kind_on_the_wire_is_refused_and_a_known_one_is_not() {
         "the located field must be the tag that says PullRequestClosed"
     );
 
-    for unknown in [0_u32, 5, 99, u32::from(u16::MAX)] {
+    for unknown in [0_u32, 9, 99, u32::from(u16::MAX)] {
         let mut corrupted = bytes.clone();
         corrupted[kind_offset..kind_offset + 4].copy_from_slice(&unknown.to_be_bytes());
         match decode_body::<ForgeEvent>(&corrupted, DecodeLimits::DEFAULT) {
