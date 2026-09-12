@@ -1,0 +1,15 @@
+name: Issue integration workbench
+on:
+  push:
+    branches: [tooling/issue-integration-20260912]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: python3 tools/issue-integration/inspect.py
