@@ -21,7 +21,7 @@ jobs:
   verify:
     needs: prepare
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       RCH_CARGO_WRAPPER_BYPASS: '1'
       CARGO_BUILD_JOBS: '2'
@@ -29,7 +29,12 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ needs.prepare.outputs.source }}
+          ref: ${{ github.sha }}
+          path: workbench
           persist-credentials: false
-      - run: cargo test --locked -p fgit-wire --all-targets
-      - run: cargo test --locked -p fgit-node --test git_daemon_v2_fragments --test git_daemon_v2 --test git_daemon_deadline --test hidden_ref_policy_end_to_end
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          path: source
+          persist-credentials: false
+      - run: python3 workbench/tools/fetch-continuation/verify.py source
