@@ -116,3 +116,55 @@ fn corrupt_pack_bad_mapping_and_cancelled_intake_leave_authority_unchanged() {
     accepted(fetch(&destination, &bytes, &mappings, "ok"));
     destination.shutdown().unwrap(); source.shutdown().unwrap();
 }
+
+#[test]
+fn full_reference_inventory_is_lossless_pinned_and_distinct_from_branch_listing() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new(); let (source, _, child, _) = fixture(&root, format);
+        let bytes = export(&source, &Default::default()).into_bytes();
+        let target = Scratch::new(); let destination = empty_node(&target, format);
+        let raw = RefName::try_new(b"refs/remotes/origin/\xff").unwrap();
+        let mut raw_mapping = mapping("refs/heads/main", "refs/remotes/origin/placeholder", None);
+        raw_mapping.destination = raw.clone();
+        accepted(fetch(&destination, &bytes, &[raw_mapping,
+            mapping("refs/heads/main", "refs/heads/local", None),
+            mapping("refs/heads/main", "refs/tags/stable", None)], "inventory"));
+        let request = destination.request_context();
+        let visible = RefVisibility::default();
+        let before = snapshot(&destination);
+        let (head, first, next) = destination.runtime().block_on(destination.list_refs_in(
+            &request, &visible, None, 1, None)).unwrap();
+        assert_eq!(first, vec![(reference("refs/heads/local"), child)]);
+        assert_eq!(next, Some(reference("refs/heads/local")));
+        let (_, second, next) = destination.runtime().block_on(destination.list_refs_in(
+            &request, &visible, next.as_ref(), 1, Some(head))).unwrap();
+        assert_eq!(second, vec![(raw.clone(), child)]); assert_eq!(next, Some(raw.clone()));
+        let (_, last, next) = destination.runtime().block_on(destination.list_refs_in(
+            &request, &visible, next.as_ref(), 1, Some(head))).unwrap();
+        assert_eq!(last, vec![(reference("refs/tags/stable"), child)]); assert!(next.is_none());
+        let (_, branches, _) = destination.runtime().block_on(destination.list_branch_refs_in(
+            &request, &visible, None, 100, Some(head))).unwrap();
+        assert_eq!(branches, first);
+        assert!(destination.runtime().block_on(destination.list_branch_refs_in(
+            &request, &visible, Some(&raw), 1, Some(head))).is_err());
+        assert!(destination.runtime().block_on(destination.list_refs_in(
+            &request, &visible, Some(&raw), 1, None)).is_err());
+        for limit in [0, 101] {
+            assert!(destination.runtime().block_on(destination.list_refs_in(
+                &request, &visible, None, limit, Some(head))).is_err());
+        }
+        let mut hidden = RefVisibility::default();
+        hidden.push_rule(b"refs/remotes", &Default::default()).unwrap();
+        let (_, disclosed, _) = destination.runtime().block_on(destination.list_refs_in(
+            &request, &hidden, None, 100, Some(head))).unwrap();
+        assert_eq!(disclosed, vec![(reference("refs/heads/local"), child), (reference("refs/tags/stable"), child)]);
+        let stopped = destination.request_context(); stopped.cancel();
+        assert!(destination.runtime().block_on(destination.list_refs_in(
+            &stopped, &visible, None, 100, None)).is_err());
+        assert_eq!(snapshot(&destination).basis(), before.basis());
+        accepted(fetch(&destination, &bytes, &[mapping("refs/heads/main", "refs/heads/later", None)], "later"));
+        assert!(destination.runtime().block_on(destination.list_refs_in(
+            &request, &visible, Some(&raw), 1, Some(head))).is_err());
+        destination.shutdown().unwrap(); source.shutdown().unwrap();
+    }
+}

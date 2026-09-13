@@ -12,6 +12,15 @@ pub(super) enum Operation {
     List{after:Option<RefName>,limit:u16,expected_head:Option<RepositoryAuthorityHeadId>},
 }
 pub(super) fn parse(args:&[String])->Result<Options,String> {
+    parse_with_read_prefix(args, b"refs/heads/")
+}
+pub(super) fn parse_inventory(args:&[String])->Result<Options,String> {
+    if args.len()>27 || args.iter().any(|arg| arg.len()>8192) || args.iter().map(String::len).sum::<usize>()>32764 { return Err("reference inventory arguments exceed the bounded profile".into()); }
+    let mut read=Vec::with_capacity(args.len()+1);
+    read.push("list".into());read.extend_from_slice(args);
+    parse_with_read_prefix(&read, b"refs/")
+}
+fn parse_with_read_prefix(args:&[String],read_prefix:&[u8])->Result<Options,String> {
     if args.len()<4 {return Err(super::USAGE.into());}
     if args.len()>28 || args.iter().any(|arg|arg.len()>8192) || args.iter().map(String::len).sum::<usize>()>32768 {
         return Err("branch arguments exceed the bounded profile".into());
@@ -41,7 +50,7 @@ pub(super) fn parse(args:&[String])->Result<Options,String> {
         "sha1"=>GitHashAlgorithm::Sha1,"sha256"=>GitHashAlgorithm::Sha256,_=>return Err("object format must be sha1 or sha256".into()),
     };
     let operation=if action=="list" {
-        let after=if flags.contains_key("--after") || flags.contains_key("--after-hex") {Some(reference(&flags,"--after","--after-hex")?)}else{None};
+        let after=if flags.contains_key("--after") || flags.contains_key("--after-hex") {Some(reference_with_prefix(&flags,"--after","--after-hex",read_prefix)?)}else{None};
         let expected_head=flags.get("--expected-head").map(|value|parse_head(value)).transpose()?;
         if after.is_some() && expected_head.is_none() {return Err("branch continuation requires --expected-head from the first page".into());}
         let limit=flags.get("--limit").map(|value|decimal(value)).transpose()?.unwrap_or(50);
@@ -79,11 +88,14 @@ fn required<'a>(flags:&BTreeMap<&str,&'a str>,flag:&str)->Result<&'a str,String>
     flags.get(flag).copied().ok_or_else(||format!("{flag} is required"))
 }
 fn reference(flags:&BTreeMap<&str,&str>,plain:&str,encoded:&str)->Result<RefName,String> {
+    reference_with_prefix(flags,plain,encoded,b"refs/heads/")
+}
+fn reference_with_prefix(flags:&BTreeMap<&str,&str>,plain:&str,encoded:&str,prefix:&[u8])->Result<RefName,String> {
     let bytes=match (flags.get(plain),flags.get(encoded)) {
         (Some(value),None) if value.len()<=4096=>value.as_bytes().to_vec(),
         (None,Some(value))=>unhex(value,4096)?,_=>return Err(format!("supply exactly one of {plain} or {encoded}")),
     };
-    if !bytes.starts_with(b"refs/heads/") {return Err("a full refs/heads/ reference is required".into());}
+    if !bytes.starts_with(prefix) {return Err("a full reference in the selected namespace is required".into());}
     RefName::try_new(&bytes).map_err(|_|"invalid branch reference bytes".into())
 }
 fn decimal(value:&str)->Result<u64,String> {

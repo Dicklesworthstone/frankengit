@@ -1,5 +1,7 @@
 //! Trusted local branch commands; the node owns validation and publication.
 mod options;
+mod inventory;
+pub(super) fn run_inventory(args: &[String]) -> Result<u8, String> { inventory::run(args) }
 use std::io::{Read, Write};
 use fgit_authority::{ExpectedOld, IdempotencyKey, ProposedNew, RefCommand, TerminalOutcome, MAX_IDEMPOTENCY_KEY_BYTES};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};

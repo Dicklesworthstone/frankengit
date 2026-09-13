@@ -12,6 +12,7 @@ case "${1:-test}" in
     run cargo test --locked -p fgit-node --lib treefs_workspace::full_bundle:: -- --nocapture
     run cargo test --locked -p fgit-node --lib quarantine_validator::typed_closure::tests -- --nocapture
     run cargo test --locked -p fgit-cli --bin fg bundle:: -- --nocapture
+    run cargo test --locked -p fgit-cli --bin fg branches:: -- --nocapture
     run cargo test --locked -p fgit-cli --test native_full_bundle_smoke -- --nocapture
     run cargo test --locked -p fgit-cli --test native_bundle_fetch_smoke -- --nocapture
     run cargo test --locked -p fgit-node --lib bundle_fetch_cannot_bypass -- --nocapture

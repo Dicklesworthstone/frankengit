@@ -179,3 +179,23 @@ stale-tip rejection, exact retries and corrupt input using the real `fg`
 binary. Exported objects are independently decoded in the test with Python's
 standard-library hash/zlib implementation; no external Git process supplies
 production behavior.
+
+### Discover exact local tips with `fg refs`
+
+`fg refs <storage-root> <tenant-id> <repository-id> --trusted-local` returns
+branches, remote-tracking refs and tags in a byte-ordered `reference_page`.
+Use `--object-format sha256` for a SHA-256 repository. Each `reference_hex`
+is lossless and its `tip` can be supplied as a subsequent fetch mapping's
+expected-old value; the listing never refreshes an expectation implicitly.
+
+Pages contain at most 100 refs (`--limit`, default 50). Continue with
+`--after-hex <next_after_hex> --expected-head <snapshot_token>`. Every page
+binds the same authenticated authority head, and any head movement, including
+a canonical refusal decision, invalidates the continuation. Restart the read
+rather than merging different snapshots. Hidden refs are filtered before
+rows are returned. The existing `fg branch list` stays branch-only.
+
+The embedding API is `OneNode::list_refs_in`, with caller visibility that can
+only narrow canonical policy. The CLI is a trusted-local owner surface, not
+a remote authentication endpoint. It performs no repository mutation. A
+failed read, shutdown, write or flush never reports a complete successful page.

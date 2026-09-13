@@ -31,6 +31,8 @@ def run_format(binary, algorithm):
             report=document(invoke(binary,bundle("export",destination,path)))
             refs,objects=decode_export(path.read_bytes(),algorithm)
             return report,refs,objects
+        def inventory(*extra,code=0):
+            return document(invoke(binary,["refs",destination,TENANT,REPOSITORY,"--trusted-local","--object-format",algorithm,*extra],code=code))
         local=b"refs/remotes/origin/\xff"
         initial=[(b"refs/heads/feed",local,"absent")]
         first=fetch(old,initial,b"private-fetch-initial\n",raw=True)
@@ -44,12 +46,20 @@ def run_format(binary, algorithm):
         require(fetch(old,initial,b"private-fetch-initial\n",raw=True)==first,"initial retry")
         invoke(binary,branch("update","refs/heads/feed","--expected-tip",f["base"],"--target",f["source"],"--idempotency-key","advance-feed"))
         new=root/"new.bundle";document(invoke(binary,bundle("export",original,new)))
-        maps=[(b"refs/heads/feed",local,f["base"]),(b"refs/heads/main",b"refs/heads/review","absent")]
+        known=inventory()
+        require(known["type"]=="reference_page" and not known["has_more"] and known["node_closed"],"complete reference inventory")
+        require(known["references"]==[{"reference_hex":local.hex(),"tip":f["base"]}],"raw tracking tip discovery")
+        maps=[(b"refs/heads/feed",local,known["references"][0]["tip"]),(b"refs/heads/main",b"refs/heads/review","absent")]
         advanced=fetch(new,maps,b"private-fetch-advance\n",raw=True)
         require(advanced["reference_count"]==2 and advanced["command_committed"],"atomic advance")
         after,refs,objects=exported("advanced")
         require(refs[local]==f["source"] and refs[b"refs/heads/review"]==f["target"] and len(refs)==2,"exact updated refs")
         require(set(objects)=={f[k] for k in ("blob","tree","base","source","target")},"complete verified native closure")
+        page=inventory("--limit","1")
+        require(page["references"]==[{"reference_hex":b"refs/heads/review".hex(),"tip":f["target"]}] and page["has_more"],"first inventory page")
+        continuation=inventory("--after-hex",page["next_after_hex"],"--expected-head",page["snapshot_token"],"--limit","1")
+        require(continuation["references"]==[{"reference_hex":local.hex(),"tip":f["source"]}] and not continuation["has_more"],"pinned tracking continuation")
+        require(continuation["source_head"]==page["source_head"]==after["source_head"],"inventory snapshot identity")
         require(fetch(new,list(reversed(maps)),b"private-fetch-advance\n",raw=True)==advanced,"reordered exact retry")
         replay,_,_=exported("replay");require(replay["source_head"]==after["source_head"],"retry advanced authority")
         stale=[(b"refs/heads/feed",local,f["base"]),(b"refs/heads/main",b"refs/heads/should-not-exist","absent")]
@@ -57,6 +67,7 @@ def run_format(binary, algorithm):
         require(refused["outcome"]=="refused" and not refused["command_committed"],"stale expected old")
         refused_snapshot,refused_refs,_=exported("stale")
         require(refused_refs==refs,"partial stale batch publication")
+        invoke(binary,["refs",destination,TENANT,REPOSITORY,"--trusted-local","--object-format",algorithm,"--after-hex",page["next_after_hex"],"--expected-head",page["snapshot_token"]],code=2)
         require(fetch(new,stale,b"stale\n",code=3,raw=True)==refused,"refused retry")
         invoke(binary,bundle("fetch",destination,new,"--principal",PRINCIPAL,"--key-stdin","--map","refs/heads/feed","refs/heads/changed","absent"),code=2,data=b"private-fetch-advance\n")
         invoke(binary,bundle("fetch",destination,old,"--principal",PRINCIPAL,"--idempotency-key","rewind","--map-hex",b"refs/heads/feed".hex(),local.hex(),f["source"]),code=2)

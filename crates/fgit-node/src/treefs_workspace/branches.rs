@@ -187,18 +187,41 @@ impl OneNode {
         &self, request: &NodeRequestContext, visibility: &RefVisibility,
         after: Option<&RefName>, limit: u16, expected_head: Option<RepositoryAuthorityHeadId>,
     ) -> Result<(RepositoryAuthorityHeadId, Vec<(RefName, GitOid)>, Option<RefName>), NodeWorkspaceRefusal> {
-        if !(1..=100).contains(&limit) { return Err(invalid("branch page limit must be 1..100")); }
-        if after.is_some() && expected_head.is_none() { return Err(invalid("branch continuation requires a snapshot identity")); }
-        if after.is_some_and(|name| !name.as_bytes().starts_with(b"refs/heads/")) { return Err(invalid("branch cursor must be a full branch reference")); }
+        self.list_ref_page_in(request, visibility, after, limit, expected_head, b"refs/heads/").await
+    }
+
+    /// List all current direct refs, including remote-tracking refs and tags,
+    /// at one authenticated authority head. Names remain exact bytes and rows
+    /// are ordered by those bytes. HEAD is configuration, not a synthetic row.
+    ///
+    /// The embedding authentication boundary supplies disclosure policy, which
+    /// may only narrow canonical visibility. Continuations require the initial
+    /// snapshot identity; authority movement refuses rather than mixing pages.
+    /// This read never refreshes a client expectation or grants write access.
+    pub async fn list_refs_in(
+        &self, request: &NodeRequestContext, visibility: &RefVisibility,
+        after: Option<&RefName>, limit: u16, expected_head: Option<RepositoryAuthorityHeadId>,
+    ) -> Result<(RepositoryAuthorityHeadId, Vec<(RefName, GitOid)>, Option<RefName>), NodeWorkspaceRefusal> {
+        self.list_ref_page_in(request, visibility, after, limit, expected_head, b"refs/").await
+    }
+
+    async fn list_ref_page_in(
+        &self, request: &NodeRequestContext, visibility: &RefVisibility,
+        after: Option<&RefName>, limit: u16, expected_head: Option<RepositoryAuthorityHeadId>,
+        prefix: &[u8],
+    ) -> Result<(RepositoryAuthorityHeadId, Vec<(RefName, GitOid)>, Option<RefName>), NodeWorkspaceRefusal> {
+        if !(1..=100).contains(&limit) { return Err(invalid("reference page limit must be 1..100")); }
+        if after.is_some() && expected_head.is_none() { return Err(invalid("reference continuation requires a snapshot identity")); }
+        if after.is_some_and(|name| !name.as_bytes().starts_with(prefix)) { return Err(invalid("cursor is outside the selected reference namespace")); }
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         let selected = self.materialize_admission_in(request).await
             .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
-        if expected_head.is_some_and(|head| head != selected.basis().id()) { return Err(invalid("branch snapshot moved")); }
+        if expected_head.is_some_and(|head| head != selected.basis().id()) { return Err(invalid("reference snapshot moved")); }
         let mut rows = Vec::with_capacity(usize::from(limit));
         let mut next = None;
         for (name, oid) in &selected.snapshot().refs {
             if !workspace_request_live(request) { return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None }); }
-            if !name.as_bytes().starts_with(b"refs/heads/") || after.is_some_and(|cursor| name <= cursor)
+            if !name.as_bytes().starts_with(prefix) || after.is_some_and(|cursor| name <= cursor)
                 || visibility.hides(name.as_bytes()) || selected.snapshot().hidden_refs.hides(name.as_bytes()) { continue; }
             if rows.len() == usize::from(limit) { next = rows.last().map(|(name, _): &(RefName, GitOid)| name.clone()); break; }
             rows.push((name.clone(), *oid));

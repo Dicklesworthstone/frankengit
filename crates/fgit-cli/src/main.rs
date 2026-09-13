@@ -34,6 +34,15 @@ fn main() -> ExitCode {
             }
         };
     }
+    if arguments.first().is_some_and(|argument| argument == "refs") {
+        return match branches::run_inventory(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("{{\"type\":\"reference_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "branch") {
         return match branches::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
