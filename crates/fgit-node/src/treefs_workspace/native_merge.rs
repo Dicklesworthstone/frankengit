@@ -187,8 +187,6 @@ impl OneNode {
         let authenticated = session
             .authenticated_session()
             .ok_or(NodeReceiveTransportRefusal::Unauthenticated)?;
-        self.push_quota.evaluate(&authenticated.principal_id())?;
-        self.receive_publication_admitted()?;
         let context = AdmissionContext {
             head_key: self.head_key.clone(),
             tenant_id: self.tenant_id,
@@ -197,6 +195,29 @@ impl OneNode {
             idempotency_key: authenticated.client_idempotency_key().clone(),
             object_format: self.object_format,
         };
+        // A retry is an outcome read, not a new mutation admission. Recover
+        // the same native seal used by bundle publication before service,
+        // quota, policy, or candidate-object checks can hide its decision.
+        // Authentication and semantic identity still precede this lookup.
+        let map_admission = |error| NodeReceiveTransportRefusal::Admission(Box::new(error));
+        let attempt = intent.seal_attempt(&context).map_err(map_admission)?;
+        let tx_id = attempt.derive().map_err(|_| map_admission(
+            AdmissionError::AsyncProjectionUnavailable(RefusalCode::CanonicalFramingInvalid),
+        ))?.0;
+        if let fgit_authority::OutcomeLookup::Decided(terminal) =
+            fgit_authority::resolve_outcome_async(
+                &self.authority, request.authority(), &self.head_key,
+                self.tenant_id, self.repository_id, tx_id,
+            ).await.map_err(|error| map_admission(error.into()))?
+        {
+            // Reconfirm the exact principal/key/request binding. This is not
+            // permission to reuse a different request under the same key.
+            fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
+                .await.map_err(|error| map_admission(error.into()))?;
+            return Ok(terminal);
+        }
+        self.push_quota.evaluate(&authenticated.principal_id())?;
+        self.receive_publication_admitted()?;
         let inner = self
             .durable_admission_projection(&context)
             .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))?;
