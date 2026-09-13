@@ -328,8 +328,17 @@ fn run_without_choices(source: &Source, inputs: RebaseRequest) -> RebasePreparat
 #[test]
 fn whole_series_resolution_intake_and_output_budgets_are_not_reset_per_step() {
     let (source, inputs, originals) = conflicted(GitHashAlgorithm::Sha1, true);
+    // Keep a distinct resolved first-line value, so the second original
+    // really conflicts too. Choosing Theirs here reproduces the second
+    // commit's exact base and correctly makes its later recipe invalid.
     let choices = [
-        recipe(originals[0], ResolutionChoice::Theirs),
+        recipe(
+            originals[0],
+            ResolutionChoice::File {
+                mode: 0o100644,
+                bytes: b"R\nb\nc\nd\ne\nf\n".to_vec(),
+            },
+        ),
         recipe(originals[1], ResolutionChoice::Theirs),
     ];
     source.polls.set(0);
@@ -376,9 +385,23 @@ fn whole_series_resolution_intake_and_output_budgets_are_not_reset_per_step() {
             "rebase resolution bytes"
         )))
     ));
-    let RebasePreparation::Clean(plan) = resolved(&source, inputs, &choices).preparation else {
+    let baseline = resolved(&source, inputs, &choices);
+    assert_eq!(
+        baseline
+            .resolutions
+            .iter()
+            .map(|step| step.original)
+            .collect::<Vec<_>>(),
+        originals
+    );
+    let RebasePreparation::Clean(plan) = baseline.preparation else {
         panic!();
     };
+    assert_eq!(plan.steps.len(), 2);
+    assert_eq!(
+        final_file(&source, &plan),
+        Some((0o100644, b"Y\nb\nc\nd\ne\nf\n".to_vec()))
+    );
     let limits = PreparationLimits {
         max_objects: plan.objects.len() - 1,
         ..PreparationLimits::default()
@@ -399,11 +422,29 @@ fn whole_series_resolution_intake_and_output_budgets_are_not_reset_per_step() {
 #[test]
 fn cancellation_during_discovery_resolution_or_later_replay_never_returns_a_candidate() {
     let (source, inputs, originals) = conflicted(GitHashAlgorithm::Sha256, true);
+    // Keep a distinct resolved first-line value, so the second original
+    // really conflicts too. Choosing Theirs here reproduces the second
+    // commit's exact base and correctly makes its later recipe invalid.
     let choices = [
-        recipe(originals[0], ResolutionChoice::Theirs),
+        recipe(
+            originals[0],
+            ResolutionChoice::File {
+                mode: 0o100644,
+                bytes: b"R\nb\nc\nd\ne\nf\n".to_vec(),
+            },
+        ),
         recipe(originals[1], ResolutionChoice::Theirs),
     ];
-    resolved(&source, inputs, &choices);
+    let baseline = resolved(&source, inputs, &choices);
+    assert_eq!(
+        baseline
+            .resolutions
+            .iter()
+            .map(|step| step.original)
+            .collect::<Vec<_>>(),
+        originals
+    );
+    assert!(matches!(baseline.preparation, RebasePreparation::Clean(_)));
     let polls = source.polls.get();
     for cutoff in [1, polls / 3, polls * 2 / 3, polls] {
         source.polls.set(0);
@@ -429,6 +470,29 @@ fn cancellation_during_discovery_resolution_or_later_replay_never_returns_a_cand
                 })
             ),
             "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn selecting_original_first_tree_requires_no_resolution_of_clean_second_replay() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (source, inputs, originals) = conflicted(format, true);
+        let first = recipe(originals[0], ResolutionChoice::Theirs);
+        let result = resolved(&source, inputs, std::slice::from_ref(&first));
+        assert_eq!(result.resolutions.len(), 1);
+        let RebasePreparation::Clean(plan) = result.preparation else {
+            panic!();
+        };
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(
+            final_file(&source, &plan),
+            Some((0o100644, b"Y\nb\nc\nd\ne\nf\n".to_vec()))
+        );
+        assert!(
+            matches!(prepare_resolved_rebase(&source, format, inputs, &committer(),
+            PreparationLimits::default(), &[first, recipe(originals[1], ResolutionChoice::Theirs)]),
+            Err(RebaseError::Resolution { original, error: ResolutionError::NoConflicts }) if original == originals[1])
         );
     }
 }
