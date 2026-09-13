@@ -20,6 +20,16 @@ impl ProductionQuarantineValidator<'_> {
         independent_uploads: &BTreeSet<GitOid>,
         deadline: &mut impl Deadline,
     ) -> Result<BTreeSet<GitOid>, RefusalCode> {
+        self.reachable_uploaded_closure_profile(request, verified, in_pack_delta_bases,
+            external_bases, independent_uploads, false, deadline)
+    }
+
+    fn reachable_uploaded_closure_profile(
+        &self, request: &ReceiveRequest, verified: &BTreeMap<GitOid, VerifiedObject>,
+        in_pack_delta_bases: &BTreeMap<GitOid, BTreeSet<GitOid>>,
+        external_bases: &ExternalBases, independent_uploads: &BTreeSet<GitOid>,
+        self_contained: bool, deadline: &mut impl Deadline,
+    ) -> Result<BTreeSet<GitOid>, RefusalCode> {
         let mut pending = BTreeSet::new();
         let mut originals = reused_targets::OriginalFrontier::new(self, external_bases)?;
         // Every native edge occupies input bytes. The hard ceiling additionally
@@ -39,7 +49,10 @@ impl ProductionQuarantineValidator<'_> {
         for command in &request.commands {
             checkpoint(deadline)?;
             if command.new.is_zero() { continue; }
-            if verified.contains_key(&command.new) {
+            if let Some(object) = verified.get(&command.new) {
+                if self_contained && command.ref_name.as_slice().starts_with(b"refs/heads/") {
+                    require_kind(object.object_type, ObjectType::Commit)?;
+                }
                 pending.insert(command.new);
             } else {
                 require_original(&mut required, command.new, None)?;
@@ -78,6 +91,9 @@ impl ProductionQuarantineValidator<'_> {
         // One proof over the entire original dependency set, not one walk per
         // tree entry or a check confined to omitted command roots. Originals
         // used for reconstruction and graph verification share one byte ledger.
+        if self_contained && !required.is_empty() {
+            return Err(RefusalCode::ObjectClosureIncomplete);
+        }
         let identities = required.keys().copied().collect();
         originals.authorize(&identities, &mut edges_left, deadline)?;
         for (id, expected) in required {
@@ -87,6 +103,46 @@ impl ProductionQuarantineValidator<'_> {
         }
         checkpoint(deadline)?;
         Ok(closure)
+    }
+
+
+    /// Complete-bundle intake deliberately supplies no external delta bases and
+    /// refuses every omitted graph edge, even when current storage could satisfy
+    /// it. Ordinary receive keeps its existing authenticated borrowing profile.
+    /// Native reconstruction, required-kind traversal and staging are shared.
+    pub(crate) fn validate_full_bundle(
+        &self, request: &ReceiveRequest, pack: Option<&QuarantinedPack>,
+        receipt: &QuarantineReceipt, deadline: &mut impl Deadline,
+    ) -> Result<ValidatedClosure, RefusalCode> {
+        checkpoint(deadline)?;
+        let pack = pack.ok_or(RefusalCode::ObjectClosureIncomplete)?;
+        if request.deletes_only() || receipt.delete_only
+            || request.commands.iter().any(|command| !command.old.is_zero() || command.new.is_zero())
+            || u32::try_from(pack.entries().len()).ok() != Some(receipt.object_count) {
+            return Err(RefusalCode::PackFramingInvalid);
+        }
+        if pack.format != receipt.object_format || pack.format != self.node.object_format {
+            return Err(RefusalCode::HashAlgorithmDomainMismatch);
+        }
+        let bases = ExternalBases { bases: BTreeMap::new(), read_bytes: 0 };
+        let (mut verified, offsets) = self.verified_pack_objects(pack, &bases, deadline)?;
+        let delta_bases = Self::in_pack_delta_bases(pack, &offsets, deadline)?;
+        let independent = reused_targets::independent_uploads(pack, &offsets, deadline)?;
+        let closure = self.reachable_uploaded_closure_profile(
+            request, &verified, &delta_bases, &bases, &independent, true, deadline,
+        )?;
+        // No bytes acquire staging responsibility until the full graph has
+        // passed. A cancellation during staging does not publish any ref.
+        for id in &closure {
+            checkpoint(deadline)?;
+            let object = verified.remove(id).ok_or(RefusalCode::ObjectClosureIncomplete)?;
+            self.stage(*id, object.object_type, object.body, deadline)?;
+        }
+        checkpoint(deadline)?;
+        Ok(ValidatedClosure {
+            object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(closure.clone()))?,
+            objects: closure,
+        })
     }
 
     fn typed_object_references(
