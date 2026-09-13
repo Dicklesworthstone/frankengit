@@ -5,6 +5,7 @@ mod commit_replay;
 mod rebase;
 mod rebase_apply;
 mod issues;
+mod protection;
 mod merge_apply;
 mod publication_support;
 mod pull_request;
@@ -63,6 +64,12 @@ fn main() -> ExitCode {
     }
     if arguments.first().is_some_and(|argument| argument == "outcome") {
         return match transaction_outcome::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+        };
+    }
+    if arguments.first().is_some_and(|argument| argument == "protection") {
+        return match protection::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
         };
