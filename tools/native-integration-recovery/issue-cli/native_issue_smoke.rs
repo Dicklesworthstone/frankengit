@@ -1,0 +1,14 @@
+#![forbid(unsafe_code)]
+//! Full process boundaries: each CLI operation opens and closes the real node.
+#[test]
+fn native_issue_cli_lifecycle_and_recovery_in_both_hash_formats() {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/e2e/issue_smoke.py");
+    let output = std::process::Command::new("python3").arg(script)
+        .arg("--fg").arg(env!("CARGO_BIN_EXE_fg")).output().expect("launch Python issue campaign");
+    assert!(output.status.success(), "native issue CLI campaign failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(report.contains("ISSUE_LIFECYCLE format=sha1 passed"));
+    assert!(report.contains("ISSUE_LIFECYCLE format=sha256 passed"));
+}
