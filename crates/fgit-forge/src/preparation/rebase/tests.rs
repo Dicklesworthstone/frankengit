@@ -22,7 +22,7 @@ impl Source {
             stop: Cell::new(usize::MAX),
         }
     }
-    fn tree(&mut self, bytes: &[u8]) -> GitOid {
+    fn store_tree(&mut self, bytes: &[u8]) -> GitOid {
         let oid = git_object_id(self.format, GitObjectKind::Blob, bytes);
         self.blobs.insert(oid, bytes.to_vec());
         let mut body = b"100644 file\0".to_vec();
@@ -38,8 +38,8 @@ impl Source {
         );
         tree
     }
-    fn commit(&mut self, bytes: &[u8], parents: &[GitOid], message: &[u8]) -> GitOid {
-        let tree = self.tree(bytes);
+    fn store_commit(&mut self, bytes: &[u8], parents: &[GitOid], message: &[u8]) -> GitOid {
+        let tree = self.store_tree(bytes);
         let data = RebaseCommitMetadata {
             author: b"Original <original@example.invalid> 17 -0430".to_vec(),
             encoding: Some(b"ISO-8859-1".to_vec()),
@@ -113,11 +113,11 @@ const BASE: &[u8] = b"a\nb\nc\nd\ne\nf\n";
 const ONTO: &[u8] = b"A\nb\nc\nd\ne\nf\n";
 fn fixture(format: GitHashAlgorithm) -> (Source, RebaseRequest, Vec<GitOid>) {
     let mut source = Source::new(format);
-    let upstream = source.commit(BASE, &[], b"base");
-    let onto = source.commit(ONTO, &[upstream], b"onto");
-    let first = source.commit(b"a\nb\nc\nd\ne\nF\n", &[upstream], b"first\r\n\xff");
-    let second = source.commit(b"a\nb\nC\nd\ne\nF\n", &[first], b"second");
-    let third = source.commit(b"a\nb\nC\nd\ne\nFF\n", &[second], b"third\n");
+    let upstream = source.store_commit(BASE, &[], b"base");
+    let onto = source.store_commit(ONTO, &[upstream], b"onto");
+    let first = source.store_commit(b"a\nb\nc\nd\ne\nF\n", &[upstream], b"first\r\n\xff");
+    let second = source.store_commit(b"a\nb\nC\nd\ne\nF\n", &[first], b"second");
+    let third = source.store_commit(b"a\nb\nC\nd\ne\nFF\n", &[second], b"third\n");
     (
         source,
         RebaseRequest {
@@ -245,10 +245,10 @@ fn one_shared_content_tree_and_output_budget_covers_the_complete_series() {
 fn original_empty_commits_survive_while_newly_empty_changes_require_a_policy() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut source = Source::new(format);
-        let upstream = source.commit(BASE, &[], b"base");
-        let already = source.commit(ONTO, &[upstream], b"already applied");
-        let changed = source.commit(ONTO, &[upstream], b"same patch different metadata");
-        let empty = source.commit(ONTO, &[changed], b"");
+        let upstream = source.store_commit(BASE, &[], b"base");
+        let already = source.store_commit(ONTO, &[upstream], b"already applied");
+        let changed = source.store_commit(ONTO, &[upstream], b"same patch different metadata");
+        let empty = source.store_commit(ONTO, &[changed], b"");
         let mut request = RebaseRequest {
             source_tip: empty,
             upstream,
@@ -275,7 +275,7 @@ fn original_empty_commits_survive_while_newly_empty_changes_require_a_policy() {
 #[test]
 fn later_conflict_returns_only_a_stop_and_not_a_partially_publishable_plan() {
     let (mut source, mut request, originals) = fixture(GitHashAlgorithm::Sha1);
-    request.source_tip = source.commit(
+    request.source_tip = source.store_commit(
         b"other top\nb\nc\nd\ne\nF\n",
         &[originals[0]],
         b"conflicting second",
@@ -299,13 +299,13 @@ fn later_conflict_returns_only_a_stop_and_not_a_partially_publishable_plan() {
 #[test]
 fn unrelated_upstream_merge_suffix_missing_history_and_cycles_refuse() {
     let (mut source, mut request, originals) = fixture(GitHashAlgorithm::Sha256);
-    request.upstream = source.commit(b"unrelated", &[], b"other");
+    request.upstream = source.store_commit(b"unrelated", &[], b"other");
     assert!(matches!(
         run(&source, request, PreparationLimits::default()),
         Err(RebaseError::UpstreamOutsideLinearHistory)
     ));
     request.upstream = source.commits[&originals[0]].parents[0];
-    request.source_tip = source.commit(BASE, &[originals[0], request.onto], b"merge");
+    request.source_tip = source.store_commit(BASE, &[originals[0], request.onto], b"merge");
     assert!(matches!(
         run(&source, request, PreparationLimits::default()),
         Err(RebaseError::MergeCommit { parents: 2, .. })
@@ -370,9 +370,9 @@ fn empty_range_and_all_dropped_range_use_onto_without_manufacturing_a_commit() {
     assert_eq!(plan.commit, request.onto);
     assert!(plan.steps.is_empty() && plan.objects.is_empty());
     let mut source = Source::new(GitHashAlgorithm::Sha1);
-    let upstream = source.commit(BASE, &[], b"base");
-    let onto = source.commit(ONTO, &[upstream], b"onto");
-    let original = source.commit(ONTO, &[upstream], b"same patch");
+    let upstream = source.store_commit(BASE, &[], b"base");
+    let onto = source.store_commit(ONTO, &[upstream], b"onto");
+    let original = source.store_commit(ONTO, &[upstream], b"same patch");
     let plan = clean(
         &source,
         RebaseRequest {
