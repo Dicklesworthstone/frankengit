@@ -1,0 +1,35 @@
+name: Native review protection activation
+on:
+  push:
+    branches: [tooling/review-protection-activation-20260913]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      PYTHONDONTWRITEBYTECODE: '1'
+      CARGO_TARGET_DIR: /tmp/fg-review-activation-target
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Record tested source and toolchain
+        run: |
+          git rev-parse HEAD
+          rustc -Vv
+      - name: Native activation and enforcement lifecycle
+        run: bash scripts/verify_review_protection.sh
+      - name: Admission regression suite
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fgit-admission --all-targets --no-fail-fast
+      - name: Preserve test source identity
+        if: ${{ !cancelled() }}
+        run: |
+          git diff --exit-code
+          git status --porcelain
