@@ -161,7 +161,10 @@ fn capability_hidden_source_stale_base_and_cancellation_fail_closed_with_success
         &hidden, &mut capability(true), simple_patch(), 0, &metadata(), PatchLimits::default())), Err(NodeWorkspaceRefusal::RefUnavailable)));
     assert!(matches!(node.runtime().block_on(node.prepare_trusted_patch_in(&request, &reference(), f.old,
         [0xd4;16], simple_patch(), &metadata(), PatchLimits::default())), Err(NodeWorkspaceRefusal::StaleWorkspaceBase)));
-    request.authority().cancel();
+    let unrelated = node.request_context();
+    request.cancel();
+    assert!(node.runtime().block_on(node.read_authority_head_in(&request)).is_err());
+    assert!(node.runtime().block_on(node.read_authority_head_in(&unrelated)).is_ok());
     assert!(node.runtime().block_on(node.prepare_trusted_patch_in(&request, &reference(), f.base,
         [0xd4;16], simple_patch(), &metadata(), PatchLimits::default())).is_err());
     assert_eq!(f.observed(), before);

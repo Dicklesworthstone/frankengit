@@ -5979,6 +5979,14 @@ pub struct NodeRequestContext {
 }
 
 impl NodeRequestContext {
+    /// Request cooperative cancellation of this operation and its database work.
+    /// This does not expose database capabilities, finalize outstanding effects,
+    /// or prove non-commit. The caller must still await the operation and resolve
+    /// any uncertain outcome using its original transaction identity.
+    pub fn cancel(&self) {
+        self.authority.cancel();
+    }
+
     const fn authority(&self) -> &FsqliteCx {
         &self.authority
     }
