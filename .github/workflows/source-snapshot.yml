@@ -24,6 +24,19 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+      - name: Retain exact tracked input for native diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fg-source"
+          git rev-parse HEAD > "$RUNNER_TEMP/fg-source/revision.txt"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/fg-source/source.tar.gz" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-source-${{ github.sha }}
+          path: ${{ runner.temp }}/fg-source
+          if-no-files-found: error
+          retention-days: 1
       - name: Execute node and CLI including fresh-process branch coverage
         shell: bash
         run: |
