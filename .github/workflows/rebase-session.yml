@@ -5,21 +5,7 @@ on:
 permissions:
   contents: read
 jobs:
-  prepare:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    outputs:
-      source: ${{ steps.prepare.outputs.source }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          fetch-depth: 0
-      - id: prepare
-        run: python3 tools/rebase-session/prepare.py
-  verify:
-    needs: prepare
+  verify-published:
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     permissions:
@@ -27,14 +13,13 @@ jobs:
     env:
       RCH_CARGO_WRAPPER_BYPASS: '1'
       CARGO_BUILD_JOBS: '2'
-      CARGO_TARGET_DIR: /tmp/fg-rebase-final-target
+      CARGO_TARGET_DIR: /tmp/fg-rebase-published-target
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ needs.prepare.outputs.source }}
+          ref: 7304c7b846331526aa4d876667b38d51a7e063a1
           persist-credentials: false
       - run: cargo fetch --locked
-      - run: cargo test --locked --offline -p fgit-node --lib merge_prepare::rebase
+      - run: cargo test --locked --offline -p fgit-cli --test native_rebase_smoke -- --nocapture
       - run: cargo test --locked --offline -p fgit-cli --bin fg rebase
-      - run: cargo check --locked --offline -p fgit-cli --all-targets
-      - run: cargo test --locked --offline -p fgit-forge --lib preparation
+      - run: git diff --exit-code
