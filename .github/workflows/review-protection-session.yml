@@ -1,0 +1,42 @@
+name: Integrate saved mandatory review protection
+on:
+  push:
+    branches: [tooling/review-protection-session-20260913]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.prepare.outputs.source }}
+      core: ${{ steps.prepare.outputs.core }}
+      node: ${{ steps.prepare.outputs.node }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - id: prepare
+        run: python3 tools/review-protection-session/prepare.py
+  verify:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      CARGO_TARGET_DIR: /tmp/fg-review-protection-native-target
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: workbench
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          path: source
+          persist-credentials: false
+      - run: python3 workbench/tools/review-protection-session/verify.py source
