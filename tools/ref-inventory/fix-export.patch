@@ -1,0 +1,80 @@
+From e6c225b9e21f9b8b889cbecb7db8dd09d5d19136 Mon Sep 17 00:00:00 2001
+From: Jeff Emanuel <35050222+Dicklesworthstone@users.noreply.github.com>
+Date: Sun, 13 Sep 2026 23:01:40 +0000
+Subject: [PATCH] fix(bundle): retain verified native edges in full export
+ plans (FG-051a)
+
+Native execution at 397912d found all nontrivial production bundle exports incorrectly refused reachable tree/blob objects. Supply real graph edges derived from the same verified bytes to the existing full-bundle closure checker; preserve selected upload-pack behavior and all no-extras checks. Existing file-backed and CLI full-bundle/fetch suites exercise the regression; re-execution is pending.
+---
+ crates/fgit-node/src/lib.rs                   |  7 ++++++-
+ .../src/treefs_workspace/full_bundle.rs       | 19 +++++++++++++++++--
+ 2 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/crates/fgit-node/src/lib.rs b/crates/fgit-node/src/lib.rs
+index 74c05d4..5806738 100644
+--- a/crates/fgit-node/src/lib.rs
++++ b/crates/fgit-node/src/lib.rs
+@@ -2909,10 +2909,15 @@ impl VerifiedFabricPackSource<'_> {
+ 
+     fn object_references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
+         let (object_type, body) = self.read_object(id)?;
++        self.references_from_body(object_type, &body)
++    }
++
++    fn references_from_body(&self, object_type: ObjectType, body: &[u8]) -> Result<Vec<GitOid>, PackWriteError> {
+         self.session_checkpoint()?;
++        if object_type == ObjectType::Blob { return Ok(Vec::new()); }
+         let parsed = parse_object_body(
+             object_type,
+-            &body,
++            body,
+             AcceptanceProfile::GitCompatibleImport,
+             &self.parse_limits(),
+         );
+diff --git a/crates/fgit-node/src/treefs_workspace/full_bundle.rs b/crates/fgit-node/src/treefs_workspace/full_bundle.rs
+index aab9e5f..576da2e 100644
+--- a/crates/fgit-node/src/treefs_workspace/full_bundle.rs
++++ b/crates/fgit-node/src/treefs_workspace/full_bundle.rs
+@@ -21,7 +21,8 @@ use fgit_git_object::ParseLimits;
+ use fgit_pack::full_bundle::fetch::BundleRefMapping;
+ use fgit_pack::full_bundle::{FullBundle, FullBundleError, FullBundleInput, FullBundleLimits};
+ use fgit_pack::{
+-    BundleReference, Deadline, PackPlanner, PackWriteProfile, PackWriter, QuarantinedPack,
++    BundleReference, CanonicalObjectSource, CanonicalPackObject, Deadline, PackPlanner,
++    PackWriteError, PackWriteProfile, PackWriter, QuarantinedPack,
+ };
+ use fgit_types::cell::{ReadMode, admits_read};
+ use fgit_types::{GitHashAlgorithm, RefusalCode, RepositoryAuthorityHeadId};
+@@ -37,6 +38,20 @@ fn bundle_error(error: impl Into<FullBundleError>) -> NodeWorkspaceRefusal {
+     NodeWorkspaceRefusal::FullBundle(Box::new(error.into()))
+ }
+ 
++/// The ordinary selected-pack source intentionally omits closure hints because
++/// filtered upload-pack selections must not be expanded. A full bundle needs
++/// the real local edges for its independent no-extras/completeness check. Derive
++/// them from the same verified bytes being packed, never from a second read or
++/// caller-supplied hints. Selection still comes from current visible ref roots.
++struct BundleObjectSource<'a, 'b>(&'a VerifiedFabricPackSource<'b>);
++impl CanonicalObjectSource for BundleObjectSource<'_, '_> {
++    fn load(&self, id: &fgit_types::GitOid) -> Result<CanonicalPackObject, PackWriteError> {
++        let (kind, body) = self.0.read_object(id)?;
++        let references = self.0.references_from_body(kind, &body)?;
++        Ok(CanonicalPackObject::new(*id, kind, body, references, 0, 0))
++    }
++}
++
+ impl OneNode {
+     /// Export the closure of all currently visible direct refs at one selected
+     /// authority head. Caller visibility only narrows canonical hidden-ref rules.
+@@ -116,7 +131,7 @@ impl OneNode {
+             PackWriteProfile::COMPRESSED_NO_DELTA_V1,
+             pack_limits.clone(),
+         )
+-        .plan_selected(&source, &ids, &mut live)
++        .plan_selected(&BundleObjectSource(&source), &ids, &mut live)
+         .map_err(bundle_error)?;
+         let bundle = FullBundle::write(
+             &references,
+-- 
+2.47.3
+

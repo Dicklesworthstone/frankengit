@@ -4,7 +4,7 @@ on:
     branches: [tooling/core-integration-9c8d0521]
     paths:
       - .github/workflows/core-integration-session.yml
-      - tools/core-fetch-work/prepare_cli.py
+      - tools/ref-inventory/prepare.py
 permissions:
   contents: read
 jobs:
@@ -20,7 +20,7 @@ jobs:
         with:
           fetch-depth: 0
       - id: prepare
-        run: python3 tools/core-fetch-work/prepare_cli.py
+        run: python3 tools/ref-inventory/prepare.py
   verify:
     needs: prepare
     runs-on: ubuntu-22.04
@@ -44,20 +44,23 @@ jobs:
           git rev-parse HEAD | tee "$RUNNER_TEMP/fetch-source.txt"
           rustc -Vv | tee "$RUNNER_TEMP/fetch-toolchain.txt"
           bash scripts/verify_native_bundle.sh check 2>&1 | tee "$RUNNER_TEMP/fetch-check.log"
-      - name: Execute bundle and fetch regressions
+      - name: Execute full bundle, mapped fetch and ref inventory regressions
         shell: bash
         run: |
           set -euo pipefail
           bash scripts/verify_native_bundle.sh test 2>&1 | tee "$RUNNER_TEMP/fetch-test.log"
-      - name: Execute patch regressions with public request cancellation
+      - name: Execute native patch regressions
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
-          cargo test --locked -p fgit-node --test workspace_patch -- --nocapture 2>&1 | tee "$RUNNER_TEMP/fetch-patch.log"
+          set -uo pipefail
+          status=0
+          cargo test --locked -p fgit-diff --lib patch:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/fetch-patch-parser.log" || status=1
+          cargo test --locked -p fgit-node --test workspace_patch -- --nocapture 2>&1 | tee "$RUNNER_TEMP/fetch-patch.log" || status=1
+          exit "$status"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: core-fetch-cli-native
+          name: full-fetch-inventory-native
           path: ${{ runner.temp }}/fetch-*
           retention-days: 1
