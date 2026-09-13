@@ -2,10 +2,27 @@ name: Exact core integration workbench
 on:
   push:
     branches: [tooling/core-integration-9c8d0521]
+    paths:
+      - .github/workflows/core-integration-session.yml
+      - tools/core-fetch-work/prepare.py
 permissions:
   contents: read
 jobs:
-  inspect:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.prepare.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - id: prepare
+        run: python3 tools/core-fetch-work/prepare.py
+  verify:
+    needs: prepare
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     env:
@@ -18,25 +35,18 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 9c8d052127a03dd7a78a6731fa3fb7d41e985c84
+          ref: ${{ needs.prepare.outputs.source }}
           persist-credentials: false
-      - name: Capture exact source
+      - name: Native check and bundle tests at exact source
+        shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/source"
-          git rev-parse HEAD > "$RUNNER_TEMP/source/revision.txt"
-          git archive --format=tar.gz -o "$RUNNER_TEMP/source/source.tar.gz" HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: core-source-9c8d0521
-          path: ${{ runner.temp }}/source
-          retention-days: 1
-      - name: Check existing native patch integration
-        run: |
-          set -o pipefail
-          cargo check --locked -p fgit-cli -p fgit-node --all-targets 2>&1 | tee "$RUNNER_TEMP/native-check.log"
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/fetch-source.txt"
+          bash scripts/verify_native_bundle.sh check 2>&1 | tee "$RUNNER_TEMP/fetch-check.log"
+          bash scripts/verify_native_bundle.sh test 2>&1 | tee "$RUNNER_TEMP/fetch-test.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: core-native-check
-          path: ${{ runner.temp }}/native-check.log
+          name: core-fetch-native
+          path: ${{ runner.temp }}/fetch-*
           retention-days: 1
