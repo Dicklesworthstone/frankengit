@@ -253,3 +253,6 @@ fn writer_refuses_missing_edges_and_unrelated_retained_objects_before_pack_work(
         );
     }
 }
+
+#[path = "full_bundle/fetch.rs"]
+mod fetch;

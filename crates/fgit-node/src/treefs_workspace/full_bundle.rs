@@ -18,6 +18,7 @@ use fgit_authority::{
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_git_object::ParseLimits;
+use fgit_pack::full_bundle::fetch::BundleRefMapping;
 use fgit_pack::full_bundle::{FullBundle, FullBundleError, FullBundleInput, FullBundleLimits};
 use fgit_pack::{
     BundleReference, Deadline, PackPlanner, PackWriteProfile, PackWriter, QuarantinedPack,
@@ -150,6 +151,31 @@ impl OneNode {
         input: &[u8],
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
+        self.admit_full_git_bundle_in(request, session, input, None, limits).await
+    }
+
+    /// Fetch explicitly selected bundle refs into exact destinations atomically.
+    /// Each mapping requires absence or an exact old tip. Existing branches and
+    /// remote-tracking refs must fast-forward through native commit parent edges;
+    /// tags can be created or reasserted, never replaced. Unselected refs and
+    /// their exclusive objects are not imported. This does not prune refs or
+    /// rewrite HEAD, forge metadata, policy, or repository configuration.
+    ///
+    /// Complete supplied objects pass the same self-contained quarantine as
+    /// import. No current object is borrowed to repair an incomplete bundle.
+    /// Terminal replay precedes intake gates; new writes retain ordinary policy
+    /// and exact-basis admission. An I/O failure does not prove non-commit.
+    pub async fn fetch_full_git_bundle_durable_in(
+        &self, request: &NodeRequestContext, session: &LoopbackReceiveSession,
+        input: &[u8], mappings: &[BundleRefMapping], limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
+        self.admit_full_git_bundle_in(request, session, input, Some(mappings), limits).await
+    }
+
+    async fn admit_full_git_bundle_in(
+        &self, request: &NodeRequestContext, session: &LoopbackReceiveSession,
+        input: &[u8], mappings: Option<&[BundleRefMapping]>, limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
         let authenticated = session
             .authenticated_session()
             .ok_or_else(|| receive_error(NodeReceiveTransportRefusal::Unauthenticated))?;
@@ -164,16 +190,18 @@ impl OneNode {
         if bundle.format() != self.object_format {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
         }
-        let commands: Vec<_> = bundle
-            .references()
-            .iter()
-            .map(|reference| RefCommand {
-                name: reference.name().clone(),
-                expected_old: ExpectedOld::Absent,
-                proposed_new: ProposedNew::Update(*reference.target()),
-                force: false,
-            })
-            .collect();
+        let commands: Vec<_> = match mappings {
+            Some(mappings) => bundle.select_updates(mappings, bundle_limits, &mut live)
+                .map_err(bundle_error)?.into_iter().map(|update| RefCommand {
+                    name: update.destination,
+                    expected_old: update.expected_old.map_or(ExpectedOld::Absent, ExpectedOld::Exactly),
+                    proposed_new: ProposedNew::Update(update.target), force: false,
+                }).collect(),
+            None => bundle.references().iter().map(|reference| RefCommand {
+                name: reference.name().clone(), expected_old: ExpectedOld::Absent,
+                proposed_new: ProposedNew::Update(*reference.target()), force: false,
+            }).collect(),
+        };
         let semantic = SemanticRequest::build(
             RECEIVE_ADMISSION_SCHEMA,
             self.object_format,
@@ -225,6 +253,10 @@ impl OneNode {
             .materialize_admission_in(request)
             .await
             .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
+        if mappings.is_some() && commands.iter().any(|command|
+            materialized.snapshot().hidden_refs.hides(command.name.as_bytes())) {
+            return Err(NodeWorkspaceRefusal::RefUnavailable);
+        }
         receive_limits.pack.max_object_bytes = receive_limits
             .pack
             .max_object_bytes
@@ -250,9 +282,17 @@ impl OneNode {
                 .map_err(|_| bundle_error(FullBundleError::Invalid("receive capabilities")))?;
         let zero = "0".repeat(self.object_format.digest_len() * 2);
         let mut packets = Vec::with_capacity(commands.len() + 1);
-        for (index, reference) in bundle.references().iter().enumerate() {
-            let mut data = format!("{zero} {} ", reference.target()).into_bytes();
-            data.extend_from_slice(reference.name().as_bytes());
+        for (index, command) in commands.iter().enumerate() {
+            let old = match command.expected_old {
+                ExpectedOld::Absent => zero.clone(),
+                ExpectedOld::Exactly(oid) => oid.to_string(),
+                ExpectedOld::Unspecified => return Err(bundle_error(FullBundleError::Invalid("unspecified fetch expectation"))),
+            };
+            let ProposedNew::Update(new) = command.proposed_new else {
+                return Err(bundle_error(FullBundleError::Invalid("bundle deletion")));
+            };
+            let mut data = format!("{old} {new} ").into_bytes();
+            data.extend_from_slice(command.name.as_bytes());
             if index == 0 {
                 data.push(0);
                 data.extend_from_slice(capability_bytes.as_bytes());
@@ -279,7 +319,7 @@ impl OneNode {
             .push_bytes(bundle.pack_bytes())
             .map_err(receive_error)?;
         let mut handoff = FullHandoff {
-            validator: FullValidator(validator),
+            validator: FullValidator { inner: validator, fetch: mappings.is_some() },
             basis: materialized.basis().clone(),
             validated: None,
         };
@@ -303,7 +343,7 @@ impl OneNode {
     }
 }
 
-struct FullValidator<'a>(ProductionQuarantineValidator<'a>);
+struct FullValidator<'a> { inner: ProductionQuarantineValidator<'a>, fetch: bool }
 impl QuarantineValidator for FullValidator<'_> {
     fn validate(
         &self,
@@ -312,8 +352,11 @@ impl QuarantineValidator for FullValidator<'_> {
         receipt: &QuarantineReceipt,
         deadline: &mut impl Deadline,
     ) -> Result<ValidatedClosure, RefusalCode> {
-        self.0
-            .validate_full_bundle(request, pack, receipt, deadline)
+        if self.fetch {
+            self.inner.validate_bundle_fetch(request, pack, receipt, deadline)
+        } else {
+            self.inner.validate_full_bundle(request, pack, receipt, deadline)
+        }
     }
 }
 struct FullHandoff<'a> {

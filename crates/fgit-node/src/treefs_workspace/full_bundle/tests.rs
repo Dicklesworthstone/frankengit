@@ -387,3 +387,5 @@ fn corrupt_cancelled_and_foreign_format_intake_never_publishes() {
     destination.shutdown().unwrap();
     source.shutdown().unwrap();
 }
+
+mod fetch;

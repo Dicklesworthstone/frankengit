@@ -6,6 +6,8 @@
 //! Header parsing is not object admission. Importers must still run the pack
 //! through native quarantine with borrowing disabled.
 
+pub mod fetch;
+
 use crate::{
     BundleReference, Deadline, NativeChecksumVerifier, ObjectFormat, ObjectId, PackError,
     PackLimits, PackPlan, PackWriteError, PackWriteReceipt, PackWriter, checkpoint,

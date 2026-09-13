@@ -114,10 +114,24 @@ impl ProductionQuarantineValidator<'_> {
         &self, request: &ReceiveRequest, pack: Option<&QuarantinedPack>,
         receipt: &QuarantineReceipt, deadline: &mut impl Deadline,
     ) -> Result<ValidatedClosure, RefusalCode> {
+        self.validate_self_contained_bundle(request, pack, receipt, false, deadline)
+    }
+
+    pub(crate) fn validate_bundle_fetch(
+        &self, request: &ReceiveRequest, pack: Option<&QuarantinedPack>,
+        receipt: &QuarantineReceipt, deadline: &mut impl Deadline,
+    ) -> Result<ValidatedClosure, RefusalCode> {
+        self.validate_self_contained_bundle(request, pack, receipt, true, deadline)
+    }
+
+    fn validate_self_contained_bundle(
+        &self, request: &ReceiveRequest, pack: Option<&QuarantinedPack>,
+        receipt: &QuarantineReceipt, fetch: bool, deadline: &mut impl Deadline,
+    ) -> Result<ValidatedClosure, RefusalCode> {
         checkpoint(deadline)?;
         let pack = pack.ok_or(RefusalCode::ObjectClosureIncomplete)?;
         if request.deletes_only() || receipt.delete_only
-            || request.commands.iter().any(|command| !command.old.is_zero() || command.new.is_zero())
+            || request.commands.iter().any(|command| (!fetch && !command.old.is_zero()) || command.new.is_zero())
             || u32::try_from(pack.entries().len()).ok() != Some(receipt.object_count) {
             return Err(RefusalCode::PackFramingInvalid);
         }
@@ -131,6 +145,10 @@ impl ProductionQuarantineValidator<'_> {
         let closure = self.reachable_uploaded_closure_profile(
             request, &verified, &delta_bases, &bases, &independent, true, deadline,
         )?;
+        if fetch {
+            require_fetch_fast_forwards(request, &verified,
+                self.pack_limits.max_total_expanded_bytes.min(MAX_GRAPH_EDGES), deadline)?;
+        }
         // No bytes acquire staging responsibility until the full graph has
         // passed. A cancellation during staging does not publish any ref.
         for id in &closure {
@@ -156,6 +174,50 @@ impl ProductionQuarantineValidator<'_> {
             &self.parse_limits, edges_left, deadline,
         )
     }
+}
+
+/// Native commit ancestry, never tree reachability or caller-provided parentage.
+/// One work budget is shared across all selected refs and all parent edges.
+fn require_fetch_fast_forwards(
+    request: &ReceiveRequest, verified: &BTreeMap<GitOid, VerifiedObject>,
+    mut work: usize, deadline: &mut impl Deadline,
+) -> Result<(), RefusalCode> {
+    for command in &request.commands {
+        checkpoint(deadline)?;
+        let is_tag = command.ref_name.starts_with(b"refs/tags/");
+        let is_branch = command.ref_name.starts_with(b"refs/heads/")
+            || command.ref_name.starts_with(b"refs/remotes/");
+        if !is_tag && !is_branch { return Err(RefusalCode::RefNameInvalid); }
+        if is_branch {
+            let target = verified.get(&command.new).ok_or(RefusalCode::ObjectClosureIncomplete)?;
+            require_kind(target.object_type, ObjectType::Commit)?;
+        }
+        if command.old.is_zero() || command.old == command.new { continue; }
+        if is_tag { return Err(RefusalCode::NonFastForwardRefused); }
+        let mut pending = BTreeSet::from([command.new]);
+        let mut seen = BTreeSet::new();
+        let mut found = false;
+        while let Some(id) = pending.pop_first() {
+            checkpoint(deadline)?;
+            charge_edge(&mut work)?;
+            if !seen.insert(id) { continue; }
+            let object = verified.get(&id).ok_or(RefusalCode::ObjectClosureIncomplete)?;
+            let ParsedObject::Commit(commit) = &object.parsed else {
+                return Err(RefusalCode::EvidenceInvalid);
+            };
+            if id == command.old { found = true; break; }
+            for parent in commit.parent_references() {
+                checkpoint(deadline)?;
+                charge_edge(&mut work)?;
+                let parent = std::str::from_utf8(parent).ok()
+                    .and_then(|text| GitOid::from_hex(command.new.algorithm(), &text.to_ascii_lowercase()).ok())
+                    .ok_or(RefusalCode::ObjectHeaderInvalid)?;
+                if !seen.contains(&parent) { pending.insert(parent); }
+            }
+        }
+        if !found { return Err(RefusalCode::NonFastForwardRefused); }
+    }
+    checkpoint(deadline)
 }
 
 fn require_original(
