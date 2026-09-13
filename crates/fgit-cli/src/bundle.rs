@@ -144,13 +144,17 @@ fn key_bytes(key: &Key, input: &mut impl Read) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
+mod incremental;
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|s| matches!(s.as_str(), "sync-export" | "sync-import")) {
+        return incremental::run(args);
+    }
     if args == ["--help"]
         || (args.len() == 2
             && args[1] == "--help"
             && matches!(args[0].as_str(), "export" | "import"))
     {
-        writeln!(std::io::stdout().lock(), "{USAGE}").map_err(|e| e.to_string())?;
+        writeln!(std::io::stdout().lock(), "{USAGE}\n{}", incremental::USAGE).map_err(|e| e.to_string())?;
         return Ok(0);
     }
     let options = parse(args)?;
