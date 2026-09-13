@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod branches;
+mod bundle;
 mod commit_replay;
 mod rebase;
 mod rebase_apply;
@@ -23,6 +24,15 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "bundle") {
+        return match bundle::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("{{\"type\":\"bundle_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "branch") {
         return match branches::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),

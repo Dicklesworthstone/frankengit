@@ -1,0 +1,49 @@
+name: Native full bundle transfer
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/native-bundle.yml
+      - scripts/verify_native_bundle.sh
+      - scripts/e2e/full_bundle_smoke.py
+      - crates/fgit-pack/src/full_bundle.rs
+      - crates/fgit-pack/tests/full_bundle.rs
+      - crates/fgit-node/src/treefs_workspace/full_bundle.rs
+      - crates/fgit-node/src/treefs_workspace/full_bundle/**
+      - crates/fgit-node/src/quarantine_validator/typed_closure.rs
+      - crates/fgit-cli/src/bundle.rs
+      - crates/fgit-cli/tests/native_full_bundle_smoke.rs
+permissions:
+  contents: read
+concurrency:
+  group: native-bundle-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TARGET_DIR: /tmp/fg-native-bundle
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Compile and execute exact-source native integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/bundle-revision.txt"
+          rustc -Vv
+          bash scripts/verify_native_bundle.sh check 2>&1 | tee "$RUNNER_TEMP/bundle-check.log"
+          bash scripts/verify_native_bundle.sh test 2>&1 | tee "$RUNNER_TEMP/bundle-test.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-bundle-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-*.log
+          if-no-files-found: error
+          retention-days: 1
