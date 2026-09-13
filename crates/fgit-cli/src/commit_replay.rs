@@ -155,24 +155,24 @@ fn parse(args: &[String], direction: ReplayDirection) -> Result<Options, String>
         inputs: ReplayRequest { direction, target: expected_target, source_tip, selected_commit, mainline },
         head, metadata, message_file, limits, resolutions })
 }
-fn decimal(text: &str) -> Result<u64, String> {
+pub(super) fn decimal(text: &str) -> Result<u64, String> {
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) || (text.len() > 1 && text.starts_with('0')) {
         return Err("expected canonical unsigned decimal".into());
     }
     text.parse().map_err(|_| "integer overflow".into())
 }
-fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
+pub(super) fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
     if text.is_empty() || text.len() > limit * 2 || text.len() % 2 != 0
         || !text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     { return Err("expected bounded lowercase hex".into()); }
     let digit = |b| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     Ok(text.as_bytes().chunks_exact(2).map(|pair| digit(pair[0]) * 16 + digit(pair[1])).collect())
 }
-fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
-fn token(head: RepositoryAuthorityHeadId) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
+pub(super) fn token(head: RepositoryAuthorityHeadId) -> String {
     let id = head.as_internal_object_id(); format!("alg:{}:{}", id.algorithm().code_point(), hex(id.digest().as_bytes()))
 }
-fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
+pub(super) fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
     let (algorithm, bytes) = text.strip_prefix("alg:").and_then(|s| s.split_once(':')).ok_or("expected algorithm-qualified head token")?;
     let algorithm = DigestAlgorithmId::try_new(u16::try_from(decimal(algorithm)?).map_err(|_| "algorithm overflow")?)
         .map_err(|_| "invalid algorithm")?;
@@ -224,7 +224,7 @@ fn render(options: &Options, head: RepositoryAuthorityHeadId, outcome: &ReplayPr
     if receipt.len() > 4 * 1024 * 1024 { return Err("replay receipt exceeds output bound".into()); }
     Ok((receipt, code))
 }
-fn write_receipt(out: &mut impl Write, receipt: &str, artifact_published: bool) -> Result<(), String> {
+pub(super) fn write_receipt(out: &mut impl Write, receipt: &str, artifact_published: bool) -> Result<(), String> {
     writeln!(out, "{receipt}").and_then(|()| out.flush()).map_err(|error|
         format!("replay receipt incomplete: {error}; bundle_published={artifact_published}; repository state was not changed"))
 }
