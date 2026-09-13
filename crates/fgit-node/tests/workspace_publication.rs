@@ -271,3 +271,66 @@ fn merely_staged_prerequisites_are_not_authority_and_unserving_nodes_do_not_publ
     assert_eq!(observed(&reopened), original);
     reopened.shutdown().unwrap();
 }
+
+#[test]
+fn terminal_workspace_decisions_recover_before_serving_without_accepting_new_intake() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (node, base, untouched) = setup(&scratch.0, format);
+        let (winner, _, winner_bundle) = candidate(format, base, untouched, &[base], "winner");
+        let (loser, _, loser_bundle) = candidate(format, base, untouched, &[base], "loser");
+        let committed = apply(&node, b"committed", base, winner, &winner_bundle).unwrap();
+        let refused = apply(&node, b"refused", base, loser, &loser_bundle).unwrap();
+        assert!(matches!(committed.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
+        assert!(matches!(refused.commands[0].terminal.outcome, DecisionOutcome::Refused { .. }));
+        let before = observed(&node);
+        node.shutdown().unwrap();
+
+        // open_existing deliberately does not bring this node into service.
+        let node = OneNode::open_existing(config(&scratch.0, format)).unwrap();
+        assert_eq!(apply(&node, b"committed", base, winner, &winner_bundle).unwrap(), committed);
+        assert_eq!(apply(&node, b"refused", base, loser, &loser_bundle).unwrap(), refused);
+        assert!(apply(&node, b"new-key", base, loser, &loser_bundle).is_err());
+        assert!(apply(&node, b"committed", base, loser, &loser_bundle).is_err());
+        assert!(apply(&node, b"committed", base, winner, &loser_bundle).is_err());
+        let request = node.request_context();
+        assert!(node.runtime().block_on(node.apply_workspace_bundle_durable_in(
+            &request, PrincipalId::from_bytes([0x84; 16]), b"committed", &reference(),
+            base, winner, &winner_bundle,
+        )).is_err(), "another principal must not recover this principal's transaction");
+        assert_eq!(observed(&node), before, "recovery and rejected intake cannot move authority");
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn terminal_recovery_is_not_fresh_transport_validation_and_still_binds_the_header() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (node, base, untouched) = setup(&scratch.0, format);
+        let (tip, _, bundle) = candidate(format, base, untouched, &[base], "terminal recovery");
+        let committed = apply(&node, b"once", base, tip, &bundle).unwrap();
+        let before = observed(&node);
+        let transport = envelope(format, base, tip, b"not a newly validated pack");
+        assert_eq!(apply(&node, b"once", base, tip, &transport).unwrap(), committed);
+        assert!(apply(&node, b"fresh", base, tip, &transport).is_err());
+        let wrong_header = envelope(format, untouched, tip, b"PACK");
+        assert!(apply(&node, b"once", base, tip, &wrong_header).is_err());
+        assert_eq!(observed(&node), before);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn recovery_preserves_the_existing_empty_key_identity_domain() {
+    let scratch = Scratch::new();
+    let format = GitHashAlgorithm::Sha1;
+    let (node, base, untouched) = setup(&scratch.0, format);
+    let (tip, _, bundle) = candidate(format, base, untouched, &[base], "existing empty key");
+    let result = apply(&node, b"", base, tip, &bundle).unwrap();
+    assert!(matches!(result.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
+    node.shutdown().unwrap();
+    let reopened = OneNode::open_existing(config(&scratch.0, format)).unwrap();
+    assert_eq!(apply(&reopened, b"", base, tip, &bundle).unwrap(), result);
+    reopened.shutdown().unwrap();
+}

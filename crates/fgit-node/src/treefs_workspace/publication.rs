@@ -15,8 +15,13 @@ pub(super) use bundle_review::BundleInspectionRefusal;
 use super::{NodeWorkspaceRefusal, workspace_request_live};
 use crate::quarantine_validator::ProductionReceiveQuarantineHandoff;
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
-use fgit_admission::{AdmissionLimits, AdmissionResult, BasisBoundValidatedReceive};
-use fgit_authority::IdempotencyKey;
+use fgit_admission::{
+    AdmissionLimits, AdmissionResult, BasisBoundValidatedReceive, CommandOutcome, SessionMapping,
+};
+use fgit_authority::{
+    ExpectedOld, IdempotencyKey, OutcomeLookup, ProposedNew, RefCommand, SealAttempt,
+    SemanticRequest, MAX_IDEMPOTENCY_KEY_BYTES, RECEIVE_ADMISSION_SCHEMA,
+};
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body};
 use fgit_object_fabric::ObjectKind;
 use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName};
@@ -169,7 +174,11 @@ impl OneNode {
     /// bytes. The exactly-one-prerequisite workspace profile is unchanged even
     /// though the common merge intake helper supports a bounded frontier.
     /// The exact expected-old condition survives into canonical admission, so
-    /// retries can recover their original decision after the ref has moved.
+    /// retries can recover their original decision after the ref has moved,
+    /// serving has stopped, or intake quota has been exhausted. Recovery binds
+    /// the header and sealed request; it does not revalidate a transport pack
+    /// or grant a fresh bundle-verification receipt. New operations still pass
+    /// every current gate, production quarantine and single-parent validation.
     /// Staging is not publication and an infrastructure error is not evidence
     /// of non-commit.
     pub async fn apply_workspace_bundle_durable_in(
@@ -182,16 +191,26 @@ impl OneNode {
         expected_candidate: GitOid,
         input: &[u8],
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
+        if idempotency_key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+            return Err(invalid("invalid bounded idempotency key"));
+        }
         let key = IdempotencyKey::new(idempotency_key.to_vec())
             .map_err(|_| invalid("invalid bounded idempotency key"))?;
+        // Header binding is independent of mutable policy and object retention.
+        // A recovered terminal result confirms the sealed ref operation, not
+        // the integrity or provenance of a newly supplied transport encoding.
+        let envelope = CandidateEnvelope::parse(input)?;
+        envelope.bind(self.object_format, reference, expected_base, expected_candidate)?;
+        if let Some(result) = self.recover_source_publication_in(
+            request, principal_id, &key, reference, expected_base, expected_candidate,
+        ).await? {
+            return Ok(result);
+        }
         self.receive_publication_admitted().map_err(receive_error)?;
         self.push_quota.evaluate(&principal_id).map_err(receive_error)?;
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
-        // This small header-only check preserves the public workspace profile.
-        // Quarantine below owns all authority and native-object verification.
-        CandidateEnvelope::parse(input)?;
         let (validated, parse_limits) = self.quarantine_reviewed_bundle_in(
             request, reference, expected_base, expected_candidate, input, &[],
         ).await?;
@@ -209,6 +228,50 @@ impl OneNode {
         self.admit_basis_bound_loopback_receive_durable_in(
             request, &session, &validated, AdmissionLimits::default(),
         ).await.map_err(receive_error)
+    }
+
+    /// Recover only the canonical single-ref receive decision. Shared by
+    /// reviewed source-only publication adapters, never coupled forge effects.
+    /// An unresolved attempt acquires no seal here: normal admission remains
+    /// responsible for validation, sealing and publication of new work.
+    pub(super) async fn recover_source_publication_in(
+        &self,
+        request: &NodeRequestContext,
+        principal_id: PrincipalId,
+        key: &IdempotencyKey,
+        reference: &RefName,
+        expected_old: GitOid,
+        candidate: GitOid,
+    ) -> Result<Option<AdmissionResult>, NodeWorkspaceRefusal> {
+        let semantic = SemanticRequest::build(
+            RECEIVE_ADMISSION_SCHEMA, self.object_format, true,
+            vec![RefCommand {
+                name: reference.clone(),
+                expected_old: ExpectedOld::Exactly(expected_old),
+                proposed_new: ProposedNew::Update(candidate),
+                force: false,
+            }], vec![], vec![],
+        ).map_err(|_| invalid("invalid source publication request"))?;
+        let attempt = SealAttempt {
+            tenant_id: self.tenant_id,
+            repository_id: self.repository_id,
+            authenticated_principal_id: principal_id,
+            idempotency_key: key.clone(),
+            request: semantic,
+        };
+        let failure = |error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)));
+        let (tx_id, _) = attempt.derive().map_err(|error| failure(error.into()))?;
+        let outcome = fgit_authority::resolve_outcome_async(
+            &self.authority, request.authority(), &self.head_key,
+            self.tenant_id, self.repository_id, tx_id,
+        ).await.map_err(|error| failure(error.into()))?;
+        let OutcomeLookup::Decided(terminal) = outcome else { return Ok(None); };
+        fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
+            .await.map_err(|error| failure(error.into()))?;
+        Ok(Some(AdmissionResult {
+            session: SessionMapping { atomic: true, tx_ids: vec![tx_id] },
+            commands: vec![CommandOutcome { tx_id, terminal }],
+        }))
     }
 
     /// Stage verified bundle objects WITHOUT admitting its source request.
