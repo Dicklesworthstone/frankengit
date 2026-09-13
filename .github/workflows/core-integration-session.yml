@@ -4,7 +4,7 @@ on:
     branches: [tooling/core-integration-9c8d0521]
     paths:
       - .github/workflows/core-integration-session.yml
-      - tools/core-fetch-work/prepare.py
+      - tools/core-fetch-work/prepare_cli.py
 permissions:
   contents: read
 jobs:
@@ -20,7 +20,7 @@ jobs:
         with:
           fetch-depth: 0
       - id: prepare
-        run: python3 tools/core-fetch-work/prepare.py
+        run: python3 tools/core-fetch-work/prepare_cli.py
   verify:
     needs: prepare
     runs-on: ubuntu-22.04
@@ -37,16 +37,27 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source }}
           persist-credentials: false
-      - name: Native check and bundle tests at exact source
+      - name: Check exact native source
         shell: bash
         run: |
           set -euo pipefail
           git rev-parse HEAD | tee "$RUNNER_TEMP/fetch-source.txt"
+          rustc -Vv | tee "$RUNNER_TEMP/fetch-toolchain.txt"
           bash scripts/verify_native_bundle.sh check 2>&1 | tee "$RUNNER_TEMP/fetch-check.log"
+      - name: Execute bundle and fetch regressions
+        shell: bash
+        run: |
+          set -euo pipefail
           bash scripts/verify_native_bundle.sh test 2>&1 | tee "$RUNNER_TEMP/fetch-test.log"
+      - name: Execute patch regressions with public request cancellation
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fgit-node --test workspace_patch -- --nocapture 2>&1 | tee "$RUNNER_TEMP/fetch-patch.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: core-fetch-native
+          name: core-fetch-cli-native
           path: ${{ runner.temp }}/fetch-*
           retention-days: 1
