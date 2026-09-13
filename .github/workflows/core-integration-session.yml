@@ -1,0 +1,42 @@
+name: Exact core integration workbench
+on:
+  push:
+    branches: [tooling/core-integration-9c8d0521]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TARGET_DIR: /tmp/fg-core-integration
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 9c8d052127a03dd7a78a6731fa3fb7d41e985c84
+          persist-credentials: false
+      - name: Capture exact source
+        run: |
+          mkdir -p "$RUNNER_TEMP/source"
+          git rev-parse HEAD > "$RUNNER_TEMP/source/revision.txt"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/source/source.tar.gz" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: core-source-9c8d0521
+          path: ${{ runner.temp }}/source
+          retention-days: 1
+      - name: Check existing native patch integration
+        run: |
+          set -o pipefail
+          cargo check --locked -p fgit-cli -p fgit-node --all-targets 2>&1 | tee "$RUNNER_TEMP/native-check.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: core-native-check
+          path: ${{ runner.temp }}/native-check.log
+          retention-days: 1
