@@ -628,3 +628,6 @@ fn empty_suffix_exports_a_valid_empty_pack_and_later_snapshot_pins_refuse() {
 
 #[path = "apply_tests.rs"]
 mod apply_tests;
+
+#[path = "resolution_tests.rs"]
+mod resolution_tests;

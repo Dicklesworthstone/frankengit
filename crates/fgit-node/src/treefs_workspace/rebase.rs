@@ -5,9 +5,13 @@ use crate::{
 };
 use fgit_admission::ProjectionFailure;
 use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_commit_closure};
+use fgit_forge::preparation::rebase::resolutions::{
+    RebaseCommitResolution, RebaseResolvedStep, prepare_resolved_rebase,
+    validate_rebase_resolutions,
+};
 use fgit_forge::preparation::rebase::{
     PreparedRebase, RebaseCommitMetadata, RebaseCommitter, RebaseError, RebaseObjectSource,
-    RebasePreparation, RebaseRequest, RebaseStepKind, prepare_rebase,
+    RebasePreparation, RebaseRequest, RebaseStepKind,
 };
 use fgit_forge::preparation::{MergeObjectSource, MergeSourceError, PreparationLimits};
 use fgit_git_object::{
@@ -146,7 +150,44 @@ impl OneNode {
         committer: &RebaseCommitter,
         limits: PreparationLimits,
     ) -> Result<PreparedRebaseBundle, RebasePreparationRefusal> {
-        limits.validate().map_err(preparation)?;
+        self.prepare_resolved_rebase_bundle_in(
+            request,
+            source_ref,
+            onto_ref,
+            inputs,
+            visibility,
+            expected_head,
+            committer,
+            limits,
+            &[],
+        )
+        .await
+        .map(|(bundle, _)| bundle)
+    }
+
+    /// Prepare a complete linear rebase with explicit original-commit-bound
+    /// conflict decisions. Returns the artifact plus byte-ordered resolution
+    /// explanations. The original source/onto pins, visibility and one selected
+    /// authority snapshot remain mandatory. Every call reconstructs the whole
+    /// suffix; no mutable sequencer or partial publication is introduced.
+    ///
+    /// An unresolved later conflict returns no bundle even after earlier steps
+    /// were resolved. A clean bundle remains untrusted transport and requires
+    /// independent candidate review and ordinary atomic receive admission.
+    pub async fn prepare_resolved_rebase_bundle_in(
+        &self,
+        request: &NodeRequestContext,
+        source_ref: &RefName,
+        onto_ref: &RefName,
+        inputs: RebaseRequest,
+        visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        committer: &RebaseCommitter,
+        limits: PreparationLimits,
+        resolutions: &[RebaseCommitResolution],
+    ) -> Result<(PreparedRebaseBundle, Vec<RebaseResolvedStep>), RebasePreparationRefusal> {
+        validate_rebase_resolutions(self.object_format, limits, resolutions)
+            .map_err(preparation)?;
         committer.validate().map_err(preparation)?;
         if source_ref == onto_ref
             || [source_ref, onto_ref]
@@ -213,8 +254,16 @@ impl OneNode {
             read_bytes: Cell::new(0),
             budget_failed: Cell::new(false),
         };
-        let outcome = prepare_rebase(&original, self.object_format, inputs, committer, limits)
-            .map_err(preparation)?;
+        let resolved = prepare_resolved_rebase(
+            &original,
+            self.object_format,
+            inputs,
+            committer,
+            limits,
+            resolutions,
+        )
+        .map_err(preparation)?;
+        let outcome = resolved.preparation;
         let (bundle, pack_objects, borrowed_objects) = match &outcome {
             RebasePreparation::Clean(plan) => {
                 let (bytes, count, borrowed) = rebase_bundle(&original, source_ref, plan, limits)?;
@@ -223,13 +272,16 @@ impl OneNode {
             RebasePreparation::Stopped { .. } => (None, 0, 0),
         };
         original.checkpoint()?;
-        Ok(PreparedRebaseBundle {
-            source_head: selected.basis().id(),
-            outcome,
-            bundle,
-            pack_objects,
-            borrowed_objects,
-        })
+        Ok((
+            PreparedRebaseBundle {
+                source_head: selected.basis().id(),
+                outcome,
+                bundle,
+                pack_objects,
+                borrowed_objects,
+            },
+            resolved.resolutions,
+        ))
     }
 }
 
