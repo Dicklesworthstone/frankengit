@@ -15,6 +15,7 @@ mod source_history;
 mod source_review;
 mod source_search;
 mod transaction_outcome;
+mod patch_command;
 #[cfg(target_os = "linux")]
 mod workspace;
 #[cfg(target_os = "linux")]
@@ -66,6 +67,12 @@ fn main() -> ExitCode {
     }
     if arguments.first().is_some_and(|argument| argument == "issue") {
         return match issues::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+        };
+    }
+    if arguments.first().is_some_and(|argument| argument == "patch") {
+        return match patch_command::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
         };
