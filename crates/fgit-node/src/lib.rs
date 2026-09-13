@@ -2349,6 +2349,9 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
                     RefusalCode::AuthorityReceiptStale,
                 ));
             }
+            fgit_admission::merge::native::protection::enforce_direct_at(
+                authority, cx, basis, fold, &|| cx.checkpoint().is_err(),
+            ).await?;
             let stage_context = cx.create_child();
             let is_cancelled = || stage_context.checkpoint().is_err();
             let provider = self
@@ -2516,6 +2519,11 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
         if prepared.refs != *next_state {
             return Err(AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach));
         }
+        // Legacy digest packages carry no authenticated exact-candidate votes.
+        // They cannot bypass a protected target through a different materializer.
+        fgit_admission::merge::native::protection::enforce_direct_at(
+            authority, cx, basis, &prepared.fold, &is_cancelled,
+        ).await?;
         self.materializer.stage_evidence_bodies_in(authority, cx, &prepared.evidence, &is_cancelled)
             .await.map_err(async_projection_unavailable)?;
         self.materializer.stage_ref_state_for_layout_in(authority, cx, context.repository_id,
@@ -2800,11 +2808,9 @@ where
                 );
             }
             if record.policy_epoch != successor.policy_epoch {
-                return Err(
-                    AdmissionMaterializationRefusal::SelectedCommitStateMismatch {
-                        field: "policy_epoch",
-                    },
-                );
+                fgit_admission::merge::native::protection::verify_epoch_advance_at(
+                    authority, cx, &basis, &successor, &batch, is_cancelled,
+                ).await.map_err(|error| AdmissionMaterializationRefusal::Delivery(Box::new(error)))?;
             }
             latest_record = Some(record_id);
         }

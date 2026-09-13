@@ -8,6 +8,7 @@ mod outbox_delivery;
 mod publication;
 mod pull_request;
 mod issues;
+mod protection;
 pub use issues::IssueReadRefusal;
 mod session_state;
 mod sessions;

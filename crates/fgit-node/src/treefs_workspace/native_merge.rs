@@ -121,6 +121,17 @@ impl OneNode {
         let attempt = intent.seal_attempt(&context).map_err(map_admission)?;
         let tx_id = attempt.derive()
             .map_err(|_| NodeWorkspaceRefusal::InvalidWorkspaceCandidate("native merge identity derivation refused"))?.0;
+        // Resolve an exact prior decision before quarantine or current policy
+        // checks. A changed policy cannot rewrite a historical merge/refusal,
+        // and a successful retry need not reconstruct the old candidate inputs.
+        if let fgit_authority::OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+            &self.authority, request.authority(), &self.head_key,
+            self.tenant_id, self.repository_id, tx_id,
+        ).await.map_err(|error| map_admission(error.into()))? {
+            fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
+                .await.map_err(|error| map_admission(error.into()))?;
+            return Ok((tx_id, terminal));
+        }
         self.receive_publication_admitted().map_err(receive_error)?;
         self.push_quota.evaluate(&principal).map_err(receive_error)?;
         let (quarantined, _) = self.quarantine_reviewed_bundle_in(
@@ -427,6 +438,11 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                     return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale));
                 }
             }
+            fgit_admission::merge::native::protection::enforce_merge_at(
+                authority, cx, basis, intent, self.inner.context.principal_id,
+                &|| self.merge_checkpoint(cx).is_err(),
+            ).await?;
+            self.merge_checkpoint(cx).map_err(ProjectionFailure::Unavailable)?;
             Ok(closure)
         }
     }
