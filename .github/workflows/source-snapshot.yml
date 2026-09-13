@@ -38,8 +38,18 @@ jobs:
           persist-credentials: false
       - name: Exact source and compiler
         run: |
-          git rev-parse HEAD
-          rustc -Vv
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/native-source"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/native-source/revision.txt"
+          rustc -Vv | tee "$RUNNER_TEMP/native-source/rustc.txt"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/native-source/source.tar.gz" HEAD
+          (cd "$RUNNER_TEMP/native-source" && sha256sum source.tar.gz > source.tar.gz.sha256)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-source-${{ github.sha }}
+          path: ${{ runner.temp }}/native-source
+          if-no-files-found: error
+          retention-days: 1
       - name: Compile production and test targets
         run: bash scripts/verify_native_rebase.sh check
       - name: Execute native integration
