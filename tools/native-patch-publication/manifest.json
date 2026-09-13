@@ -1,0 +1,32 @@
+[
+  {
+    "subject": "feat(diff): add exact bounded native patch engine (FG-051a)",
+    "files": {
+      "crates/fgit-diff/src/lib.rs": "3c48b84f2b8ce8c4eb168c4ee0333ebead5144f5",
+      "crates/fgit-diff/src/patch.rs": "cb1cc26c56b788750fce9f2f4dd31531272c62f6",
+      "crates/fgit-diff/src/patch/tests.rs": "b68052a0e848ccef45021bbf60ddd8099ffa289b"
+    }
+  },
+  {
+    "subject": "feat(node): prepare verified capability-scoped patch candidates (FG-051a)",
+    "files": {
+      "crates/fgit-forge/src/lib.rs": "953a34b87e70464a59e6a9ed6924b2970d420cc2",
+      "crates/fgit-node/src/lib.rs": "8b691b748c2262594b5b36277738d4d8a41c1f92",
+      "crates/fgit-node/src/treefs_workspace.rs": "ecb761655cb52bef67bb9d9ffeff8e4fc913bfb6",
+      "crates/fgit-node/src/treefs_workspace/patch.rs": "4e24db6e9662e92af1c4808d986a09c465db9e26",
+      "crates/fgit-node/tests/workspace_patch.rs": "bb71d3174fda7adb9719e5760d8ba07aab167d9a"
+    }
+  },
+  {
+    "subject": "feat(cli): add native patch prepare and reviewed apply workflows (FG-051a)",
+    "files": {
+      "crates/fgit-cli/src/main.rs": "00a959abc9b5db37c460dc852c6878ab3d517cb0",
+      "crates/fgit-cli/src/patch_command.rs": "d3fd65f95c7f8b87fd1b2f4b6fe135c89801fa43",
+      "crates/fgit-cli/src/patch_command/options.rs": "f8eef71c7b893452cd4d4313c0efa549f6fe1795",
+      "crates/fgit-cli/src/patch_command/tests.rs": "db906627e7c7add104a699e2b5abf130a8c89e03",
+      "crates/fgit-cli/tests/native_patch_smoke.rs": "10b13834c9a469d210588b04ca67899b78952b48",
+      "docs/NATIVE_EXACT_PATCH.md": "e4644a3c697a3f917fbbc0b59c4290e1cfc1cd8a",
+      "scripts/e2e/patch_smoke.py": "e4c9bea090907894bf9e5f00e180f40c0032aa79"
+    }
+  }
+]

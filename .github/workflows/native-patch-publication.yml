@@ -1,0 +1,21 @@
+name: Prepare exact saved native patch commits
+on:
+  push:
+    branches: [tooling/native-patch-publication-d4387604]
+    paths:
+      - .github/workflows/native-patch-publication.yml
+      - tools/native-patch-publication/**
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Reconstruct and verify the three saved source commits
+        run: python3 tools/native-patch-publication/prepare.py
