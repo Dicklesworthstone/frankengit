@@ -577,6 +577,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_text("ForgeEntityId", review.label().as_str())?;
             out.write_ref_name(target)?;
         }
+        ForgeEventKind::RepositoryProtectionChanged { policy } => {
+            out.write_raw_byte(7);
+            out.write_text("ForgeEntityId", policy.label().as_str())?;
+        }
         ForgeEventKind::IssueChanged { issue } => {
             out.write_raw_byte(6);
             out.write_text("ForgeEntityId", issue.label().as_str())?;

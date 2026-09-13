@@ -33,6 +33,7 @@ pub mod progress;
 pub mod pull_request;
 mod metadata;
 pub mod issues;
+pub mod protection;
 pub mod settlement;
 mod storage;
 pub use storage::{legacy_genesis_root, load_forge_positions};
@@ -362,6 +363,9 @@ where
                 return Err(ProjectionFailure::Refuse(code).into());
             }
             let closure = projection.validate_merge_async(store, cx, &basis, &authenticated, intent).await?;
+            protection::guard_native_merge(store, cx, &basis, intent, context.principal_id,
+                &|| projection.merge_checkpoint(cx).is_err()).await?;
+            projection.merge_checkpoint(cx).map_err(ProjectionFailure::Unavailable)?;
             // A self-consistent caller-supplied set is not native-object
             // evidence. Require the exact independently verified closure and
             // retain explicit containment of every package-declared object.

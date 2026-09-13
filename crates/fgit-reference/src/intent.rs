@@ -185,6 +185,8 @@ pub enum ForgeEventKind {
     },
     /// Issue lifecycle or discussion changed; detailed action/text are sealed in its event batch.
     IssueChanged { issue: ForgeEntityId },
+    /// Canonical repository policy replacement; it moves no Git ref.
+    RepositoryProtectionChanged { policy: ForgeEntityId },
 }
 
 impl ForgeEventKind {
@@ -194,7 +196,7 @@ impl ForgeEventKind {
         match self {
             Self::PullRequestMerged { target, .. } => Some(target),
             Self::PullRequestOpened { .. } | Self::PullRequestClosed { .. }
-            | Self::PullRequestUpdated { .. } | Self::PullRequestReviewed { .. } | Self::IssueChanged { .. } => None,
+            | Self::PullRequestUpdated { .. } | Self::PullRequestReviewed { .. } | Self::IssueChanged { .. } | Self::RepositoryProtectionChanged { .. } => None,
         }
     }
 
@@ -208,6 +210,7 @@ impl ForgeEventKind {
             | Self::PullRequestUpdated { pull_request, .. } => *pull_request,
             Self::PullRequestReviewed { review, .. } => *review,
             Self::IssueChanged { issue } => *issue,
+            Self::RepositoryProtectionChanged { policy } => *policy,
         }
     }
 }

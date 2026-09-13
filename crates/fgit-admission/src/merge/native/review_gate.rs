@@ -132,7 +132,7 @@ fn infrastructure(error: AdmissionError) -> ProjectionFailure {
         _ => ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptInvalid),
     }
 }
-async fn verify_at<S, C>(store: &S, cx: &S::Context, basis: &PublicationBasis,
+pub(crate) async fn verify_at<S, C>(store: &S, cx: &S::Context, basis: &PublicationBasis,
     intent: &NativeMergeIntent, submitter: PrincipalId, required: &ReviewRequirements, cancelled: &C)
     -> Result<(), ProjectionFailure>
 where S: AsyncAuthorityStore + ?Sized, C: Fn() -> bool + Sync,

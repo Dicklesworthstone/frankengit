@@ -144,6 +144,8 @@ pub enum AggregateId {
     PullRequestReview { pull_request: PullRequestNumber, reviewer: fgit_types::PrincipalId },
     /// A canonical repository issue. Existing aggregate encodings are unchanged.
     Issue(IssueNumber),
+    /// Singleton repository review-protection administration.
+    RepositoryProtection,
 }
 
 /// Wire tag for [`AggregateId::Organisation`], written only after a zero slot.
@@ -178,6 +180,7 @@ impl fmt::Display for AggregateId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Issue(number) => write!(formatter, "issue/{number}"),
+            Self::RepositoryProtection => formatter.write_str("repository-protection"),
             Self::PullRequest(number) => write!(formatter, "pull-request/{number}"),
             Self::Organisation(number) => write!(formatter, "organisation/{number}"),
             Self::Team(number) => write!(formatter, "team/{number}"),
