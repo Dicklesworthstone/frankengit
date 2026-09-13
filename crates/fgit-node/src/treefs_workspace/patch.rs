@@ -291,7 +291,8 @@ fn pack<A: GitHashAlgorithm>(format: ObjectFormat, reference: &RefName,
     let mut body = format!("tree {root_tree}\nparent {source_commit}\nauthor {} {} +0000\ncommitter {} {} +0000\n\n",
         metadata.author, metadata.timestamp, metadata.committer, metadata.timestamp).into_bytes();
     body.extend_from_slice(&metadata.message);
-    let limits = PackLimits { max_input_bytes: 128 * 1024 * 1024, max_entries: EXPORT_OBJECTS + 1,
+    let limits = PackLimits { max_input_bytes: 128 * 1024 * 1024, max_entries: u32::try_from(EXPORT_OBJECTS + 1)
+        .map_err(|_| invalid("patch object count cannot be represented"))?,
         max_object_bytes: EXPORT_BYTES, max_total_expanded_bytes: EXPORT_BYTES + 1024 * 1024,
         ..PackLimits::default() };
     let parsing = ParseLimits { tree_reference_bytes: format.digest_len(), max_object_bytes: EXPORT_BYTES,
