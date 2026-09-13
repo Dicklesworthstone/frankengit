@@ -147,7 +147,7 @@ fn prepare_replay_inner<S: MergeObjectSource>(
     let source = EmptyTreeSource { source, empty };
     let mut planner = Planner {
         source: &source, format, limits, entries: 0, content_merges: 0, output_bytes: 0,
-        objects: BTreeMap::new(), conflicts: Vec::new(), resolutions: BTreeMap::new(),
+        objects: BTreeMap::new(), trees: BTreeMap::new(), conflicts: Vec::new(), resolutions: BTreeMap::new(),
     };
     let (base, applied) = match request.direction {
         ReplayDirection::CherryPick => (parent_tree, selected.tree),

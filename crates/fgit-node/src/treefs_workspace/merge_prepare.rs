@@ -9,6 +9,8 @@ mod source_history;
 mod merge_resolution;
 #[path = "commit_replay.rs"]
 mod commit_replay;
+#[path = "rebase.rs"]
+mod rebase;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;

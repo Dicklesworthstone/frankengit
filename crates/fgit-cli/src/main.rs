@@ -1,7 +1,11 @@
 #![forbid(unsafe_code)]
 
+mod branches;
 mod commit_replay;
+mod rebase;
+mod rebase_apply;
 mod issues;
+mod protection;
 mod merge_apply;
 mod publication_support;
 mod pull_request;
@@ -19,6 +23,37 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "branch") {
+        return match branches::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("{{\"type\":\"branch_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments.first().is_some_and(|argument| argument == "rebase") {
+        let result = if arguments.get(1).is_some_and(|argument| argument == "apply") {
+            rebase_apply::run(&arguments[2..])
+        } else if arguments[1..] == ["--help"] {
+            rebase::run(&arguments[1..]).and_then(|_| rebase_apply::run(&arguments[1..]))
+        } else {
+            rebase::run(&arguments[1..])
+        };
+        return match result {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("{{\"type\":\"rebase_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments.first().is_some_and(|argument| argument == "protection") {
+        return match protection::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "issue") {
         return match issues::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),

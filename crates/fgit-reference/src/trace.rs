@@ -336,6 +336,9 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             write_slug(out, "ForgeEntityId", pull_request.label())?;
             out.write_ref_name(target)?;
         }
+        ForgeEventKind::ReviewProtectionChanged { policy } => {
+            out.write_raw_byte(7); write_slug(out, "ForgeEntityId", policy.label())?;
+        }
         ForgeEventKind::IssueChanged { issue } => {
             out.write_raw_byte(6); write_slug(out, "ForgeEntityId", issue.label())?;
         }
@@ -383,6 +386,7 @@ fn read_forge_event(input: &mut Decoder<'_>) -> Result<ForgeEventKind, CodecRefu
             let target = input.read_ref_name()?;
             Ok(ForgeEventKind::PullRequestReviewed { review, target })
         }
+        7 => Ok(ForgeEventKind::ReviewProtectionChanged { policy: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?) }),
         6 => Ok(ForgeEventKind::IssueChanged { issue: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?) }),
         other => malformed("ForgeEventKind", u64::from(other)),
     }

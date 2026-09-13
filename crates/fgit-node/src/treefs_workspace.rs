@@ -1,5 +1,6 @@
 //! Authority-selected TreeFS input discovery over the production object fabric.
 
+mod branches;
 mod candidate;
 mod merge_prepare;
 mod native_merge;
@@ -7,6 +8,7 @@ mod outbox_delivery;
 mod publication;
 mod pull_request;
 mod issues;
+mod protection;
 pub use issues::IssueReadRefusal;
 mod session_state;
 mod sessions;
@@ -38,6 +40,8 @@ use std::cell::Cell;
 /// An unavailable/hidden ref is intentionally one indistinguishable outcome.
 #[derive(Debug)]
 pub enum NodeWorkspaceRefusal {
+    /// A local branch operation has an invalid shape or unsupported transition.
+    BranchOperation(&'static str),
     /// This workspace is currently owned by another edit/publication/recovery.
     WorkspaceBusy,
     /// The node's finite session or export capacity was exceeded.

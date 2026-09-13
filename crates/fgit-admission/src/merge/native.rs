@@ -33,6 +33,7 @@ pub mod progress;
 pub mod pull_request;
 mod metadata;
 pub mod issues;
+pub mod protection;
 pub mod settlement;
 mod storage;
 pub use storage::{legacy_genesis_root, load_forge_positions};

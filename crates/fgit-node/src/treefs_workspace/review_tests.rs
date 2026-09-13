@@ -244,3 +244,8 @@ fn opener_votes_and_stale_pr_metadata_do_not_authorize_publication() {
     assert!(matches!(refused.1.outcome, DecisionOutcome::Refused { code: RefusalCode::EvidenceStale, .. }));
     f.node.shutdown().unwrap();
 }
+
+mod mandatory_protection {
+    use super::*;
+    include!("mandatory_protection_tests.rs");
+}
