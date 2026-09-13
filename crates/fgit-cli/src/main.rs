@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod branches;
 mod commit_replay;
 mod issues;
 mod merge_apply;
@@ -19,6 +20,15 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "branch") {
+        return match branches::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("{{\"type\":\"branch_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "issue") {
         return match issues::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
