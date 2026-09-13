@@ -106,3 +106,76 @@ history from subsequent exports while preserving shared ancestors.
 These tests are bounded native implementation evidence. They are not a pinned
 upstream-Git differential campaign, remote transport authentication evidence,
 full forge backup/restore evidence or completion of the wider FG-051a bead.
+
+## Repeatable synchronization with `fg bundle fetch`
+
+Import remains create-only. Fetch is the explicit update path for an existing
+repository: select advertised source refs and map them into destination refs.
+Every mapping states either `absent` or the exact old native object ID that the
+operator previously observed. A batch is one atomic receive transaction; a
+stale destination refuses all changes, including otherwise valid creations.
+
+```bash
+printf '%s' 'fetch-first-001' | fg bundle fetch \
+  "$DESTINATION_ROOT" "$DESTINATION_TENANT" "$DESTINATION_REPOSITORY" repo.bundle \
+  --trusted-local --object-format sha256 --principal "$PRINCIPAL" --key-stdin \
+  --map refs/heads/main refs/remotes/upstream/main absent
+
+printf '%s' 'fetch-update-002' | fg bundle fetch \
+  "$DESTINATION_ROOT" "$DESTINATION_TENANT" "$DESTINATION_REPOSITORY" newer.bundle \
+  --trusted-local --object-format sha256 --principal "$PRINCIPAL" --key-stdin \
+  --map refs/heads/main refs/remotes/upstream/main "$PREVIOUS_MAIN_OID" \
+  --map refs/heads/topic refs/heads/review-topic absent
+```
+
+`--map-hex SOURCE_HEX DESTINATION_HEX absent-or-old-oid` preserves arbitrary
+valid native reference-name bytes. Mixed `--map` and `--map-hex` inputs are
+accepted. Repeated destination names, unknown sources, implicit `latest`, zero
+old IDs, wildcards, force, and prune are refused. One source can feed multiple
+explicit destinations. Neither unselected source refs nor their exclusive
+objects are published. HEAD and forge metadata remain untouched.
+
+Destinations are restricted to `refs/heads/`, `refs/remotes/`, and `refs/tags/`.
+Branches and remote-tracking refs must target commits. An update must be equal
+or a fast-forward proven from actual verified commit-parent edges in the
+supplied pack. Tree edges and advertised IDs do not prove ancestry. Tags may
+be created or reasserted at the same ID, but never replaced. This requirement
+is additional to, not a replacement for, current authority policy and exact
+expected-old admission. A mandatory review policy still blocks direct changes
+to its protected branches.
+
+The input remains self-contained, even when the destination already stores
+its ancestry. This is repeatable offline synchronization, not prerequisite-
+bundle negotiation, network fetch, a remote-authentication endpoint, or
+bandwidth-efficient incremental transfer. Existing pack byte, object, graph,
+and cancellation bounds remain in force. An additional finite ancestry-work
+budget is shared across every update and parent edge in the batch.
+
+The receipt type is `git_bundle_fetch`; it includes tenant, repository,
+principal, native format, canonical transaction/decision identity, sorted
+requested mappings, reference count, outcome and cleanup state. Exit 0 means
+committed, 3 means a canonical refusal, and 2 means input, quarantine,
+infrastructure, output or cleanup failure. A typed pre-admission refusal is
+not a recorded canonical decision. A transport error is not proof of
+non-commit; use the original scoped key for recovery.
+
+The sealed operation is the canonical destination/expected-old/new command
+set. Reordering mappings does not change that identity, and alternate source
+advertisements of the same native target do not invent a second authority
+operation. Retry after a terminal decision recovers that decision before
+current intake checks; it is not fresh verification of the bundle contents.
+No automatic rebase or changed-old-tip retry is performed.
+
+Library users call `OneNode::fetch_full_git_bundle_durable_in` with
+`fgit_node::BundleRefMapping` values. The codec's `select_updates` derives
+bounded, deterministic update targets; it provides no authority or object
+proof. Node quarantine verifies supplied native objects and ancestry before
+staging, then uses the existing basis-bound admission path.
+
+The bundle verification script also runs mapped-fetch unit/integration cases
+and `native_bundle_fetch_smoke`. The fresh-process test exercises both hash
+domains, raw names, selected-object closure, fast-forward updates, atomic
+stale-tip rejection, exact retries and corrupt input using the real `fg`
+binary. Exported objects are independently decoded in the test with Python's
+standard-library hash/zlib implementation; no external Git process supplies
+production behavior.

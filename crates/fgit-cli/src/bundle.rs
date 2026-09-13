@@ -1,4 +1,5 @@
 //! Bounded offline Git transfer; canonical publication remains in OneNode.
+mod fetch;
 use super::merge_apply::preparation::{publish_new_bundle, require_absent};
 use super::publication_support::{describe, quote, read_bundle, set_once, write_terminal_receipt};
 use fgit_authority::{IdempotencyKey, MAX_IDEMPOTENCY_KEY_BYTES, TerminalOutcome};
@@ -145,12 +146,15 @@ fn key_bytes(key: &Key, input: &mut impl Read) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|arg| arg == "fetch") {
+        return fetch::run(&args[1..]);
+    }
     if args == ["--help"]
         || (args.len() == 2
             && args[1] == "--help"
             && matches!(args[0].as_str(), "export" | "import"))
     {
-        writeln!(std::io::stdout().lock(), "{USAGE}").map_err(|e| e.to_string())?;
+        writeln!(std::io::stdout().lock(), "{USAGE}\n\n{}", fetch::USAGE).map_err(|e| e.to_string())?;
         return Ok(0);
     }
     let options = parse(args)?;

@@ -611,3 +611,5 @@ fn direct_native_merge_retry_does_not_consume_quota_but_undecided_requests_still
         f.node.shutdown().unwrap();
     }
 }
+
+include!("bundle_fetch_protection_tests.rs");

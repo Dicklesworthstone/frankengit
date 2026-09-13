@@ -44,6 +44,7 @@ use fgit_admission::{
     permitted_object_closure_root, prepare_canonical_commit, ref_state_root,
     validate_source_import,
 };
+pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
 mod treefs_workspace;
 pub use treefs_workspace::IssueReadRefusal;
 pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
