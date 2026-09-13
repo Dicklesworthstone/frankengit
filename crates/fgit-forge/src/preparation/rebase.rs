@@ -2,6 +2,9 @@
 //! This module constructs immutable candidates; it never moves a branch.
 use super::*;
 
+pub mod resolutions;
+use resolutions::{RebaseResolvedStep, ResolvedRebasePreparation};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EmptyCommitPolicy {
     Stop,
@@ -93,9 +96,18 @@ pub enum RebasePreparation {
 pub enum RebaseError {
     Preparation(PreparationError),
     UpstreamOutsideLinearHistory,
-    MergeCommit { commit: GitOid, parents: usize },
+    MergeCommit {
+        commit: GitOid,
+        parents: usize,
+    },
     CyclicHistory(GitOid),
     InvalidOriginalMetadata(GitOid),
+    Resolution {
+        original: GitOid,
+        error: resolution::ResolutionError,
+    },
+    DuplicateResolutionCommit(GitOid),
+    ResolutionOutsideSuffix(GitOid),
 }
 impl From<PreparationError> for RebaseError {
     fn from(error: PreparationError) -> Self {
@@ -126,6 +138,18 @@ pub fn prepare_rebase<S: RebaseObjectSource>(
     committer: &RebaseCommitter,
     limits: PreparationLimits,
 ) -> Result<RebasePreparation, RebaseError> {
+    resolutions::prepare_resolved_rebase(source, format, request, committer, limits, &[])
+        .map(|resolved| resolved.preparation)
+}
+
+fn prepare_rebase_inner<S: RebaseObjectSource>(
+    source: &S,
+    format: GitHashAlgorithm,
+    request: RebaseRequest,
+    committer: &RebaseCommitter,
+    limits: PreparationLimits,
+    mut choices: BTreeMap<GitOid, &[resolution::ConflictResolution]>,
+) -> Result<ResolvedRebasePreparation, RebaseError> {
     limits.validate()?;
     committer.validate()?;
     for id in [request.source_tip, request.upstream, request.onto] {
@@ -168,6 +192,12 @@ pub fn prepare_rebase<S: RebaseObjectSource>(
             }
         }
     }
+    for original in choices.keys() {
+        if !seen.contains(original) {
+            return Err(RebaseError::ResolutionOutsideSuffix(*original));
+        }
+    }
+    let mut resolved_steps = Vec::new();
     history.read(request.upstream)?;
     let mut tree = history.read(request.onto)?.tree;
     let mut current = request.onto;
@@ -181,25 +211,49 @@ pub fn prepare_rebase<S: RebaseObjectSource>(
         let parent_tree = history.read(input.parents[0])?.tree;
         let result = planner.directory(Some(parent_tree), tree, input.tree, &[], 0, false)?;
         source.checkpoint()?;
-        if !planner.conflicts.is_empty() {
+        let merged = if planner.conflicts.is_empty() {
+            if choices.remove(&original).is_some() {
+                return Err(RebaseError::Resolution {
+                    original,
+                    error: resolution::ResolutionError::NoConflicts,
+                });
+            }
+            result.ok_or(PreparationError::InvalidTree)?
+        } else if let Some(resolutions) = choices.remove(&original) {
+            let (resolved_tree, paths) = resolution::resolve_discovered_conflicts(
+                &mut planner,
+                Some(parent_tree),
+                tree,
+                input.tree,
+                resolutions,
+            )
+            .map_err(|error| RebaseError::Resolution { original, error })?;
+            resolved_steps.push(RebaseResolvedStep { original, paths });
+            resolved_tree
+        } else {
             planner.conflicts.sort_by(|a, b| a.path.cmp(&b.path));
-            return Ok(RebasePreparation::Stopped {
-                request,
-                original,
-                completed: steps,
-                reason: RebaseStop::Conflicted(planner.conflicts),
+            return Ok(ResolvedRebasePreparation {
+                preparation: RebasePreparation::Stopped {
+                    request,
+                    original,
+                    completed: steps,
+                    reason: RebaseStop::Conflicted(planner.conflicts),
+                },
+                resolutions: resolved_steps,
             });
-        }
-        let merged = result.ok_or(PreparationError::InvalidTree)?;
+        };
         let originally_empty = input.tree == parent_tree;
         if merged == tree && !originally_empty {
             match request.empty {
                 EmptyCommitPolicy::Stop => {
-                    return Ok(RebasePreparation::Stopped {
-                        request,
-                        original,
-                        completed: steps,
-                        reason: RebaseStop::BecameEmpty,
+                    return Ok(ResolvedRebasePreparation {
+                        preparation: RebasePreparation::Stopped {
+                            request,
+                            original,
+                            completed: steps,
+                            reason: RebaseStop::BecameEmpty,
+                        },
+                        resolutions: resolved_steps,
                     });
                 }
                 EmptyCommitPolicy::Drop => {
@@ -256,13 +310,21 @@ pub fn prepare_rebase<S: RebaseObjectSource>(
         });
     }
     source.checkpoint()?;
-    Ok(RebasePreparation::Clean(PreparedRebase {
-        request,
-        tree,
-        commit: current,
-        steps,
-        objects: planner.objects.into_values().collect(),
-    }))
+    // All supplied recipes belong to the suffix and must have been consumed
+    // on actual conflicts before a publishable candidate can be returned.
+    if let Some(original) = choices.keys().next() {
+        return Err(RebaseError::ResolutionOutsideSuffix(*original));
+    }
+    Ok(ResolvedRebasePreparation {
+        preparation: RebasePreparation::Clean(PreparedRebase {
+            request,
+            tree,
+            commit: current,
+            steps,
+            objects: planner.objects.into_values().collect(),
+        }),
+        resolutions: resolved_steps,
+    })
 }
 
 fn validate_metadata(

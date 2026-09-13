@@ -409,3 +409,5 @@ fn malformed_original_headers_and_cross_hash_inputs_never_become_commits() {
         Err(RebaseError::Preparation(PreparationError::ObjectFormat))
     ));
 }
+
+mod resolutions;
