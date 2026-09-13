@@ -6,6 +6,8 @@ mod candidate;
 mod merge_prepare;
 mod native_merge;
 mod outbox_delivery;
+mod patch;
+pub use patch::{PatchPathReceipt, WorkspacePatchCandidate};
 mod publication;
 mod pull_request;
 mod issues;
@@ -76,6 +78,8 @@ pub enum NodeWorkspaceRefusal {
     UnsupportedWorkspaceEdit,
     /// The edit log exceeds the caller's declared construction envelope.
     WorkspaceEditLimit,
+    /// Exact patch parsing/application refused without publishing any edits.
+    WorkspacePatch(fgit_forge::patch::PatchError),
     /// A filtered listing would omit siblings from a rebuilt directory.
     /// No undisclosed path is included in this refusal.
     IncompleteWorkspaceExportScope,

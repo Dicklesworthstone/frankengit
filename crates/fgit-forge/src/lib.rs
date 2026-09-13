@@ -219,3 +219,5 @@ impl core::error::Error for ForgeRefusal {}
 use fgit_codec::CodecRefusal;
 use fgit_diff::TreeMergeError;
 use fgit_types::GitOid;
+/// Exact bounded patch input shared by forge and workspace consumers.
+pub use fgit_diff::patch;
