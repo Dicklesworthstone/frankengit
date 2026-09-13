@@ -2909,10 +2909,15 @@ impl VerifiedFabricPackSource<'_> {
 
     fn object_references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
         let (object_type, body) = self.read_object(id)?;
+        self.references_from_body(object_type, &body)
+    }
+
+    fn references_from_body(&self, object_type: ObjectType, body: &[u8]) -> Result<Vec<GitOid>, PackWriteError> {
         self.session_checkpoint()?;
+        if object_type == ObjectType::Blob { return Ok(Vec::new()); }
         let parsed = parse_object_body(
             object_type,
-            &body,
+            body,
             AcceptanceProfile::GitCompatibleImport,
             &self.parse_limits(),
         );

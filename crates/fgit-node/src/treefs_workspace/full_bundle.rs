@@ -21,7 +21,8 @@ use fgit_git_object::ParseLimits;
 use fgit_pack::full_bundle::fetch::BundleRefMapping;
 use fgit_pack::full_bundle::{FullBundle, FullBundleError, FullBundleInput, FullBundleLimits};
 use fgit_pack::{
-    BundleReference, Deadline, PackPlanner, PackWriteProfile, PackWriter, QuarantinedPack,
+    BundleReference, CanonicalObjectSource, CanonicalPackObject, Deadline, PackPlanner,
+    PackWriteError, PackWriteProfile, PackWriter, QuarantinedPack,
 };
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_types::{GitHashAlgorithm, RefusalCode, RepositoryAuthorityHeadId};
@@ -35,6 +36,20 @@ use std::cell::Cell;
 
 fn bundle_error(error: impl Into<FullBundleError>) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::FullBundle(Box::new(error.into()))
+}
+
+/// The ordinary selected-pack source intentionally omits closure hints because
+/// filtered upload-pack selections must not be expanded. A full bundle needs
+/// the real local edges for its independent no-extras/completeness check. Derive
+/// them from the same verified bytes being packed, never from a second read or
+/// caller-supplied hints. Selection still comes from current visible ref roots.
+struct BundleObjectSource<'a, 'b>(&'a VerifiedFabricPackSource<'b>);
+impl CanonicalObjectSource for BundleObjectSource<'_, '_> {
+    fn load(&self, id: &fgit_types::GitOid) -> Result<CanonicalPackObject, PackWriteError> {
+        let (kind, body) = self.0.read_object(id)?;
+        let references = self.0.references_from_body(kind, &body)?;
+        Ok(CanonicalPackObject::new(*id, kind, body, references, 0, 0))
+    }
 }
 
 impl OneNode {
@@ -116,7 +131,7 @@ impl OneNode {
             PackWriteProfile::COMPRESSED_NO_DELTA_V1,
             pack_limits.clone(),
         )
-        .plan_selected(&source, &ids, &mut live)
+        .plan_selected(&BundleObjectSource(&source), &ids, &mut live)
         .map_err(bundle_error)?;
         let bundle = FullBundle::write(
             &references,
