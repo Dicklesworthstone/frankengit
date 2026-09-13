@@ -32,6 +32,7 @@ use fgit_wire::receive::{
 use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, encode_packets};
 use std::cell::Cell;
+mod incremental;
 
 fn bundle_error(error: impl Into<FullBundleError>) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::FullBundle(Box::new(error.into()))
@@ -116,7 +117,7 @@ impl OneNode {
             PackWriteProfile::COMPRESSED_NO_DELTA_V1,
             pack_limits.clone(),
         )
-        .plan_selected(&source, &ids, &mut live)
+        .plan_selected(&BundleObjectSource(&source), &ids, &mut live)
         .map_err(bundle_error)?;
         let bundle = FullBundle::write(
             &references,
@@ -151,7 +152,7 @@ impl OneNode {
         input: &[u8],
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
-        self.admit_full_git_bundle_in(request, session, input, None, limits).await
+        self.admit_full_git_bundle_in(request, session, input, None, None, limits).await
     }
 
     /// Fetch explicitly selected bundle refs into exact destinations atomically.
@@ -169,12 +170,22 @@ impl OneNode {
         &self, request: &NodeRequestContext, session: &LoopbackReceiveSession,
         input: &[u8], mappings: &[BundleRefMapping], limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
-        self.admit_full_git_bundle_in(request, session, input, Some(mappings), limits).await
+        self.admit_full_git_bundle_in(request, session, input, Some(mappings), None, limits).await
+    }
+
+    /// Synchronize every advertised ref under explicit old-tip or absent leases.
+    /// No implicit refresh or deletion. Caller authorization is required for
+    /// exact-tip updates, including rewrites; mandatory repository policy remains.
+    pub async fn import_incremental_git_bundle_durable_in(
+        &self, request: &NodeRequestContext, session: &LoopbackReceiveSession, input: &[u8],
+        expectations: &[(fgit_types::RefName, Option<fgit_types::GitOid>)], limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
+        self.admit_full_git_bundle_in(request, session, input, None, Some(expectations), limits).await
     }
 
     async fn admit_full_git_bundle_in(
         &self, request: &NodeRequestContext, session: &LoopbackReceiveSession,
-        input: &[u8], mappings: Option<&[BundleRefMapping]>, limits: AdmissionLimits,
+        input: &[u8], mappings: Option<&[BundleRefMapping]>, expectations: Option<&[(fgit_types::RefName, Option<fgit_types::GitOid>)]>, limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeWorkspaceRefusal> {
         let authenticated = session
             .authenticated_session()
@@ -185,10 +196,33 @@ impl OneNode {
         bundle_limits.max_references = bundle_limits
             .max_references
             .min(receive_limits.max_commands);
-        let bundle =
-            FullBundleInput::parse(input, bundle_limits, &mut live).map_err(bundle_error)?;
+        // Advertisements and mutation commands have distinct bounds. Mapped
+        // full fetch can select one command out of many advertised refs. The
+        // incremental profile names every direct ref, plus at most one HEAD.
+        if expectations.is_some() {
+            bundle_limits.max_references = bundle_limits.max_references
+                .min(limits.max_commands.saturating_add(1));
+        }
+        let bundle = if expectations.is_some() {
+            FullBundleInput::parse_incremental(input, bundle_limits, &mut live)
+        } else { FullBundleInput::parse(input, bundle_limits, &mut live) }.map_err(bundle_error)?;
         if bundle.format() != self.object_format {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
+        }
+        let mut expected = std::collections::BTreeMap::new();
+        if let Some(expectations) = expectations {
+            if expectations.len() != bundle.references().len() || expectations.len() > limits.max_commands {
+                return Err(bundle_error(FullBundleError::Invalid("one expectation per reference is required")));
+            }
+            for (name, old) in expectations {
+                if old.is_some_and(|id| id.is_zero() || id.algorithm() != self.object_format)
+                    || expected.insert(name.clone(), *old).is_some() {
+                    return Err(bundle_error(FullBundleError::Invalid("invalid or duplicate expected reference")));
+                }
+            }
+            if bundle.references().iter().any(|r| !expected.contains_key(r.name())) {
+                return Err(bundle_error(FullBundleError::Invalid("expectations differ from advertised reference set")));
+            }
         }
         let commands: Vec<_> = match mappings {
             Some(mappings) => bundle.select_updates(mappings, bundle_limits, &mut live)
@@ -198,7 +232,8 @@ impl OneNode {
                     proposed_new: ProposedNew::Update(update.target), force: false,
                 }).collect(),
             None => bundle.references().iter().map(|reference| RefCommand {
-                name: reference.name().clone(), expected_old: ExpectedOld::Absent,
+                name: reference.name().clone(), expected_old: expected.get(reference.name()).copied().flatten()
+                    .map_or(ExpectedOld::Absent, ExpectedOld::Exactly),
                 proposed_new: ProposedNew::Update(*reference.target()), force: false,
             }).collect(),
         };
@@ -253,7 +288,7 @@ impl OneNode {
             .materialize_admission_in(request)
             .await
             .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
-        if mappings.is_some() && commands.iter().any(|command|
+        if (mappings.is_some() || expectations.is_some()) && commands.iter().any(|command|
             materialized.snapshot().hidden_refs.hides(command.name.as_bytes())) {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
@@ -319,7 +354,7 @@ impl OneNode {
             .push_bytes(bundle.pack_bytes())
             .map_err(receive_error)?;
         let mut handoff = FullHandoff {
-            validator: FullValidator { inner: validator, fetch: mappings.is_some() },
+            validator: FullValidator { inner: validator, fetch: mappings.is_some(), prerequisites: expectations.map(|_| bundle.prerequisites().to_vec()) },
             basis: materialized.basis().clone(),
             validated: None,
         };
@@ -343,7 +378,7 @@ impl OneNode {
     }
 }
 
-struct FullValidator<'a> { inner: ProductionQuarantineValidator<'a>, fetch: bool }
+struct FullValidator<'a> { inner: ProductionQuarantineValidator<'a>, fetch: bool, prerequisites: Option<Vec<fgit_types::GitOid>> }
 impl QuarantineValidator for FullValidator<'_> {
     fn validate(
         &self,
@@ -352,7 +387,9 @@ impl QuarantineValidator for FullValidator<'_> {
         receipt: &QuarantineReceipt,
         deadline: &mut impl Deadline,
     ) -> Result<ValidatedClosure, RefusalCode> {
-        if self.fetch {
+        if let Some(prerequisites) = &self.prerequisites {
+            self.inner.validate_incremental_bundle(request, pack, receipt, prerequisites, deadline)
+        } else if self.fetch {
             self.inner.validate_bundle_fetch(request, pack, receipt, deadline)
         } else {
             self.inner.validate_full_bundle(request, pack, receipt, deadline)
@@ -402,3 +439,18 @@ impl ReceiveQuarantineHandoff for FullHandoff<'_> {
 
 #[cfg(test)]
 mod tests;
+
+// Bundle writers verify closure independently from the selected-ID traversal.
+// Keep native dependency metadata on the plan, deriving it from the exact body
+// that is already being loaded. Do not reread object fabric or widen selection.
+struct BundleObjectSource<'source, 'context>(&'source VerifiedFabricPackSource<'context>);
+impl fgit_pack::CanonicalObjectSource for BundleObjectSource<'_, '_> {
+    fn load(&self, id: &fgit_types::GitOid) -> Result<fgit_pack::CanonicalPackObject, fgit_pack::PackWriteError> {
+        let (kind, body) = self.0.read_object(id)?;
+        let references = self.0.object_references_from_body(kind, &body)?;
+        if !self.0.database_read_is_live() {
+            return Err(fgit_pack::PackError::DeadlineExceeded.into());
+        }
+        Ok(fgit_pack::CanonicalPackObject::new(*id, kind, body, references, 0, 0))
+    }
+}

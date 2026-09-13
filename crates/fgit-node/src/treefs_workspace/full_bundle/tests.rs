@@ -389,3 +389,6 @@ fn corrupt_cancelled_and_foreign_format_intake_never_publishes() {
 }
 
 mod fetch;
+
+#[path = "incremental_tests.rs"]
+mod incremental_tests;

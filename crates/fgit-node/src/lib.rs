@@ -2909,6 +2909,12 @@ impl VerifiedFabricPackSource<'_> {
 
     fn object_references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
         let (object_type, body) = self.read_object(id)?;
+        self.object_references_from_body(object_type, &body)
+    }
+
+    fn object_references_from_body(
+        &self, object_type: ObjectType, body: &[u8],
+    ) -> Result<Vec<GitOid>, PackWriteError> {
         self.session_checkpoint()?;
         let parsed = parse_object_body(
             object_type,

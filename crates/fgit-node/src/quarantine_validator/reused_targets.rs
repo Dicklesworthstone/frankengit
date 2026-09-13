@@ -28,6 +28,42 @@ impl<'a, 'node> OriginalFrontier<'a, 'node> {
         Ok(Self { validator, bases, bytes: bases.read_bytes, kinds: BTreeMap::new(), authorized: BTreeSet::new() })
     }
 
+    pub(super) const fn read_bytes(&self) -> usize { self.bytes }
+
+    /// Require the complete local history of a currently visible prerequisite.
+    /// Every original body is checked, including leaf blobs; a damaged or
+    /// shallow local placement cannot masquerade as an available prerequisite.
+    pub(super) fn prerequisite_closure(&mut self, roots: &BTreeSet<GitOid>,
+        edges_left: &mut usize, deadline: &mut impl Deadline)
+        -> Result<BTreeSet<GitOid>, RefusalCode> {
+        self.authorize(roots, edges_left, deadline)?;
+        let mut pending = Vec::new();
+        let mut requirements = BTreeMap::new();
+        for id in roots.iter().rev() {
+            enqueue(*id, Some(ObjectType::Commit), &mut pending, &mut requirements, &self.kinds, deadline)?;
+        }
+        let mut complete = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            checkpoint(deadline)?;
+            let format = self.validator.node.object_format;
+            let limits = self.validator.parse_limits.clone();
+            let (kind, edges) = self.with_object(id, deadline, |kind, bytes, deadline| {
+                let parsed = fgit_git_object::parse_object_body(kind, bytes,
+                    AcceptanceProfile::GitCompatibleImport, &limits)
+                    .map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
+                crate::loose_import::graph::references(format, &parsed, bytes, &limits,
+                    edges_left, deadline).map(|edges| (kind, edges))
+            })?;
+            check_kind(kind, requirements.get(&id).copied().flatten())?;
+            complete.insert(id);
+            for (child, expected) in edges {
+                enqueue(child, Some(expected), &mut pending, &mut requirements, &self.kinds, deadline)?;
+            }
+        }
+        checkpoint(deadline)?;
+        Ok(complete)
+    }
+
     pub(super) fn kind(
         &mut self, id: GitOid, deadline: &mut impl Deadline,
     ) -> Result<ObjectType, RefusalCode> {
