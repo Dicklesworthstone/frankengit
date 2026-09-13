@@ -1,0 +1,49 @@
+name: Native merge recovery and mandatory protection
+on:
+  push:
+    branches: [tooling/native-merge-recovery-20260913]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.prepare.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - id: prepare
+        run: python3 tools/native-merge-recovery/prepare.py
+  verify:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      PYTHONDONTWRITEBYTECODE: '1'
+      CARGO_TARGET_DIR: /tmp/fg-native-merge-recovery-target
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - run: |
+          git rev-parse HEAD
+          rustc -Vv
+          cargo test --locked -p fgit-node --lib mandatory_protection -- --nocapture
+      - if: ${{ !cancelled() }}
+        run: bash scripts/verify_review_protection.sh
+      - if: ${{ !cancelled() }}
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
