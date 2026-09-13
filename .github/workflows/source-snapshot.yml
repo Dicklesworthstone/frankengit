@@ -24,18 +24,21 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Check native integration including test targets
+      - name: Execute node and CLI including fresh-process branch coverage
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/fg-branch-evidence"
-          git rev-parse HEAD | tee "$RUNNER_TEMP/fg-branch-evidence/revision.txt"
-          rustc -Vv | tee "$RUNNER_TEMP/fg-branch-evidence/rustc.txt"
+          out="$RUNNER_TEMP/fg-branch-evidence"
+          mkdir -p "$out"
+          git rev-parse HEAD | tee "$out/revision.txt"
+          rustc -Vv | tee "$out/rustc.txt"
+          python3 -m py_compile scripts/e2e/branch_smoke.py
+          git diff --check
           set +e
-          cargo check --locked -p fgit-node -p fgit-cli --all-targets > "$RUNNER_TEMP/fg-branch-evidence/check.log" 2>&1
+          cargo test --locked -p fgit-node -p fgit-cli --all-targets --no-fail-fast -- --nocapture > "$out/test.log" 2>&1
           code=$?
-          echo "$code" > "$RUNNER_TEMP/fg-branch-evidence/check.exit"
-          tail -n 160 "$RUNNER_TEMP/fg-branch-evidence/check.log"
+          echo "$code" > "$out/test.exit"
+          tail -n 180 "$out/test.log"
           exit "$code"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
