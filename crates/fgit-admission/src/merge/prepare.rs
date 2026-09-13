@@ -89,6 +89,7 @@ pub(crate) fn prepare_event(
     resolved: &NativeMergeBasis,
 ) -> Result<PreparedNativeMerge, RefusalCode> {
     let aggregate_matches = match &event.payload {
+        ForgeEventPayload::RepositoryProtectionChangedNative(_) => event.aggregate == fgit_forge::AggregateId::RepositoryProtection,
         ForgeEventPayload::PullRequestReviewedNative(review) => event.aggregate == review.aggregate(),
         ForgeEventPayload::IssueChangedNative(_) => matches!(event.aggregate, fgit_forge::AggregateId::Issue(_)),
         _ => matches!(event.aggregate, fgit_forge::AggregateId::PullRequest(_)),
@@ -113,7 +114,20 @@ pub(crate) fn prepare_event(
     let label = AsciiSlug::try_new("forge_stream", event.aggregate.to_string().as_bytes())
         .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let entity = ForgeEntityId::new(label);
+    let resulting_policy_epoch = match &event.payload {
+        ForgeEventPayload::RepositoryProtectionChangedNative(change) => {
+            change.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if change.actor != context.principal_id || !attempt.request.ref_commands().is_empty()
+                || !closure.objects.is_empty() || change.expected_policy_epoch != basis.body().policy_epoch
+            { return Err(RefusalCode::EvidenceInvalid); }
+            change.activated_epoch()?
+        }
+        _ => basis.body().policy_epoch,
+    };
     let (kind, required_objects, ref_effect) = match &event.payload {
+        ForgeEventPayload::RepositoryProtectionChangedNative(_) => {
+            (ForgeEventKind::RepositoryProtectionChanged { policy: entity }, Vec::new(), None)
+        }
         ForgeEventPayload::IssueChangedNative(change) => {
             change.action.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
             if change.actor != context.principal_id || !attempt.request.ref_commands().is_empty()
@@ -250,7 +264,7 @@ pub(crate) fn prepare_event(
         ref_root: crate::ref_state_root(resolved.root_layout, &refs)?,
         forge_position_root: transition.forge_position_root(),
         outbox_root: transition.outbox_root(), retention_root: basis.body().retention_root,
-        policy_epoch: basis.body().policy_epoch, compaction_generation_link: None,
+        policy_epoch: resulting_policy_epoch, compaction_generation_link: None,
     };
     let record = RepositoryCommitRecord {
         repository_id: context.repository_id,

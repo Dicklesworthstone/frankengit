@@ -46,6 +46,7 @@ use fgit_admission::{
 };
 mod treefs_workspace;
 pub use treefs_workspace::IssueReadRefusal;
+pub use treefs_workspace::{RepositoryProtectionView, ProtectionReadRefusal};
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
@@ -2351,6 +2352,12 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
             }
             let stage_context = cx.create_child();
             let is_cancelled = || stage_context.checkpoint().is_err();
+            let targets = match &fold.outcome {
+                fgit_reference::effect::FoldOutcome::Folded(effects) => effects.refs.keys().cloned().collect::<Vec<_>>(),
+                _ => return Err(AsyncProjectionFailure::Refuse(RefusalCode::ConflictingSemanticEffects)),
+            };
+            fgit_admission::merge::native::protection::guard_direct_refs(
+                authority, &stage_context, basis, &targets, &is_cancelled).await?;
             let provider = self
                 .materializer
                 .stage_decision_evidence_in(
@@ -2500,6 +2507,11 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
             return Err(AsyncProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
         }
         let is_cancelled = || cx.checkpoint().is_err();
+        let targets = prepared_basis.ref_state.refs().keys().chain(next_state.refs().keys())
+            .filter(|name| prepared_basis.ref_state.refs().get(*name) != next_state.refs().get(*name))
+            .cloned().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+        fgit_admission::merge::native::protection::guard_direct_refs(
+            authority, cx, basis, &targets, &is_cancelled).await?;
         let delivery = fgit_admission::merge::native::delivery::read_in(
             authority,
             cx,

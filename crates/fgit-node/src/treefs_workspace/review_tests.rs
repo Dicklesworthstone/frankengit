@@ -1,6 +1,8 @@
 //! Embedded authority regressions for candidate reviews and review-gated merge.
 //! Fixtures are native objects imported by the real node, not mocked authority.
 use super::*;
+#[path = "protection_tests.rs"]
+mod protection_tests;
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::{AggregateVersion, ForgeEventPayload};
 use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, PullRequestData};
