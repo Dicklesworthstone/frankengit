@@ -2,6 +2,7 @@
 
 mod branches;
 mod commit_replay;
+mod rebase;
 mod issues;
 mod merge_apply;
 mod publication_support;
@@ -27,6 +28,12 @@ fn main() -> ExitCode {
                 eprintln!("{{\"type\":\"branch_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
                 ExitCode::from(2)
             }
+        };
+    }
+    if arguments.first().is_some_and(|argument| argument == "rebase") {
+        return match rebase::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
         };
     }
     if arguments.first().is_some_and(|argument| argument == "issue") {
