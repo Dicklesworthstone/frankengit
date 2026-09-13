@@ -1,0 +1,30 @@
+name: Read-only source snapshot
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/source-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Archive the exact tracked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fgit-source"
+          git rev-parse HEAD > "$RUNNER_TEMP/fgit-source/source-revision.txt"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/fgit-source/source.tar.gz" HEAD
+          cd "$RUNNER_TEMP/fgit-source"
+          sha256sum source.tar.gz > source.tar.gz.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fgit-source-${{ github.sha }}
+          path: ${{ runner.temp }}/fgit-source
+          if-no-files-found: error
+          retention-days: 1
