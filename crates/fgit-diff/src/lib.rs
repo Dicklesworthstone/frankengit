@@ -2089,3 +2089,6 @@ mod tests {
         );
     }
 }
+
+/// Exact, resource-bounded Git unified-patch parsing and application.
+pub mod patch;
