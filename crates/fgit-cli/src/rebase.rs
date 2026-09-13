@@ -1,9 +1,11 @@
 //! Native branch rebase preparation, with a separate publication boundary.
+mod resolutions;
 use crate::commit_replay::{decimal, hex, parse_head, token, unhex, write_receipt};
 use crate::merge_apply::preparation::{publish_new_bundle, render_conflict, require_absent};
 use crate::publication_support::{parse_oid, quote};
 use fgit_crypto::sha256_digest;
 use fgit_forge::preparation::PreparationLimits;
+use fgit_forge::preparation::rebase::resolutions::{RebaseCommitResolution, RebaseResolvedStep};
 use fgit_forge::preparation::rebase::{
     EmptyCommitPolicy, RebaseCommitter, RebasePreparation, RebaseRequest, RebaseStep,
     RebaseStepKind, RebaseStop,
@@ -13,7 +15,14 @@ use fgit_types::{HeadGeneration, RefName, RepositoryAuthorityHeadId, RepositoryI
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: fg rebase prepare <storage-root> <tenant-id> <repository-id> <source-ref> <output-bundle>\n  --trusted-local --profile path-v1 --onto-ref <visible-branch>\n  --expected-source <tip> --expected-onto <tip> --upstream <exclusive-old-base>\n  --committer <name-and-email> --timestamp <unix-seconds>\n  [--empty stop|drop|keep] [--expected-head <snapshot-token>]\n  [--source-ref-hex] [--onto-ref-hex <bytes>]\n  [--max-commits <n>] [--max-edges <n>] [--max-output-bytes <n>]\n\nReplay the linear suffix (upstream, source] onto the exact target, oldest first.\nOriginal author/time/timezone, message bytes and encoding are preserved; old\nsignatures are not reused. Merge commits in the suffix refuse. A conflict or\nnewly-empty stop creates no partial bundle. Original empty commits are kept.\nThe output has onto as its sole prerequisite. Preparation moves no ref and\nstages no objects. Review and publish separately with an exact expected-old\nreceive operation; workspace apply is single-commit and is not this operation.\nExit 0: prepared; 3: conflict or newly-empty stop; 2: input/infrastructure error.";
+const USAGE: &str = "usage: fg rebase prepare <storage-root> <tenant-id> <repository-id> <source-ref> <output-bundle>\n  --trusted-local --profile path-v1 --onto-ref <visible-branch>\n  --expected-source <tip> --expected-onto <tip> --upstream <exclusive-old-base>\n  --committer <name-and-email> --timestamp <unix-seconds>\n  [--empty stop|drop|keep] [--expected-head <snapshot-token>]\n  [--source-ref-hex] [--onto-ref-hex <bytes>]\n  [--max-commits <n>] [--max-edges <n>] [--max-output-bytes <n>]
+  [--resolve <original-oid>:<path-hex>:base|ours|theirs|delete]...
+  [--resolve-file <original-oid>:<path-hex>:100644|100755:<local-file>]...\n\nReplay the linear suffix (upstream, source] onto the exact target, oldest first.\nOriginal author/time/timezone, message bytes and encoding are preserved; old\nsignatures are not reused. Merge commits in the suffix refuse. A conflict or\nnewly-empty stop creates no partial bundle. Original empty commits are kept.
+Resolutions bind original commit IDs, not mutable step numbers. Ours is the
+accumulated rebased tree; theirs is the replayed original; base is its parent.
+Resolved files are byte-exact, including binary content. Every supplied choice
+must target an actual conflict. Rerun with the same pins and all earlier choices
+to resolve a later stop. No partial branch update or implicit approval occurs.\nThe output has onto as its sole prerequisite. Preparation moves no ref and\nstages no objects. Review and publish separately with an exact expected-old\nreceive operation; workspace apply is single-commit and is not this operation.\nExit 0: prepared; 3: conflict or newly-empty stop; 2: input/infrastructure error.";
 
 struct Options {
     storage: PathBuf,
@@ -26,6 +35,7 @@ struct Options {
     head: Option<RepositoryAuthorityHeadId>,
     committer: RebaseCommitter,
     limits: PreparationLimits,
+    resolutions: Vec<RebaseCommitResolution>,
 }
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
@@ -45,7 +55,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
             .map_err(|e| e.to_string())?;
         let request = node.request_context();
         node.runtime()
-            .block_on(node.prepare_rebase_bundle_in(
+            .block_on(node.prepare_resolved_rebase_bundle_in(
                 &request,
                 &options.source,
                 &options.onto,
@@ -54,11 +64,12 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
                 options.head,
                 &options.committer,
                 options.limits,
+                &options.resolutions,
             ))
             .map_err(|e| e.to_string())
     })();
     let cleanup = node.shutdown().err().map(|e| e.to_string());
-    let artifact = match (result, cleanup) {
+    let (artifact, resolved_steps) = match (result, cleanup) {
         (Ok(artifact), None) => artifact,
         (Err(error), None) => return Err(error),
         (Ok(_), Some(error)) => {
@@ -79,6 +90,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
         artifact.bundle.as_deref(),
         artifact.pack_objects,
         artifact.borrowed_objects,
+        &resolved_steps,
     )?;
     if let Some(bundle) = artifact.bundle.as_ref() {
         publish_new_bundle(&options.output, bundle)?;
@@ -95,7 +107,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 6 || args[0] != "prepare" {
         return Err(USAGE.into());
     }
-    if args.len() > 48
+    if args.len() > 48 + 2 * PreparationLimits::default().max_conflicts
         || args.iter().any(|s| s.len() > 64 * 1024)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
     {
@@ -110,6 +122,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let tenant = TenantId::from_hex(&args[2]).map_err(|_| "invalid tenant ID")?;
     let repository = RepositoryId::from_hex(&args[3]).map_err(|_| "invalid repository ID")?;
     let mut flags = BTreeMap::new();
+    let mut resolution_args = Vec::new();
     let mut at = 6;
     while at < args.len() {
         let flag = args[at].as_str();
@@ -131,6 +144,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     | "--max-commits"
                     | "--max-edges"
                     | "--max-output-bytes"
+                    | "--resolve"
+                    | "--resolve-file"
             )
         {
             return Err(format!("unknown rebase option {flag:?}"));
@@ -144,6 +159,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
             at += 1;
             value.as_str()
         };
+        if matches!(flag, "--resolve" | "--resolve-file") {
+            if resolution_args.len() == PreparationLimits::default().max_conflicts {
+                return Err("too many rebase resolution paths".into());
+            }
+            resolution_args.push((flag, value));
+            continue;
+        }
         if flags.insert(flag, value).is_some() {
             return Err(format!("duplicate {flag}"));
         }
@@ -234,6 +256,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         head,
         committer,
         limits,
+        resolutions: resolutions::parse(&resolution_args, source_tip.algorithm(), limits)?,
     })
 }
 
@@ -244,6 +267,7 @@ fn render(
     bundle: Option<&[u8]>,
     pack_objects: usize,
     borrowed_objects: usize,
+    resolved_steps: &[RebaseResolvedStep],
 ) -> Result<(String, u8), String> {
     if options.head.is_some_and(|h| h != head) {
         return Err("rebase snapshot binding mismatch".into());
@@ -343,6 +367,7 @@ fn render(
             return Err("rebase step identity mismatch".into());
         }
     }
+    let resolution_details = resolutions::render(&options.resolutions, resolved_steps, outcome)?;
     let receipt = format!(
         concat!(
             "{{\"type\":\"rebase_preparation\",\"schema_version\":1,\"profile\":\"path-v1\",",
@@ -350,7 +375,7 @@ fn render(
             "\"source_reference_hex\":{},\"onto_reference_hex\":{},\"expected_source\":{},\"expected_onto\":{},\"upstream\":{},",
             "\"committer\":{},\"timestamp\":{},\"empty_policy\":{},\"steps\":[{}],",
             "\"bundle_created\":{},\"bundle_path\":{},\"published_to_repository\":false,\"objects_staged\":false,",
-            "\"approval_granted\":false,\"node_closed\":true,{}}}"
+            "\"approval_granted\":false,\"node_closed\":true,\"resolution_decisions\":[{}],{}}}"
         ),
         quote(label),
         quote(&options.tenant.to_string()),
@@ -375,6 +400,7 @@ fn render(
             || "null".into(),
             |_| quote(&options.output.to_string_lossy())
         ),
+        resolution_details,
         detail
     );
     if receipt.len() > 4 * 1024 * 1024 {
@@ -509,14 +535,14 @@ mod tests {
             completed: vec![],
             reason: RebaseStop::BecameEmpty,
         };
-        let (text, code) = render(&o, head, &stopped, None, 0, 0).unwrap();
+        let (text, code) = render(&o, head, &stopped, None, 0, 0, &[]).unwrap();
         assert_eq!(code, 3);
         assert!(
             text.contains("\"candidate_commit\":null")
                 && text.contains("\"bundle_created\":false")
                 && text.contains("\"objects_staged\":false")
         );
-        assert!(render(&o, head, &stopped, Some(b"bad"), 1, 0).is_err());
+        assert!(render(&o, head, &stopped, Some(b"bad"), 1, 0, &[]).is_err());
     }
     #[test]
     fn malformed_options_refuse_without_opening_a_repository() {
