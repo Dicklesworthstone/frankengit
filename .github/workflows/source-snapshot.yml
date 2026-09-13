@@ -1,39 +1,46 @@
-# Temporary transport for this native implementation session. The consumer is
-# the offline native rebase compiler/test run; remove after that run is retained.
-# No credentials, Git directory, mutable provider state or build results travel.
-name: Exact native development inputs
+name: Native publication and rebase integration
 on:
   push:
     branches: [main]
-    paths: [.github/workflows/source-snapshot.yml]
+    paths:
+      - .github/workflows/source-snapshot.yml
+      - scripts/verify_native_rebase.sh
+      - scripts/e2e/rebase_smoke.py
+      - crates/fgit-forge/src/preparation/rebase.rs
+      - crates/fgit-forge/src/preparation/rebase/**
+      - crates/fgit-node/src/treefs_workspace/publication.rs
+      - crates/fgit-node/src/treefs_workspace/rebase*.rs
+      - crates/fgit-node/src/treefs_workspace/rebase/**
+      - crates/fgit-node/src/treefs_workspace/branches/tests.rs
+      - crates/fgit-node/tests/workspace_publication.rs
+      - crates/fgit-cli/src/rebase*.rs
+      - crates/fgit-cli/src/rebase/**
+      - crates/fgit-cli/tests/native_rebase_smoke.rs
 permissions:
   contents: read
+concurrency:
+  group: native-rebase-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  snapshot:
+  native:
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 30
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TARGET_DIR: /tmp/fg-native-rebase
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Retain the exact compiler and locked public registry inputs
-        shell: bash
+      - name: Exact source and compiler
         run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/fg-native-input"
-          mkdir -p "$out"
-          git rev-parse HEAD > "$out/revision.txt"
-          rustc -Vv > "$out/rustc.txt"
-          cargo fetch --locked
-          sysroot="$(rustc --print sysroot)"
-          tar -C "$sysroot" --exclude=share/doc -czf "$out/toolchain.tar.gz" .
-          tar -C "${CARGO_HOME:-$HOME/.cargo}" -czf "$out/registry.tar.gz" registry
-          git archive --format=tar.gz --output="$out/source.tar.gz" HEAD
-          (cd "$out" && sha256sum toolchain.tar.gz registry.tar.gz source.tar.gz > checksums.txt)
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: native-development-${{ github.sha }}
-          path: ${{ runner.temp }}/fg-native-input
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+          git rev-parse HEAD
+          rustc -Vv
+      - name: Compile production and test targets
+        run: bash scripts/verify_native_rebase.sh check
+      - name: Execute native integration
+        run: bash scripts/verify_native_rebase.sh test
