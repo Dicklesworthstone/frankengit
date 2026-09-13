@@ -277,14 +277,21 @@ impl<'node> ProductionQuarantineValidator<'node> {
         pack: &QuarantinedPack,
         deadline: &mut impl Deadline,
     ) -> Result<ExternalBases, RefusalCode> {
+        self.external_bases_with_initial_bytes(pack, 0, None, deadline)
+    }
+
+    fn external_bases_with_initial_bytes(&self, pack: &QuarantinedPack,
+        initial_bytes: usize, permitted: Option<&BTreeSet<GitOid>>, deadline: &mut impl Deadline) -> Result<ExternalBases, RefusalCode> {
         let mut bases = BTreeMap::new();
-        let mut read_bytes = 0usize;
+        let mut read_bytes = initial_bytes;
         let limit = self.external_read_limit();
+        if read_bytes > limit { return Err(RefusalCode::ResourceBudgetExceeded); }
         for entry in pack.entries() {
             checkpoint(deadline)?;
             let Some(ParsedDeltaBase::Ref { base, .. }) = &entry.delta_base else {
                 continue;
             };
+            if permitted.is_some_and(|scope| !scope.contains(base)) { continue; }
             if bases.contains_key(base) {
                 continue;
             }

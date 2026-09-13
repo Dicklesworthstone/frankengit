@@ -9,6 +9,9 @@ use super::*;
 // Bounds on additional verification state, independent of uploaded entry count.
 // A single new tree may legitimately reference many already-selected objects.
 const MAX_GRAPH_EDGES: usize = 4_000_000;
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ClosureProfile { Receive, FullBundle, IncrementalBundle }
+
 
 impl ProductionQuarantineValidator<'_> {
     pub(super) fn reachable_uploaded_closure(
@@ -21,14 +24,14 @@ impl ProductionQuarantineValidator<'_> {
         deadline: &mut impl Deadline,
     ) -> Result<BTreeSet<GitOid>, RefusalCode> {
         self.reachable_uploaded_closure_profile(request, verified, in_pack_delta_bases,
-            external_bases, independent_uploads, false, deadline)
+            external_bases, independent_uploads, ClosureProfile::Receive, deadline)
     }
 
     fn reachable_uploaded_closure_profile(
         &self, request: &ReceiveRequest, verified: &BTreeMap<GitOid, VerifiedObject>,
         in_pack_delta_bases: &BTreeMap<GitOid, BTreeSet<GitOid>>,
         external_bases: &ExternalBases, independent_uploads: &BTreeSet<GitOid>,
-        self_contained: bool, deadline: &mut impl Deadline,
+        profile: ClosureProfile, deadline: &mut impl Deadline,
     ) -> Result<BTreeSet<GitOid>, RefusalCode> {
         let mut pending = BTreeSet::new();
         let mut originals = reused_targets::OriginalFrontier::new(self, external_bases)?;
@@ -50,12 +53,14 @@ impl ProductionQuarantineValidator<'_> {
             checkpoint(deadline)?;
             if command.new.is_zero() { continue; }
             if let Some(object) = verified.get(&command.new) {
-                if self_contained && command.ref_name.as_slice().starts_with(b"refs/heads/") {
+                if profile != ClosureProfile::Receive && command.ref_name.as_slice().starts_with(b"refs/heads/") {
                     require_kind(object.object_type, ObjectType::Commit)?;
                 }
                 pending.insert(command.new);
             } else {
-                require_original(&mut required, command.new, None)?;
+                let kind = (profile != ClosureProfile::Receive && command.ref_name.starts_with(b"refs/heads/"))
+                    .then_some(ObjectType::Commit);
+                require_original(&mut required, command.new, kind)?;
                 closure.insert(command.new);
             }
         }
@@ -91,7 +96,7 @@ impl ProductionQuarantineValidator<'_> {
         // One proof over the entire original dependency set, not one walk per
         // tree entry or a check confined to omitted command roots. Originals
         // used for reconstruction and graph verification share one byte ledger.
-        if self_contained && !required.is_empty() {
+        if profile == ClosureProfile::FullBundle && !required.is_empty() {
             return Err(RefusalCode::ObjectClosureIncomplete);
         }
         let identities = required.keys().copied().collect();
@@ -114,47 +119,85 @@ impl ProductionQuarantineValidator<'_> {
         &self, request: &ReceiveRequest, pack: Option<&QuarantinedPack>,
         receipt: &QuarantineReceipt, deadline: &mut impl Deadline,
     ) -> Result<ValidatedClosure, RefusalCode> {
-        self.validate_self_contained_bundle(request, pack, receipt, false, deadline)
+        self.validate_bundle_profile(request, pack, receipt, None, false, deadline)
     }
 
     pub(crate) fn validate_bundle_fetch(
         &self, request: &ReceiveRequest, pack: Option<&QuarantinedPack>,
         receipt: &QuarantineReceipt, deadline: &mut impl Deadline,
     ) -> Result<ValidatedClosure, RefusalCode> {
-        self.validate_self_contained_bundle(request, pack, receipt, true, deadline)
+        self.validate_bundle_profile(request, pack, receipt, None, true, deadline)
     }
 
-    fn validate_self_contained_bundle(
+    /// Only a prerequisite already reachable from the current visible refs can
+    /// seed borrowing. After that proof, every omitted dependency and external
+    /// delta base must be reachable from the DECLARED prerequisite frontier.
+    pub(crate) fn validate_incremental_bundle(
         &self, request: &ReceiveRequest, pack: Option<&QuarantinedPack>,
-        receipt: &QuarantineReceipt, fetch: bool, deadline: &mut impl Deadline,
+        receipt: &QuarantineReceipt, prerequisites: &[GitOid], deadline: &mut impl Deadline,
+    ) -> Result<ValidatedClosure, RefusalCode> {
+        self.validate_bundle_profile(request, pack, receipt, Some(prerequisites), false, deadline)
+    }
+
+    fn validate_bundle_profile(
+        &self, request: &ReceiveRequest, pack: Option<&QuarantinedPack>,
+        receipt: &QuarantineReceipt, prerequisites: Option<&[GitOid]>, fetch: bool, deadline: &mut impl Deadline,
     ) -> Result<ValidatedClosure, RefusalCode> {
         checkpoint(deadline)?;
         let pack = pack.ok_or(RefusalCode::ObjectClosureIncomplete)?;
         if request.deletes_only() || receipt.delete_only
-            || request.commands.iter().any(|command| (!fetch && !command.old.is_zero()) || command.new.is_zero())
+            || request.commands.iter().any(|command| command.new.is_zero()
+                || (prerequisites.is_none() && !fetch && !command.old.is_zero()))
             || u32::try_from(pack.entries().len()).ok() != Some(receipt.object_count) {
             return Err(RefusalCode::PackFramingInvalid);
         }
         if pack.format != receipt.object_format || pack.format != self.node.object_format {
             return Err(RefusalCode::HashAlgorithmDomainMismatch);
         }
-        let bases = ExternalBases { bases: BTreeMap::new(), read_bytes: 0 };
-        let (mut verified, offsets) = self.verified_pack_objects(pack, &bases, deadline)?;
+        let mut restricted = None;
+        let mut bytes_read = 0;
+        if let Some(prerequisites) = prerequisites {
+            if prerequisites.len() > fgit_pack::full_bundle::MAX_BUNDLE_PREREQUISITES {
+                return Err(RefusalCode::ResourceBudgetExceeded);
+            }
+            let required: BTreeSet<_> = prerequisites.iter().copied().collect();
+            if required.len() != prerequisites.len() { return Err(RefusalCode::EvidenceInvalid); }
+            let empty = ExternalBases { bases: BTreeMap::new(), read_bytes: 0 };
+            let mut originals = reused_targets::OriginalFrontier::new(self, &empty)?;
+            let mut edges = self.pack_limits.max_total_expanded_bytes.min(MAX_GRAPH_EDGES);
+            let complete = originals.prerequisite_closure(&required, &mut edges, deadline)?;
+            bytes_read = originals.read_bytes();
+            restricted = Some(ProductionQuarantineValidator {
+                node: self.node, selected_closure: self.selected_closure.clone(),
+                visible_roots: complete, pack_limits: self.pack_limits.clone(),
+                parse_limits: self.parse_limits.clone(),
+            });
+        }
+        let validator = restricted.as_ref().unwrap_or(self);
+        let bases = if prerequisites.is_some() {
+            // Continue the original-input ledger; proving prerequisite visibility
+            // does not mint a new byte envelope for delta or graph reads.
+            validator.external_bases_with_initial_bytes(pack, bytes_read, Some(&validator.visible_roots), deadline)?
+        } else { ExternalBases { bases: BTreeMap::new(), read_bytes: 0 } };
+        let (mut verified, offsets) = validator.verified_pack_objects(pack, &bases, deadline)?;
         let delta_bases = Self::in_pack_delta_bases(pack, &offsets, deadline)?;
         let independent = reused_targets::independent_uploads(pack, &offsets, deadline)?;
-        let closure = self.reachable_uploaded_closure_profile(
-            request, &verified, &delta_bases, &bases, &independent, true, deadline,
+        let profile = if prerequisites.is_some() { ClosureProfile::IncrementalBundle }
+            else { ClosureProfile::FullBundle };
+        let closure = validator.reachable_uploaded_closure_profile(
+            request, &verified, &delta_bases, &bases, &independent, profile, deadline,
         )?;
         if fetch {
             require_fetch_fast_forwards(request, &verified,
                 self.pack_limits.max_total_expanded_bytes.min(MAX_GRAPH_EDGES), deadline)?;
         }
-        // No bytes acquire staging responsibility until the full graph has
-        // passed. A cancellation during staging does not publish any ref.
         for id in &closure {
             checkpoint(deadline)?;
-            let object = verified.remove(id).ok_or(RefusalCode::ObjectClosureIncomplete)?;
-            self.stage(*id, object.object_type, object.body, deadline)?;
+            if let Some(object) = verified.remove(id) {
+                validator.stage(*id, object.object_type, object.body, deadline)?;
+            } else if !validator.selected_closure.closure().objects().contains(id) {
+                return Err(RefusalCode::ObjectClosureIncomplete);
+            }
         }
         checkpoint(deadline)?;
         Ok(ValidatedClosure {
