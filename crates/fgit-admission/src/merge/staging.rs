@@ -25,6 +25,7 @@ const RETENTION: &[u8] = b"frankengit/admission/retention-delta/v1/";
 /// Check all body/record links before the first write. The preparation itself
 /// was derived against an authenticated predecessor, not supplied by a client.
 pub(crate) fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), AdmissionError> {
+    validate_epoch_transition(prepared)?;
     let record = &prepared.materialization.record;
     let roots = &prepared.materialization.roots;
     let repository = record.repository_id;
@@ -49,7 +50,6 @@ pub(crate) fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), Ad
         || root(&prepared.forge)? != roots.forge_position_root
         || record.resulting_forge_position_root != roots.forge_position_root
         || root(&prepared.outbox)? != roots.outbox_root
-        || record.policy_epoch != roots.policy_epoch
         || roots.compaction_generation_link.is_some()
         || principal_snapshot_id(prepared.evidence.principal_snapshot()).map_err(unavailable)? != record.principal_snapshot_id
         || root(prepared.evidence.policy_decision())? != record.policy_decision_root
@@ -135,3 +135,32 @@ fn root<B: CanonicalBody>(body: &B) -> Result<Digest, AdmissionError> {
 }
 fn unavailable(code: RefusalCode) -> AdmissionError { AdmissionError::AsyncProjectionUnavailable(code) }
 fn invalid() -> AdmissionError { unavailable(RefusalCode::EvidenceInvalid) }
+
+/// Policy changes are authorized by the predecessor epoch but publish its
+/// immediate successor. No other forge event may advance the policy epoch.
+fn validate_epoch_transition(prepared: &PreparedNativeMerge) -> Result<(), AdmissionError> {
+    use fgit_forge::{AggregateId, ForgeEventPayload};
+    let [event] = prepared.event.events.as_slice() else { return Err(invalid()); };
+    let record = &prepared.materialization.record;
+    let resulting = prepared.materialization.roots.policy_epoch;
+    match &event.payload {
+        ForgeEventPayload::ReviewProtectionChanged(change) => {
+            change.validate().map_err(|_| invalid())?;
+            if event.aggregate != AggregateId::ReviewProtection
+                || change.actor != prepared.request.principal
+                || change.expected_epoch != record.policy_epoch
+                || change.resulting_epoch().map_err(unavailable)? != resulting
+                || !prepared.closure.objects().is_empty()
+                || !prepared.fold.effects().is_some_and(|effects|
+                    effects.refs.is_empty() && effects.retention.is_empty())
+            { return Err(invalid()); }
+        }
+        _ if resulting != record.policy_epoch => return Err(invalid()),
+        _ => {}
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "staging_epoch_tests.rs"]
+mod epoch_tests;
