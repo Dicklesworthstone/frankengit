@@ -16,6 +16,7 @@ use crate::aggregate::{
 pub mod pull_request;
 pub mod review;
 pub mod issue;
+pub mod protection;
 use issue::{NativeIssueEvent, IssueAction};
 use pull_request::{NativePullRequestEvent, PullRequestAction};
 use review::NativeReviewEvent;
@@ -28,6 +29,7 @@ const KIND_NATIVE_MERGE_COMMITTED: u32 = 5;
 const KIND_NATIVE_PULL_REQUEST_CHANGED: u32 = 6;
 const KIND_NATIVE_PULL_REQUEST_REVIEWED: u32 = 7;
 const KIND_NATIVE_ISSUE_CHANGED: u32 = 8;
+const KIND_REVIEW_PROTECTION_CHANGED: u32 = 9;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -98,6 +100,8 @@ fn invalid_native(field: &'static str) -> CodecRefusal {
 /// remains a native typed value; it is never cast into a legacy Digest field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ForgeEventPayload {
+    /// Required canonical review-protection replacement, wire kind 9.
+    ReviewProtectionChanged(protection::NativeProtectionEvent),
     PullRequestOpened {
         source_ref: Vec<u8>,
         target_ref: Vec<u8>,
@@ -135,6 +139,7 @@ impl ForgeEventPayload {
             Self::PullRequestChangedNative(_) => KIND_NATIVE_PULL_REQUEST_CHANGED,
             Self::PullRequestReviewedNative(_) => KIND_NATIVE_PULL_REQUEST_REVIEWED,
             Self::IssueChangedNative(_) => KIND_NATIVE_ISSUE_CHANGED,
+            Self::ReviewProtectionChanged(_) => KIND_REVIEW_PROTECTION_CHANGED,
         }
     }
 }
@@ -148,6 +153,7 @@ pub struct ForgeEvent {
 
 fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
     match aggregate {
+        AggregateId::ReviewProtection => { out.write_scalar(0_u64); out.write_scalar(crate::aggregate::AGGREGATE_KIND_REVIEW_PROTECTION); }
         AggregateId::Issue(number) => { out.write_scalar(0_u64); out.write_scalar(AGGREGATE_KIND_ISSUE); out.write_scalar(number.get()); }
         AggregateId::PullRequest(number) => out.write_scalar(number.get()),
         AggregateId::Organisation(number) => {
@@ -177,6 +183,7 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
     let kind_offset = input.offset();
     let kind = input.read_scalar::<u32>("aggregate.kind")?;
     match kind {
+        crate::aggregate::AGGREGATE_KIND_REVIEW_PROTECTION => Ok(AggregateId::ReviewProtection),
         AGGREGATE_KIND_ISSUE => Ok(AggregateId::Issue(counter("aggregate.issue", input.read_scalar::<u64>("aggregate.issue")?)?)),
         AGGREGATE_KIND_ORGANISATION => Ok(AggregateId::Organisation(counter(
             "aggregate.organisation", input.read_scalar::<u64>("aggregate.organisation")?,
@@ -209,6 +216,8 @@ fn validate_review(event: &ForgeEvent, review: &NativeReviewEvent) -> Result<(),
 }
 
 fn validate_issue(event: &ForgeEvent) -> Result<(), CodecRefusal> {
+    if matches!(event.aggregate, AggregateId::ReviewProtection) != matches!(event.payload, ForgeEventPayload::ReviewProtectionChanged(_)) { return Err(invalid_native("review_protection.aggregate")); }
+    if let ForgeEventPayload::ReviewProtectionChanged(change) = &event.payload { change.validate()?; }
     if matches!(event.aggregate, AggregateId::Issue(_)) != matches!(event.payload, ForgeEventPayload::IssueChangedNative(_)) { return Err(invalid_native("issue.aggregate_kind")); }
     if let ForgeEventPayload::IssueChangedNative(change) = &event.payload {
         change.action.validate()?;
@@ -251,6 +260,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
             change.write(out)?;
         }
         ForgeEventPayload::IssueChangedNative(change) => change.write(out)?,
+        ForgeEventPayload::ReviewProtectionChanged(change) => change.write(out)?,
         ForgeEventPayload::PullRequestReviewedNative(review) => {
             validate_review(event, review)?;
             review.write(out)?;
@@ -288,6 +298,7 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         KIND_NATIVE_PULL_REQUEST_CHANGED => ForgeEventPayload::PullRequestChangedNative(NativePullRequestEvent::read(input)?),
         KIND_NATIVE_PULL_REQUEST_REVIEWED => ForgeEventPayload::PullRequestReviewedNative(NativeReviewEvent::read(input)?),
         KIND_NATIVE_ISSUE_CHANGED => ForgeEventPayload::IssueChangedNative(NativeIssueEvent::read(input)?),
+        KIND_REVIEW_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(protection::NativeProtectionEvent::read(input)?),
         unknown => return Err(CodecRefusal::VariantUnknown {
             field: "kind", observed: unknown, offset: kind_offset,
         }),

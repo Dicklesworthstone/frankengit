@@ -91,6 +91,7 @@ pub(crate) fn prepare_event(
     let aggregate_matches = match &event.payload {
         ForgeEventPayload::PullRequestReviewedNative(review) => event.aggregate == review.aggregate(),
         ForgeEventPayload::IssueChangedNative(_) => matches!(event.aggregate, fgit_forge::AggregateId::Issue(_)),
+        ForgeEventPayload::ReviewProtectionChanged(_) => event.aggregate == fgit_forge::AggregateId::ReviewProtection,
         _ => matches!(event.aggregate, fgit_forge::AggregateId::PullRequest(_)),
     };
     if !aggregate_matches
@@ -114,6 +115,13 @@ pub(crate) fn prepare_event(
         .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let entity = ForgeEntityId::new(label);
     let (kind, required_objects, ref_effect) = match &event.payload {
+        ForgeEventPayload::ReviewProtectionChanged(change) => {
+            change.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if change.actor != context.principal_id || !attempt.request.ref_commands().is_empty()
+                || !closure.objects.is_empty() { return Err(RefusalCode::EvidenceInvalid); }
+            if change.expected_epoch != basis.body().policy_epoch { return Err(RefusalCode::EvidenceStale); }
+            (ForgeEventKind::ReviewProtectionChanged { policy: entity }, Vec::new(), None)
+        }
         ForgeEventPayload::IssueChangedNative(change) => {
             change.action.validate().map_err(|_| RefusalCode::EvidenceInvalid)?;
             if change.actor != context.principal_id || !attempt.request.ref_commands().is_empty()
@@ -250,7 +258,10 @@ pub(crate) fn prepare_event(
         ref_root: crate::ref_state_root(resolved.root_layout, &refs)?,
         forge_position_root: transition.forge_position_root(),
         outbox_root: transition.outbox_root(), retention_root: basis.body().retention_root,
-        policy_epoch: basis.body().policy_epoch, compaction_generation_link: None,
+        policy_epoch: match &event.events[0].payload {
+            ForgeEventPayload::ReviewProtectionChanged(change) => change.resulting_epoch()?,
+            _ => basis.body().policy_epoch,
+        }, compaction_generation_link: None,
     };
     let record = RepositoryCommitRecord {
         repository_id: context.repository_id,
@@ -260,7 +271,7 @@ pub(crate) fn prepare_event(
         ref_delta_root: crate::canonical_ref_delta_root(&crate::CanonicalRefDelta::from_effects(&effects.refs))?,
         resulting_ref_root: roots.ref_root, object_closure_root: closure.object_closure_root,
         forge_event_batch_root: event_root,
-        resulting_forge_position_root: roots.forge_position_root, policy_epoch: roots.policy_epoch,
+        resulting_forge_position_root: roots.forge_position_root, policy_epoch: basis.body().policy_epoch,
         policy_decision_root: evidence_root(evidence.policy_decision())?,
         invariant_evidence_root: evidence_root(evidence.invariant_evidence())?,
         outbox_effect_root: evidence_root(evidence.outbox_effect_batch())?,

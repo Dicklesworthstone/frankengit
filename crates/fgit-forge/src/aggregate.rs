@@ -133,6 +133,8 @@ impl fmt::Display for ExpectedVersion {
 /// one of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AggregateId {
+    /// One repository-scoped review-protection policy stream.
+    ReviewProtection,
     /// One pull request. Encoded bare, with no tag.
     PullRequest(PullRequestNumber),
     /// One organisation.
@@ -154,6 +156,7 @@ pub(crate) const AGGREGATE_KIND_TEAM: u32 = 2;
 pub(crate) const AGGREGATE_KIND_PULL_REQUEST_REVIEW: u32 = 3;
 /// Required issue aggregate discriminator, appended without reusing a code point.
 pub(crate) const AGGREGATE_KIND_ISSUE: u32 = 4;
+pub(crate) const AGGREGATE_KIND_REVIEW_PROTECTION: u32 = 5;
 impl From<IssueNumber> for AggregateId { fn from(number: IssueNumber) -> Self { Self::Issue(number) } }
 
 impl From<PullRequestNumber> for AggregateId {
@@ -177,6 +180,7 @@ impl From<TeamNumber> for AggregateId {
 impl fmt::Display for AggregateId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ReviewProtection => formatter.write_str("review-protection"),
             Self::Issue(number) => write!(formatter, "issue/{number}"),
             Self::PullRequest(number) => write!(formatter, "pull-request/{number}"),
             Self::Organisation(number) => write!(formatter, "organisation/{number}"),
