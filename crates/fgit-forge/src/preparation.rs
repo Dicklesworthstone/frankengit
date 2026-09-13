@@ -18,6 +18,7 @@ use fgit_types::{GitHashAlgorithm, GitOid};
 
 pub mod resolution;
 pub mod replay;
+pub mod rebase;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitInput {
@@ -249,7 +250,7 @@ pub fn prepare_merge<S: MergeObjectSource>(
     let their_tree = source.commit(incoming)?.tree;
     let mut planner = Planner {
         source, format, limits, entries: 0, content_merges: 0, output_bytes: 0,
-        objects: BTreeMap::new(), conflicts: Vec::new(), resolutions: BTreeMap::new(),
+        objects: BTreeMap::new(), trees: BTreeMap::new(), conflicts: Vec::new(), resolutions: BTreeMap::new(),
     };
     let tree = planner.directory(Some(base_tree), our_tree, their_tree, &[], 0, false)?;
     source.checkpoint()?;
@@ -290,11 +291,28 @@ struct Planner<'a, S> {
     content_merges: usize,
     output_bytes: usize,
     objects: BTreeMap<GitOid, PlannedMergeObject>,
+    // Parsed metadata for our own generated trees; bounded by generation and
+    // tree-entry budgets. Never used as authority for original object reads.
+    trees: BTreeMap<GitOid, Vec<MergeEntry>>,
     conflicts: Vec<MergeConflict>,
     resolutions: BTreeMap<Vec<u8>, resolution::BoundResolution>,
 }
 
-impl<S: MergeObjectSource> Planner<'_, S> {
+impl<'a, S: MergeObjectSource> Planner<'a, S> {
+    fn new(source: &'a S, format: GitHashAlgorithm, limits: PreparationLimits) -> Self {
+        Self { source, format, limits, entries: 0, content_merges: 0, output_bytes: 0,
+            objects: BTreeMap::new(), trees: BTreeMap::new(), conflicts: Vec::new(), resolutions: BTreeMap::new() }
+    }
+
+    fn blob(&self, id: GitOid) -> Result<Vec<u8>, PreparationError> {
+        self.source.checkpoint()?;
+        if let Some(object) = self.objects.get(&id) {
+            if object.kind != GitObjectKind::Blob { return Err(PreparationError::InvalidTree); }
+            return Ok(object.body.clone());
+        }
+        Ok(self.source.blob(id)?)
+    }
+
     fn emit(&mut self, kind: GitObjectKind, body: Vec<u8>) -> Result<GitOid, PreparationError> {
         self.source.checkpoint()?;
         let id = git_object_id(self.format, kind, &body);
@@ -314,7 +332,10 @@ impl<S: MergeObjectSource> Planner<'_, S> {
         let Some(id) = id else { return Ok(BTreeMap::new()); };
         self.source.checkpoint()?;
         if id.is_zero() || id.algorithm() != self.format { return Err(PreparationError::ObjectFormat); }
-        let entries = self.source.tree(id)?;
+        let entries = match self.trees.get(&id) {
+            Some(entries) => entries.clone(),
+            None => self.source.tree(id)?,
+        };
         self.entries = self.entries.checked_add(entries.len())
             .filter(|count| *count <= self.limits.max_tree_entries)
             .ok_or(PreparationError::Budget("tree entries"))?;
@@ -389,7 +410,9 @@ impl<S: MergeObjectSource> Planner<'_, S> {
         }
         let id = git_object_id(self.format, GitObjectKind::Tree, &body);
         if Some(id) == base || id == ours || id == theirs { return Ok(Some(id)); }
-        self.emit(GitObjectKind::Tree, body).map(Some)
+        let id = self.emit(GitObjectKind::Tree, body)?;
+        self.trees.insert(id, result);
+        Ok(Some(id))
     }
 
     fn conflict(
@@ -442,9 +465,9 @@ impl<S: MergeObjectSource> Planner<'_, S> {
                     return Err(PreparationError::Budget("content merges"));
                 }
                 self.content_merges += 1;
-                let b = match base { Some(b) => self.source.blob(b.oid)?, None => Vec::new() };
-                let o_bytes = self.source.blob(o.oid)?;
-                let t_bytes = self.source.blob(t.oid)?;
+                let b = match base { Some(b) => self.blob(b.oid)?, None => Vec::new() };
+                let o_bytes = self.blob(o.oid)?;
+                let t_bytes = self.blob(t.oid)?;
                 self.source.checkpoint()?;
                 if [&b, &o_bytes, &t_bytes].iter().any(|bytes| bytes.contains(&0)) {
                     return self.conflict(path, ConflictKind::Binary, base, ours, theirs);

@@ -175,7 +175,7 @@ pub fn prepare_resolved_merge<S: MergeObjectSource>(
     let source_tree = source.commit(inputs.source)?.tree;
     let mut planner = Planner {
         source, format, limits, entries: 0, content_merges: 0, output_bytes: 0,
-        objects: BTreeMap::new(), conflicts: Vec::new(), resolutions: BTreeMap::new(),
+        objects: BTreeMap::new(), trees: BTreeMap::new(), conflicts: Vec::new(), resolutions: BTreeMap::new(),
     };
     planner.directory(Some(base_tree), target_tree, source_tree, &[], 0, false)?;
     source.checkpoint()?;
