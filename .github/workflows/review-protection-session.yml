@@ -1,15 +1,32 @@
-name: Verify published mandatory review protection
+name: Verify mandatory protection after native regression fixes
 on:
   push:
     branches: [tooling/review-protection-session-20260913]
 permissions:
   contents: read
 jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.prepare.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - id: prepare
+        run: python3 tools/review-protection-session/prepare.py
   verify:
+    needs: prepare
     runs-on: ubuntu-22.04
     timeout-minutes: 45
+    permissions:
+      contents: read
     env:
       CARGO_TARGET_DIR: /tmp/fg-review-protection-native-target
+      PRODUCT_SOURCE_SHA: ${{ needs.prepare.outputs.source }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -18,22 +35,30 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 8262f91d25dbdd054a8e117afb3560286deeca17
+          ref: ${{ needs.prepare.outputs.source }}
           path: source
           persist-credentials: false
       - name: Fetch locked dependencies
+        id: fetch
         run: python3 workbench/tools/review-protection-session/verify.py source fetch
       - name: Check native CLI all targets
+        id: cli
         run: python3 workbench/tools/review-protection-session/verify.py source cli-check
       - name: Check native node all targets
+        id: node
         run: python3 workbench/tools/review-protection-session/verify.py source node-check
       - name: Test forge reference and transaction crates
+        if: ${{ !cancelled() && steps.cli.outcome == 'success' && steps.node.outcome == 'success' }}
         run: python3 workbench/tools/review-protection-session/verify.py source core
       - name: Test admission all targets
+        if: ${{ !cancelled() && steps.cli.outcome == 'success' && steps.node.outcome == 'success' }}
         run: python3 workbench/tools/review-protection-session/verify.py source admission
       - name: Test complete node library
+        if: ${{ !cancelled() && steps.cli.outcome == 'success' && steps.node.outcome == 'success' }}
         run: python3 workbench/tools/review-protection-session/verify.py source node-library
       - name: Test CLI unit suite
+        if: ${{ !cancelled() && steps.cli.outcome == 'success' && steps.node.outcome == 'success' }}
         run: python3 workbench/tools/review-protection-session/verify.py source cli-unit
       - name: Test real policy and mandatory merge processes
+        if: ${{ !cancelled() && steps.cli.outcome == 'success' && steps.node.outcome == 'success' }}
         run: python3 workbench/tools/review-protection-session/verify.py source protection-process

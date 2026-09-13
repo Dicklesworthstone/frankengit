@@ -1,14 +1,14 @@
 import json, os, pathlib, re, signal, subprocess, sys, tempfile
 root=pathlib.Path(sys.argv[1]).resolve()
 source=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()
-assert source=='8262f91d25dbdd054a8e117afb3560286deeca17'
+assert source==os.environ['PRODUCT_SOURCE_SHA']
 env=os.environ.copy();env.update(RCH_CARGO_WRAPPER_BYPASS='1',CARGO_BUILD_JOBS='1',CARGO_PROFILE_DEV_DEBUG='0',CARGO_PROFILE_TEST_DEBUG='0')
 commands={
  'fetch':['cargo','fetch','--locked'],
  'cli-check':['cargo','check','--offline','--locked','-p','fgit-cli','--all-targets'],
  'node-check':['cargo','check','--offline','--locked','-p','fgit-node','--all-targets'],
- 'core':['cargo','test','--offline','--locked','-p','fgit-forge','-p','fgit-reference','-p','fgit-txn','--all-targets'],
- 'admission':['cargo','test','--offline','--locked','-p','fgit-admission','--all-targets'],
+ 'core':['cargo','test','--offline','--locked','-p','fgit-forge','-p','fgit-reference','-p','fgit-txn','--all-targets','--no-fail-fast'],
+ 'admission':['cargo','test','--offline','--locked','-p','fgit-admission','--all-targets','--no-fail-fast'],
  'node-library':['cargo','test','--offline','--locked','-p','fgit-node','--lib'],
  'cli-unit':['cargo','test','--offline','--locked','-p','fgit-cli','--bin','fg'],
  'protection-process':['cargo','test','--offline','--locked','-p','fgit-cli','--test','native_protection_smoke','--','--nocapture'],
@@ -29,6 +29,6 @@ with tempfile.TemporaryDirectory(prefix='fg-review-verification-') as td:
     counts=[tuple(map(int,match)) for line in summaries for match in re.findall(r'(\d+) passed; (\d+) failed; (\d+) ignored;',line)]
     entry={'label':label,'revision':source,'command':' '.join(args),'exit':code,'summaries':summaries,'totals':[sum(row[i] for row in counts) for i in range(3)]}
     print('VERIFICATION',json.dumps(entry),flush=True)
-    print('\n'.join(lines[-220:] if code else [line for line in lines if line.startswith('test result:') or 'PROTECTION_' in line or 'mandatory_' in line or 'protection::' in line or 'Finished ' in line]),flush=True)
+    print('\n'.join(lines[-250:] if code else [line for line in lines if line.startswith('test result:') or 'PROTECTION_' in line or 'mandatory_' in line or 'protection::' in line or 'Finished ' in line]),flush=True)
     assert not subprocess.check_output(['git','status','--porcelain'],cwd=root,text=True).strip(),'verification modified source'
     raise SystemExit(code)
