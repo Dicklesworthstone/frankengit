@@ -32,14 +32,15 @@ def run_case(fg, root, fmt):
     def show():
         return invoke(['protection', 'show', *common, '--trusted-local', '--object-format', fmt])
 
-    def configure(who, version, epoch, key, administrators, protect=True, expected=0):
+    def configure(who, version, epoch, key, administrators, protect=True, expected=0, reviewers=None):
         flags = ['--trusted-local', '--object-format', fmt, '--principal', who,
                  '--expected-version', str(version), '--expected-epoch', str(epoch), '--idempotency-key', key]
         for administrator in administrators:
             flags += ['--admin', administrator]
         if protect:
             for branch in ['refs/heads/main', 'refs/heads/protected']:
-                flags += ['--require-reviewer', f'{branch}:{reviewer}']
+                for required in ([reviewer] if reviewers is None else reviewers):
+                    flags += ['--require-reviewer', f'{branch}:{required}']
         else:
             flags += ['--clear']
         value = invoke(['protection', 'set', *common, *flags], expected)
@@ -95,6 +96,77 @@ def run_case(fg, root, fmt):
         '--expected-epoch', '0', '--admin', successor, '--clear']
     assert invoke(invalid, 2, False).stdout == b''
     assert show()['source_head'] == latest['source_head']
+    # Exercise the non-opt-in production CLI route, not just policy storage.
+    second_reviewer = '04' * 16
+    configure(successor, 3, 4, 'two-reviewer-policy', [successor],
+              reviewers=[reviewer, second_reviewer])
+    assert show()['policy_epoch'] == 5
+    bundle = root / 'reviewed.bundle'
+    bundle.write_bytes(fixture['bundle'])
+    invoke(['pr', 'open', *common, '7', '--trusted-local', '--object-format', fmt,
+            '--principal', admin, '--idempotency-key', 'protected-pr-open',
+            '--expected-version', '0', '--source-ref', 'refs/heads/topic',
+            '--target-ref', 'refs/heads/main', '--expected-source', fixture['source'],
+            '--expected-target', fixture['target'], '--title', 'Mandatory review example',
+            '--body', 'Exact independently supplied candidate coordinates'])
+    subject = ['--expected-version', '1', '--source-ref', 'refs/heads/topic',
+               '--target-ref', 'refs/heads/main', '--source-tip', fixture['source'],
+               '--target-tip', fixture['target'], '--merge-base', fixture['base'],
+               '--candidate', fixture['candidate'], '--policy-epoch', '5']
+    def vote(who, own_version, decision, key):
+        args = ['pr', 'review', *common, '7', '--trusted-local', '--principal', who,
+                '--idempotency-key', key, *subject, '--review-version', str(own_version),
+                '--decision', decision]
+        args += ['--reason', 'Retract this exact candidate'] if decision == 'withdraw' else ['--bundle', bundle]
+        receipt = invoke(args)
+        assert receipt['type'] == 'candidate_review_decision' and receipt['outcome'] == 'committed'
+        assert receipt['git_refs_changed'] is False and receipt['delivery_acknowledged'] is None
+        return receipt
+    def merge(key, accepted=False):
+        args = ['merge', 'apply', *common, 'refs/heads/main', bundle,
+                '--trusted-local', '--principal', successor, '--idempotency-key', key,
+                '--source-ref', 'refs/heads/topic', '--expected-source', fixture['source'],
+                '--expected-target', fixture['target'], '--merge-base', fixture['base'],
+                '--expected-commit', fixture['candidate'], '--pull-request', '7',
+                '--expected-version', '1']
+        # The established plain merge CLI emits its terminal JSON and uses
+        # exit 2 for refusal; do not mistake that for an infrastructure error.
+        receipt = invoke(args, 0 if accepted else 2)
+        assert receipt['type'] == 'merge_publication'
+        assert receipt['outcome'] == ('committed' if accepted else 'refused')
+        assert receipt['published_to_repository'] is accepted
+        assert receipt['candidate_commit'] == fixture['candidate']
+        assert receipt['expected_source'] == fixture['source'] and receipt['expected_target'] == fixture['target']
+        assert receipt['delivery_acknowledged'] is None
+        if not accepted:
+            assert receipt['refusal_record_id'] and receipt['repository_commit_id'] is None
+        return receipt
+    before_votes = merge('no-mandatory-votes')
+    vote(reviewer, 0, 'approve', 'approve-reviewer-three')
+    weakened = invoke(['merge', 'apply-reviewed', *common, '7', '--trusted-local',
+                      '--principal', successor, '--idempotency-key', 'weaker-caller-list',
+                      *subject, '--bundle', bundle, '--require-reviewer', reviewer], 3)
+    assert weakened['outcome'] == 'refused' and weakened['published_to_repository'] is False
+    vote(second_reviewer, 0, 'approve', 'approve-reviewer-four')
+    vote(second_reviewer, 1, 'withdraw', 'withdraw-reviewer-four')
+    withdrawn = merge('withdrawn-review-blocks')
+    assert withdrawn['refusal_code'] == 'ProtectedRefTransitionDenied'
+    vote(second_reviewer, 2, 'approve', 'reapprove-reviewer-four')
+    same_decision(before_votes, merge('no-mandatory-votes'))
+    same_decision(withdrawn, merge('withdrawn-review-blocks'))
+    permitted = merge('all-mandatory-votes', True)
+    state_after_merge = show()
+    same_decision(permitted, merge('all-mandatory-votes', True))
+    same_decision(before_votes, merge('no-mandatory-votes'))
+    assert show()['source_head'] == state_after_merge['source_head'], 'historical retries must not republish'
+    pr = invoke(['pr', 'show', *common, '7', '--trusted-local', '--object-format', fmt])
+    assert pr['pull_request']['state'] == 'merged' and pr['pull_request']['version'] == 2
+    bundle.unlink()
+    recovered = invoke(['outcome', *common, '--trusted-local', '--object-format', fmt,
+                        '--principal', successor, '--idempotency-key', 'all-mandatory-votes'])
+    assert recovered['transaction']['tx_id'] == permitted['tx_id']
+    assert show()['source_head'] == state_after_merge['source_head']
+    print(f'PROTECTION_REVIEW_CLI format={fmt} required=2 withdrawal=checked plain_merge=committed', flush=True)
     print(f'PROTECTION_CLI format={fmt} passed commands={calls}', flush=True)
 
 

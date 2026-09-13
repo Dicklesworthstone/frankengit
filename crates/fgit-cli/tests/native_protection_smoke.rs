@@ -20,5 +20,7 @@ fn fresh_process_protection_enforces_direct_write_guards_and_retains_policy_owne
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 campaign report");
     assert!(stdout.contains("PROTECTION_CLI format=sha1 "));
     assert!(stdout.contains("PROTECTION_CLI format=sha256 "));
+    assert!(stdout.contains("PROTECTION_REVIEW_CLI format=sha1 required=2 "));
+    assert!(stdout.contains("PROTECTION_REVIEW_CLI format=sha256 required=2 "));
     print!("{stdout}");
 }
