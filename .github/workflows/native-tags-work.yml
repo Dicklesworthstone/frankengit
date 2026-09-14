@@ -1,0 +1,19 @@
+name: Native tag implementation
+on:
+  push:
+    branches: [tooling/native-service-43a97bd]
+    paths: [tools/native-tags/**, .github/workflows/native-tags-work.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - id: prepare
+        run: python3 tools/native-tags/prepare.py 43a97bd32d3fc92927666c07fdb90c8c7c9d0244 1 3e341bfa22a6dcd9fccba031aadba5d5c1ee9e20b497bddb7a29e78803b2ff3d 'feat(forge): construct byte-exact native tag proposals (FG-051a)'
