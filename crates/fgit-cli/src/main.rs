@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod tags;
 mod branches;
 mod bundle;
 mod commit_replay;
@@ -26,6 +27,15 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "tag") {
+        return match tags::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("{{\"type\":\"tag_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     if let Some(command @ ("tree" | "show")) = arguments.first().map(String::as_str) {
         return match source_browse::run(&arguments[1..], command == "show") {
             Ok(code) => ExitCode::from(code),
