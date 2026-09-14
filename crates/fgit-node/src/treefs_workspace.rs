@@ -164,8 +164,8 @@ impl OneNode {
         ) -> Result<T, NodeWorkspaceRefusal>
         + Send,
     ) -> Result<T, NodeWorkspaceRefusal> {
-        self.with_workspace_snapshot_in(request, reference, visibility, capability, now, None, None,
-            |base, source, capability, _head| consume(base, source, capability)).await
+        self.with_workspace_snapshot_in(request, reference, visibility, capability, now, None, None, usize::MAX,
+            |base, source, capability, _head, _metadata_bytes| consume(base, source, capability)).await
     }
 
     /// Shared single-selection variant for snapshot-pinned source consumers.
@@ -173,8 +173,9 @@ impl OneNode {
         &self, request: &NodeRequestContext, reference: &RefName,
         visibility: &RefVisibility, capability: &mut TreeCapability, now: u64,
         expected_head: Option<fgit_types::RepositoryAuthorityHeadId>, expected_commit: Option<AnyOid>,
+        maximum_object_bytes: usize,
         consume: impl FnOnce(&BaseView<A>, &NodeTreeSource<'_>, &mut TreeCapability,
-            fgit_types::RepositoryAuthorityHeadId) -> Result<T, NodeWorkspaceRefusal> + Send,
+            fgit_types::RepositoryAuthorityHeadId, u64) -> Result<T, NodeWorkspaceRefusal> + Send,
     ) -> Result<T, NodeWorkspaceRefusal> {
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         if capability.repository_id() != self.repository_id() {
@@ -223,7 +224,8 @@ impl OneNode {
             inner: VerifiedFabricPackSource {
                 fabric: &self.fabric,
                 object_format: self.object_format,
-                maximum_object_bytes: usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX),
+                maximum_object_bytes: usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX)
+                    .min(maximum_object_bytes),
                 database_context: request.authority(),
                 database_exhaustion: &exhaustion,
                 session_is_live: None,
@@ -267,7 +269,7 @@ impl OneNode {
                 source.inner.parse_limits(),
                 PathPolicy::default(),
             );
-            consume(&base, &source, capability, selected.basis().id())
+            consume(&base, &source, capability, selected.basis().id(), body.len() as u64)
         })();
         if let PackContextCheckpoint::Stopped { budget_exhaustion } =
             checkpoint_pack_context(request.authority())

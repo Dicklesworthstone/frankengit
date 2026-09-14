@@ -64,9 +64,9 @@ impl OneNode {
             capability.authorize_read(path, now).map_err(|e| base_error(e.into()))?;
         }
         self.with_workspace_snapshot_in::<A, _>(request, reference, visibility, capability, now,
-            query.expected_head, query.expected_commit,
-            |base, source, capability, head| browse_at(base, source, request, capability,
-                now, head, query, path.as_ref()),
+            query.expected_head, query.expected_commit, MAX_OBJECT_BYTES,
+            |base, source, capability, head, metadata_bytes| browse_at(base, source, request, capability,
+                now, head, query, path.as_ref(), ReadBudget::new(metadata_bytes, 1)),
         ).await
     }
 
@@ -166,31 +166,59 @@ impl OneNode {
             A::parse_hex(&commit.to_string()).map_err(|_| NodeWorkspaceRefusal::ObjectFormatMismatch)?,
             A::parse_hex(&tree.to_string()).map_err(|_| NodeWorkspaceRefusal::ObjectFormatMismatch)?,
             parse, PathPolicy::default());
-        browse_at(&base, &source, request, &mut capability, 0, head, query, path.as_ref())
+        browse_at(&base, &source, request, &mut capability, 0, head, query, path.as_ref(),
+            ReadBudget::new(metadata_bytes, metadata_objects))
     }
 }
 
+// The commit/root discovery reads and the subsequent traversal share this
+// envelope. A small output slice must not authorize an unbounded blob decode.
+struct ReadBudget {
+    bytes: Cell<u64>,
+    objects: Cell<u64>,
+}
+impl ReadBudget {
+    fn new(bytes: u64, objects: u64) -> Self {
+        Self { bytes: Cell::new(bytes), objects: Cell::new(objects) }
+    }
+    fn reserve(&self) -> Result<usize, ObjectSourceError> {
+        let remaining = MAX_READ_BYTES.checked_sub(self.bytes.get())
+            .ok_or_else(|| read_refused("source byte budget"))?;
+        if self.objects.get() >= MAX_READ_OBJECTS {
+            return Err(read_refused("source object budget"));
+        }
+        self.objects.set(self.objects.get() + 1);
+        Ok(MAX_OBJECT_BYTES.min(usize::try_from(remaining).unwrap_or(usize::MAX)))
+    }
+    fn charge(&self, bytes: usize) -> Result<(), ObjectSourceError> {
+        let total = self.bytes.get().checked_add(bytes as u64)
+            .filter(|total| *total <= MAX_READ_BYTES)
+            .ok_or_else(|| read_refused("source byte budget"))?;
+        self.bytes.set(total);
+        Ok(())
+    }
+}
+fn read_refused(reason: &str) -> ObjectSourceError {
+    ObjectSourceError::Refused { reason: reason.into() }
+}
 struct BoundedSource<'a, 'source> {
     inner: &'a NodeTreeSource<'source>, request: &'a NodeRequestContext,
-    bytes: Cell<u64>, objects: Cell<u64>,
+    budget: ReadBudget,
 }
 impl<A: GitHashAlgorithm> ObjectSource<A> for BoundedSource<'_, '_> {
     fn read_object(&self, id: &GitOid<A>, kind: GitObjectKind, grant: &ReadGrant)
         -> Result<Vec<u8>, ObjectSourceError> {
-        let refused = |reason: &str| ObjectSourceError::Refused { reason: reason.into() };
-        if !workspace_request_live(self.request) { return Err(refused("source read cancelled")); }
-        if self.objects.get() >= MAX_READ_OBJECTS { return Err(refused("source object budget")); }
-        self.objects.set(self.objects.get() + 1);
-        // Tighten the fabric read bound BEFORE decompression/allocation.
+        if !workspace_request_live(self.request) { return Err(read_refused("source read cancelled")); }
+        let remaining = self.budget.reserve()?;
+        // Tighten the fabric read bound BEFORE decompression/allocation,
+        // including the remaining aggregate allowance, not merely each object.
         let bounded = NodeTreeSource { inner: VerifiedFabricPackSource {
-            maximum_object_bytes: self.inner.inner.maximum_object_bytes.min(MAX_OBJECT_BYTES),
+            maximum_object_bytes: self.inner.inner.maximum_object_bytes.min(remaining),
             ..self.inner.inner
         }, selected: self.inner.selected, workspace: self.inner.workspace };
         let body = bounded.read_object::<A>(id, kind, grant)?;
-        if !workspace_request_live(self.request) { return Err(refused("source read cancelled")); }
-        let total = self.bytes.get().checked_add(body.len() as u64)
-            .filter(|total| *total <= MAX_READ_BYTES).ok_or_else(|| refused("source byte budget"))?;
-        self.bytes.set(total);
+        if !workspace_request_live(self.request) { return Err(read_refused("source read cancelled")); }
+        self.budget.charge(body.len())?;
         Ok(body)
     }
 }
@@ -199,9 +227,10 @@ impl<A: GitHashAlgorithm> ObjectSource<A> for BoundedSource<'_, '_> {
 fn browse_at<A: GitHashAlgorithm>(base: &BaseView<A>, original: &NodeTreeSource<'_>,
     request: &NodeRequestContext, capability: &mut TreeCapability, now: u64,
     head: RepositoryAuthorityHeadId, query: &SourceBrowseQuery, path: Option<&TreePath>,
+    budget: ReadBudget,
 ) -> Result<SourceBrowseReport, NodeWorkspaceRefusal> {
     live(request)?;
-    let source = BoundedSource { inner: original, request, bytes: Cell::new(0), objects: Cell::new(0) };
+    let source = BoundedSource { inner: original, request, budget };
     let result = (|| {
         let entry = match path {
             Some(path) => base.resolve(&source, capability, path, now).map_err(base_error)?,
@@ -250,4 +279,34 @@ fn browse_at<A: GitHashAlgorithm>(base: &BaseView<A>, original: &NodeTreeSource<
     })();
     live(request)?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn metadata_and_traversal_share_the_object_allowance() {
+        let budget = ReadBudget::new(91, 2);
+        for _ in 2..MAX_READ_OBJECTS {
+            assert_eq!(budget.reserve().unwrap(), MAX_OBJECT_BYTES);
+            budget.charge(0).unwrap();
+        }
+        assert!(budget.reserve().is_err());
+        assert_eq!(budget.objects.get(), MAX_READ_OBJECTS);
+        assert_eq!(budget.bytes.get(), 91);
+        assert!(ReadBudget::new(0, u64::MAX).reserve().is_err());
+    }
+    #[test]
+    fn remaining_total_bounds_decode_before_the_next_read() {
+        let budget = ReadBudget::new(MAX_READ_BYTES - 7, 1);
+        assert_eq!(budget.reserve().unwrap(), 7);
+        assert!(budget.charge(8).is_err());
+        assert_eq!(budget.bytes.get(), MAX_READ_BYTES - 7);
+        budget.charge(7).unwrap();
+        assert_eq!(budget.reserve().unwrap(), 0);
+        budget.charge(0).unwrap();
+        assert!(budget.charge(1).is_err());
+        assert!(ReadBudget::new(u64::MAX, 1).reserve().is_err());
+        assert_eq!(ReadBudget::new(0, 0).reserve().unwrap(), MAX_OBJECT_BYTES);
+    }
 }
