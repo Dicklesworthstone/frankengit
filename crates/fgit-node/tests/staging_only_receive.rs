@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+// This suite intentionally transports blobs. Native tags permit those targets;
+// commit-only branch roots are exercised in the dedicated ref_roots suites.
 //! §22.6's isolation responses on the receive path, end to end.
 //! `frankengit-fg036b`.
 //!
@@ -214,7 +216,7 @@ fn push_blob(
         .block_on(node.materialize_admission_in(&materialization_request))
         .expect("genesis state materializes");
     let object_id = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, blob);
-    let command = format!("{} {object_id} refs/heads/main\0report-status", zero_oid()).into_bytes();
+    let command = format!("{} {object_id} refs/tags/staging-fixture\0report-status", zero_oid()).into_bytes();
     let input = packet_line(command, &one_blob_pack(blob));
     let request = node.request_context();
     let mut live = || true;

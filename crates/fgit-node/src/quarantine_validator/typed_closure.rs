@@ -49,12 +49,11 @@ impl ProductionQuarantineValidator<'_> {
         for command in &request.commands {
             checkpoint(deadline)?;
             if command.new.is_zero() { continue; }
-            if let Some(object) = verified.get(&command.new) {
-                if self_contained && command.ref_name.as_slice().starts_with(b"refs/heads/") {
-                    require_kind(object.object_type, ObjectType::Commit)?;
-                }
+            if verified.contains_key(&command.new) {
                 pending.insert(command.new);
             } else {
+                // Ref-root kind checks happen after all original dependencies
+                // are authorized below, including those used by thin deltas.
                 require_original(&mut required, command.new, None)?;
                 closure.insert(command.new);
             }
@@ -100,6 +99,22 @@ impl ProductionQuarantineValidator<'_> {
             checkpoint(deadline)?;
             let actual = originals.kind(id, deadline)?;
             if let Some(expected) = expected { require_kind(actual, expected)?; }
+        }
+        // A ref is a typed graph root, not just an object ID. Do this only
+        // after original-input authorization: even an uploaded delta RESULT
+        // can inherit its kind from an inaccessible server-owned base. No
+        // type verdict may turn that base into a disclosure oracle.
+        for command in &request.commands {
+            checkpoint(deadline)?;
+            if command.new.is_zero() { continue; }
+            let Some(expected) = fgit_git_object::required_ref_target_kind(&command.ref_name) else {
+                continue;
+            };
+            let actual = match verified.get(&command.new) {
+                Some(object) => object.object_type,
+                None => originals.kind(command.new, deadline)?,
+            };
+            require_kind(actual, expected)?;
         }
         checkpoint(deadline)?;
         Ok(closure)

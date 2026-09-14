@@ -521,8 +521,8 @@ impl OneNode {
             PackedObjectSources::open(&git_directory, self.object_format, self.max_object_bytes, control)?;
         let refs = read_direct_refs(&git_directory, self.object_format, max_refs, control)?;
         let head_target = read_head_target(&git_directory, control)?;
-        let validated = graph::validate_controlled(
-            refs.values().copied(), self.object_format,
+        let validated = graph::validate_typed_controlled(
+            refs.iter().map(|(name, id)| (*id, fgit_git_object::required_ref_target_kind(name.as_bytes()))), self.object_format,
             &parse_limits(self.object_format, self.max_object_bytes), graph::Limits::default(),
             |identity| read_local_object(&git_directory, identity, self.object_format,
                 self.max_object_bytes, &mut packed, control), control,

@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+// This suite intentionally transports blobs. Native tags permit those targets;
+// commit-only branch roots are exercised in the dedicated ref_roots suites.
 //! The hidden-ref policy, proven end to end on the production carrier
 //! (`frankengit-jkbo`, acceptance lines 2 and 3).
 //!
@@ -15,7 +17,7 @@
 //! the helpers below run the whole chain against the durable store:
 //!
 //! 1. initialize a repository through the production path;
-//! 2. push `refs/heads/main` and `refs/private/secret`, at two *different*
+//! 2. push `refs/tags/visible` and `refs/private/secret`, at two *different*
 //!    objects, through the production durable receive path;
 //! 3. stage a policy body hiding `refs/private`;
 //! 4. stage a 2.1 configuration naming it by `policy_root`, differing from the
@@ -108,7 +110,7 @@ const AUTHORITY_DATABASE_FILE: &str = "authority.fsqlite";
 const STORE_INSTANCE: StoreInstanceId = StoreInstanceId::from_raw(1);
 const REPOSITORY_ID: RepositoryId = RepositoryId::from_bytes([0x0B; 16]);
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
-const VISIBLE_REF: &[u8] = b"refs/heads/main";
+const VISIBLE_REF: &[u8] = b"refs/tags/visible";
 const HIDDEN_REF: &[u8] = b"refs/private/secret";
 const HIDE_RULE: &[u8] = b"refs/private";
 const VISIBLE_BLOB: &[u8] = b"hidden-ref policy end-to-end: the advertised blob\n";
@@ -117,7 +119,7 @@ const HIDDEN_BLOB: &[u8] = b"hidden-ref policy end-to-end: the concealed blob\n"
 const REFUSED_REF: &[u8] = b"refs/private/attempted";
 const REFUSED_BLOB: &[u8] = b"hidden-ref policy end-to-end: the refused push blob\n";
 /// Its permitted twin: same repository, same policy, a name no rule matches.
-const ADMITTED_REF: &[u8] = b"refs/heads/other";
+const ADMITTED_REF: &[u8] = b"refs/tags/other";
 const ADMITTED_BLOB: &[u8] = b"hidden-ref policy end-to-end: the admitted push blob\n";
 
 static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);

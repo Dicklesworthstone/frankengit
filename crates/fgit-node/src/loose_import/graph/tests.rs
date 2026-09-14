@@ -174,7 +174,7 @@ fn checksum_valid_wrong_kind_graphs_refuse_before_any_fabric_placement() {
                     _ => objects.tag(format, blob, "commit"),
                 };
                 let path = scratch.0.join("source");
-                source(&path, format, &objects, &[("refs/heads/main", root)], packed);
+                source(&path, format, &objects, &[("refs/tags/invalid-graph", root)], packed);
                 let node = scratch.node(format); let request = node.request_context();
                 let before = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
                 assert!(matches!(node.stage_loose_git_import(&path),
@@ -200,7 +200,7 @@ fn ambiguous_edges_and_unknown_kinds_do_not_choose_a_convenient_parse() {
                 3 => objects.put(format, ObjectType::Tag, format!("object {empty}\ntype tree\ntype blob\n\nmessage").into_bytes()),
                 _ => objects.tree(format, "140000", empty),
             };
-            let path = scratch.0.join("source"); source(&path, format, &objects, &[("refs/heads/main", root)], false);
+            let path = scratch.0.join("source"); source(&path, format, &objects, &[("refs/tags/invalid-graph", root)], false);
             let node = scratch.node(format);
             assert!(matches!(node.stage_loose_git_import(&path),
                 Err(LooseGitImportRefusal::ObjectGraph { code: RefusalCode::ObjectHeaderInvalid, .. })), "case {case}");
@@ -328,3 +328,5 @@ fn valid_submodule_import_publishes_and_reopens_through_the_original_durable_api
         node.shutdown().unwrap();
     }
 }
+
+mod ref_roots;

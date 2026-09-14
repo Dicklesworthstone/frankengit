@@ -103,7 +103,8 @@
                 .expect("fixed zero SHA-1 identity parses"),
                 new: AnyGitOid::from_hex(GitObjectFormat::Sha1, &id.to_string())
                     .expect("computed SHA-1 identity parses"),
-                ref_name: b"refs/heads/main".to_vec(),
+                // Arbitrary-object graph fixtures belong in the tag namespace.
+                ref_name: b"refs/tags/quarantine-fixture".to_vec(),
             }],
             capabilities: Vec::new(),
             push_options: Vec::new(),

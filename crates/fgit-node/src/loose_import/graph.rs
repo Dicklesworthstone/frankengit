@@ -55,8 +55,21 @@ pub(super) fn validate(
     validate_controlled(roots, format, parse_limits, limits, load, &control)
 }
 
+/// Unconstrained graph roots are used only by graph/control unit tests. Real
+/// repository import must retain the namespace constraint of every direct ref.
+#[cfg(test)]
 pub(super) fn validate_controlled(
-    roots: impl IntoIterator<Item = GitOid>,
+    roots: impl IntoIterator<Item = GitOid>, format: GitHashAlgorithm,
+    parse_limits: &ParseLimits, limits: Limits,
+    load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
+    control: &ImportControl<'_>,
+) -> Result<ValidatedImport, LooseGitImportRefusal> {
+    validate_typed_controlled(roots.into_iter().map(|id| (id, None)),
+        format, parse_limits, limits, load, control)
+}
+
+pub(super) fn validate_typed_controlled(
+    roots: impl IntoIterator<Item = (GitOid, Option<ObjectType>)>,
     format: GitHashAlgorithm,
     parse_limits: &ParseLimits,
     limits: Limits,
@@ -73,9 +86,9 @@ pub(super) fn validate_controlled(
     let mut required = BTreeMap::new();
     let mut pending = BTreeSet::new();
     let mut objects = BTreeMap::<GitOid, LooseObject>::new();
-    for root in roots {
+    for (root, kind) in roots {
         control.checkpoint()?;
-        enqueue(root, None, format, limits.objects, &mut required, &mut pending)?;
+        enqueue(root, kind, format, limits.objects, &mut required, &mut pending)?;
     }
     let mut total_bytes = 0_u64;
     let mut edges_left = limits.edges;

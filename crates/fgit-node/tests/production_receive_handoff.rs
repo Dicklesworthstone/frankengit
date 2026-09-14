@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+// This suite intentionally transports blobs. Native tags permit those targets;
+// commit-only branch roots are exercised in the dedicated ref_roots suites.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -180,7 +182,7 @@ fn raw_object_bearing_receive_is_quarantined_then_durably_admitted() {
         .expect("empty genesis state materializes");
     let blob = b"quarantined production blob\n";
     let object_id = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, blob);
-    let command = format!("{} {object_id} refs/heads/main\0report-status", zero_oid()).into_bytes();
+    let command = format!("{} {object_id} refs/tags/transport-main\0report-status", zero_oid()).into_bytes();
     let input = packet_line(command, &one_blob_pack(blob));
     let request = node.request_context();
     let mut live = || true;
@@ -265,7 +267,7 @@ fn raw_receive_cancellation_prevents_quarantine_handoff_and_publication() {
         .expect("empty genesis state materializes");
     let blob = b"cancelled quarantine blob\n";
     let object_id = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, blob);
-    let command = format!("{} {object_id} refs/heads/main\0report-status", zero_oid()).into_bytes();
+    let command = format!("{} {object_id} refs/tags/transport-main\0report-status", zero_oid()).into_bytes();
     let input = packet_line(command, &one_blob_pack(blob));
     let request = node.request_context();
     let mut cancelled = || false;
@@ -313,7 +315,7 @@ fn stale_validation_basis_refuses_thin_base_after_successor_omits_it() {
         .block_on(node.materialize_admission_in(&genesis_request))
         .expect("empty genesis state materializes");
     let create_command =
-        format!("{} {base_id} refs/heads/base\0report-status", zero_oid()).into_bytes();
+        format!("{} {base_id} refs/tags/transport-base\0report-status", zero_oid()).into_bytes();
     let create = node
         .runtime()
         .block_on(node.receive_loopback_pack_durable_in(
@@ -337,11 +339,11 @@ fn stale_validation_basis_refuses_thin_base_after_successor_omits_it() {
         .runtime()
         .block_on(node.materialize_admission_in(&basis_with_base_request))
         .expect("basis A materializes after the base publication");
-    let base_ref = RefName::try_new(b"refs/heads/base").expect("fixed branch ref is valid");
+    let base_ref = RefName::try_new(b"refs/tags/transport-base").expect("fixed native tag ref is valid");
     assert_eq!(selected_a.snapshot().refs.get(&base_ref), Some(&base_id));
 
     let delete_command = format!(
-        "{base_id} {} refs/heads/base\0report-status delete-refs",
+        "{base_id} {} refs/tags/transport-base\0report-status delete-refs",
         zero_oid()
     )
     .into_bytes();
@@ -371,7 +373,7 @@ fn stale_validation_basis_refuses_thin_base_after_successor_omits_it() {
     assert!(selected_b.snapshot().refs.is_empty());
 
     let stale_command =
-        format!("{} {target_id} refs/heads/stale\0report-status", zero_oid()).into_bytes();
+        format!("{} {target_id} refs/tags/transport-stale\0report-status", zero_oid()).into_bytes();
     let stale = node
         .runtime()
         .block_on(node.receive_loopback_pack_durable_in(

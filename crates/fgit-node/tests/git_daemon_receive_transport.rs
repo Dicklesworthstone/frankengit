@@ -24,7 +24,9 @@ use fgit_wire::WireLimits;
 
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 const PUSHED_BLOB: &[u8] = b"git-daemon receive transport: the pushed blob body\n";
-const PUSHED_REF: &str = "refs/heads/main";
+// The transport fixtures deliberately transfer blobs; only a non-branch ref
+// may name those native objects. Branch-kind behavior has dedicated twins below.
+const PUSHED_REF: &str = "refs/tags/transport-fixture";
 
 static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -594,3 +596,6 @@ fn a_receive_processing_deadline_refusal_is_reported_not_hung_up() {
         "an over-budget receive publishes no ref when admission reports refusal, got {refs:?}"
     );
 }
+
+#[path = "git_daemon_receive_transport/ref_roots.rs"]
+mod ref_roots;

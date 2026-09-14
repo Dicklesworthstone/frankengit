@@ -354,3 +354,5 @@ fn typed_handoff_enters_real_admission_and_recovers_without_a_second_decision() 
         node.shutdown().unwrap();
     }
 }
+
+mod ref_roots;
