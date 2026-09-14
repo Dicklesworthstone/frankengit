@@ -205,6 +205,15 @@ impl OneNode {
         self.list_ref_page_in(request, visibility, after, limit, expected_head, b"refs/").await
     }
 
+    /// List current visible tag refs in raw-byte order using the existing
+    /// snapshot-bound pagination contract. No automatic dereference or trust.
+    pub async fn list_tag_refs_in(
+        &self, request: &NodeRequestContext, visibility: &RefVisibility,
+        after: Option<&RefName>, limit: u16, expected_head: Option<RepositoryAuthorityHeadId>,
+    ) -> Result<(RepositoryAuthorityHeadId, Vec<(RefName, GitOid)>, Option<RefName>), NodeWorkspaceRefusal> {
+        self.list_ref_page_in(request, visibility, after, limit, expected_head, b"refs/tags/").await
+    }
+
     async fn list_ref_page_in(
         &self, request: &NodeRequestContext, visibility: &RefVisibility,
         after: Option<&RefName>, limit: u16, expected_head: Option<RepositoryAuthorityHeadId>,

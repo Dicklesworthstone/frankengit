@@ -1,6 +1,7 @@
 //! Authority-selected TreeFS input discovery over the production object fabric.
 
 mod branches;
+mod tags;
 mod full_bundle;
 mod candidate;
 mod merge_prepare;
@@ -45,6 +46,8 @@ use std::cell::Cell;
 /// An unavailable/hidden ref is intentionally one indistinguishable outcome.
 #[derive(Debug)]
 pub enum NodeWorkspaceRefusal {
+    /// Native tag construction or verified peeling refused.
+    Tag(fgit_forge::tags::TagRefusal),
     /// An exact source browse request failed without returning partial data.
     SourceBrowse(Box<SourceBrowseError>),
     /// A bounded native Git bundle cannot be parsed, selected or constructed.
