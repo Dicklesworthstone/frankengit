@@ -1,0 +1,52 @@
+name: Final native tag integration
+on:
+  push:
+    branches: [tooling/native-continuation-4ff36797]
+    paths: [tools/native-tag-work/races.rs, tools/native-tag-work/prepare_final.py, .github/workflows/native-tag-final.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.prepare.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - id: prepare
+        run: python3 tools/native-tag-work/prepare_final.py
+  native:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TARGET_DIR: /tmp/fg-native-tags-final
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - name: Native compilation and actual tag lifecycle
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/tags-evidence"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/tags-evidence/revision.txt"
+          rustc -Vv | tee "$RUNNER_TEMP/tags-evidence/rustc.txt"
+          bash scripts/verify_native_tags.sh check 2>&1 | tee "$RUNNER_TEMP/tags-evidence/check.log"
+          bash scripts/verify_native_tags.sh test 2>&1 | tee "$RUNNER_TEMP/tags-evidence/test.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-tags-final-${{ needs.prepare.outputs.source }}
+          path: ${{ runner.temp }}/tags-evidence
+          retention-days: 1
+          if-no-files-found: error
