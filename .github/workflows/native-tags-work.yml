@@ -16,4 +16,5 @@ jobs:
         with:
           fetch-depth: 0
       - id: prepare
-        run: python3 tools/native-tags/prepare.py 43a97bd32d3fc92927666c07fdb90c8c7c9d0244 1 3e341bfa22a6dcd9fccba031aadba5d5c1ee9e20b497bddb7a29e78803b2ff3d 'feat(forge): construct byte-exact native tag proposals (FG-051a)'
+        run: |
+          python3 tools/native-tags/prepare.py 43a97bd32d3fc92927666c07fdb90c8c7c9d0244 1 3e341bfa22a6dcd9fccba031aadba5d5c1ee9e20b497bddb7a29e78803b2ff3d 'feat(forge): construct byte-exact native tag proposals (FG-051a)'
