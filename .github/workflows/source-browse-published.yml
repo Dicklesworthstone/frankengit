@@ -16,10 +16,11 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_TARGET_DIR: /tmp/fg-source-browse-native
+      RUST_BACKTRACE: '1'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: d80f6f9ee5c1d7d4b8f9ae9fbd6616f2599339f7
+          ref: 07890078bfba201b26894847d8fecfaa17047aa5
           persist-credentials: false
       - name: Execute repository-owned native verification
         run: |
@@ -51,7 +52,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: published-source-browse-d80f6f9
+          name: published-source-browse-0789007
           path: ${{ runner.temp }}/browse-evidence
           retention-days: 1
           if-no-files-found: error
