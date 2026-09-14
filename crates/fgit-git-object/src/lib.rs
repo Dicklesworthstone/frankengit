@@ -18,6 +18,9 @@ pub use fgit_crypto::{
 pub use fgit_deflate::{CancellationProbe, InflateLimits, InflateRefusal, StreamProgress};
 use fgit_types::{GitHashAlgorithm as NativeGitHashAlgorithm, GitOid as AnyGitOid};
 
+pub mod reference_target;
+pub use reference_target::{ReferenceTargetKindMismatch, required_ref_target_kind, validate_reference_target_kind};
+
 pub mod notes;
 pub use notes::{
     DEFAULT_NOTES_FANOUT_THRESHOLD, NotesEntry, NotesError, NotesMergeConflict, NotesMergeStrategy,
