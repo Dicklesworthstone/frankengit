@@ -1,0 +1,26 @@
+name: Exact source read
+on:
+  push:
+    branches: [tooling/exact-source-read-e1b8180e]
+    paths: [.github/workflows/exact-source-read.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: e1b8180e604fb65d0796af3bcc1026f3f5545ee7
+          persist-credentials: false
+      - run: |
+          mkdir -p "$RUNNER_TEMP/source"
+          git rev-parse HEAD > "$RUNNER_TEMP/source/revision.txt"
+          git archive HEAD --format=tar.gz --output="$RUNNER_TEMP/source/source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: exact-source-e1b8180e
+          path: ${{ runner.temp }}/source
+          retention-days: 1
+          if-no-files-found: error
