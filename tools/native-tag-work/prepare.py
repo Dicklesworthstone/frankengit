@@ -1,6 +1,9 @@
 import base64, hashlib, os, pathlib, subprocess, zlib
 base = '4ff367973c805f98a6e81ed32fb469bce31c2e97'
 source = pathlib.Path('tools/native-tag-work/patch.b64').read_bytes()
+assert source[4429:4430] == b'f' and source[6844:6849] == b'cPvbn'
+source = source[:6844] + b'zq' + source[6849:]
+source = source[:4429] + b'/' + source[4430:]
 patch = zlib.decompress(base64.b64decode(source, validate=True))
 assert hashlib.sha256(patch).hexdigest() == '7a8a721e6c12787b9b883653795049ca0a6da70f78ab873e706a29cb7bb3fed9', 'saved source digest mismatch'
 p = pathlib.Path(os.environ['RUNNER_TEMP'])/'tags.patch'; p.write_bytes(patch)
