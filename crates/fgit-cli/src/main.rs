@@ -11,6 +11,7 @@ mod merge_apply;
 mod publication_support;
 mod pull_request;
 mod review_commands;
+mod source_browse;
 mod source_history;
 mod source_review;
 mod source_search;
@@ -25,6 +26,15 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if let Some(command @ ("tree" | "show")) = arguments.first().map(String::as_str) {
+        return match source_browse::run(&arguments[1..], command == "show") {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("{{\"type\":\"source_read_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "bundle") {
         return match bundle::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
