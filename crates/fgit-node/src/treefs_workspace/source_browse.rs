@@ -186,7 +186,7 @@ impl<A: GitHashAlgorithm> ObjectSource<A> for BoundedSource<'_, '_> {
             maximum_object_bytes: self.inner.inner.maximum_object_bytes.min(MAX_OBJECT_BYTES),
             ..self.inner.inner
         }, selected: self.inner.selected, workspace: self.inner.workspace };
-        let body = bounded.read_object::<A>(id, kind)?;
+        let body = bounded.read_object::<A>(id, kind, grant)?;
         if !workspace_request_live(self.request) { return Err(refused("source read cancelled")); }
         let total = self.bytes.get().checked_add(body.len() as u64)
             .filter(|total| *total <= MAX_READ_BYTES).ok_or_else(|| refused("source byte budget"))?;
@@ -207,7 +207,7 @@ fn browse_at<A: GitHashAlgorithm>(base: &BaseView<A>, original: &NodeTreeSource<
             Some(path) => base.resolve(&source, capability, path, now).map_err(base_error)?,
             None => BaseEntry::Directory { oid: *base.base_tree_oid() },
         };
-        let object_id = oid(entry.oid(), original.inner.object_format)?;
+        let object_id = oid::<A>(entry.oid(), original.inner.object_format)?;
         let content = match &query.action {
             SourceBrowseAction::List { after, limit } => {
                 let mut entries = base.list(&source, capability, path, now).map_err(base_error)?;
@@ -221,7 +221,7 @@ fn browse_at<A: GitHashAlgorithm>(base: &BaseView<A>, original: &NodeTreeSource<
                     if rows.len() == usize::from(*limit) {
                         next_after = rows.last().map(|row: &SourceDirectoryEntry| row.name.clone()); break;
                     }
-                    rows.push(SourceDirectoryEntry { name, oid: oid(entry.oid(), original.inner.object_format)?, kind: kind(&entry)? });
+                    rows.push(SourceDirectoryEntry { name, oid: oid::<A>(entry.oid(), original.inner.object_format)?, kind: kind(&entry)? });
                 }
                 SourceBrowseContent::Directory { entries: rows, next_after }
             }
@@ -244,8 +244,8 @@ fn browse_at<A: GitHashAlgorithm>(base: &BaseView<A>, original: &NodeTreeSource<
             }
         };
         Ok(SourceBrowseReport { repository_id: base.repository_id(), source_head: head,
-            source_rcr: base.base_rcr_id(), source_commit: oid(base.base_commit_oid(), original.inner.object_format)?,
-            root_tree: oid(base.base_tree_oid(), original.inner.object_format)?, object_id,
+            source_rcr: base.base_rcr_id(), source_commit: oid::<A>(base.base_commit_oid(), original.inner.object_format)?,
+            root_tree: oid::<A>(base.base_tree_oid(), original.inner.object_format)?, object_id,
             path: query.path.clone(), content })
     })();
     live(request)?;
