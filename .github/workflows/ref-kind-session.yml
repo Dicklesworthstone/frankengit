@@ -5,25 +5,9 @@ on:
 permissions:
   contents: read
 jobs:
-  prepare:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    outputs:
-      source: ${{ steps.prepare.outputs.source }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          fetch-depth: 0
-      - id: prepare
-        run: python3 tools/ref-kind-session/prepare.py
   verify:
-    needs: prepare
     runs-on: ubuntu-22.04
     timeout-minutes: 35
-    permissions:
-      contents: read
     env:
       RCH_CARGO_WRAPPER_BYPASS: '1'
       CARGO_BUILD_JOBS: '1'
@@ -40,6 +24,6 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           path: source
-          ref: ${{ needs.prepare.outputs.source }}
+          ref: ec949642f9a7e7c3943a86605cb374846890db9b
           persist-credentials: false
       - run: python3 workbench/tools/ref-kind-session/verify.py source
