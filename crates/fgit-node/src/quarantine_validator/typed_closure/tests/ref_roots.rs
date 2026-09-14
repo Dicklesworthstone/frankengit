@@ -151,7 +151,7 @@ fn ref_roots_enforce_omitted_targets_after_visibility_and_keep_commit_and_tag_tw
         let (pack, receipt) = packed(format, &all.iter().map(full).collect::<Vec<_>>());
         let mut initial = request(format, &all.iter().map(|o| o.id).collect::<Vec<_>>());
         initial.commands[2].ref_name = b"refs/heads/main".to_vec();
-        initial.capabilities.push(b"atomic".to_vec());
+        initial.capabilities.push(fgit_wire::Capability::parse(b"atomic", &fgit_wire::WireLimits::default()).unwrap());
         let published = admit(&node, &at, &initial, &pack, &receipt, b"valid-ref-roots");
         assert!(
             published
@@ -189,7 +189,7 @@ fn ref_roots_enforce_omitted_targets_after_visibility_and_keep_commit_and_tag_tw
             );
         }
         let mut reused = branch_request(format, tip.id);
-        reused.capabilities.push(b"atomic".to_vec());
+        reused.capabilities.push(fgit_wire::Capability::parse(b"atomic", &fgit_wire::WireLimits::default()).unwrap());
         let admitted = admit(
             &node,
             &at,
