@@ -1,0 +1,57 @@
+name: Verify published source browsing
+on:
+  push:
+    branches: [tooling/exact-source-read-e1b8180e]
+    paths: [.github/workflows/source-browse-published.yml]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TARGET_DIR: /tmp/fg-source-browse-native
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: d80f6f9ee5c1d7d4b8f9ae9fbd6616f2599339f7
+          persist-credentials: false
+      - name: Execute repository-owned native verification
+        run: |
+          set +e
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/browse-evidence"
+          out="$RUNNER_TEMP/browse-evidence"
+          git rev-parse HEAD | tee "$out/revision.txt"
+          rustc -Vv > "$out/rustc.txt"
+          bash scripts/verify_source_browse.sh check > "$out/check.log" 2>&1
+          a=$?
+          tail -n 100 "$out/check.log"
+          bash scripts/verify_source_browse.sh test > "$out/test.log" 2>&1
+          b=$?
+          tail -n 150 "$out/test.log"
+          printf 'check=%s test=%s\n' "$a" "$b" > "$out/exit.txt"
+          test "$a" = 0 && test "$b" = 0
+      - name: Retain exact-source runnable artifacts for local diagnosis
+        if: always()
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/browse-evidence"
+          mkdir -p "$out"
+          git diff --check
+          git status --porcelain > "$out/status.txt"
+          git archive HEAD --format=tar.gz --output="$out/source.tar.gz"
+          if test -x "$CARGO_TARGET_DIR/debug/fg"; then cp "$CARGO_TARGET_DIR/debug/fg" "$out/fg"; fi
+          find "$CARGO_TARGET_DIR/debug/deps" -maxdepth 1 -type f -executable \( -name 'source_browse-*' -o -name 'native_source_browse_smoke-*' -o -name 'fg-*' \) -exec cp '{}' "$out/" \;
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: published-source-browse-d80f6f9
+          path: ${{ runner.temp }}/browse-evidence
+          retention-days: 1
+          if-no-files-found: error
