@@ -4,7 +4,10 @@ ROOT=Path.cwd()
 BASE='e1b8180e604fb65d0796af3bcc1026f3f5545ee7'
 def git(*args, cwd=ROOT):
     return subprocess.check_output(['git', *args],cwd=cwd,text=True).strip()
-patch=gzip.decompress(base64.b64decode((ROOT/'tools/source-browse-work/node.b64').read_text(),validate=True))
+encoded=(ROOT/'tools/source-browse-work/node.b64').read_text()
+assert encoded[4357:4358] == 'P'
+encoded=encoded[:4357]+'N'+encoded[4358:]
+patch=gzip.decompress(base64.b64decode(encoded,validate=True))
 assert hashlib.sha256(patch).hexdigest()=='875bf92e751b86847b4c79d68e45664c6baf301269cb90cef3f2f986ea5ba1e3'
 work=Path(os.environ['RUNNER_TEMP'])/'source-browse-product'
 git('worktree','add','--detach',str(work),BASE)
