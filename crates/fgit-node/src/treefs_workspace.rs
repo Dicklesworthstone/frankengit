@@ -16,6 +16,8 @@ pub use issues::IssueReadRefusal;
 mod session_state;
 mod sessions;
 mod source_search;
+mod source_browse;
+use fgit_forge::source_browse::SourceBrowseError;
 mod transaction_recovery;
 pub use session_state::WorkspaceSessionRefusal;
 pub use sessions::{MergeWorkspaceReceipt, WorkspaceShutdownBlocked};
@@ -43,6 +45,8 @@ use std::cell::Cell;
 /// An unavailable/hidden ref is intentionally one indistinguishable outcome.
 #[derive(Debug)]
 pub enum NodeWorkspaceRefusal {
+    /// An exact source browse request failed without returning partial data.
+    SourceBrowse(Box<SourceBrowseError>),
     /// A bounded native Git bundle cannot be parsed, selected or constructed.
     FullBundle(Box<fgit_pack::full_bundle::FullBundleError>),
     /// The selected visible Git graph could not be read completely.
@@ -160,6 +164,18 @@ impl OneNode {
         ) -> Result<T, NodeWorkspaceRefusal>
         + Send,
     ) -> Result<T, NodeWorkspaceRefusal> {
+        self.with_workspace_snapshot_in(request, reference, visibility, capability, now, None, None,
+            |base, source, capability, _head| consume(base, source, capability)).await
+    }
+
+    /// Shared single-selection variant for snapshot-pinned source consumers.
+    async fn with_workspace_snapshot_in<A: GitHashAlgorithm, T>(
+        &self, request: &NodeRequestContext, reference: &RefName,
+        visibility: &RefVisibility, capability: &mut TreeCapability, now: u64,
+        expected_head: Option<fgit_types::RepositoryAuthorityHeadId>, expected_commit: Option<AnyOid>,
+        consume: impl FnOnce(&BaseView<A>, &NodeTreeSource<'_>, &mut TreeCapability,
+            fgit_types::RepositoryAuthorityHeadId) -> Result<T, NodeWorkspaceRefusal> + Send,
+    ) -> Result<T, NodeWorkspaceRefusal> {
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         if capability.repository_id() != self.repository_id() {
             return Err(NodeWorkspaceRefusal::RepositoryMismatch);
@@ -189,6 +205,12 @@ impl OneNode {
             .refs
             .get(reference)
             .ok_or(NodeWorkspaceRefusal::RefUnavailable)?;
+        if expected_head.is_some_and(|head| head != selected.basis().id()) {
+            return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(SourceBrowseError::SnapshotMoved)));
+        }
+        if expected_commit.is_some_and(|expected| expected != *commit) {
+            return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(SourceBrowseError::CommitMoved)));
+        }
         let rcr = match selected.selected_closure().source() {
             ClosureSelectionSource::RepositoryCommit(rcr)
             | ClosureSelectionSource::CumulativeHistory { latest: rcr, .. } => rcr,
@@ -245,7 +267,7 @@ impl OneNode {
                 source.inner.parse_limits(),
                 PathPolicy::default(),
             );
-            consume(&base, &source, capability)
+            consume(&base, &source, capability, selected.basis().id())
         })();
         if let PackContextCheckpoint::Stopped { budget_exhaustion } =
             checkpoint_pack_context(request.authority())
