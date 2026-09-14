@@ -224,3 +224,6 @@ pub use fgit_diff::patch;
 
 /// Snapshot-pinned directory and exact-byte source browsing contracts.
 pub mod source_browse;
+
+/// Native tag construction and snapshot-pinned inspection contracts.
+pub mod tags;
