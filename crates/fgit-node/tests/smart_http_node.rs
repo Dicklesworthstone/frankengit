@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fgit_node::{NodeConfig, NodeSmartHttpRefusal, OneNode};
+use fgit_authority::IdempotencyKey;
+use fgit_node::{LoopbackReceiveSession, NodeConfig, NodeSmartHttpRefusal, OneNode};
+use fgit_types::PrincipalId;
 use fgit_types::numeric::HeadGeneration;
 use fgit_types::{GitHashAlgorithm, RepositoryId, TenantId};
 use fgit_wire::smart_http::{HttpLimits, ProtocolVersion, parse_head};
@@ -228,5 +230,108 @@ fn rpc_cancellation_precedes_authority_work_and_response_bytes() {
         .is_err()
     );
     assert!(output.is_empty());
+    node.shutdown().unwrap();
+}
+
+fn receive_discovery_request(route: &str, protocol: Option<&str>) -> Vec<u8> {
+    let protocol = protocol.map_or(String::new(), |value| format!("Git-Protocol: {value}\r\n"));
+    format!(
+        "GET {route}/info/refs?service=git-receive-pack HTTP/1.1\r\nHost: loopback\r\n{protocol}\r\n"
+    )
+    .into_bytes()
+}
+
+fn authenticated_receive() -> LoopbackReceiveSession {
+    LoopbackReceiveSession::authenticated(
+        PrincipalId::from_bytes([0x77; 16]),
+        IdempotencyKey::new(b"smart-http-receive-discovery".to_vec())
+            .expect("fixed retry key is bounded"),
+    )
+}
+
+#[test]
+fn authenticated_receive_discovery_uses_authority_visible_refs() {
+    let scratch = Scratch::new();
+    let node = serving_node(&scratch, GitHashAlgorithm::Sha1);
+    let route = std::str::from_utf8(node.git_daemon_repository_path().as_bytes()).unwrap();
+    let bytes = receive_discovery_request(route, None);
+    let head = parse_head(&bytes, HttpLimits::default()).unwrap().unwrap();
+    let response = node
+        .smart_http_receive_discovery_in(&head, &authenticated_receive(), WireLimits::default())
+        .expect("authenticated receive discovery serves");
+    assert_eq!(response.version(), ProtocolVersion::V0);
+    assert!(
+        response
+            .head()
+            .contains("application/x-git-receive-pack-advertisement")
+    );
+    assert!(
+        response
+            .body()
+            .starts_with(b"001f# service=git-receive-pack\n0000")
+    );
+    assert!(
+        response
+            .body()
+            .windows(b"report-status".len())
+            .any(|w| w == b"report-status")
+    );
+    assert!(
+        response
+            .body()
+            .windows(b"object-format=sha1".len())
+            .any(|w| w == b"object-format=sha1")
+    );
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn receive_discovery_refuses_anonymous_and_protocol_v2() {
+    let scratch = Scratch::new();
+    let node = serving_node(&scratch, GitHashAlgorithm::Sha1);
+    let route = std::str::from_utf8(node.git_daemon_repository_path().as_bytes()).unwrap();
+    let anonymous_bytes = receive_discovery_request(route, None);
+    let anonymous_head = parse_head(&anonymous_bytes, HttpLimits::default())
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        node.smart_http_receive_discovery_in(
+            &anonymous_head,
+            &LoopbackReceiveSession::Anonymous,
+            WireLimits::default(),
+        ),
+        Err(NodeSmartHttpRefusal::UnauthenticatedReceive)
+    ));
+    let v2_bytes = receive_discovery_request(route, Some("version=2"));
+    let v2_head = parse_head(&v2_bytes, HttpLimits::default())
+        .unwrap()
+        .unwrap();
+    assert!(
+        node.smart_http_receive_discovery_in(
+            &v2_head,
+            &authenticated_receive(),
+            WireLimits::default(),
+        )
+        .is_err()
+    );
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn receive_discovery_sha256_retains_authenticated_object_domain() {
+    let scratch = Scratch::new();
+    let node = serving_node(&scratch, GitHashAlgorithm::Sha256);
+    let route = std::str::from_utf8(node.git_daemon_repository_path().as_bytes()).unwrap();
+    let bytes = receive_discovery_request(route, None);
+    let head = parse_head(&bytes, HttpLimits::default()).unwrap().unwrap();
+    let response = node
+        .smart_http_receive_discovery_in(&head, &authenticated_receive(), WireLimits::default())
+        .unwrap();
+    assert!(
+        response
+            .body()
+            .windows(b"object-format=sha256".len())
+            .any(|w| w == b"object-format=sha256")
+    );
     node.shutdown().unwrap();
 }

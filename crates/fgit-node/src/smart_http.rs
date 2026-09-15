@@ -11,8 +11,10 @@ use std::fmt::{self, Display, Formatter};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use fgit_wire::receive::ReceiveCancellation;
-use fgit_wire::smart_http::rpc::{RpcError, UploadRpc, upload_discovery};
+use fgit_wire::receive::{
+    ReceiveCancellation, ReceiveContext, ReceiveError, ReceiveLimits, SignedPushProfile,
+};
+use fgit_wire::smart_http::rpc::{RpcError, UploadRpc, receive_discovery, upload_discovery};
 use fgit_wire::smart_http::{
     HttpError, HttpLimits, Operation, ProtocolVersion, RequestHead, ResponseEncoder, Service,
     success_head,
@@ -21,10 +23,10 @@ use fgit_wire::{Capabilities, Packet, UploadPackRepository, WireError, WireLimit
 
 use super::{
     AdmissionUploadPackRepository, BudgetClass, GitDaemonSessionDeadline,
-    GitDaemonTransportRefusal, NodeAdmissionViewRefusal, NodeGitDaemonServeRefusal,
-    NodePackMaterializationRefusal, OneNode, PackContextCheckpoint, SELECTED_PACK_BUDGET_CLASS,
-    SELECTED_PACK_MATERIALIZATION_OPERATION, checkpoint_pack_context, git_daemon_capabilities,
-    selected_write_profile,
+    GitDaemonTransportRefusal, LoopbackReceiveSession, NodeAdmissionViewRefusal,
+    NodeGitDaemonServeRefusal, NodePackMaterializationRefusal, OneNode, PackContextCheckpoint,
+    SELECTED_PACK_BUDGET_CLASS, SELECTED_PACK_MATERIALIZATION_OPERATION, checkpoint_pack_context,
+    git_daemon_capabilities, selected_write_profile,
 };
 
 /// Complete successful Smart HTTP discovery response.
@@ -85,6 +87,8 @@ impl NodeSmartHttpUploadReceipt {
 pub enum NodeSmartHttpRefusal {
     RepositoryRouteMismatch,
     UnsupportedOperation,
+    /// Receive-pack discovery is never available without caller-authenticated identity.
+    UnauthenticatedReceive,
     /// The HTTP body ended at its declared boundary while caller-owned bytes remained.
     TrailingRequestBytes {
         count: usize,
@@ -93,6 +97,7 @@ pub enum NodeSmartHttpRefusal {
     Serve(Box<NodeGitDaemonServeRefusal>),
     Pack(Box<NodePackMaterializationRefusal>),
     Rpc(Box<RpcError>),
+    Receive(Box<ReceiveError>),
     Http(Box<HttpError>),
     Wire(Box<WireError>),
     Io {
@@ -110,6 +115,9 @@ impl Display for NodeSmartHttpRefusal {
             Self::UnsupportedOperation => {
                 formatter.write_str("smart HTTP operation is not served by this node entry point")
             }
+            Self::UnauthenticatedReceive => {
+                formatter.write_str("smart HTTP receive-pack requires an authenticated principal")
+            }
             Self::TrailingRequestBytes { count } => {
                 write!(
                     formatter,
@@ -120,6 +128,7 @@ impl Display for NodeSmartHttpRefusal {
             Self::Serve(error) => Display::fmt(error, formatter),
             Self::Pack(error) => Display::fmt(error, formatter),
             Self::Rpc(error) => Display::fmt(error, formatter),
+            Self::Receive(error) => Display::fmt(error, formatter),
             Self::Http(error) => Display::fmt(error, formatter),
             Self::Wire(error) => Display::fmt(error, formatter),
             Self::Io { operation, source } => write!(formatter, "{operation}: {source}"),
@@ -134,11 +143,13 @@ impl Error for NodeSmartHttpRefusal {
             Self::Serve(error) => Some(error.as_ref()),
             Self::Pack(error) => Some(error.as_ref()),
             Self::Rpc(error) => Some(error.as_ref()),
+            Self::Receive(error) => Some(error.as_ref()),
             Self::Http(error) => Some(error.as_ref()),
             Self::Wire(error) => Some(error.as_ref()),
             Self::Io { source, .. } => Some(source),
             Self::RepositoryRouteMismatch
             | Self::UnsupportedOperation
+            | Self::UnauthenticatedReceive
             | Self::TrailingRequestBytes { .. } => None,
         }
     }
@@ -162,6 +173,11 @@ impl From<NodePackMaterializationRefusal> for NodeSmartHttpRefusal {
 impl From<RpcError> for NodeSmartHttpRefusal {
     fn from(value: RpcError) -> Self {
         Self::Rpc(Box::new(value))
+    }
+}
+impl From<ReceiveError> for NodeSmartHttpRefusal {
+    fn from(value: ReceiveError) -> Self {
+        Self::Receive(Box::new(value))
     }
 }
 impl From<HttpError> for NodeSmartHttpRefusal {
@@ -450,6 +466,68 @@ impl OneNode {
             version: request.requested_version,
             body_bytes,
             pack_requested,
+        })
+    }
+
+    /// Build authenticated receive-pack discovery from one authority-selected
+    /// visible ref snapshot. Caller-owned authentication is required before
+    /// any canonical state is read; protocol v2 push remains explicitly
+    /// unsupported because Git does not define a v2 receive-pack service.
+    pub fn smart_http_receive_discovery_in(
+        &self,
+        request: &RequestHead<'_>,
+        session: &LoopbackReceiveSession,
+        limits: WireLimits,
+    ) -> Result<NodeSmartHttpDiscovery, NodeSmartHttpRefusal> {
+        if !self.smart_http_route_matches(request) {
+            return Err(NodeSmartHttpRefusal::RepositoryRouteMismatch);
+        }
+        if request.operation != Operation::Discover(Service::ReceivePack) {
+            return Err(NodeSmartHttpRefusal::UnsupportedOperation);
+        }
+        if !matches!(session, LoopbackReceiveSession::Authenticated(_)) {
+            return Err(NodeSmartHttpRefusal::UnauthenticatedReceive);
+        }
+        if request.requested_version == ProtocolVersion::V2 {
+            return Err(HttpError::UnsupportedVersion.into());
+        }
+
+        let node_request = self.request_context();
+        let repository = self
+            .runtime
+            .block_on(self.durable_admission_upload_pack_repository_in(&node_request, &limits))
+            .map_err(NodeSmartHttpRefusal::from)?;
+        let format_name = match self.object_format {
+            fgit_types::GitHashAlgorithm::Sha1 => "sha1",
+            fgit_types::GitHashAlgorithm::Sha256 => "sha256",
+        };
+        let capability_text =
+            format!("report-status delete-refs ofs-delta object-format={format_name}");
+        let server_capabilities = Capabilities::parse_v1(capability_text.as_bytes(), &limits)?;
+        let wire_format = match self.object_format {
+            fgit_types::GitHashAlgorithm::Sha1 => fgit_wire::GitObjectFormat::Sha1,
+            fgit_types::GitHashAlgorithm::Sha256 => fgit_wire::GitObjectFormat::Sha256,
+        };
+        let receive_limits = ReceiveLimits {
+            wire: limits.clone(),
+            ..ReceiveLimits::default()
+        };
+        let context = ReceiveContext::new(
+            wire_format,
+            server_capabilities,
+            receive_limits,
+            SignedPushProfile::Refuse,
+        )?;
+        let body = receive_discovery(
+            repository.advertised_refs().to_vec(),
+            &context,
+            request.requested_version,
+        )?;
+        let length = u64::try_from(body.len()).map_err(|_| WireError::AllocationFailure)?;
+        Ok(NodeSmartHttpDiscovery {
+            head: success_head(request, Some(length)),
+            body,
+            version: request.requested_version,
         })
     }
 }
