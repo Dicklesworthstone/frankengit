@@ -1,6 +1,5 @@
 //! Resumable canonical forge-event feed for trusted local integrations.
 use crate::publication_support::quote;
-use fgit_admission::merge::native::feed::{ForgeEventCursor, ForgeEventEnvelope};
 use fgit_node::{NodeConfig, OneNode};
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{
@@ -20,12 +19,17 @@ frame in lowercase hex, so integrations need not infer fields from display text.
 This command is read-only and does not acknowledge delivery. Exit 0: complete
 page; 2: input/read/output failure.";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EventCursor {
+    repository_sequence: u64,
+    event_index: u32,
+}
 struct Options {
     storage: PathBuf,
     tenant: TenantId,
     repository: RepositoryId,
     format: GitHashAlgorithm,
-    after: Option<ForgeEventCursor>,
+    after: Option<EventCursor>,
     limit: u16,
     expected_head: Option<RepositoryAuthorityHeadId>,
 }
@@ -48,7 +52,9 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
         node.runtime()
             .block_on(node.read_forge_events_in(
                 &request,
-                options.after,
+                options
+                    .after
+                    .map(|cursor| (cursor.repository_sequence, cursor.event_index)),
                 options.limit,
                 options.expected_head,
             ))
@@ -57,7 +63,42 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     let cleanup = node.shutdown().err().map(|e| e.to_string());
     match (operation, cleanup) {
         (Ok(page), None) => {
-            write_page(&mut std::io::stdout().lock(), &receipt(&options, &page)?)?;
+            let rows = page
+                .events
+                .iter()
+                .map(|value| {
+                    let frame = fgit_codec::encode_body(&value.event).map_err(|e| e.to_string())?;
+                    Ok(format!(
+                        "{{\"cursor\":{},\"repository_sequence\":{},\"event_index\":{},\"tx_id\":{},\"policy_epoch\":{},\"aggregate\":{},\"aggregate_version\":{},\"kind\":{},\"event_frame_hex\":{}}}",
+                        quote(&cursor(value.cursor.repository_sequence, value.cursor.event_index)),
+                        value.cursor.repository_sequence,
+                        value.cursor.event_index,
+                        quote(&value.tx_id.to_string()),
+                        value.policy_epoch.get(),
+                        quote(&value.event.aggregate.to_string()),
+                        value.event.version.get(),
+                        value.event.payload.kind(),
+                        quote(&hex(&frame))
+                    ))
+                })
+                .collect::<Result<Vec<String>, String>>()?
+                .join(",");
+            let next_after = page.next_after.map_or_else(
+                || "null".into(),
+                |value| quote(&cursor(value.repository_sequence, value.event_index)),
+            );
+            let receipt = format!(
+                "{{\"type\":\"forge_event_page\",\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"source_head\":{},\"snapshot_token\":{},\"events\":[{}],\"next_after\":{},\"has_more\":{},\"node_closed\":true}}",
+                quote(&options.tenant.to_string()),
+                quote(&options.repository.to_string()),
+                quote(options.format.as_str()),
+                quote(&page.source_head.to_string()),
+                quote(&head_token(page.source_head)),
+                rows,
+                next_after,
+                page.next_after.is_some()
+            );
+            write_page(&mut std::io::stdout().lock(), &receipt)?;
             Ok(0)
         }
         (result, cleanup) => Err(format!(
@@ -149,13 +190,19 @@ fn decimal(value: &str) -> Result<u64, String> {
     }
     value.parse().map_err(|_| "decimal overflow".into())
 }
-fn parse_cursor(value: &str) -> Result<ForgeEventCursor, String> {
+fn parse_cursor(value: &str) -> Result<EventCursor, String> {
     let (sequence, index) = value
         .split_once(':')
         .ok_or("event cursor must be repository-sequence:event-index")?;
-    let sequence = decimal(sequence)?;
-    let index = u32::try_from(decimal(index)?).map_err(|_| "event index overflow")?;
-    ForgeEventCursor::new(sequence, index).map_err(|_| "event sequence must be nonzero".into())
+    let repository_sequence = decimal(sequence)?;
+    if repository_sequence == 0 {
+        return Err("event sequence must be nonzero".into());
+    }
+    let event_index = u32::try_from(decimal(index)?).map_err(|_| "event index overflow")?;
+    Ok(EventCursor {
+        repository_sequence,
+        event_index,
+    })
 }
 fn unhex(value: &str) -> Result<Vec<u8>, String> {
     if value.is_empty()
@@ -199,46 +246,8 @@ fn parse_head(value: &str) -> Result<RepositoryAuthorityHeadId, String> {
         digest,
     ))
 }
-fn cursor(value: ForgeEventCursor) -> String {
-    format!("{}:{}", value.repository_sequence, value.event_index)
-}
-fn row(value: &ForgeEventEnvelope) -> Result<String, String> {
-    let frame = fgit_codec::encode_body(&value.event).map_err(|e| e.to_string())?;
-    Ok(format!(
-        "{{\"cursor\":{},\"repository_sequence\":{},\"event_index\":{},\"tx_id\":{},\"policy_epoch\":{},\"aggregate\":{},\"aggregate_version\":{},\"kind\":{},\"event_frame_hex\":{}}}",
-        quote(&cursor(value.cursor)),
-        value.cursor.repository_sequence,
-        value.cursor.event_index,
-        quote(&value.tx_id.to_string()),
-        value.policy_epoch.get(),
-        quote(&value.event.aggregate.to_string()),
-        value.event.version.get(),
-        value.event.payload.kind(),
-        quote(&hex(&frame))
-    ))
-}
-fn receipt(
-    options: &Options,
-    page: &fgit_admission::merge::native::feed::ForgeEventPage,
-) -> Result<String, String> {
-    let rows = page
-        .events
-        .iter()
-        .map(row)
-        .collect::<Result<Vec<_>, _>>()?
-        .join(",");
-    Ok(format!(
-        "{{\"type\":\"forge_event_page\",\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"source_head\":{},\"snapshot_token\":{},\"events\":[{}],\"next_after\":{},\"has_more\":{},\"node_closed\":true}}",
-        quote(&options.tenant.to_string()),
-        quote(&options.repository.to_string()),
-        quote(options.format.as_str()),
-        quote(&page.source_head.to_string()),
-        quote(&head_token(page.source_head)),
-        rows,
-        page.next_after
-            .map_or_else(|| "null".into(), |v| quote(&cursor(v))),
-        page.next_after.is_some()
-    ))
+fn cursor(repository_sequence: u64, event_index: u32) -> String {
+    format!("{repository_sequence}:{event_index}")
 }
 fn write_page(output: &mut impl Write, page: &str) -> Result<(), String> {
     writeln!(output, "{page}")
@@ -264,7 +273,7 @@ mod tests {
         let parsed = parse(&base).unwrap();
         assert_eq!(
             parsed.after,
-            Some(ForgeEventCursor {
+            Some(EventCursor {
                 repository_sequence: 7,
                 event_index: 3
             })
@@ -280,7 +289,7 @@ mod tests {
     fn cursor_parser_is_canonical_and_bounded() {
         assert_eq!(
             parse_cursor("1:0").unwrap(),
-            ForgeEventCursor {
+            EventCursor {
                 repository_sequence: 1,
                 event_index: 0
             }
