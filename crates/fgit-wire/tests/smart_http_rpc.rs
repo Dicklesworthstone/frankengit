@@ -336,3 +336,83 @@ fn operation_mismatch_and_fictional_v2_push_are_refused() {
     assert!(UploadRpc::new(&request, ProtocolVersion::V0, caps(b""), &repo, WireLimits::default(), HttpLimits::default()).is_err());
     assert!(ReceiveRpc::new(&request, ProtocolVersion::V2, context(repo.format), HttpLimits::default()).is_err());
 }
+
+#[test]
+fn v2_negotiation_and_wait_for_done_never_issue_a_premature_pack() {
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let repo = Repository::new(format);
+        for common in [false, true] {
+            for wait in [false, true] {
+                for done in [false, true] {
+                    let have = if common { repo.oid() } else { "22".repeat(format.digest_len()) };
+                    let mut packets = vec![data(b"command=fetch\n"), Packet::Delimiter,
+                        data(format!("want {}\n", repo.oid())), data(format!("have {have}\n"))];
+                    if wait { packets.push(data(b"wait-for-done\n")); }
+                    if done { packets.push(data(b"done\n")); }
+                    packets.push(Packet::Flush); let body = wire(&packets);
+                    let header = head(Service::UploadPack, body.len(), false);
+                    let request = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
+                    let capabilities = Capabilities::parse_v2_advertisement(&[data(b"version 2\n"),
+                        data(b"fetch=wait-for-done\n"), Packet::Flush], &WireLimits::default()).unwrap();
+                    let mut rpc = UploadRpc::new(&request, ProtocolVersion::V2, capabilities, &repo,
+                        WireLimits::default(), HttpLimits::default()).unwrap();
+                    for fragment in body.chunks(3) { rpc.push(fragment, &mut || true).unwrap(); }
+                    let reply = rpc.finish(&mut || true).unwrap();
+                    let should_pack = done || (common && !wait);
+                    assert_eq!(reply.pack_request().is_some(), should_pack);
+                    let expected = if done { vec![data(b"packfile\n")] } else {
+                        let mut output = vec![data(b"acknowledgments\n"), if common {
+                            data(format!("ACK {have}\n"))
+                        } else { data(b"NAK\n") }];
+                        if should_pack { output.extend([data(b"ready\n"), Packet::Delimiter, data(b"packfile\n")]); }
+                        else { output.push(Packet::Flush); }
+                        output
+                    };
+                    assert_eq!(reply.prefix(), wire(&expected));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn v2_sideband_all_frames_metadata_without_multiplexing_control_packets() {
+    let repo = Repository::new(GitObjectFormat::Sha1);
+    for done in [false, true] {
+        let mut packets = vec![data(b"command=fetch\n"), Packet::Delimiter,
+            data(format!("want {}\n", repo.oid())), data(format!("have {}\n", "22".repeat(20))),
+            data(b"sideband-all\n")];
+        if done { packets.push(data(b"done\n")); }
+        packets.push(Packet::Flush); let body = wire(&packets);
+        let header = head(Service::UploadPack, body.len(), false);
+        let request = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
+        let capabilities = Capabilities::parse_v2_advertisement(&[data(b"version 2\n"),
+            data(b"fetch=sideband-all\n"), Packet::Flush], &WireLimits::default()).unwrap();
+        let mut rpc = UploadRpc::new(&request, ProtocolVersion::V2, capabilities, &repo,
+            WireLimits::default(), HttpLimits::default()).unwrap();
+        rpc.push(&body, &mut || true).unwrap();
+        let reply = rpc.finish(&mut || true).unwrap();
+        assert_eq!(reply.pack_request().is_some(), done);
+        if done {
+            assert_eq!(reply.prefix(), wire(&[data(b"\x01packfile\n")]));
+            assert!(reply.pack_request().unwrap().options.sideband_all());
+        } else {
+            assert_eq!(reply.prefix(), wire(&[data(b"\x01acknowledgments\n"), data(b"\x01NAK\n"), Packet::Flush]));
+        }
+    }
+}
+
+#[test]
+fn v2_fetch_features_must_be_advertised_before_being_requested() {
+    let repo = Repository::new(GitObjectFormat::Sha1);
+    for feature in ["wait-for-done", "sideband-all"] {
+        let body = wire(&[data(b"command=fetch\n"), Packet::Delimiter,
+            data(format!("want {}\n", repo.oid())), data(format!("{feature}\n")), Packet::Flush]);
+        let header = head(Service::UploadPack, body.len(), false);
+        let request = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
+        let mut rpc = UploadRpc::new(&request, ProtocolVersion::V2, v2_caps(), &repo,
+            WireLimits::default(), HttpLimits::default()).unwrap();
+        assert!(rpc.push(&body, &mut || true).is_err());
+        assert!(rpc.finish(&mut || true).is_err());
+    }
+}

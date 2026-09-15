@@ -111,7 +111,8 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
                     .with_stateless_http_rounds().with_shallow_updates())
             }
             ProtocolVersion::V2 => UploadMachine::V2(
-                V2UploadPack::new(capabilities, wire_limits.clone())?.with_shallow_updates()),
+                V2UploadPack::new(capabilities, wire_limits.clone())?
+                    .with_stateless_http_rounds().with_shallow_updates()),
         };
         Ok(Self { repository, body, decoder, machine, version: selected_version,
             limits: wire_limits, output: Vec::new(), pack_request: None, command_complete: false })
@@ -168,10 +169,12 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
                     UploadMachine::Failed => return Err(RpcError::FailedRequest),
                 };
                 self.accept_transition(transition)?;
-                if matches!(&self.machine, UploadMachine::Legacy(machine)
-                    if machine.is_http_negotiation_complete()) {
-                    self.command_complete = true;
-                }
+                let negotiation_complete = match &self.machine {
+                    UploadMachine::Legacy(machine) => machine.is_http_negotiation_complete(),
+                    UploadMachine::V2(machine) => machine.is_http_negotiation_complete(),
+                    UploadMachine::Failed => false,
+                };
+                self.command_complete |= negotiation_complete;
             }
             // Reject even a partial second command following a complete first
             // one. A successful first command cannot hide a trailing bad frame.
@@ -181,7 +184,25 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
     }
 
     fn accept_transition(&mut self, transition: Transition) -> Result<(), RpcError> {
-        append_packets(&mut self.output, &transition.output, &self.limits)?;
+        let sideband_all = matches!(&self.machine, UploadMachine::V2(machine)
+            if machine.options.sideband_all());
+        if sideband_all {
+            for packet in transition.output {
+                let packet = match packet {
+                    Packet::Data(data) => {
+                        let count = data.len().checked_add(1).ok_or(RpcError::OutputLimit)?;
+                        let mut framed = Vec::new();
+                        framed.try_reserve_exact(count).map_err(|_| WireError::AllocationFailure)?;
+                        framed.push(1); framed.extend_from_slice(&data);
+                        Packet::Data(framed)
+                    }
+                    control => control,
+                };
+                append_packets(&mut self.output, &[packet], &self.limits)?;
+            }
+        } else {
+            append_packets(&mut self.output, &transition.output, &self.limits)?;
+        }
         for event in transition.events {
             match event {
                 WireEvent::PackRequested(request) => {

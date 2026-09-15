@@ -1337,6 +1337,12 @@ impl PackOptions {
         self.contains(Self::SIDE_BAND_64K.0)
     }
 
+    /// Whether protocol-v2 response metadata as well as pack data is multiplexed.
+    #[must_use]
+    pub const fn sideband_all(self) -> bool {
+        self.contains(Self::SIDEBAND_ALL)
+    }
+
     /// Whether the client negotiated `ofs-delta` entry encoding.
     ///
     /// A served pack may carry OFS_DELTA entries only when this is true; a
@@ -2427,9 +2433,27 @@ pub struct V2UploadPack {
     ref_prefixes: Vec<Vec<u8>>,
     ls_refs: LsRefsOptions,
     automatic_shallow_updates: bool,
+    stateless_http: bool,
+    http_round_complete: bool,
+    wait_for_done: bool,
 }
 
 impl V2UploadPack {
+    /// Treat a fetch negotiation response as a complete stateless HTTP round.
+    /// A client may send a new request carrying its wants and haves again; it
+    /// never needs server-local negotiation state from an earlier HTTP call.
+    #[must_use]
+    pub fn with_stateless_http_rounds(mut self) -> Self {
+        self.stateless_http = true;
+        self
+    }
+
+    /// The current HTTP request finished with acknowledgments but no pack.
+    #[must_use]
+    pub const fn is_http_negotiation_complete(&self) -> bool {
+        self.http_round_complete
+    }
+
     /// Resolve and frame shallow-info before the packfile section.
     /// The default remains a parser-only handoff for existing low-level users.
     #[must_use]
@@ -2459,6 +2483,9 @@ impl V2UploadPack {
             ref_prefixes: Vec::new(),
             ls_refs: LsRefsOptions::default(),
             automatic_shallow_updates: false,
+            stateless_http: false,
+            http_round_complete: false,
+            wait_for_done: false,
         })
     }
 
@@ -2702,7 +2729,9 @@ impl V2UploadPack {
             return Ok(Transition::empty());
         }
         if line == b"sideband-all" {
-            if !self.server_capabilities.contains(b"sideband-all") {
+            if self.stateless_http {
+                self.require_fetch_feature(b"sideband-all")?;
+            } else if !self.server_capabilities.contains(b"sideband-all") {
                 return Err(WireError::UnknownCapability {
                     capability: b"sideband-all".to_vec(),
                 });
@@ -2721,6 +2750,14 @@ impl V2UploadPack {
             line,
             b"thin-pack" | b"include-tag" | b"ofs-delta" | b"no-progress"
         ) {
+            return Ok(Transition::empty());
+        }
+        if line == b"wait-for-done" && self.stateless_http {
+            self.require_fetch_feature(b"wait-for-done")?;
+            if self.wait_for_done {
+                return Err(WireError::MalformedRequestLine { line: line.to_vec() });
+            }
+            self.wait_for_done = true;
             return Ok(Transition::empty());
         }
         if line == b"done" {
@@ -2887,22 +2924,49 @@ impl V2UploadPack {
             return Err(WireError::MissingWant);
         }
         let mut output = Vec::new();
-        if !self.done && !self.haves.is_empty() {
-            output.push(line_packet(b"acknowledgments\n"));
+        if !self.done && (!self.haves.is_empty() || self.wait_for_done) {
+            let mut used_bytes = 0;
+            add_output_packet(&mut output, line_packet(b"acknowledgments\n"),
+                b"acknowledgments\n".len() + 4, &mut used_bytes, &self.limits)?;
             let mut any_common = false;
             for &have in &self.haves {
                 if repository.is_common(have) {
-                    output.push(line_packet(
-                        format!("ACK {oid_hex}\n", oid_hex = oid_hex(have)).into_bytes(),
-                    ));
+                    let line = format!("ACK {}\n", oid_hex(have)).into_bytes();
+                    let count = line.len() + 4;
+                    add_output_packet(&mut output, line_packet(line), count,
+                        &mut used_bytes, &self.limits)?;
                     any_common = true;
                 }
             }
             if !any_common {
-                output.push(line_packet(b"NAK\n"));
+                add_output_packet(&mut output, line_packet(b"NAK\n"), 8,
+                    &mut used_bytes, &self.limits)?;
             }
-            output.push(line_packet(b"ready\n"));
-            output.push(Packet::Delimiter);
+            // Without an ancestry oracle, only exact wanted common tips prove
+            // a sufficient cut. Conservatively ask for another round otherwise;
+            // the client's explicit `done` can always terminate negotiation.
+            let ready = if self.stateless_http {
+                let mut sorted = Vec::new();
+                sorted.try_reserve_exact(self.haves.len()).map_err(|_| WireError::AllocationFailure)?;
+                sorted.extend_from_slice(&self.haves);
+                sorted.sort_unstable();
+                !self.wait_for_done && any_common && self.shallows.is_empty()
+                    && self.deepen.is_none() && self.deepen_since.is_none()
+                    && self.deepen_not.is_empty()
+                    && self.wants.iter().all(|oid| sorted.binary_search(oid).is_ok()
+                        && repository.is_common(*oid))
+            } else { true };
+            if !ready {
+                add_output_packet(&mut output, Packet::Flush, 4,
+                    &mut used_bytes, &self.limits)?;
+                self.http_round_complete = true;
+                self.state = V2State::Complete;
+                return Ok(Transition { output, events: Vec::new() });
+            }
+            add_output_packet(&mut output, line_packet(b"ready\n"), 10,
+                &mut used_bytes, &self.limits)?;
+            add_output_packet(&mut output, Packet::Delimiter, 4,
+                &mut used_bytes, &self.limits)?;
         }
         let request = PackRequest {
             version: UploadPackVersion::V2,
