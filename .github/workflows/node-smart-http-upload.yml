@@ -1,0 +1,20 @@
+name: Node Smart HTTP upload publish
+on:
+  push:
+    branches: [tooling/http-transfer-c15bea04]
+    paths:
+      - .github/workflows/node-smart-http-upload.yml
+      - tools/http-transfer/publish-node-smart-http-upload.sh
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Build, test, and fast-forward main
+        run: bash tools/http-transfer/publish-node-smart-http-upload.sh
