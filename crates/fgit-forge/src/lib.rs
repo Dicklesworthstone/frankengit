@@ -34,6 +34,7 @@ pub mod aggregate;
 pub mod bisection;
 pub mod event;
 pub mod history;
+pub mod initial_commit;
 pub mod merge;
 pub mod preparation;
 pub mod review;
