@@ -1,0 +1,37 @@
+name: Native incremental bundle integration
+on:
+  push:
+    branches: [tooling/incremental-integration-b7cc80e4]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      PYTHONDONTWRITEBYTECODE: '1'
+      CARGO_TARGET_DIR: /tmp/fg-incremental-integrated-target
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: b7cc80e48839ea79e6c73c7c3a6fc62543d36954
+          persist-credentials: false
+      - name: Record exact source and toolchain
+        run: |
+          git rev-parse HEAD
+          rustc -Vv
+      - name: Native incremental export and atomic import lifecycle
+        run: bash scripts/verify_incremental_bundle.sh
+      - name: Retained branch-root and receive regression gates
+        if: ${{ !cancelled() }}
+        run: bash scripts/verify_ref_target_integrity.sh test
+      - name: Product source remains unchanged
+        if: ${{ !cancelled() }}
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
