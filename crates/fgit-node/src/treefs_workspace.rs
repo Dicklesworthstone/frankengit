@@ -1,6 +1,7 @@
 //! Authority-selected TreeFS input discovery over the production object fabric.
 
 mod branches;
+mod initial_commit;
 mod tags;
 mod full_bundle;
 mod candidate;
@@ -46,6 +47,8 @@ use std::cell::Cell;
 /// An unavailable/hidden ref is intentionally one indistinguishable outcome.
 #[derive(Debug)]
 pub enum NodeWorkspaceRefusal {
+    /// Exact creation-only patch or root-commit construction refused.
+    InitialCommit(fgit_forge::initial_commit::InitialCommitError),
     /// Native tag construction or verified peeling refused.
     Tag(fgit_forge::tags::TagRefusal),
     /// An exact source browse request failed without returning partial data.
