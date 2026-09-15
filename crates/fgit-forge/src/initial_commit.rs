@@ -10,7 +10,7 @@ use crate::preparation::{MergeMetadata, PlannedMergeObject, PreparationError};
 /// An additional hard ceiling on the complete native closure, including trees.
 pub const MAX_INITIAL_OBJECTS: usize = 32_768;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum InitialCommitError {
     Patch(PatchError),
     Metadata(PreparationError),
