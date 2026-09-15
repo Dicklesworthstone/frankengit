@@ -70,7 +70,7 @@ export CARGO_TARGET_DIR="$RUNNER_TEMP/frankengit-http-target"
 echo '=== formatting owned continuation files ==='
 mapfile -t owned_files < "$temp/expected-files.txt"
 set +e
-rustfmt --edition 2024 "${owned_files[@]}"
+rustfmt --edition 2024 --config skip_children=true "${owned_files[@]}"
 fmt_rc=$?
 set -e
 echo "rustfmt rc=$fmt_rc"
@@ -93,7 +93,7 @@ if test -s "$temp/formatted-files.txt"; then
 fi
 
 test -z "$(git status --porcelain)"
-rustfmt --edition 2024 --check "${owned_files[@]}"
+rustfmt --edition 2024 --config skip_children=true --check "${owned_files[@]}"
 echo '=== focused wire tests ==='
 cargo test -p fgit-wire --lib --test stateless_http_negotiation --test smart_http_rpc --test smart_http_response
 
