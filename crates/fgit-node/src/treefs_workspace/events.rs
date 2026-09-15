@@ -8,6 +8,7 @@ use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 #[derive(Debug)]
 pub enum ForgeEventReadRefusal {
     InvalidLimit,
+    InvalidCursor,
     SnapshotMoved,
     Cell(CellRefusal),
     Authority(Box<AdmissionMaterializationRefusal>),
@@ -29,13 +30,19 @@ impl OneNode {
     pub async fn read_forge_events_in(
         &self,
         request: &NodeRequestContext,
-        after: Option<ForgeEventCursor>,
+        after: Option<(u64, u32)>,
         limit: u16,
         expected_head: Option<RepositoryAuthorityHeadId>,
     ) -> Result<ForgeEventPage, ForgeEventReadRefusal> {
         if limit == 0 || limit > 100 {
             return Err(ForgeEventReadRefusal::InvalidLimit);
         }
+        let after = after
+            .map(|(repository_sequence, event_index)| {
+                ForgeEventCursor::new(repository_sequence, event_index)
+                    .map_err(|_| ForgeEventReadRefusal::InvalidCursor)
+            })
+            .transpose()?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(ForgeEventReadRefusal::Cell)?;
         let selected = self
             .materialize_admission_in(request)
@@ -136,7 +143,7 @@ mod tests {
     }
     fn page(
         node: &OneNode,
-        after: Option<ForgeEventCursor>,
+        after: Option<(u64, u32)>,
         limit: u16,
         expected_head: Option<RepositoryAuthorityHeadId>,
     ) -> Result<ForgeEventPage, ForgeEventReadRefusal> {
@@ -148,6 +155,9 @@ mod tests {
             expected_head,
         ))
     }
+    fn coordinates(cursor: ForgeEventCursor) -> (u64, u32) {
+        (cursor.repository_sequence, cursor.event_index)
+    }
 
     #[test]
     fn refusal_vocabulary_distinguishes_input_and_snapshot_movement() {
@@ -155,6 +165,11 @@ mod tests {
             ForgeEventReadRefusal::InvalidLimit
                 .to_string()
                 .contains("InvalidLimit")
+        );
+        assert!(
+            ForgeEventReadRefusal::InvalidCursor
+                .to_string()
+                .contains("InvalidCursor")
         );
         assert!(
             ForgeEventReadRefusal::SnapshotMoved
@@ -167,8 +182,7 @@ mod tests {
     fn forge_event_feed_is_paginated_append_stable_snapshot_pinnable_and_durable() {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let scratch = Scratch::new();
-            let config = scratch.config(format);
-            let (mut node, _) = OneNode::init(config.clone()).unwrap();
+            let (mut node, _) = OneNode::init(scratch.config(format)).unwrap();
             node.bring_into_service(HeadGeneration::FIRST).unwrap();
 
             let opened = publish(&node, &open(), "open");
@@ -186,7 +200,7 @@ mod tests {
             let first_cursor = first.events[0].cursor;
             assert_eq!(first.next_after, Some(first_cursor));
 
-            let second = page(&node, Some(first_cursor), 1, Some(first.source_head)).unwrap();
+            let second = page(&node, Some(coordinates(first_cursor)), 1, Some(first.source_head)).unwrap();
             assert_eq!(second.events.len(), 1);
             assert_eq!(second.events[0].tx_id, commented.0);
             assert!(matches!(
@@ -197,16 +211,15 @@ mod tests {
             assert!(second.next_after.is_none());
             let second_cursor = second.events[0].cursor;
 
-            // Exact retries never manufacture a duplicate event.
             assert_eq!(publish(&node, &comment, "comment"), commented);
-            assert!(page(&node, Some(second_cursor), 10, None).unwrap().events.is_empty());
+            assert!(page(&node, Some(coordinates(second_cursor)), 10, None).unwrap().events.is_empty());
 
             let closed = publish(&node, &change(2, IssueAction::Close), "close");
             assert!(matches!(
-                page(&node, Some(second_cursor), 10, Some(first.source_head)),
+                page(&node, Some(coordinates(second_cursor)), 10, Some(first.source_head)),
                 Err(ForgeEventReadRefusal::SnapshotMoved)
             ));
-            let advanced = page(&node, Some(second_cursor), 10, None).unwrap();
+            let advanced = page(&node, Some(coordinates(second_cursor)), 10, None).unwrap();
             assert_eq!(advanced.events.len(), 1);
             assert_eq!(advanced.events[0].tx_id, closed.0);
             assert!(matches!(
@@ -217,31 +230,31 @@ mod tests {
             assert!(advanced.events[0].cursor > second_cursor);
             assert!(advanced.next_after.is_none());
 
-            // A syntactically valid cursor must still name a real event.
             assert!(matches!(
                 page(
                     &node,
-                    Some(ForgeEventCursor {
-                        repository_sequence: first_cursor.repository_sequence,
-                        event_index: u32::MAX,
-                    }),
+                    Some((first_cursor.repository_sequence, u32::MAX)),
                     10,
                     None,
                 ),
                 Err(ForgeEventReadRefusal::Admission(_))
             ));
+            assert!(matches!(
+                page(&node, Some((0, 0)), 10, None),
+                Err(ForgeEventReadRefusal::InvalidCursor)
+            ));
 
             let last_cursor = advanced.events[0].cursor;
             node.shutdown().unwrap();
-            let mut reopened = OneNode::open_existing(config).unwrap();
+            let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
             reopened.bring_into_service(HeadGeneration::FIRST).unwrap();
-            let replay = page(&reopened, Some(first_cursor), 10, None).unwrap();
+            let replay = page(&reopened, Some(coordinates(first_cursor)), 10, None).unwrap();
             assert_eq!(replay.events.len(), 2);
             assert_eq!(replay.events[0].cursor, second_cursor);
             assert_eq!(replay.events[1].cursor, last_cursor);
             assert_eq!(replay.events[0].tx_id, commented.0);
             assert_eq!(replay.events[1].tx_id, closed.0);
-            assert!(page(&reopened, Some(last_cursor), 10, None).unwrap().events.is_empty());
+            assert!(page(&reopened, Some(coordinates(last_cursor)), 10, None).unwrap().events.is_empty());
             reopened.shutdown().unwrap();
         }
     }
