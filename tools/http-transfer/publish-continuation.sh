@@ -67,12 +67,13 @@ test "$(git hash-object crates/fgit-wire/tests/smart_http_response.rs)" = 6c125a
 
 export RCH_CARGO_WRAPPER_BYPASS=1
 export CARGO_TARGET_DIR="$RUNNER_TEMP/frankengit-http-target"
-echo '=== formatting continuation ==='
+echo '=== formatting owned continuation files ==='
+mapfile -t owned_files < "$temp/expected-files.txt"
 set +e
-cargo fmt --package fgit-wire
+rustfmt --edition 2024 "${owned_files[@]}"
 fmt_rc=$?
 set -e
-echo "cargo fmt rc=$fmt_rc"
+echo "rustfmt rc=$fmt_rc"
 git status --short
 test "$fmt_rc" = 0
 
@@ -92,7 +93,7 @@ if test -s "$temp/formatted-files.txt"; then
 fi
 
 test -z "$(git status --porcelain)"
-cargo fmt --package fgit-wire -- --check
+rustfmt --edition 2024 --check "${owned_files[@]}"
 echo '=== focused wire tests ==='
 cargo test -p fgit-wire --lib --test stateless_http_negotiation --test smart_http_rpc --test smart_http_response
 
