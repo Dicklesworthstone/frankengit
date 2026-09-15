@@ -2923,6 +2923,18 @@ impl V2UploadPack {
         if self.wants.is_empty() {
             return Err(WireError::MissingWant);
         }
+        let request = PackRequest {
+            version: UploadPackVersion::V2,
+            wants: self.wants.clone(),
+            haves: self.haves.clone(),
+            shallows: self.shallows.clone(),
+            deepen: self.deepen,
+            deepen_since: self.deepen_since,
+            deepen_not: self.deepen_not.clone(),
+            filter: self.filter.clone(),
+            options: self.options.with(PackOptions::SIDE_BAND_64K.0),
+        };
+        shallow_response::validate_relative_depth(&request)?;
         let mut output = Vec::new();
         if !self.done && (!self.haves.is_empty() || self.wait_for_done) {
             let mut used_bytes = 0;
@@ -2968,18 +2980,6 @@ impl V2UploadPack {
             add_output_packet(&mut output, Packet::Delimiter, 4,
                 &mut used_bytes, &self.limits)?;
         }
-        let request = PackRequest {
-            version: UploadPackVersion::V2,
-            wants: self.wants.clone(),
-            haves: self.haves.clone(),
-            shallows: self.shallows.clone(),
-            deepen: self.deepen,
-            deepen_since: self.deepen_since,
-            deepen_not: self.deepen_not.clone(),
-            filter: self.filter.clone(),
-            options: self.options.with(PackOptions::SIDE_BAND_64K.0),
-        };
-        shallow_response::validate_relative_depth(&request)?;
         if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
             output.extend(shallow_response::response(repository, &request, &self.limits)?);
         }

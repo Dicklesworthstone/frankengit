@@ -52,8 +52,8 @@ fn context(format: GitObjectFormat) -> ReceiveContext {
     ReceiveContext::new(format, caps(capabilities.as_bytes()), ReceiveLimits::default(), SignedPushProfile::Refuse).unwrap()
 }
 fn receive_body(format: GitObjectFormat, delete: bool) -> Vec<u8> {
-    let old = if delete { "11" } else { "00" }.repeat(format.digest_len());
-    let new = if delete { "00" } else { "11" }.repeat(format.digest_len());
+    let old = (if delete { "11" } else { "00" }).repeat(format.digest_len());
+    let new = (if delete { "00" } else { "11" }).repeat(format.digest_len());
     let algorithm = if format == GitObjectFormat::Sha1 { "sha1" } else { "sha256" };
     let mut body = wire(&[data(format!("{old} {new} refs/tags/http\0report-status delete-refs object-format={algorithm}")), Packet::Flush]);
     if !delete {
@@ -414,5 +414,91 @@ fn v2_fetch_features_must_be_advertised_before_being_requested() {
             WireLimits::default(), HttpLimits::default()).unwrap();
         assert!(rpc.push(&body, &mut || true).is_err());
         assert!(rpc.finish(&mut || true).is_err());
+    }
+}
+
+#[test]
+fn one_packet_decoder_budget_is_independent_of_http_fragmentation() {
+    let repo = Repository::new(GitObjectFormat::Sha1); let body = clone_request(&repo);
+    let header = head(Service::UploadPack, body.len(), false);
+    let request = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
+    let limits = WireLimits { max_packets_per_push: 1, ..WireLimits::default() };
+    for width in [1, 4, 13, body.len()] {
+        let mut rpc = UploadRpc::new(&request, ProtocolVersion::V0, caps(b""), &repo,
+            limits.clone(), HttpLimits::default()).unwrap();
+        for fragment in body.chunks(width) { rpc.push(fragment, &mut || true).unwrap(); }
+        assert_eq!(rpc.finish(&mut || true).unwrap().prefix(), b"0008NAK\n");
+    }
+    let body = receive_body(repo.format, true);
+    let header = head(Service::ReceivePack, body.len(), false);
+    let request = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
+    let mut context = context(repo.format); context.limits.wire.max_packets_per_push = 1;
+    let mut rpc = ReceiveRpc::new(&request, ProtocolVersion::V0, context, HttpLimits::default()).unwrap();
+    rpc.push(&body, &mut || true).unwrap();
+    let mut handoff = StructuralHandoff::default();
+    rpc.finish_with_handoff(&mut handoff, &mut || true).unwrap();
+    assert_eq!(handoff.calls, 1);
+}
+
+#[test]
+fn acknowledgment_only_v2_round_still_validates_shallow_controls() {
+    let repo = Repository::new(GitObjectFormat::Sha1);
+    let body = wire(&[data(b"command=fetch\n"), Packet::Delimiter,
+        data(format!("want {}\n", repo.oid())), data(format!("have {}\n", "22".repeat(20))),
+        data(b"deepen-relative\n"), Packet::Flush]);
+    let header = head(Service::UploadPack, body.len(), false);
+    let request = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
+    let capabilities = Capabilities::parse_v2_advertisement(&[data(b"version 2\n"),
+        data(b"fetch=shallow\n"), Packet::Flush], &WireLimits::default()).unwrap();
+    let mut rpc = UploadRpc::new(&request, ProtocolVersion::V2, capabilities, &repo,
+        WireLimits::default(), HttpLimits::default()).unwrap();
+    assert!(rpc.push(&body, &mut || true).is_err());
+    assert!(rpc.finish(&mut || true).is_err());
+}
+
+#[test]
+fn http_receive_preserves_a_real_native_writer_pack_and_its_target_identity() {
+    use fgit_git_object::{ObjectType, Sha1, Sha256, native_object_oid};
+    use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, ObjectId, PackLimits,
+        PackPlanner, PackWriteError, PackWriteProfile, PackWriter};
+    struct Blob(CanonicalPackObject);
+    impl CanonicalObjectSource for Blob {
+        fn load(&self, id: &ObjectId) -> Result<CanonicalPackObject, PackWriteError> {
+            assert_eq!(*id, self.0.id()); Ok(self.0.clone())
+        }
+    }
+    struct Check { target: AnyGitOid, called: bool }
+    impl ReceiveQuarantineHandoff for Check {
+        fn handoff(&mut self, request: &ReceiveRequest, pack: Option<&fgit_pack::QuarantinedPack>, receipt: &QuarantineReceipt) -> Result<(), ReceiveError> {
+            assert_eq!(request.commands[0].new, self.target);
+            assert_eq!(request.commands[0].ref_name, b"refs/tags/http-blob");
+            assert_eq!(receipt.object_count, 1);
+            let entries = pack.unwrap().entries();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].inflated, b"a real object transported by the native HTTP composition\n");
+            self.called = true; Ok(())
+        }
+    }
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let body = b"a real object transported by the native HTTP composition\n".to_vec();
+        let id = match format {
+            GitObjectFormat::Sha1 => ObjectId::from(native_object_oid::<Sha1>(ObjectType::Blob, &body)),
+            GitObjectFormat::Sha256 => ObjectId::from(native_object_oid::<Sha256>(ObjectType::Blob, &body)),
+        };
+        let source = Blob(CanonicalPackObject::new(id, ObjectType::Blob, body, Vec::new(), 0, 0));
+        let plan = PackPlanner::new(format, PackWriteProfile::STORED_V1, PackLimits::default())
+            .plan(&source, &[id], &mut || true).unwrap();
+        let (pack, _) = PackWriter::new(PackLimits::default()).write(&plan, &mut || true).unwrap();
+        let algorithm = if format == GitObjectFormat::Sha1 { "sha1" } else { "sha256" };
+        let mut raw = wire(&[data(format!("{} {id} refs/tags/http-blob\0report-status object-format={algorithm}",
+            "00".repeat(format.digest_len()))), Packet::Flush]);
+        raw.extend_from_slice(&pack);
+        let header = head(Service::ReceivePack, raw.len(), true);
+        let request = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
+        let mut rpc = ReceiveRpc::new(&request, ProtocolVersion::V0, context(format), HttpLimits::default()).unwrap();
+        for fragment in chunked(&raw, 11).chunks(3) { rpc.push(fragment, &mut || true).unwrap(); }
+        let mut handoff = Check { target: id, called: false };
+        let completion = rpc.finish_with_handoff(&mut handoff, &mut || true).unwrap();
+        assert!(handoff.called); assert_eq!(completion.quarantine.pack_bytes, pack.len());
     }
 }

@@ -157,7 +157,9 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
         if self.command_complete { return Err(RpcError::MultipleCommands); }
         // Bound each decoder push regardless of the HTTP framework's chunk size.
         // A many-megabyte HTTP chunk never becomes one packet-decoder allocation.
-        for fragment in payload.chunks(self.limits.max_packet_bytes) {
+        let decoder_chunk_bytes = self.limits.max_packet_bytes
+            .min(self.limits.max_packets_per_push.saturating_mul(4));
+        for fragment in payload.chunks(decoder_chunk_bytes) {
             checkpoint(cancellation)?;
             let packets = self.decoder.push(fragment)?;
             for packet in packets {
@@ -272,7 +274,8 @@ impl ReceiveRpc {
     ) -> Result<Self, RpcError> {
         if selected_version == ProtocolVersion::V2 { return Err(HttpError::UnsupportedVersion.into()); }
         let body = body_for(request, Service::ReceivePack, http_limits)?;
-        let chunk_bytes = context.limits.wire.max_packet_bytes;
+        let chunk_bytes = context.limits.wire.max_packet_bytes
+            .min(context.limits.wire.max_packets_per_push.saturating_mul(4));
         let machine = Some(ReceivePack::new(context)?);
         Ok(Self { body, machine, chunk_bytes })
     }
