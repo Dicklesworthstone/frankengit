@@ -65,6 +65,20 @@ test "$(git hash-object crates/fgit-wire/tests/stateless_http_negotiation.rs)" =
 test "$(git hash-object crates/fgit-wire/tests/smart_http_rpc.rs)" = c3e5fe7887deda23fe5cbc7370e6b72ebf765ae0
 test "$(git hash-object crates/fgit-wire/tests/smart_http_response.rs)" = 6c125abdd7fc3cf30c9128bab9a44e0ef68ab6bc
 
+python3 - <<'PY'
+from pathlib import Path
+path = Path('crates/fgit-wire/tests/smart_http_rpc.rs')
+text = path.read_text()
+old = 'fn caps(bytes: &[u8]) -> Capabilities { Capabilities::parse_v1(bytes, &WireLimits::default()).unwrap() }'
+new = 'fn caps(bytes: &[u8]) -> Capabilities { if bytes.is_empty() { Capabilities::default() } else { Capabilities::parse_v1(bytes, &WireLimits::default()).unwrap() } }'
+if text.count(old) != 1:
+    raise SystemExit('expected exactly one empty-capability fixture helper')
+path.write_text(text.replace(old, new))
+PY
+git diff --check
+git add -- crates/fgit-wire/tests/smart_http_rpc.rs
+git commit -m 'test(wire): construct empty HTTP capability sets correctly (FG-105a)'
+
 export RCH_CARGO_WRAPPER_BYPASS=1
 export CARGO_TARGET_DIR="$RUNNER_TEMP/frankengit-http-target"
 echo '=== formatting owned continuation files ==='
