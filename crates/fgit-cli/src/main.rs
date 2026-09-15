@@ -1,23 +1,24 @@
 #![forbid(unsafe_code)]
 
-mod tags;
 mod branches;
 mod bundle;
 mod commit_replay;
-mod rebase;
-mod rebase_apply;
+mod events;
 mod issues;
-mod protection;
 mod merge_apply;
+mod patch_command;
+mod protection;
 mod publication_support;
 mod pull_request;
+mod rebase;
+mod rebase_apply;
 mod review_commands;
 mod source_browse;
 mod source_history;
 mod source_review;
 mod source_search;
+mod tags;
 mod transaction_outcome;
-mod patch_command;
 #[cfg(target_os = "linux")]
 mod workspace;
 #[cfg(target_os = "linux")]
@@ -27,11 +28,29 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "events")
+    {
+        return match events::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!(
+                    "{{\"type\":\"forge_event_error\",\"schema_version\":1,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "tag") {
         return match tags::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
-                eprintln!("{{\"type\":\"tag_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                eprintln!(
+                    "{{\"type\":\"tag_error\",\"schema_version\":1,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
                 ExitCode::from(2)
             }
         };
@@ -40,16 +59,25 @@ fn main() -> ExitCode {
         return match source_browse::run(&arguments[1..], command == "show") {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
-                eprintln!("{{\"type\":\"source_read_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                eprintln!(
+                    "{{\"type\":\"source_read_error\",\"schema_version\":1,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
                 ExitCode::from(2)
             }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "bundle") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "bundle")
+    {
         return match bundle::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
-                eprintln!("{{\"type\":\"bundle_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                eprintln!(
+                    "{{\"type\":\"bundle_error\",\"schema_version\":1,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
                 ExitCode::from(2)
             }
         };
@@ -58,21 +86,33 @@ fn main() -> ExitCode {
         return match branches::run_inventory(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
-                eprintln!("{{\"type\":\"reference_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                eprintln!(
+                    "{{\"type\":\"reference_error\",\"schema_version\":1,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
                 ExitCode::from(2)
             }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "branch") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "branch")
+    {
         return match branches::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
-                eprintln!("{{\"type\":\"branch_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                eprintln!(
+                    "{{\"type\":\"branch_error\",\"schema_version\":1,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
                 ExitCode::from(2)
             }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "rebase") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "rebase")
+    {
         let result = if arguments.get(1).is_some_and(|argument| argument == "apply") {
             rebase_apply::run(&arguments[2..])
         } else if arguments[1..] == ["--help"] {
@@ -83,44 +123,80 @@ fn main() -> ExitCode {
         return match result {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
-                eprintln!("{{\"type\":\"rebase_error\",\"schema_version\":1,\"error\":{}}}", publication_support::quote(&error));
+                eprintln!(
+                    "{{\"type\":\"rebase_error\",\"schema_version\":1,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
                 ExitCode::from(2)
             }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "protection") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "protection")
+    {
         return match protection::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "issue") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "issue")
+    {
         return match issues::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "patch") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "patch")
+    {
         return match patch_command::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
     if let Some(command @ ("cherry-pick" | "revert")) = arguments.first().map(String::as_str) {
-        let direction = if command == "revert" { fgit_forge::preparation::replay::ReplayDirection::Revert }
-            else { fgit_forge::preparation::replay::ReplayDirection::CherryPick };
+        let direction = if command == "revert" {
+            fgit_forge::preparation::replay::ReplayDirection::Revert
+        } else {
+            fgit_forge::preparation::replay::ReplayDirection::CherryPick
+        };
         return match commit_replay::run(&arguments[1..], direction) {
             Ok(code) => ExitCode::from(code),
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "outcome") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "outcome")
+    {
         return match transaction_outcome::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
-    let review_mode = match (arguments.first().map(String::as_str), arguments.get(1).map(String::as_str)) {
+    let review_mode = match (
+        arguments.first().map(String::as_str),
+        arguments.get(1).map(String::as_str),
+    ) {
         (Some("pr"), Some("review")) => Some(review_commands::Mode::Review),
         (Some("pr"), Some("reviews")) => Some(review_commands::Mode::Reviews),
         (Some("merge"), Some("apply-reviewed")) => Some(review_commands::Mode::Apply),
@@ -129,22 +205,38 @@ fn main() -> ExitCode {
     if let Some(mode) = review_mode {
         return match review_commands::run(&arguments[2..], mode) {
             Ok(code) => ExitCode::from(code),
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
-    if arguments.first().is_some_and(|argument| matches!(argument.as_str(), "log" | "blame")) {
+    if arguments
+        .first()
+        .is_some_and(|argument| matches!(argument.as_str(), "log" | "blame"))
+    {
         return match source_history::run(&arguments[1..], arguments[0] == "blame") {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
     // Read-only artifact inspection is independent of the Linux host-tool adapter.
-    if arguments.first().is_some_and(|argument| argument == "workspace" || argument == "merge")
-        && arguments.get(1).is_some_and(|argument| argument == "inspect")
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "workspace" || argument == "merge")
+        && arguments
+            .get(1)
+            .is_some_and(|argument| argument == "inspect")
     {
         return match source_review::inspect_bundle(&arguments[2..], arguments[0] == "merge") {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
     let pr_diff = arguments.first().is_some_and(|argument| argument == "pr")
@@ -152,28 +244,49 @@ fn main() -> ExitCode {
     if pr_diff || arguments.first().is_some_and(|argument| argument == "diff") {
         return match source_review::run(&arguments[if pr_diff { 2 } else { 1 }..], pr_diff) {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
     if arguments.first().is_some_and(|argument| argument == "pr") {
         return match pull_request::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "search") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "search")
+    {
         return match source_search::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "merge") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "merge")
+    {
         return match merge_apply::run(&arguments[1..]) {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+            Err(error) => {
+                eprintln!("fg: {error}");
+                ExitCode::from(2)
+            }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "workspace") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "workspace")
+    {
         #[cfg(target_os = "linux")]
         {
             let outcome = if arguments.get(1).is_some_and(|argument| argument == "apply") {
@@ -183,7 +296,10 @@ fn main() -> ExitCode {
             };
             return match outcome {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(error) => { eprintln!("fg: {error}"); ExitCode::from(2) }
+                Err(error) => {
+                    eprintln!("fg: {error}");
+                    ExitCode::from(2)
+                }
             };
         }
         #[cfg(not(target_os = "linux"))]
