@@ -1762,6 +1762,8 @@ pub struct LegacyUploadPack {
     saw_want_capabilities: bool,
     automatic_shallow_updates: bool,
     shallow_negotiated: bool,
+    stateless_http: bool,
+    http_round_complete: bool,
 }
 
 /// Bounded stateless-RPC envelope adapter for a legacy upload-pack request.
@@ -1854,6 +1856,44 @@ impl StatelessRpcUploadPack {
 }
 
 impl LegacyUploadPack {
+    /// Select raw HTTP request-body semantics, not fetch-pack's local outer
+    /// pkt-line envelope. Each HTTP request owns a fresh machine. Have-batch
+    /// flushes finish negotiation rounds without pretending a pack was asked
+    /// for; `done` (or a justified negotiated `no-done`) selects a pack.
+    /// The host must validate the complete HTTP body before releasing outputs.
+    #[must_use]
+    pub fn with_stateless_http_rounds(mut self) -> Self {
+        self.stateless_http = true;
+        self
+    }
+
+    /// A have-batch flush ended this HTTP round without selecting a pack.
+    #[must_use]
+    pub const fn is_http_negotiation_complete(&self) -> bool {
+        self.http_round_complete
+    }
+
+    /// Validate HTTP EOF against protocol state as well as packet framing.
+    /// An initial shallow exchange can end after its want-section flush;
+    /// arbitrary wants-only or unterminated have streams cannot.
+    pub fn finish_stateless_http_round(&self) -> Result<(), WireError> {
+        self.finish()?;
+        if self.stateless_http
+            && (self.is_complete()
+                || self.http_round_complete
+                || (self.state == LegacyState::AwaitHave
+                    && self.shallow_negotiated
+                    && self.haves.is_empty()))
+        {
+            Ok(())
+        } else {
+            Err(WireError::IllegalTransition {
+                state: "incomplete stateless HTTP upload-pack round",
+                packet: "end of input",
+            })
+        }
+    }
+
     /// Ask the repository to resolve and frame shallow changes before haves.
     ///
     /// Without this opt-in the machine retains its low-level parser contract:
@@ -1897,6 +1937,8 @@ impl LegacyUploadPack {
             saw_want_capabilities: false,
             automatic_shallow_updates: false,
             shallow_negotiated: false,
+            stateless_http: false,
+            http_round_complete: false,
         })
     }
 
@@ -1931,6 +1973,12 @@ impl LegacyUploadPack {
         packet: &Packet,
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
+        if self.http_round_complete {
+            return Err(WireError::IllegalTransition {
+                state: "completed stateless HTTP negotiation round",
+                packet: packet_name(packet),
+            });
+        }
         match self.state {
             LegacyState::AwaitWant => self.accept_want_phase(packet, repository),
             LegacyState::AwaitHave => self.accept_have_phase(packet, repository),
@@ -1962,7 +2010,7 @@ impl LegacyUploadPack {
                 } else {
                     Vec::new()
                 };
-                if !shallow_negotiated && self.ack_mode != AckMode::None {
+                if !self.stateless_http && !shallow_negotiated && self.ack_mode != AckMode::None {
                     output.push(line_packet(b"NAK\n"));
                 }
                 if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
@@ -2086,6 +2134,9 @@ impl LegacyUploadPack {
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
         if matches!(packet, Packet::Flush) {
+            if self.stateless_http {
+                return self.finish_http_have_batch(repository);
+            }
             if !self.no_done {
                 return Err(WireError::IllegalTransition {
                     state: "legacy have phase",
@@ -2123,8 +2174,13 @@ impl LegacyUploadPack {
             let oid = parse_object_id(rest, repository.object_format())?;
             push_deduplicated_oid("have", oid, &mut self.haves, self.limits.max_haves)?;
             if repository.is_common(oid) {
+                let first_common = self.last_common.is_none();
                 self.last_common = Some(oid);
-                return Ok(self.common_ack_transition(oid));
+                let mut transition = self.common_ack_transition(oid);
+                if self.stateless_http && self.ack_mode == AckMode::None && first_common {
+                    transition.output.push(line_packet(format!("ACK {}\n", oid_hex(oid))));
+                }
+                return Ok(transition);
             }
             return Ok(Transition::empty());
         }
@@ -2142,6 +2198,45 @@ impl LegacyUploadPack {
         Err(WireError::MalformedRequestLine {
             line: line.to_vec(),
         })
+    }
+
+    fn finish_http_have_batch(
+        &mut self,
+        repository: &impl UploadPackRepository,
+    ) -> Result<Transition, WireError> {
+        // Readiness is conservative: exact wanted tips must be in the client's
+        // common have set. A mere unrelated common object never proves ready.
+        // Sorting a bounded vector avoids a wants-times-haves scan.
+        let mut common = Vec::new();
+        common.try_reserve_exact(self.haves.len()).map_err(|_| WireError::AllocationFailure)?;
+        common.extend_from_slice(&self.haves);
+        common.sort_unstable();
+        let ready = self.ack_mode == AckMode::MultiAckDetailed
+            && self.last_common.is_some()
+            && self.shallows.is_empty()
+            && self.deepen.is_none()
+            && self.deepen_since.is_none()
+            && self.deepen_not.is_empty()
+            && self.wants.iter().all(|oid| {
+                common.binary_search(oid).is_ok() && repository.is_common(*oid)
+            });
+        let mut transition = Transition::empty();
+        if ready {
+            if let Some(oid) = self.last_common {
+                transition.output.push(line_packet(format!("ACK {} ready\n", oid_hex(oid))));
+            }
+        }
+        if self.ack_mode != AckMode::None || self.last_common.is_none() {
+            transition.output.push(line_packet(b"NAK\n"));
+        }
+        if ready && self.no_done {
+            transition.append(self.final_ack_transition())?;
+            transition.events.push(WireEvent::PackRequested(self.pack_request()));
+            self.state = LegacyState::Complete;
+        } else {
+            self.http_round_complete = true;
+        }
+        Ok(transition)
     }
 
     fn accept_request_capabilities(&mut self, requested: &Capabilities) -> Result<(), WireError> {
@@ -2203,6 +2298,14 @@ impl LegacyUploadPack {
     }
 
     fn final_ack_transition(&self) -> Transition {
+        if self.stateless_http {
+            let output = match self.last_common {
+                Some(_) if self.ack_mode == AckMode::None => Vec::new(),
+                Some(oid) => vec![line_packet(format!("ACK {}\n", oid_hex(oid)))],
+                None => vec![line_packet(b"NAK\n")],
+            };
+            return Transition { output, events: Vec::new() };
+        }
         let output = match self.last_common {
             Some(oid) => match self.ack_mode {
                 AckMode::MultiAckDetailed => vec![line_packet(
