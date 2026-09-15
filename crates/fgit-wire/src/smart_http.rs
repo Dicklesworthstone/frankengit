@@ -13,6 +13,9 @@
 
 #![forbid(unsafe_code)]
 
+/// Composition with the existing native upload-pack and receive-pack machines.
+pub mod rpc;
+
 use std::fmt::{self, Display, Formatter};
 
 /// HTTP resource ceilings, independent of pack expansion and Git wire limits.
