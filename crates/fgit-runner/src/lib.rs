@@ -28,6 +28,9 @@
 #[cfg(target_os = "linux")]
 pub mod sparse_workspace;
 
+/// Bounded execution of explicitly trusted, source-selected workflows.
+pub mod workflow;
+
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;

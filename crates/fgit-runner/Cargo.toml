@@ -13,6 +13,7 @@ fgit-codec.workspace = true
 fgit-crypto.workspace = true
 fgit-evidence.workspace = true
 fgit-resource.workspace = true
+fgit-schema.workspace = true
 fgit-treefs.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
