@@ -5,13 +5,14 @@ use super::{storage, unavailable};
 use crate::AdmissionError;
 use fgit_authority::AsyncAuthorityStore;
 use fgit_chronicle::{PublicationBasis, verify_pair};
-use fgit_codec::CryptoBodyIdentity;
+use fgit_codec::{CryptoBodyIdentity, encode_body};
 use fgit_forge::ForgeEvent;
 use fgit_types::{Digest, PolicyEpoch, RefusalCode, RepositoryAuthorityHeadId, TxId};
 
 const MAX_HISTORY_BATCHES: usize = 4096;
 const MAX_HISTORY_RECORDS: usize = 65_536;
 const MAX_PAGE: u16 = 100;
+const MAX_PAGE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ForgeEventCursor {
@@ -66,6 +67,19 @@ fn page_limit(limit: u16) -> Result<usize, AdmissionError> {
     } else {
         Ok(usize::from(limit))
     }
+}
+fn charge_page_bytes(total: &mut usize, next: usize) -> Result<bool, AdmissionError> {
+    if next > MAX_PAGE_EVENT_BYTES {
+        return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
+    }
+    let Some(updated) = total.checked_add(next) else {
+        return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
+    };
+    if updated > MAX_PAGE_EVENT_BYTES {
+        return Ok(false);
+    }
+    *total = updated;
+    Ok(true)
 }
 
 /// Read forge events in canonical repository order. `after` is an append-stable
@@ -148,6 +162,7 @@ where
     reverse.reverse();
     let mut cursor_seen = after.is_none();
     let mut output = Vec::with_capacity(limit);
+    let mut page_bytes = 0usize;
     let mut has_more = false;
     'records: for record in reverse {
         checkpoint(cancelled)?;
@@ -177,6 +192,13 @@ where
         for (index, event) in batch.events.into_iter().enumerate().skip(start) {
             checkpoint(cancelled)?;
             if output.len() == limit {
+                has_more = true;
+                break 'records;
+            }
+            let encoded_bytes = encode_body(&event)
+                .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
+                .len();
+            if !charge_page_bytes(&mut page_bytes, encoded_bytes)? {
                 has_more = true;
                 break 'records;
             }
@@ -235,5 +257,11 @@ mod tests {
         assert_eq!(page_limit(1).unwrap(), 1);
         assert_eq!(page_limit(100).unwrap(), 100);
         assert!(page_limit(101).is_err());
+
+        let mut bytes = 0;
+        assert!(charge_page_bytes(&mut bytes, MAX_PAGE_EVENT_BYTES).unwrap());
+        assert_eq!(bytes, MAX_PAGE_EVENT_BYTES);
+        assert!(!charge_page_bytes(&mut bytes, 1).unwrap());
+        assert!(charge_page_bytes(&mut 0, MAX_PAGE_EVENT_BYTES + 1).is_err());
     }
 }
