@@ -14,7 +14,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Reconstruct, verify, and fast-forward main
+      - name: Reconstruct, format, verify, and fast-forward main
         env:
           BASE: 2ab7584ebdedd2da1e22e1c00b992d707defa253
         run: |
@@ -78,6 +78,16 @@ jobs:
           test "$(git hash-object crates/fgit-wire/tests/stateless_http_negotiation.rs)" = 3a7d920f0484cc57b20262ed2169161959d07a53
           test "$(git hash-object crates/fgit-wire/tests/smart_http_rpc.rs)" = c3e5fe7887deda23fe5cbc7370e6b72ebf765ae0
           test "$(git hash-object crates/fgit-wire/tests/smart_http_response.rs)" = 6c125abdd7fc3cf30c9128bab9a44e0ef68ab6bc
+          RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="$RUNNER_TEMP/frankengit-http-target" cargo fmt --package fgit-wire
+          git diff --name-only | sort > "$temp/formatted-files.txt"
+          test -s "$temp/formatted-files.txt"
+          unexpected="$(comm -23 "$temp/formatted-files.txt" "$temp/expected-files.txt")"
+          test -z "$unexpected"
+          git diff --check
+          while IFS= read -r path; do git add -- "$path"; done < "$temp/formatted-files.txt"
+          git commit -m 'fix(wire): normalize smart HTTP continuation formatting (FG-105a)'
+          test "$(git rev-list --count "$BASE"..HEAD)" = 6
+          test -z "$(git status --porcelain)"
           RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="$RUNNER_TEMP/frankengit-http-target" cargo fmt --package fgit-wire -- --check
           RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="$RUNNER_TEMP/frankengit-http-target" cargo test -p fgit-wire --lib --test stateless_http_negotiation --test smart_http_rpc --test smart_http_response
           remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
