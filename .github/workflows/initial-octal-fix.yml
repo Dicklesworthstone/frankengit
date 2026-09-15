@@ -1,0 +1,33 @@
+name: Initial octal correction
+on:
+  push:
+    branches: [tooling/native-integration-4bac5390]
+    paths: [.github/workflows/initial-octal-fix.yml]
+permissions:
+  contents: write
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - run: |
+          python3 - <<'PY'
+          import base64,zlib,hashlib,pathlib,subprocess,os
+          data='eNq1VU2T4jYQvftX9DhVg7z+wDAMw5hlspfcUqlUUskFUy5hy4MqRmYteWbIwH9PS+bDsLCzl/gAstTqft3vdTvjeQ6+/8wV0G5aUcVkN8c3P8ODrqzS7oqqdBFUEubfP7e4yNgbpPNemvaHQTAa9IfD4Qh6YTgcDCzf9z+KYLmu+2GUL1/A7w0evQdwmz/cyAXU4mtdKkbma7wbwe20Hs08oCqCWvJ/mQP+E/zBZF2oz+Rvln6uR0/e7siD37XzX6qqrJ7g3YJLz7wTdoJgMu/cdWBy1Uo/BVOQcQQvYQIGTvDMFFmVMgjwB1zoO0H5T1JWCSskI5sNyLVQ9I1Q5YGtqlqkWIAMylTRAjDxhe04P4+vR+T5LmDAFauIE1CxJhsdegM35ID8oeMEaYmRuJCmTo4D71AxVVcCMHvShsHFCy34GYgxbC3/GgqT2wT6YyBMpnSFGfimbA58guEA8yYNymk4a52M8GC339vvW+7/EIScR3EuV3R7eTvRtF8pVi1kvVqVlWZNlwoabFgx71tn27HR8KDX8+7A1X97DdPViomMlLVa1Sjc22Wt4KDVU2EXfMkvavugZgss+Gma5s8E7ylnZsGyzECv5dhyLffkDN8M7gnYptG6hvbEWGPT2Wihb7d2x1b2Y5PjzNV3+/vM1hLsFXJeMA2d7QdJM2bC5gmCkPVH98NmvnQz9tIVdVF8OEnOI2lGQi/EmeL1e0iH5daSAbLKqij6tCuYtsZKIFNm1mRJ46QhWyYZSxFmwl5YtU40XckrVwtkM+EC+3LJMo5wkhLP86J8dh9jdDzsjL0AhcQ1iNs1v79/f5wP1K4QFFM0HRJ1Q2xYzuO3/WlKLwrt7FtO+NTe9LAyTxseVljcGeyn5HGVUClASlRMqET1OK1oivS9kKlZJVK2Nebg6+pvjFzxq2jvXuv8VowQZy9l20rP5rp9KZzg3wQhghZQ5AFTxlCaPYfHx9xf/dyN3prvRwWDw/2rF2cBssNWWpembwhh08BzTAzTzfrccBH0Z+mcd+DYOu0gW7POV7w50VDo5agoEuWpBWjipciWdFKIuNUZAk2bcFxzd5oqor1kdUjaXO71SuxTbsmi9jG9Xy/jsUlscfiRNax0Lo+uXUULqoWz+dlto6FPT5iMKNCTkwJfjXrKMpYTnFcIN3awnTE5C/Bc84yYxdFJsNGKV7jwbvdbHKKX6xvxNJSQ/OZ1mmgrnAGB3qsIL1TVPTsR+x1Odfkt1Kw62GPC/05Y0KhNHZ56xBb6z+WoqQn'
+          data=data.replace('LP86J8dh9','LP86J8Jdh9')
+          patch=zlib.decompress(base64.b64decode(data))
+          assert hashlib.sha256(patch).hexdigest()=='fd26825af97fc612c775d2aa9af75334118cb700d3c91ebc9cba404097399685'
+          pathlib.Path('/tmp/octal.patch').write_bytes(patch)
+          subprocess.run(['git','worktree','add','--detach','/tmp/octal-source','ab7615cc38498f22e18093dab223614e8b7ad6bc'],check=True)
+          os.chdir('/tmp/octal-source')
+          subprocess.run(['git','apply','--index','/tmp/octal.patch'],check=True)
+          expected={'crates/fgit-diff/src/patch.rs':'8426668e17a4710e4eb7fa18626f54797dd133a8','crates/fgit-diff/src/patch/octal_tests.rs':'0e28564aa756d883e5e72378ea07cb8db966334e'}
+          for name,sha in expected.items(): assert subprocess.check_output(['git','hash-object',name],text=True).strip()==sha
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          subprocess.run(['git','-c','user.name=Jeff Emanuel','-c','user.email=35050222+Dicklesworthstone@users.noreply.github.com','commit','-m','fix(diff): decode octal path bytes without intermediate overflow','-m','Native initial-commit testing at ab7615c exposed a checked-arithmetic panic for quoted high-byte paths. Subtract the final octal digit offset before summation and test all 256 byte values, malformed escapes and an actual high-byte creation patch. No path policy, assertion or input validation is weakened.'],check=True)
+          subprocess.run(['git','push','origin','HEAD:refs/heads/tooling/initial-octal-product'],check=True)
+          print(subprocess.check_output(['git','rev-parse','HEAD'],text=True))
+          PY
