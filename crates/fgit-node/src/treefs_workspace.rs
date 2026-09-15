@@ -1,29 +1,31 @@
 //! Authority-selected TreeFS input discovery over the production object fabric.
 
 mod branches;
-mod initial_commit;
-mod tags;
-mod full_bundle;
 mod candidate;
+mod full_bundle;
+mod initial_commit;
 mod merge_prepare;
 mod native_merge;
 mod outbox_delivery;
 mod patch;
+mod tags;
 pub use patch::{PatchPathReceipt, WorkspacePatchCandidate};
+mod events;
+mod issues;
 mod publication;
 mod pull_request;
-mod issues;
+pub use events::ForgeEventReadRefusal;
 mod protection;
 pub use issues::IssueReadRefusal;
 mod session_state;
 mod sessions;
-mod source_search;
 mod source_browse;
+mod source_search;
 use fgit_forge::source_browse::SourceBrowseError;
 mod transaction_recovery;
 pub use session_state::WorkspaceSessionRefusal;
-pub use sessions::{MergeWorkspaceReceipt, WorkspaceShutdownBlocked};
 pub(crate) use sessions::NodeWorkspaceSessions;
+pub use sessions::{MergeWorkspaceReceipt, WorkspaceShutdownBlocked};
 #[cfg(target_os = "linux")]
 mod trusted_tool;
 
@@ -170,18 +172,39 @@ impl OneNode {
         ) -> Result<T, NodeWorkspaceRefusal>
         + Send,
     ) -> Result<T, NodeWorkspaceRefusal> {
-        self.with_workspace_snapshot_in(request, reference, visibility, capability, now, None, None, usize::MAX,
-            |base, source, capability, _head, _metadata_bytes| consume(base, source, capability)).await
+        self.with_workspace_snapshot_in(
+            request,
+            reference,
+            visibility,
+            capability,
+            now,
+            None,
+            None,
+            usize::MAX,
+            |base, source, capability, _head, _metadata_bytes| consume(base, source, capability),
+        )
+        .await
     }
 
     /// Shared single-selection variant for snapshot-pinned source consumers.
     async fn with_workspace_snapshot_in<A: GitHashAlgorithm, T>(
-        &self, request: &NodeRequestContext, reference: &RefName,
-        visibility: &RefVisibility, capability: &mut TreeCapability, now: u64,
-        expected_head: Option<fgit_types::RepositoryAuthorityHeadId>, expected_commit: Option<AnyOid>,
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        visibility: &RefVisibility,
+        capability: &mut TreeCapability,
+        now: u64,
+        expected_head: Option<fgit_types::RepositoryAuthorityHeadId>,
+        expected_commit: Option<AnyOid>,
         maximum_object_bytes: usize,
-        consume: impl FnOnce(&BaseView<A>, &NodeTreeSource<'_>, &mut TreeCapability,
-            fgit_types::RepositoryAuthorityHeadId, u64) -> Result<T, NodeWorkspaceRefusal> + Send,
+        consume: impl FnOnce(
+            &BaseView<A>,
+            &NodeTreeSource<'_>,
+            &mut TreeCapability,
+            fgit_types::RepositoryAuthorityHeadId,
+            u64,
+        ) -> Result<T, NodeWorkspaceRefusal>
+        + Send,
     ) -> Result<T, NodeWorkspaceRefusal> {
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         if capability.repository_id() != self.repository_id() {
@@ -213,10 +236,14 @@ impl OneNode {
             .get(reference)
             .ok_or(NodeWorkspaceRefusal::RefUnavailable)?;
         if expected_head.is_some_and(|head| head != selected.basis().id()) {
-            return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(SourceBrowseError::SnapshotMoved)));
+            return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
+                SourceBrowseError::SnapshotMoved,
+            )));
         }
         if expected_commit.is_some_and(|expected| expected != *commit) {
-            return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(SourceBrowseError::CommitMoved)));
+            return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
+                SourceBrowseError::CommitMoved,
+            )));
         }
         let rcr = match selected.selected_closure().source() {
             ClosureSelectionSource::RepositoryCommit(rcr)
@@ -230,7 +257,8 @@ impl OneNode {
             inner: VerifiedFabricPackSource {
                 fabric: &self.fabric,
                 object_format: self.object_format,
-                maximum_object_bytes: usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX)
+                maximum_object_bytes: usize::try_from(self.max_object_bytes)
+                    .unwrap_or(usize::MAX)
                     .min(maximum_object_bytes),
                 database_context: request.authority(),
                 database_exhaustion: &exhaustion,
@@ -275,7 +303,13 @@ impl OneNode {
                 source.inner.parse_limits(),
                 PathPolicy::default(),
             );
-            consume(&base, &source, capability, selected.basis().id(), body.len() as u64)
+            consume(
+                &base,
+                &source,
+                capability,
+                selected.basis().id(),
+                body.len() as u64,
+            )
         })();
         if let PackContextCheckpoint::Stopped { budget_exhaustion } =
             checkpoint_pack_context(request.authority())
