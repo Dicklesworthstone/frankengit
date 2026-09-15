@@ -41,11 +41,11 @@ use fgit_types::RefName;
 
 /// Bounded shallow-history and partial-clone closure computation.
 pub mod closure;
-mod filter_syntax;
 mod cutoff_ref;
-mod shallow_response;
+mod filter_syntax;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
+mod shallow_response;
 /// Bounded smart HTTP discovery, routing, and streaming message framing.
 pub mod smart_http;
 /// Hidden-ref authorization policy and visibility-filtered repository views.
@@ -1079,7 +1079,9 @@ pub enum ObjectFilter {
 
 /// Parses one bounded upload-pack `filter` value.
 pub fn parse_filter(
-    text: &[u8], object_format: GitObjectFormat, limits: &WireLimits,
+    text: &[u8],
+    object_format: GitObjectFormat,
+    limits: &WireLimits,
 ) -> Result<ObjectFilter, WireError> {
     filter_syntax::parse(text, object_format, limits)
 }
@@ -1367,8 +1369,11 @@ impl PackOptions {
     /// Select relative history semantics without changing pack-format flags.
     #[must_use]
     pub const fn with_deepen_relative(self, enabled: bool) -> Self {
-        if enabled { self.with(Self::DEEPEN_RELATIVE) }
-        else { Self(self.0 & !Self::DEEPEN_RELATIVE) }
+        if enabled {
+            self.with(Self::DEEPEN_RELATIVE)
+        } else {
+            Self(self.0 & !Self::DEEPEN_RELATIVE)
+        }
     }
 }
 
@@ -2007,15 +2012,14 @@ impl LegacyUploadPack {
                 }
                 let request = self.pack_request();
                 shallow_response::validate_relative_depth(&request)?;
-                let shallow_negotiated = self.automatic_shallow_updates
-                    && shallow_response::changes_boundary(&request);
-                let mut output = if self.automatic_shallow_updates
-                    && shallow_response::has_controls(&request)
-                {
-                    shallow_response::response(repository, &request, &self.limits)?
-                } else {
-                    Vec::new()
-                };
+                let shallow_negotiated =
+                    self.automatic_shallow_updates && shallow_response::changes_boundary(&request);
+                let mut output =
+                    if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
+                        shallow_response::response(repository, &request, &self.limits)?
+                    } else {
+                        Vec::new()
+                    };
                 if !self.stateless_http && !shallow_negotiated && self.ack_mode != AckMode::None {
                     output.push(line_packet(b"NAK\n"));
                 }
@@ -2024,7 +2028,10 @@ impl LegacyUploadPack {
                 }
                 self.shallow_negotiated = shallow_negotiated;
                 self.state = LegacyState::AwaitHave;
-                Ok(Transition { output, events: Vec::new() })
+                Ok(Transition {
+                    output,
+                    events: Vec::new(),
+                })
             }
             Packet::Data(line) => self.accept_want_line(line, repository),
             Packet::Delimiter | Packet::ResponseEnd => Err(WireError::IllegalTransition {
@@ -2115,7 +2122,9 @@ impl LegacyUploadPack {
             .advertised_refs()
             .iter()
             .any(|reference| reference.oid == oid)
-            && !(self.server_capabilities.contains(b"allow-reachable-sha1-in-want")
+            && !(self
+                .server_capabilities
+                .contains(b"allow-reachable-sha1-in-want")
                 && repository.contains_want(oid))
         {
             return Err(WireError::WantNotAdvertised { oid });
@@ -2184,7 +2193,9 @@ impl LegacyUploadPack {
                 self.last_common = Some(oid);
                 let mut transition = self.common_ack_transition(oid);
                 if self.stateless_http && self.ack_mode == AckMode::None && first_common {
-                    transition.output.push(line_packet(format!("ACK {}\n", oid_hex(oid))));
+                    transition
+                        .output
+                        .push(line_packet(format!("ACK {}\n", oid_hex(oid))));
                 }
                 return Ok(transition);
             }
@@ -2214,7 +2225,9 @@ impl LegacyUploadPack {
         // common have set. A mere unrelated common object never proves ready.
         // Sorting a bounded vector avoids a wants-times-haves scan.
         let mut common = Vec::new();
-        common.try_reserve_exact(self.haves.len()).map_err(|_| WireError::AllocationFailure)?;
+        common
+            .try_reserve_exact(self.haves.len())
+            .map_err(|_| WireError::AllocationFailure)?;
         common.extend_from_slice(&self.haves);
         common.sort_unstable();
         let ready = self.ack_mode == AckMode::MultiAckDetailed
@@ -2223,13 +2236,16 @@ impl LegacyUploadPack {
             && self.deepen.is_none()
             && self.deepen_since.is_none()
             && self.deepen_not.is_empty()
-            && self.wants.iter().all(|oid| {
-                common.binary_search(oid).is_ok() && repository.is_common(*oid)
-            });
+            && self
+                .wants
+                .iter()
+                .all(|oid| common.binary_search(oid).is_ok() && repository.is_common(*oid));
         let mut transition = Transition::empty();
         if ready {
             if let Some(oid) = self.last_common {
-                transition.output.push(line_packet(format!("ACK {} ready\n", oid_hex(oid))));
+                transition
+                    .output
+                    .push(line_packet(format!("ACK {} ready\n", oid_hex(oid))));
             }
         }
         if self.ack_mode != AckMode::None || self.last_common.is_none() {
@@ -2237,7 +2253,9 @@ impl LegacyUploadPack {
         }
         if ready && self.no_done {
             transition.append(self.final_ack_transition())?;
-            transition.events.push(WireEvent::PackRequested(self.pack_request()));
+            transition
+                .events
+                .push(WireEvent::PackRequested(self.pack_request()));
             self.state = LegacyState::Complete;
         } else {
             self.http_round_complete = true;
@@ -2266,7 +2284,9 @@ impl LegacyUploadPack {
                 b"no-progress" => self.options = self.options.with(PackOptions::NO_PROGRESS),
                 b"deepen-relative" => {
                     if capability.value.is_some() {
-                        return Err(WireError::MalformedRequestLine { line: capability.encoded()? });
+                        return Err(WireError::MalformedRequestLine {
+                            line: capability.encoded()?,
+                        });
                     }
                     self.options = self.options.with_deepen_relative(true);
                 }
@@ -2310,7 +2330,10 @@ impl LegacyUploadPack {
                 Some(oid) => vec![line_packet(format!("ACK {}\n", oid_hex(oid)))],
                 None => vec![line_packet(b"NAK\n")],
             };
-            return Transition { output, events: Vec::new() };
+            return Transition {
+                output,
+                events: Vec::new(),
+            };
         }
         let output = match self.last_common {
             Some(oid) => match self.ack_mode {
@@ -2755,7 +2778,9 @@ impl V2UploadPack {
         if line == b"wait-for-done" && self.stateless_http {
             self.require_fetch_feature(b"wait-for-done")?;
             if self.wait_for_done {
-                return Err(WireError::MalformedRequestLine { line: line.to_vec() });
+                return Err(WireError::MalformedRequestLine {
+                    line: line.to_vec(),
+                });
             }
             self.wait_for_done = true;
             return Ok(Transition::empty());
@@ -2938,57 +2963,100 @@ impl V2UploadPack {
         let mut output = Vec::new();
         if !self.done && (!self.haves.is_empty() || self.wait_for_done) {
             let mut used_bytes = 0;
-            add_output_packet(&mut output, line_packet(b"acknowledgments\n"),
-                b"acknowledgments\n".len() + 4, &mut used_bytes, &self.limits)?;
+            add_output_packet(
+                &mut output,
+                line_packet(b"acknowledgments\n"),
+                b"acknowledgments\n".len() + 4,
+                &mut used_bytes,
+                &self.limits,
+            )?;
             let mut any_common = false;
             for &have in &self.haves {
                 if repository.is_common(have) {
                     let line = format!("ACK {}\n", oid_hex(have)).into_bytes();
                     let count = line.len() + 4;
-                    add_output_packet(&mut output, line_packet(line), count,
-                        &mut used_bytes, &self.limits)?;
+                    add_output_packet(
+                        &mut output,
+                        line_packet(line),
+                        count,
+                        &mut used_bytes,
+                        &self.limits,
+                    )?;
                     any_common = true;
                 }
             }
             if !any_common {
-                add_output_packet(&mut output, line_packet(b"NAK\n"), 8,
-                    &mut used_bytes, &self.limits)?;
+                add_output_packet(
+                    &mut output,
+                    line_packet(b"NAK\n"),
+                    8,
+                    &mut used_bytes,
+                    &self.limits,
+                )?;
             }
             // Without an ancestry oracle, only exact wanted common tips prove
             // a sufficient cut. Conservatively ask for another round otherwise;
             // the client's explicit `done` can always terminate negotiation.
             let ready = if self.stateless_http {
                 let mut sorted = Vec::new();
-                sorted.try_reserve_exact(self.haves.len()).map_err(|_| WireError::AllocationFailure)?;
+                sorted
+                    .try_reserve_exact(self.haves.len())
+                    .map_err(|_| WireError::AllocationFailure)?;
                 sorted.extend_from_slice(&self.haves);
                 sorted.sort_unstable();
-                !self.wait_for_done && any_common && self.shallows.is_empty()
-                    && self.deepen.is_none() && self.deepen_since.is_none()
+                !self.wait_for_done
+                    && any_common
+                    && self.shallows.is_empty()
+                    && self.deepen.is_none()
+                    && self.deepen_since.is_none()
                     && self.deepen_not.is_empty()
-                    && self.wants.iter().all(|oid| sorted.binary_search(oid).is_ok()
-                        && repository.is_common(*oid))
-            } else { true };
+                    && self
+                        .wants
+                        .iter()
+                        .all(|oid| sorted.binary_search(oid).is_ok() && repository.is_common(*oid))
+            } else {
+                true
+            };
             if !ready {
-                add_output_packet(&mut output, Packet::Flush, 4,
-                    &mut used_bytes, &self.limits)?;
+                add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, &self.limits)?;
                 self.http_round_complete = true;
                 self.state = V2State::Complete;
-                return Ok(Transition { output, events: Vec::new() });
+                return Ok(Transition {
+                    output,
+                    events: Vec::new(),
+                });
             }
-            add_output_packet(&mut output, line_packet(b"ready\n"), 10,
-                &mut used_bytes, &self.limits)?;
-            add_output_packet(&mut output, Packet::Delimiter, 4,
-                &mut used_bytes, &self.limits)?;
+            add_output_packet(
+                &mut output,
+                line_packet(b"ready\n"),
+                10,
+                &mut used_bytes,
+                &self.limits,
+            )?;
+            add_output_packet(
+                &mut output,
+                Packet::Delimiter,
+                4,
+                &mut used_bytes,
+                &self.limits,
+            )?;
         }
         if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
-            output.extend(shallow_response::response(repository, &request, &self.limits)?);
+            output.extend(shallow_response::response(
+                repository,
+                &request,
+                &self.limits,
+            )?);
         }
         output.push(line_packet(b"packfile\n"));
         if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
             let _ = encode_packets(&output, &self.limits)?;
         }
         self.state = V2State::Complete;
-        Ok(Transition { output, events: vec![WireEvent::PackRequested(request)] })
+        Ok(Transition {
+            output,
+            events: vec![WireEvent::PackRequested(request)],
+        })
     }
 }
 
