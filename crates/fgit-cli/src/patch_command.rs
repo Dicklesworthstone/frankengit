@@ -1,5 +1,6 @@
 //! Native patch preparation and separately reviewed ordinary workspace admission.
 mod options;
+mod initial;
 
 use std::io::{Read, Write};
 use fgit_authority::{IdempotencyKey, TerminalOutcome, MAX_IDEMPOTENCY_KEY_BYTES};
@@ -34,9 +35,13 @@ quarantine and ordinary expected-old admission; there is no force bypass.
 These are trusted local-owner commands, not remote authentication endpoints.
 --ref-hex decodes the positional reference as exact lowercase hex. Stdin keys
 are bounded exact bytes, including newlines, and never appear in receipts.
+For a first commit without a source repository, use fg patch prepare-initial --help.
 Exit 0: prepared/committed; 3: canonical refusal; 2: input/infrastructure/output error.";
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|s| matches!(s.as_str(), "prepare-initial" | "apply-initial")) {
+        return initial::run(args);
+    }
     if args == ["--help"] || args == ["prepare", "--help"] || args == ["apply", "--help"] {
         writeln!(std::io::stdout().lock(), "{USAGE}").map_err(|error| error.to_string())?;
         return Ok(0);
