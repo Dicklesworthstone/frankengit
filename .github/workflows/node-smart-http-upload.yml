@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/node-smart-http-upload.yml
       - tools/http-transfer/publish-node-smart-http-upload.sh
+      - tools/http-transfer/publish-node-smart-http-upload-v2.sh
 permissions:
   contents: write
 jobs:
@@ -17,4 +18,4 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
       - name: Build, test, and fast-forward main
-        run: bash tools/http-transfer/publish-node-smart-http-upload.sh
+        run: bash tools/http-transfer/publish-node-smart-http-upload-v2.sh
