@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 3a0f3fcdfb69ace27147a697f5b63f9ef2111891
+          ref: 0e21ecd4d68eecd638e4816bf3aee824d28e27af
           persist-credentials: false
       - run: git rev-parse HEAD && rustc -Vv
       - run: cargo check --locked -p fgit-cli --all-targets
