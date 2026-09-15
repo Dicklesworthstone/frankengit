@@ -15,6 +15,8 @@
 
 /// Composition with the existing native upload-pack and receive-pack machines.
 pub mod rpc;
+/// Backpressured native pack response streaming and aggregate byte budgets.
+pub mod response;
 
 use std::fmt::{self, Display, Formatter};
 
