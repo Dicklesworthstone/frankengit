@@ -39,7 +39,7 @@ fn fetch_updates_exact_tracking_refs_and_replays_after_reopen_without_importing_
         assert_eq!(after.snapshot().head_target, empty.snapshot().head_target);
         assert_eq!(after.snapshot().outbox, empty.snapshot().outbox);
         assert_eq!(after.basis().body().forge_position_root, empty.basis().body().forge_position_root);
-        assert_eq!(destination.read_git_object(child).unwrap(), source.read_git_object(child).unwrap());
+        assert_native_transfer(&source, &destination, child);
         destination.push_quota.limit.max_events = 0;
         assert_eq!(fetch(&destination, &next, &mappings, "fetch").unwrap(), result);
         assert_eq!(fetch(&destination, &next, &[mappings[1].clone(), mappings[0].clone()], "fetch").unwrap(), result);

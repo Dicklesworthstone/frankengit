@@ -97,10 +97,7 @@ fn incremental_transfer_excludes_prerequisite_history_and_recovers_after_reopen(
             after.basis().body().forge_position_root,
             before.basis().body().forge_position_root
         );
-        assert_eq!(
-            destination.read_git_object(child).unwrap(),
-            source.read_git_object(child).unwrap()
-        );
+        assert_native_transfer(&source, &destination, child);
         assert!(
             sync_import(
                 &destination,
@@ -435,7 +432,7 @@ fn actual_ref_delta_incremental_bundle_reconstructs_from_authorized_original_byt
             &[("refs/heads/main", Some(base))],
             "thin-native-transfer",
         ));
-        assert_eq!(destination.read_git_object(child).unwrap(), new);
+        assert_native_transfer(&source, &destination, child);
         assert_eq!(
             snapshot(&destination).snapshot().refs[&reference("refs/heads/main")],
             child
