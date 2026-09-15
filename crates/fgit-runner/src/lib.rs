@@ -954,18 +954,24 @@ impl SecretBroker {
     }
 
     fn revoke_all(&mut self, leases: &[SecretLease]) -> Result<u16, RunnerRefusal> {
-        let mut revoked = 0_u16;
+        // An invalid handle must not leave a partially revoked set whose retry
+        // then fails on the already-settled first lease.
+        let revoked = u16::try_from(leases.len())
+            .map_err(|_| RunnerRefusal::SecretLeaseExhausted)?;
+        let mut seen = BTreeSet::new();
         for lease in leases {
-            let Some(record) = self.records.get_mut(lease) else {
-                return Err(RunnerRefusal::UnknownSecretLease);
-            };
+            if !seen.insert(*lease) {
+                return Err(RunnerRefusal::DuplicateSecretLease);
+            }
+            let record = self.records.get(lease).ok_or(RunnerRefusal::UnknownSecretLease)?;
             if record.state != SecretState::Bound {
                 return Err(RunnerRefusal::SecretLeaseUnavailable);
             }
-            record.state = SecretState::Revoked;
-            revoked = revoked
-                .checked_add(1)
-                .ok_or(RunnerRefusal::SecretLeaseExhausted)?;
+        }
+        for lease in leases {
+            if let Some(record) = self.records.get_mut(lease) {
+                record.state = SecretState::Revoked;
+            }
         }
         Ok(revoked)
     }
@@ -1337,8 +1343,6 @@ impl RunnerControlPlane {
         }) {
             return Err(RunnerRefusal::ResourceCeilingAboveRunnerMaximum { dimension });
         }
-        broker.bind_all(&request.secret_leases, &policy, request.forked, logical_now)?;
-        self.available_slots -= 1;
         let cache_namespace = CacheNamespace::for_capsule(policy.trust_domain(), &capsule);
         let runner_request = policy.ceilings.runner_request(
             policy.profile,
@@ -1346,6 +1350,10 @@ impl RunnerControlPlane {
             policy.network,
             cache_namespace,
         )?;
+        // Finish every fallible, responsibility-free preparation before binding
+        // secrets or consuming capacity. Binding validates the whole set first.
+        broker.bind_all(&request.secret_leases, &policy, request.forked, logical_now)?;
+        self.available_slots -= 1;
         Ok(AdmittedRun {
             plan: SandboxPlan {
                 capsule,
@@ -1442,6 +1450,12 @@ impl RunnerControlPlane {
         observation: SubstrateObservation,
         broker: &mut SecretBroker,
     ) -> Result<CheckReceipt, RunnerRefusal> {
+        // The substrate has returned a terminal observation. Settle ownership
+        // before interpreting untrusted output metadata: a malformed artifact
+        // list or evidence frame must never keep secrets live or leak a slot.
+        // Failure to revoke retains capacity rather than hiding an obligation.
+        let revoked_secrets = broker.revoke_all(&admitted.plan.secret_leases)?;
+        self.available_slots = self.available_slots.saturating_add(1);
         if observation.artifacts.len() > MAX_ARTIFACTS {
             return Err(RunnerRefusal::CollectionTooLarge {
                 field: "artifacts",
@@ -1452,8 +1466,6 @@ impl RunnerControlPlane {
             return Err(RunnerRefusal::DuplicateArtifactCommitment);
         }
         let evidence = receipt_evidence(admitted.plan(), outcome, &observation)?;
-        let revoked_secrets = broker.revoke_all(&admitted.plan.secret_leases)?;
-        self.available_slots = self.available_slots.saturating_add(1);
         let runner_finished = RunnerFinished {
             exit_class: outcome.exit_class(),
             artifacts: u32::try_from(observation.artifacts.len()).map_err(|_| {
@@ -1483,7 +1495,7 @@ impl RunnerControlPlane {
 
 /// A plan admitted by [`RunnerControlPlane`].
 #[must_use = "an admitted run must be executed or settled through the owning region"]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct AdmittedRun {
     plan: SandboxPlan,
     runner_request: RunnerRequest,
