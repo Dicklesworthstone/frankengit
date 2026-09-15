@@ -5,9 +5,25 @@ on:
 permissions:
   contents: read
 jobs:
-  native:
+  prepare:
     runs-on: ubuntu-22.04
-    timeout-minutes: 40
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.prepare.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - id: prepare
+        run: python3 tools/incremental-transfer-check/prepare.py
+  native:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
     env:
       RCH_CARGO_WRAPPER_BYPASS: '1'
       CARGO_BUILD_JOBS: '1'
@@ -19,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: b7cc80e48839ea79e6c73c7c3a6fc62543d36954
+          ref: ${{ needs.prepare.outputs.source }}
           persist-credentials: false
       - name: Record exact source and toolchain
         run: |
