@@ -1,4 +1,4 @@
-name: HTTP source transport
+name: HTTP continuation publish
 on:
   push:
     branches: [tooling/http-transfer-c15bea04]
@@ -6,47 +6,83 @@ on:
 permissions:
   contents: write
 jobs:
-  transfer:
+  publish:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Prepare exact source-only tree; never update main
+          persist-credentials: true
+      - name: Reconstruct, verify, and fast-forward main
         env:
-          BASE: c15bea045f2c01790917b020963ae8ab24696422
+          BASE: 2ab7584ebdedd2da1e22e1c00b992d707defa253
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import base64, hashlib, json, os, pathlib, subprocess, zlib
-          def git(*a):
-              return subprocess.check_output(['git',*a],text=True).strip()
-          payload=pathlib.Path('tools/http-transfer/phase1.b64').read_bytes()
-          patch=zlib.decompress(base64.b64decode(payload))
-          assert hashlib.sha256(patch).hexdigest()=='42985a8fe823022a6c36d473e513fa63d80d86a6cd73875386728f33c9a376de'
-          temp=pathlib.Path(os.environ['RUNNER_TEMP'])
-          pp=temp/'http.patch'; pp.write_bytes(patch)
-          work=temp/'http-source'; git('worktree','add','--detach',str(work),os.environ['BASE'])
-          os.chdir(work)
-          assert git('hash-object','crates/fgit-wire/src/lib.rs')=='fa60b3dbefe9b91a8a35e8aa30d42c0b0f56ec26'
-          subprocess.run(['git','apply','--index',str(pp)],check=True)
-          expected={'crates/fgit-wire/src/lib.rs':'41d0ce459544079ea1860729d5a164484aa49cc1','crates/fgit-wire/src/smart_http.rs':'fb9dc67e2f9a35b9739a6cb2b1f9659b2aeb47ba','crates/fgit-wire/src/smart_http_tests.rs':'5e6f580620a80bfc414214b34177b492800a90d0'}
-          assert set(git('diff','--cached','--name-only').splitlines())==set(expected)
-          for name, sha in expected.items(): assert git('hash-object',name)==sha, name
-          subprocess.run(['git','diff','--cached','--check'],check=True)
-          tree=git('write-tree')
-          commit=git('-c','user.name=Jeff Emanuel','-c','user.email=35050222+Dicklesworthstone@users.noreply.github.com','commit-tree',tree,'-p',os.environ['BASE'],'-m','transport: source-only bounded HTTP codec tree')
-          git('push','origin',commit+':refs/heads/tooling/http-source-phase1')
-          out=temp/'http-transport'; out.mkdir()
-          (out/'receipt.json').write_text(json.dumps({'base':os.environ['BASE'],'tree':tree,'transport_commit':commit,'files':expected},indent=2))
-          git('archive',commit,'--format=tar.gz','--output='+str(out/'source.tar.gz'))
-          print('SOURCE_TREE='+tree)
-          print('TRANSPORT_COMMIT='+commit)
-          PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: http-source-phase1
-          path: ${{ runner.temp }}/http-transport
-          retention-days: 1
-          if-no-files-found: error
+          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          test "$remote_main" = "$BASE"
+          temp="$RUNNER_TEMP/http-continuation"
+          mkdir -p "$temp/payload"
+          cat tools/http-transfer/continuation.part00 \
+              tools/http-transfer/continuation.part01 \
+              tools/http-transfer/continuation.part02 \
+              tools/http-transfer/continuation.part03 \
+              tools/http-transfer/continuation.part04 > "$temp/payload.b64"
+          test "$(sha256sum "$temp/payload.b64" | awk '{print $1}')" = 0f3f168bcb7811d5634677edc9c5f61c6bf6dc748a03bd144e8ab0a3925ab85b
+          base64 -d "$temp/payload.b64" > "$temp/patches.tar.gz"
+          test "$(sha256sum "$temp/patches.tar.gz" | awk '{print $1}')" = a9482edab3451b7dbd6d5d8c244ddd8528180d3724207e3619dd3a7ebadb57c2
+          tar -xzf "$temp/patches.tar.gz" -C "$temp/payload"
+          printf '%s  %s\n' \
+            9cc4a44e9562e2be604f838d3f7d43ec6fad753246a712ecfced12fdc8de96ed "$temp/payload/commits/0001-feat-wire-implement-native-stateless-HTTP-fetch-nego.patch" \
+            1d1dd3f9388ad87db5816df65398ac481bd30a38ccd2d0706eed610704293e1c "$temp/payload/commits/0002-feat-wire-compose-HTTP-RPC-bodies-with-native-Git-an.patch" \
+            9e00ab2b68cca8bcc63182443e06f765cbd68faba5fbdc209a9c46d489fcb1d2 "$temp/payload/commits/0003-feat-wire-preserve-stateless-v2-negotiation-and-mult.patch" \
+            6473155af42c6a57ae918ab30d4b475689e7abc8250f04d1c547bf05aac59a1e "$temp/payload/commits/0004-feat-wire-stream-bounded-native-packs-into-HTTP-resp.patch" \
+            bbb57aa086637e432909e17ddeffc370ba4ca3c92ca8ea5991bbef76f55e0891 "$temp/payload/commits/0005-fix-wire-validate-negotiation-controls-and-retain-fr.patch" \
+            | sha256sum -c -
+          work="$temp/work"
+          git worktree add --detach "$work" "$BASE"
+          cd "$work"
+          git config user.name 'Jeff Emanuel'
+          git config user.email '35050222+Dicklesworthstone@users.noreply.github.com'
+          for patch in "$temp"/payload/commits/000*.patch; do
+            git am --committer-date-is-author-date "$patch"
+          done
+          test "$(git rev-list --count "$BASE"..HEAD)" = 5
+          cat > "$temp/expected-subjects.txt" <<'SUBJECTS'
+          feat(wire): implement native stateless HTTP fetch negotiation rounds (FG-105a)
+          feat(wire): compose HTTP RPC bodies with native Git and quarantine (FG-105a)
+          feat(wire): preserve stateless v2 negotiation and multiplexed responses (FG-105a)
+          feat(wire): stream bounded native packs into HTTP responses (FG-105a)
+          fix(wire): validate negotiation controls and retain fragmentation invariance (FG-105a)
+          SUBJECTS
+          sed -i 's/^          //' "$temp/expected-subjects.txt"
+          git log --reverse --format='%s' "$BASE"..HEAD > "$temp/actual-subjects.txt"
+          cmp "$temp/expected-subjects.txt" "$temp/actual-subjects.txt"
+          git diff "$BASE"..HEAD --check
+          cat > "$temp/expected-files.txt" <<'FILES'
+          crates/fgit-wire/src/lib.rs
+          crates/fgit-wire/src/smart_http.rs
+          crates/fgit-wire/src/smart_http/response.rs
+          crates/fgit-wire/src/smart_http/rpc.rs
+          crates/fgit-wire/tests/smart_http_response.rs
+          crates/fgit-wire/tests/smart_http_rpc.rs
+          crates/fgit-wire/tests/stateless_http_negotiation.rs
+          FILES
+          sed -i 's/^          //' "$temp/expected-files.txt"
+          git diff --name-only "$BASE"..HEAD | sort > "$temp/actual-files.txt"
+          cmp "$temp/expected-files.txt" "$temp/actual-files.txt"
+          test "$(git hash-object crates/fgit-wire/src/lib.rs)" = c603b2cca00a55980d37914f48b4bb6af264ac39
+          test "$(git hash-object crates/fgit-wire/src/smart_http.rs)" = 9aee279464e0862aea9c5cbcfb715753e21b638c
+          test "$(git hash-object crates/fgit-wire/src/smart_http/rpc.rs)" = c687dec3756d355878cfa33e829a04084ab894ca
+          test "$(git hash-object crates/fgit-wire/src/smart_http/response.rs)" = 94243f918c3a1ff719214abcd7c5308c84e88405
+          test "$(git hash-object crates/fgit-wire/tests/stateless_http_negotiation.rs)" = 3a7d920f0484cc57b20262ed2169161959d07a53
+          test "$(git hash-object crates/fgit-wire/tests/smart_http_rpc.rs)" = c3e5fe7887deda23fe5cbc7370e6b72ebf765ae0
+          test "$(git hash-object crates/fgit-wire/tests/smart_http_response.rs)" = 6c125abdd7fc3cf30c9128bab9a44e0ef68ab6bc
+          RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="$RUNNER_TEMP/frankengit-http-target" cargo fmt --package fgit-wire -- --check
+          RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="$RUNNER_TEMP/frankengit-http-target" cargo test -p fgit-wire --lib --test stateless_http_negotiation --test smart_http_rpc --test smart_http_response
+          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          test "$remote_main" = "$BASE"
+          git push origin HEAD:refs/heads/main
+          published="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          test "$published" = "$(git rev-parse HEAD)"
+          echo "PUBLISHED=$published"
