@@ -25,7 +25,7 @@ impl UploadPackRepository for Repository {
 }
 fn data(text: impl Into<Vec<u8>>) -> Packet { Packet::Data(text.into()) }
 fn wire(packets: &[Packet]) -> Vec<u8> { encode_packets(packets, &WireLimits::default()).unwrap() }
-fn caps(bytes: &[u8]) -> Capabilities { Capabilities::parse_v1(bytes, &WireLimits::default()).unwrap() }
+fn caps(bytes: &[u8]) -> Capabilities { if bytes.is_empty() { Capabilities::default() } else { Capabilities::parse_v1(bytes, &WireLimits::default()).unwrap() } }
 fn v2_caps() -> Capabilities {
     Capabilities::parse_v2_advertisement(&[data(b"version 2\n"), data(b"ls-refs\n"),
         data(b"fetch\n"), Packet::Flush], &WireLimits::default()).unwrap()
