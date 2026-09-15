@@ -1,0 +1,92 @@
+name: Initial commit CLI integration
+on:
+  push:
+    branches: [tooling/initial-cli-finish-896dfd6a]
+    paths: [.github/workflows/initial-commit-cli.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.apply.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - id: apply
+        run: |
+          python3 - <<'PY'
+          import base64,zlib,hashlib,pathlib,subprocess,os
+          encoded=''.join(pathlib.Path(f'tools/native-integration/cli.{i}').read_text().strip() for i in range(3))
+          patch=zlib.decompress(base64.b64decode(encoded,validate=True))
+          assert hashlib.sha256(patch).hexdigest()=='88388b53b5978a37030af21c480eac86e354b1291c614266c793edcb1998e883'
+          pathlib.Path('/tmp/initial-cli.patch').write_bytes(patch)
+          subprocess.run(['git','worktree','add','--detach','/tmp/initial-cli','478a09798963a0239a70d37081e5ac8cc42c050d'],check=True)
+          os.chdir('/tmp/initial-cli')
+          subprocess.run(['git','apply','--index','/tmp/initial-cli.patch'],check=True)
+          expected={'crates/fgit-cli/src/patch_command.rs':'565119a98d3590bf78cf8470f413839476b2d585','crates/fgit-cli/src/patch_command/initial.rs':'24c27ee6d5e15368a40c51ce3fce4457b630056d','crates/fgit-cli/src/patch_command/initial/options.rs':'92139fde17b460da33adc79d7c76e4f885b979d8','crates/fgit-cli/src/patch_command/initial/tests.rs':'2ae8d72a50c1465bd41a019f572f277aea92a6e0','crates/fgit-cli/tests/native_initial_commit_smoke.rs':'8c23ab80b454057177493e3a97c75c4ceb3f9286','docs/NATIVE_INITIAL_COMMITS.md':'cdb23da4903cdcb3c83ffdb800feeabfd02b0595','scripts/e2e/initial_commit_smoke.py':'6f9a4c4db24ea58393e750a67cf6f61462ed693d','scripts/verify_initial_commit.sh':'b356ae258f80e818c856101b449c85d8f6c84818'}
+          assert set(subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines())==set(expected)
+          for name,sha in expected.items(): assert subprocess.check_output(['git','hash-object',name],text=True).strip()==sha,name
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          subprocess.run(['git','-c','user.name=Jeff Emanuel','-c','user.email=35050222+Dicklesworthstone@users.noreply.github.com','commit','-m','feat(cli): bootstrap first native commits with reviewed absent-branch publication (FG-051a)','-m','Expose fg patch prepare-initial and apply-initial with exact creation patches, independent candidate identity, saved bundles, authenticated byte-exact retry keys and truthful terminal receipts. Include pure-native fresh-process first/second commit, replay and refusal coverage in both hash domains. Preserve existing source edits and concurrent workflow/bundle implementations. Native execution is recorded separately.'],check=True)
+          sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          subprocess.run(['git','push','origin','HEAD:refs/heads/tooling/initial-cli-product'],check=True)
+          print('SOURCE_COMMIT='+sha)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('source='+sha+'\n')
+          PY
+  native:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TARGET_DIR: /tmp/initial-cli-target
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - name: Compile all node and CLI targets and execute initial-commit tests
+        run: |
+          set +e
+          set -uo pipefail
+          out="$RUNNER_TEMP/initial-evidence"
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/revision.txt"
+          rustc -Vv > "$out/rustc.txt"
+          bash scripts/verify_initial_commit.sh check > "$out/check.log" 2>&1
+          a=$?
+          tail -n 100 "$out/check.log"
+          bash scripts/verify_initial_commit.sh test > "$out/test.log" 2>&1
+          b=$?
+          tail -n 160 "$out/test.log"
+          cargo test --locked -p fgit-diff --lib octal_tests -- --nocapture > "$out/octal.log" 2>&1
+          c=$?
+          tail -n 60 "$out/octal.log"
+          printf 'check=%s test=%s octal=%s\n' "$a" "$b" "$c" > "$out/exit.txt"
+          test "$a" = 0 && test "$b" = 0 && test "$c" = 0
+      - name: Retain exact-source evidence
+        if: always()
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/initial-evidence"
+          mkdir -p "$out"
+          git status --porcelain > "$out/status.txt"
+          git archive HEAD --format=tar.gz --output="$out/source.tar.gz"
+          if test -x "$CARGO_TARGET_DIR/debug/fg"; then cp "$CARGO_TARGET_DIR/debug/fg" "$out/fg"; fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: initial-commit-native-${{ needs.prepare.outputs.source }}
+          path: ${{ runner.temp }}/initial-evidence
+          retention-days: 1
+          if-no-files-found: error
