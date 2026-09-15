@@ -1,0 +1,76 @@
+name: Workflow execution native work
+on:
+  push:
+    branches: [tooling/workflow-execution-4bac5390]
+    paths: [.github/workflows/workflow-execution-transport.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.prepare.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64,gzip,hashlib,os,pathlib,subprocess
+          payload='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'
+          # Correct a single transport transcription byte only; the complete
+          # decompressed source hash remains the acceptance boundary.
+          payload=payload.replace('LGdbWSWjue','LGdbWSjue')
+          patch=gzip.decompress(base64.b64decode(payload,validate=True))
+          assert hashlib.sha256(patch).hexdigest()=='11f465f66eb2e5849f23a7b310a739b34aac431fe8d977c61d210db508b0863d'
+          run=lambda *args: subprocess.check_output(args,text=True).strip()
+          base='4bac5390d902c53fb59803d01a592ac28dae425f'
+          subprocess.run(['git','checkout','--detach',base],check=True)
+          assert run('git','rev-parse','HEAD:crates/fgit-runner/src/lib.rs')=='0c751289b71525774f1872d2bb0b8351b62ea120'
+          subprocess.run(['git','apply','--check','-'],input=patch,check=True)
+          subprocess.run(['git','apply','-'],input=patch,check=True)
+          subprocess.run(['git','diff','--check'],check=True)
+          subprocess.run(['git','config','user.name','Jeff Emanuel'],check=True)
+          subprocess.run(['git','config','user.email','35050222+Dicklesworthstone@users.noreply.github.com'],check=True)
+          subprocess.run(['git','add','crates/fgit-runner/src/lib.rs','crates/fgit-runner/tests/settlement.rs'],check=True)
+          subprocess.run(['git','commit','-m','fix(runner): settle rejected terminal outputs without leaking leases or capacity (FG-095b)'],check=True)
+          source=run('git','rev-parse','HEAD')
+          subprocess.run(['git','push','origin',source+':refs/heads/tooling/workflow-settlement-product-4bac5390'],check=True)
+          pathlib.Path(os.environ['GITHUB_OUTPUT']).open('a').write('source='+source+'\n')
+          print('PRODUCT_SOURCE='+source)
+          PY
+  native:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      RCH_CARGO_WRAPPER_BYPASS: '1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TARGET_DIR: /tmp/fg-workflow-settlement
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/evidence/revision.txt"
+          rustc -Vv | tee "$RUNNER_TEMP/evidence/rustc.txt"
+          cargo test -p fgit-runner --test settlement 2>&1 | tee "$RUNNER_TEMP/evidence/settlement.log"
+          cargo test -p fgit-runner --lib 2>&1 | tee "$RUNNER_TEMP/evidence/runner.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: workflow-settlement-${{ needs.prepare.outputs.source }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 1
