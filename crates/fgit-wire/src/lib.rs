@@ -25,8 +25,9 @@
 //! and publication remain outside this crate. Explicitly unsupported, and
 //! refused rather than delegated, are unknown v2 commands/capabilities,
 //! unbounded negotiation sets, malformed `deepen` and filter grammar,
-//! object-info/bundle-uri/server-option commands, and transport/service-
-//! discovery framing. A runtime adapter owns socket cancellation, while a pack
+//! object-info/bundle-uri/server-option commands. The [`smart_http`] module
+//! supplies bounded HTTP discovery and RPC framing, not authentication or
+//! sockets. A runtime adapter owns socket cancellation, while a pack
 //! implementation owns pack bytes and the eventual thin-pack or delta
 //! construction; neither can change these parsed request commitments.
 
@@ -45,6 +46,8 @@ mod cutoff_ref;
 mod shallow_response;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
+/// Bounded smart HTTP discovery, routing, and streaming message framing.
+pub mod smart_http;
 /// Hidden-ref authorization policy and visibility-filtered repository views.
 pub mod stale_disclosure;
 pub mod visibility;
