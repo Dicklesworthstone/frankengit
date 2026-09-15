@@ -28,3 +28,24 @@ evidence/
 beads_compliance_audit/
 # br doctor per-run artifacts
 .doctor/
+
+# === agent ephemeral residue 2026-09-15 ===
+# br salvage DBs, recovery dumps, and live write locks.
+.beads/*.lock
+.beads/*.bad_*
+.beads/*.rebuild_*
+.beads/recovery_*/
+.beads/*.vacuum-wal-cert*
+.beads-recovery-*/
+# Local runtime/state and one-off e2e dumps.
+.state/
+/e2e.ndjson
+# Isolated cargo target trees and RCH worker caches.
+/target-*/
+.rch-tmp/
+rustc-ice-*.txt
+# Local perf-baseline clones (never product source).
+/work/
+# Per-host gate wrappers at the repo root.
+/.gate_*.sh
+/.verify_*.sh
