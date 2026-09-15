@@ -149,7 +149,7 @@ fn unquote(bytes: &[u8], at: usize) -> Result<(Vec<u8>, usize), PatchError> {
                     b'0'..=b'3' => {
                         let digits = bytes.get(pos..pos + 2).ok_or_else(|| syntax(at, "truncated octal path"))?;
                         if digits.iter().any(|byte| !(b'0'..=b'7').contains(byte)) { return Err(syntax(at, "invalid octal path")); }
-                        pos += 2; (escaped - b'0') * 64 + (digits[0] - b'0') * 8 + digits[1] - b'0'
+                        pos += 2; (escaped - b'0') * 64 + (digits[0] - b'0') * 8 + (digits[1] - b'0')
                     }
                     _ => return Err(syntax(at, "unsupported path escape")),
                 };
@@ -411,3 +411,7 @@ fn append(output: &mut Vec<u8>, bytes: &[u8], limit: usize) -> Result<(), PatchE
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "patch/octal_tests.rs"]
+mod octal_tests;
