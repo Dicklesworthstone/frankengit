@@ -1,0 +1,52 @@
+name: HTTP source transport
+on:
+  push:
+    branches: [tooling/http-transfer-c15bea04]
+    paths: [.github/workflows/http-transfer.yml]
+permissions:
+  contents: write
+jobs:
+  transfer:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Prepare exact source-only tree; never update main
+        env:
+          BASE: c15bea045f2c01790917b020963ae8ab24696422
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, zlib
+          def git(*a):
+              return subprocess.check_output(['git',*a],text=True).strip()
+          payload=pathlib.Path('tools/http-transfer/phase1.b64').read_bytes()
+          patch=zlib.decompress(base64.b64decode(payload))
+          assert hashlib.sha256(patch).hexdigest()=='42985a8fe823022a6c36d473e513fa63d80d86a6cd73875386728f33c9a376de'
+          temp=pathlib.Path(os.environ['RUNNER_TEMP'])
+          pp=temp/'http.patch'; pp.write_bytes(patch)
+          work=temp/'http-source'; git('worktree','add','--detach',str(work),os.environ['BASE'])
+          os.chdir(work)
+          assert git('hash-object','crates/fgit-wire/src/lib.rs')=='fa60b3dbefe9b91a8a35e8aa30d42c0b0f56ec26'
+          subprocess.run(['git','apply','--index',str(pp)],check=True)
+          expected={'crates/fgit-wire/src/lib.rs':'41d0ce459544079ea1860729d5a164484aa49cc1','crates/fgit-wire/src/smart_http.rs':'fb9dc67e2f9a35b9739a6cb2b1f9659b2aeb47ba','crates/fgit-wire/src/smart_http_tests.rs':'5e6f580620a80bfc414214b34177b492800a90d0'}
+          assert set(git('diff','--cached','--name-only').splitlines())==set(expected)
+          for name, sha in expected.items(): assert git('hash-object',name)==sha, name
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          tree=git('write-tree')
+          commit=git('-c','user.name=Jeff Emanuel','-c','user.email=35050222+Dicklesworthstone@users.noreply.github.com','commit-tree',tree,'-p',os.environ['BASE'],'-m','transport: source-only bounded HTTP codec tree')
+          git('push','origin',commit+':refs/heads/tooling/http-source-phase1')
+          out=temp/'http-transport'; out.mkdir()
+          (out/'receipt.json').write_text(json.dumps({'base':os.environ['BASE'],'tree':tree,'transport_commit':commit,'files':expected},indent=2))
+          git('archive',commit,'--format=tar.gz','--output='+str(out/'source.tar.gz'))
+          print('SOURCE_TREE='+tree)
+          print('TRANSPORT_COMMIT='+commit)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: http-source-phase1
+          path: ${{ runner.temp }}/http-transport
+          retention-days: 1
+          if-no-files-found: error
