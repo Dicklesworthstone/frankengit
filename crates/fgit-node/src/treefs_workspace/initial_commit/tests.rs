@@ -161,3 +161,62 @@ fn current_review_protection_blocks_root_creation_without_weakening_other_branch
         assert_unchanged(&after,&f.state());
     }
 }
+
+
+// These are deliberately handwritten untrusted bundles, not builder-produced
+// proof. The native pack writer commits real bytes; admission must rediscover
+// their reference graph independently instead of trusting this test's metadata.
+fn adversarial_bundle(format: GitHashAlgorithm, tip: GitOid, objects: &[(GitObjectKind, Vec<u8>)]) -> Vec<u8> {
+    let source = Objects(objects.iter().map(|(kind, body)| {
+        let id = git_object_id(format, *kind, body);
+        (id, CanonicalPackObject::new(id, *kind, body.clone(), vec![], 0, 0))
+    }).collect());
+    let ids = source.0.keys().copied().collect::<Vec<_>>();
+    let limits = PackLimits::default();
+    let plan = PackPlanner::new(format, PackWriteProfile::STORED_V1, limits.clone())
+        .plan_selected(&source, &ids, &mut || true).unwrap();
+    let (pack, _) = PackWriter::new(limits).write(&plan, &mut || true).unwrap();
+    let mut bundle = match format {
+        GitHashAlgorithm::Sha1 => b"# v2 git bundle\n".to_vec(),
+        GitHashAlgorithm::Sha256 => b"# v3 git bundle\n@object-format=sha256\n".to_vec(),
+    };
+    bundle.extend_from_slice(format!("{tip} refs/heads/main\n\n").as_bytes());
+    bundle.extend(pack);
+    bundle
+}
+
+#[test]
+fn complete_reviewed_root_is_required_even_when_advertisement_and_checksum_are_valid() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = Fixture::new(format);
+        let (_, plan, _) = f.prepare("refs/heads/topic", patch());
+        let complete = plan.objects.iter().map(|o| (o.kind, o.body.clone())).collect::<Vec<_>>();
+        let valid = adversarial_bundle(format, plan.commit, &complete);
+        let before = f.state();
+        // An unreachable extra blob must not hitchhike into the object fabric.
+        let mut extra = complete.clone();
+        extra.push((GitObjectKind::Blob, b"unreviewed unrelated object".to_vec()));
+        let extra_id = git_object_id(format, GitObjectKind::Blob, b"unreviewed unrelated object");
+        assert!(f.apply("refs/heads/main", plan.commit, &adversarial_bundle(format, plan.commit, &extra), b"extra").is_err());
+        assert!(f.node().read_git_object(extra_id).is_err());
+        assert_unchanged(&before, &f.state());
+        // A valid native commit with a parent is not an initial commit, even
+        // with its correct independently supplied ID and complete ancestry.
+        let body = format!("tree {}\nparent {}\nauthor Author <a@example.invalid> 2 +0000\ncommitter Committer <c@example.invalid> 2 +0000\n\nnot a root\n", plan.tree, plan.commit).into_bytes();
+        let descendant = git_object_id(format, GitObjectKind::Commit, &body);
+        let mut history = complete.clone(); history.push((GitObjectKind::Commit, body));
+        assert!(f.apply("refs/heads/main", descendant, &adversarial_bundle(format, descendant, &history), b"parent").is_err());
+        assert!(f.node().read_git_object(descendant).is_err());
+        assert_unchanged(&before, &f.state());
+        // Store the exact dependencies under another branch first. A truncated
+        // initial bundle still cannot borrow those admitted objects secretly.
+        let (_, seed, bundle) = f.prepare("refs/heads/topic", patch());
+        committed(f.apply("refs/heads/topic", seed.commit, bundle.bytes(), b"seed"));
+        let seeded = f.state();
+        let missing = complete.iter().filter(|(kind, _)| *kind != GitObjectKind::Blob).cloned().collect::<Vec<_>>();
+        assert!(f.apply("refs/heads/main", plan.commit, &adversarial_bundle(format, plan.commit, &missing), b"missing").is_err());
+        assert_unchanged(&seeded, &f.state());
+        committed(f.apply("refs/heads/main", plan.commit, &valid, b"complete"));
+        assert_eq!(f.state().snapshot().refs[&reference("refs/heads/main")], plan.commit);
+    }
+}
