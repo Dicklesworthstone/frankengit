@@ -1,12 +1,13 @@
-//! Bounded, single-repository Smart HTTP gateway (frankengit-asa3).
+//! Bounded, single-repository HTTP gateway (frankengit-asa3).
 //!
 //! This is an explicit loopback capability profile, not organization/team IAM.
-//! Operators grant principals service scopes through bearer credentials.
-//! TLS terminates outside this listener; forwarded headers never authenticate.
-//! Header reads may retain bounded body read-ahead. After authentication, RPC
-//! bytes flow directly into the native machines without a gateway body buffer.
+//! Operators grant principals independent Git and issue scopes through bearer
+//! credentials. TLS terminates outside this listener; forwarded headers never
+//! authenticate. Git RPCs stream to native machines; issue forms have a separate
+//! small envelope and enter the existing durable issue admission driver.
 
 mod credentials;
+mod issues;
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -19,7 +20,7 @@ use fgit_authority::IdempotencyKey;
 use fgit_types::PrincipalId;
 use fgit_types::cell::CellState;
 use fgit_wire::smart_http::{
-    HttpError, HttpLimits, HttpVersion, Operation, RequestHead, Service, parse_head,
+    HttpError, HttpLimits, HttpVersion, Operation, RequestHead, Service, head, parse_head,
 };
 use fgit_wire::smart_http::rpc::RpcError;
 use fgit_wire::WireLimits;
@@ -43,6 +44,7 @@ struct Profile {
     route: Vec<u8>,
     credentials: CredentialSource,
     allow_receive: bool,
+    allow_issues: bool,
     http: HttpLimits,
     maximum_response_bytes: u64,
     timeout: GitDaemonSessionTimeout,
@@ -85,7 +87,8 @@ impl OneNode {
     ///
     /// This local capability profile does not implement organization/team IAM
     /// or TLS. Non-loopback listeners are refused. Forwarded identity headers
-    /// never convey authority. HTTP connections are not reused.
+    /// never convey authority. HTTP connections are not reused. Native issue
+    /// endpoints remain disabled on this backward-compatible entry point.
     ///
     /// RPC ingress is incremental: fixed-size read buffers feed the native
     /// machines directly. Receive-pack owns its bounded quarantine, not a
@@ -108,7 +111,7 @@ impl OneNode {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits,
             CredentialSource::Static { digest: credential_digest, principal },
-            allow_receive, idle_timeout,
+            allow_receive, false, idle_timeout,
         )
     }
 
@@ -125,11 +128,12 @@ impl OneNode {
     ///
     /// The private regular file starts with
     /// `frankengit-http-credentials-v1 <tenant> <repository> <incarnation>`.
-    /// Each following line is `<sha256-of-token> <principal> <scopes>`, where
-    /// scopes is exactly `read`, `receive`, or `read,receive`. IDs and digests
-    /// are lowercase hex. At most 256 grants and 64 KiB are accepted. A header
-    /// without rows revokes all credentials. `allow_receive` remains a mandatory
-    /// deployment-wide ceiling even for individually receive-enabled grants.
+    /// Each following line is `<sha256-of-token> <principal> <scopes>`. Git
+    /// scopes are `read` and `receive`; issue scopes are independent. This
+    /// entry point leaves issue endpoints disabled even if such grants exist.
+    /// IDs and digests are lowercase hex. At most 256 grants and 64 KiB are
+    /// accepted. A header without rows revokes all credentials. `allow_receive`
+    /// remains a mandatory ceiling for individually receive-enabled grants.
     ///
     /// The file is re-read for EVERY authentication. Replace it atomically to
     /// rotate tokens, change scopes, or revoke access without restarting.
@@ -137,9 +141,6 @@ impl OneNode {
     /// grants. Already authenticated requests retain their bounded grant; this
     /// is not instant revocation of in-flight publication or a canonical IAM
     /// service. Receive scope permits push discovery but does not imply fetch.
-    ///
-    /// The remaining ownership, loopback, deadline and drain contract is the
-    /// same as `serve_smart_http_bounded`.
     pub fn serve_smart_http_with_credentials_file_bounded(
         &self,
         listener: &TcpListener,
@@ -150,7 +151,35 @@ impl OneNode {
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, idle_timeout,
+            allow_receive, false, idle_timeout,
+        )
+    }
+
+    /// Explicitly enable the native issue API alongside the Git endpoints.
+    ///
+    /// GET `{repository-route}/api/v1/issues` lists head-pinned issue state;
+    /// GET `.../issues/{number}` pages its exact event/comment history.
+    /// POST `.../issues/{number}/{open|edit|close|reopen|comment}` accepts a
+    /// bounded URL-encoded form with an explicit expected_version and an
+    /// Idempotency-Key header. Replies are JSON. The principal comes only
+    /// from this repository-incarnation-bound credential table.
+    ///
+    /// `issues-read` and `issues-write` are explicit independent grants; neither
+    /// Git permission grants either, and issue write does not imply issue read.
+    /// List scopes once in read,receive,issues-read,issues-write order. Git
+    /// pushes still require allow_receive. This is repository-wide issue
+    /// access, not per-issue ACLs, account administration, or TLS.
+    pub fn serve_git_and_issue_http_with_credentials_file_bounded(
+        &self,
+        listener: &TcpListener,
+        server_limits: GitDaemonServerLimits,
+        credentials_file: &Path,
+        allow_receive: bool,
+        idle_timeout: Duration,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        self.serve_smart_http_with_source_bounded(
+            listener, server_limits, self.smart_http_credentials_source(credentials_file),
+            allow_receive, true, idle_timeout,
         )
     }
 
@@ -171,6 +200,7 @@ impl OneNode {
         server_limits: GitDaemonServerLimits,
         credentials: CredentialSource,
         allow_receive: bool,
+        allow_issues: bool,
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         let address = listener.local_addr().map_err(|source| io_error("inspect HTTP listener", source))?;
@@ -207,6 +237,7 @@ impl OneNode {
             route: self.git_daemon_repository_path().as_bytes().to_vec(),
             credentials,
             allow_receive,
+            allow_issues,
             http,
             maximum_response_bytes,
             timeout: self.git_daemon_session_timeout,
@@ -281,7 +312,6 @@ impl OneNode {
         for child in pending {
             (child.join)();
         }
-        // Return the listener to blocking mode after the bounded run.
         let restored = listener.set_nonblocking(false)
             .map_err(|source| io_error("restore HTTP listener", source));
         if let Some(error) = failure {
@@ -316,16 +346,18 @@ fn io_error(operation: &'static str, source: io::Error) -> NodeSmartHttpRefusal 
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Status {
-    BadRequest, Unauthorized, Forbidden, NotFound, TooLarge, HeaderTooLarge,
+    Success, BadRequest, Unauthorized, Forbidden, NotFound, Conflict, TooLarge, HeaderTooLarge,
     MediaType, Method, Expectation, Timeout, RateLimited, Unavailable,
 }
 impl Status {
     fn line(self) -> &'static str {
         match self {
+            Self::Success => "200 OK",
             Self::BadRequest => "400 Bad Request",
             Self::Unauthorized => "401 Unauthorized",
             Self::Forbidden => "403 Forbidden",
             Self::NotFound => "404 Not Found",
+            Self::Conflict => "409 Conflict",
             Self::TooLarge => "413 Content Too Large",
             Self::HeaderTooLarge => "431 Request Header Fields Too Large",
             Self::MediaType => "415 Unsupported Media Type",
@@ -335,6 +367,11 @@ impl Status {
             Self::RateLimited => "429 Too Many Requests",
             Self::Unavailable => "503 Service Unavailable",
         }
+    }
+}
+impl From<CredentialFailure> for Status {
+    fn from(error: CredentialFailure) -> Self {
+        match error { CredentialFailure::UnknownCredential => Self::Unauthorized, _ => Self::Unavailable }
     }
 }
 impl From<HttpError> for Status {
@@ -382,18 +419,12 @@ impl From<NodeSmartHttpRefusal> for Status {
     }
 }
 
-// No Debug on credentials/profile; no client text is echoed in a refusal.
 fn authenticated_session(
     request: &RequestHead<'_>,
     raw_head: &[u8],
     profile: &Profile,
 ) -> Result<LoopbackReceiveSession, Status> {
-    let grant = profile.credentials.authenticate(request.authorization()).map_err(|error| {
-        match error {
-            CredentialFailure::UnknownCredential => Status::Unauthorized,
-            _ => Status::Unavailable,
-        }
-    })?;
+    let grant = profile.credentials.authenticate(request.authorization()).map_err(Status::from)?;
     if request.repository_route.as_bytes() != profile.route {
         return Err(Status::NotFound);
     }
@@ -451,7 +482,7 @@ fn read_head(reader: &mut impl Read, limits: HttpLimits) -> Result<Vec<u8>, Stat
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; IO_CHUNK];
     loop {
-        if parse_head(&bytes, limits)?.is_some() { return Ok(bytes); }
+        if head::parse(&bytes, limits)?.is_some() { return Ok(bytes); }
         let count = buffer.len().min(limits.max_head_bytes.saturating_sub(bytes.len()));
         if count == 0 { return Err(Status::HeaderTooLarge); }
         let read = match reader.read(&mut buffer[..count]) {
@@ -506,86 +537,112 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
         started: false,
     };
     let mut version = HttpVersion::Http11;
+    let mut native = false;
+    let mut native_mutation = false;
+    let mut api_error = None;
     let served = (|| -> Result<(), Status> {
         let bytes = read_head(&mut reader, profile.http)?;
-        let request = parse_head(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
-        version = request.http_version;
-        let session = authenticated_session(&request, &bytes[..request.consumed], profile)?;
-        if request.operation == Operation::Rpc(Service::ReceivePack) {
+        let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
+        version = envelope.version;
+        native = envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/issues"));
+        native_mutation = native && envelope.method == "POST";
+        let issue_request = issues::Request::parse(&envelope).map_err(|error| {
+            api_error = Some(error);
+            error.status
+        })?;
+        let git_request = if issue_request.is_none() {
+            Some(parse_head(&bytes, profile.http)?.ok_or(Status::BadRequest)?)
+        } else { None };
+        let session = if let Some(request) = &issue_request {
+            issues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                .map_err(|error| { api_error = Some(error); error.status })?
+        } else {
+            authenticated_session(git_request.as_ref().ok_or(Status::BadRequest)?, &bytes[..envelope.consumed], profile)?
+        };
+        let mutation = native_mutation || git_request.as_ref().is_some_and(|request| request.operation == Operation::Rpc(Service::ReceivePack));
+        if mutation {
             let principal = session.authenticated_session().ok_or(Status::Unauthorized)?.principal_id();
             profile.quota.evaluate(&principal).map_err(|_| Status::RateLimited)?;
         }
-        if request.expect_continue && request.http_version == HttpVersion::Http10 {
+        if envelope.expect_continue && envelope.version == HttpVersion::Http10 {
             return Err(Status::Expectation);
         }
-        let initial = &bytes[request.consumed..];
-        if matches!(request.operation, Operation::Discover(_)) && !initial.is_empty() {
-            return Err(Status::BadRequest);
-        }
+        let initial = &bytes[envelope.consumed..];
+        let body_not_allowed = issue_request.as_ref().is_some_and(|request| !request.is_mutation())
+            || git_request.as_ref().is_some_and(|request| matches!(request.operation, Operation::Discover(_)));
+        if body_not_allowed && !initial.is_empty() { return Err(Status::BadRequest); }
         let mut node = OneNode::open_existing(profile.config.clone()).map_err(|_| Status::Unavailable)?;
-        let result = (|| -> Result<(), NodeSmartHttpRefusal> {
+        let result = (|| -> Result<(), Status> {
             let authenticated = node.runtime().block_on(node.authenticate_authority_head())
-                .map_err(crate::NodeAdmissionViewRefusal::from)?;
-            node.bring_into_service(authenticated.receipt().generation())
-                .map_err(|error| io_error("bring HTTP child into service", io::Error::other(error.to_string())))?;
-            if request.expect_continue {
-                // No interim success until credentials and the exact repository
-                // incarnation have been checked and the child admits work.
-                writer.inner.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
-                    .map_err(|source| io_error("write HTTP continue", source))?;
-                writer.inner.flush().map_err(|source| io_error("flush HTTP continue", source))?;
+                .map_err(|_| Status::Unavailable)?;
+            node.bring_into_service(authenticated.receipt().generation()).map_err(|_| Status::Unavailable)?;
+            if envelope.expect_continue {
+                // No interim success before credentials, scopes, incarnation,
+                // endpoint envelope policy and node intake have all passed.
+                writer.inner.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+                writer.inner.flush()?;
             }
-            // Reuse bounded header read-ahead without copying it. The RPC
-            // decoder owns the HTTP boundary and stops pulling at completion.
             let mut body = io::Cursor::new(initial).chain(&mut reader);
-            // Socket reads already enforce the ingress deadline. Node adapters
-            // own independent materialization/validation/publication budgets,
-            // and ResponseWriter starts a fresh finite response phase.
-            let mut live = || true;
-            match request.operation {
-                Operation::Discover(service) => {
-                    let discovery = match service {
-                        Service::UploadPack => node.smart_http_upload_discovery_in(&request, WireLimits::default())?,
-                        Service::ReceivePack => node.smart_http_receive_discovery_in(&request, &session, WireLimits::default())?,
-                    };
-                    writer.write_all(discovery.head().as_bytes()).map_err(|source| io_error("write HTTP discovery head", source))?;
-                    writer.write_all(discovery.body()).map_err(|source| io_error("write HTTP discovery body", source))?;
+            if let Some(request) = &issue_request {
+                let reply = issues::execute(&node, request, &session, envelope.body, &mut body,
+                    profile.http, profile.maximum_response_bytes)
+                    .map_err(|error| { api_error = Some(error); error.status })?;
+                reply.send(&mut writer, version).map_err(|_| Status::Unavailable)?;
+            } else {
+                let request = git_request.as_ref().ok_or(Status::BadRequest)?;
+                let mut live = || true;
+                let git_result = (|| -> Result<(), NodeSmartHttpRefusal> {
+                    match request.operation {
+                        Operation::Discover(service) => {
+                            let discovery = match service {
+                                Service::UploadPack => node.smart_http_upload_discovery_in(request, WireLimits::default())?,
+                                Service::ReceivePack => node.smart_http_receive_discovery_in(request, &session, WireLimits::default())?,
+                            };
+                            writer.write_all(discovery.head().as_bytes()).map_err(|source| io_error("write HTTP discovery head", source))?;
+                            writer.write_all(discovery.body()).map_err(|source| io_error("write HTTP discovery body", source))?;
+                        }
+                        Operation::Rpc(Service::UploadPack) => {
+                            node.smart_http_upload_stream_in(request, &mut body, WireLimits::default(), profile.http,
+                                profile.maximum_response_bytes, &mut live, &mut writer)?;
+                        }
+                        Operation::Rpc(Service::ReceivePack) => {
+                            let _outcome = node.smart_http_receive_stream_in(request, &session, &mut body,
+                                profile.http, fgit_admission::AdmissionLimits::default(), &mut live, &mut writer)?;
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(NodeSmartHttpRefusal::ReceiveResponse { outcome, .. }) = &git_result {
+                    for command in &outcome.commands {
+                        eprintln!("Smart HTTP reply lost after canonical outcome for transaction {}; retry with the original Idempotency-Key", command.tx_id);
+                    }
                 }
-                Operation::Rpc(Service::UploadPack) => {
-                    node.smart_http_upload_stream_in(&request, &mut body, WireLimits::default(), profile.http,
-                        profile.maximum_response_bytes, &mut live, &mut writer)?;
-                }
-                Operation::Rpc(Service::ReceivePack) => {
-                    let _outcome = node.smart_http_receive_stream_in(&request, &session, &mut body,
-                        profile.http, fgit_admission::AdmissionLimits::default(), &mut live, &mut writer)?;
-                }
+                git_result.map_err(Status::from)?;
             }
-            writer.flush().map_err(|source| io_error("flush HTTP response", source))
+            writer.flush().map_err(|_| Status::Unavailable)
         })();
         let cleanup = node.shutdown();
-        if let Err(NodeSmartHttpRefusal::ReceiveResponse { outcome, .. }) = &result {
-            for command in &outcome.commands {
-                eprintln!("Smart HTTP reply lost after canonical outcome for transaction {}; retry with the original Idempotency-Key", command.tx_id);
-            }
-        }
         if let Err(error) = cleanup {
             log_cleanup(&error);
             return Err(Status::Unavailable);
         }
-        result.map_err(Status::from)
+        result
     })();
     if let Err(status) = served {
-        // Never append a second HTTP response after a partially written 200,
-        // including a push whose commit succeeded but response delivery failed.
+        // Never append a second response after any final response has started.
+        // In particular, disconnect/cleanup never proves a mutation rolled back.
         if !writer.started {
-            let _ = write_error(&mut writer, version, status);
+            if native {
+                let error = api_error.unwrap_or_else(|| issues::ApiError::from_status(status, native_mutation));
+                let _ = error.send(&mut writer, version);
+            } else {
+                let _ = write_error(&mut writer, version, status);
+            }
         }
     }
     drop(writer);
     drop(reader);
     let _ = output.shutdown(Shutdown::Write);
-    // Bound the politeness drain by BOTH bytes and absolute time. A peer that
-    // keeps transmitting cannot pin a worker after its response is finished.
     let started = Instant::now();
     let mut remaining = 64 * 1024;
     let mut buffer = [0_u8; 1024];
@@ -623,6 +680,7 @@ mod tests {
                 principal: PrincipalId::from_bytes([3; 16]),
             },
             allow_receive: true,
+            allow_issues: false,
             http: HttpLimits::default(),
             maximum_response_bytes: 1024,
             timeout: GitDaemonSessionTimeout::DEFAULT,
@@ -658,9 +716,6 @@ mod tests {
         }
         assert_eq!(retry_key(&head("Idempotency-Key: a\r\n")).unwrap(), Some(b"a".as_slice()));
     }
-
-    // Exercise the actual streaming feeder with the production body decoder;
-    // only the Git parser is omitted in these HTTP framing-specific tests.
     fn decoded_body(reader: &mut impl Read, initial: &[u8], request: &RequestHead<'_>, limits: HttpLimits) -> Result<u64, Status> {
         let mut decoder = BodyDecoder::new(request.body, limits)?;
         let mut reader = Cursor::new(initial).chain(reader);
