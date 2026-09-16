@@ -3,8 +3,8 @@
 //! This is an explicit loopback capability profile, not organization/team IAM.
 //! The operator grants one principal repository access through a bearer secret.
 //! TLS terminates outside this listener; forwarded headers never authenticate.
-//! Every request authenticates before repository opening, 100 Continue, or body
-//! retention. Git parsing and canonical publication remain in the node adapters.
+//! Every request authenticates before repository opening, 100 Continue, or a
+//! transaction-body buffer. Header reads may retain bounded body read-ahead. Git parsing and canonical publication remain in the node adapters.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -93,7 +93,8 @@ impl OneNode {
     /// Socket work runs only on this node's Asupersync blocking pool.
     ///
     /// Acceptance stops at `server_limits.max_sessions()` or `idle_timeout`
-    /// since the last accepted connection. Every accepted child is joined,
+    /// without accepted or active connections. Completing a request starts a
+    /// fresh idle window for follow-up Git requests. Every accepted child is joined,
     /// including after an accept/scheduling failure, before this returns. A
     /// refused-session count describes transport completion, NOT non-commit.
     pub fn serve_smart_http_bounded(
@@ -142,8 +143,6 @@ impl OneNode {
             http,
             maximum_response_bytes,
             timeout: self.git_daemon_session_timeout,
-            // Shared across all HTTP connections, unlike each reopened node's
-            // local counter. A contained caller never reaches body retention.
             quota: Arc::new(PushQuota::default()),
         });
         listener.set_nonblocking(true).map_err(|source| io_error("configure HTTP listener", source))?;
@@ -151,16 +150,23 @@ impl OneNode {
         let refused = Arc::new(AtomicUsize::new(0));
         let mut pending: Vec<PendingSession> = Vec::new();
         let mut accepted = 0;
-        let mut last_accept = Instant::now();
+        let mut last_activity = Instant::now();
         let mut failure = None;
-        while accepted < server_limits.max_sessions() && last_accept.elapsed() < idle_timeout {
+        while accepted < server_limits.max_sessions() {
             let mut index = 0;
             while index < pending.len() {
                 if pending[index].finished.load(Ordering::Acquire) {
                     (pending.swap_remove(index).join)();
+                    last_activity = Instant::now();
                 } else {
                     index += 1;
                 }
+            }
+            // Active work has its own deadlines; it is not listener idleness.
+            // Otherwise a long push could retire acceptance before its client's
+            // immediately-following fetch, despite completing successfully.
+            if pending.is_empty() && last_activity.elapsed() >= idle_timeout {
+                break;
             }
             if pending.len() >= server_limits.max_in_flight() {
                 self.runtime.wait_for(Duration::from_millis(1));
@@ -179,7 +185,7 @@ impl OneNode {
                 }
             };
             accepted += 1;
-            last_accept = Instant::now();
+            last_activity = Instant::now();
             // Queue time counts against ingress: a queued peer does not acquire
             // a new wall-clock allowance when a blocking worker becomes free.
             let deadline = GitDaemonSessionDeadline::new(profile.timeout, GitDaemonSessionWorkScaling::FLAT);
@@ -309,7 +315,6 @@ fn authenticated_session(
     let key = if request.operation == Operation::Rpc(Service::ReceivePack) {
         key.ok_or(Status::BadRequest)?
     } else {
-        // Discovery never seals a transaction; its session identity is unused.
         b"smart-http-discovery-no-publication".as_slice()
     };
     let key = IdempotencyKey::new(key.to_vec()).map_err(|_| Status::BadRequest)?;
@@ -330,7 +335,6 @@ fn retry_key(raw_head: &[u8]) -> Result<Option<&[u8]>, Status> {
             }
             key = Some(value);
         }
-        // A hop-by-hop retry identity could be stripped by an intermediary.
         if name.eq_ignore_ascii_case("Connection")
             && value.split(',').any(|part| part.trim().eq_ignore_ascii_case("Idempotency-Key"))
         {
@@ -401,8 +405,6 @@ fn read_body(
     Ok(body)
 }
 
-// First final write begins a separate finite response phase, so completed
-// admission does not lose its reply to an already-spent ingress allowance.
 struct ResponseWriter<'a> {
     inner: DeadlineTcpStream<'a>,
     timeout: GitDaemonSessionTimeout,
@@ -458,8 +460,6 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
             if request.http_version == HttpVersion::Http10 {
                 return Err(Status::Expectation);
             }
-            // Only authenticated, route-authorized, quota-admitted requests
-            // reach this interim response. It is not a final success header.
             writer.inner.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
             writer.inner.flush()?;
         }
@@ -492,7 +492,6 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
             }
             writer.flush().map_err(|source| io_error("flush HTTP response", source))
         })();
-        // Always close the child, even on protocol, publication, or write error.
         let cleanup = node.shutdown();
         if let Err(NodeSmartHttpRefusal::ReceiveResponse { outcome, .. }) = &result {
             for command in &outcome.commands {
