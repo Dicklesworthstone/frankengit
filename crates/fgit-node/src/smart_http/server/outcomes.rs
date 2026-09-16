@@ -256,6 +256,10 @@ fn send_json(writer: &mut impl Write, version: HttpVersion, status: Status, body
 }
 
 #[cfg(test)]
+#[path = "outcomes/observations.rs"]
+mod observations;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use fgit_wire::smart_http::{HttpLimits, head};
