@@ -13,6 +13,7 @@ mod pull_request;
 mod rebase;
 mod rebase_apply;
 mod review_commands;
+mod smart_http_server;
 mod source_browse;
 mod source_history;
 mod source_review;
@@ -28,6 +29,18 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "serve-http") {
+        return match smart_http_server::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!(
+                    "{{\"type\":\"smart_http_error\",\"schema_version\":1,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "events")
