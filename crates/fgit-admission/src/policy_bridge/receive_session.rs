@@ -15,7 +15,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use fgit_authority::{
-    AsyncAuthorityStore, SealAttempt, SemanticRequest, TerminalOutcome,
+    AsyncAuthorityStore, IdempotencyKey, SealAttempt, SemanticRequest, TerminalOutcome,
     bind_idempotency_key_async, read_authority_head_body_async,
     read_decision_batch_body_async,
 };
@@ -29,6 +29,29 @@ use crate::{
     SessionPlan, SessionTerminals, admit_one_async, assemble_result, basis_bound_receive_input,
     lower_ref_update, plan_session, read_basis_async, seal_attempt,
 };
+
+/// Select one non-atomic receive command for read-only lost-response recovery.
+///
+/// `index` is its zero-based position in the ORIGINAL wire command list, not
+/// canonical ref-name order. This calls the admission lowerer's only key
+/// derivation; transports and CLIs must not duplicate that identity protocol.
+/// Pass the returned key to the existing authority key-recovery API under the
+/// original authenticated tenant/repository/principal scope. A key is not a
+/// credential. No storage is read or written here.
+///
+/// A missing observation at one index does not establish the command count,
+/// session completion, or non-commit. Atomic receives use their original key
+/// directly, even when they contain several ref commands.
+pub fn non_atomic_command_key(
+    original: &IdempotencyKey,
+    index: usize,
+) -> Result<IdempotencyKey, AdmissionError> {
+    let limit = AdmissionLimits::default().max_commands;
+    if index >= limit {
+        return Err(AdmissionError::CommandLimitExceeded { limit });
+    }
+    crate::non_atomic_key(original, index)
+}
 
 /// An interrupted session may already have canonical outcomes for a prefix.
 ///
@@ -290,6 +313,37 @@ fn is_own_decision(
                 return false;
             };
             record.tx_id == tx_id && record.object_closure_root == closure_root
+        }
+    }
+}
+
+#[cfg(test)]
+mod recovery_selector_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_uses_the_admission_key_for_every_permitted_wire_index() {
+        for bytes in [Vec::new(), b"opaque\0key\n\xff".to_vec(), vec![b'k'; 256]] {
+            let original = IdempotencyKey::new(bytes).unwrap();
+            let mut previous = None;
+            for index in 0..64 {
+                let selected = non_atomic_command_key(&original, index).unwrap();
+                assert_eq!(selected, crate::non_atomic_key(&original, index).unwrap());
+                assert_ne!(selected, original);
+                assert_ne!(previous.as_ref(), Some(&selected));
+                previous = Some(selected);
+            }
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_command_is_not_coerced_into_a_different_key() {
+        let key = IdempotencyKey::new(b"original".to_vec()).unwrap();
+        for index in [64, 65, usize::MAX] {
+            assert!(matches!(
+                non_atomic_command_key(&key, index),
+                Err(AdmissionError::CommandLimitExceeded { limit: 64 })
+            ));
         }
     }
 }
