@@ -45,6 +45,8 @@ pub(super) struct Grant {
     issues_read: bool,
     issues_write: bool,
     outcomes_read: bool,
+    pulls_read: bool,
+    pulls_write: bool,
 }
 impl Grant {
     pub fn permits(self, service: Service) -> bool {
@@ -55,6 +57,10 @@ impl Grant {
     }
     pub fn permits_issues(self, mutation: bool) -> bool {
         if mutation { self.issues_write } else { self.issues_read }
+    }
+    /// PR metadata authority is separate from code publication and reviews.
+    pub fn permits_pulls(self, mutation: bool) -> bool {
+        if mutation { self.pulls_write } else { self.pulls_read }
     }
     /// Recovery is separately grantable after write access has been withdrawn.
     /// It never permits inspecting another principal's transaction namespace.
@@ -114,7 +120,8 @@ impl CredentialSource {
                 // Preserve the static Git profile without silently granting any
                 // newly added metadata authority to an existing credential.
                 Ok(Grant { principal: *principal, read: true, receive: true,
-                    issues_read: false, issues_write: false, outcomes_read: false })
+                    issues_read: false, issues_write: false, outcomes_read: false,
+                    pulls_read: false, pulls_write: false })
             }
             Self::File { path, binding } => {
                 let entries = load(path, *binding)?;
@@ -191,7 +198,8 @@ fn lower_hex<const N: usize>(text: &str) -> Result<[u8; N], CredentialFailure> {
 
 fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailure> {
     let mut grant = Grant { principal, read: false, receive: false,
-        issues_read: false, issues_write: false, outcomes_read: false };
+        issues_read: false, issues_write: false, outcomes_read: false,
+        pulls_read: false, pulls_write: false };
     let mut previous = 0;
     for scope in scopes.split(',') {
         // Canonical order extends the existing grammar. An old deployment
@@ -202,6 +210,8 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
             "issues-read" => (3, &mut grant.issues_read),
             "issues-write" => (4, &mut grant.issues_write),
             "outcomes-read" => (5, &mut grant.outcomes_read),
+            "pulls-read" => (6, &mut grant.pulls_read),
+            "pulls-write" => (7, &mut grant.pulls_write),
             _ => return Err(CredentialFailure::InvalidFile),
         };
         if rank <= previous { return Err(CredentialFailure::InvalidFile); }
@@ -331,6 +341,30 @@ mod tests {
         assert!(full.permits_outcomes() && full.permits_issues(true));
         assert!(grant(principal, "outcomes-read,read").is_err());
         assert!(grant(principal, "outcomes-read,outcomes-read").is_err());
+    }
+    #[test]
+    fn pull_request_scopes_do_not_imply_each_other_or_any_existing_service() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        for scope in ["read", "receive", "issues-read", "issues-write", "outcomes-read"] {
+            let old = grant(principal, scope).unwrap();
+            assert!(!old.permits_pulls(false) && !old.permits_pulls(true));
+        }
+        for (scope, write) in [("pulls-read", false), ("pulls-write", true)] {
+            let selected = grant(principal, scope).unwrap();
+            assert!(selected.permits_pulls(write));
+            assert!(!selected.permits_pulls(!write));
+            assert!(!selected.permits(Service::UploadPack) && !selected.permits(Service::ReceivePack));
+            assert!(!selected.permits_issues(false) && !selected.permits_issues(true));
+            assert!(!selected.permits_outcomes());
+        }
+        assert!(grant(principal, "outcomes-read,pulls-read,pulls-write").is_ok());
+        for scopes in ["pulls-write,pulls-read", "pulls-read,pulls-read", "pulls-read,read", "pulls-merge"] {
+            assert!(grant(principal, scopes).is_err());
+        }
+        let token = "a".repeat(64);
+        let source = CredentialSource::Static { digest: sha256_digest(token.as_bytes()), principal };
+        let legacy = source.authenticate(Some(&format!("Bearer {token}"))).unwrap();
+        assert!(!legacy.permits_pulls(false) && !legacy.permits_pulls(true));
     }
     #[test]
     fn duplicate_tokens_bad_scopes_and_foreign_bindings_fail_closed() {
