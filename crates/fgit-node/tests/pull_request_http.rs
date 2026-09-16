@@ -276,3 +276,31 @@ fn a_well_formed_but_stale_source_tip_is_a_canonical_refusal_not_a_silent_refres
         node.shutdown().unwrap();
     }
 }
+
+#[test]
+fn valid_pr_credentials_cannot_enable_a_disabled_deployment() {
+    let root = Scratch::new();
+    let config = root.config(GitHashAlgorithm::Sha256);
+    let (node, data) = fixture(&root, GitHashAlgorithm::Sha256);
+    let before = generation(&node);
+    let path = root.0.join("credentials");
+    grants(&node, &path);
+    let disabled = Server::start(node, &path, 2, false, false);
+    // These are valid PR-scoped credentials. Only the deployment gate denies
+    // them, not another service's unrelated token or missing authentication.
+    status(&get(&disabled.client, "/api/v1/pulls", 'a'), 403);
+    status(&withheld(&disabled.client, 'b', true, 64), 403);
+    assert_eq!(disabled.finish().refused_sessions(), 2);
+    let node = reopen(&config);
+    assert_eq!(generation(&node), before);
+    // Same repository and credential file, now with deliberate opt-in.
+    let enabled = Server::start(node, &path, 2, true, false);
+    committed(&post(&enabled.client, 1, "open", 'b', "enabled-open", &form(&data, 0), false));
+    let visible = get(&enabled.client, "/api/v1/pulls/1", 'a');
+    status(&visible, 200);
+    assert!(visible.body.contains("\"found\":true"));
+    assert_eq!(enabled.finish().accepted_sessions(), 2);
+    let node = reopen(&config);
+    assert_eq!(generation(&node), before + 1);
+    node.shutdown().unwrap();
+}
