@@ -164,9 +164,9 @@ fn full_issue_lifecycle_has_stable_retries_exact_pages_and_reopened_authority_st
         assert!(first.body.contains("\"labels\":[\"a\",\"z\"]"));
         let old = token(&first);
         committed(&post(&server, "/api/v1/issues/1/comment", 'b', "comment-one", "expected_version=1&body=first+comment", false)); // 4
-        let stale_page = get(&server, &format!("/api/v1/issues/1?expected_head={old}"), 'a'); // 5
-        status(&stale_page, 409);
-        assert!(stale_page.body.contains("\"code\":\"snapshot_moved\""));
+        let retained_page = get(&server, &format!("/api/v1/issues/1?limit=1&expected_head={old}"), 'a'); // 5
+        status(&retained_page, 200);
+        assert_eq!(retained_page.body, first.body);
         committed(&post(&server, "/api/v1/issues/1/edit", 'b', "edit-one", "expected_version=2&title=Beta&body=&clear_labels=true", true)); // 6
         committed(&post(&server, "/api/v1/issues/1/close", 'b', "close-one", "expected_version=3", false)); // 7
         committed(&post(&server, "/api/v1/issues/1/reopen", 'b', "reopen-one", "expected_version=4", false)); // 8
@@ -300,3 +300,6 @@ fn rotating_issue_credentials_preserves_the_principals_canonical_retry() {
     assert_eq!(node.runtime().block_on(node.materialize_admission()).unwrap().basis().generation().get(), before.get() + 1);
     node.shutdown().unwrap();
 }
+
+#[path = "issue_http/snapshots.rs"]
+mod snapshots;
