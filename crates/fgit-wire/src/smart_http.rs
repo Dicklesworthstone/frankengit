@@ -13,6 +13,8 @@
 
 #![forbid(unsafe_code)]
 
+/// Shared bounded HTTP envelopes; endpoint policy remains adapter-owned.
+pub mod head;
 /// Backpressured native pack response streaming and aggregate byte budgets.
 pub mod response;
 /// Composition with the existing native upload-pack and receive-pack machines.
@@ -206,145 +208,40 @@ impl fmt::Debug for RequestHead<'_> {
     }
 }
 
-/// Inspect a bounded accumulated HTTP header. `None` means more header bytes
-/// are needed. Trailing body bytes are not copied, scanned, or charged against
-/// the header ceiling. Do not read more than `max_head_bytes` without calling.
+/// Inspect a bounded accumulated Git HTTP header. `None` means more bytes are
+/// needed. Native endpoints share envelope framing, never Git service policy.
 pub fn parse_head(input: &[u8], limits: HttpLimits) -> Result<Option<RequestHead<'_>>, HttpError> {
-    limits.validate()?;
-    let visible = &input[..input.len().min(limits.max_head_bytes)];
-    let Some(end) = visible.windows(4).position(|part| part == b"\r\n\r\n") else {
-        return if input.len() >= limits.max_head_bytes {
-            Err(HttpError::HeadTooLarge)
-        } else {
-            Ok(None)
-        };
-    };
-    let text = std::str::from_utf8(&input[..end]).map_err(|_| HttpError::InvalidHeader)?;
-    let mut lines = text.split("\r\n");
-    let request = lines.next().ok_or(HttpError::InvalidRequest)?;
-    let mut words = request.split(' ');
-    let method = words.next().ok_or(HttpError::InvalidRequest)?;
-    let target = words.next().ok_or(HttpError::InvalidRequest)?;
-    let version = words.next().ok_or(HttpError::InvalidRequest)?;
-    if words.next().is_some() || !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
-        return Err(HttpError::InvalidRequest);
-    }
-    let (operation, repository_route) = route(method, target, limits.max_target_bytes)?;
-    let (mut host, mut length, mut transfer, mut media, mut protocol, mut authorization) =
-        (None, None, None, None, None, None);
-    let (mut encoding, mut expectation, mut connection) = (None, None, None);
-    for (index, line) in lines.enumerate() {
-        if index >= limits.max_headers {
-            return Err(HttpError::TooManyHeaders);
-        }
-        let (name, value) = line.split_once(':').ok_or(HttpError::InvalidHeader)?;
-        if name.is_empty()
-            || !name.bytes().all(token_byte)
-            || !value
-                .bytes()
-                .all(|byte| byte == b'\t' || (32..=126).contains(&byte))
-        {
-            return Err(HttpError::InvalidHeader);
-        }
-        let value = value.trim_matches([' ', '\t']);
-        if name.eq_ignore_ascii_case("host") {
-            unique(&mut host, value)?;
-        } else if name.eq_ignore_ascii_case("content-length") {
-            unique(&mut length, value)?;
-        } else if name.eq_ignore_ascii_case("transfer-encoding") {
-            unique(&mut transfer, value)?;
-        } else if name.eq_ignore_ascii_case("content-type") {
-            unique(&mut media, value)?;
-        } else if name.eq_ignore_ascii_case("git-protocol") {
-            unique(&mut protocol, value)?;
-        } else if name.eq_ignore_ascii_case("authorization") {
-            unique(&mut authorization, value)?;
-        } else if name.eq_ignore_ascii_case("content-encoding") {
-            unique(&mut encoding, value)?;
-        } else if name.eq_ignore_ascii_case("expect") {
-            unique(&mut expectation, value)?;
-        } else if name.eq_ignore_ascii_case("connection") {
-            unique(&mut connection, value)?;
-        } else if name.eq_ignore_ascii_case("trailer") {
-            return Err(HttpError::TrailersNotSupported);
-        }
-    }
-    if (version == "HTTP/1.1" && host.is_none())
-        || host.is_some_and(|value| {
-            value.is_empty()
-                || value
-                    .bytes()
-                    .any(|b| b.is_ascii_whitespace() || b"/?#@\\,".contains(&b))
-        })
-    {
-        return Err(HttpError::InvalidHost);
-    }
-    if connection.is_some_and(|value| {
-        value.split(',').any(|part| {
-            let part = part.trim_matches([' ', '\t']);
-            !part.eq_ignore_ascii_case("close") && !part.eq_ignore_ascii_case("keep-alive")
-        })
-    }) {
-        return Err(HttpError::InvalidHeader);
-    }
-    if encoding.is_some_and(|value| !value.eq_ignore_ascii_case("identity")) {
-        return Err(HttpError::UnsupportedContentEncoding);
-    }
-    if length.is_some() && transfer.is_some() {
-        return Err(HttpError::AmbiguousFraming);
-    }
-    let body = if let Some(value) = length {
-        let count = decimal(value)?;
-        if count > limits.max_body_bytes {
-            return Err(HttpError::BodyTooLarge);
-        }
-        BodyFraming::ContentLength(count)
-    } else if let Some(value) = transfer {
-        if version != "HTTP/1.1" || !value.eq_ignore_ascii_case("chunked") {
-            return Err(HttpError::AmbiguousFraming);
-        }
-        BodyFraming::Chunked
-    } else {
-        BodyFraming::Empty
-    };
-    let expect_continue = match expectation {
-        None => false,
-        Some(value) if value.eq_ignore_ascii_case("100-continue") => true,
-        Some(_) => return Err(HttpError::UnsupportedExpectation),
+    let Some((envelope, (operation, repository_route))) =
+        head::parse_with(input, limits, |method, target| route(method, target, limits.max_target_bytes))?
+    else {
+        return Ok(None);
     };
     match operation {
         Operation::Discover(_) => {
-            if !matches!(body, BodyFraming::Empty | BodyFraming::ContentLength(0))
-                || expect_continue
+            if !matches!(envelope.body, BodyFraming::Empty | BodyFraming::ContentLength(0))
+                || envelope.expect_continue
             {
                 return Err(HttpError::BodyNotAllowed);
             }
         }
         Operation::Rpc(service) => {
-            if body == BodyFraming::Empty {
+            if envelope.body == BodyFraming::Empty {
                 return Err(HttpError::LengthRequired);
             }
-            if !media.is_some_and(|value| value.eq_ignore_ascii_case(service.request_media_type()))
-            {
+            if !envelope.content_type.is_some_and(|value| value.eq_ignore_ascii_case(service.request_media_type())) {
                 return Err(HttpError::UnsupportedMediaType);
             }
         }
     }
-    let requested_version = parse_protocol(protocol)?;
-    let http_version = if version == "HTTP/1.0" {
-        HttpVersion::Http10
-    } else {
-        HttpVersion::Http11
-    };
     Ok(Some(RequestHead {
         operation,
         repository_route,
-        requested_version,
-        body,
-        http_version,
-        expect_continue,
-        consumed: end + 4,
-        authorization,
+        requested_version: parse_protocol(envelope.git_protocol)?,
+        body: envelope.body,
+        http_version: envelope.version,
+        expect_continue: envelope.expect_continue,
+        consumed: envelope.consumed,
+        authorization: envelope.authorization,
     }))
 }
 
