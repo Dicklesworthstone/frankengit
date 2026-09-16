@@ -136,6 +136,14 @@ impl PullRequestReadRefusal {
         matches!(self, Self::SnapshotMoved)
     }
 }
+impl reviews::ReviewReadRefusal {
+    /// Preserve the same typed distinction for review pages; never parse an
+    /// error string or disguise corrupt evidence as an expired page token.
+    #[must_use]
+    pub const fn is_snapshot_unavailable(&self) -> bool {
+        matches!(self, Self::SnapshotMoved)
+    }
+}
 impl std::fmt::Display for PullRequestReadRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "native pull-request read refused: {self:?}")
