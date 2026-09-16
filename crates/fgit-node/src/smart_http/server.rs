@@ -423,7 +423,7 @@ impl Status {
             Self::NotFound => "404 Not Found",
             Self::Conflict => "409 Conflict",
             Self::TooLarge => "413 Content Too Large",
-            Self::HeaderTooLarge => "431 Request Header Fields TooLarge",
+            Self::HeaderTooLarge => "431 Request Header Fields Too Large",
             Self::MediaType => "415 Unsupported Media Type",
             Self::Method => "405 Method Not Allowed",
             Self::Expectation => "417 Expectation Failed",
