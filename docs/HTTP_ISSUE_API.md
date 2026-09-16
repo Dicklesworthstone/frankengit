@@ -46,14 +46,15 @@ outside repository content and never commit them or put them in URLs.
 Scope names, when combined, appear once in this order:
 
 ```text
-read,receive,issues-read,issues-write
+read,receive,issues-read,issues-write,outcomes-read
 ```
 
 `read` means Git fetch, and `receive` means Git push. Neither grants issue access.
 `issues-read` permits repository-wide issue lists and histories. `issues-write`
 permits repository-wide issue mutation, including comments. Write does not imply
 read. A token with only issue scopes has no Git permission. Every endpoint also
-requires the deployment's explicit `--allow-issues` ceiling.
+requires the deployment's explicit `--allow-issues` ceiling. `outcomes-read` is
+independent read-only transaction recovery, documented in [HTTP_OUTCOME_API.md](HTTP_OUTCOME_API.md).
 
 The file is bounded to 256 grants / 64 KiB and bound to one tenant, repository,
 and incarnation. Replace it atomically to rotate or revoke grants. Each new
@@ -153,9 +154,11 @@ GET {REPO_URL}/api/v1/issues/{number}?limit=50
 ```
 
 List responses are `issue_page` JSON with ordered issue snapshots and an optional
-`next_after`. Individual reads are `issue_history` JSON with the current snapshot
-and versioned action/comment events, plus optional `next_after_version`. A missing
-issue returns HTTP 404 with `found: false`, not an empty fabricated issue.
+`next_after`. Individual reads are `issue_history` JSON with the issue snapshot
+at the selected head and versioned action/comment events, plus optional
+`next_after_version`. A missing issue returns HTTP 404 with `found: false`, not
+an empty fabricated issue. An issue created after a pinned head remains absent
+when read through that earlier token.
 
 Every page includes an algorithm-qualified `snapshot_token` and the exact
 `source_head`. Continue using that token and the returned cursor:
@@ -169,10 +172,43 @@ curl --get --header @/secure/issue-reader.headers \
 ```
 
 For list continuation use `after`, not `after_version`. A nonzero cursor without
-a token is rejected. If *any* canonical publication has moved the head, including
-a refusal or an unrelated issue update, continuation returns HTTP 409 with
-`code: "snapshot_moved"`. Restart pagination explicitly; this endpoint does not
-silently mix revisions or promise a retained historical snapshot session.
+a token is rejected. Without a token, a first page selects the authenticated
+current head. With a token, the reader selects that exact retained ancestor.
+Ordinary intervening publications, including unrelated issues, comments, edits,
+ref updates, and canonical refusals, no longer force the walk to restart.
+The response still names the original head: newer issues do not enter the list,
+and later comments or edits do not change the pinned history or its issue state.
+An identical retained page can be read after the listener or node restarts.
+
+### Retained snapshot bounds and authorization
+
+A snapshot token is not a credential or a mutable cursor session. Every HTTP
+request still authenticates current credential grants before reading metadata.
+Revoked credentials cannot reuse old tokens; a rotated credential for the same
+principal with the required read grant can continue normally.
+
+The node starts from its current authenticated materialization and follows only
+its committed predecessor chain, verifying every transition with the existing
+chronicle verifier. It never directly trusts a client-named stored head. The
+bounded profile permits at most 256 ancestor transitions and 65,536 traversed
+decisions, within one repository/configuration/policy/registry/checkpoint epoch.
+It refuses to cross compaction-generation links. The selected immutable forge
+and outbox roots still pass their existing commitment and replay checks.
+
+An unknown token, exceeded ancestry window, or unsupported epoch boundary
+returns HTTP 409 with `code: "snapshot_moved"`; no different head is silently
+substituted. Required evidence that is missing, corrupt, unavailable, or cancelled
+remains an error, not a fabricated empty page. This profile creates no retention
+lease and promises no indefinite availability of historical bodies. Restart a
+walk explicitly when its old snapshot is unavailable.
+
+The same retained-basis selector serves the local node PR-list and review-page
+APIs. PRs and reviews continue to apply CURRENT canonical hidden-ref policy and
+caller visibility before disclosure. Review freshness uses the historical ref
+root matching the selected page, never a current ref map mixed into an old PR
+view. Such a displayed historical approval is not merge authority: merge
+admission still checks current votes, branch tips, and policy at its CAS.
+This does not add HTTP PR/review endpoints or change mutation preconditions.
 
 Issue text is JSON data. Control and bidi-formatting characters are escaped
 without changing their decoded content. No returned text is executable HTML,
@@ -190,12 +226,16 @@ bounds returns an error, not a silently partial successful page.
 
 ```sh
 cargo test -p fgit-wire --lib smart_http
+cargo test -p fgit-node --lib treefs_workspace::issues
+cargo test -p fgit-node --lib treefs_workspace::pull_request
 cargo test -p fgit-node --lib smart_http::server
 cargo test -p fgit-cli --bin fg smart_http_server::tests
 cargo test -p fgit-node --test issue_http --test issue_http_race
 ```
 
 The tests exercise actual node admission, TCP serving, exact-version conflicts,
-retries, credential scope separation and rotation, bounded framing, pinned
-pagination, and reopened authority state. Their presence is not a claim they
-have passed at a particular revision; record actual execution separately.
+retries, credential scope separation and rotation, bounded framing, retained
+pagination through intervening publications, and reopened authority state.
+Review tests distinguish retained display evidence from current merge admission.
+Their presence is not a claim they have passed at a particular revision; record
+actual execution separately.
