@@ -6,6 +6,7 @@
 mod multipart;
 mod output;
 mod request;
+pub(super) mod resolution_upload;
 
 use std::io::Read;
 use fgit_authority::IdempotencyKey;
@@ -31,8 +32,6 @@ pub(super) fn authenticate(request: &Request<'_>, envelope: &Envelope<'_>,
     let permitted = match request.operation {
         Operation::List(_) => grant.permits_reviews(false),
         Operation::Review(_) => grant.permits_reviews(true),
-        // This explicit grant includes choosing additional nonempty named-reviewer
-        // requirements. It never disables canonical mandatory ref protection.
         Operation::Merge => grant.permits_reviewed_merge(),
     };
     if !profile.allow_pulls || !permitted { return Err(ApiError::new(Status::Forbidden, "forbidden")); }
@@ -48,8 +47,6 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
 ) -> Result<Reply, ApiError> {
     let authenticated = session.authenticated_session()
         .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
-    // Complete HTTP intake precedes multipart parsing, quarantine or sealing.
-    // The socket owns ingress deadlines. Native work gets its own phase budget.
     let bytes = if request.is_mutation() {
         match request.encoding {
             Encoding::Form => read_form(reader, framing, limits)?,
@@ -89,13 +86,10 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
                 upload.bundle.unwrap_or(&[]), required.policy_epoch(), required.reviewers()), &mut live)
             .map_err(|error| match error {
                 NodeWorkspaceRefusal::WorkspacePublication(source) => admission_error(*source),
-                // No transport inference can manufacture a terminal refusal or
-                // establish non-commit after a failed native operation.
                 _ => ApiError::unknown(),
             })?,
     };
-    // No post-admission cancellation check: the authenticated terminal result
-    // wins. Response/flush failures retain the receipt in the shared Reply.
+    // An authenticated terminal result wins over post-admission cancellation.
     let body = output::mutation(node, authenticated.principal_id(), &command, tx, terminal);
     if body.len() > maximum {
         eprintln!("Review/merge HTTP reply exceeds limit after canonical outcome for transaction {tx}; recover the original key");
@@ -108,7 +102,16 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
 }
 
 fn read_upload(reader: &mut impl Read, framing: BodyFraming, limits: HttpLimits) -> Result<Vec<u8>, ApiError> {
-    let maximum = limits.max_body_bytes.min(multipart::MAX_UPLOAD_BYTES as u64);
+    read_upload_bounded(reader, framing, limits, multipart::MAX_UPLOAD_BYTES)
+}
+
+/// A consumer can narrow the existing candidate ingress envelope, never widen
+/// it. Complete HTTP framing precedes any part parsing, staging or construction.
+pub(super) fn read_upload_bounded(reader: &mut impl Read, framing: BodyFraming,
+    limits: HttpLimits, maximum_bytes: usize,
+) -> Result<Vec<u8>, ApiError> {
+    if maximum_bytes > multipart::MAX_UPLOAD_BYTES { return Err(ApiError::too_large()); }
+    let maximum = limits.max_body_bytes.min(maximum_bytes as u64);
     let limits = HttpLimits { max_body_bytes: maximum,
         max_body_wire_bytes: limits.max_body_wire_bytes.min(maximum + 1024 * 1024),
         max_chunks: limits.max_chunks.min(16_384), ..limits };
@@ -147,5 +150,6 @@ mod tests {
         assert_eq!(read_upload(&mut Cursor::new(b"3\r\nabc\r\n0\r\n\r\n"), BodyFraming::Chunked, HttpLimits::default()).unwrap(), b"abc");
         let limits = HttpLimits { max_body_bytes: 2, ..HttpLimits::default() };
         assert!(read_upload(&mut Cursor::new(b"abc"), BodyFraming::ContentLength(3), limits).is_err());
+        assert!(read_upload_bounded(&mut Cursor::new(b"abc"), BodyFraming::ContentLength(3), HttpLimits::default(), 2).is_err());
     }
 }
