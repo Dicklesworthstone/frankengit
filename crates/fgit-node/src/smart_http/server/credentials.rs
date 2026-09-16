@@ -42,6 +42,8 @@ pub(super) struct Grant {
     pub principal: PrincipalId,
     read: bool,
     receive: bool,
+    issues_read: bool,
+    issues_write: bool,
 }
 impl Grant {
     pub fn permits(self, service: Service) -> bool {
@@ -49,6 +51,9 @@ impl Grant {
             Service::UploadPack => self.read,
             Service::ReceivePack => self.receive,
         }
+    }
+    pub fn permits_issues(self, mutation: bool) -> bool {
+        if mutation { self.issues_write } else { self.issues_read }
     }
 }
 
@@ -100,9 +105,10 @@ impl CredentialSource {
                 if !verify_mac(digest, &candidate) {
                     return Err(CredentialFailure::UnknownCredential);
                 }
-                // Preserve the existing static API. Its deployment-wide receive
-                // switch is still an independent mandatory gate in the server.
-                Ok(Grant { principal: *principal, read: true, receive: true })
+                // Preserve the static Git profile without silently granting any
+                // newly added metadata authority to an existing credential.
+                Ok(Grant { principal: *principal, read: true, receive: true,
+                    issues_read: false, issues_write: false })
             }
             Self::File { path, binding } => {
                 let entries = load(path, *binding)?;
@@ -177,6 +183,26 @@ fn lower_hex<const N: usize>(text: &str) -> Result<[u8; N], CredentialFailure> {
     Ok(result)
 }
 
+fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailure> {
+    let mut grant = Grant { principal, read: false, receive: false, issues_read: false, issues_write: false };
+    let mut previous = 0;
+    for scope in scopes.split(',') {
+        // Canonical order extends the original read,receive grammar. An old
+        // deployment rejecting these new explicit scopes fails closed.
+        let (rank, flag) = match scope {
+            "read" => (1, &mut grant.read),
+            "receive" => (2, &mut grant.receive),
+            "issues-read" => (3, &mut grant.issues_read),
+            "issues-write" => (4, &mut grant.issues_write),
+            _ => return Err(CredentialFailure::InvalidFile),
+        };
+        if rank <= previous { return Err(CredentialFailure::InvalidFile); }
+        *flag = true;
+        previous = rank;
+    }
+    Ok(grant)
+}
+
 fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure> {
     if bytes.len() > MAX_FILE_BYTES {
         return Err(CredentialFailure::InvalidFile);
@@ -207,17 +233,12 @@ fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure
         let mut fields = line.split(' ');
         let digest = lower_hex(fields.next().ok_or(CredentialFailure::InvalidFile)?)?;
         let principal = PrincipalId::from_bytes(lower_hex(fields.next().ok_or(CredentialFailure::InvalidFile)?)?);
-        let (read, receive) = match fields.next() {
-            Some("read") => (true, false),
-            Some("receive") => (false, true),
-            Some("read,receive") => (true, true),
-            _ => return Err(CredentialFailure::InvalidFile),
-        };
+        let grant = grant(principal, fields.next().ok_or(CredentialFailure::InvalidFile)?)?;
         if fields.next().is_some() || !digests.insert(digest) {
             return Err(CredentialFailure::InvalidFile);
         }
         entries.try_reserve(1).map_err(|_| CredentialFailure::Unavailable)?;
-        entries.push(Entry { digest, grant: Grant { principal, read, receive } });
+        entries.push(Entry { digest, grant });
     }
     // A header with zero entries is a valid revoke-all configuration.
     Ok(entries)
@@ -260,6 +281,31 @@ mod tests {
         assert!(entries[2].grant.permits(Service::UploadPack));
         assert!(entries[2].grant.permits(Service::ReceivePack));
         assert_ne!(entries[0].grant.principal, entries[1].grant.principal);
+        for entry in entries {
+            assert!(!entry.grant.permits_issues(false));
+            assert!(!entry.grant.permits_issues(true));
+        }
+    }
+    #[test]
+    fn issue_grants_never_imply_git_or_each_other() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let read = grant(principal, "issues-read").unwrap();
+        let write = grant(principal, "issues-write").unwrap();
+        assert!(read.permits_issues(false));
+        assert!(!read.permits_issues(true));
+        assert!(write.permits_issues(true));
+        assert!(!write.permits_issues(false));
+        for grant in [read, write] {
+            assert!(!grant.permits(Service::UploadPack));
+            assert!(!grant.permits(Service::ReceivePack));
+        }
+        assert!(grant(principal, "issues-read,issues-write").unwrap().permits_issues(true));
+        assert!(grant(principal, "issues-write,read").is_err());
+        assert!(grant(principal, "issues-read,issues-read").is_err());
+        let token = "a".repeat(64);
+        let source = CredentialSource::Static { digest: sha256_digest(token.as_bytes()), principal };
+        let legacy = source.authenticate(Some(&format!("Bearer {token}"))).unwrap();
+        assert!(!legacy.permits_issues(false) && !legacy.permits_issues(true));
     }
     #[test]
     fn duplicate_tokens_bad_scopes_and_foreign_bindings_fail_closed() {
