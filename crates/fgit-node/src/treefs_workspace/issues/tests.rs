@@ -156,7 +156,13 @@ fn issue_and_timeline_pagination_are_numeric_snapshot_pinned_and_read_only() {
     assert_eq!(second.issues[0].number.get(),10); assert!(second.next_after.is_none());
     assert!(history(&node, 99, 0, None).unwrap().issue.is_none()); assert_eq!(snapshot(&node).basis(), before.basis());
     accepted(apply(&node, &change(1, 1, IssueAction::Close), "close"));
-    assert!(matches!(node.runtime().block_on(node.read_issues_in(&request, 2, 2, Some(first.source_head))), Err(IssueReadRefusal::SnapshotMoved)));
-    assert!(matches!(history(&node, 1, 1, Some(first.source_head)), Err(IssueReadRefusal::SnapshotMoved)));
+    let after = snapshot(&node);
+    assert_eq!(node.runtime().block_on(node.read_issues_in(&request, 2, 2, Some(first.source_head))).unwrap(), second);
+    let pinned = history(&node, 1, 1, Some(first.source_head)).unwrap();
+    assert_eq!(pinned.source_head, first.source_head);
+    assert!(pinned.events.is_empty());
+    assert_eq!(pinned.issue.unwrap().state, IssueState::Open);
+    assert_eq!(history(&node, 1, 0, None).unwrap().issue.unwrap().state, IssueState::Closed);
+    assert_eq!(snapshot(&node).basis(), after.basis());
     node.shutdown().unwrap();
 }

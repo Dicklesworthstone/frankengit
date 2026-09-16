@@ -1,5 +1,8 @@
 //! Durable repository issues on the node's real authority. Local authenticated
 //! commands share metadata publication with PRs; reads never trust a cache.
+#[path = "metadata_snapshot.rs"]
+pub(super) mod snapshots;
+
 use fgit_admission::{AdmissionContext, AdmissionError, AdmissionLimits};
 use fgit_admission::merge::native::{issues, objects::MergeObjectLimits};
 use fgit_authority::{OutcomeLookup, TerminalOutcome};
@@ -44,29 +47,41 @@ impl OneNode {
     }
 
     /// Repository-local canonical metadata read. Git hidden-ref policies are
-    /// not an issue ACL; a future remote adapter must authenticate repository
-    /// metadata access before calling this local-operator surface.
+    /// not an issue ACL; a remote adapter must authenticate repository metadata
+    /// access before calling this local-operator surface.
+    ///
+    /// Without a token, select the authenticated current head. With a token,
+    /// return that exact retained ancestor, including after ordinary concurrent
+    /// publications. The bounded walk refuses policy/configuration/checkpoint
+    /// changes and compaction; it never substitutes another snapshot. Nonzero
+    /// cursors require the first page's token. No cursor cache or read lease is
+    /// created, and reads never change canonical repository state.
     pub async fn read_issues_in(&self, request: &NodeRequestContext, after: u64,
         limit: u16, expected_head: Option<RepositoryAuthorityHeadId>,
     ) -> Result<issues::IssuePage, IssueReadRefusal> {
         validate_page(after, limit, expected_head)?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(IssueReadRefusal::Cell)?;
-        let selected = self.materialize_admission_in(request).await
+        let current = self.materialize_admission_in(request).await
             .map_err(|source| IssueReadRefusal::Authority(Box::new(source)))?;
-        if expected_head.is_some_and(|head| head != selected.basis().id()) { return Err(IssueReadRefusal::SnapshotMoved); }
-        issues::read_page_at(&self.authority, request.authority(), selected.basis(), after, limit,
+        let selected = snapshots::select(&self.authority, request.authority(), current.basis(),
+            expected_head, &|| !super::workspace_request_live(request)).await?;
+        issues::read_page_at(&self.authority, request.authority(), &selected, after, limit,
             &|| !super::workspace_request_live(request)).await.map_err(|source| IssueReadRefusal::Admission(Box::new(source)))
     }
 
+    /// Page exact action/comment history and its accompanying issue snapshot
+    /// from the same retained head. Later edits, comments, or newly opened
+    /// issues do not change either half of an already pinned response.
     pub async fn read_issue_history_in(&self, request: &NodeRequestContext, number: IssueNumber,
         after_version: u64, limit: u16, expected_head: Option<RepositoryAuthorityHeadId>,
     ) -> Result<issues::IssueHistoryPage, IssueReadRefusal> {
         validate_page(after_version, limit, expected_head)?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(IssueReadRefusal::Cell)?;
-        let selected = self.materialize_admission_in(request).await
+        let current = self.materialize_admission_in(request).await
             .map_err(|source| IssueReadRefusal::Authority(Box::new(source)))?;
-        if expected_head.is_some_and(|head| head != selected.basis().id()) { return Err(IssueReadRefusal::SnapshotMoved); }
-        issues::read_history_at(&self.authority, request.authority(), selected.basis(), number,
+        let selected = snapshots::select(&self.authority, request.authority(), current.basis(),
+            expected_head, &|| !super::workspace_request_live(request)).await?;
+        issues::read_history_at(&self.authority, request.authority(), &selected, number,
             after_version, limit, &|| !super::workspace_request_live(request)).await
             .map_err(|source| IssueReadRefusal::Admission(Box::new(source)))
     }
@@ -80,10 +95,20 @@ fn validate_page(after: u64, limit: u16, expected: Option<RepositoryAuthorityHea
 pub enum IssueReadRefusal {
     InvalidLimit,
     SnapshotRequired,
+    /// The token is not an available ancestor within the admitted read epoch.
+    /// Ordinary intervening publications alone no longer cause this refusal.
     SnapshotMoved,
     Cell(CellRefusal),
     Authority(Box<AdmissionMaterializationRefusal>),
     Admission(Box<AdmissionError>),
+}
+impl From<snapshots::SnapshotReadRefusal> for IssueReadRefusal {
+    fn from(error: snapshots::SnapshotReadRefusal) -> Self {
+        match error {
+            snapshots::SnapshotReadRefusal::Unavailable => Self::SnapshotMoved,
+            snapshots::SnapshotReadRefusal::Admission(error) => Self::Admission(error),
+        }
+    }
 }
 impl std::fmt::Display for IssueReadRefusal {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(output, "native issue read refused: {self:?}") }
