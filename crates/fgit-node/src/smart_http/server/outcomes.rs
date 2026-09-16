@@ -21,12 +21,12 @@ const ROUTE: &str = "/api/v1/outcomes";
 
 /// An original key is carried in Idempotency-Key, never in a URL or response.
 /// POST is a read-only query here; its envelope must have no body.
-pub(super) struct Request<'a> {
+struct Request<'a> {
     repository_route: &'a str,
     command_index: Option<usize>,
 }
 impl<'a> Request<'a> {
-    pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
+    fn parse(envelope: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
         let Some((repository_route, suffix)) = envelope.target.rsplit_once(ROUTE) else {
             return Ok(None);
         };
@@ -62,7 +62,7 @@ impl<'a> Request<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct ApiError {
     pub(super) status: Status,
     code: &'static str,
@@ -100,7 +100,7 @@ impl ApiError {
     }
 }
 
-pub(super) fn authenticate(
+fn authenticate(
     request: &Request<'_>, envelope: &Envelope<'_>, raw_head: &[u8], profile: &Profile,
 ) -> Result<LoopbackReceiveSession, ApiError> {
     let grant = profile.credentials.authenticate(envelope.authorization())
@@ -122,12 +122,40 @@ pub(super) fn authenticate(
     Ok(LoopbackReceiveSession::authenticated(grant.principal, key))
 }
 
-pub(super) struct Reply {
+/// Own one bounded lookup child, including explicit close on every result.
+/// This path never reads a transaction body or brings the child into Serving.
+/// Recovery has its own quota so an exhausted write quota cannot hide a result.
+pub(super) fn serve(
+    profile: &Profile, envelope: &Envelope<'_>, raw_head: &[u8],
+    read_ahead: &[u8], writer: &mut impl Write,
+) -> Result<(), ApiError> {
+    let request = Request::parse(envelope)?
+        .ok_or_else(|| ApiError::new(Status::NotFound, "not_found"))?;
+    let session = authenticate(&request, envelope, raw_head, profile)?;
+    if !read_ahead.is_empty() { return Err(ApiError::bad("body_not_allowed")); }
+    let principal = session.authenticated_session()
+        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?.principal_id();
+    profile.outcome_quota.evaluate(&principal)
+        .map_err(|_| ApiError::from_status(Status::RateLimited))?;
+    let node = OneNode::open_existing(profile.config.clone())
+        .map_err(|_| ApiError::from_status(Status::Unavailable))?;
+    let result = execute(&node, &request, &session, profile.maximum_response_bytes)
+        .and_then(|reply| reply.send(writer, envelope.version)
+            .map_err(|_| ApiError::from_status(Status::Unavailable)));
+    let cleanup = node.shutdown();
+    if let Err(error) = cleanup {
+        super::log_cleanup(&error);
+        return Err(ApiError::from_status(Status::Unavailable));
+    }
+    result
+}
+
+struct Reply {
     body: String,
     terminal_tx: Option<fgit_types::TxId>,
 }
 impl Reply {
-    pub(super) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
+    fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
         let result = send_json(writer, version, Status::Success, &self.body);
         if result.is_err() {
             if let Some(tx) = self.terminal_tx {
@@ -138,14 +166,13 @@ impl Reply {
     }
 }
 
-pub(super) fn execute(
+fn execute(
     node: &OneNode, request: &Request<'_>, session: &LoopbackReceiveSession, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let principal = session.authenticated_session()
         .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?.principal_id();
     let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(node.git_daemon_session_timeout, GitDaemonSessionWorkScaling::FLAT);
-    // Recovery deliberately does not require Serving or mutation admission.
     // The resolver preserves a terminal result even if cancellation arrives
     // after that decision was authenticated. No seal or binding is written.
     let report = drive_request_while(node, &context,
