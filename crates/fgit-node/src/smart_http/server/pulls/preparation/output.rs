@@ -1,12 +1,12 @@
-//! Bounded read-only artifacts. A clean result has JSON metadata and a binary
-//! Git bundle in one multipart/mixed response; no second bundle-sized copy is
-//! made. Boundary collisions, limits and cancellation are checked before HTTP
-//! success. Conflict paths are exact hex bytes, not lossy or executable text.
+//! Bounded read-only artifacts. Clean/resolved results carry JSON metadata and
+//! a binary Git bundle without a second bundle-sized response copy. Conflict
+//! and resolution paths are exact hex bytes, never lossy filesystem strings.
 
 use std::io::{self, Write};
 use fgit_crypto::sha256_digest;
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::{ConflictKind, MergeEntry, MergePreparation};
+use fgit_forge::preparation::resolution::{ResolutionKind, ResolvedMerge, ResolvedPath};
 use fgit_types::RepositoryAuthorityHeadId;
 use fgit_wire::smart_http::HttpVersion;
 use crate::OneNode;
@@ -16,8 +16,6 @@ const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 pub(super) const MAX_REPLY_BYTES: usize = MAX_METADATA_BYTES + MAX_BUNDLE_BYTES + 16 * 1024;
 
-/// Only this encoder can construct a reply; transport callers cannot bypass
-/// the complete-body, delimiter and response-ceiling checks with enum fields.
 pub(crate) struct Reply(Body);
 enum Body {
     Json { status: Status, body: String },
@@ -67,13 +65,47 @@ fn kind(value: ConflictKind) -> &'static str {
         ConflictKind::AttributesRequireDriver => "attributes_require_driver",
     }
 }
+fn resolution_metadata(out: &mut String, paths: &[ResolvedPath], live: &mut impl FnMut() -> bool) -> Result<(), ApiError> {
+    if paths.is_empty() || paths.len() > 128
+        || paths.windows(2).any(|pair| pair[0].conflict.path >= pair[1].conflict.path)
+    { return Err(ApiError::unavailable()); }
+    append(out, "\"resolution_profile\":\"exact-path-resolutions-v1\",\"resolutions\":[")?;
+    for (index, path) in paths.iter().enumerate() {
+        checkpoint(live)?;
+        let conflict = &path.conflict;
+        if conflict.path.is_empty() || conflict.path.len() > 4096 { return Err(ApiError::too_large()); }
+        let choice = match path.choice { ResolutionKind::Base => "base", ResolutionKind::Ours => "ours",
+            ResolutionKind::Theirs => "theirs", ResolutionKind::Delete => "delete", ResolutionKind::File => "file" };
+        if (path.choice == ResolutionKind::Delete) != path.result.is_none() { return Err(ApiError::unavailable()); }
+        append(out, &format!(concat!("{}{{\"path_hex\":{},\"kind\":{},\"base\":{},\"ours\":{},",
+            "\"theirs\":{},\"choice\":{},\"result\":{}}}"), if index == 0 { "" } else { "," },
+            quote(&hex(&conflict.path)), quote(kind(conflict.kind)), entry(conflict.base.as_ref()),
+            entry(conflict.ours.as_ref()), entry(conflict.theirs.as_ref()), quote(choice), entry(path.result.as_ref())))?;
+    }
+    append(out, "],")
+}
 
 pub(super) fn build(node: &OneNode, head: RepositoryAuthorityHeadId, subject: &ReviewSubject,
     outcome: &MergePreparation, bundle: Option<Vec<u8>>, maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Reply, ApiError> {
+    build_inner(node, head, subject, outcome, bundle, None, maximum, live)
+}
+
+pub(super) fn build_resolved(node: &OneNode, head: RepositoryAuthorityHeadId, subject: &ReviewSubject,
+    resolved: ResolvedMerge, bundle: Vec<u8>, maximum: usize, live: &mut impl FnMut() -> bool,
+) -> Result<Reply, ApiError> {
+    let ResolvedMerge { plan, resolutions } = resolved;
+    build_inner(node, head, subject, &MergePreparation::Clean(plan), Some(bundle), Some(&resolutions), maximum, live)
+}
+
+fn build_inner(node: &OneNode, head: RepositoryAuthorityHeadId, subject: &ReviewSubject,
+    outcome: &MergePreparation, bundle: Option<Vec<u8>>, resolutions: Option<&[ResolvedPath]>,
+    maximum: usize, live: &mut impl FnMut() -> bool,
+) -> Result<Reply, ApiError> {
     checkpoint(live)?;
     if bundle.as_ref().is_some_and(|bytes| bytes.len() > MAX_BUNDLE_BYTES) { return Err(ApiError::too_large()); }
+    if resolutions.is_some() && !matches!(outcome, MergePreparation::Clean(_)) { return Err(ApiError::unavailable()); }
     let bundle_digest = bundle.as_ref().map(|bytes| hex(&sha256_digest(bytes)));
     checkpoint(live)?;
     let id = head.as_internal_object_id();
@@ -90,15 +122,15 @@ pub(super) fn build(node: &OneNode, head: RepositoryAuthorityHeadId, subject: &R
         quote(&head.to_string()), quote(&token), subject.pull_request.get(), subject.pull_request_version.get(),
         subject.policy_epoch.get(), quote(subject.source_ref.as_str()), quote(subject.target_ref.as_str()),
         quote(&subject.source_tip.to_string()), quote(&subject.target_tip.to_string()));
+    if let Some(paths) = resolutions { resolution_metadata(&mut metadata, paths, live)?; }
     let status = match outcome {
         MergePreparation::Clean(plan) => {
             let bytes = bundle.as_ref().filter(|bytes| !bytes.is_empty()).ok_or_else(ApiError::unavailable)?;
-            if plan.source != subject.source_tip || plan.target != subject.target_tip {
-                return Err(ApiError::unavailable());
-            }
+            if plan.source != subject.source_tip || plan.target != subject.target_tip { return Err(ApiError::unavailable()); }
             append(&mut metadata, &format!(concat!(
-                "\"state\":\"clean\",\"candidate\":{{\"merge_base\":{},\"commit\":{},\"tree\":{},\"new_object_count\":{}}},",
+                "\"state\":{},\"candidate\":{{\"merge_base\":{},\"commit\":{},\"tree\":{},\"new_object_count\":{}}},",
                 "\"bundle\":{{\"bytes\":{},\"sha256\":{}}},\"conflicts\":[]}}"),
+                quote(if resolutions.is_some() { "resolved" } else { "clean" }),
                 quote(&plan.base.to_string()), quote(&plan.commit.to_string()), quote(&plan.tree.to_string()),
                 plan.objects.len(), bytes.len(), quote(bundle_digest.as_deref().ok_or_else(ApiError::unavailable)?)))?;
             Status::Success
@@ -137,7 +169,6 @@ fn contains(bytes: &[u8], pattern: &[u8], live: &mut impl FnMut() -> bool) -> Re
     let mut offset = 0;
     while offset < bytes.len() {
         checkpoint(live)?;
-        // Overlap preserves matches that straddle a cancellation checkpoint.
         let end = offset.saturating_add(64 * 1024 + pattern.len() - 1).min(bytes.len());
         if bytes[offset..end].windows(pattern.len()).any(|window| window == pattern) { return Ok(true); }
         offset = offset.saturating_add(64 * 1024);
@@ -147,14 +178,11 @@ fn contains(bytes: &[u8], pattern: &[u8], live: &mut impl FnMut() -> bool) -> Re
 fn mixed(metadata: String, bundle: Vec<u8>, digest: &str, maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Reply, ApiError> {
-    // Leave room below MIME's 70-byte delimiter limit. The complete checksum
-    // remains in metadata; this prefix is only transport framing.
     let digest = digest.get(..48).ok_or_else(ApiError::unavailable)?;
     let mut selected = None;
     for attempt in 0..16 {
         let boundary = format!("fg-prepare-{digest}-{attempt:x}");
         let marker = format!("--{boundary}");
-        // Never rely on hash collision resistance for MIME framing correctness.
         if !contains(metadata.as_bytes(), marker.as_bytes(), live)?
             && !contains(&bundle, marker.as_bytes(), live)?
         { selected = Some(boundary); break; }
@@ -200,5 +228,19 @@ mod tests {
         let reply = mixed("{}".into(), bundle, &digest, 4096, &mut || true).unwrap();
         let Body::Bundle { content_type, .. } = reply.0 else { panic!("binary") };
         assert!(content_type.ends_with("-1"));
+    }
+    #[test]
+    fn resolution_receipts_are_byte_exact_non_authorizing_and_complete() {
+        let path = ResolvedPath {
+            conflict: fgit_forge::preparation::MergeConflict { path: vec![255], kind: ConflictKind::Binary,
+                base: None, ours: None, theirs: None }, choice: ResolutionKind::Delete, result: None,
+        };
+        let mut json = String::new();
+        resolution_metadata(&mut json, std::slice::from_ref(&path), &mut || true).unwrap();
+        assert!(json.contains("\"path_hex\":\"ff\""));
+        assert!(json.contains("\"choice\":\"delete\",\"result\":null"));
+        assert!(!json.contains("approved"));
+        assert!(resolution_metadata(&mut String::new(), &[path.clone(), path], &mut || true).is_err());
+        assert!(resolution_metadata(&mut String::new(), &[], &mut || true).is_err());
     }
 }
