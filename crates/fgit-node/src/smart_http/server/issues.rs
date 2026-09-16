@@ -19,7 +19,20 @@ use crate::{GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, IssueReadRefu
 use super::{Profile, Status, retry_key};
 use super::super::{drive_request_while, ingress::BodyInput};
 use request::Operation;
-pub(super) use request::Request;
+pub(super) use request::{Page, Request};
+
+// Sibling forge adapters reuse the same hostile-input and JSON primitives.
+// These helpers confer no identity, visibility, or publication permission.
+pub(super) const MAX_FORM_BYTES: usize = request::MAX_FORM_BYTES;
+pub(super) fn parse_form(bytes: &[u8], maximum_fields: usize) -> Result<Vec<(String, String)>, ApiError> {
+    request::form(bytes, maximum_fields)
+}
+pub(super) fn parse_decimal(text: &str) -> Result<u64, ApiError> { request::decimal(text) }
+pub(super) fn parse_page(query: Option<&str>, cursor: &str) -> Result<Page, ApiError> { request::page(query, cursor) }
+pub(super) fn parse_snapshot(text: &str) -> Result<fgit_types::RepositoryAuthorityHeadId, ApiError> {
+    request::parse_head_token(text)
+}
+pub(super) fn quote(text: &str) -> String { output::quote(text) }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ApiError {
@@ -28,15 +41,15 @@ pub(crate) struct ApiError {
     pub(super) outcome_unknown: bool,
 }
 impl ApiError {
-    fn new(status: Status, code: &'static str) -> Self { Self { status, code, outcome_unknown: false } }
-    fn bad(code: &'static str) -> Self { Self::new(Status::BadRequest, code) }
-    fn not_found() -> Self { Self::new(Status::NotFound, "not_found") }
-    fn too_large() -> Self { Self::new(Status::TooLarge, "resource_limit") }
-    fn media() -> Self { Self::new(Status::MediaType, "unsupported_media_type") }
-    fn method() -> Self { Self::new(Status::Method, "method_not_allowed") }
-    fn unavailable() -> Self { Self::new(Status::Unavailable, "repository_unavailable") }
-    fn snapshot_moved() -> Self { Self::new(Status::Conflict, "snapshot_moved") }
-    fn unknown() -> Self { Self { status: Status::Unavailable, code: "outcome_unknown", outcome_unknown: true } }
+    pub(super) fn new(status: Status, code: &'static str) -> Self { Self { status, code, outcome_unknown: false } }
+    pub(super) fn bad(code: &'static str) -> Self { Self::new(Status::BadRequest, code) }
+    pub(super) fn not_found() -> Self { Self::new(Status::NotFound, "not_found") }
+    pub(super) fn too_large() -> Self { Self::new(Status::TooLarge, "resource_limit") }
+    pub(super) fn media() -> Self { Self::new(Status::MediaType, "unsupported_media_type") }
+    pub(super) fn method() -> Self { Self::new(Status::Method, "method_not_allowed") }
+    pub(super) fn unavailable() -> Self { Self::new(Status::Unavailable, "repository_unavailable") }
+    pub(super) fn snapshot_moved() -> Self { Self::new(Status::Conflict, "snapshot_moved") }
+    pub(super) fn unknown() -> Self { Self { status: Status::Unavailable, code: "outcome_unknown", outcome_unknown: true } }
 
     pub(super) fn from_status(status: Status, mutation: bool) -> Self {
         let code = match status {
@@ -52,8 +65,11 @@ impl ApiError {
         Self { status, code, outcome_unknown: mutation && status == Status::Unavailable }
     }
     pub(super) fn send(self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
-        let body = format!("{{\"type\":\"issue_error\",\"schema_version\":1,\"code\":{},\"outcome_unknown\":{}}}",
-            output::quote(self.code), self.outcome_unknown);
+        self.send_named(writer, version, "issue_error")
+    }
+    pub(super) fn send_named(self, writer: &mut impl Write, version: HttpVersion, family: &'static str) -> io::Result<()> {
+        let body = format!("{{\"type\":{},\"schema_version\":1,\"code\":{},\"outcome_unknown\":{}}}",
+            output::quote(family), output::quote(self.code), self.outcome_unknown);
         write_json(writer, version, self.status, &body)
     }
 }
@@ -69,16 +85,16 @@ impl From<IssueReadRefusal> for ApiError {
 }
 
 pub(super) struct Reply {
-    status: Status,
-    body: String,
-    terminal: Option<(TxId, TerminalOutcome)>,
+    pub(super) status: Status,
+    pub(super) body: String,
+    pub(super) terminal: Option<(TxId, TerminalOutcome)>,
 }
 impl Reply {
     pub(super) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
         let delivered = write_json(writer, version, self.status, &self.body);
         if delivered.is_err() {
             if let Some((tx, _)) = self.terminal {
-                eprintln!("Issue HTTP reply lost after canonical outcome for transaction {tx}; retry the identical command and Idempotency-Key");
+                eprintln!("Forge HTTP reply lost after canonical outcome for transaction {tx}; retry the identical command and Idempotency-Key");
             }
         }
         delivered
@@ -112,6 +128,17 @@ pub(super) fn authenticate(request: &Request<'_>, envelope: &Envelope<'_>,
     Ok(LoopbackReceiveSession::authenticated(grant.principal, key))
 }
 
+pub(super) fn admission_error(error: NodeReceiveTransportRefusal) -> ApiError {
+    // Reusing a key is a request rejection, not a new terminal refusal.
+    // Infrastructure failures remain ambiguous even after earlier work.
+    if let NodeReceiveTransportRefusal::Admission(error) = &error {
+        if matches!(error.as_ref(), AdmissionError::Seal(source)
+            if matches!(source.as_ref(), SealFailure::Rejected(_)))
+        { return ApiError::new(Status::Conflict, "idempotency_key_reuse"); }
+    }
+    ApiError::unknown()
+}
+
 /// Body framing is finished before admission. Once admission starts, its exact
 /// terminal result wins over local timeout or connection status.
 pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackReceiveSession,
@@ -141,16 +168,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
             command.proposed_event(principal).map_err(|_| ApiError::bad("invalid_issue_command"))?;
             let (tx, terminal) = drive_request_while(node, &context,
                 node.admit_issue_durable_in(&context, session, &command, Default::default()), &mut live)
-                .map_err(|error| {
-                    // Reusing a key is a request rejection, not a new terminal
-                    // refusal. Every other admission failure remains ambiguous.
-                    if let NodeReceiveTransportRefusal::Admission(error) = &error {
-                        if matches!(error.as_ref(), AdmissionError::Seal(source)
-                            if matches!(source.as_ref(), SealFailure::Rejected(_)))
-                        { return ApiError::new(Status::Conflict, "idempotency_key_reuse"); }
-                    }
-                    ApiError::unknown()
-                })?;
+                .map_err(admission_error)?;
             let body = output::mutation(node, principal, &command, tx, terminal);
             if body.len() > maximum {
                 eprintln!("Issue HTTP response limit after canonical outcome for transaction {tx}");
@@ -164,7 +182,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     }
 }
 
-fn read_form(reader: &mut impl Read, framing: BodyFraming, limits: HttpLimits) -> Result<Vec<u8>, ApiError> {
+pub(super) fn read_form(reader: &mut impl Read, framing: BodyFraming, limits: HttpLimits) -> Result<Vec<u8>, ApiError> {
     let limits = HttpLimits {
         max_body_bytes: limits.max_body_bytes.min(request::MAX_FORM_BYTES as u64),
         max_body_wire_bytes: limits.max_body_wire_bytes.min((request::MAX_FORM_BYTES + 64 * 1024) as u64),
