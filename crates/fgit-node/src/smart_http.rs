@@ -516,13 +516,25 @@ impl OneNode {
         }
 
         let node_request = self.request_context();
-        let repository = self
+        let materialized = self
             .runtime
-            .block_on(self.durable_admission_upload_pack_repository_in(&node_request, &limits))
-            .map_err(NodeSmartHttpRefusal::from)?;
+            .block_on(self.materialize_admission_in(&node_request))
+            .map_err(NodeAdmissionViewRefusal::from)?;
+        let snapshot = materialized.snapshot();
+        // Push advertises direct refs, not the fetch view's synthetic HEAD.
+        // A tags-only repository or a dangling default branch must remain
+        // pushable. The dedicated projection also counts only visible refs
+        // before enforcing bounds, without disclosing hidden names via errors.
+        let advertisement = super::AdmissionReceivePackAdvertisement::from_snapshot(
+            &snapshot,
+            &snapshot.hidden_refs,
+            self.object_format,
+            &limits,
+        )
+        .map_err(NodeAdmissionViewRefusal::from)?;
         let context = self.smart_http_receive_context(limits)?;
         let body = receive_discovery(
-            repository.advertised_refs().to_vec(),
+            advertisement.advertised_refs().to_vec(),
             &context,
             request.requested_version,
         )?;
