@@ -1,4 +1,4 @@
-//! Explicit loopback Smart HTTP service for the single-principal local profile.
+//! Explicit loopback Smart HTTP service with operator-provisioned credentials.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -16,13 +16,51 @@ use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
 use crate::publication_support::quote;
 
-const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address> --trusted-local --token-file <path> --principal <id> [--allow-receive] [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>] [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>] [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>] [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..1024>]\n\nRequires an existing repository. Read-only by default; --allow-receive enables pushes. The token file must contain 64 lowercase hexadecimal characters, optionally followed by a newline, and must be private on Unix (mode 0600 or stricter). Every HTTP request must carry Authorization: Bearer <token>. Each push RPC must also carry a unique client-selected Idempotency-Key; reuse that key only to retry the identical push. This single-principal loopback profile does not provide multi-user IAM or TLS. Forwarded headers are never credentials. Default bounds: 1024 requests, 4 in flight, 300-second idle/network/processing phases, 128 MiB input/expanded/pack envelopes.\n";
+const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
+  --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
+  [--allow-receive] [--expected-incarnation <id>]
+  [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
+  [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
+  [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
+  [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..1024>]
 
+Provisioning (reads/authenticates the repository, opens no listener):
+  fg serve-http <storage-root> <tenant-id> <repository-id> 127.0.0.1:0
+    --trusted-local --print-credentials-header [--expected-incarnation <id>]
+
+Requires an existing repository. Read-only by default; --allow-receive enables
+pushes only for credentials whose own scopes permit receive. --token-file keeps
+the original static single-principal profile and contains 64 lowercase hex
+characters, optionally followed by one newline. --credentials-file is reloaded
+for every request and contains token HASHES, never plaintext bearer secrets:
+  frankengit-http-credentials-v1 <tenant-id> <repository-id> <incarnation-id>
+  <sha256-of-64-character-token> <principal-id> <read|receive|read,receive>
+The header must match this exact repository incarnation. At most 256 entries
+and 64 KiB are accepted; a header with no entries revokes all tokens. Duplicate
+hashes or malformed rows refuse the entire table. Both files must be private
+regular files on Unix (0600 or stricter), not symlinks. Atomically replace the
+table to rotate/revoke credentials without restarting. Already authenticated
+in-flight requests retain their bounded grant. Receive does not imply fetch.
+
+Every request carries Authorization: Bearer <token>. Each push RPC also needs a
+client-selected Idempotency-Key; reuse it only for the identical push. Rotation
+to a new token for the same principal preserves its retry identity. Forwarded
+identity headers never authenticate. This is a trusted local credential grant
+profile, not organization/team IAM, per-ref ACLs, account lifecycle, or TLS.
+Default bounds: 1024 requests, 4 in flight, 300-second phases, 128 MiB envelopes.
+";
+
+enum CredentialInput {
+    Static { token_file: PathBuf, principal: PrincipalId },
+    Reloadable(PathBuf),
+    HeaderOnly,
+}
 struct Options {
     config: NodeConfig,
+    tenant: TenantId,
+    repository: RepositoryId,
     listen: SocketAddr,
-    principal: PrincipalId,
-    token_file: PathBuf,
+    credentials: CredentialInput,
     allow_receive: bool,
     limits: GitDaemonServerLimits,
     idle_timeout: Duration,
@@ -57,8 +95,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     while index < arguments.len() {
         let name = arguments[index].as_str();
         index += 1;
-        let boolean = matches!(name, "--trusted-local" | "--allow-receive");
-        if !boolean && !matches!(name, "--token-file" | "--principal" | "--expected-incarnation"
+        let boolean = matches!(name, "--trusted-local" | "--allow-receive" | "--print-credentials-header");
+        if !boolean && !matches!(name, "--token-file" | "--principal" | "--credentials-file" | "--expected-incarnation"
             | "--max-sessions" | "--max-in-flight" | "--idle-timeout-secs"
             | "--session-timeout-secs" | "--processing-timeout-secs"
             | "--receive-max-input-mib" | "--receive-max-expanded-mib" | "--pack-max-expanded-mib")
@@ -74,11 +112,26 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         if flags.insert(name, value).is_some() { return Err(format!("duplicate serve-http option {name}")); }
     }
     if !flags.contains_key("--trusted-local") {
-        return Err("--trusted-local is required for this single-principal capability profile".into());
+        return Err("--trusted-local is required for this operator-owned capability profile".into());
     }
-    let token_file = PathBuf::from(*flags.get("--token-file").ok_or("--token-file is required")?);
-    let principal = PrincipalId::from_hex(flags.get("--principal").copied().ok_or("--principal is required")?)
-        .map_err(|_| "invalid principal ID")?;
+    let credentials = if flags.contains_key("--print-credentials-header") {
+        if flags.keys().any(|name| !matches!(*name,
+            "--trusted-local" | "--print-credentials-header" | "--expected-incarnation"))
+        {
+            return Err("header provisioning cannot be combined with serving or credential options".into());
+        }
+        CredentialInput::HeaderOnly
+    } else if let Some(path) = flags.get("--credentials-file") {
+        if flags.contains_key("--token-file") || flags.contains_key("--principal") {
+            return Err("--credentials-file cannot be combined with --token-file or --principal".into());
+        }
+        CredentialInput::Reloadable(PathBuf::from(*path))
+    } else {
+        let token_file = PathBuf::from(*flags.get("--token-file").ok_or("supply --credentials-file or --token-file with --principal")?);
+        let principal = PrincipalId::from_hex(flags.get("--principal").copied().ok_or("--principal is required with --token-file")?)
+            .map_err(|_| "invalid principal ID")?;
+        CredentialInput::Static { token_file, principal }
+    };
     let sessions = number(&flags, "--max-sessions", 1024, 1_000_000)? as usize;
     let in_flight = number(&flags, "--max-in-flight", 4, 16)? as usize;
     let limits = GitDaemonServerLimits::try_new(sessions, in_flight).map_err(|e| e.to_string())?;
@@ -101,7 +154,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             RepositoryIncarnationId::from_hex(incarnation).map_err(|_| "invalid repository incarnation")?,
         );
     }
-    Ok(Options { config, listen, principal, token_file, allow_receive: flags.contains_key("--allow-receive"), limits, idle_timeout })
+    Ok(Options { config, tenant, repository, listen, credentials,
+        allow_receive: flags.contains_key("--allow-receive"), limits, idle_timeout })
 }
 
 fn token_digest(bytes: &[u8]) -> Result<[u8; 32], String> {
@@ -140,23 +194,51 @@ pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
         return Ok(0);
     }
     let options = parse(arguments)?;
-    // Refuse bad or public credentials before opening a node or binding a port.
-    let credential = read_token(&options.token_file)?;
+    // Static secrets are checked before opening a node. Reloadable tables
+    // additionally need its authenticated incarnation and are checked before
+    // listener binding or readiness output below.
+    let credential = match &options.credentials {
+        CredentialInput::Static { token_file, .. } => Some(read_token(token_file)?),
+        _ => None,
+    };
     let mut node = OneNode::open_existing(options.config).map_err(|e| e.to_string())?;
+    if matches!(&options.credentials, CredentialInput::HeaderOnly) {
+        let authentication = node.runtime().block_on(node.authenticate_authority_head()).map_err(|e| e.to_string());
+        let header = format!("frankengit-http-credentials-v1 {} {} {}",
+            options.tenant, options.repository, node.repository_incarnation_id());
+        let cleanup = node.shutdown().map_err(|e| e.to_string());
+        authentication?;
+        cleanup?;
+        let mut out = io::stdout().lock();
+        writeln!(out, "{header}").and_then(|()| out.flush()).map_err(|e| e.to_string())?;
+        return Ok(0);
+    }
     let serving = (|| -> Result<GitDaemonServerReceipt, String> {
+        if let CredentialInput::Reloadable(path) = &options.credentials {
+            node.validate_smart_http_credentials_file(path).map_err(|e| e.to_string())?;
+        }
         let head = node.runtime().block_on(node.authenticate_authority_head()).map_err(|e| e.to_string())?;
         node.bring_into_service(head.receipt().generation()).map_err(|e| e.to_string())?;
         let listener = TcpListener::bind(options.listen).map_err(|e| format!("cannot bind HTTP listener: {e}"))?;
         let address = listener.local_addr().map_err(|e| e.to_string())?;
         let route = std::str::from_utf8(node.git_daemon_repository_path().as_bytes()).map_err(|_| "invalid canonical route")?;
         let url = format!("http://{address}{route}");
+        let mode = match &options.credentials { CredentialInput::Reloadable(_) => "reloadable", _ => "static" };
         let mut output = io::stdout().lock();
-        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"repository_incarnation\":{}}}",
-            quote(&url), options.allow_receive, quote(&node.repository_incarnation_id().to_string()))
+        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{}}}",
+            quote(&url), options.allow_receive, quote(&node.repository_incarnation_id().to_string()), quote(mode))
             .and_then(|()| output.flush()).map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
         drop(output);
-        node.serve_smart_http_bounded(&listener, options.limits, credential, options.principal,
-            options.allow_receive, options.idle_timeout).map_err(|e| e.to_string())
+        match &options.credentials {
+            CredentialInput::Static { principal, .. } => node.serve_smart_http_bounded(
+                &listener, options.limits, credential.ok_or("static credential missing")?, *principal,
+                options.allow_receive, options.idle_timeout,
+            ),
+            CredentialInput::Reloadable(path) => node.serve_smart_http_with_credentials_file_bounded(
+                &listener, options.limits, path, options.allow_receive, options.idle_timeout,
+            ),
+            CredentialInput::HeaderOnly => return Err("header-only operation cannot serve".into()),
+        }.map_err(|e| e.to_string())
     })();
     let cleanup = node.shutdown().map_err(|e| e.to_string());
     let receipt = match (serving, cleanup) {
@@ -210,5 +292,23 @@ mod tests {
             let error = token_digest(bytes).unwrap_err(); assert!(!error.contains("secret token"));
         }
         assert!(token_digest(format!("{token}\n\n").as_bytes()).is_err());
+    }
+    #[test]
+    fn reloadable_mode_never_accepts_a_static_principal_override() {
+        let mut args = arguments()[..5].to_vec();
+        args.extend(["--credentials-file".into(), "grants".into()]);
+        assert!(matches!(parse(&args).unwrap().credentials, CredentialInput::Reloadable(_)));
+        assert!(!parse(&args).unwrap().allow_receive);
+        for extra in [vec!["--principal".into(), "33".repeat(16)], vec!["--token-file".into(), "token".into()]] {
+            let mut invalid = args.clone(); invalid.extend(extra); assert!(parse(&invalid).is_err());
+        }
+    }
+    #[test]
+    fn header_provisioning_is_a_separate_read_only_operation() {
+        let mut args = arguments()[..5].to_vec();
+        args.push("--print-credentials-header".into());
+        assert!(matches!(parse(&args).unwrap().credentials, CredentialInput::HeaderOnly));
+        args.push("--allow-receive".into());
+        assert!(parse(&args).is_err());
     }
 }
