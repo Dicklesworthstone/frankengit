@@ -148,13 +148,13 @@ fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<(), ApiError> {
     if slot.replace(value).is_some() { return Err(ApiError::bad("duplicate_field")); }
     Ok(())
 }
-fn decimal(text: &str) -> Result<u64, ApiError> {
+pub(super) fn decimal(text: &str) -> Result<u64, ApiError> {
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) || (text.len() > 1 && text.starts_with('0')) {
         return Err(ApiError::bad("invalid_integer"));
     }
     text.parse().map_err(|_| ApiError::bad("integer_overflow"))
 }
-fn page(query: Option<&str>, cursor: &str) -> Result<Page, ApiError> {
+pub(super) fn page(query: Option<&str>, cursor: &str) -> Result<Page, ApiError> {
     let (mut after, mut limit, mut expected) = (None, None, None);
     for (name, value) in form(query.unwrap_or("").as_bytes(), 3)? {
         if name == cursor {
@@ -173,7 +173,7 @@ fn page(query: Option<&str>, cursor: &str) -> Result<Page, ApiError> {
     Ok(Page { after, limit: limit as u16, expected_head: expected })
 }
 
-fn form(bytes: &[u8], maximum_fields: usize) -> Result<Vec<(String, String)>, ApiError> {
+pub(super) fn form(bytes: &[u8], maximum_fields: usize) -> Result<Vec<(String, String)>, ApiError> {
     if bytes.len() > MAX_FORM_BYTES { return Err(ApiError::too_large()); }
     if bytes.is_empty() { return Ok(Vec::new()); }
     let mut result = Vec::new();
@@ -220,7 +220,7 @@ fn digit(byte: u8) -> Result<u8, ApiError> {
         _ => Err(ApiError::bad("invalid_percent_escape")),
     }
 }
-fn parse_head_token(text: &str) -> Result<RepositoryAuthorityHeadId, ApiError> {
+pub(super) fn parse_head_token(text: &str) -> Result<RepositoryAuthorityHeadId, ApiError> {
     let (algorithm, digest) = text.strip_prefix("alg:").and_then(|text| text.split_once(':'))
         .ok_or_else(|| ApiError::bad("invalid_snapshot_token"))?;
     let algorithm = DigestAlgorithmId::try_new(u16::try_from(decimal(algorithm)?)
