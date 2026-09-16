@@ -5,13 +5,14 @@
 //! then composes wire requests with the exact authority-selected admission and
 //! disclosure machinery already used by the raw Git compatibility service.
 
+mod ingress;
 mod server;
 
 use std::cell::Cell;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use fgit_admission::{AdmissionLimits, AdmissionResult};
@@ -329,15 +330,62 @@ impl OneNode {
     /// publication basis used for ref disclosure and pack selection.
     ///
     /// `body_wire` starts at the HTTP body boundary and may include chunk
-    /// framing. Bytes after the declared body are never consumed as a second
-    /// command: their presence is refused before any response is written.
-    /// Likewise, a requested pack is fully selected and verified before the
-    /// success header is emitted. The HTTP body itself remains pull-driven and
-    /// bounded while it is written.
+    /// framing. Every supplied byte must belong to this request. A requested
+    /// pack is fully selected and verified before the success header is emitted.
     pub fn smart_http_upload_rpc_in<W, C>(
         &self,
         request: &RequestHead<'_>,
         body_wire: &[u8],
+        wire_limits: WireLimits,
+        http_limits: HttpLimits,
+        maximum_response_bytes: u64,
+        cancellation: &mut C,
+        writer: &mut W,
+    ) -> Result<NodeSmartHttpUploadReceipt, NodeSmartHttpRefusal>
+    where
+        W: Write,
+        C: ReceiveCancellation,
+    {
+        self.smart_http_upload_body_in(
+            request, ingress::BodyInput::Slice(body_wire), wire_limits, http_limits,
+            maximum_response_bytes, cancellation, writer,
+        )
+    }
+
+    /// Pull an upload-pack body directly into its bounded native RPC machine.
+    ///
+    /// The caller authenticates first and supplies a reader starting at the
+    /// HTTP body, with chunk framing intact. Reads use a fixed 16 KiB scratch
+    /// buffer. HTTP completion, not socket EOF, ends intake. A suffix in a read
+    /// crossing that boundary is refused; unread bytes remain the host's and
+    /// must not be reused as another command. The host owns finite read/write
+    /// deadlines. Pack construction receives a fresh server-work budget after
+    /// ingress and uses the same immutable view selected before negotiation.
+    pub fn smart_http_upload_stream_in<R, W, C>(
+        &self,
+        request: &RequestHead<'_>,
+        reader: &mut R,
+        wire_limits: WireLimits,
+        http_limits: HttpLimits,
+        maximum_response_bytes: u64,
+        cancellation: &mut C,
+        writer: &mut W,
+    ) -> Result<NodeSmartHttpUploadReceipt, NodeSmartHttpRefusal>
+    where
+        R: Read,
+        W: Write,
+        C: ReceiveCancellation,
+    {
+        self.smart_http_upload_body_in(
+            request, ingress::BodyInput::Reader(reader), wire_limits, http_limits,
+            maximum_response_bytes, cancellation, writer,
+        )
+    }
+
+    fn smart_http_upload_body_in<W, C>(
+        &self,
+        request: &RequestHead<'_>,
+        body: ingress::BodyInput<'_>,
         wire_limits: WireLimits,
         http_limits: HttpLimits,
         maximum_response_bytes: u64,
@@ -403,17 +451,18 @@ impl OneNode {
             wire_limits.clone(),
             http_limits,
         )?;
-        let progress = rpc.push(body_wire, cancellation)?;
-        if progress.consumed != body_wire.len() {
-            return Err(NodeSmartHttpRefusal::TrailingRequestBytes {
-                count: body_wire.len() - progress.consumed,
-            });
-        }
-        if !progress.body_complete {
-            return Err(RpcError::IncompleteRequest.into());
-        }
+        body.consume(cancellation, |bytes, live| rpc.push(bytes, live))?;
         let reply = rpc.finish(cancellation)?;
         let pack_requested = reply.pack_request().is_some();
+
+        // The network peer must not spend the budget reserved for selecting
+        // and verifying its pack. Only contexts change here: the authenticated
+        // materialization and exact-head disclosure proof remain unchanged.
+        let deadline = GitDaemonSessionDeadline::new(
+            self.git_daemon_session_timeout,
+            self.git_daemon_session_work_scaling,
+        );
+        let node_request = self.request_context();
 
         // Construct the whole selected pack before writing HTTP success. The
         // current pack writer has its own explicit memory envelope; this HTTP
@@ -586,23 +635,72 @@ impl OneNode {
     /// The gateway supplies a verified principal and a stable client retry key
     /// in `session`; neither is inferred from headers, PACK bytes or a socket.
     /// `body_wire` starts at the HTTP body boundary, with chunk framing intact
-    /// when applicable. The full declared body must finish, with no trailing
-    /// bytes, before the production quarantine handoff can stage objects.
+    /// when applicable. Every supplied byte must belong to this one request.
     ///
     /// Admission uses the same exact-basis proof, policy, compare-and-swap,
     /// idempotency and cell-state publication gates as the raw receive service.
-    /// A successful return is the canonical admission result, not merely an
-    /// HTTP transport receipt. A response failure after admission retains that
-    /// result in `NodeSmartHttpRefusal::ReceiveResponse`.
-    ///
-    /// Like the upload adapter, this synchronous outer binding belongs on the
-    /// runtime's blocking lane. The gateway owns bounded ingress and socket
-    /// write deadlines; this method bounds parsing, validation and admission.
+    /// Response failures after admission retain the canonical result in
+    /// `NodeSmartHttpRefusal::ReceiveResponse` instead of inferring rollback.
     pub fn smart_http_receive_rpc_in<W, C>(
         &self,
         request: &RequestHead<'_>,
         session: &LoopbackReceiveSession,
         body_wire: &[u8],
+        http_limits: HttpLimits,
+        admission_limits: AdmissionLimits,
+        cancellation: &mut C,
+        writer: &mut W,
+    ) -> Result<AdmissionResult, NodeSmartHttpRefusal>
+    where
+        W: Write,
+        C: ReceiveCancellation,
+    {
+        self.smart_http_receive_body_in(
+            request, session, ingress::BodyInput::Slice(body_wire), http_limits,
+            admission_limits, cancellation, writer,
+        )
+    }
+
+    /// Pull an authenticated push directly into native transaction quarantine.
+    ///
+    /// Authentication, quota and cell-intake gates precede the first body read.
+    /// The reader starts at the HTTP body and retains chunk framing when used.
+    /// Only a fixed 16 KiB ingress scratch buffer is added to the native bounded
+    /// quarantine; no whole-request gateway copy or decoded-body copy is made.
+    /// The full HTTP envelope must finish before object validation/staging or
+    /// durable admission. Any buffered suffix past the boundary is refused.
+    ///
+    /// The host must bound blocking read/write time and close the connection
+    /// after this request. Completion never waits for socket EOF. Server-work
+    /// deadlines start after ingress, so a slow upload cannot spend the budget
+    /// reserved for validating and publishing an otherwise admissible pack.
+    /// Like the slice adapter, call this only on the runtime's blocking lane.
+    pub fn smart_http_receive_stream_in<R, W, C>(
+        &self,
+        request: &RequestHead<'_>,
+        session: &LoopbackReceiveSession,
+        reader: &mut R,
+        http_limits: HttpLimits,
+        admission_limits: AdmissionLimits,
+        cancellation: &mut C,
+        writer: &mut W,
+    ) -> Result<AdmissionResult, NodeSmartHttpRefusal>
+    where
+        R: Read,
+        W: Write,
+        C: ReceiveCancellation,
+    {
+        self.smart_http_receive_body_in(
+            request, session, ingress::BodyInput::Reader(reader), http_limits,
+            admission_limits, cancellation, writer,
+        )
+    }
+
+    fn smart_http_receive_body_in<W, C>(
+        &self,
+        request: &RequestHead<'_>,
+        session: &LoopbackReceiveSession,
+        body: ingress::BodyInput<'_>,
         http_limits: HttpLimits,
         admission_limits: AdmissionLimits,
         cancellation: &mut C,
@@ -635,6 +733,11 @@ impl OneNode {
 
         let receive_limits = self.git_daemon_receive_limits.clone();
         let context = self.smart_http_receive_context(receive_limits.wire.clone())?;
+        let mut rpc = ReceiveRpc::new(request, request.requested_version, context, http_limits)?;
+        let decoded_body_bytes = body.consume(cancellation, |bytes, live| rpc.push(bytes, live))?;
+
+        // Ingress is complete. These independent, finite server-work clocks
+        // cannot be exhausted by time the peer spent uploading its body.
         let deadline = GitDaemonSessionDeadline::new(
             self.git_daemon_session_timeout,
             self.git_daemon_session_work_scaling,
@@ -645,22 +748,8 @@ impl OneNode {
         let mut live = || {
             cancellation.checkpoint() && !deadline.expired() && !processing.expired()
         };
-        let mut rpc = ReceiveRpc::new(request, request.requested_version, context, http_limits)?;
-        let progress = rpc.push(body_wire, &mut live)?;
-        if progress.consumed != body_wire.len() {
-            return Err(NodeSmartHttpRefusal::TrailingRequestBytes {
-                count: body_wire.len() - progress.consumed,
-            });
-        }
-        if !progress.body_complete {
-            return Err(RpcError::IncompleteRequest.into());
-        }
-
         let node_request = super::NodeRequestContext {
-            authority: self.receive_admission_authority_context(
-                progress.decoded_body_bytes,
-                &deadline,
-            ),
+            authority: self.receive_admission_authority_context(decoded_body_bytes, &deadline),
         };
         let admission_is_live = || !deadline.expired() && !processing.expired();
         let materialized = drive_request_while(
