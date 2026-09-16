@@ -68,3 +68,5 @@ fn recovery_checkpoint(request: &NodeRequestContext) -> Result<(), RefusalCode> 
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod session_tests;
