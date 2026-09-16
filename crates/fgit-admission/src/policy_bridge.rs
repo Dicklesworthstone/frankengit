@@ -20,6 +20,8 @@
 //!   never silently treated as allow.
 
 pub mod persisted;
+/// Authority-bound reuse of validation evidence between receive commands.
+pub mod receive_session;
 
 use crate::RefusalCode;
 use fgit_policy::content::PolicySnapshotId;
