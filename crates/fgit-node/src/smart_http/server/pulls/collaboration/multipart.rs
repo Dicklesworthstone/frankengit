@@ -1,9 +1,8 @@
-//! Bounded RFC 7578 upload profile: one URL-encoded `command`, optionally one
-//! binary `bundle`. Part order is immaterial. Filenames are never filesystem
-//! paths. No transfer encodings, nested multipart, preamble or epilogue.
-//!
-//! Parsing borrows the HTTP-owned body; it does not copy a second bundle.
-//! Boundary search is linear even for repeated hostile boundary prefixes.
+//! Bounded multipart framing shared by candidate operations. Each caller owns
+//! its closed part-name/media/size grammar; the existing review profile remains
+//! exactly one `command` and at most one `bundle`. Filenames are never paths.
+//! No transfer encodings, nested multipart, preamble or epilogue are accepted.
+//! Parsing borrows the HTTP-owned body and uses cancellable linear search.
 
 pub(super) const MAX_COMMAND_BYTES: usize = 256 * 1024;
 pub(super) const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
@@ -19,8 +18,13 @@ pub(super) struct Upload<'a> {
     pub bundle: Option<&'a [u8]>,
 }
 
-/// Curl/browser token boundaries, quoted or unquoted. Restricting the boundary
-/// alphabet is an explicit profile refusal, not permissive MIME normalization.
+#[derive(Debug)]
+pub(super) struct Part<'a> {
+    pub name: &'a str,
+    pub media: &'a str,
+    pub content: &'a [u8],
+}
+
 pub(super) fn boundary(content_type: &str) -> Result<&str, Error> {
     let mut fields = content_type.split(';');
     if !fields.next().is_some_and(|v| v.trim().eq_ignore_ascii_case("multipart/form-data")) {
@@ -32,13 +36,18 @@ pub(super) fn boundary(content_type: &str) -> Result<&str, Error> {
         return Err(Error::Framing);
     }
     let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
-    if value.is_empty() || value.len() > 70
-        || !value.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-    { return Err(Error::Framing); }
+    validate_boundary(value)?;
     Ok(value)
 }
 
-fn part_name(head: &[u8]) -> Result<&str, Error> {
+fn validate_boundary(value: &str) -> Result<(), Error> {
+    if value.is_empty() || value.len() > 70
+        || !value.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    { return Err(Error::Framing); }
+    Ok(())
+}
+
+fn part_head(head: &[u8]) -> Result<(&str, &str), Error> {
     if head.len() > MAX_PART_HEAD { return Err(Error::Limit); }
     let text = std::str::from_utf8(head).map_err(|_| Error::Framing)?;
     let (mut disposition, mut media) = (None, None);
@@ -69,17 +78,12 @@ fn part_name(head: &[u8]) -> Result<&str, Error> {
         else if key.eq_ignore_ascii_case("filename") && !filename { filename = true; }
         else { return Err(Error::Framing); }
     }
-    let name = name.ok_or(Error::Framing)?;
-    let media = media.ok_or(Error::Framing)?;
-    let valid = match name {
-        "command" => media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
-            || media.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8"),
-        "bundle" => media.eq_ignore_ascii_case("application/x-git-bundle")
-            || media.eq_ignore_ascii_case("application/octet-stream"),
-        _ => false,
-    };
-    if !valid { return Err(Error::Framing); }
-    Ok(name)
+    Ok((name.ok_or(Error::Framing)?, media.ok_or(Error::Framing)?))
+}
+
+pub(super) fn command_media(media: &str) -> bool {
+    media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        || media.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8")
 }
 
 fn prefix_table(marker: &[u8]) -> Vec<usize> {
@@ -106,60 +110,69 @@ fn find_boundary(bytes: &[u8], start: usize, marker: &[u8], prefix: &[usize],
             if matches!(bytes.get(after..after.saturating_add(2)), Some(b"\r\n" | b"--")) {
                 return Ok(after - marker.len());
             }
-            // An incomplete delimiter is not an end marker; it remains data.
             matched = prefix[matched - 1];
         }
     }
     Err(Error::Framing)
 }
 
-pub(super) fn parse<'a>(bytes: &'a [u8], boundary: &str,
-    live: &mut impl FnMut() -> bool,
-) -> Result<Upload<'a>, Error> {
-    if bytes.len() > MAX_UPLOAD_BYTES { return Err(Error::Limit); }
+/// Framing only: consumers must validate every part and may not publish or
+/// stage effects in `accept`. Its results remain provisional until the entire
+/// envelope, final marker and cancellation checkpoint succeed.
+pub(super) fn visit_parts<'a>(bytes: &'a [u8], boundary: &str,
+    maximum_bytes: usize, maximum_parts: usize, live: &mut impl FnMut() -> bool,
+    mut accept: impl FnMut(Part<'a>) -> Result<(), Error>,
+) -> Result<(), Error> {
+    if maximum_parts == 0 || maximum_parts > 129 || maximum_bytes > MAX_UPLOAD_BYTES
+        || bytes.len() > maximum_bytes { return Err(Error::Limit); }
     if !live() { return Err(Error::Cancelled); }
-    // Validate independently of the HTTP entry point as this parser is also
-    // used by tests and must remain total for arbitrary caller-provided input.
-    if boundary.is_empty() || boundary.len() > 70
-        || !boundary.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-    { return Err(Error::Framing); }
+    validate_boundary(boundary)?;
     let opening = format!("--{boundary}\r\n");
     if !bytes.starts_with(opening.as_bytes()) { return Err(Error::Framing); }
     let marker = format!("\r\n--{boundary}");
     let prefix = prefix_table(marker.as_bytes());
     let mut cursor = opening.len();
-    let (mut command, mut bundle) = (None, None);
-    for _ in 0..2 {
+    for _ in 0..maximum_parts {
         if !live() { return Err(Error::Cancelled); }
-        let tail = &bytes[cursor..];
+        let tail = bytes.get(cursor..).ok_or(Error::Framing)?;
         let head_end = tail[..tail.len().min(MAX_PART_HEAD + 4)].windows(4)
             .position(|v| v == b"\r\n\r\n").ok_or(Error::Framing)?;
-        let name = part_name(&tail[..head_end])?;
+        let (name, media) = part_head(&tail[..head_end])?;
         cursor += head_end + 4;
         let end = find_boundary(bytes, cursor, marker.as_bytes(), &prefix, live)?;
-        let content = &bytes[cursor..end];
-        match name {
-            "command" if command.is_none() => {
-                if content.len() > MAX_COMMAND_BYTES { return Err(Error::Limit); }
-                command = Some(content);
-            }
-            "bundle" if bundle.is_none() => {
-                if content.len() > MAX_BUNDLE_BYTES { return Err(Error::Limit); }
-                bundle = Some(content);
-            }
-            _ => return Err(Error::Framing),
-        }
+        accept(Part { name, media, content: &bytes[cursor..end] })?;
         cursor = end + marker.len();
         if bytes[cursor..].starts_with(b"--") {
             let trailing = &bytes[cursor + 2..];
             if !matches!(trailing, b"" | b"\r\n") { return Err(Error::Framing); }
             if !live() { return Err(Error::Cancelled); }
-            return Ok(Upload { command: command.ok_or(Error::Framing)?, bundle });
+            return Ok(());
         }
-        // find_boundary accepted exactly CRLF or the closing marker above.
         cursor += 2;
     }
-    Err(Error::Framing)
+    Err(Error::Limit)
+}
+
+pub(super) fn parse<'a>(bytes: &'a [u8], boundary: &str,
+    live: &mut impl FnMut() -> bool,
+) -> Result<Upload<'a>, Error> {
+    let (mut command, mut bundle) = (None, None);
+    visit_parts(bytes, boundary, MAX_UPLOAD_BYTES, 2, live, |part| {
+        match part.name {
+            "command" if command.is_none() && command_media(part.media) => {
+                if part.content.len() > MAX_COMMAND_BYTES { return Err(Error::Limit); }
+                command = Some(part.content);
+            }
+            "bundle" if bundle.is_none() && (part.media.eq_ignore_ascii_case("application/x-git-bundle")
+                || part.media.eq_ignore_ascii_case("application/octet-stream")) => {
+                if part.content.len() > MAX_BUNDLE_BYTES { return Err(Error::Limit); }
+                bundle = Some(part.content);
+            }
+            _ => return Err(Error::Framing),
+        }
+        Ok(())
+    })?;
+    Ok(Upload { command: command.ok_or(Error::Framing)?, bundle })
 }
 
 #[cfg(test)]
@@ -195,7 +208,7 @@ mod tests {
         duplicate.extend(part("command", "application/x-www-form-urlencoded", b"a=c"));
         duplicate.extend_from_slice(b"--example--\r\n");
         assert!(parse(&duplicate, "example", &mut || true).is_err());
-        assert!(part_name(b"Content-Disposition: form-data; name=\"bundle\"\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64").is_err());
+        assert!(part_head(b"Content-Disposition: form-data; name=\"bundle\"\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64").is_err());
         for invalid in ["multipart/form-data", "multipart/form-data; boundary=", "multipart/form-data; boundary=a; boundary=b", "multipart/form-data; boundary=\"a"] {
             assert!(boundary(invalid).is_err());
         }
@@ -208,5 +221,20 @@ mod tests {
         let mut calls = 0;
         assert_eq!(parse(&bytes, "example", &mut || { calls += 1; calls < 7; }).unwrap_err(), Error::Cancelled);
         assert_eq!(parse(&bytes, "", &mut || true).unwrap_err(), Error::Framing);
+    }
+    #[test]
+    fn shared_framing_does_not_widen_the_existing_bundle_profile() {
+        let mut bytes = part("command", "application/x-www-form-urlencoded", b"a=b");
+        bytes.extend(part("file_0", "application/octet-stream", b"\0\xff"));
+        bytes.extend(part("file_1", "application/octet-stream", b""));
+        bytes.extend_from_slice(b"--example--\r\n");
+        let mut parts = Vec::new();
+        visit_parts(&bytes, "example", bytes.len(), 3, &mut || true, |part| {
+            parts.push((part.name, part.content)); Ok(())
+        }).unwrap();
+        assert_eq!(parts, [("command", b"a=b".as_slice()), ("file_0", b"\0\xff"), ("file_1", b"")]);
+        assert!(parse(&bytes, "example", &mut || true).is_err());
+        assert_eq!(visit_parts(&bytes, "example", bytes.len(), 2, &mut || true, |_| Ok(())).unwrap_err(), Error::Limit);
+        assert_eq!(visit_parts(&bytes, "example", bytes.len() - 1, 3, &mut || true, |_| Ok(())).unwrap_err(), Error::Limit);
     }
 }
