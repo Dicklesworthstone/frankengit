@@ -16,12 +16,12 @@ const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 pub(super) const MAX_REPLY_BYTES: usize = MAX_METADATA_BYTES + MAX_BUNDLE_BYTES + 16 * 1024;
 
-pub(super) enum Reply {
+pub(crate) enum Reply {
     Json { status: Status, body: String },
     Bundle { content_type: String, prefix: String, bundle: Vec<u8>, suffix: String, length: usize },
 }
 impl Reply {
-    pub(super) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
+    pub(crate) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
         let (status, content_type, length) = match self {
             Self::Json { status, body } => (*status, "application/json; charset=utf-8", body.len()),
             Self::Bundle { content_type, length, .. } => (Status::Success, content_type.as_str(), *length),
@@ -131,10 +131,10 @@ pub(super) fn build(node: &OneNode, head: RepositoryAuthorityHeadId, subject: &R
 }
 
 fn contains(bytes: &[u8], pattern: &[u8], live: &mut impl FnMut() -> bool) -> Result<bool, ApiError> {
-    // Overlap preserves matches that straddle a cancellation checkpoint.
     let mut offset = 0;
     while offset < bytes.len() {
         checkpoint(live)?;
+        // Overlap preserves matches that straddle a cancellation checkpoint.
         let end = offset.saturating_add(64 * 1024 + pattern.len() - 1).min(bytes.len());
         if bytes[offset..end].windows(pattern.len()).any(|window| window == pattern) { return Ok(true); }
         offset = offset.saturating_add(64 * 1024);
@@ -144,12 +144,14 @@ fn contains(bytes: &[u8], pattern: &[u8], live: &mut impl FnMut() -> bool) -> Re
 fn mixed(metadata: String, bundle: Vec<u8>, digest: &str, maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Reply, ApiError> {
+    // Leave room below MIME's 70-byte delimiter limit. The complete checksum
+    // remains in metadata; this prefix is only transport framing.
+    let digest = digest.get(..48).ok_or_else(ApiError::unavailable)?;
     let mut selected = None;
-    // The hash is a deterministic transport checksum, NOT publication evidence.
-    // Correctness does not assume collision resistance: both parts are scanned.
     for attempt in 0..16 {
         let boundary = format!("fg-prepare-{digest}-{attempt:x}");
         let marker = format!("--{boundary}");
+        // Never rely on hash collision resistance for MIME framing correctness.
         if !contains(metadata.as_bytes(), marker.as_bytes(), live)?
             && !contains(&bundle, marker.as_bytes(), live)?
         { selected = Some(boundary); break; }
@@ -178,6 +180,8 @@ mod tests {
         let split = out.windows(4).position(|x| x == b"\r\n\r\n").unwrap() + 4;
         let header = std::str::from_utf8(&out[..split]).unwrap();
         assert!(header.contains(&format!("Content-Length: {}\r\n", out.len() - split)));
+        let boundary = header.split_once("boundary=").unwrap().1.split("\r\n").next().unwrap();
+        assert!(boundary.len() <= 70);
         assert!(out.windows(bundle.len()).any(|x| x == bundle));
         assert!(header.contains("Cache-Control: no-store"));
         assert!(mixed("{}".into(), bundle, &digest, 1, &mut || true).is_err());
@@ -188,7 +192,7 @@ mod tests {
         let mut bytes = vec![b'x'; 64 * 1024 - 3]; bytes.extend_from_slice(pattern);
         assert!(contains(&bytes, pattern, &mut || true).unwrap());
         assert!(contains(&bytes, pattern, &mut || false).is_err());
-        let digest = "a".repeat(64);
+        let digest = "a".repeat(48);
         let bundle = format!("--fg-prepare-{digest}-0").into_bytes();
         let reply = mixed("{}".into(), bundle, &digest, 4096, &mut || true).unwrap();
         let Reply::Bundle { content_type, .. } = reply else { panic!("binary") };
