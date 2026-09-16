@@ -8,11 +8,12 @@ use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
 use fgit_types::{DecisionOutcome, Digest, GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
 use super::publication_support::{describe, quote, write_terminal_receipt};
 
-const USAGE: &str = "usage: fg outcome <storage-root> <tenant-id> <repository-id> --trusted-local\n  --principal <original-principal-id>\n  (--idempotency-key <exact-text> | --idempotency-key-hex <hex> | --key-stdin)\n  [--object-format sha1|sha256]\n\nNo bundle, workspace, command body or transaction ID is needed. The exact key\nis interpreted in the original tenant/repository/principal scope, not as a\ncredential. Stdin is bounded and byte-exact: no newline is removed.\nExit 0: committed; 3: canonical refusal; 4: nonterminal observation; 2: error.\nAn absent key, unobserved seal, or undecided request is NOT proof of rollback.\nNon-atomic receive requires its per-command key; repository creation is a\nseparate protocol. This command does not retry or cancel a mutation.";
+const USAGE: &str = "usage: fg outcome <storage-root> <tenant-id> <repository-id> --trusted-local\n  --principal <original-principal-id>\n  (--idempotency-key <exact-text> | --idempotency-key-hex <hex> | --key-stdin)\n  [--receive-command-index <0..63>] [--object-format sha1|sha256]\n\nNo bundle, workspace, command body or transaction ID is needed. The exact key\nis interpreted in the original tenant/repository/principal scope, not as a\ncredential. Stdin is bounded and byte-exact: no newline is removed.\nExit 0: committed; 3: canonical refusal; 4: nonterminal observation; 2: error.\nAn absent key, unobserved seal, or undecided request is NOT proof of rollback.\nFor non-atomic receive, pass the ORIGINAL session key and its zero-based wire\ncommand index. The selector uses the admission lowerer's existing key rule;\nkey_digest in the receipt identifies the selected child key. One observation\ndoes not establish session length or completion. Without an index, the key is\nused directly, as required for atomic pushes and other sealed transactions.\nRepository creation is separate. This command never retries or cancels work.";
 
 struct Options {
     storage: PathBuf, tenant: TenantId, repository: RepositoryId,
     principal: PrincipalId, format: GitHashAlgorithm, key: KeyInput,
+    receive_command_index: Option<usize>,
 }
 enum KeyInput { Bytes(Vec<u8>), Stdin }
 
@@ -26,7 +27,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
         KeyInput::Bytes(bytes) => bytes.clone(),
         KeyInput::Stdin => read_key(&mut std::io::stdin().lock())?,
     };
-    let key = IdempotencyKey::new(bytes).map_err(|_| "invalid bounded idempotency key")?;
+    let key = selected_key(bytes, options.receive_command_index)?;
     let key_digest = key.digest();
     let session = LoopbackReceiveSession::authenticated(options.principal, key);
     let node = OneNode::open_existing(NodeConfig::new(options.storage.clone(), options.tenant,
@@ -63,6 +64,13 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     Ok(status)
 }
 
+fn selected_key(bytes: Vec<u8>, index: Option<usize>) -> Result<IdempotencyKey, String> {
+    let original = IdempotencyKey::new(bytes).map_err(|_| "invalid bounded idempotency key")?;
+    match index {
+        None => Ok(original),
+        Some(index) => OneNode::receive_command_recovery_key(&original, index).map_err(|error| error.to_string()),
+    }
+}
 fn emit(output: &mut impl Write, text: &str) -> Result<(), String> {
     writeln!(output, "{text}").and_then(|()| output.flush())
         .map_err(|error| format!("transaction outcome output incomplete: {error}; absence is not proof of non-commit"))
@@ -76,7 +84,7 @@ fn read_key(input: &mut impl Read) -> Result<Vec<u8>, String> {
 }
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 3 { return Err(USAGE.into()); }
-    if args.len() > 16 || args.iter().any(|value| value.len() > 8192)
+    if args.len() > 18 || args.iter().any(|value| value.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
     { return Err("outcome arguments exceed the bounded profile".into()); }
     if args[0].is_empty() || args[0].len() > 4096 { return Err("invalid storage path".into()); }
@@ -85,13 +93,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut principal = None;
     let mut format = GitHashAlgorithm::Sha1;
     let mut key = None;
+    let mut receive_command_index = None;
     let mut trusted = false;
     let mut seen = BTreeSet::new();
     let mut index = 3;
     while index < args.len() {
         let flag = args[index].as_str(); index += 1;
         if !matches!(flag, "--trusted-local" | "--principal" | "--object-format"
-            | "--idempotency-key" | "--idempotency-key-hex" | "--key-stdin")
+            | "--idempotency-key" | "--idempotency-key-hex" | "--key-stdin" | "--receive-command-index")
         { return Err(format!("unknown outcome option {flag:?}")); }
         let group = if matches!(flag, "--idempotency-key" | "--idempotency-key-hex" | "--key-stdin") { "original key" } else { flag };
         if !seen.insert(group) { return Err(format!("duplicate {group}")); }
@@ -109,13 +118,21 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 key = Some(KeyInput::Bytes(value.as_bytes().to_vec()));
             }
             "--idempotency-key-hex" => key = Some(KeyInput::Bytes(unhex_key(value)?)),
+            "--receive-command-index" => {
+                if value.is_empty() || value.len() > 2 || !value.bytes().all(|b| b.is_ascii_digit())
+                    || (value.len() > 1 && value.starts_with('0'))
+                { return Err("receive command index must be canonical decimal 0..63".into()); }
+                let selected: usize = value.parse().map_err(|_| "invalid receive command index")?;
+                if selected >= 64 { return Err("receive command index must be 0..63".into()); }
+                receive_command_index = Some(selected);
+            }
             _ => return Err("inapplicable outcome option".into()),
         }
     }
     if !trusted { return Err("--trusted-local is required; a key is not a credential".into()); }
     Ok(Options { storage: args[0].clone().into(), tenant, repository, format,
         principal: principal.ok_or("the original --principal is required")?,
-        key: key.ok_or("exactly one original key input is required")? })
+        key: key.ok_or("exactly one original key input is required")?, receive_command_index })
 }
 fn unhex_key(text: &str) -> Result<Vec<u8>, String> {
     if text.len() > 2 * MAX_IDEMPOTENCY_KEY_BYTES || text.len() % 2 != 0
@@ -156,11 +173,14 @@ fn render(options: &Options, key_digest: Digest, report: &RequestRecovery, clean
     });
     (format!(concat!("{{\"type\":\"transaction_outcome\",\"schema_version\":1,",
         "\"tenant_id\":{},\"repository_id\":{},\"principal_id\":{},\"object_format\":{},",
-        "\"key_digest\":{},\"state\":{},\"terminal\":{},\"transaction\":{},\"decision\":{},",
+        "\"key_digest\":{},\"selector\":{},\"command_index\":{},\"state\":{},\"terminal\":{},\"transaction\":{},\"decision\":{},",
         "\"read_only\":true,\"request_reexecuted\":false,\"absence_proves_non_commit\":false,",
-        "\"node_closed\":{},\"cleanup_error\":{}}}"),
+        "\"session_completeness_established\":false,\"node_closed\":{},\"cleanup_error\":{}}}"),
         quote(&options.tenant.to_string()), quote(&options.repository.to_string()), quote(&options.principal.to_string()),
-        quote(options.format.as_str()), digest(key_digest), quote(state), outcome.is_some(), transaction, decision,
+        quote(options.format.as_str()), digest(key_digest),
+        quote(if options.receive_command_index.is_some() { "receive_command" } else { "transaction" }),
+        options.receive_command_index.map_or_else(|| "null".to_owned(), |index| index.to_string()),
+        quote(state), outcome.is_some(), transaction, decision,
         cleanup.is_none(), cleanup.map_or_else(|| "null".into(), quote)), exit)
 }
 
@@ -194,6 +214,28 @@ mod tests {
         assert!(matches!(parse(&input).unwrap().key, KeyInput::Stdin));
     }
     #[test]
+    fn receive_selector_is_bounded_and_uses_the_original_binary_key_exactly() {
+        for index in [0, 1, 63] {
+            let mut input = args();
+            input.extend(["--receive-command-index".into(), index.to_string()]);
+            assert_eq!(parse(&input).unwrap().receive_command_index, Some(index));
+            let original = b"key\0\n\xff".to_vec();
+            let key = IdempotencyKey::new(original.clone()).unwrap();
+            assert_eq!(selected_key(original, Some(index)).unwrap(),
+                OneNode::receive_command_recovery_key(&key, index).unwrap());
+        }
+        for value in ["", "64", "-1", "+1", "00", "01", "999999999999999999999"] {
+            let mut input = args();
+            input.extend(["--receive-command-index".into(), value.into()]);
+            assert!(parse(&input).is_err(), "{value}");
+        }
+        let mut input = args();
+        input.extend(["--receive-command-index".into(), "0".into(), "--receive-command-index".into(), "1".into()]);
+        assert!(parse(&input).is_err());
+        assert_eq!(selected_key(b"atomic-key".to_vec(), None).unwrap(),
+            IdempotencyKey::new(b"atomic-key".to_vec()).unwrap());
+    }
+    #[test]
     fn nonterminal_reports_do_not_expose_raw_keys_or_assert_noncommit() {
         let options = parse(&args()).unwrap(); let key = IdempotencyKey::new(b"original-key".to_vec()).unwrap();
         for report in [RequestRecovery::KeyNotObserved, RequestRecovery::SealNotObserved] {
@@ -205,6 +247,18 @@ mod tests {
             let (failed, _) = render(&options, key.digest(), &report, Some("shutdown\nfailed"));
             assert!(failed.contains("\"node_closed\":false")); assert!(!failed.contains('\n'));
         }
+    }
+    #[test]
+    fn receive_receipts_identify_only_the_selected_observation_not_a_complete_session() {
+        let mut input = args();
+        input.extend(["--receive-command-index".into(), "1".into()]);
+        let options = parse(&input).unwrap();
+        let selected = selected_key(b"original-key".to_vec(), options.receive_command_index).unwrap();
+        let (text, status) = render(&options, selected.digest(), &RequestRecovery::KeyNotObserved, None);
+        assert_eq!(status, 4);
+        assert!(text.contains("\"selector\":\"receive_command\",\"command_index\":1"));
+        assert!(text.contains("\"session_completeness_established\":false"));
+        assert!(!text.contains("original-key"));
     }
     #[test]
     fn output_write_and_flush_failures_remain_errors() {
