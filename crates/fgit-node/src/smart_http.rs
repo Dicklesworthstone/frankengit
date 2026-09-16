@@ -11,10 +11,13 @@ use std::fmt::{self, Display, Formatter};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use fgit_admission::{AdmissionLimits, AdmissionResult};
 use fgit_wire::receive::{
     ReceiveCancellation, ReceiveContext, ReceiveError, ReceiveLimits, SignedPushProfile,
 };
-use fgit_wire::smart_http::rpc::{RpcError, UploadRpc, receive_discovery, upload_discovery};
+use fgit_wire::smart_http::rpc::{
+    ReceiveRpc, RpcError, UploadRpc, receive_discovery, upload_discovery,
+};
 use fgit_wire::smart_http::{
     HttpError, HttpLimits, Operation, ProtocolVersion, RequestHead, ResponseEncoder, Service,
     success_head,
@@ -24,7 +27,8 @@ use fgit_wire::{Capabilities, Packet, UploadPackRepository, WireError, WireLimit
 use super::{
     AdmissionUploadPackRepository, BudgetClass, GitDaemonSessionDeadline,
     GitDaemonTransportRefusal, LoopbackReceiveSession, NodeAdmissionViewRefusal,
-    NodeGitDaemonServeRefusal, NodePackMaterializationRefusal, OneNode, PackContextCheckpoint,
+    NodeGitDaemonServeRefusal, NodePackMaterializationRefusal, NodeReceiveTransportRefusal,
+    OneNode, PackContextCheckpoint, ProductionReceiveQuarantineHandoff,
     SELECTED_PACK_BUDGET_CLASS, SELECTED_PACK_MATERIALIZATION_OPERATION, checkpoint_pack_context,
     git_daemon_capabilities, selected_write_profile,
 };
@@ -87,7 +91,7 @@ impl NodeSmartHttpUploadReceipt {
 pub enum NodeSmartHttpRefusal {
     RepositoryRouteMismatch,
     UnsupportedOperation,
-    /// Receive-pack discovery is never available without caller-authenticated identity.
+    /// Receive-pack is never available without caller-authenticated identity.
     UnauthenticatedReceive,
     /// The HTTP body ended at its declared boundary while caller-owned bytes remained.
     TrailingRequestBytes {
@@ -98,6 +102,13 @@ pub enum NodeSmartHttpRefusal {
     Pack(Box<NodePackMaterializationRefusal>),
     Rpc(Box<RpcError>),
     Receive(Box<ReceiveError>),
+    ReceiveTransport(Box<NodeReceiveTransportRefusal>),
+    /// A canonical terminal outcome exists even though its response failed.
+    /// Retry recovery must use this outcome, never infer rollback from I/O.
+    ReceiveResponse {
+        outcome: Box<AdmissionResult>,
+        source: Box<Self>,
+    },
     Http(Box<HttpError>),
     Wire(Box<WireError>),
     Io {
@@ -129,6 +140,11 @@ impl Display for NodeSmartHttpRefusal {
             Self::Pack(error) => Display::fmt(error, formatter),
             Self::Rpc(error) => Display::fmt(error, formatter),
             Self::Receive(error) => Display::fmt(error, formatter),
+            Self::ReceiveTransport(error) => Display::fmt(error, formatter),
+            Self::ReceiveResponse { source, .. } => write!(
+                formatter,
+                "smart HTTP receive has a canonical outcome but response delivery failed: {source}"
+            ),
             Self::Http(error) => Display::fmt(error, formatter),
             Self::Wire(error) => Display::fmt(error, formatter),
             Self::Io { operation, source } => write!(formatter, "{operation}: {source}"),
@@ -144,6 +160,8 @@ impl Error for NodeSmartHttpRefusal {
             Self::Pack(error) => Some(error.as_ref()),
             Self::Rpc(error) => Some(error.as_ref()),
             Self::Receive(error) => Some(error.as_ref()),
+            Self::ReceiveTransport(error) => Some(error.as_ref()),
+            Self::ReceiveResponse { source, .. } => Some(source.as_ref()),
             Self::Http(error) => Some(error.as_ref()),
             Self::Wire(error) => Some(error.as_ref()),
             Self::Io { source, .. } => Some(source),
@@ -168,6 +186,11 @@ impl From<NodeGitDaemonServeRefusal> for NodeSmartHttpRefusal {
 impl From<NodePackMaterializationRefusal> for NodeSmartHttpRefusal {
     fn from(value: NodePackMaterializationRefusal) -> Self {
         Self::Pack(Box::new(value))
+    }
+}
+impl From<NodeReceiveTransportRefusal> for NodeSmartHttpRefusal {
+    fn from(value: NodeReceiveTransportRefusal) -> Self {
+        Self::ReceiveTransport(Box::new(value))
     }
 }
 impl From<RpcError> for NodeSmartHttpRefusal {
@@ -497,27 +520,7 @@ impl OneNode {
             .runtime
             .block_on(self.durable_admission_upload_pack_repository_in(&node_request, &limits))
             .map_err(NodeSmartHttpRefusal::from)?;
-        let format_name = match self.object_format {
-            fgit_types::GitHashAlgorithm::Sha1 => "sha1",
-            fgit_types::GitHashAlgorithm::Sha256 => "sha256",
-        };
-        let capability_text =
-            format!("report-status delete-refs ofs-delta object-format={format_name}");
-        let server_capabilities = Capabilities::parse_v1(capability_text.as_bytes(), &limits)?;
-        let wire_format = match self.object_format {
-            fgit_types::GitHashAlgorithm::Sha1 => fgit_wire::GitObjectFormat::Sha1,
-            fgit_types::GitHashAlgorithm::Sha256 => fgit_wire::GitObjectFormat::Sha256,
-        };
-        let receive_limits = ReceiveLimits {
-            wire: limits.clone(),
-            ..ReceiveLimits::default()
-        };
-        let context = ReceiveContext::new(
-            wire_format,
-            server_capabilities,
-            receive_limits,
-            SignedPushProfile::Refuse,
-        )?;
+        let context = self.smart_http_receive_context(limits)?;
         let body = receive_discovery(
             repository.advertised_refs().to_vec(),
             &context,
@@ -529,5 +532,164 @@ impl OneNode {
             body,
             version: request.requested_version,
         })
+    }
+
+    /// Admit one authenticated, complete Smart HTTP push and emit report-status.
+    ///
+    /// The gateway supplies a verified principal and a stable client retry key
+    /// in `session`; neither is inferred from headers, PACK bytes or a socket.
+    /// `body_wire` starts at the HTTP body boundary, with chunk framing intact
+    /// when applicable. The full declared body must finish, with no trailing
+    /// bytes, before the production quarantine handoff can stage objects.
+    ///
+    /// Admission uses the same exact-basis proof, policy, compare-and-swap,
+    /// idempotency and cell-state publication gates as the raw receive service.
+    /// A successful return is the canonical admission result, not merely an
+    /// HTTP transport receipt. A response failure after admission retains that
+    /// result in `NodeSmartHttpRefusal::ReceiveResponse`.
+    ///
+    /// Like the upload adapter, this synchronous outer binding belongs on the
+    /// runtime's blocking lane. The gateway owns bounded ingress and socket
+    /// write deadlines; this method bounds parsing, validation and admission.
+    pub fn smart_http_receive_rpc_in<W, C>(
+        &self,
+        request: &RequestHead<'_>,
+        session: &LoopbackReceiveSession,
+        body_wire: &[u8],
+        http_limits: HttpLimits,
+        admission_limits: AdmissionLimits,
+        cancellation: &mut C,
+        writer: &mut W,
+    ) -> Result<AdmissionResult, NodeSmartHttpRefusal>
+    where
+        W: Write,
+        C: ReceiveCancellation,
+    {
+        if !self.smart_http_route_matches(request) {
+            return Err(NodeSmartHttpRefusal::RepositoryRouteMismatch);
+        }
+        if request.operation != Operation::Rpc(Service::ReceivePack) {
+            return Err(NodeSmartHttpRefusal::UnsupportedOperation);
+        }
+        let Some(authenticated) = session.authenticated_session() else {
+            return Err(NodeSmartHttpRefusal::UnauthenticatedReceive);
+        };
+        if request.requested_version == ProtocolVersion::V2 {
+            return Err(HttpError::UnsupportedVersion.into());
+        }
+        if !cancellation.checkpoint() {
+            return Err(RpcError::Cancelled.into());
+        }
+        // Keep the raw receive boundary's ordering: authenticate, rate-limit,
+        // then check intake before retaining any untrusted transaction bytes.
+        self.push_quota.evaluate(&authenticated.principal_id())?;
+        fgit_types::cell::admits_staging_intake(self.cell_state())
+            .map_err(NodeReceiveTransportRefusal::CellState)?;
+
+        let receive_limits = self.git_daemon_receive_limits.clone();
+        let context = self.smart_http_receive_context(receive_limits.wire.clone())?;
+        let deadline = GitDaemonSessionDeadline::new(
+            self.git_daemon_session_timeout,
+            self.git_daemon_session_work_scaling,
+        );
+        let processing = super::GitDaemonReceiveProcessingDeadline::new(
+            self.git_daemon_receive_processing_timeout,
+        );
+        let mut live = || {
+            cancellation.checkpoint() && !deadline.expired() && !processing.expired()
+        };
+        let mut rpc = ReceiveRpc::new(request, request.requested_version, context, http_limits)?;
+        let progress = rpc.push(body_wire, &mut live)?;
+        if progress.consumed != body_wire.len() {
+            return Err(NodeSmartHttpRefusal::TrailingRequestBytes {
+                count: body_wire.len() - progress.consumed,
+            });
+        }
+        if !progress.body_complete {
+            return Err(RpcError::IncompleteRequest.into());
+        }
+
+        let node_request = super::NodeRequestContext {
+            authority: self.receive_admission_authority_context(
+                progress.decoded_body_bytes,
+                &deadline,
+            ),
+        };
+        let admission_is_live = || !deadline.expired() && !processing.expired();
+        let materialized = self
+            .runtime
+            .block_on(self.materialize_admission_while_in(&node_request, &admission_is_live))
+            .map_err(NodeAdmissionViewRefusal::from)?;
+        if !live() {
+            return Err(RpcError::Cancelled.into());
+        }
+        let validator = self
+            .production_quarantine_validator(
+                &materialized,
+                receive_limits.pack.clone(),
+                fgit_git_object::ParseLimits::default(),
+            )
+            .map_err(ReceiveError::AuthoritativeRefusal)?;
+        let mut handoff =
+            ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
+        let completion = rpc.finish_with_handoff(&mut handoff, &mut live)?;
+        let validated = handoff.into_validated_receive()?;
+        if !live() {
+            return Err(RpcError::Cancelled.into());
+        }
+        let outcome = self.runtime.block_on(
+            self.admit_basis_bound_loopback_receive_durable_in(
+                &node_request,
+                session,
+                &validated,
+                admission_limits,
+            ),
+        )?;
+
+        // From here on, cancellation and I/O failure cannot mean non-commit.
+        // Preserve the canonical result on every response-encoding/write path.
+        let delivered: Result<(), NodeSmartHttpRefusal> = (|| {
+            let packets = outcome.report_packets(&completion.request, &receive_limits)?;
+            let body = fgit_wire::encode_packets(&packets, &receive_limits.wire)?;
+            let length = u64::try_from(body.len()).map_err(|_| WireError::AllocationFailure)?;
+            let head = success_head(request, Some(length));
+            write_response_part(writer, head.as_bytes(), "write smart HTTP receive head")?;
+            write_response_part(writer, &body, "write smart HTTP receive report")?;
+            writer.flush().map_err(|source| NodeSmartHttpRefusal::Io {
+                operation: "flush smart HTTP receive report",
+                source,
+            })
+        })();
+        match delivered {
+            Ok(()) => Ok(outcome),
+            Err(source) => Err(NodeSmartHttpRefusal::ReceiveResponse {
+                outcome: Box::new(outcome),
+                source: Box::new(source),
+            }),
+        }
+    }
+
+    // Discovery and RPC must advertise/accept the same capability matrix and
+    // object-format domain, under the operator's immutable receive envelope.
+    fn smart_http_receive_context(
+        &self,
+        wire: WireLimits,
+    ) -> Result<ReceiveContext, NodeSmartHttpRefusal> {
+        let (wire_format, format_name) = match self.object_format {
+            fgit_types::GitHashAlgorithm::Sha1 => (fgit_wire::GitObjectFormat::Sha1, "sha1"),
+            fgit_types::GitHashAlgorithm::Sha256 => (fgit_wire::GitObjectFormat::Sha256, "sha256"),
+        };
+        let capability_text =
+            format!("report-status delete-refs ofs-delta object-format={format_name}");
+        let capabilities = Capabilities::parse_v1(capability_text.as_bytes(), &wire)?;
+        Ok(ReceiveContext::new(
+            wire_format,
+            capabilities,
+            ReceiveLimits {
+                wire,
+                ..self.git_daemon_receive_limits.clone()
+            },
+            SignedPushProfile::Refuse,
+        )?)
     }
 }
