@@ -6,6 +6,7 @@
 //! disclosure machinery already used by the raw Git compatibility service.
 
 mod ingress;
+mod receive_session;
 mod server;
 
 use std::cell::Cell;
@@ -107,6 +108,9 @@ pub enum NodeSmartHttpRefusal {
     Rpc(Box<RpcError>),
     Receive(Box<ReceiveError>),
     ReceiveTransport(Box<NodeReceiveTransportRefusal>),
+    /// An interrupted multi-ref session retains its authenticated outcome prefix.
+    /// Commands outside that prefix have unknown outcomes, not inferred refusals.
+    ReceiveInterrupted(Box<fgit_admission::policy_bridge::receive_session::InterruptedSession>),
     /// A canonical terminal outcome exists even though its response failed.
     /// Retry recovery must use this outcome, never infer rollback from I/O.
     ReceiveResponse {
@@ -145,6 +149,7 @@ impl Display for NodeSmartHttpRefusal {
             Self::Rpc(error) => Display::fmt(error, formatter),
             Self::Receive(error) => Display::fmt(error, formatter),
             Self::ReceiveTransport(error) => Display::fmt(error, formatter),
+            Self::ReceiveInterrupted(error) => Display::fmt(error, formatter),
             Self::ReceiveResponse { source, .. } => write!(
                 formatter,
                 "smart HTTP receive has a canonical outcome but response delivery failed: {source}"
@@ -165,6 +170,7 @@ impl Error for NodeSmartHttpRefusal {
             Self::Rpc(error) => Some(error.as_ref()),
             Self::Receive(error) => Some(error.as_ref()),
             Self::ReceiveTransport(error) => Some(error.as_ref()),
+            Self::ReceiveInterrupted(error) => Some(error.as_ref()),
             Self::ReceiveResponse { source, .. } => Some(source.as_ref()),
             Self::Http(error) => Some(error.as_ref()),
             Self::Wire(error) => Some(error.as_ref()),
@@ -637,10 +643,12 @@ impl OneNode {
     /// `body_wire` starts at the HTTP body boundary, with chunk framing intact
     /// when applicable. Every supplied byte must belong to this one request.
     ///
-    /// Admission uses the same exact-basis proof, policy, compare-and-swap,
+    /// Admission uses the same per-transaction planner, policy, compare-and-swap,
     /// idempotency and cell-state publication gates as the raw receive service.
-    /// Response failures after admission retain the canonical result in
-    /// `NodeSmartHttpRefusal::ReceiveResponse` instead of inferring rollback.
+    /// Non-atomic HTTP sessions retain exact-basis validation for every command,
+    /// advancing only over their own verified committed or refused decisions.
+    /// Interrupted sessions retain known outcomes in `ReceiveInterrupted`;
+    /// response failures after admission retain the result in `ReceiveResponse`.
     pub fn smart_http_receive_rpc_in<W, C>(
         &self,
         request: &RequestHead<'_>,
@@ -779,7 +787,7 @@ impl OneNode {
         let outcome = drive_request_while(
             self,
             &node_request,
-            self.admit_basis_bound_loopback_receive_durable_in(
+            self.admit_continuing_http_receive_in(
                 &node_request,
                 session,
                 &validated,
