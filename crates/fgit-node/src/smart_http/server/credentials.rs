@@ -47,6 +47,9 @@ pub(super) struct Grant {
     outcomes_read: bool,
     pulls_read: bool,
     pulls_write: bool,
+    reviews_read: bool,
+    reviews_write: bool,
+    merges_write: bool,
 }
 impl Grant {
     pub fn permits(self, service: Service) -> bool {
@@ -62,6 +65,13 @@ impl Grant {
     pub fn permits_pulls(self, mutation: bool) -> bool {
         if mutation { self.pulls_write } else { self.pulls_read }
     }
+    /// A vote always uses this credential's principal, not a form field.
+    pub fn permits_reviews(self, mutation: bool) -> bool {
+        if mutation { self.reviews_write } else { self.reviews_read }
+    }
+    /// Allows reviewed code publication and selection of additional named
+    /// reviewers. Mandatory repository protection remains enforced at CAS.
+    pub fn permits_reviewed_merge(self) -> bool { self.merges_write }
     /// Recovery is separately grantable after write access has been withdrawn.
     /// It never permits inspecting another principal's transaction namespace.
     pub fn permits_outcomes(self) -> bool {
@@ -121,7 +131,8 @@ impl CredentialSource {
                 // newly added metadata authority to an existing credential.
                 Ok(Grant { principal: *principal, read: true, receive: true,
                     issues_read: false, issues_write: false, outcomes_read: false,
-                    pulls_read: false, pulls_write: false })
+                    pulls_read: false, pulls_write: false,
+                    reviews_read: false, reviews_write: false, merges_write: false })
             }
             Self::File { path, binding } => {
                 let entries = load(path, *binding)?;
@@ -199,7 +210,8 @@ fn lower_hex<const N: usize>(text: &str) -> Result<[u8; N], CredentialFailure> {
 fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailure> {
     let mut grant = Grant { principal, read: false, receive: false,
         issues_read: false, issues_write: false, outcomes_read: false,
-        pulls_read: false, pulls_write: false };
+        pulls_read: false, pulls_write: false,
+        reviews_read: false, reviews_write: false, merges_write: false };
     let mut previous = 0;
     for scope in scopes.split(',') {
         // Canonical order extends the existing grammar. An old deployment
@@ -212,6 +224,9 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
             "outcomes-read" => (5, &mut grant.outcomes_read),
             "pulls-read" => (6, &mut grant.pulls_read),
             "pulls-write" => (7, &mut grant.pulls_write),
+            "reviews-read" => (8, &mut grant.reviews_read),
+            "reviews-write" => (9, &mut grant.reviews_write),
+            "merges-write" => (10, &mut grant.merges_write),
             _ => return Err(CredentialFailure::InvalidFile),
         };
         if rank <= previous { return Err(CredentialFailure::InvalidFile); }
@@ -365,6 +380,28 @@ mod tests {
         let source = CredentialSource::Static { digest: sha256_digest(token.as_bytes()), principal };
         let legacy = source.authenticate(Some(&format!("Bearer {token}"))).unwrap();
         assert!(!legacy.permits_pulls(false) && !legacy.permits_pulls(true));
+    }
+    #[test]
+    fn review_and_merge_grants_are_independent_of_each_other_and_all_old_scopes() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let old = grant(principal, "read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write").unwrap();
+        assert!(!old.permits_reviews(false) && !old.permits_reviews(true) && !old.permits_reviewed_merge());
+        for scope in ["reviews-read", "reviews-write", "merges-write"] {
+            let selected = grant(principal, scope).unwrap();
+            assert_eq!(selected.permits_reviews(false), scope == "reviews-read");
+            assert_eq!(selected.permits_reviews(true), scope == "reviews-write");
+            assert_eq!(selected.permits_reviewed_merge(), scope == "merges-write");
+            assert!(!selected.permits_pulls(false) && !selected.permits_pulls(true));
+            assert!(!selected.permits(Service::UploadPack) && !selected.permits(Service::ReceivePack));
+            assert!(!selected.permits_issues(false) && !selected.permits_issues(true) && !selected.permits_outcomes());
+        }
+        assert!(grant(principal, "reviews-read,reviews-write,merges-write").is_ok());
+        assert!(grant(principal, "merges-write,reviews-write").is_err());
+        assert!(grant(principal, "reviews-read,reviews-read").is_err());
+        let token = "a".repeat(64);
+        let legacy = CredentialSource::Static { digest: sha256_digest(token.as_bytes()), principal }
+            .authenticate(Some(&format!("Bearer {token}"))).unwrap();
+        assert!(!legacy.permits_reviews(false) && !legacy.permits_reviews(true) && !legacy.permits_reviewed_merge());
     }
     #[test]
     fn duplicate_tokens_bad_scopes_and_foreign_bindings_fail_closed() {
