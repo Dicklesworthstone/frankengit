@@ -5,9 +5,12 @@
 //! then composes wire requests with the exact authority-selected admission and
 //! disclosure machinery already used by the raw Git compatibility service.
 
+mod server;
+
 use std::cell::Cell;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::future::Future;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -253,13 +256,32 @@ fn write_response_part<W: Write>(
         .map_err(|source| NodeSmartHttpRefusal::Io { operation, source })
 }
 
+// Cancellation must reach awaited authority work, not stop at the last parser
+// checkpoint. Cancel the owning context before each subsequent poll, but keep
+// driving the future to completion. Dropping it or replacing its actual result
+// with a local timeout could erase a canonical post-transmission outcome.
+fn drive_request_while<F: Future>(
+    node: &OneNode,
+    request: &super::NodeRequestContext,
+    future: F,
+    is_live: &mut impl FnMut() -> bool,
+) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    node.runtime.block_on(std::future::poll_fn(|cx| {
+        if !is_live() {
+            request.cancel();
+        }
+        future.as_mut().poll(cx)
+    }))
+}
+
 impl OneNode {
     fn smart_http_route_matches(&self, request: &RequestHead<'_>) -> bool {
         request.repository_route.as_bytes() == self.git_daemon_repository_path.as_bytes()
     }
 
     /// Build one complete upload-pack discovery response from authenticated
-    /// canonical state.
+    /// canonical state, using the same visible graph as RPC negotiation.
     pub fn smart_http_upload_discovery_in(
         &self,
         request: &RequestHead<'_>,
@@ -272,18 +294,29 @@ impl OneNode {
             return Err(NodeSmartHttpRefusal::UnsupportedOperation);
         }
         let node_request = self.request_context();
-        let repository = self
+        let deadline = GitDaemonSessionDeadline::new(
+            self.git_daemon_session_timeout,
+            self.git_daemon_session_work_scaling,
+        );
+        let is_live = || !deadline.expired();
+        let materialized = self
             .runtime
-            .block_on(self.durable_admission_upload_pack_repository_in(&node_request, &limits))
-            .map_err(NodeSmartHttpRefusal::from)?;
-        let capabilities =
-            upload_capabilities(self, &repository, request.requested_version, &limits)?;
-        let body = upload_discovery(
-            &repository,
-            capabilities,
-            request.requested_version,
-            &limits,
+            .block_on(self.materialize_admission_while_in(&node_request, &is_live))
+            .map_err(NodeAdmissionViewRefusal::from)?;
+        let disclosure = self.prepare_visible_upload_pack(
+            &node_request, &materialized, &limits, &deadline,
         )?;
+        let repository = disclosure.repository();
+        let capabilities =
+            upload_capabilities(self, repository, request.requested_version, &limits)?;
+        let body = if request.requested_version == ProtocolVersion::V2 {
+            upload_discovery(repository, capabilities, request.requested_version, &limits)?
+        } else {
+            // A legacy annotated-tag advertisement needs its synthetic ^{}
+            // records. The wrapper uses only already-verified visible peels.
+            let legacy = super::upload_visibility::tags::LegacyTagRepository::new(repository, &limits)?;
+            upload_discovery(&legacy, capabilities, request.requested_version, &limits)?
+        };
         let length = u64::try_from(body.len()).map_err(|_| WireError::AllocationFailure)?;
         Ok(NodeSmartHttpDiscovery {
             head: success_head(request, Some(length)),
@@ -341,10 +374,12 @@ impl OneNode {
             }
             true
         };
-        let materialized = self
-            .runtime
-            .block_on(self.materialize_admission_while_in(&node_request, &admission_is_live))
-            .map_err(|error| NodeAdmissionViewRefusal::from(error))?;
+        let materialized = drive_request_while(
+            self,
+            &node_request,
+            self.materialize_admission_while_in(&node_request, &admission_is_live),
+            &mut || cancellation.checkpoint() && !deadline.expired(),
+        );
         if admission_deadline_expired.load(Ordering::Relaxed) || deadline.expired() {
             return Err(NodeGitDaemonServeRefusal::from(
                 GitDaemonTransportRefusal::SessionDeadlineExceeded {
@@ -353,6 +388,7 @@ impl OneNode {
             )
             .into());
         }
+        let materialized = materialized.map_err(NodeAdmissionViewRefusal::from)?;
         let disclosure = self
             .prepare_visible_upload_pack(&node_request, &materialized, &wire_limits, &deadline)
             .map_err(NodeSmartHttpRefusal::from)?;
@@ -521,12 +557,11 @@ impl OneNode {
             .block_on(self.materialize_admission_in(&node_request))
             .map_err(NodeAdmissionViewRefusal::from)?;
         let snapshot = materialized.snapshot();
-        // Push advertises direct refs, not the fetch view's synthetic HEAD.
-        // A tags-only repository or a dangling default branch must remain
-        // pushable. The dedicated projection also counts only visible refs
-        // before enforcing bounds, without disclosing hidden names via errors.
+        // Receive discovery advertises only direct writable ref names. In
+        // particular, a missing/unborn default HEAD must not block pushing a
+        // tag-only repository or repairing that default branch.
         let advertisement = super::AdmissionReceivePackAdvertisement::from_snapshot(
-            &snapshot,
+            snapshot,
             &snapshot.hidden_refs,
             self.object_format,
             &limits,
@@ -628,10 +663,13 @@ impl OneNode {
             ),
         };
         let admission_is_live = || !deadline.expired() && !processing.expired();
-        let materialized = self
-            .runtime
-            .block_on(self.materialize_admission_while_in(&node_request, &admission_is_live))
-            .map_err(NodeAdmissionViewRefusal::from)?;
+        let materialized = drive_request_while(
+            self,
+            &node_request,
+            self.materialize_admission_while_in(&node_request, &admission_is_live),
+            &mut live,
+        )
+        .map_err(NodeAdmissionViewRefusal::from)?;
         if !live() {
             return Err(RpcError::Cancelled.into());
         }
@@ -649,13 +687,16 @@ impl OneNode {
         if !live() {
             return Err(RpcError::Cancelled.into());
         }
-        let outcome = self.runtime.block_on(
+        let outcome = drive_request_while(
+            self,
+            &node_request,
             self.admit_basis_bound_loopback_receive_durable_in(
                 &node_request,
                 session,
                 &validated,
                 admission_limits,
             ),
+            &mut live,
         )?;
 
         // From here on, cancellation and I/O failure cannot mean non-commit.
