@@ -15,7 +15,8 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use fgit_authority::{
-    AsyncAuthorityStore, TerminalOutcome, read_authority_head_body_async,
+    AsyncAuthorityStore, SealAttempt, SemanticRequest, TerminalOutcome,
+    bind_idempotency_key_async, read_authority_head_body_async,
     read_decision_batch_body_async,
 };
 use fgit_chronicle::{PublicationBasis, verify_pair};
@@ -23,10 +24,10 @@ use fgit_codec::{CryptoBodyIdentity, RepositoryDecisionBatchBody};
 use fgit_types::{DecisionOutcome, RepositoryAuthorityHeadId, TxId};
 
 use crate::{
-    AdmissionContext, AdmissionError, AdmissionLimits, AdmissionResult,
+    AdmissionContext, AdmissionError, AdmissionInput, AdmissionLimits, AdmissionResult,
     AsyncAdmissionProjection, BasisBoundValidatedReceive, CommandOutcome, SessionMapping,
-    SessionTerminals, admit_one_async, assemble_result, basis_bound_receive_input,
-    plan_session, read_basis_async,
+    SessionPlan, SessionTerminals, admit_one_async, assemble_result, basis_bound_receive_input,
+    lower_ref_update, plan_session, read_basis_async, seal_attempt,
 };
 
 /// An interrupted session may already have canonical outcomes for a prefix.
@@ -108,6 +109,17 @@ where
         atomic: plan.atomic,
         tx_ids: plan.tx_ids.clone(),
     };
+    // Bind the WHOLE request before admitting any child. Per-index bindings
+    // alone permit appending commands to an already used session key. Bind all
+    // child keys up front too, so a changed wire-order mapping cannot publish a
+    // new prefix before encountering a conflicting existing child binding.
+    bind_session_keys(store, cx, context, &input, &plan)
+        .await
+        .map_err(|source| InterruptedSession {
+            source: Box::new(source),
+            session: Some(mapping.clone()),
+            completed: Vec::new(),
+        })?;
     let mut outcomes = Vec::with_capacity(plan.lowered.len());
     let mut permitted = validated.validation_basis();
 
@@ -165,6 +177,50 @@ where
         SessionTerminals::PerCommand(outcomes)
     };
     Ok(assemble_result(plan, terminals))
+}
+
+async fn bind_session_keys<S>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    input: &AdmissionInput<'_>,
+    plan: &SessionPlan,
+) -> Result<(), AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    if !plan.atomic {
+        let commands = input.updates.iter()
+            .map(|update| lower_ref_update(update.old, update.new, update.ref_name))
+            .collect::<Result<Vec<_>, _>>()?;
+        let options = input.push_options.iter().cloned()
+            .map(fgit_authority::PushOption::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        let whole = SealAttempt {
+            tenant_id: context.tenant_id,
+            repository_id: context.repository_id,
+            authenticated_principal_id: context.principal_id,
+            idempotency_key: context.idempotency_key.clone(),
+            request: SemanticRequest::build(
+                fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+                context.object_format,
+                false,
+                commands,
+                options,
+                Vec::new(),
+            )?,
+        };
+        let (identity, _) = whole.derive()?;
+        // This reserves the caller's original key; it does NOT seal or publish
+        // another transaction. Only the unchanged child TxIds in SessionMapping
+        // acquire terminal decisions. Pack bytes and validation basis remain
+        // excluded by the existing canonical SemanticRequest/SealAttempt rules.
+        bind_idempotency_key_async(store, cx, &whole, identity).await?;
+    }
+    for (lowered, identity) in plan.lowered.iter().zip(&plan.tx_ids) {
+        bind_idempotency_key_async(store, cx, &seal_attempt(context, lowered), *identity).await?;
+    }
+    Ok(())
 }
 
 async fn advance_over_own_decision<S>(
