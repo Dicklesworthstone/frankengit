@@ -11,7 +11,7 @@ use fgit_authority::{
 };
 use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName, RepositoryId, TenantId};
 
-use super::{MAX_REPLY_BYTES, Request, Status, execute};
+use super::{MAX_REPLY_BYTES, Request, Selector, Status, execute};
 use crate::{LoopbackReceiveSession, NodeConfig, OneNode};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -42,7 +42,7 @@ fn attempt(node: &OneNode, key: &[u8]) -> SealAttempt {
 fn query(node: &OneNode, attempt: &SealAttempt) -> String {
     let session = LoopbackReceiveSession::authenticated(attempt.authenticated_principal_id,
         attempt.idempotency_key.clone());
-    let request = Request { repository_route: "/unused-after-authentication", command_index: None };
+    let request = Request { repository_route: "/unused-after-authentication", selector: Selector::Transaction };
     execute(node, &request, &session, MAX_REPLY_BYTES as u64).unwrap().body
 }
 
@@ -106,7 +106,7 @@ fn corrupt_seal_is_an_error_not_an_absent_or_undecided_observation() {
     node.runtime().block_on(node.authority.put_if_absent(request.authority(), &slot, b"not a canonical seal")).unwrap();
     let session = LoopbackReceiveSession::authenticated(attempt.authenticated_principal_id,
         attempt.idempotency_key.clone());
-    let request = Request { repository_route: "/unused-after-authentication", command_index: None };
+    let request = Request { repository_route: "/unused-after-authentication", selector: Selector::Transaction };
     let error = match execute(&node, &request, &session, MAX_REPLY_BYTES as u64) {
         Ok(_) => panic!("corrupt required evidence cannot produce an observation"),
         Err(error) => error,

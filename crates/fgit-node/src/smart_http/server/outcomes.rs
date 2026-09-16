@@ -4,6 +4,8 @@
 //! scope. The authority's existing key/seal verifier and outcome resolver own
 //! every reported fact. In particular, absence is never an abort certificate.
 
+mod sessions;
+
 use std::io::{self, Write};
 
 use fgit_admission::policy_bridge::receive_session::non_atomic_command_key;
@@ -19,11 +21,23 @@ use super::super::drive_request_while;
 const MAX_REPLY_BYTES: usize = 16 * 1024;
 const ROUTE: &str = "/api/v1/outcomes";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Selector {
+    Transaction,
+    Command(usize),
+    Session,
+}
+impl Selector {
+    fn command_index(self) -> Option<usize> {
+        match self { Self::Command(index) => Some(index), _ => None }
+    }
+}
+
 /// An original key is carried in Idempotency-Key, never in a URL or response.
 /// POST is a read-only query here; its envelope must have no body.
 struct Request<'a> {
     repository_route: &'a str,
-    command_index: Option<usize>,
+    selector: Selector,
 }
 impl<'a> Request<'a> {
     fn parse(envelope: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
@@ -33,8 +47,10 @@ impl<'a> Request<'a> {
         if envelope.method != "POST" {
             return Err(ApiError::new(Status::Method, "method_not_allowed"));
         }
-        let command_index = if suffix.is_empty() {
-            None
+        let selector = if suffix.is_empty() {
+            Selector::Transaction
+        } else if suffix == "/receive" {
+            Selector::Session
         } else {
             let number = suffix.strip_prefix("/receive/")
                 .ok_or_else(|| ApiError::new(Status::NotFound, "not_found"))?;
@@ -48,7 +64,7 @@ impl<'a> Request<'a> {
             if index >= fgit_admission::AdmissionLimits::default().max_commands {
                 return Err(ApiError::bad("invalid_command_index"));
             }
-            Some(index)
+            Selector::Command(index)
         };
         if !matches!(envelope.body, BodyFraming::Empty | BodyFraming::ContentLength(0))
             || envelope.expect_continue
@@ -58,7 +74,7 @@ impl<'a> Request<'a> {
         if envelope.git_protocol.is_some() {
             return Err(ApiError::bad("git_protocol_not_applicable"));
         }
-        Ok(Some(Self { repository_route, command_index }))
+        Ok(Some(Self { repository_route, selector }))
     }
 }
 
@@ -114,9 +130,9 @@ fn authenticate(
     let original = retry_key(raw_head).map_err(|_| ApiError::bad("invalid_original_key"))?
         .ok_or_else(|| ApiError::bad("original_key_required"))?;
     let original = IdempotencyKey::new(original.to_vec()).map_err(|_| ApiError::bad("invalid_original_key"))?;
-    let key = match request.command_index {
-        None => original,
-        Some(index) => non_atomic_command_key(&original, index)
+    let key = match request.selector {
+        Selector::Transaction | Selector::Session => original,
+        Selector::Command(index) => non_atomic_command_key(&original, index)
             .map_err(|_| ApiError::bad("invalid_command_index"))?,
     };
     Ok(LoopbackReceiveSession::authenticated(grant.principal, key))
@@ -169,6 +185,9 @@ impl Reply {
 fn execute(
     node: &OneNode, request: &Request<'_>, session: &LoopbackReceiveSession, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
+    if request.selector == Selector::Session {
+        return sessions::execute(node, session, maximum_response);
+    }
     let principal = session.authenticated_session()
         .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?.principal_id();
     let context = node.request_context();
@@ -178,7 +197,7 @@ fn execute(
     let report = drive_request_while(node, &context,
         node.recover_transaction_in(&context, session), &mut || !deadline.expired())
         .map_err(|_| ApiError::from_status(Status::Unavailable))?;
-    let body = render(node, principal, request.command_index, &report);
+    let body = render(node, principal, request.selector.command_index(), &report);
     let maximum = usize::try_from(maximum_response).unwrap_or(usize::MAX).min(MAX_REPLY_BYTES);
     if body.len() > maximum {
         return Err(ApiError::from_status(Status::TooLarge));
@@ -266,12 +285,13 @@ mod tests {
 
     #[test]
     fn selectors_are_bodyless_queries_with_explicit_original_wire_indices() {
-        for suffix in ["", "/receive/0", "/receive/63"] {
+        for (suffix, selector) in [("", Selector::Transaction), ("/receive", Selector::Session),
+            ("/receive/0", Selector::Command(0)), ("/receive/63", Selector::Command(63))] {
             let bytes = format!("POST /repo.git/api/v1/outcomes{suffix} HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\n\r\n");
             let envelope = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
             let request = Request::parse(&envelope).unwrap().unwrap();
             assert_eq!(request.repository_route, "/repo.git");
-            assert_eq!(request.command_index, if suffix.is_empty() { None } else if suffix.ends_with("/0") { Some(0) } else { Some(63) });
+            assert_eq!(request.selector, selector);
         }
     }
 
@@ -280,6 +300,8 @@ mod tests {
         for (suffix, headers) in [
             ("?key=secret", ""), ("/receive/64", ""), ("/receive/00", ""),
             ("/receive/-1", ""), ("/receive/1/extra", ""), ("/receive/%30", ""),
+            ("/receive/", ""), ("/receive?key=secret", ""),
+            ("/receive", "Content-Length: 1\r\n"), ("/receive", "Expect: 100-continue\r\n"),
             ("", "Content-Length: 1\r\n"), ("", "Transfer-Encoding: chunked\r\n"),
             ("", "Expect: 100-continue\r\n"), ("", "Git-Protocol: version=2\r\n"),
         ] {
