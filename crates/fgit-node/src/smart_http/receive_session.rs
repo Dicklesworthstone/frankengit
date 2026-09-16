@@ -9,6 +9,21 @@ use super::NodeSmartHttpRefusal;
 use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestContext, OneNode};
 
 impl OneNode {
+    /// Derive the key needed to recover one non-atomic receive command.
+    ///
+    /// The index is zero-based ORIGINAL wire order and must be below 64.
+    /// This is a pure selector over the admission lowerer's existing identity
+    /// rule, not a credential, new transaction, or storage operation. A local
+    /// client can then call `recover_transaction_in` with this key under the
+    /// original authenticated principal. Atomic pushes use the original key
+    /// directly. No command-count or whole-session completion is inferred.
+    pub fn receive_command_recovery_key(
+        original: &fgit_authority::IdempotencyKey,
+        index: usize,
+    ) -> Result<fgit_authority::IdempotencyKey, fgit_admission::AdmissionError> {
+        receive_session::non_atomic_command_key(original, index)
+    }
+
     /// Preserve the loopback receive boundary's authentication and cell policy
     /// while using the proof-preserving per-command session coordinator.
     pub(super) async fn admit_continuing_http_receive_in(
