@@ -23,6 +23,21 @@ pub enum NodeResolutionRefusal {
     SnapshotMoved,
     TipsMoved,
 }
+impl NodeResolutionRefusal {
+    #[must_use]
+    pub const fn is_snapshot_unavailable(&self) -> bool {
+        matches!(self, Self::SnapshotMoved | Self::TipsMoved)
+    }
+    /// Transports classify the real typed cause, never its diagnostic string.
+    #[must_use]
+    pub fn source_refusal(&self) -> Option<&NodeWorkspaceRefusal> {
+        match self { Self::Source(error) => Some(error), _ => None }
+    }
+    #[must_use]
+    pub fn resolution_refusal(&self) -> Option<&ResolutionError> {
+        match self { Self::Resolution(error) => Some(error), _ => None }
+    }
+}
 impl std::fmt::Display for NodeResolutionRefusal {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(out, "native merge resolution refused: {self:?}")
@@ -37,6 +52,30 @@ impl From<ResolutionError> for NodeResolutionRefusal {
 }
 
 impl OneNode {
+    /// Prepare explicit resolutions for an existing open PR, not merely two
+    /// branches whose names happen to match it. Current PR version, policy,
+    /// branch identities and tips are checked through the shared PR selector.
+    /// Native construction is then pinned to that same authenticated head.
+    ///
+    /// The native planner reproduces all conflicts and independently verifies
+    /// the unique base. Only the complete exact conflict set can be replaced.
+    /// This read never stages a candidate, seals work or grants an approval.
+    pub async fn prepare_resolved_pull_request_bundle_in(
+        &self, request: &NodeRequestContext,
+        subject: &fgit_forge::event::review::ReviewSubject,
+        merge_base: fgit_types::GitOid, visibility: &RefVisibility,
+        resolutions: &[ConflictResolution], metadata: &MergeMetadata,
+        limits: PreparationLimits,
+    ) -> Result<ResolvedMergeBundle, NodeResolutionRefusal> {
+        let inputs = ResolutionInputs { base: merge_base, target: subject.target_tip, source: subject.source_tip };
+        inputs.validate(self.object_format)?;
+        validate_resolutions(resolutions, limits)?;
+        metadata.validate().map_err(ResolutionError::from)?;
+        let head = self.validate_pull_request_preparation_in(request, subject, visibility).await?;
+        self.prepare_resolved_merge_bundle_in(request, &subject.target_ref, &subject.source_ref,
+            visibility, Some(head), inputs, resolutions, metadata, limits).await
+    }
+
     /// Prepare a resolved candidate at independently supplied exact branch tips
     /// and unique merge base. Every resolution must name an actual conflict;
     /// the complete set must resolve, or no candidate bytes are returned.
@@ -93,8 +132,6 @@ impl OneNode {
             read_bytes: Cell::new(0), budget_failed: Cell::new(false),
         };
         let resolved = prepare_resolved_merge(&source, self.object_format, inputs, resolutions, metadata, limits)?;
-        // The normal production native verifier and pack writer independently
-        // validate the complete constructed closure, including selected subtrees.
         let bundle = bundle_for_plan(&source, target, incoming, &resolved.plan, limits)?;
         source.checkpoint().map_err(ResolutionError::from)?;
         let bundle_sha256 = fgit_crypto::sha256_digest(&bundle);
