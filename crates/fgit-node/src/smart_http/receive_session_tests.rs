@@ -209,6 +209,7 @@ fn interrupted_second_command_preserves_first_outcome_and_stable_retry_mapping()
             RefusalCode::DurabilityProfileUnavailable)));
         assert_only_first(&node);
         let before_retry = node.runtime.block_on(node.materialize_admission()).unwrap().basis().generation();
+        drop(projection);
         let projection = node.durable_admission_projection(&context).unwrap();
         let retried = node.runtime.block_on(receive_session::admit(&node.authority,
             node.request_context().authority(), &context, &validated,
@@ -248,25 +249,33 @@ fn a_lost_second_cas_cannot_publish_under_an_unrelated_successor() {
 #[test]
 fn recovering_an_old_commit_does_not_unlock_an_unrelated_head_for_later_refs() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let scratch = Scratch::new();
-        let node = node(&scratch, format);
-        let context = context(&node);
-        let validated = native_receive(&node);
-        let projection = Probe::new(&node, &context, Mode::InterruptSecondSnapshot);
-        let request = node.request_context();
-        let interrupted = node.runtime.block_on(receive_session::admit(&node.authority, request.authority(),
-            &context, &validated, AdmissionLimits::default(), &projection)).unwrap_err();
-        let own_head = node.runtime.block_on(node.materialize_admission()).unwrap();
-        node.runtime.block_on(publish_unrelated_refusal(&node.authority, request.authority(),
-            &node.admission_materializer, &context, own_head.basis()));
-        let projection = node.durable_admission_projection(&context).unwrap();
-        let result = node.runtime.block_on(receive_session::admit(&node.authority, request.authority(),
-            &context, &validated, AdmissionLimits::default(), &projection)).unwrap();
-        assert_eq!(result.commands[0], interrupted.completed_commands()[0]);
-        assert!(matches!(result.commands[1].terminal.outcome,
-            DecisionOutcome::Refused { code: RefusalCode::AuthorityReceiptStale, .. }));
-        assert_only_first(&node);
-        drop(projection);
-        node.shutdown().unwrap();
+        for refresh_validation in [false, true] {
+            let scratch = Scratch::new();
+            let node = node(&scratch, format);
+            let context = context(&node);
+            let original = native_receive(&node);
+            let projection = Probe::new(&node, &context, Mode::InterruptSecondSnapshot);
+            let request = node.request_context();
+            let interrupted = node.runtime.block_on(receive_session::admit(&node.authority, request.authority(),
+                &context, &original, AdmissionLimits::default(), &projection)).unwrap_err();
+            drop(projection);
+            // Exercise both proof positions. With fresh validation, the foreign
+            // head below is an IMMEDIATE successor of the permitted head. Only
+            // checking predecessor/generation would mistakenly authorize it;
+            // the prior command's exact terminal decision must also match.
+            let validated = if refresh_validation { native_receive(&node) } else { original };
+            let own_head = node.runtime.block_on(node.materialize_admission()).unwrap();
+            node.runtime.block_on(publish_unrelated_refusal(&node.authority, request.authority(),
+                &node.admission_materializer, &context, own_head.basis()));
+            let projection = node.durable_admission_projection(&context).unwrap();
+            let result = node.runtime.block_on(receive_session::admit(&node.authority, request.authority(),
+                &context, &validated, AdmissionLimits::default(), &projection)).unwrap();
+            assert_eq!(result.commands[0], interrupted.completed_commands()[0]);
+            assert!(matches!(result.commands[1].terminal.outcome,
+                DecisionOutcome::Refused { code: RefusalCode::AuthorityReceiptStale, .. }));
+            assert_only_first(&node);
+            drop(projection);
+            node.shutdown().unwrap();
+        }
     }
 }
