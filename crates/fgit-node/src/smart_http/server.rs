@@ -1,14 +1,15 @@
 //! Bounded, single-repository HTTP gateway (frankengit-asa3).
 //!
 //! This is an explicit loopback capability profile, not organization/team IAM.
-//! Operators grant principals independent Git, issue and outcome scopes through
-//! bearer credentials. TLS terminates outside this listener; forwarded headers
-//! never authenticate. Git RPCs stream to native machines; issue forms have a
-//! separate small envelope. Outcome queries never execute a mutation.
+//! Operators grant principals independent Git, issue, PR and outcome scopes
+//! through bearer credentials. TLS terminates outside this listener; forwarded
+//! headers never authenticate. Git RPCs stream to native machines; metadata
+//! forms have a separate small envelope. Outcome queries never mutate state.
 
 mod credentials;
 mod issues;
 mod outcomes;
+mod pulls;
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -47,6 +48,7 @@ struct Profile {
     allow_receive: bool,
     allow_issues: bool,
     allow_outcomes: bool,
+    allow_pulls: bool,
     http: HttpLimits,
     maximum_response_bytes: u64,
     timeout: GitDaemonSessionTimeout,
@@ -90,8 +92,8 @@ impl OneNode {
     ///
     /// This local capability profile does not implement organization/team IAM
     /// or TLS. Non-loopback listeners are refused. Forwarded identity headers
-    /// never convey authority. HTTP connections are not reused. Native issue
-    /// and outcome endpoints remain disabled on this compatible entry point.
+    /// never convey authority. HTTP connections are not reused. Native issue,
+    /// PR and outcome endpoints remain disabled on this compatible entry point.
     ///
     /// RPC ingress is incremental: fixed-size read buffers feed the native
     /// machines directly. Receive-pack owns its bounded quarantine, not a
@@ -114,7 +116,7 @@ impl OneNode {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits,
             CredentialSource::Static { digest: credential_digest, principal },
-            allow_receive, false, false, idle_timeout,
+            allow_receive, false, false, false, idle_timeout,
         )
     }
 
@@ -154,7 +156,7 @@ impl OneNode {
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, false, false, idle_timeout,
+            allow_receive, false, false, false, idle_timeout,
         )
     }
 
@@ -170,8 +172,8 @@ impl OneNode {
     /// `issues-read` and `issues-write` are explicit independent grants; neither
     /// Git permission grants either, and issue write does not imply issue read.
     /// Git pushes still require allow_receive. This is repository-wide issue
-    /// access, not per-issue ACLs, account administration, or TLS. Outcome
-    /// queries remain disabled on this backward-compatible entry point.
+    /// access, not per-issue ACLs, account administration, or TLS. Outcome and
+    /// PR queries remain disabled on this backward-compatible entry point.
     pub fn serve_git_and_issue_http_with_credentials_file_bounded(
         &self,
         listener: &TcpListener,
@@ -182,7 +184,7 @@ impl OneNode {
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, true, false, idle_timeout,
+            allow_receive, true, false, false, idle_timeout,
         )
     }
 
@@ -198,6 +200,7 @@ impl OneNode {
     /// permission. A read never re-seals or resubmits work, and nonterminal
     /// observations never prove non-commit. Existing entry points do not
     /// enable these endpoints implicitly. All listener/drain bounds still apply.
+    /// PR endpoints remain disabled on this backward-compatible entry point.
     pub fn serve_repository_http_with_credentials_file_bounded(
         &self,
         listener: &TcpListener,
@@ -210,7 +213,32 @@ impl OneNode {
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, allow_issues, allow_outcomes, idle_timeout,
+            allow_receive, allow_issues, allow_outcomes, false, idle_timeout,
+        )
+    }
+
+    /// Explicitly enable same-repository native PR metadata alongside selected
+    /// existing services. PR list/show use `pulls-read`; open/update/close use
+    /// `pulls-write`. Neither grants Git, issue, recovery, review or merge rights.
+    ///
+    /// Requests carry complete explicit data, native object format, expected
+    /// aggregate version and client Idempotency-Key. The node's existing sealed
+    /// admission publishes the PR event and outbox obligation together, without
+    /// changing any Git ref. Reads use retained snapshots and current hidden-ref
+    /// policy. This local operator profile is not per-PR ACLs or hosted IAM.
+    pub fn serve_repository_http_with_pull_requests_bounded(
+        &self,
+        listener: &TcpListener,
+        server_limits: GitDaemonServerLimits,
+        credentials_file: &Path,
+        allow_receive: bool,
+        allow_issues: bool,
+        allow_outcomes: bool,
+        idle_timeout: Duration,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        self.serve_smart_http_with_source_bounded(
+            listener, server_limits, self.smart_http_credentials_source(credentials_file),
+            allow_receive, allow_issues, allow_outcomes, true, idle_timeout,
         )
     }
 
@@ -233,6 +261,7 @@ impl OneNode {
         allow_receive: bool,
         allow_issues: bool,
         allow_outcomes: bool,
+        allow_pulls: bool,
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         let address = listener.local_addr().map_err(|source| io_error("inspect HTTP listener", source))?;
@@ -271,6 +300,7 @@ impl OneNode {
             allow_receive,
             allow_issues,
             allow_outcomes,
+            allow_pulls,
             http,
             maximum_response_bytes,
             timeout: self.git_daemon_session_timeout,
@@ -573,6 +603,7 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
     let mut version = HttpVersion::Http11;
     let mut native = false;
     let mut native_mutation = false;
+    let mut pull_api = false;
     let mut api_error = None;
     let mut recovery = false;
     let mut recovery_error = None;
@@ -588,16 +619,26 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
                 &bytes[envelope.consumed..], &mut writer)
                 .map_err(|error| { recovery_error = Some(error); error.status });
         }
-        native = envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/issues"));
+        pull_api = envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/pulls"));
+        native = pull_api || envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/issues"));
         native_mutation = native && envelope.method == "POST";
-        let issue_request = issues::Request::parse(&envelope).map_err(|error| {
+        let pull_request = pulls::Request::parse(&envelope).map_err(|error| {
             api_error = Some(error);
             error.status
         })?;
-        let git_request = if issue_request.is_none() {
+        let issue_request = if pull_request.is_none() {
+            issues::Request::parse(&envelope).map_err(|error| {
+                api_error = Some(error);
+                error.status
+            })?
+        } else { None };
+        let git_request = if issue_request.is_none() && pull_request.is_none() {
             Some(parse_head(&bytes, profile.http)?.ok_or(Status::BadRequest)?)
         } else { None };
-        let session = if let Some(request) = &issue_request {
+        let session = if let Some(request) = &pull_request {
+            pulls::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                .map_err(|error| { api_error = Some(error); error.status })?
+        } else if let Some(request) = &issue_request {
             issues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
                 .map_err(|error| { api_error = Some(error); error.status })?
         } else {
@@ -612,7 +653,8 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
             return Err(Status::Expectation);
         }
         let initial = &bytes[envelope.consumed..];
-        let body_not_allowed = issue_request.as_ref().is_some_and(|request| !request.is_mutation())
+        let body_not_allowed = pull_request.as_ref().is_some_and(|request| !request.is_mutation())
+            || issue_request.as_ref().is_some_and(|request| !request.is_mutation())
             || git_request.as_ref().is_some_and(|request| matches!(request.operation, Operation::Discover(_)));
         if body_not_allowed && !initial.is_empty() { return Err(Status::BadRequest); }
         let mut node = OneNode::open_existing(profile.config.clone()).map_err(|_| Status::Unavailable)?;
@@ -627,7 +669,12 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
                 writer.inner.flush()?;
             }
             let mut body = io::Cursor::new(initial).chain(&mut reader);
-            if let Some(request) = &issue_request {
+            if let Some(request) = &pull_request {
+                let reply = pulls::execute(&node, request, &session, envelope.body, &mut body,
+                    profile.http, profile.maximum_response_bytes)
+                    .map_err(|error| { api_error = Some(error); error.status })?;
+                reply.send(&mut writer, version).map_err(|_| Status::Unavailable)?;
+            } else if let Some(request) = &issue_request {
                 let reply = issues::execute(&node, request, &session, envelope.body, &mut body,
                     profile.http, profile.maximum_response_bytes)
                     .map_err(|error| { api_error = Some(error); error.status })?;
@@ -681,7 +728,11 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
                 let _ = error.send(&mut writer, version);
             } else if native {
                 let error = api_error.unwrap_or_else(|| issues::ApiError::from_status(status, native_mutation));
-                let _ = error.send(&mut writer, version);
+                if pull_api {
+                    let _ = error.send_named(&mut writer, version, "pull_request_error");
+                } else {
+                    let _ = error.send(&mut writer, version);
+                }
             } else {
                 let _ = write_error(&mut writer, version, status);
             }
@@ -729,6 +780,7 @@ mod tests {
             allow_receive: true,
             allow_issues: false,
             allow_outcomes: false,
+            allow_pulls: false,
             http: HttpLimits::default(),
             maximum_response_bytes: 1024,
             timeout: GitDaemonSessionTimeout::DEFAULT,
