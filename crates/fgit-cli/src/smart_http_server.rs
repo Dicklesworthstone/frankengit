@@ -18,8 +18,8 @@ use crate::publication_support::quote;
 
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
-  [--allow-receive] [--allow-issues] [--allow-outcomes] [--expected-incarnation <id>]
-  [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
+  [--allow-receive] [--allow-issues] [--allow-outcomes] [--allow-pulls]
+  [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
   [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..1024>]
@@ -28,18 +28,19 @@ Provisioning (reads/authenticates the repository, opens no listener):
   fg serve-http <storage-root> <tenant-id> <repository-id> 127.0.0.1:0
     --trusted-local --print-credentials-header [--expected-incarnation <id>]
 
-Requires an existing repository. Git pushes, issue APIs and outcome queries are
-disabled by default. --allow-receive enables Git pushes for receive-scoped tokens.
---allow-issues requires --credentials-file and the token's independent issue
-scopes. --allow-outcomes also requires --credentials-file and an outcomes-read
-grant; it enables read-only recovery even with Git pushes and issues disabled.
+Requires an existing repository. Git pushes, issue APIs, PR APIs and outcome
+queries are disabled by default. --allow-receive enables Git pushes for
+receive-scoped tokens. --allow-issues, --allow-outcomes and --allow-pulls require
+--credentials-file and the token's independent scopes. No switch enables another
+service; PR write grants cannot merge, review, push Git refs, or mutate issues.
 
 --token-file keeps the static Git-only profile and contains 64 lowercase hex
 characters, optionally followed by one newline. --credentials-file is reloaded
 for every request and contains token HASHES, never plaintext bearer secrets:
   frankengit-http-credentials-v1 <tenant-id> <repository-id> <incarnation-id>
   <sha256-of-64-character-token> <principal-id> <comma-separated-scopes>
-Choose scopes in this order: read,receive,issues-read,issues-write,outcomes-read.
+Choose scopes once in this order:
+  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write
 No scope implies another. The header must match the exact repository incarnation.
 At most 256 entries and 64 KiB are accepted; a header alone revokes all tokens.
 Duplicate hashes or malformed rows refuse the entire table. Files must be private
@@ -58,10 +59,23 @@ POST bodies use application/x-www-form-urlencoded and require expected_version
 (0 for open, a positive exact predecessor otherwise). Open needs title and body;
 comment needs body; edit accepts title/body/label or clear_labels=true. Repeated
 label fields form a set. Replies are bounded JSON. Continuation requires the
-snapshot_token from the first page; moved snapshots return 409, never mixed pages.
+first page's snapshot_token and uses that retained head across ordinary writes.
+Unavailable snapshots return 409; they are never replaced with a different head.
+
+The independently enabled native PR API is at <repository-url>/api/v1/pulls:
+  GET /api/v1/pulls[?limit=50&after=N&expected_head=TOKEN]
+  GET /api/v1/pulls/N[?expected_head=TOKEN]
+  POST /api/v1/pulls/N/<open|update|close>
+Each PR POST is a complete URL-encoded command containing expected_version,
+object_format (sha1 or sha256), source_ref, target_ref, source_tip, target_tip,
+title and body. Closing preserves the exact prior data. No latest-tip lookup,
+implicit partial edit, automatic issue number, cross-repository PR, review or
+merge operation is supplied. PR pages retain snapshots and current hidden-ref
+policy. Use pulls-read/pulls-write grants; write does not imply read.
 
 Outcome lookup uses a bodyless POST and the ORIGINAL Idempotency-Key:
-  POST /api/v1/outcomes                 (issue/other transaction or atomic push)
+  POST /api/v1/outcomes                 (metadata transaction or atomic push)
+  POST /api/v1/outcomes/receive         (whole recorded non-atomic session)
   POST /api/v1/outcomes/receive/INDEX   (non-atomic push; zero-based index 0..63)
 No original command body, transaction ID or pack is needed. The authenticated
 principal can inspect only its own key scope. These queries never re-seal,
@@ -69,11 +83,12 @@ resubmit or cancel work. Missing/undecided observations do not prove rollback;
 a single receive-command result does not prove completion of the whole session.
 
 Forwarded identity headers never authenticate. This is an operator credential
-profile, not organization/team IAM, per-ref/per-issue ACLs, account lifecycle or
+profile, not organization/team IAM, per-ref/per-item ACLs, account lifecycle or
 TLS. Use an authenticated external TLS terminator for nonlocal access.
 Default bounds: 1024 requests, 4 in flight, 300-second phases, 128 MiB Git envelopes;
-issue forms have a separate 256 KiB ceiling and pages contain at most 100 entries.
-Outcome replies are capped at 16 KiB and have a separate per-principal quota.
+metadata forms have a separate 256 KiB ceiling and pages contain at most 100 entries.
+Outcome replies have a separate per-principal quota; single-transaction replies
+are capped at 16 KiB and whole-session replies at 1 MiB.
 ";
 
 enum CredentialInput {
@@ -90,6 +105,7 @@ struct Options {
     allow_receive: bool,
     allow_issues: bool,
     allow_outcomes: bool,
+    allow_pulls: bool,
     limits: GitDaemonServerLimits,
     idle_timeout: Duration,
 }
@@ -108,7 +124,7 @@ fn number(flags: &BTreeMap<&str, &str>, name: &str, default: u64, maximum: u64) 
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
     if arguments.len() < 4 { return Err(USAGE.into()); }
-    if arguments.len() > 39 || arguments.iter().any(|arg| arg.len() > 4096)
+    if arguments.len() > 40 || arguments.iter().any(|arg| arg.len() > 4096)
         || arguments.iter().map(String::len).sum::<usize>() > 32768
     {
         return Err("serve-http arguments exceed the bounded profile".into());
@@ -124,7 +140,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         let name = arguments[index].as_str();
         index += 1;
         let boolean = matches!(name, "--trusted-local" | "--allow-receive" | "--allow-issues"
-            | "--allow-outcomes" | "--print-credentials-header");
+            | "--allow-outcomes" | "--allow-pulls" | "--print-credentials-header");
         if !boolean && !matches!(name, "--token-file" | "--principal" | "--credentials-file" | "--expected-incarnation"
             | "--max-sessions" | "--max-in-flight" | "--idle-timeout-secs"
             | "--session-timeout-secs" | "--processing-timeout-secs"
@@ -163,8 +179,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     };
     let allow_issues = flags.contains_key("--allow-issues");
     let allow_outcomes = flags.contains_key("--allow-outcomes");
-    if (allow_issues || allow_outcomes) && !matches!(&credentials, CredentialInput::Reloadable(_)) {
-        return Err("issue/outcome endpoints require explicit scopes in --credentials-file".into());
+    let allow_pulls = flags.contains_key("--allow-pulls");
+    if (allow_issues || allow_outcomes || allow_pulls) && !matches!(&credentials, CredentialInput::Reloadable(_)) {
+        return Err("issue/PR/outcome endpoints require explicit scopes in --credentials-file".into());
     }
     let sessions = number(&flags, "--max-sessions", 1024, 1_000_000)? as usize;
     let in_flight = number(&flags, "--max-in-flight", 4, 16)? as usize;
@@ -189,7 +206,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         );
     }
     Ok(Options { config, tenant, repository, listen, credentials,
-        allow_receive: flags.contains_key("--allow-receive"), allow_issues, allow_outcomes, limits, idle_timeout })
+        allow_receive: flags.contains_key("--allow-receive"), allow_issues, allow_outcomes, allow_pulls, limits, idle_timeout })
 }
 
 fn token_digest(bytes: &[u8]) -> Result<[u8; 32], String> {
@@ -254,8 +271,8 @@ pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
         let url = format!("http://{address}{route}");
         let mode = match &options.credentials { CredentialInput::Reloadable(_) => "reloadable", _ => "static" };
         let mut output = io::stdout().lock();
-        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{}}}",
-            quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes,
+        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{}}}",
+            quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
             quote(&node.repository_incarnation_id().to_string()), quote(mode))
             .and_then(|()| output.flush()).map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
         drop(output);
@@ -263,6 +280,10 @@ pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
             CredentialInput::Static { principal, .. } => node.serve_smart_http_bounded(
                 &listener, options.limits, credential.ok_or("static credential missing")?, *principal,
                 options.allow_receive, options.idle_timeout,
+            ),
+            CredentialInput::Reloadable(path) if options.allow_pulls => node.serve_repository_http_with_pull_requests_bounded(
+                &listener, options.limits, path, options.allow_receive, options.allow_issues,
+                options.allow_outcomes, options.idle_timeout,
             ),
             CredentialInput::Reloadable(path) => node.serve_repository_http_with_credentials_file_bounded(
                 &listener, options.limits, path, options.allow_receive, options.allow_issues,
@@ -296,6 +317,7 @@ mod tests {
         assert!(!options.allow_receive);
         assert!(!options.allow_issues);
         assert!(!options.allow_outcomes);
+        assert!(!options.allow_pulls);
         assert_eq!(options.limits.max_sessions(), 1024);
         assert_eq!(options.limits.max_in_flight(), 4);
         let mut args = arguments();
@@ -349,6 +371,7 @@ mod tests {
         assert!(options.allow_issues);
         assert!(!options.allow_receive);
         assert!(!options.allow_outcomes);
+        assert!(!options.allow_pulls);
         args.push("--allow-issues".into());
         assert!(parse(&args).is_err());
     }
@@ -363,8 +386,23 @@ mod tests {
         args.push("--allow-outcomes".into());
         let options = parse(&args).unwrap();
         assert!(options.allow_outcomes);
-        assert!(!options.allow_receive && !options.allow_issues);
+        assert!(!options.allow_receive && !options.allow_issues && !options.allow_pulls);
         args.push("--allow-outcomes".into());
+        assert!(parse(&args).is_err());
+    }
+    #[test]
+    fn pull_requests_require_explicit_file_grants_and_do_not_enable_other_services() {
+        let mut static_args = arguments();
+        static_args.push("--allow-pulls".into());
+        assert!(parse(&static_args).is_err());
+        let mut args = arguments()[..5].to_vec();
+        args.extend(["--credentials-file".into(), "grants".into()]);
+        assert!(!parse(&args).unwrap().allow_pulls);
+        args.push("--allow-pulls".into());
+        let options = parse(&args).unwrap();
+        assert!(options.allow_pulls);
+        assert!(!options.allow_receive && !options.allow_issues && !options.allow_outcomes);
+        args.push("--allow-pulls".into());
         assert!(parse(&args).is_err());
     }
     #[test]
