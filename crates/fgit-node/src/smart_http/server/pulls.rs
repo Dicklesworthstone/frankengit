@@ -1,7 +1,8 @@
-//! Authenticated native PR lifecycle. This adapter supplies no PR database,
-//! object proof, merge permission, or alternate publication path. It binds a
-//! credential principal to explicit commands and calls the existing node APIs.
+//! Authenticated PR collaboration. Every route selects its own explicit grant
+//! and calls the existing node engine; metadata, reviews and code publication
+//! never gain authority from each other or from request text.
 
+mod collaboration;
 mod output;
 mod request;
 
@@ -17,11 +18,32 @@ use super::{Profile, Status, retry_key};
 use super::issues::{ApiError, Reply, admission_error, read_form};
 use super::super::drive_request_while;
 use request::Operation;
-pub(super) use request::Request;
+
+#[derive(Debug)]
+pub(super) enum Request<'a> {
+    Metadata(request::Request<'a>),
+    Collaboration(collaboration::Request<'a>),
+}
+impl<'a> Request<'a> {
+    pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
+        if let Some(request) = collaboration::Request::parse(envelope)? {
+            return Ok(Some(Self::Collaboration(request)));
+        }
+        request::Request::parse(envelope).map(|request| request.map(Self::Metadata))
+    }
+    pub(super) fn is_mutation(&self) -> bool {
+        match self { Self::Metadata(request) => request.is_mutation(),
+            Self::Collaboration(request) => request.is_mutation() }
+    }
+}
 
 pub(super) fn authenticate(
     request: &Request<'_>, envelope: &Envelope<'_>, raw_head: &[u8], profile: &Profile,
 ) -> Result<LoopbackReceiveSession, ApiError> {
+    let request = match request {
+        Request::Collaboration(request) => return collaboration::authenticate(request, envelope, raw_head, profile),
+        Request::Metadata(request) => request,
+    };
     let grant = profile.credentials.authenticate(envelope.authorization())
         .map_err(|error| ApiError::from_status(Status::from(error), false))?;
     if request.repository_route.as_bytes() != profile.route { return Err(ApiError::not_found()); }
@@ -46,6 +68,10 @@ pub(super) fn execute(
     node: &OneNode, request: &Request<'_>, session: &LoopbackReceiveSession,
     framing: BodyFraming, reader: &mut impl Read, limits: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
+    let request = match request {
+        Request::Collaboration(request) => return collaboration::execute(node, request, session, framing, reader, limits, maximum_response),
+        Request::Metadata(request) => request,
+    };
     let principal = session.authenticated_session()
         .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?.principal_id();
     let command = if request.is_mutation() {
@@ -92,6 +118,28 @@ pub(super) fn execute(
                 DecisionOutcome::Committed { .. } => Status::Success,
                 DecisionOutcome::Refused { .. } => Status::Conflict,
             }, body, terminal: Some((tx, terminal)) })
+        }
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use fgit_wire::smart_http::head;
+    #[test]
+    fn metadata_reviews_and_merges_have_distinct_typed_routes() {
+        for (method, path, collaboration, mutation) in [
+            ("GET", "/api/v1/pulls/1", false, false),
+            ("GET", "/api/v1/pulls/1/reviews", true, false),
+            ("POST", "/api/v1/pulls/1/reviews/approve", true, true),
+            ("POST", "/api/v1/pulls/1/merge", true, true),
+        ] {
+            let headers = if mutation { "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n" } else { "" };
+            let bytes = format!("{method} /repo.git{path} HTTP/1.1\r\nHost: local\r\n{headers}\r\n");
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+            let request = Request::parse(&envelope).unwrap().unwrap();
+            assert_eq!(matches!(request, Request::Collaboration(_)), collaboration);
+            assert_eq!(request.is_mutation(), mutation);
         }
     }
 }
