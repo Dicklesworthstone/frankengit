@@ -1,4 +1,4 @@
-//! Explicit loopback Git and issue HTTP service with operator credentials.
+//! Explicit loopback repository HTTP service with operator credentials.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -18,7 +18,7 @@ use crate::publication_support::quote;
 
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
-  [--allow-receive] [--allow-issues] [--expected-incarnation <id>]
+  [--allow-receive] [--allow-issues] [--allow-outcomes] [--expected-incarnation <id>]
   [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
@@ -28,17 +28,18 @@ Provisioning (reads/authenticates the repository, opens no listener):
   fg serve-http <storage-root> <tenant-id> <repository-id> 127.0.0.1:0
     --trusted-local --print-credentials-header [--expected-incarnation <id>]
 
-Requires an existing repository. Git pushes and issue APIs are disabled by
-default. --allow-receive enables Git pushes only for receive-scoped credentials.
---allow-issues requires --credentials-file and independently enables the native
-issue API, subject to each token's issues-read and issues-write grants.
+Requires an existing repository. Git pushes, issue APIs and outcome queries are
+disabled by default. --allow-receive enables Git pushes for receive-scoped tokens.
+--allow-issues requires --credentials-file and the token's independent issue
+scopes. --allow-outcomes also requires --credentials-file and an outcomes-read
+grant; it enables read-only recovery even with Git pushes and issues disabled.
 
 --token-file keeps the static Git-only profile and contains 64 lowercase hex
 characters, optionally followed by one newline. --credentials-file is reloaded
 for every request and contains token HASHES, never plaintext bearer secrets:
   frankengit-http-credentials-v1 <tenant-id> <repository-id> <incarnation-id>
   <sha256-of-64-character-token> <principal-id> <comma-separated-scopes>
-Choose explicit scopes in this order: read,receive,issues-read,issues-write.
+Choose scopes in this order: read,receive,issues-read,issues-write,outcomes-read.
 No scope implies another. The header must match the exact repository incarnation.
 At most 256 entries and 64 KiB are accepted; a header alone revokes all tokens.
 Duplicate hashes or malformed rows refuse the entire table. Files must be private
@@ -59,11 +60,20 @@ comment needs body; edit accepts title/body/label or clear_labels=true. Repeated
 label fields form a set. Replies are bounded JSON. Continuation requires the
 snapshot_token from the first page; moved snapshots return 409, never mixed pages.
 
+Outcome lookup uses a bodyless POST and the ORIGINAL Idempotency-Key:
+  POST /api/v1/outcomes                 (issue/other transaction or atomic push)
+  POST /api/v1/outcomes/receive/INDEX   (non-atomic push; zero-based index 0..63)
+No original command body, transaction ID or pack is needed. The authenticated
+principal can inspect only its own key scope. These queries never re-seal,
+resubmit or cancel work. Missing/undecided observations do not prove rollback;
+a single receive-command result does not prove completion of the whole session.
+
 Forwarded identity headers never authenticate. This is an operator credential
 profile, not organization/team IAM, per-ref/per-issue ACLs, account lifecycle or
 TLS. Use an authenticated external TLS terminator for nonlocal access.
 Default bounds: 1024 requests, 4 in flight, 300-second phases, 128 MiB Git envelopes;
 issue forms have a separate 256 KiB ceiling and pages contain at most 100 entries.
+Outcome replies are capped at 16 KiB and have a separate per-principal quota.
 ";
 
 enum CredentialInput {
@@ -79,6 +89,7 @@ struct Options {
     credentials: CredentialInput,
     allow_receive: bool,
     allow_issues: bool,
+    allow_outcomes: bool,
     limits: GitDaemonServerLimits,
     idle_timeout: Duration,
 }
@@ -97,7 +108,7 @@ fn number(flags: &BTreeMap<&str, &str>, name: &str, default: u64, maximum: u64) 
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
     if arguments.len() < 4 { return Err(USAGE.into()); }
-    if arguments.len() > 38 || arguments.iter().any(|arg| arg.len() > 4096)
+    if arguments.len() > 39 || arguments.iter().any(|arg| arg.len() > 4096)
         || arguments.iter().map(String::len).sum::<usize>() > 32768
     {
         return Err("serve-http arguments exceed the bounded profile".into());
@@ -112,7 +123,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     while index < arguments.len() {
         let name = arguments[index].as_str();
         index += 1;
-        let boolean = matches!(name, "--trusted-local" | "--allow-receive" | "--allow-issues" | "--print-credentials-header");
+        let boolean = matches!(name, "--trusted-local" | "--allow-receive" | "--allow-issues"
+            | "--allow-outcomes" | "--print-credentials-header");
         if !boolean && !matches!(name, "--token-file" | "--principal" | "--credentials-file" | "--expected-incarnation"
             | "--max-sessions" | "--max-in-flight" | "--idle-timeout-secs"
             | "--session-timeout-secs" | "--processing-timeout-secs"
@@ -150,8 +162,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         CredentialInput::Static { token_file, principal }
     };
     let allow_issues = flags.contains_key("--allow-issues");
-    if allow_issues && !matches!(&credentials, CredentialInput::Reloadable(_)) {
-        return Err("--allow-issues requires explicit issue scopes in --credentials-file".into());
+    let allow_outcomes = flags.contains_key("--allow-outcomes");
+    if (allow_issues || allow_outcomes) && !matches!(&credentials, CredentialInput::Reloadable(_)) {
+        return Err("issue/outcome endpoints require explicit scopes in --credentials-file".into());
     }
     let sessions = number(&flags, "--max-sessions", 1024, 1_000_000)? as usize;
     let in_flight = number(&flags, "--max-in-flight", 4, 16)? as usize;
@@ -176,7 +189,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         );
     }
     Ok(Options { config, tenant, repository, listen, credentials,
-        allow_receive: flags.contains_key("--allow-receive"), allow_issues, limits, idle_timeout })
+        allow_receive: flags.contains_key("--allow-receive"), allow_issues, allow_outcomes, limits, idle_timeout })
 }
 
 fn token_digest(bytes: &[u8]) -> Result<[u8; 32], String> {
@@ -241,8 +254,9 @@ pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
         let url = format!("http://{address}{route}");
         let mode = match &options.credentials { CredentialInput::Reloadable(_) => "reloadable", _ => "static" };
         let mut output = io::stdout().lock();
-        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{}}}",
-            quote(&url), options.allow_receive, options.allow_issues, quote(&node.repository_incarnation_id().to_string()), quote(mode))
+        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{}}}",
+            quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes,
+            quote(&node.repository_incarnation_id().to_string()), quote(mode))
             .and_then(|()| output.flush()).map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
         drop(output);
         match &options.credentials {
@@ -250,11 +264,9 @@ pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
                 &listener, options.limits, credential.ok_or("static credential missing")?, *principal,
                 options.allow_receive, options.idle_timeout,
             ),
-            CredentialInput::Reloadable(path) if options.allow_issues => node.serve_git_and_issue_http_with_credentials_file_bounded(
-                &listener, options.limits, path, options.allow_receive, options.idle_timeout,
-            ),
-            CredentialInput::Reloadable(path) => node.serve_smart_http_with_credentials_file_bounded(
-                &listener, options.limits, path, options.allow_receive, options.idle_timeout,
+            CredentialInput::Reloadable(path) => node.serve_repository_http_with_credentials_file_bounded(
+                &listener, options.limits, path, options.allow_receive, options.allow_issues,
+                options.allow_outcomes, options.idle_timeout,
             ),
             CredentialInput::HeaderOnly => return Err("header-only operation cannot serve".into()),
         }.map_err(|e| e.to_string())
@@ -283,6 +295,7 @@ mod tests {
         let options = parse(&arguments()).unwrap();
         assert!(!options.allow_receive);
         assert!(!options.allow_issues);
+        assert!(!options.allow_outcomes);
         assert_eq!(options.limits.max_sessions(), 1024);
         assert_eq!(options.limits.max_in_flight(), 4);
         let mut args = arguments();
@@ -335,7 +348,23 @@ mod tests {
         let options = parse(&args).unwrap();
         assert!(options.allow_issues);
         assert!(!options.allow_receive);
+        assert!(!options.allow_outcomes);
         args.push("--allow-issues".into());
+        assert!(parse(&args).is_err());
+    }
+    #[test]
+    fn outcome_recovery_is_opt_in_and_does_not_enable_either_write_service() {
+        let mut static_args = arguments();
+        static_args.push("--allow-outcomes".into());
+        assert!(parse(&static_args).is_err());
+        let mut args = arguments()[..5].to_vec();
+        args.extend(["--credentials-file".into(), "grants".into()]);
+        assert!(!parse(&args).unwrap().allow_outcomes);
+        args.push("--allow-outcomes".into());
+        let options = parse(&args).unwrap();
+        assert!(options.allow_outcomes);
+        assert!(!options.allow_receive && !options.allow_issues);
+        args.push("--allow-outcomes".into());
         assert!(parse(&args).is_err());
     }
     #[test]
