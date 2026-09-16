@@ -26,17 +26,13 @@ pub struct PreparedPullRequestBundle {
 
 impl OneNode {
     /// Construct an exact-candidate review artifact from an existing open PR.
-    ///
-    /// The independently authenticated caller supplies the complete subject
-    /// and deterministic commit metadata. Current caller/canonical visibility
-    /// applies before PR disclosure. No principal, key, seal or publication is
-    /// required because this operation neither stages nor mutates anything.
+    /// Caller/canonical visibility applies before disclosure. No principal,
+    /// key, seal or publication is required for this read-only operation.
     ///
     /// The existing native constructor owns object selection, validation and
     /// packing. Its independently selected head MUST equal the PR head before
-    /// any artifact is returned. This conservative check can refuse harmless
-    /// concurrent writes; it never mixes metadata from one head with another
-    /// head's source or policy. Retrying preparation does not retry a mutation.
+    /// any artifact returns. Harmless concurrent publications can therefore
+    /// refuse an attempt, but never mix PR metadata with a different source.
     pub async fn prepare_pull_request_bundle_in(
         &self,
         request: &NodeRequestContext,
@@ -45,12 +41,34 @@ impl OneNode {
         metadata: &MergeMetadata,
         limits: PreparationLimits,
     ) -> Result<PreparedPullRequestBundle, NodeWorkspaceRefusal> {
+        metadata.validate().map_err(NodeWorkspaceRefusal::MergePreparation)?;
+        limits.validate().map_err(NodeWorkspaceRefusal::MergePreparation)?;
+        let head = self.validate_pull_request_preparation_in(request, subject, visibility).await?;
+        let prepared = self.prepare_merge_bundle_in(request, &subject.target_ref,
+            &subject.source_ref, visibility, metadata, limits).await?;
+        if prepared.source_head != head {
+            return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
+        }
+        if !super::super::workspace_request_live(request) {
+            return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
+        }
+        Ok(PreparedPullRequestBundle {
+            source_head: prepared.source_head, subject: subject.clone(),
+            outcome: prepared.outcome, bundle: prepared.bundle,
+        })
+    }
+
+    /// Shared exact-PR selection for automatic and explicitly resolved reads.
+    /// This is not a publication capability. Every caller must still pin its
+    /// subsequent native construction to the returned authenticated head.
+    pub(in crate::treefs_workspace) async fn validate_pull_request_preparation_in(
+        &self, request: &NodeRequestContext, subject: &ReviewSubject,
+        visibility: &RefVisibility,
+    ) -> Result<RepositoryAuthorityHeadId, NodeWorkspaceRefusal> {
         subject.validate().map_err(|_| NodeWorkspaceRefusal::InvalidWorkspaceCandidate("invalid preparation subject"))?;
         if subject.source_tip.algorithm() != self.object_format {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
         }
-        metadata.validate().map_err(NodeWorkspaceRefusal::MergePreparation)?;
-        limits.validate().map_err(NodeWorkspaceRefusal::MergePreparation)?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         if visibility.hides(subject.source_ref.as_bytes()) || visibility.hides(subject.target_ref.as_bytes()) {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
@@ -91,17 +109,9 @@ impl OneNode {
         {
             return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
         }
-        let prepared = self.prepare_merge_bundle_in(request, &subject.target_ref,
-            &subject.source_ref, visibility, metadata, limits).await?;
-        if prepared.source_head != current.basis().id() {
-            return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
-        }
         if !super::super::workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
-        Ok(PreparedPullRequestBundle {
-            source_head: prepared.source_head, subject: subject.clone(),
-            outcome: prepared.outcome, bundle: prepared.bundle,
-        })
+        Ok(current.basis().id())
     }
 }
