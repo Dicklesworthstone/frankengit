@@ -18,7 +18,7 @@ pub struct Envelope<'a> {
     pub consumed: usize,
     pub content_type: Option<&'a str>,
     pub git_protocol: Option<&'a str>,
-    authorization: Option<&'a str>,
+    pub(super) authorization: Option<&'a str>,
 }
 
 impl Envelope<'_> {
