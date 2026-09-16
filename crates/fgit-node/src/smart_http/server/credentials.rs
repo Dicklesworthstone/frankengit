@@ -44,6 +44,7 @@ pub(super) struct Grant {
     receive: bool,
     issues_read: bool,
     issues_write: bool,
+    outcomes_read: bool,
 }
 impl Grant {
     pub fn permits(self, service: Service) -> bool {
@@ -54,6 +55,11 @@ impl Grant {
     }
     pub fn permits_issues(self, mutation: bool) -> bool {
         if mutation { self.issues_write } else { self.issues_read }
+    }
+    /// Recovery is separately grantable after write access has been withdrawn.
+    /// It never permits inspecting another principal's transaction namespace.
+    pub fn permits_outcomes(self) -> bool {
+        self.outcomes_read
     }
 }
 
@@ -108,7 +114,7 @@ impl CredentialSource {
                 // Preserve the static Git profile without silently granting any
                 // newly added metadata authority to an existing credential.
                 Ok(Grant { principal: *principal, read: true, receive: true,
-                    issues_read: false, issues_write: false })
+                    issues_read: false, issues_write: false, outcomes_read: false })
             }
             Self::File { path, binding } => {
                 let entries = load(path, *binding)?;
@@ -184,16 +190,18 @@ fn lower_hex<const N: usize>(text: &str) -> Result<[u8; N], CredentialFailure> {
 }
 
 fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailure> {
-    let mut grant = Grant { principal, read: false, receive: false, issues_read: false, issues_write: false };
+    let mut grant = Grant { principal, read: false, receive: false,
+        issues_read: false, issues_write: false, outcomes_read: false };
     let mut previous = 0;
     for scope in scopes.split(',') {
-        // Canonical order extends the original read,receive grammar. An old
-        // deployment rejecting these new explicit scopes fails closed.
+        // Canonical order extends the existing grammar. An old deployment
+        // rejecting a new explicit scope fails closed rather than widening it.
         let (rank, flag) = match scope {
             "read" => (1, &mut grant.read),
             "receive" => (2, &mut grant.receive),
             "issues-read" => (3, &mut grant.issues_read),
             "issues-write" => (4, &mut grant.issues_write),
+            "outcomes-read" => (5, &mut grant.outcomes_read),
             _ => return Err(CredentialFailure::InvalidFile),
         };
         if rank <= previous { return Err(CredentialFailure::InvalidFile); }
@@ -284,6 +292,7 @@ mod tests {
         for entry in entries {
             assert!(!entry.grant.permits_issues(false));
             assert!(!entry.grant.permits_issues(true));
+            assert!(!entry.grant.permits_outcomes());
         }
     }
     #[test]
@@ -298,6 +307,7 @@ mod tests {
         for grant in [read, write] {
             assert!(!grant.permits(Service::UploadPack));
             assert!(!grant.permits(Service::ReceivePack));
+            assert!(!grant.permits_outcomes());
         }
         assert!(grant(principal, "issues-read,issues-write").unwrap().permits_issues(true));
         assert!(grant(principal, "issues-write,read").is_err());
@@ -306,6 +316,21 @@ mod tests {
         let source = CredentialSource::Static { digest: sha256_digest(token.as_bytes()), principal };
         let legacy = source.authenticate(Some(&format!("Bearer {token}"))).unwrap();
         assert!(!legacy.permits_issues(false) && !legacy.permits_issues(true));
+        assert!(!legacy.permits_outcomes());
+    }
+    #[test]
+    fn recovery_scope_can_survive_write_withdrawal_without_restoring_other_access() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let recovery = grant(principal, "outcomes-read").unwrap();
+        assert!(recovery.permits_outcomes());
+        assert!(!recovery.permits(Service::UploadPack));
+        assert!(!recovery.permits(Service::ReceivePack));
+        assert!(!recovery.permits_issues(false));
+        assert!(!recovery.permits_issues(true));
+        let full = grant(principal, "read,receive,issues-read,issues-write,outcomes-read").unwrap();
+        assert!(full.permits_outcomes() && full.permits_issues(true));
+        assert!(grant(principal, "outcomes-read,read").is_err());
+        assert!(grant(principal, "outcomes-read,outcomes-read").is_err());
     }
     #[test]
     fn duplicate_tokens_bad_scopes_and_foreign_bindings_fail_closed() {
