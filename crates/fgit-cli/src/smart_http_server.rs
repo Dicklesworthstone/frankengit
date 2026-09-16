@@ -1,4 +1,4 @@
-//! Explicit loopback Smart HTTP service with operator-provisioned credentials.
+//! Explicit loopback Git and issue HTTP service with operator credentials.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -18,7 +18,7 @@ use crate::publication_support::quote;
 
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
-  [--allow-receive] [--expected-incarnation <id>]
+  [--allow-receive] [--allow-issues] [--expected-incarnation <id>]
   [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
@@ -28,26 +28,42 @@ Provisioning (reads/authenticates the repository, opens no listener):
   fg serve-http <storage-root> <tenant-id> <repository-id> 127.0.0.1:0
     --trusted-local --print-credentials-header [--expected-incarnation <id>]
 
-Requires an existing repository. Read-only by default; --allow-receive enables
-pushes only for credentials whose own scopes permit receive. --token-file keeps
-the original static single-principal profile and contains 64 lowercase hex
+Requires an existing repository. Git pushes and issue APIs are disabled by
+default. --allow-receive enables Git pushes only for receive-scoped credentials.
+--allow-issues requires --credentials-file and independently enables the native
+issue API, subject to each token's issues-read and issues-write grants.
+
+--token-file keeps the static Git-only profile and contains 64 lowercase hex
 characters, optionally followed by one newline. --credentials-file is reloaded
 for every request and contains token HASHES, never plaintext bearer secrets:
   frankengit-http-credentials-v1 <tenant-id> <repository-id> <incarnation-id>
-  <sha256-of-64-character-token> <principal-id> <read|receive|read,receive>
-The header must match this exact repository incarnation. At most 256 entries
-and 64 KiB are accepted; a header with no entries revokes all tokens. Duplicate
-hashes or malformed rows refuse the entire table. Both files must be private
+  <sha256-of-64-character-token> <principal-id> <comma-separated-scopes>
+Choose explicit scopes in this order: read,receive,issues-read,issues-write.
+No scope implies another. The header must match the exact repository incarnation.
+At most 256 entries and 64 KiB are accepted; a header alone revokes all tokens.
+Duplicate hashes or malformed rows refuse the entire table. Files must be private
 regular files on Unix (0600 or stricter), not symlinks. Atomically replace the
 table to rotate/revoke credentials without restarting. Already authenticated
-in-flight requests retain their bounded grant. Receive does not imply fetch.
+in-flight requests retain their bounded grant.
 
-Every request carries Authorization: Bearer <token>. Each push RPC also needs a
-client-selected Idempotency-Key; reuse it only for the identical push. Rotation
-to a new token for the same principal preserves its retry identity. Forwarded
-identity headers never authenticate. This is a trusted local credential grant
-profile, not organization/team IAM, per-ref ACLs, account lifecycle, or TLS.
-Default bounds: 1024 requests, 4 in flight, 300-second phases, 128 MiB envelopes.
+Every request carries Authorization: Bearer <token>. Each mutation RPC needs a
+client-selected Idempotency-Key; reuse it only for the identical command.
+Rotation to a new token for the same principal preserves its retry identity.
+The opt-in issue API is at <repository-url>/api/v1/issues:
+  GET /api/v1/issues[?limit=50&after=N&expected_head=TOKEN]
+  GET /api/v1/issues/N[?limit=50&after_version=V&expected_head=TOKEN]
+  POST /api/v1/issues/N/<open|edit|close|reopen|comment>
+POST bodies use application/x-www-form-urlencoded and require expected_version
+(0 for open, a positive exact predecessor otherwise). Open needs title and body;
+comment needs body; edit accepts title/body/label or clear_labels=true. Repeated
+label fields form a set. Replies are bounded JSON. Continuation requires the
+snapshot_token from the first page; moved snapshots return 409, never mixed pages.
+
+Forwarded identity headers never authenticate. This is an operator credential
+profile, not organization/team IAM, per-ref/per-issue ACLs, account lifecycle or
+TLS. Use an authenticated external TLS terminator for nonlocal access.
+Default bounds: 1024 requests, 4 in flight, 300-second phases, 128 MiB Git envelopes;
+issue forms have a separate 256 KiB ceiling and pages contain at most 100 entries.
 ";
 
 enum CredentialInput {
@@ -62,6 +78,7 @@ struct Options {
     listen: SocketAddr,
     credentials: CredentialInput,
     allow_receive: bool,
+    allow_issues: bool,
     limits: GitDaemonServerLimits,
     idle_timeout: Duration,
 }
@@ -80,7 +97,7 @@ fn number(flags: &BTreeMap<&str, &str>, name: &str, default: u64, maximum: u64) 
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
     if arguments.len() < 4 { return Err(USAGE.into()); }
-    if arguments.len() > 36 || arguments.iter().any(|arg| arg.len() > 4096)
+    if arguments.len() > 38 || arguments.iter().any(|arg| arg.len() > 4096)
         || arguments.iter().map(String::len).sum::<usize>() > 32768
     {
         return Err("serve-http arguments exceed the bounded profile".into());
@@ -95,7 +112,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     while index < arguments.len() {
         let name = arguments[index].as_str();
         index += 1;
-        let boolean = matches!(name, "--trusted-local" | "--allow-receive" | "--print-credentials-header");
+        let boolean = matches!(name, "--trusted-local" | "--allow-receive" | "--allow-issues" | "--print-credentials-header");
         if !boolean && !matches!(name, "--token-file" | "--principal" | "--credentials-file" | "--expected-incarnation"
             | "--max-sessions" | "--max-in-flight" | "--idle-timeout-secs"
             | "--session-timeout-secs" | "--processing-timeout-secs"
@@ -132,6 +149,10 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             .map_err(|_| "invalid principal ID")?;
         CredentialInput::Static { token_file, principal }
     };
+    let allow_issues = flags.contains_key("--allow-issues");
+    if allow_issues && !matches!(&credentials, CredentialInput::Reloadable(_)) {
+        return Err("--allow-issues requires explicit issue scopes in --credentials-file".into());
+    }
     let sessions = number(&flags, "--max-sessions", 1024, 1_000_000)? as usize;
     let in_flight = number(&flags, "--max-in-flight", 4, 16)? as usize;
     let limits = GitDaemonServerLimits::try_new(sessions, in_flight).map_err(|e| e.to_string())?;
@@ -155,7 +176,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         );
     }
     Ok(Options { config, tenant, repository, listen, credentials,
-        allow_receive: flags.contains_key("--allow-receive"), limits, idle_timeout })
+        allow_receive: flags.contains_key("--allow-receive"), allow_issues, limits, idle_timeout })
 }
 
 fn token_digest(bytes: &[u8]) -> Result<[u8; 32], String> {
@@ -167,8 +188,6 @@ fn token_digest(bytes: &[u8]) -> Result<[u8; 32], String> {
 }
 
 fn read_token(path: &Path) -> Result<[u8; 32], String> {
-    // This file belongs to the trusted local operator, not a remote request.
-    // Both pre-open and opened metadata are checked before any secret bytes.
     let metadata = fs::symlink_metadata(path).map_err(|e| format!("cannot inspect token file: {e}"))?;
     if !metadata.is_file() || metadata.len() > 66 { return Err("token must be a bounded regular file, not a symlink or device".into()); }
     let mut file = File::open(path).map_err(|e| format!("cannot open token file: {e}"))?;
@@ -194,9 +213,6 @@ pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
         return Ok(0);
     }
     let options = parse(arguments)?;
-    // Static secrets are checked before opening a node. Reloadable tables
-    // additionally need its authenticated incarnation and are checked before
-    // listener binding or readiness output below.
     let credential = match &options.credentials {
         CredentialInput::Static { token_file, .. } => Some(read_token(token_file)?),
         _ => None,
@@ -225,14 +241,17 @@ pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
         let url = format!("http://{address}{route}");
         let mode = match &options.credentials { CredentialInput::Reloadable(_) => "reloadable", _ => "static" };
         let mut output = io::stdout().lock();
-        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{}}}",
-            quote(&url), options.allow_receive, quote(&node.repository_incarnation_id().to_string()), quote(mode))
+        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{}}}",
+            quote(&url), options.allow_receive, options.allow_issues, quote(&node.repository_incarnation_id().to_string()), quote(mode))
             .and_then(|()| output.flush()).map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
         drop(output);
         match &options.credentials {
             CredentialInput::Static { principal, .. } => node.serve_smart_http_bounded(
                 &listener, options.limits, credential.ok_or("static credential missing")?, *principal,
                 options.allow_receive, options.idle_timeout,
+            ),
+            CredentialInput::Reloadable(path) if options.allow_issues => node.serve_git_and_issue_http_with_credentials_file_bounded(
+                &listener, options.limits, path, options.allow_receive, options.idle_timeout,
             ),
             CredentialInput::Reloadable(path) => node.serve_smart_http_with_credentials_file_bounded(
                 &listener, options.limits, path, options.allow_receive, options.idle_timeout,
@@ -263,6 +282,7 @@ mod tests {
     fn safe_defaults_require_credentials_and_do_not_enable_receive() {
         let options = parse(&arguments()).unwrap();
         assert!(!options.allow_receive);
+        assert!(!options.allow_issues);
         assert_eq!(options.limits.max_sessions(), 1024);
         assert_eq!(options.limits.max_in_flight(), 4);
         let mut args = arguments();
@@ -302,6 +322,21 @@ mod tests {
         for extra in [vec!["--principal".into(), "33".repeat(16)], vec!["--token-file".into(), "token".into()]] {
             let mut invalid = args.clone(); invalid.extend(extra); assert!(parse(&invalid).is_err());
         }
+    }
+    #[test]
+    fn issue_api_requires_explicit_opt_in_and_file_scopes() {
+        let mut static_args = arguments();
+        static_args.push("--allow-issues".into());
+        assert!(parse(&static_args).is_err());
+        let mut args = arguments()[..5].to_vec();
+        args.extend(["--credentials-file".into(), "grants".into()]);
+        assert!(!parse(&args).unwrap().allow_issues);
+        args.push("--allow-issues".into());
+        let options = parse(&args).unwrap();
+        assert!(options.allow_issues);
+        assert!(!options.allow_receive);
+        args.push("--allow-issues".into());
+        assert!(parse(&args).is_err());
     }
     #[test]
     fn header_provisioning_is_a_separate_read_only_operation() {
