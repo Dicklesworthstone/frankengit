@@ -16,21 +16,24 @@ const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 pub(super) const MAX_REPLY_BYTES: usize = MAX_METADATA_BYTES + MAX_BUNDLE_BYTES + 16 * 1024;
 
-pub(crate) enum Reply {
+/// Only this encoder can construct a reply; transport callers cannot bypass
+/// the complete-body, delimiter and response-ceiling checks with enum fields.
+pub(crate) struct Reply(Body);
+enum Body {
     Json { status: Status, body: String },
     Bundle { content_type: String, prefix: String, bundle: Vec<u8>, suffix: String, length: usize },
 }
 impl Reply {
     pub(crate) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
-        let (status, content_type, length) = match self {
-            Self::Json { status, body } => (*status, "application/json; charset=utf-8", body.len()),
-            Self::Bundle { content_type, length, .. } => (Status::Success, content_type.as_str(), *length),
+        let (status, content_type, length) = match &self.0 {
+            Body::Json { status, body } => (*status, "application/json; charset=utf-8", body.len()),
+            Body::Bundle { content_type, length, .. } => (Status::Success, content_type.as_str(), *length),
         };
         let version = match version { HttpVersion::Http10 => "HTTP/1.0", HttpVersion::Http11 => "HTTP/1.1" };
         write!(writer, "{version} {}\r\nContent-Type: {content_type}\r\nContent-Length: {length}\r\nCache-Control: no-store\r\nVary: Authorization\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n", status.line())?;
-        match self {
-            Self::Json { body, .. } => writer.write_all(body.as_bytes())?,
-            Self::Bundle { prefix, bundle, suffix, .. } => {
+        match &self.0 {
+            Body::Json { body, .. } => writer.write_all(body.as_bytes())?,
+            Body::Bundle { prefix, bundle, suffix, .. } => {
                 writer.write_all(prefix.as_bytes())?;
                 writer.write_all(bundle)?;
                 writer.write_all(suffix.as_bytes())?;
@@ -124,7 +127,7 @@ pub(super) fn build(node: &OneNode, head: RepositoryAuthorityHeadId, subject: &R
     match bundle {
         None => {
             if metadata.len() > maximum { return Err(ApiError::too_large()); }
-            Ok(Reply::Json { status, body: metadata })
+            Ok(Reply(Body::Json { status, body: metadata }))
         }
         Some(bundle) => mixed(metadata, bundle, bundle_digest.as_deref().ok_or_else(ApiError::unavailable)?, maximum, live),
     }
@@ -165,7 +168,7 @@ fn mixed(metadata: String, bundle: Vec<u8>, digest: &str, maximum: usize,
     let length = prefix.len().checked_add(bundle.len()).and_then(|n| n.checked_add(suffix.len()))
         .filter(|n| *n <= maximum).ok_or_else(ApiError::too_large)?;
     checkpoint(live)?;
-    Ok(Reply::Bundle { content_type: format!("multipart/mixed; boundary={boundary}"), prefix, bundle, suffix, length })
+    Ok(Reply(Body::Bundle { content_type: format!("multipart/mixed; boundary={boundary}"), prefix, bundle, suffix, length }))
 }
 
 #[cfg(test)]
@@ -182,7 +185,7 @@ mod tests {
         assert!(header.contains(&format!("Content-Length: {}\r\n", out.len() - split)));
         let boundary = header.split_once("boundary=").unwrap().1.split("\r\n").next().unwrap();
         assert!(boundary.len() <= 70);
-        assert!(out.windows(bundle.len()).any(|x| x == bundle));
+        assert!(out.windows(bundle.len()).any(|x| x == bundle.as_slice()));
         assert!(header.contains("Cache-Control: no-store"));
         assert!(mixed("{}".into(), bundle, &digest, 1, &mut || true).is_err());
     }
@@ -195,7 +198,7 @@ mod tests {
         let digest = "a".repeat(48);
         let bundle = format!("--fg-prepare-{digest}-0").into_bytes();
         let reply = mixed("{}".into(), bundle, &digest, 4096, &mut || true).unwrap();
-        let Reply::Bundle { content_type, .. } = reply else { panic!("binary") };
+        let Body::Bundle { content_type, .. } = reply.0 else { panic!("binary") };
         assert!(content_type.ends_with("-1"));
     }
 }
