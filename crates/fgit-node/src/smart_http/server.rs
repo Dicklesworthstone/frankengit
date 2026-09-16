@@ -1,13 +1,14 @@
 //! Bounded, single-repository HTTP gateway (frankengit-asa3).
 //!
 //! This is an explicit loopback capability profile, not organization/team IAM.
-//! Operators grant principals independent Git and issue scopes through bearer
-//! credentials. TLS terminates outside this listener; forwarded headers never
-//! authenticate. Git RPCs stream to native machines; issue forms have a separate
-//! small envelope and enter the existing durable issue admission driver.
+//! Operators grant principals independent Git, issue and outcome scopes through
+//! bearer credentials. TLS terminates outside this listener; forwarded headers
+//! never authenticate. Git RPCs stream to native machines; issue forms have a
+//! separate small envelope. Outcome queries never execute a mutation.
 
 mod credentials;
 mod issues;
+mod outcomes;
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -45,10 +46,12 @@ struct Profile {
     credentials: CredentialSource,
     allow_receive: bool,
     allow_issues: bool,
+    allow_outcomes: bool,
     http: HttpLimits,
     maximum_response_bytes: u64,
     timeout: GitDaemonSessionTimeout,
     quota: Arc<PushQuota>,
+    outcome_quota: Arc<PushQuota>,
 }
 
 struct PendingSession {
@@ -88,7 +91,7 @@ impl OneNode {
     /// This local capability profile does not implement organization/team IAM
     /// or TLS. Non-loopback listeners are refused. Forwarded identity headers
     /// never convey authority. HTTP connections are not reused. Native issue
-    /// endpoints remain disabled on this backward-compatible entry point.
+    /// and outcome endpoints remain disabled on this compatible entry point.
     ///
     /// RPC ingress is incremental: fixed-size read buffers feed the native
     /// machines directly. Receive-pack owns its bounded quarantine, not a
@@ -111,7 +114,7 @@ impl OneNode {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits,
             CredentialSource::Static { digest: credential_digest, principal },
-            allow_receive, false, idle_timeout,
+            allow_receive, false, false, idle_timeout,
         )
     }
 
@@ -129,8 +132,8 @@ impl OneNode {
     /// The private regular file starts with
     /// `frankengit-http-credentials-v1 <tenant> <repository> <incarnation>`.
     /// Each following line is `<sha256-of-token> <principal> <scopes>`. Git
-    /// scopes are `read` and `receive`; issue scopes are independent. This
-    /// entry point leaves issue endpoints disabled even if such grants exist.
+    /// scopes are `read` and `receive`; metadata scopes are independent. This
+    /// entry point leaves metadata endpoints disabled even if grants exist.
     /// IDs and digests are lowercase hex. At most 256 grants and 64 KiB are
     /// accepted. A header without rows revokes all credentials. `allow_receive`
     /// remains a mandatory ceiling for individually receive-enabled grants.
@@ -151,7 +154,7 @@ impl OneNode {
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, false, idle_timeout,
+            allow_receive, false, false, idle_timeout,
         )
     }
 
@@ -166,9 +169,9 @@ impl OneNode {
     ///
     /// `issues-read` and `issues-write` are explicit independent grants; neither
     /// Git permission grants either, and issue write does not imply issue read.
-    /// List scopes once in read,receive,issues-read,issues-write order. Git
-    /// pushes still require allow_receive. This is repository-wide issue
-    /// access, not per-issue ACLs, account administration, or TLS.
+    /// Git pushes still require allow_receive. This is repository-wide issue
+    /// access, not per-issue ACLs, account administration, or TLS. Outcome
+    /// queries remain disabled on this backward-compatible entry point.
     pub fn serve_git_and_issue_http_with_credentials_file_bounded(
         &self,
         listener: &TcpListener,
@@ -179,7 +182,35 @@ impl OneNode {
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, true, idle_timeout,
+            allow_receive, true, false, idle_timeout,
+        )
+    }
+
+    /// Select independent Git-write, issue, and read-only recovery endpoints.
+    ///
+    /// Outcome lookup is a bodyless POST to `.../api/v1/outcomes` with the
+    /// ORIGINAL Idempotency-Key. A non-atomic receive command is selected by
+    /// `.../api/v1/outcomes/receive/{zero-based-wire-index}`. Only an explicit
+    /// `outcomes-read` grant permits either query, and only in that grant's
+    /// principal namespace. This does not reveal another principal's results.
+    ///
+    /// Recovery uses a separate per-principal quota and requires no mutation
+    /// permission. A read never re-seals or resubmits work, and nonterminal
+    /// observations never prove non-commit. Existing entry points do not
+    /// enable these endpoints implicitly. All listener/drain bounds still apply.
+    pub fn serve_repository_http_with_credentials_file_bounded(
+        &self,
+        listener: &TcpListener,
+        server_limits: GitDaemonServerLimits,
+        credentials_file: &Path,
+        allow_receive: bool,
+        allow_issues: bool,
+        allow_outcomes: bool,
+        idle_timeout: Duration,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        self.serve_smart_http_with_source_bounded(
+            listener, server_limits, self.smart_http_credentials_source(credentials_file),
+            allow_receive, allow_issues, allow_outcomes, idle_timeout,
         )
     }
 
@@ -201,6 +232,7 @@ impl OneNode {
         credentials: CredentialSource,
         allow_receive: bool,
         allow_issues: bool,
+        allow_outcomes: bool,
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         let address = listener.local_addr().map_err(|source| io_error("inspect HTTP listener", source))?;
@@ -238,10 +270,12 @@ impl OneNode {
             credentials,
             allow_receive,
             allow_issues,
+            allow_outcomes,
             http,
             maximum_response_bytes,
             timeout: self.git_daemon_session_timeout,
             quota: Arc::new(PushQuota::default()),
+            outcome_quota: Arc::new(PushQuota::default()),
         });
         listener.set_nonblocking(true).map_err(|source| io_error("configure HTTP listener", source))?;
         let completed = Arc::new(AtomicUsize::new(0));
@@ -540,10 +574,20 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
     let mut native = false;
     let mut native_mutation = false;
     let mut api_error = None;
+    let mut recovery = false;
+    let mut recovery_error = None;
     let served = (|| -> Result<(), Status> {
         let bytes = read_head(&mut reader, profile.http)?;
         let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
         version = envelope.version;
+        recovery = envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/outcomes"));
+        if recovery {
+            // This read-only child has no mutation intake/Serving transition.
+            // It uses its own scoped quota and always closes before returning.
+            return outcomes::serve(profile, &envelope, &bytes[..envelope.consumed],
+                &bytes[envelope.consumed..], &mut writer)
+                .map_err(|error| { recovery_error = Some(error); error.status });
+        }
         native = envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/issues"));
         native_mutation = native && envelope.method == "POST";
         let issue_request = issues::Request::parse(&envelope).map_err(|error| {
@@ -632,7 +676,10 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
         // Never append a second response after any final response has started.
         // In particular, disconnect/cleanup never proves a mutation rolled back.
         if !writer.started {
-            if native {
+            if recovery {
+                let error = recovery_error.unwrap_or_else(|| outcomes::ApiError::from_status(status));
+                let _ = error.send(&mut writer, version);
+            } else if native {
                 let error = api_error.unwrap_or_else(|| issues::ApiError::from_status(status, native_mutation));
                 let _ = error.send(&mut writer, version);
             } else {
@@ -681,10 +728,12 @@ mod tests {
             },
             allow_receive: true,
             allow_issues: false,
+            allow_outcomes: false,
             http: HttpLimits::default(),
             maximum_response_bytes: 1024,
             timeout: GitDaemonSessionTimeout::DEFAULT,
             quota: Arc::new(PushQuota::default()),
+            outcome_quota: Arc::new(PushQuota::default()),
         }
     }
     fn head(extra: &str) -> Vec<u8> {
