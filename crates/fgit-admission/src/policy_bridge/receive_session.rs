@@ -1,0 +1,237 @@
+//! Exact-basis continuation for a production receive session.
+//!
+//! A non-atomic push must continue after either a committed OR refused command.
+//! Both decisions advance the authority head. Clearing the validation witness
+//! after a commit, or keeping the original head after a refusal, is not enough:
+//! the former admits unrelated successors and the latter rejects valid later
+//! commands. This driver advances only across its own verified one-decision
+//! publication. Every actual decision still uses the shared admission planner,
+//! lowerer, seal, CAS loop, and authoritative outcome resolver.
+//!
+//! The conservative profile deliberately does not walk arbitrary descendants.
+//! An intervening publication requires a newly validated request on retry.
+
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
+
+use fgit_authority::{
+    AsyncAuthorityStore, TerminalOutcome, read_authority_head_body_async,
+    read_decision_batch_body_async,
+};
+use fgit_chronicle::{PublicationBasis, verify_pair};
+use fgit_codec::{CryptoBodyIdentity, RepositoryDecisionBatchBody};
+use fgit_types::{DecisionOutcome, RepositoryAuthorityHeadId, TxId};
+
+use crate::{
+    AdmissionContext, AdmissionError, AdmissionLimits, AdmissionResult,
+    AsyncAdmissionProjection, BasisBoundValidatedReceive, CommandOutcome, SessionMapping,
+    SessionTerminals, admit_one_async, assemble_result, basis_bound_receive_input,
+    plan_session, read_basis_async,
+};
+
+/// An interrupted session may already have canonical outcomes for a prefix.
+///
+/// Remaining commands are UNKNOWN, not rejected: an interrupted store call may
+/// have published. Retrying the same session key and semantic command list uses
+/// the same transaction identities and recovers their authenticated outcomes.
+#[derive(Debug)]
+pub struct InterruptedSession {
+    source: AdmissionError,
+    session: Option<SessionMapping>,
+    completed: Vec<CommandOutcome>,
+}
+
+impl InterruptedSession {
+    /// Stable transaction mapping, present once the entire request was lowered.
+    #[must_use]
+    pub fn session(&self) -> Option<&SessionMapping> {
+        self.session.as_ref()
+    }
+
+    /// Only outcomes already returned by the authoritative resolver, in order.
+    #[must_use]
+    pub fn completed_commands(&self) -> &[CommandOutcome] {
+        &self.completed
+    }
+
+    /// The exact underlying failure; no timeout is rewritten as non-commit.
+    #[must_use]
+    pub fn admission_error(&self) -> &AdmissionError {
+        &self.source
+    }
+}
+
+impl Display for InterruptedSession {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "receive interrupted after {} authenticated command outcomes; remaining outcomes unknown: {}",
+            self.completed.len(),
+            self.source,
+        )
+    }
+}
+
+impl Error for InterruptedSession {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Admit a basis-bound receive while retaining the witness for every command.
+///
+/// This is a session coordinator, not a second publication implementation.
+/// Atomic input enters the same one-transaction decision core. Non-atomic input
+/// retains the existing per-command retry keys and original report order.
+/// The transport owns authentication, quota, and cell-publication gates.
+pub async fn admit<S, P>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    validated: &BasisBoundValidatedReceive,
+    limits: AdmissionLimits,
+    projection: &P,
+) -> Result<AdmissionResult, InterruptedSession>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    P: AsyncAdmissionProjection<S> + ?Sized,
+{
+    let input = basis_bound_receive_input(validated);
+    let plan = plan_session(context, &input, limits).map_err(|source| InterruptedSession {
+        source,
+        session: None,
+        completed: Vec::new(),
+    })?;
+    let mapping = SessionMapping {
+        atomic: plan.atomic,
+        tx_ids: plan.tx_ids.clone(),
+    };
+    let mut outcomes = Vec::with_capacity(plan.lowered.len());
+    let mut permitted = validated.validation_basis();
+
+    for (index, lowered) in plan.lowered.iter().enumerate() {
+        let attempt = async {
+            if let Some(previous) = outcomes.last().copied() {
+                permitted = advance_over_own_decision(
+                    store,
+                    cx,
+                    context,
+                    permitted,
+                    plan.tx_ids[index - 1],
+                    previous,
+                    input.closure.object_closure_root,
+                )
+                .await?;
+            }
+            // Always Some, including after a recovered or newly committed ref.
+            // A race after continuation verification meets this guard again at
+            // every CAS plan; this read cannot authorize a later foreign head.
+            admit_one_async(
+                store,
+                cx,
+                context,
+                input.closure,
+                Some(permitted),
+                lowered,
+                projection,
+                limits,
+            )
+            .await
+        }
+        .await;
+        match attempt {
+            Ok(terminal) => outcomes.push(terminal),
+            Err(source) => {
+                let completed = outcomes
+                    .into_iter()
+                    .zip(plan.tx_ids.iter().copied())
+                    .map(|(terminal, tx_id)| CommandOutcome { tx_id, terminal })
+                    .collect();
+                return Err(InterruptedSession {
+                    source,
+                    session: Some(mapping),
+                    completed,
+                });
+            }
+        }
+    }
+    // No extra authority read after the final outcome. A successful admission
+    // cannot be turned into an error by optional continuation work or cleanup.
+    let terminals = if plan.atomic {
+        SessionTerminals::Atomic(outcomes[0])
+    } else {
+        SessionTerminals::PerCommand(outcomes)
+    };
+    Ok(assemble_result(plan, terminals))
+}
+
+async fn advance_over_own_decision<S>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    permitted: RepositoryAuthorityHeadId,
+    tx_id: TxId,
+    terminal: TerminalOutcome,
+    closure_root: fgit_types::Digest,
+) -> Result<RepositoryAuthorityHeadId, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let (observed, _, _) = read_basis_async(store, cx, &context.head_key).await?;
+    if observed.body().repository_id != context.repository_id {
+        return Err(AdmissionError::MaterializationMismatch("receive continuation repository"));
+    }
+    if observed.id() == permitted {
+        // Common retry case: earlier commands were already terminal before this
+        // request's fresh quarantine validation selected its current basis.
+        return Ok(permitted);
+    }
+    if observed.body().predecessor_head_id != Some(permitted) {
+        // Never treat an arbitrary newer head as authorization for old evidence.
+        // Keep the witness; the shared planner produces the typed stale refusal.
+        return Ok(permitted);
+    }
+    let predecessor = read_authority_head_body_async(store, cx, permitted).await?;
+    let Some(tail) = observed.body().decision_tail_id else {
+        return Err(AdmissionError::MaterializationMismatch("receive continuation decision tail"));
+    };
+    let batch = read_decision_batch_body_async(store, cx, tail).await?;
+    let basis = PublicationBasis::new(permitted, predecessor);
+    verify_pair(&CryptoBodyIdentity, &basis, &batch, observed.body())?;
+    if !is_own_decision(&batch, tx_id, terminal, closure_root)
+        || observed.body().configuration_root != basis.body().configuration_root
+        || observed.body().policy_epoch != basis.body().policy_epoch
+        || observed.body().format_registry_epoch != basis.body().format_registry_epoch
+        || observed.body().last_checkpoint_id != basis.body().last_checkpoint_id
+    {
+        return Ok(permitted);
+    }
+    Ok(observed.id())
+}
+
+fn is_own_decision(
+    batch: &RepositoryDecisionBatchBody,
+    tx_id: TxId,
+    terminal: TerminalOutcome,
+    closure_root: fgit_types::Digest,
+) -> bool {
+    let [decision] = batch.decisions.as_slice() else {
+        return false;
+    };
+    if decision.tx_id != tx_id
+        || decision.decision_sequence != terminal.decision_sequence
+        || decision.outcome != terminal.outcome
+        || batch.compaction_generation_link.is_some()
+    {
+        return false;
+    }
+    match terminal.outcome {
+        DecisionOutcome::Refused { .. } => batch.committed_rcrs.is_empty(),
+        DecisionOutcome::Committed { .. } => {
+            let [record] = batch.committed_rcrs.as_slice() else {
+                return false;
+            };
+            record.tx_id == tx_id && record.object_closure_root == closure_root
+        }
+    }
+}
