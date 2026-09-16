@@ -22,6 +22,7 @@ use fgit_types::{GitOid, PolicyEpoch, PrincipalId, RefusalCode, RepositoryAuthor
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_wire::visibility::RefVisibility;
 use fsqlite_types::cx::Cx;
+use super::super::issues::snapshots;
 use super::super::native_merge::NodeNativeMergeProjection;
 use super::super::{NodeWorkspaceRefusal, workspace_request_live};
 use super::super::publication::receive_error;
@@ -63,8 +64,16 @@ impl OneNode {
         Ok((tx_id, terminal))
     }
 
-    /// Latest reviewer decisions at one authenticated current head. Continuations
-    /// require its exact identity. No approval count is derived from partial pages.
+    /// Reviewer decisions at one authenticated current or retained head.
+    /// Continuations require its exact identity. Ordinary later publications
+    /// do not replace votes or PR metadata in a pinned display page. Freshness
+    /// is evaluated using the SAME historical ref root as that page, while
+    /// CURRENT hidden-ref policy and caller visibility still gate disclosure.
+    ///
+    /// The bounded ancestor walk refuses policy/configuration, checkpoint and
+    /// compaction boundaries. A retained approval is only historical display
+    /// evidence: merge admission still evaluates current votes and policy.
+    /// No approval count or merge permission is derived from partial pages.
     pub async fn read_reviews_in(
         &self, request: &NodeRequestContext, visibility: &RefVisibility, number: PullRequestNumber,
         after: Option<PrincipalId>, limit: u16, expected_head: Option<RepositoryAuthorityHeadId>,
@@ -72,14 +81,30 @@ impl OneNode {
         if limit == 0 || limit > 100 { return Err(ReviewReadRefusal::InvalidLimit); }
         if after.is_some() && expected_head.is_none() { return Err(ReviewReadRefusal::UnpinnedContinuation); }
         admits_read(self.cell_state(), ReadMode::Current).map_err(|error| ReviewReadRefusal::Read(error.to_string()))?;
-        let selected = self.materialize_admission_in(request).await.map_err(|error| ReviewReadRefusal::Read(error.to_string()))?;
-        if expected_head.is_some_and(|head| head != selected.basis().id()) { return Err(ReviewReadRefusal::SnapshotMoved); }
+        let current = self.materialize_admission_in(request).await.map_err(|error| ReviewReadRefusal::Read(error.to_string()))?;
+        let selected = snapshots::select(&self.authority, request.authority(), current.basis(),
+            expected_head, &|| !workspace_request_live(request)).await.map_err(|error| match error {
+                snapshots::SnapshotReadRefusal::Unavailable => ReviewReadRefusal::SnapshotMoved,
+                snapshots::SnapshotReadRefusal::Admission(error) => ReviewReadRefusal::Admission(error),
+            })?;
+        let historical_refs = if selected.id() == current.basis().id() {
+            None
+        } else {
+            Some(crate::read_historical_ref_state_in(&self.authority, request.authority(),
+                self.repository_id, selected.body()).await
+                .map_err(|error| ReviewReadRefusal::Read(error.to_string()))?)
+        };
+        if !workspace_request_live(request) {
+            return Err(ReviewReadRefusal::Admission(Box::new(
+                AdmissionError::AsyncProjectionUnavailable(RefusalCode::CancellationInProgress))));
+        }
+        let refs = historical_refs.as_ref().map_or(&current.snapshot().refs, |state| state.refs());
         let visible = |source: &fgit_types::RefName, target: &fgit_types::RefName| {
             [source, target].iter().all(|name| !visibility.hides(name.as_bytes())
-                && !selected.snapshot().hidden_refs.hides(name.as_bytes()))
+                && !current.snapshot().hidden_refs.hides(name.as_bytes()))
         };
-        reviews::read_page_at(&self.authority, request.authority(), selected.basis(), number,
-            &selected.snapshot().refs, after, limit, &visible, &|| !workspace_request_live(request))
+        reviews::read_page_at(&self.authority, request.authority(), &selected, number,
+            refs, after, limit, &visible, &|| !workspace_request_live(request))
             .await.map_err(|error| ReviewReadRefusal::Admission(Box::new(error)))
     }
 

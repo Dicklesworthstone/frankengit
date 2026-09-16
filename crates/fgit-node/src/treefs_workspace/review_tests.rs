@@ -214,8 +214,8 @@ fn reviewer_keys_competing_versions_and_snapshot_pages_do_not_alias() {
     committed(vote(&f.node, &update, Some(&f.bundle), 3, "block").unwrap());
     let stale = vote(&f.node, &update, Some(&f.bundle), 3, "competing-review").unwrap();
     assert!(matches!(stale.1.outcome, DecisionOutcome::Refused { code: RefusalCode::EvidenceStale, .. }));
-    assert!(matches!(f.node.runtime().block_on(f.node.read_reviews_in(&request, &RefVisibility::new(),
-        PullRequestNumber::FIRST, first.next_after, 1, Some(first.source_head))), Err(ReviewReadRefusal::SnapshotMoved)));
+    assert_eq!(f.node.runtime().block_on(f.node.read_reviews_in(&request, &RefVisibility::new(),
+        PullRequestNumber::FIRST, first.next_after, 1, Some(first.source_head))).unwrap(), Some(second));
     let mut hidden = RefVisibility::new(); hidden.push_rule(b"refs/heads/topic", &fgit_wire::WireLimits::default()).unwrap();
     assert!(f.node.runtime().block_on(f.node.read_reviews_in(&request, &hidden,
         PullRequestNumber::FIRST, None, 100, None)).unwrap().is_none());
@@ -249,3 +249,6 @@ mod mandatory_protection {
     use super::*;
     include!("mandatory_protection_tests.rs");
 }
+
+#[path = "review_snapshot_tests.rs"]
+mod snapshots;
