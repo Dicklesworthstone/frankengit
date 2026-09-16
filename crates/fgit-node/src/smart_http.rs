@@ -821,8 +821,12 @@ impl OneNode {
             fgit_types::GitHashAlgorithm::Sha1 => (fgit_wire::GitObjectFormat::Sha1, "sha1"),
             fgit_types::GitHashAlgorithm::Sha256 => (fgit_wire::GitObjectFormat::Sha256, "sha256"),
         };
+        // The native admission driver seals an atomic command list as one
+        // transaction and publishes its complete fold under one head CAS.
+        // Advertise that existing guarantee on HTTP; do not emulate atomicity
+        // with a loop over independently published ref updates in the gateway.
         let capability_text =
-            format!("report-status delete-refs ofs-delta object-format={format_name}");
+            format!("report-status delete-refs ofs-delta atomic object-format={format_name}");
         let capabilities = Capabilities::parse_v1(capability_text.as_bytes(), &wire)?;
         Ok(ReceiveContext::new(
             wire_format,
