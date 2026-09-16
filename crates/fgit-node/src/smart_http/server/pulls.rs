@@ -4,18 +4,19 @@
 
 mod collaboration;
 mod output;
+mod preparation;
 mod request;
 
-use std::io::Read;
+use std::io::{self, Read, Write};
 
 use fgit_authority::IdempotencyKey;
 use fgit_types::DecisionOutcome;
-use fgit_wire::smart_http::{BodyFraming, HttpLimits, head::Envelope};
+use fgit_wire::smart_http::{BodyFraming, HttpLimits, HttpVersion, head::Envelope};
 use fgit_wire::visibility::RefVisibility;
 
 use crate::{GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession, OneNode};
 use super::{Profile, Status, retry_key};
-use super::issues::{ApiError, Reply, admission_error, read_form};
+use super::issues::{ApiError, Reply as JsonReply, admission_error, read_form};
 use super::super::drive_request_while;
 use request::Operation;
 
@@ -23,9 +24,13 @@ use request::Operation;
 pub(super) enum Request<'a> {
     Metadata(request::Request<'a>),
     Collaboration(collaboration::Request<'a>),
+    Preparation(preparation::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
+        if let Some(request) = preparation::Request::parse(envelope)? {
+            return Ok(Some(Self::Preparation(request)));
+        }
         if let Some(request) = collaboration::Request::parse(envelope)? {
             return Ok(Some(Self::Collaboration(request)));
         }
@@ -33,7 +38,25 @@ impl<'a> Request<'a> {
     }
     pub(super) fn is_mutation(&self) -> bool {
         match self { Self::Metadata(request) => request.is_mutation(),
-            Self::Collaboration(request) => request.is_mutation() }
+            Self::Collaboration(request) => request.is_mutation(), Self::Preparation(_) => false }
+    }
+    /// Read-only preparation needs a bounded body and work quota, but never
+    /// acquires transaction responsibility merely because its method is POST.
+    pub(super) fn accepts_body(&self) -> bool {
+        self.is_mutation() || matches!(self, Self::Preparation(_))
+    }
+}
+
+pub(super) enum Reply {
+    Json(JsonReply),
+    Preparation(preparation::Reply),
+}
+impl Reply {
+    pub(super) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
+        match self {
+            Self::Json(reply) => reply.send(writer, version),
+            Self::Preparation(reply) => reply.send(writer, version),
+        }
     }
 }
 
@@ -41,6 +64,7 @@ pub(super) fn authenticate(
     request: &Request<'_>, envelope: &Envelope<'_>, raw_head: &[u8], profile: &Profile,
 ) -> Result<LoopbackReceiveSession, ApiError> {
     let request = match request {
+        Request::Preparation(request) => return preparation::authenticate(request, envelope, raw_head, profile),
         Request::Collaboration(request) => return collaboration::authenticate(request, envelope, raw_head, profile),
         Request::Metadata(request) => request,
     };
@@ -60,18 +84,23 @@ pub(super) fn authenticate(
     Ok(LoopbackReceiveSession::authenticated(grant.principal, key))
 }
 
-/// The listener authenticates scopes and applies intake quota before this call.
-/// Full HTTP framing precedes any admission. The exact submitted command enters
-/// durable PR admission, so ref/closure/policy/version checks and retry identity
-/// are identical to local publication. Closing never refreshes metadata first.
 pub(super) fn execute(
     node: &OneNode, request: &Request<'_>, session: &LoopbackReceiveSession,
     framing: BodyFraming, reader: &mut impl Read, limits: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
-    let request = match request {
-        Request::Collaboration(request) => return collaboration::execute(node, request, session, framing, reader, limits, maximum_response),
-        Request::Metadata(request) => request,
-    };
+    match request {
+        Request::Preparation(request) => preparation::execute(node, request, session, framing, reader, limits, maximum_response).map(Reply::Preparation),
+        Request::Collaboration(request) => collaboration::execute(node, request, session, framing, reader, limits, maximum_response).map(Reply::Json),
+        Request::Metadata(request) => execute_metadata(node, request, session, framing, reader, limits, maximum_response).map(Reply::Json),
+    }
+}
+
+/// Full HTTP framing precedes metadata admission. The exact submitted command
+/// enters the existing durable engine; closing never refreshes metadata first.
+fn execute_metadata(
+    node: &OneNode, request: &request::Request<'_>, session: &LoopbackReceiveSession,
+    framing: BodyFraming, reader: &mut impl Read, limits: HttpLimits, maximum_response: u64,
+) -> Result<JsonReply, ApiError> {
     let principal = session.authenticated_session()
         .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?.principal_id();
     let command = if request.is_mutation() {
@@ -81,8 +110,6 @@ pub(super) fn execute(
     let deadline = GitDaemonSessionDeadline::new(node.git_daemon_session_timeout, GitDaemonSessionWorkScaling::FLAT);
     let mut live = || !deadline.expired();
     let maximum = usize::try_from(maximum_response).unwrap_or(usize::MAX).min(output::MAX_REPLY_BYTES);
-    // An empty caller visibility filter cannot override canonical hidden refs:
-    // the node applies current repository policy to both source and target.
     let visibility = RefVisibility::new();
     match &request.operation {
         Operation::List(page) => {
@@ -91,7 +118,7 @@ pub(super) fn execute(
                 &mut live).map_err(|error| {
                     if error.is_snapshot_unavailable() { ApiError::snapshot_moved() } else { ApiError::unavailable() }
                 })?;
-            Ok(Reply { status: Status::Success, body: output::list(node, *page, &result, maximum)?, terminal: None })
+            Ok(JsonReply { status: Status::Success, body: output::list(node, *page, &result, maximum)?, terminal: None })
         }
         Operation::Show { number, expected_head } => {
             let result = drive_request_while(node, &context,
@@ -100,7 +127,7 @@ pub(super) fn execute(
                     if error.is_snapshot_unavailable() { ApiError::snapshot_moved() } else { ApiError::unavailable() }
                 })?;
             let (found, body) = output::show(node, *number, *expected_head, &result, maximum)?;
-            Ok(Reply { status: if found { Status::Success } else { Status::NotFound }, body, terminal: None })
+            Ok(JsonReply { status: if found { Status::Success } else { Status::NotFound }, body, terminal: None })
         }
         Operation::Mutate { .. } => {
             let command = command.ok_or_else(|| ApiError::bad("missing_command"))?;
@@ -114,7 +141,7 @@ pub(super) fn execute(
                 eprintln!("PR HTTP response limit after canonical outcome for transaction {tx}; recover the original key");
                 return Err(ApiError::unknown());
             }
-            Ok(Reply { status: match terminal.outcome {
+            Ok(JsonReply { status: match terminal.outcome {
                 DecisionOutcome::Committed { .. } => Status::Success,
                 DecisionOutcome::Refused { .. } => Status::Conflict,
             }, body, terminal: Some((tx, terminal)) })
@@ -140,6 +167,16 @@ mod routing_tests {
             let request = Request::parse(&envelope).unwrap().unwrap();
             assert_eq!(matches!(request, Request::Collaboration(_)), collaboration);
             assert_eq!(request.is_mutation(), mutation);
+            assert_eq!(request.accepts_body(), mutation);
         }
+    }
+    #[test]
+    fn a_body_bearing_preparation_never_acquires_publication_semantics() {
+        let bytes = b"POST /repo.git/api/v1/pulls/1/prepare HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n";
+        let envelope = head::parse(bytes, HttpLimits::default()).unwrap().unwrap();
+        let request = Request::parse(&envelope).unwrap().unwrap();
+        assert!(matches!(request, Request::Preparation(_)));
+        assert!(request.accepts_body());
+        assert!(!request.is_mutation());
     }
 }
