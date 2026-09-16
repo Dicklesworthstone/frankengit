@@ -128,6 +128,14 @@ pub enum PullRequestReadRefusal {
     Authority(Box<AdmissionMaterializationRefusal>),
     Admission(Box<AdmissionError>),
 }
+impl PullRequestReadRefusal {
+    /// A transport may ask the client to restart pagination only for this
+    /// explicit observation, not for missing/corrupt authority or cancellation.
+    #[must_use]
+    pub const fn is_snapshot_unavailable(&self) -> bool {
+        matches!(self, Self::SnapshotMoved)
+    }
+}
 impl std::fmt::Display for PullRequestReadRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "native pull-request read refused: {self:?}")
