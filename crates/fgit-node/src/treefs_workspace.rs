@@ -90,8 +90,6 @@ pub enum NodeWorkspaceRefusal {
     /// A requested file operation is not supported by this export profile.
     UnsupportedWorkspaceEdit,
     /// The edit log exceeds the caller's declared construction envelope.
-    UnsupportedWorkspaceEdit,
-    /// The edit log exceeds the caller's declared construction envelope.
     WorkspaceEditLimit,
     /// Exact patch parsing/application refused without publishing any edits.
     WorkspacePatch(fgit_forge::patch::PatchError),
@@ -152,7 +150,7 @@ impl OneNode {
             now,
             |base, source, capability| {
                 SparseManifest::build(base, source, capability, now, limits)
-                    .map_err(NodeWorkspaceRefusalusal::Manifest)
+                    .map_err(NodeWorkspaceRefusal::Manifest)
             },
         )
         .await
