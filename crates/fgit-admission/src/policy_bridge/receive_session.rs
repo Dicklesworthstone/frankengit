@@ -11,6 +11,8 @@
 //! The conservative profile deliberately does not walk arbitrary descendants.
 //! An intervening publication requires a newly validated request on retry.
 
+pub mod recovery;
+
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
@@ -212,7 +214,7 @@ async fn bind_session_keys<S>(
 where
     S: AsyncAuthorityStore + ?Sized,
 {
-    if !plan.atomic {
+    let whole = if !plan.atomic {
         let commands = input.updates.iter()
             .map(|update| lower_ref_update(update.old, update.new, update.ref_name))
             .collect::<Result<Vec<_>, _>>()?;
@@ -239,9 +241,19 @@ where
         // acquire terminal decisions. Pack bytes and validation basis remain
         // excluded by the existing canonical SemanticRequest/SealAttempt rules.
         bind_idempotency_key_async(store, cx, &whole, identity).await?;
-    }
+        Some(whole)
+    } else {
+        None
+    };
     for (lowered, identity) in plan.lowered.iter().zip(&plan.tx_ids) {
         bind_idempotency_key_async(store, cx, &seal_attempt(context, lowered), *identity).await?;
+    }
+    if let Some(whole) = whole {
+        // This recovery carrier is checked against all of those bindings on
+        // read. It neither creates another seal nor authorizes publication.
+        // Persist before the first child so interruption cannot leave committed
+        // commands whose original session shape was never recorded.
+        recovery::stage(store, cx, context, &whole, plan).await?;
     }
     Ok(())
 }
