@@ -1,19 +1,21 @@
 //! Bounded, single-repository Smart HTTP gateway (frankengit-asa3).
 //!
 //! This is an explicit loopback capability profile, not organization/team IAM.
-//! The operator grants one principal repository access through a bearer secret.
+//! Operators grant principals service scopes through bearer credentials.
 //! TLS terminates outside this listener; forwarded headers never authenticate.
 //! Header reads may retain bounded body read-ahead. After authentication, RPC
 //! bytes flow directly into the native machines without a gateway body buffer.
 
+mod credentials;
+
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use fgit_authority::IdempotencyKey;
-use fgit_crypto::{sha256_digest, verify_mac};
 use fgit_types::PrincipalId;
 use fgit_types::cell::CellState;
 use fgit_wire::smart_http::{
@@ -22,6 +24,7 @@ use fgit_wire::smart_http::{
 use fgit_wire::smart_http::rpc::RpcError;
 use fgit_wire::WireLimits;
 
+use credentials::{Binding, CredentialFailure, CredentialSource};
 use super::NodeSmartHttpRefusal;
 use crate::{
     DeadlineTcpStream, GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionDeadline,
@@ -38,8 +41,7 @@ const FRAMING_ALLOWANCE: u64 = 4 * 1024 * 1024;
 struct Profile {
     config: NodeConfig,
     route: Vec<u8>,
-    credential_digest: [u8; 32],
-    principal: PrincipalId,
+    credentials: CredentialSource,
     allow_receive: bool,
     http: HttpLimits,
     maximum_response_bytes: u64,
@@ -81,31 +83,93 @@ impl OneNode {
     /// additionally carry a client-chosen `Idempotency-Key` header; retrying it
     /// unchanged resolves an ambiguous response through canonical admission.
     ///
-    /// This local capability profile does not implement multi-user IAM or TLS.
-    /// Non-loopback listeners are refused. An external TLS gateway must forward
-    /// the actual bearer credential: Forwarded/X-Forwarded-* and identity-like
-    /// headers never convey authority. HTTP connections are not reused.
+    /// This local capability profile does not implement organization/team IAM
+    /// or TLS. Non-loopback listeners are refused. Forwarded identity headers
+    /// never convey authority. HTTP connections are not reused.
     ///
-    /// The configured receive input envelope bounds each complete HTTP body;
-    /// chunk framing has a separate 4 MiB ceiling above it. RPC ingress is
-    /// incremental: fixed-size read buffers feed the native machines directly.
-    /// Receive-pack still owns its bounded transaction-local quarantine, but
-    /// the gateway does not retain a second whole-request copy. Pack responses
-    /// are streamed. At most 16 connections may be in flight, and completed
-    /// worker handles are reaped continuously rather than retained per request.
-    /// Socket work runs only on this node's Asupersync blocking pool.
+    /// RPC ingress is incremental: fixed-size read buffers feed the native
+    /// machines directly. Receive-pack owns its bounded quarantine, not a
+    /// second gateway body copy. Pack responses are streamed. At most 16
+    /// connections run on the node's Asupersync blocking pool. Every accepted
+    /// child is joined before return, including on accept/scheduling failure.
     ///
-    /// Acceptance stops at `server_limits.max_sessions()` or `idle_timeout`
-    /// without accepted or active connections. Completing a request starts a
-    /// fresh idle window for follow-up Git requests. Every accepted child is joined,
-    /// including after an accept/scheduling failure, before this returns. A
-    /// refused-session count describes transport completion, NOT non-commit.
+    /// Acceptance ends at the request limit or an idle window without active
+    /// work. Completed requests start a fresh idle window for follow-up fetches.
+    /// Refused transport counts never constitute evidence of non-commit.
     pub fn serve_smart_http_bounded(
         &self,
         listener: &TcpListener,
         server_limits: GitDaemonServerLimits,
         credential_digest: [u8; 32],
         principal: PrincipalId,
+        allow_receive: bool,
+        idle_timeout: Duration,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        self.serve_smart_http_with_source_bounded(
+            listener, server_limits,
+            CredentialSource::Static { digest: credential_digest, principal },
+            allow_receive, idle_timeout,
+        )
+    }
+
+    /// Validate an operator credential table against this exact node before
+    /// reporting listener readiness. This does not cache or activate a table.
+    pub fn validate_smart_http_credentials_file(
+        &self,
+        path: &Path,
+    ) -> Result<(), NodeSmartHttpRefusal> {
+        self.smart_http_credentials_source(path).validate().map_err(credential_error)
+    }
+
+    /// Serve multiple explicitly granted principals on the same bounded node.
+    ///
+    /// The private regular file starts with
+    /// `frankengit-http-credentials-v1 <tenant> <repository> <incarnation>`.
+    /// Each following line is `<sha256-of-token> <principal> <scopes>`, where
+    /// scopes is exactly `read`, `receive`, or `read,receive`. IDs and digests
+    /// are lowercase hex. At most 256 grants and 64 KiB are accepted. A header
+    /// without rows revokes all credentials. `allow_receive` remains a mandatory
+    /// deployment-wide ceiling even for individually receive-enabled grants.
+    ///
+    /// The file is re-read for EVERY authentication. Replace it atomically to
+    /// rotate tokens, change scopes, or revoke access without restarting.
+    /// Missing/malformed/foreign-incarnation files fail closed without cached
+    /// grants. Already authenticated requests retain their bounded grant; this
+    /// is not instant revocation of in-flight publication or a canonical IAM
+    /// service. Receive scope permits push discovery but does not imply fetch.
+    ///
+    /// The remaining ownership, loopback, deadline and drain contract is the
+    /// same as `serve_smart_http_bounded`.
+    pub fn serve_smart_http_with_credentials_file_bounded(
+        &self,
+        listener: &TcpListener,
+        server_limits: GitDaemonServerLimits,
+        credentials_file: &Path,
+        allow_receive: bool,
+        idle_timeout: Duration,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        self.serve_smart_http_with_source_bounded(
+            listener, server_limits, self.smart_http_credentials_source(credentials_file),
+            allow_receive, idle_timeout,
+        )
+    }
+
+    fn smart_http_credentials_source(&self, path: &Path) -> CredentialSource {
+        CredentialSource::File {
+            path: path.to_path_buf(),
+            binding: Binding {
+                tenant: self.tenant_id,
+                repository: self.repository_id,
+                incarnation: self.repository_incarnation_id(),
+            },
+        }
+    }
+
+    fn serve_smart_http_with_source_bounded(
+        &self,
+        listener: &TcpListener,
+        server_limits: GitDaemonServerLimits,
+        credentials: CredentialSource,
         allow_receive: bool,
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
@@ -122,6 +186,7 @@ impl OneNode {
         {
             return Err(invalid_configuration("invalid bounded Smart HTTP service limits"));
         }
+        credentials.validate().map_err(credential_error)?;
         let maximum_body = u64::try_from(self.git_daemon_receive_limits.pack.max_input_bytes)
             .map_err(|_| invalid_configuration("HTTP input envelope is not representable"))?;
         let maximum_wire = maximum_body.checked_add(FRAMING_ALLOWANCE)
@@ -140,8 +205,7 @@ impl OneNode {
             config: self.service_config.clone()
                 .with_expected_repository_incarnation(self.repository_incarnation_id()),
             route: self.git_daemon_repository_path().as_bytes().to_vec(),
-            credential_digest,
-            principal,
+            credentials,
             allow_receive,
             http,
             maximum_response_bytes,
@@ -240,6 +304,9 @@ impl OneNode {
     }
 }
 
+fn credential_error(error: CredentialFailure) -> NodeSmartHttpRefusal {
+    io_error("load Smart HTTP credentials", io::Error::other(error))
+}
 fn invalid_configuration(message: &'static str) -> NodeSmartHttpRefusal {
     io_error("configure Smart HTTP service", io::Error::new(io::ErrorKind::InvalidInput, message))
 }
@@ -321,19 +388,18 @@ fn authenticated_session(
     raw_head: &[u8],
     profile: &Profile,
 ) -> Result<LoopbackReceiveSession, Status> {
-    let (scheme, token) = request.authorization().and_then(|value| value.split_once(' '))
-        .ok_or(Status::Unauthorized)?;
-    if !scheme.eq_ignore_ascii_case("bearer")
-        || token.len() != 64
-        || !token.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || !verify_mac(&profile.credential_digest, &sha256_digest(token.as_bytes()))
-    {
-        return Err(Status::Unauthorized);
-    }
+    let grant = profile.credentials.authenticate(request.authorization()).map_err(|error| {
+        match error {
+            CredentialFailure::UnknownCredential => Status::Unauthorized,
+            _ => Status::Unavailable,
+        }
+    })?;
     if request.repository_route.as_bytes() != profile.route {
         return Err(Status::NotFound);
     }
-    if request.operation.service() == Service::ReceivePack && !profile.allow_receive {
+    if !grant.permits(request.operation.service())
+        || (request.operation.service() == Service::ReceivePack && !profile.allow_receive)
+    {
         return Err(Status::Forbidden);
     }
     let key = retry_key(raw_head)?;
@@ -343,7 +409,7 @@ fn authenticated_session(
         b"smart-http-discovery-no-publication".as_slice()
     };
     let key = IdempotencyKey::new(key.to_vec()).map_err(|_| Status::BadRequest)?;
-    Ok(LoopbackReceiveSession::authenticated(profile.principal, key))
+    Ok(LoopbackReceiveSession::authenticated(grant.principal, key))
 }
 
 fn retry_key(raw_head: &[u8]) -> Result<Option<&[u8]>, Status> {
@@ -446,7 +512,8 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
         version = request.http_version;
         let session = authenticated_session(&request, &bytes[..request.consumed], profile)?;
         if request.operation == Operation::Rpc(Service::ReceivePack) {
-            profile.quota.evaluate(&profile.principal).map_err(|_| Status::RateLimited)?;
+            let principal = session.authenticated_session().ok_or(Status::Unauthorized)?.principal_id();
+            profile.quota.evaluate(&principal).map_err(|_| Status::RateLimited)?;
         }
         if request.expect_continue && request.http_version == HttpVersion::Http10 {
             return Err(Status::Expectation);
@@ -541,6 +608,7 @@ fn log_cleanup(error: &NodeRefusal) {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use fgit_crypto::sha256_digest;
     use fgit_types::{RepositoryId, TenantId};
     use fgit_wire::smart_http::BodyDecoder;
     use fgit_wire::smart_http::rpc::RpcProgress;
@@ -550,8 +618,10 @@ mod tests {
         Profile {
             config: NodeConfig::new("unused".into(), TenantId::from_bytes([1; 16]), RepositoryId::from_bytes([2; 16])),
             route: b"/repo.git".to_vec(),
-            credential_digest: sha256_digest(&[b'a'; 64]),
-            principal: PrincipalId::from_bytes([3; 16]),
+            credentials: CredentialSource::Static {
+                digest: sha256_digest(&[b'a'; 64]),
+                principal: PrincipalId::from_bytes([3; 16]),
+            },
             allow_receive: true,
             http: HttpLimits::default(),
             maximum_response_bytes: 1024,
