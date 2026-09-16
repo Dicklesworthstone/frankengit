@@ -22,6 +22,7 @@ use fgit_types::{GitOid, RefusalCode, RepositoryAuthorityHeadId, TxId};
 use fgit_wire::visibility::RefVisibility;
 use fsqlite_types::cx::Cx;
 
+use super::issues::snapshots;
 use super::native_merge::NodeNativeMergeProjection;
 use crate::{AdmissionMaterializationRefusal, LoopbackReceiveSession, NodeReceiveTransportRefusal,
     NodeRequestContext, OneNode, VerifiedFabricPackSource, async_projection_unavailable};
@@ -79,10 +80,15 @@ impl OneNode {
     }
 
     /// Read native PRs and explicit merge-only receipts at one authenticated
-    /// head. Caller visibility can only narrow canonical hidden-ref policy.
-    /// A supplied head must equal the selected snapshot before any row returns;
-    /// use the first page's head for every continuation. This is a local read
-    /// boundary, not a remote credential verifier or historical-policy bypass.
+    /// current or retained head. A supplied head selects that exact verified
+    /// ancestor across ordinary publications, never a best-effort newer view.
+    /// Continuations should retain the first page's token. Without a token,
+    /// `after` selects a fresh current window, not a consistent paginated walk.
+    ///
+    /// CURRENT canonical hidden-ref policy and caller visibility still apply
+    /// before disclosure. The ancestry walk refuses policy/configuration,
+    /// checkpoint and compaction boundaries. A token is neither a credential
+    /// nor a historical-policy bypass; this remains a local read boundary.
     pub async fn read_pull_requests_in(
         &self,
         request: &NodeRequestContext,
@@ -93,18 +99,21 @@ impl OneNode {
     ) -> Result<PullRequestPage, PullRequestReadRefusal> {
         if limit == 0 || limit > 100 { return Err(PullRequestReadRefusal::InvalidLimit); }
         admits_read(self.cell_state(), ReadMode::Current).map_err(PullRequestReadRefusal::Cell)?;
-        let selected = self.materialize_admission_in(request).await
+        let current = self.materialize_admission_in(request).await
             .map_err(|error| PullRequestReadRefusal::Authority(Box::new(error)))?;
-        if expected_head.is_some_and(|head| head != selected.basis().id()) {
-            return Err(PullRequestReadRefusal::SnapshotMoved);
-        }
+        let selected = snapshots::select(&self.authority, request.authority(), current.basis(),
+            expected_head, &|| !super::workspace_request_live(request)).await
+            .map_err(|error| match error {
+                snapshots::SnapshotReadRefusal::Unavailable => PullRequestReadRefusal::SnapshotMoved,
+                snapshots::SnapshotReadRefusal::Admission(error) => PullRequestReadRefusal::Admission(error),
+            })?;
         let visible = |source: &fgit_types::RefName, target: &fgit_types::RefName| {
             [source, target].iter().all(|reference|
                 !visibility.hides(reference.as_bytes())
-                && !selected.snapshot().hidden_refs.hides(reference.as_bytes()))
+                && !current.snapshot().hidden_refs.hides(reference.as_bytes()))
         };
         pull_request::read_page_at(
-            &self.authority, request.authority(), selected.basis(), after, limit,
+            &self.authority, request.authority(), &selected, after, limit,
             &visible, &|| !super::workspace_request_live(request),
         ).await.map_err(|error| PullRequestReadRefusal::Admission(Box::new(error)))
     }
@@ -113,6 +122,7 @@ impl OneNode {
 #[derive(Debug)]
 pub enum PullRequestReadRefusal {
     InvalidLimit,
+    /// The requested snapshot is not an available ancestor in this read epoch.
     SnapshotMoved,
     Cell(CellRefusal),
     Authority(Box<AdmissionMaterializationRefusal>),

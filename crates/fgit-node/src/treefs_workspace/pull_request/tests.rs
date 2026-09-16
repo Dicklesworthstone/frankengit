@@ -250,7 +250,8 @@ fn pagination_is_numeric_pinned_and_filters_both_branch_names() {
         assert!(result.pull_requests.is_empty()); assert_eq!(result.next_after, None);
     }
     accepted(apply(&node, &command(&f, 3), "newer"));
-    assert!(matches!(page(&node, 2, 2, Some(first.source_head)), Err(PullRequestReadRefusal::SnapshotMoved)));
+    assert_eq!(page(&node, 2, 2, Some(first.source_head)).unwrap(), second);
+    assert_eq!(page(&node, 2, 2, None).unwrap().pull_requests.iter().map(|row| row.number.get()).collect::<Vec<_>>(), [3, 10]);
     assert!(matches!(page(&node, 0, 0, None), Err(PullRequestReadRefusal::InvalidLimit)));
     node.shutdown().unwrap();
 }
@@ -316,3 +317,6 @@ fn closed_pr_cannot_authorize_a_merge_and_serving_gate_precedes_mutation() {
     assert!(apply(&unopened, &command(&f, 9), "unserving").is_err());
     unopened.shutdown().unwrap();
 }
+
+#[path = "snapshot_tests.rs"]
+mod snapshot_tests;
