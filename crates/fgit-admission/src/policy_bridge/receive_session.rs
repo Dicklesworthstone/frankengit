@@ -36,10 +36,12 @@ use crate::{
 /// the same transaction identities and recovers their authenticated outcomes.
 #[derive(Debug)]
 pub struct InterruptedSession {
-    source: AdmissionError,
+    source: Box<AdmissionError>,
     session: Option<SessionMapping>,
     completed: Vec<CommandOutcome>,
 }
+
+const _: () = assert!(std::mem::size_of::<InterruptedSession>() <= 128);
 
 impl InterruptedSession {
     /// Stable transaction mapping, present once the entire request was lowered.
@@ -57,7 +59,7 @@ impl InterruptedSession {
     /// The exact underlying failure; no timeout is rewritten as non-commit.
     #[must_use]
     pub fn admission_error(&self) -> &AdmissionError {
-        &self.source
+        self.source.as_ref()
     }
 }
 
@@ -74,7 +76,7 @@ impl Display for InterruptedSession {
 
 impl Error for InterruptedSession {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.source)
+        Some(self.source.as_ref())
     }
 }
 
@@ -98,7 +100,7 @@ where
 {
     let input = basis_bound_receive_input(validated);
     let plan = plan_session(context, &input, limits).map_err(|source| InterruptedSession {
-        source,
+        source: Box::new(source),
         session: None,
         completed: Vec::new(),
     })?;
@@ -148,7 +150,7 @@ where
                     .map(|(terminal, tx_id)| CommandOutcome { tx_id, terminal })
                     .collect();
                 return Err(InterruptedSession {
-                    source,
+                    source: Box::new(source),
                     session: Some(mapping),
                     completed,
                 });
