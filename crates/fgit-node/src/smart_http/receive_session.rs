@@ -47,3 +47,7 @@ impl OneNode {
         .map_err(|error| NodeSmartHttpRefusal::ReceiveInterrupted(Box::new(error)))
     }
 }
+
+#[cfg(test)]
+#[path = "receive_session_tests.rs"]
+mod tests;
