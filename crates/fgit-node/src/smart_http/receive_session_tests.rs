@@ -193,6 +193,10 @@ fn assert_only_first(node: &OneNode) {
 
 #[test]
 fn interrupted_second_command_preserves_first_outcome_and_stable_retry_mapping() {
+    use fgit_admission::policy_bridge::receive_session::recovery::SessionRecovery;
+    use fgit_authority::key_recovery::RequestRecovery;
+    use fgit_authority::OutcomeLookup;
+
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let scratch = Scratch::new();
         let node = node(&scratch, format);
@@ -210,6 +214,22 @@ fn interrupted_second_command_preserves_first_outcome_and_stable_retry_mapping()
         assert_only_first(&node);
         let before_retry = node.runtime.block_on(node.materialize_admission()).unwrap().basis().generation();
         drop(projection);
+
+        // Query only the original key: neither the command list nor the pack
+        // is supplied to recovery. The real first commit must not conceal the
+        // real sealed-but-undecided second command, or make the session complete.
+        let session = crate::LoopbackReceiveSession::authenticated(context.principal_id,
+            context.idempotency_key.clone());
+        let observed = node.runtime.block_on(node.recover_receive_session_in(
+            &node.request_context(), &session)).unwrap();
+        let SessionRecovery::Recovered(partial) = observed else { panic!("intake persisted the complete shape") };
+        assert_eq!(partial.commands().len(), 2);
+        assert!(!partial.all_terminal());
+        assert_eq!(partial.commands()[0].recovery().terminal(), Some(error.completed_commands()[0].terminal));
+        assert!(matches!(partial.commands()[1].recovery(), RequestRecovery::Recovered(known)
+            if known.outcome() == OutcomeLookup::Undecided));
+        assert_eq!(node.runtime.block_on(node.materialize_admission()).unwrap().basis().generation(), before_retry);
+
         let projection = node.durable_admission_projection(&context).unwrap();
         let retried = node.runtime.block_on(receive_session::admit(&node.authority,
             node.request_context().authority(), &context, &validated,
@@ -220,6 +240,15 @@ fn interrupted_second_command_preserves_first_outcome_and_stable_retry_mapping()
         let after = node.runtime.block_on(node.materialize_admission()).unwrap();
         assert_eq!(after.basis().generation().get(), before_retry.get() + 1);
         assert_eq!(after.snapshot().refs.len(), 2);
+        let SessionRecovery::Recovered(complete) = node.runtime.block_on(
+            node.recover_receive_session_in(&node.request_context(), &session)).unwrap()
+            else { panic!("same persisted shape must recover after retry") };
+        assert!(complete.all_terminal());
+        assert_eq!(complete.identity(), partial.identity());
+        for (observed, admitted) in complete.commands().iter().zip(&retried.commands) {
+            assert_eq!(observed.recovery().terminal(), Some(admitted.terminal));
+        }
+        assert_eq!(node.runtime.block_on(node.materialize_admission()).unwrap().basis().generation(), after.basis().generation());
         drop(projection);
         node.shutdown().unwrap();
     }
