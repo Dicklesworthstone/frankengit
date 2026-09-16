@@ -3,8 +3,8 @@
 //! This is an explicit loopback capability profile, not organization/team IAM.
 //! The operator grants one principal repository access through a bearer secret.
 //! TLS terminates outside this listener; forwarded headers never authenticate.
-//! Every request authenticates before repository opening, 100 Continue, or a
-//! transaction-body buffer. Header reads may retain bounded body read-ahead. Git parsing and canonical publication remain in the node adapters.
+//! Header reads may retain bounded body read-ahead. After authentication, RPC
+//! bytes flow directly into the native machines without a gateway body buffer.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -17,8 +17,9 @@ use fgit_crypto::{sha256_digest, verify_mac};
 use fgit_types::PrincipalId;
 use fgit_types::cell::CellState;
 use fgit_wire::smart_http::{
-    BodyDecoder, HttpError, HttpLimits, HttpVersion, Operation, RequestHead, Service, parse_head,
+    HttpError, HttpLimits, HttpVersion, Operation, RequestHead, Service, parse_head,
 };
+use fgit_wire::smart_http::rpc::RpcError;
 use fgit_wire::WireLimits;
 
 use super::NodeSmartHttpRefusal;
@@ -86,9 +87,11 @@ impl OneNode {
     /// headers never convey authority. HTTP connections are not reused.
     ///
     /// The configured receive input envelope bounds each complete HTTP body;
-    /// chunk framing has a separate 4 MiB ceiling above it. Ingress is buffered
-    /// under that bound before native quarantine. Pack responses are streamed.
-    /// At most 16 connections and their buffers may be in flight, and completed
+    /// chunk framing has a separate 4 MiB ceiling above it. RPC ingress is
+    /// incremental: fixed-size read buffers feed the native machines directly.
+    /// Receive-pack still owns its bounded transaction-local quarantine, but
+    /// the gateway does not retain a second whole-request copy. Pack responses
+    /// are streamed. At most 16 connections may be in flight, and completed
     /// worker handles are reaped continuously rather than retained per request.
     /// Socket work runs only on this node's Asupersync blocking pool.
     ///
@@ -289,6 +292,28 @@ impl From<io::Error> for Status {
         }
     }
 }
+impl From<NodeSmartHttpRefusal> for Status {
+    fn from(error: NodeSmartHttpRefusal) -> Self {
+        match error {
+            NodeSmartHttpRefusal::Http(error) => Self::from(*error),
+            NodeSmartHttpRefusal::TrailingRequestBytes { .. } => Self::BadRequest,
+            NodeSmartHttpRefusal::UnauthenticatedReceive => Self::Unauthorized,
+            NodeSmartHttpRefusal::RepositoryRouteMismatch => Self::NotFound,
+            NodeSmartHttpRefusal::Rpc(error) => match *error {
+                RpcError::Http(error) => Self::from(error),
+                RpcError::Cancelled => Self::Timeout,
+                RpcError::Wire(_) | RpcError::Receive(_) | RpcError::WrongOperation
+                | RpcError::IncompleteRequest | RpcError::MultipleCommands
+                | RpcError::FailedRequest => Self::BadRequest,
+                _ => Self::Unavailable,
+            },
+            NodeSmartHttpRefusal::Io { operation: "read smart HTTP body", source } => Self::from(source),
+            // Admission errors can follow transmission or partial non-atomic
+            // publication. Never classify those as proof of a rejected push.
+            _ => Self::Unavailable,
+        }
+    }
+}
 
 // No Debug on credentials/profile; no client text is echoed in a refusal.
 fn authenticated_session(
@@ -372,39 +397,6 @@ fn read_head(reader: &mut impl Read, limits: HttpLimits) -> Result<Vec<u8>, Stat
     }
 }
 
-fn read_body(
-    reader: &mut impl Read,
-    initial: &[u8],
-    request: &RequestHead<'_>,
-    limits: HttpLimits,
-) -> Result<Vec<u8>, Status> {
-    let mut decoder = BodyDecoder::new(request.body, limits)?;
-    let mut body = Vec::new();
-    let mut consume = |offered: &[u8], decoder: &mut BodyDecoder| -> Result<(), Status> {
-        let mut cursor = 0;
-        while cursor < offered.len() {
-            if decoder.is_complete() { return Err(Status::BadRequest); }
-            let step = decoder.push(&offered[cursor..])?;
-            if step.consumed == 0 { return Err(Status::BadRequest); }
-            append_bounded(&mut body, &offered[cursor..cursor + step.consumed], limits.max_body_wire_bytes)?;
-            cursor += step.consumed;
-        }
-        Ok(())
-    };
-    consume(initial, &mut decoder)?;
-    let mut buffer = [0_u8; IO_CHUNK];
-    while !decoder.is_complete() {
-        let read = match reader.read(&mut buffer) {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            result => result?,
-        };
-        if read == 0 { return Err(Status::BadRequest); }
-        consume(&buffer[..read], &mut decoder)?;
-    }
-    decoder.finish()?;
-    Ok(body)
-}
-
 struct ResponseWriter<'a> {
     inner: DeadlineTcpStream<'a>,
     timeout: GitDaemonSessionTimeout,
@@ -456,22 +448,33 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
         if request.operation == Operation::Rpc(Service::ReceivePack) {
             profile.quota.evaluate(&profile.principal).map_err(|_| Status::RateLimited)?;
         }
-        if request.expect_continue {
-            if request.http_version == HttpVersion::Http10 {
-                return Err(Status::Expectation);
-            }
-            writer.inner.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
-            writer.inner.flush()?;
+        if request.expect_continue && request.http_version == HttpVersion::Http10 {
+            return Err(Status::Expectation);
         }
-        let body = read_body(&mut reader, &bytes[request.consumed..], &request, profile.http)?;
+        let initial = &bytes[request.consumed..];
+        if matches!(request.operation, Operation::Discover(_)) && !initial.is_empty() {
+            return Err(Status::BadRequest);
+        }
         let mut node = OneNode::open_existing(profile.config.clone()).map_err(|_| Status::Unavailable)?;
-        let work_deadline = GitDaemonSessionDeadline::new(profile.timeout, GitDaemonSessionWorkScaling::FLAT);
         let result = (|| -> Result<(), NodeSmartHttpRefusal> {
             let authenticated = node.runtime().block_on(node.authenticate_authority_head())
                 .map_err(crate::NodeAdmissionViewRefusal::from)?;
             node.bring_into_service(authenticated.receipt().generation())
                 .map_err(|error| io_error("bring HTTP child into service", io::Error::other(error.to_string())))?;
-            let mut live = || !work_deadline.expired();
+            if request.expect_continue {
+                // No interim success until credentials and the exact repository
+                // incarnation have been checked and the child admits work.
+                writer.inner.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                    .map_err(|source| io_error("write HTTP continue", source))?;
+                writer.inner.flush().map_err(|source| io_error("flush HTTP continue", source))?;
+            }
+            // Reuse bounded header read-ahead without copying it. The RPC
+            // decoder owns the HTTP boundary and stops pulling at completion.
+            let mut body = io::Cursor::new(initial).chain(&mut reader);
+            // Socket reads already enforce the ingress deadline. Node adapters
+            // own independent materialization/validation/publication budgets,
+            // and ResponseWriter starts a fresh finite response phase.
+            let mut live = || true;
             match request.operation {
                 Operation::Discover(service) => {
                     let discovery = match service {
@@ -482,11 +485,11 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
                     writer.write_all(discovery.body()).map_err(|source| io_error("write HTTP discovery body", source))?;
                 }
                 Operation::Rpc(Service::UploadPack) => {
-                    node.smart_http_upload_rpc_in(&request, &body, WireLimits::default(), profile.http,
+                    node.smart_http_upload_stream_in(&request, &mut body, WireLimits::default(), profile.http,
                         profile.maximum_response_bytes, &mut live, &mut writer)?;
                 }
                 Operation::Rpc(Service::ReceivePack) => {
-                    let _outcome = node.smart_http_receive_rpc_in(&request, &session, &body,
+                    let _outcome = node.smart_http_receive_stream_in(&request, &session, &mut body,
                         profile.http, fgit_admission::AdmissionLimits::default(), &mut live, &mut writer)?;
                 }
             }
@@ -502,7 +505,7 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
             log_cleanup(&error);
             return Err(Status::Unavailable);
         }
-        result.map_err(|_| Status::Unavailable)
+        result.map_err(Status::from)
     })();
     if let Err(status) = served {
         // Never append a second HTTP response after a partially written 200,
@@ -539,6 +542,9 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use fgit_types::{RepositoryId, TenantId};
+    use fgit_wire::smart_http::BodyDecoder;
+    use fgit_wire::smart_http::rpc::RpcProgress;
+    use super::super::ingress::BodyInput;
 
     fn profile() -> Profile {
         Profile {
@@ -582,6 +588,20 @@ mod tests {
         }
         assert_eq!(retry_key(&head("Idempotency-Key: a\r\n")).unwrap(), Some(b"a".as_slice()));
     }
+
+    // Exercise the actual streaming feeder with the production body decoder;
+    // only the Git parser is omitted in these HTTP framing-specific tests.
+    fn decoded_body(reader: &mut impl Read, initial: &[u8], request: &RequestHead<'_>, limits: HttpLimits) -> Result<u64, Status> {
+        let mut decoder = BodyDecoder::new(request.body, limits)?;
+        let mut reader = Cursor::new(initial).chain(reader);
+        BodyInput::Reader(&mut reader).consume(&mut || true, |bytes, _| {
+            let mut consumed = 0;
+            while consumed < bytes.len() && !decoder.is_complete() {
+                consumed += decoder.push(&bytes[consumed..])?.consumed;
+            }
+            Ok(RpcProgress { consumed, body_complete: decoder.is_complete(), decoded_body_bytes: decoder.decoded_bytes() })
+        }).map_err(Status::from)
+    }
     #[test]
     fn bodies_finish_at_framing_without_waiting_for_socket_eof() {
         struct NoMoreReads;
@@ -590,19 +610,19 @@ mod tests {
         }
         let bytes = head("");
         let request = parse_head(&bytes, HttpLimits::default()).unwrap().unwrap();
-        assert_eq!(read_body(&mut NoMoreReads, b"0000", &request, HttpLimits::default()).unwrap(), b"0000");
-        assert_eq!(read_body(&mut NoMoreReads, b"0000NEXT", &request, HttpLimits::default()), Err(Status::BadRequest));
-        assert_eq!(read_body(&mut Cursor::new(b""), b"000", &request, HttpLimits::default()), Err(Status::BadRequest));
+        assert_eq!(decoded_body(&mut NoMoreReads, b"0000", &request, HttpLimits::default()).unwrap(), 4);
+        assert_eq!(decoded_body(&mut NoMoreReads, b"0000NEXT", &request, HttpLimits::default()), Err(Status::BadRequest));
+        assert_eq!(decoded_body(&mut Cursor::new(b""), b"000", &request, HttpLimits::default()), Err(Status::BadRequest));
     }
     #[test]
-    fn chunked_intake_preserves_wire_bytes_and_rejects_trailers_and_overflow() {
+    fn chunked_intake_rejects_trailers_and_overflow() {
         let bytes = String::from_utf8(head("")).unwrap().replace("Content-Length: 4", "Transfer-Encoding: chunked");
         let request = parse_head(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
         let body = b"2\r\n00\r\n2\r\n00\r\n0\r\n\r\n";
-        assert_eq!(read_body(&mut Cursor::new(body), b"", &request, HttpLimits::default()).unwrap(), body);
-        assert_eq!(read_body(&mut Cursor::new(b"0\r\nX: y\r\n\r\n"), b"", &request, HttpLimits::default()), Err(Status::BadRequest));
+        assert_eq!(decoded_body(&mut Cursor::new(body), b"", &request, HttpLimits::default()).unwrap(), 4);
+        assert_eq!(decoded_body(&mut Cursor::new(b"0\r\nX: y\r\n\r\n"), b"", &request, HttpLimits::default()), Err(Status::BadRequest));
         let limits = HttpLimits { max_body_bytes: 3, ..HttpLimits::default() };
-        assert_eq!(read_body(&mut Cursor::new(body), b"", &request, limits), Err(Status::TooLarge));
+        assert_eq!(decoded_body(&mut Cursor::new(body), b"", &request, limits), Err(Status::TooLarge));
     }
     #[test]
     fn final_refusal_is_self_delimiting_and_contains_no_request_text() {
