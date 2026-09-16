@@ -23,6 +23,25 @@ use super::super::issues::{ApiError, Reply, admission_error, read_form};
 use request::{Command, Encoding, Operation};
 pub(super) use request::Request;
 
+pub(super) const CANDIDATE_UPLOAD_BYTES: usize = multipart::MAX_UPLOAD_BYTES;
+pub(super) fn candidate_boundary(content_type: &str) -> Result<&str, ApiError> {
+    multipart::boundary(content_type).map_err(|_| ApiError::media())
+}
+/// Inspection requires actual bytes even when a similar review is terminal.
+/// The shared MIME parser still owns part order, byte bounds and delimiters.
+pub(super) fn inspection_upload<'a>(bytes: &'a [u8], boundary: &str,
+    live: &mut impl FnMut() -> bool,
+) -> Result<(&'a [u8], &'a [u8]), ApiError> {
+    let upload = multipart::parse(bytes, boundary, live).map_err(|error| match error {
+        multipart::Error::Limit => ApiError::too_large(),
+        multipart::Error::Framing => ApiError::bad("invalid_candidate_upload"),
+        multipart::Error::Cancelled => ApiError::from_status(Status::Timeout, false),
+    })?;
+    let bundle = upload.bundle.filter(|bytes| !bytes.is_empty())
+        .ok_or_else(|| ApiError::bad("candidate_bundle_required"))?;
+    Ok((upload.command, bundle))
+}
+
 pub(super) fn authenticate(request: &Request<'_>, envelope: &Envelope<'_>,
     raw_head: &[u8], profile: &Profile,
 ) -> Result<LoopbackReceiveSession, ApiError> {
@@ -151,5 +170,11 @@ mod tests {
         let limits = HttpLimits { max_body_bytes: 2, ..HttpLimits::default() };
         assert!(read_upload(&mut Cursor::new(b"abc"), BodyFraming::ContentLength(3), limits).is_err());
         assert!(read_upload_bounded(&mut Cursor::new(b"abc"), BodyFraming::ContentLength(3), HttpLimits::default(), 2).is_err());
+    }
+    #[test]
+    fn inspection_cannot_use_the_terminal_review_retry_without_a_bundle() {
+        let command = b"--x\r\nContent-Disposition: form-data; name=\"command\"\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\na=b\r\n--x--\r\n";
+        assert!(multipart::parse(command, "x", &mut || true).is_ok());
+        assert_eq!(inspection_upload(command, "x", &mut || true).unwrap_err().code, "candidate_bundle_required");
     }
 }
