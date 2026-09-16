@@ -423,7 +423,7 @@ impl Status {
             Self::NotFound => "404 Not Found",
             Self::Conflict => "409 Conflict",
             Self::TooLarge => "413 Content Too Large",
-            Self::HeaderTooLarge => "431 Request Header Fields Too Large",
+            Self::HeaderTooLarge => "431 Request Header Fields TooLarge",
             Self::MediaType => "415 Unsupported Media Type",
             Self::Method => "405 Method Not Allowed",
             Self::Expectation => "417 Expectation Failed",
@@ -626,6 +626,9 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
             api_error = Some(error);
             error.status
         })?;
+        if let Some(request) = &pull_request {
+            native_mutation = request.is_mutation();
+        }
         let issue_request = if pull_request.is_none() {
             issues::Request::parse(&envelope).map_err(|error| {
                 api_error = Some(error);
@@ -645,7 +648,9 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
             authenticated_session(git_request.as_ref().ok_or(Status::BadRequest)?, &bytes[..envelope.consumed], profile)?
         };
         let mutation = native_mutation || git_request.as_ref().is_some_and(|request| request.operation == Operation::Rpc(Service::ReceivePack));
-        if mutation {
+        // Preparation spends bounded work but never acquires mutation outcome
+        // semantics. Apply the same intake quota before reading its POST body.
+        if mutation || pull_request.as_ref().is_some_and(|request| request.accepts_body()) {
             let principal = session.authenticated_session().ok_or(Status::Unauthorized)?.principal_id();
             profile.quota.evaluate(&principal).map_err(|_| Status::RateLimited)?;
         }
@@ -653,7 +658,7 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
             return Err(Status::Expectation);
         }
         let initial = &bytes[envelope.consumed..];
-        let body_not_allowed = pull_request.as_ref().is_some_and(|request| !request.is_mutation())
+        let body_not_allowed = pull_request.as_ref().is_some_and(|request| !request.accepts_body())
             || issue_request.as_ref().is_some_and(|request| !request.is_mutation())
             || git_request.as_ref().is_some_and(|request| matches!(request.operation, Operation::Discover(_)));
         if body_not_allowed && !initial.is_empty() { return Err(Status::BadRequest); }
