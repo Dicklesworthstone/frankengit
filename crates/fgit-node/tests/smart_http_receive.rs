@@ -150,12 +150,19 @@ fn blob_pack(format: GitHashAlgorithm, body: &[u8]) -> Vec<u8> {
     pack
 }
 
+fn format_name(format: GitHashAlgorithm) -> &'static str {
+    match format {
+        GitHashAlgorithm::Sha1 => "sha1",
+        GitHashAlgorithm::Sha256 => "sha256",
+    }
+}
+
 fn create(format: GitHashAlgorithm) -> (GitOid, Vec<u8>) {
     let oid = git_object_id(format, GitObjectKind::Blob, BLOB);
     let zero = "0".repeat(oid.as_bytes().len() * 2);
     let command = format!(
         "{zero} {oid} {TAG}\0report-status object-format={}",
-        format.as_str()
+        format_name(format)
     );
     (oid, packets(command, &blob_pack(format, BLOB)))
 }
@@ -209,7 +216,13 @@ fn delete_only_push_needs_no_pack_in_either_object_domain() {
         let (oid, body) = create(format);
         assert_committed(&post(&node, &session(b"create"), &body, false, &mut Vec::new()).unwrap());
         let zero = "0".repeat(oid.as_bytes().len() * 2);
-        let delete = packets(format!("{oid} {zero} {TAG}\0report-status delete-refs"), &[]);
+        let delete = packets(
+            format!(
+                "{oid} {zero} {TAG}\0report-status delete-refs object-format={}",
+                format_name(format)
+            ),
+            &[],
+        );
         let mut output = Vec::new();
         assert_committed(&post(&node, &session(b"delete"), &delete, true, &mut output).unwrap());
         assert_report(&output, b"ok refs/tags/http-blob\n");
