@@ -79,19 +79,20 @@ fn binary_resolution_survives_restart_and_only_the_reviewed_candidate_can_publis
         let outbox = node.runtime().block_on(node.materialize_admission()).unwrap().snapshot().outbox.len();
         let path = root.0.join("credentials"); configure(&node, &path);
         let server = Server::start(node, &path, 8, true, true);
-        let (base_command, base) = discovery(&server.client, &data); // 1..3, all over TCP.
+        let (base_command, base) = discovery(&server.client, &data);
         let command = base_command.clone() + &format!("&resolution={PATH_HEX}:file:100755:file_0");
-        let original = resolve(&server.client, &command, &[("file_0", CONTENT)], false); // 4
+        let original = resolve(&server.client, &command, &[("file_0", CONTENT)], false);
         let (candidate, metadata) = extract(&original, data.clone());
+        assert_eq!(candidate.binding.merge_base, GitOid::from_hex(format, &base).unwrap());
         assert!(metadata.contains("\"state\":\"resolved\""));
         assert!(metadata.contains("\"choice\":\"file\""));
         assert!(metadata.contains(&format!("\"result\":{{\"mode\":{},", 0o100755)));
-        assert_eq!(resolve(&server.client, &command, &[("file_0", CONTENT)], true), original); // 5
-        error(&resolve(&server.client, &base_command, &[], false), 409, "unresolved_conflicts"); // 6
+        assert_eq!(resolve(&server.client, &command, &[("file_0", CONTENT)], true), original);
+        error(&resolve(&server.client, &base_command, &[], false), 409, "unresolved_conflicts");
         let extra = base_command + &format!("&resolution={PATH_HEX}:ours&resolution=636c65616e:delete");
-        error(&resolve(&server.client, &extra, &[], false), 409, "resolution_names_clean_path"); // 7
+        error(&resolve(&server.client, &extra, &[], false), 409, "resolution_names_clean_path");
         let wrong_base = command.replace(&format!("merge_base={base}"), &format!("merge_base={}", data.target_tip));
-        error(&resolve(&server.client, &wrong_base, &[("file_0", CONTENT)], false), 409, "resolution_base_mismatch"); // 8
+        error(&resolve(&server.client, &wrong_base, &[("file_0", CONTENT)], false), 409, "resolution_base_mismatch");
         assert_eq!(server.finish().accepted_sessions(), 8);
         let node = reopen(&config);
         assert_eq!(generation(&node), before + 1, "only PR opening published");
@@ -102,19 +103,19 @@ fn binary_resolution_survives_restart_and_only_the_reviewed_candidate_can_publis
             IdempotencyKey::new(b"read-only-candidate-preparation".to_vec()).unwrap());
         assert!(matches!(node.runtime().block_on(node.recover_transaction_in(&node.request_context(), &no_attempt)).unwrap(), RequestRecovery::KeyNotObserved));
         let server = Server::start(node, &path, 8, true, true);
-        assert_eq!(resolve(&server.client, &command, &[("file_0", CONTENT)], false), original); // 1
-        accepted(&send(&server.client, "reviews/approve", 'b', "approve-resolution", &review_form(&candidate, 0), Some(&candidate.bundle), true)); // 2
-        let altered = resolve(&server.client, &command, &[("file_0", b"unreviewed bytes\n")], true); // 3
+        assert_eq!(resolve(&server.client, &command, &[("file_0", CONTENT)], false), original);
+        accepted(&send(&server.client, "reviews/approve", 'b', "approve-resolution", &review_form(&candidate, 0), Some(&candidate.bundle), true));
+        let altered = resolve(&server.client, &command, &[("file_0", b"unreviewed bytes\n")], true);
         let (other, _) = extract(&altered, data.clone());
         assert_ne!(other.binding.commit, candidate.binding.commit);
-        refused(&send(&server.client, "merge", 'c', "different-resolution", &merge_form(&other, &[REVIEWER]), Some(&other.bundle), false)); // 4
+        refused(&send(&server.client, "merge", 'c', "different-resolution", &merge_form(&other, &[REVIEWER]), Some(&other.bundle), false));
         let merge = merge_form(&candidate, &[REVIEWER]);
-        let published = send(&server.client, "merge", 'c', "merge-resolution", &merge, Some(&candidate.bundle), true); // 5
+        let published = send(&server.client, "merge", 'c', "merge-resolution", &merge, Some(&candidate.bundle), true);
         accepted(&published);
-        assert_eq!(send(&server.client, "merge", 'c', "merge-resolution", &merge, None, false), published); // 6
-        let pr = get(&server.client, "/api/v1/pulls/1", 'a'); status(&pr, 200); // 7
+        assert_eq!(send(&server.client, "merge", 'c', "merge-resolution", &merge, None, false), published);
+        let pr = get(&server.client, "/api/v1/pulls/1", 'a'); status(&pr, 200);
         assert!(pr.body.contains("\"state\":\"merged\""));
-        error(&resolve(&server.client, &command, &[("file_0", CONTENT)], false), 409, "preparation_subject_moved"); // 8
+        error(&resolve(&server.client, &command, &[("file_0", CONTENT)], false), 409, "preparation_subject_moved");
         server.finish();
         let node = reopen(&config);
         assert_eq!(generation(&node), before + 4, "PR, vote, refused alternative, coupled merge; resolution reads never publish");
@@ -167,20 +168,19 @@ fn grants_keys_framing_and_unused_binary_data_refuse_before_construction() {
     for token in ['a', 'b', 'c'] {
         let reply = withheld(token, "", 100);
         assert_eq!(reply.status, 403); assert!(!reply.head.contains("100 Continue"));
-    } // 1..3: metadata, reviewer and merger rights cannot replace the two reads.
-    let reply = withheld('d', "Idempotency-Key: not-a-mutation\r\n", 100); // 4
+    }
+    let reply = withheld('d', "Idempotency-Key: not-a-mutation\r\n", 100);
     error(&reply, 400, "preparation_has_no_transaction_key"); assert!(!reply.head.contains("100 Continue"));
-    let reply = withheld('d', "", 80 * 1024 * 1024); // 5
+    let reply = withheld('d', "", 80 * 1024 * 1024);
     assert_eq!(reply.status, 413); assert!(!reply.head.contains("100 Continue"));
-    error(&resolve(&server.client, &command, &[("file_0", b"unused")], false), 400, "unreferenced_resolution_file"); // 6
+    error(&resolve(&server.client, &command, &[("file_0", b"unused")], false), 400, "unreferenced_resolution_file");
     let mut truncated = resolve_bytes(&server.client, 'd', &command, &[("file_0", CONTENT)], true);
     truncated.truncate(truncated.len() - 3);
-    assert_eq!(binary_exchange(&server.client, &truncated, true).status, 400); // 7
+    assert_eq!(binary_exchange(&server.client, &truncated, true).status, 400);
     let invalid = command.replace(&format!("{PATH_HEX}:ours"), "2e2e2f78:delete");
-    error(&resolve(&server.client, &invalid, &[], false), 400, "invalid_resolution_set"); // 8
+    error(&resolve(&server.client, &invalid, &[], false), 400, "invalid_resolution_set");
     server.finish();
     let node = reopen(&config); assert_eq!(generation(&node), before);
-    // Two credentials for the same principal must not union their grants.
     replace(&path, &(header + &row('d', FOREIGN, "read") + &row('f', FOREIGN, "pulls-read")));
     let server = Server::start(node, &path, 2, true, false);
     for token in ['d', 'f'] {
@@ -231,6 +231,32 @@ fn exact_pr_resolution_rechecks_version_policy_visibility_cancellation_and_work_
         assert_eq!(result.source_head, current.basis().id());
         assert!(node.read_git_object(result.resolved.plan.commit).is_err());
         assert_eq!(generation(&node), current.basis().generation().get());
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn edited_and_closed_prs_cannot_silently_refresh_an_old_resolution_subject() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new(); let config = root.config(format);
+        let (node, mut data) = non_clean_fixture(&root, format, true); let before = generation(&node);
+        let path = root.0.join("credentials"); configure(&node, &path);
+        let server = Server::start(node, &path, 8, true, false);
+        let (base, _) = discovery(&server.client, &data);
+        let original = base + &format!("&resolution={PATH_HEX}:ours");
+        data.title = "Explicitly edited PR".into();
+        committed(&post(&server.client, 1, "update", 'a', "edit-before-resolution", &form(&data, 1), false));
+        error(&resolve(&server.client, &original, &[], false), 409, "preparation_subject_moved");
+        let refreshed = original.replace("pull_request_version=1", "pull_request_version=2");
+        let reply = resolve(&server.client, &refreshed, &[], false);
+        let (candidate, metadata) = extract(&reply, data.clone());
+        assert!(metadata.contains("\"pull_request_version\":2"));
+        committed(&post(&server.client, 1, "close", 'a', "close-before-resolution", &form(&data, 2), false));
+        error(&resolve(&server.client, &refreshed, &[], true), 409, "preparation_subject_moved");
+        assert_eq!(server.finish().accepted_sessions(), 8);
+        let node = reopen(&config);
+        assert_eq!(generation(&node), before + 3, "opening, edit and close only; stale reads do not publish decisions");
+        assert!(node.read_git_object(candidate.binding.commit).is_err());
         node.shutdown().unwrap();
     }
 }
