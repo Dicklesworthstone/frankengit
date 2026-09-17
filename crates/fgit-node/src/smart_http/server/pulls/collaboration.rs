@@ -7,6 +7,7 @@ mod multipart;
 mod output;
 mod request;
 pub(super) mod resolution_upload;
+pub(super) mod source_upload;
 
 use std::io::Read;
 use fgit_authority::IdempotencyKey;
