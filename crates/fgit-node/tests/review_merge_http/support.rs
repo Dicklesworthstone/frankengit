@@ -51,7 +51,7 @@ pub fn open(endpoint: &Endpoint, candidate: &Candidate) {
 pub fn common(candidate: &Candidate) -> String {
     format!("object_format={}&pull_request_version=1&policy_epoch={}&source_ref={}&target_ref={}&source_tip={}&target_tip={}&merge_base={}&candidate_commit={}",
         candidate.data.source_tip.algorithm().as_str(), candidate.epoch.get(),
-        candidate.data.source_ref.as_str(), candidate.data.target_ref.as_str(), candidate.data.source_tip,
+        candidate.data.source_ref, candidate.data.target_ref, candidate.data.source_tip,
         candidate.data.target_tip, candidate.binding.merge_base, candidate.binding.commit)
 }
 pub fn review_form(candidate: &Candidate, version: u64) -> String {

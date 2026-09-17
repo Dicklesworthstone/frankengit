@@ -220,7 +220,7 @@ fn exact_pr_resolution_rechecks_version_policy_visibility_cancellation_and_work_
         let mut hidden = RefVisibility::new(); hidden.push_rule(data.source_ref.as_bytes(), &Default::default()).unwrap();
         assert!(node.runtime().block_on(node.prepare_resolved_pull_request_bundle_in(&request, &subject, base,
             &hidden, &choices, &metadata, PreparationLimits::default())).is_err());
-        let cancelled = node.request_context(); cancelled.authority().cancel();
+        let cancelled = node.request_context(); cancelled.cancel();
         assert!(node.runtime().block_on(node.prepare_resolved_pull_request_bundle_in(&cancelled, &subject, base,
             &RefVisibility::new(), &choices, &metadata, PreparationLimits::default())).is_err());
         let narrow = PreparationLimits { max_content_merges: 1, ..PreparationLimits::default() };

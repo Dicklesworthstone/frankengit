@@ -180,7 +180,7 @@ fn hidden_sources_changed_coordinates_cancellation_and_work_limits_never_stage_o
         let tight = PreparationLimits { max_commits: 1, ..PreparationLimits::default() };
         assert!(node.runtime().block_on(node.prepare_pull_request_bundle_in(&request, &subject,
             &RefVisibility::new(), &metadata, tight)).is_err());
-        let cancelled = node.request_context(); cancelled.authority().cancel();
+        let cancelled = node.request_context(); cancelled.cancel();
         assert!(node.runtime().block_on(node.prepare_pull_request_bundle_in(&cancelled, &subject,
             &RefVisibility::new(), &metadata, PreparationLimits::default())).is_err());
         assert_eq!(generation(&node), before);

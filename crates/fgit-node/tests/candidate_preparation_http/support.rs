@@ -38,7 +38,7 @@ pub fn preparation_form(data: &PullRequestData, epoch: PolicyEpoch) -> String {
     format!(concat!("object_format={}&pull_request_version=1&policy_epoch={}&source_ref={}&target_ref={}",
         "&source_tip={}&target_tip={}&author=Fixture+%3Cfixture%40example.invalid%3E",
         "&committer=Fixture+%3Cfixture%40example.invalid%3E&timestamp=1&message=Remote+candidate%0A"),
-        data.source_tip.algorithm().as_str(), epoch.get(), data.source_ref.as_str(), data.target_ref.as_str(),
+        data.source_tip.algorithm().as_str(), epoch.get(), data.source_ref, data.target_ref,
         data.source_tip, data.target_tip)
 }
 pub fn prepare_bytes(endpoint: &Endpoint, number: u64, token: char, body: &str, chunked: bool) -> Vec<u8> {

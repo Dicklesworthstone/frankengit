@@ -183,7 +183,7 @@ fn node_inspection_refuses_filters_hidden_refs_stale_subjects_cancellation_and_e
         let mut stale = subject.clone(); stale.pull_request_version = AggregateVersion::try_new(2).unwrap();
         assert!(node.runtime().block_on(node.inspect_pull_request_bundle_in(&request, &stale,
             candidate.binding, &candidate.bundle, &visible, &options)).is_err());
-        let cancelled = node.request_context(); cancelled.authority().cancel();
+        let cancelled = node.request_context(); cancelled.cancel();
         assert!(node.runtime().block_on(node.inspect_pull_request_bundle_in(&cancelled, &subject,
             candidate.binding, &candidate.bundle, &visible, &options)).is_err());
         let mut low = options.clone(); low.limits.max_output_bytes = 1;

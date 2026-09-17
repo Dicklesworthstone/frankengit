@@ -239,7 +239,7 @@ fn native_search_binds_preconditions_and_refuses_cancelled_or_wrong_domain_reads
         let foreign = GitOid::from_hex(foreign, &"a".repeat(foreign.digest_len() * 2)).unwrap();
         assert!(node.runtime().block_on(node.search_source_snapshot_local_in(
             &request, &reference, None, Some(foreign), &query, SearchLimits::default())).is_err());
-        let cancelled = node.request_context(); cancelled.authority().cancel();
+        let cancelled = node.request_context(); cancelled.cancel();
         assert!(node.runtime().block_on(node.search_source_snapshot_local_in(
             &cancelled, &reference, None, None, &query, SearchLimits::default())).is_err());
         assert_eq!(generation(&node), before); node.shutdown().unwrap();
