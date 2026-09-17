@@ -196,7 +196,7 @@ pub fn post(endpoint: &Endpoint, number: u64, action: &str, token: char, key: &s
     let headers = format!("Content-Type: application/x-www-form-urlencoded\r\n{framing}Idempotency-Key: {key}\r\n");
     exchange(endpoint, &request(endpoint, "POST", &format!("/api/v1/pulls/{number}/{action}"), token, &headers, &wire), true)
 }
-fn encode(bytes: &[u8]) -> String {
+pub fn encode(bytes: &[u8]) -> String {
     bytes.iter().copied().map(|byte| if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
         (byte as char).to_string()
     } else { format!("%{byte:02X}") }).collect()
