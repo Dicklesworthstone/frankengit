@@ -56,6 +56,28 @@ impl std::fmt::Display for ReplayPreparationRefusal {
     }
 }
 impl std::error::Error for ReplayPreparationRefusal {}
+impl ReplayPreparationRefusal {
+    // Transport adapters classify typed failures without exposing private object
+    // owners, formatting Debug strings, or disclosing internal object IDs.
+    pub(crate) fn is_snapshot_moved(&self) -> bool { matches!(self, Self::SnapshotMoved) }
+    pub(crate) fn is_tip_moved(&self) -> bool { matches!(self, Self::TipMoved) }
+    pub(crate) fn is_unavailable(&self) -> bool { matches!(self, Self::RefUnavailable) }
+    pub(crate) fn is_invalid_input(&self) -> bool { matches!(self, Self::InvalidInput(_)) }
+    pub(crate) fn is_resource_refusal(&self) -> bool {
+        matches!(self, Self::BudgetExceeded | Self::Validation(ProjectionFailure::Unavailable(
+            fgit_types::RefusalCode::ResourceBudgetExceeded)))
+    }
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Source(MergeSourceError::Cancelled)
+            | Self::Validation(ProjectionFailure::Unavailable(fgit_types::RefusalCode::CancellationInProgress)))
+    }
+    pub(crate) fn source_refusal(&self) -> Option<&MergeSourceError> {
+        if let Self::Source(error) = self { Some(error) } else { None }
+    }
+    pub(crate) fn preparation_refusal(&self) -> Option<&ReplayError> {
+        if let Self::Preparation(error) = self { Some(error) } else { None }
+    }
+}
 impl From<MergeSourceError> for ReplayPreparationRefusal {
     fn from(error: MergeSourceError) -> Self { Self::Source(error) }
 }
