@@ -95,7 +95,10 @@ fn literal_search_reports_overlap_binary_content_component_prefixes_and_real_tru
         assert!(overlap.body.contains("\"byte_offset\":17,\"line\":2,\"byte_column\":3"));
         let binary = post(&server.client, "search", 'a', &format!("{query}&needle_hex=00ff"), true); // 6
         status(&binary, 200); assert_eq!(number(&binary.body, "returned_matches"), 1);
-        assert_eq!(text(&binary.body, "excerpt_hex"), hex(BINARY));
+        // Excerpts stop before the terminating LF; CR and all prior binary
+        // bytes remain exact. Blob reads above include the complete CRLF.
+        assert_eq!(text(&binary.body, "excerpt_hex"), hex(&BINARY[..BINARY.len() - 1]));
+        assert!(text(&binary.body, "excerpt_hex").ends_with("0d"));
         let prefix = post(&server.client, "search", 'a', &(needle.clone() + "&path_prefix_hex=646972"), false); // 7
         status(&prefix, 200); assert_eq!(number(&prefix.body, "returned_matches"), 1);
         assert_eq!(text(&prefix.body, "path_hex"), hex(b"dir/nested.txt"));
