@@ -149,3 +149,24 @@ pub fn non_clean_fixture(root: &Scratch, format: GitHashAlgorithm, conflict: boo
         target_ref: RefName::try_new(b"refs/heads/main").unwrap(), source_tip: theirs, target_tip: ours,
         title: "Non-clean candidate".into(), body: String::new() })
 }
+
+#[test]
+fn candidate_forms_preserve_reference_bytes() {
+    let root = Scratch::new();
+    let (node, mut candidate) = prepared(&root, GitHashAlgorithm::Sha1);
+    node.shutdown().unwrap();
+    for (raw, encoded) in [
+        (b"refs/heads/a+b&c%d".as_slice(), "refs%2Fheads%2Fa%2Bb%26c%25d"),
+        (b"refs/heads/nonutf8\xff".as_slice(), "refs%2Fheads%2Fnonutf8%FF"),
+    ] {
+        candidate.data.source_ref = RefName::try_new(raw).unwrap();
+        candidate.data.target_ref = RefName::try_new(raw).unwrap();
+        for body in [common(&candidate), preparation_form(&candidate.data, candidate.epoch)] {
+            for field in ["source_ref", "target_ref"] {
+                let prefix = format!("{field}=");
+                let values: Vec<_> = body.split('&').filter_map(|part| part.strip_prefix(&prefix)).collect();
+                assert_eq!(values, [encoded], "{body}");
+            }
+        }
+    }
+}
