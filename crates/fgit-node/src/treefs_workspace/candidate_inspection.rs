@@ -119,3 +119,32 @@ impl OneNode {
         })
     }
 }
+
+/// Actual uploaded native commit bytes, ordered oldest first in an inspected
+/// linear series. This does not assert correspondence to an original commit.
+#[derive(Debug)]
+pub struct InspectedRebaseCommit {
+    pub id: GitOid,
+    pub parent: GitOid,
+    pub tree: GitOid,
+    pub body: Vec<u8>,
+}
+
+/// Read-only inspection of the entire uploaded linear series and final result.
+/// `comparisons[0]` is old source -> candidate; each following comparison is
+/// the corresponding commit's sole parent -> commit. All share one review
+/// allowance. A zero-commit series still has its final-source comparison.
+/// Nothing here approves the rewrite or proves the historical replay algorithm.
+#[derive(Debug)]
+pub struct RebaseBundleInspection {
+    pub repository_id: fgit_types::RepositoryId,
+    pub source_head: fgit_types::RepositoryAuthorityHeadId,
+    pub source_reference: fgit_types::RefName,
+    pub onto_reference: fgit_types::RefName,
+    pub expected_source: GitOid,
+    pub onto: GitOid,
+    pub candidate: GitOid,
+    pub commits: Vec<InspectedRebaseCommit>,
+    pub comparisons: Vec<fgit_forge::review::SourceComparison>,
+    pub bundle: InspectedBundle,
+}

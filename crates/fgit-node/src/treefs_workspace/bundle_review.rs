@@ -4,6 +4,8 @@
 
 #[path = "bundle_review/pack.rs"]
 mod pack;
+#[path = "bundle_review/rebase.rs"]
+mod rebase;
 #[cfg(test)]
 #[path = "bundle_review/tests.rs"]
 mod tests;
