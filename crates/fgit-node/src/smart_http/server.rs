@@ -2,7 +2,8 @@
 //!
 //! This is an explicit loopback capability profile, not organization/team IAM.
 //! Operators grant principals independent Git, issue, PR and outcome scopes
-//! through bearer credentials. TLS terminates outside this listener; forwarded
+//! through token credentials (Bearer or Basic token-as-password). TLS
+//! terminates outside this listener; forwarded
 //! headers never authenticate. Git RPCs stream to native machines; metadata
 //! forms have a separate small envelope. Outcome queries never mutate state.
 
@@ -35,6 +36,14 @@ use crate::{
     GitDaemonSessionTimeout, GitDaemonSessionWorkScaling, LoopbackReceiveSession, NodeConfig,
     NodeRefusal, OneNode, PushQuota,
 };
+
+// Offer Basic first so ordinary Git credential helpers can negotiate a token
+// password. Both schemes authenticate through the SAME digest/grant lookup.
+// This profile remains loopback-only; neither scheme replaces external TLS.
+const AUTHENTICATION_CHALLENGES: &str = concat!(
+    "WWW-Authenticate: Basic realm=\"frankengit\", charset=\"UTF-8\"\r\n",
+    "WWW-Authenticate: Bearer realm=\"frankengit\"\r\n",
+);
 
 const IO_CHUNK: usize = 16 * 1024;
 const MAX_IN_FLIGHT: usize = 16;
@@ -88,7 +97,11 @@ impl OneNode {
     ///
     /// `credential_digest` is SHA-256 of an operator-provisioned 64-character
     /// lowercase hexadecimal bearer secret. It grants access ONLY to this
-    /// repository incarnation and principal. Receive discovery and RPC are
+    /// repository incarnation and principal. The same token can be supplied as
+    /// a Basic password through an ordinary Git credential helper. Basic
+    /// usernames are nonempty UTF-8, at most 256 bytes, with no ASCII control
+    /// characters; they never select a principal or grant additional scopes.
+    /// Receive discovery and RPC are
     /// disabled unless `allow_receive` is explicitly true. Every push RPC must
     /// additionally carry a client-chosen `Idempotency-Key` header; retrying it
     /// unchanged resolves an ambiguous response through canonical admission.
@@ -606,7 +619,7 @@ fn write_error(writer: &mut impl Write, version: HttpVersion, status: Status) ->
         "Smart HTTP request refused\n"
     };
     let extra = match status {
-        Status::Unauthorized => "WWW-Authenticate: Bearer realm=\"frankengit\"\r\n",
+        Status::Unauthorized => AUTHENTICATION_CHALLENGES,
         Status::RateLimited => "Retry-After: 60\r\n",
         Status::Method => "Allow: GET, POST\r\n",
         _ => "",
@@ -860,6 +873,68 @@ mod tests {
         readonly.allow_receive = false;
         assert_eq!(authenticated_session(&request, &bytes, &readonly), Err(Status::Forbidden));
     }
+    // RFC 4648 encoding of the fixture user-pass `git:` + 64 lowercase a's.
+    const BASIC: &str = "Basic Z2l0OmFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=";
+
+    #[test]
+    fn basic_and_bearer_bind_the_same_principal_and_explicit_retry_key() {
+        let profile = profile();
+        let basic = head(&format!("Authorization: {BASIC}\r\nIdempotency-Key: stable-1\r\n"));
+        let bearer = head(&format!("Authorization: Bearer {}\r\nIdempotency-Key: stable-1\r\n", "a".repeat(64)));
+        let basic_request = parse_head(&basic, profile.http).unwrap().unwrap();
+        let bearer_request = parse_head(&bearer, profile.http).unwrap().unwrap();
+        let selected = authenticated_session(&basic_request, &basic, &profile).unwrap();
+        assert_eq!(selected, authenticated_session(&bearer_request, &bearer, &profile).unwrap());
+        assert_eq!(selected.authenticated_session().unwrap().principal_id(), PrincipalId::from_bytes([3; 16]));
+        let no_key = head(&format!("Authorization: {BASIC}\r\n"));
+        let request = parse_head(&no_key, profile.http).unwrap().unwrap();
+        assert_eq!(authenticated_session(&request, &no_key, &profile), Err(Status::BadRequest));
+        let mut readonly = profile.clone();
+        readonly.allow_receive = false;
+        assert_eq!(authenticated_session(&basic_request, &basic, &readonly), Err(Status::Forbidden));
+        let mut foreign = profile.clone();
+        foreign.route = b"/different.git".to_vec();
+        assert_eq!(authenticated_session(&basic_request, &basic, &foreign), Err(Status::NotFound));
+    }
+
+    #[test]
+    fn credential_helper_discovery_needs_no_publication_key_or_write_permission() {
+        let mut profile = profile();
+        profile.allow_receive = false;
+        let bytes = format!("GET /repo.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: local\r\nAuthorization: {BASIC}\r\n\r\n").into_bytes();
+        let request = parse_head(&bytes, profile.http).unwrap().unwrap();
+        let selected = authenticated_session(&request, &bytes, &profile).unwrap();
+        assert_eq!(selected.authenticated_session().unwrap().principal_id(), PrincipalId::from_bytes([3; 16]));
+        assert_eq!(retry_key(&bytes).unwrap(), None);
+    }
+
+    #[test]
+    fn only_unauthorized_responses_offer_both_credential_challenges() {
+        for (version, prefix) in [(HttpVersion::Http10, "HTTP/1.0"), (HttpVersion::Http11, "HTTP/1.1")] {
+            for status in [Status::Unauthorized, Status::Forbidden, Status::Unavailable] {
+                let mut response = Vec::new();
+                write_error(&mut response, version, status).unwrap();
+                let response = String::from_utf8(response).unwrap();
+                let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+                assert!(headers.starts_with(&format!("{prefix} {}", status.line())));
+                assert!(headers.contains(&format!("Content-Length: {}\r\n", body.len())));
+                assert!(headers.contains("Cache-Control: no-store"));
+                assert!(!response.contains(BASIC));
+                if status == Status::Unauthorized {
+                    assert!(headers.contains("WWW-Authenticate: Basic realm=\"frankengit\", charset=\"UTF-8\""));
+                    assert!(headers.contains("WWW-Authenticate: Bearer realm=\"frankengit\""));
+                    assert_eq!(headers.matches("WWW-Authenticate:").count(), 2);
+                    assert!(headers.find("WWW-Authenticate: Basic") < headers.find("WWW-Authenticate: Bearer"));
+                } else {
+                    assert!(!headers.contains("WWW-Authenticate:"));
+                }
+                if status == Status::Unavailable {
+                    assert!(body.contains("a push may already be committed"));
+                }
+            }
+        }
+    }
+
     #[test]
     fn duplicate_or_hop_by_hop_retry_identity_is_refused() {
         for extra in ["Idempotency-Key: a\r\nidempotency-key: b\r\n", "Idempotency-Key: a\r\nConnection: Idempotency-Key\r\n", "Idempotency-Key: \r\n"] {
