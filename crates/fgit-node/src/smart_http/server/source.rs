@@ -1,44 +1,84 @@
-//! Authenticated repository-wide source reads. The gateway grants exactly the
-//! selected repository's read scope before invoking the native local-owner
-//! readers. No caller-controlled path/OID creates authority or a host path.
+//! Repository source reads and exact candidate operations. Read grants never
+//! imply publication. Applying a bundle additionally requires receive scope
+//! and the explicit Git-write deployment switch, through native admission.
 
 mod request;
 mod output;
+mod changes;
 
-use std::io::Read;
+use std::io::{self, Read, Write};
 use fgit_authority::IdempotencyKey;
 use fgit_forge::source_browse::SourceBrowseError;
 use fgit_forge::source_search::SearchError;
 use fgit_treefs::BaseError;
-use fgit_wire::smart_http::{BodyFraming, HttpLimits, Service, head::Envelope};
+use fgit_wire::smart_http::{BodyFraming, HttpLimits, HttpVersion, Service, head::Envelope};
 use crate::{GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession,
     NodeWorkspaceRefusal, OneNode};
 use crate::smart_http::drive_request_while;
 use super::{Profile, Status, retry_key};
-use super::issues::{ApiError, Reply, read_form};
+use super::issues::{ApiError, Reply as JsonReply, read_form};
 use request::Command;
-pub(super) use request::Request;
+
+#[derive(Debug)]
+pub(super) struct Request<'a>(RequestKind<'a>);
+#[derive(Debug)]
+enum RequestKind<'a> { Read(request::Request<'a>), Change(changes::Request<'a>) }
+impl<'a> Request<'a> {
+    pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = changes::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::Change(request)));
+        }
+        request::Request::parse(envelope).map(|request| Self(RequestKind::Read(request)))
+    }
+    pub(super) fn is_mutation(&self) -> bool {
+        matches!(&self.0, RequestKind::Change(request) if request.is_mutation())
+    }
+    fn route(&self) -> &str {
+        match &self.0 { RequestKind::Read(request) => request.repository_route,
+            RequestKind::Change(request) => request.repository_route }
+    }
+}
+
+pub(super) struct Reply(ReplyBody);
+enum ReplyBody { Json(JsonReply), Patch(changes::PatchReply) }
+impl Reply {
+    fn json(reply: JsonReply) -> Self { Self(ReplyBody::Json(reply)) }
+    fn patch(reply: changes::PatchReply) -> Self { Self(ReplyBody::Patch(reply)) }
+    pub(super) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
+        match &self.0 { ReplyBody::Json(reply) => reply.send(writer, version),
+            ReplyBody::Patch(reply) => reply.send(writer, version) }
+    }
+}
 
 pub(super) fn authenticate(request: &Request<'_>, envelope: &Envelope<'_>,
     raw_head: &[u8], profile: &Profile,
 ) -> Result<LoopbackReceiveSession, ApiError> {
     let grant = profile.credentials.authenticate(envelope.authorization())
         .map_err(|error| ApiError::from_status(Status::from(error), false))?;
-    if request.repository_route.as_bytes() != profile.route { return Err(ApiError::not_found()); }
-    if !profile.allow_source || !grant.permits(Service::UploadPack) {
-        return Err(ApiError::new(Status::Forbidden, "forbidden"));
-    }
-    if retry_key(raw_head).map_err(|_| ApiError::bad("invalid_idempotency_key"))?.is_some() {
-        return Err(ApiError::bad("source_read_has_no_transaction_key"));
-    }
-    // This identity is transport-local and never reaches any seal/key binder.
+    if request.route().as_bytes() != profile.route { return Err(ApiError::not_found()); }
+    let permitted = if request.is_mutation() {
+        profile.allow_receive && grant.permits(Service::ReceivePack)
+    } else { grant.permits(Service::UploadPack) };
+    if !profile.allow_source || !permitted { return Err(ApiError::new(Status::Forbidden, "forbidden")); }
+    let supplied_key = retry_key(raw_head).map_err(|_| ApiError::bad("invalid_idempotency_key"))?;
+    let key = if request.is_mutation() {
+        supplied_key.ok_or_else(|| ApiError::bad("idempotency_key_required"))?
+    } else {
+        if supplied_key.is_some() { return Err(ApiError::bad("source_read_has_no_transaction_key")); }
+        // Transport identity only: reads never pass it into seal/key binding.
+        b"read-only-source-query".as_slice()
+    };
     Ok(LoopbackReceiveSession::authenticated(grant.principal,
-        IdempotencyKey::new(b"read-only-source-query".to_vec()).map_err(|_| ApiError::unavailable())?))
+        IdempotencyKey::new(key.to_vec()).map_err(|_| ApiError::bad("invalid_idempotency_key"))?))
 }
 
 pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackReceiveSession,
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
+    let request = match &request.0 {
+        RequestKind::Change(request) => return changes::execute(node, request, session, framing, reader, http, maximum_response),
+        RequestKind::Read(request) => request,
+    };
     if session.authenticated_session().is_none() { return Err(ApiError::new(Status::Unauthorized, "unauthorized")); }
     let command = request.command(&read_form(reader, framing, http)?, node.object_format)?;
     let context = node.request_context();
@@ -63,7 +103,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
             output::search(node, selection, query, *limits, head, &report, maximum, &mut live)?
         }
     };
-    Ok(Reply { status: Status::Success, body, terminal: None })
+    Ok(Reply::json(JsonReply { status: Status::Success, body, terminal: None }))
 }
 
 fn base_error(error: BaseError) -> ApiError {
@@ -120,6 +160,17 @@ mod tests {
             error.send_named(&mut reply, fgit_wire::smart_http::HttpVersion::Http11, "source_error").unwrap();
             let text = String::from_utf8(reply).unwrap();
             assert!(!text.contains("\"matches\":[]") && !text.contains("\"outcome\":\"refused\""));
+        }
+    }
+    #[test]
+    fn only_explicit_source_apply_acquires_mutation_semantics() {
+        for (action, media, mutation) in [("tree", "application/x-www-form-urlencoded", false),
+            ("prepare", "multipart/form-data; boundary=x", false),
+            ("inspect", "multipart/form-data; boundary=x", false),
+            ("apply", "multipart/form-data; boundary=x", true)] {
+            let bytes = format!("POST /repo.git/api/v1/source/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: {media}\r\nContent-Length: 1\r\n\r\n");
+            let envelope = fgit_wire::smart_http::head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+            assert_eq!(Request::parse(&envelope).unwrap().is_mutation(), mutation);
         }
     }
 }
