@@ -245,12 +245,13 @@ impl OneNode {
         )
     }
 
-    /// Enable repository source browsing and literal-byte search for read-scoped
-    /// credentials, independently of all mutation services. Every source query
-    /// is a bounded read, including body-bearing POSTs. Current canonical hidden
-    /// refs apply; paths cannot select host files or arbitrary admitted objects.
-    /// Source reads have their own principal quota. Older entrypoints keep this
-    /// feature disabled, including the static-token compatibility profile.
+    /// Enable source browsing, search, patch preparation and candidate inspection
+    /// for read-scoped credentials. Applying a single-parent candidate additionally
+    /// requires `allow_receive` and the token's independent receive grant; it uses
+    /// native sealed admission and cannot turn a read grant into write authority.
+    /// Current canonical hidden refs apply. Paths never select host files or
+    /// arbitrary admitted objects. Reads have their own principal quota; source
+    /// publication shares mutation quota. Older entrypoints keep source disabled.
     pub fn serve_repository_http_with_source_bounded(
         &self, listener: &TcpListener, server_limits: GitDaemonServerLimits,
         credentials_file: &Path, allow_receive: bool, allow_issues: bool,
@@ -650,6 +651,9 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
         let source_request = if source_api {
             Some(source::Request::parse(&envelope).map_err(|error| { api_error = Some(error); error.status })?)
         } else { None };
+        if let Some(request) = &source_request {
+            native_mutation = request.is_mutation();
+        }
         let pull_request = if source_request.is_none() {
             pulls::Request::parse(&envelope).map_err(|error| { api_error = Some(error); error.status })?
         } else { None };
@@ -678,7 +682,7 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
             authenticated_session(git_request.as_ref().ok_or(Status::BadRequest)?, &bytes[..envelope.consumed], profile)?
         };
         let mutation = native_mutation || git_request.as_ref().is_some_and(|request| request.operation == Operation::Rpc(Service::ReceivePack));
-        if source_request.is_some() {
+        if source_request.is_some() && !mutation {
             let principal = session.authenticated_session().ok_or(Status::Unauthorized)?.principal_id();
             profile.source_quota.evaluate(&principal).map_err(|_| Status::RateLimited)?;
         } else if mutation || pull_request.as_ref().is_some_and(|request| request.accepts_body()) {
