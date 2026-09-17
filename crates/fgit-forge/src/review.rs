@@ -2,10 +2,13 @@
 //! approval, patch application, or authorization mechanism. The object owner
 //! supplies the same identity-verified source used by native merge preparation.
 
+mod series;
+pub use series::{MAX_SERIES_COMPARISONS, compare_source_series};
+
 use std::collections::BTreeMap;
 use fgit_diff::{CommitGraph, DiffAlgorithm, DiffError, DiffLimits, DiffOptions, Edit,
     MergeBaseError, MergeBaseLimits, MergeBaseResult, ParentSet, RenameProfile,
-    TreeChange, TreeDiffLimits, TreeDiffOptions, TreeEntry, TreeMode, diff, diff_trees,
+    TreeChange, TreeDiffLimits, TreeDiffOptions, TreeEntry, TreeMode, diff_with_cancellation, diff_trees,
     merge_bases_all};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId, RepositoryId};
 use crate::aggregate::{AggregateVersion, PullRequestNumber};
@@ -328,13 +331,19 @@ impl<S: MergeObjectSource> Walker<'_, S> {
     }
     fn text(&mut self, old: &[u8], new: &[u8]) -> Result<ReviewContent, ReviewError> {
         self.source.checkpoint()?;
-        let result = diff(old, new, DiffOptions::myers_lines(DiffLimits {
+        let stopped = std::cell::Cell::new(None);
+        let result = diff_with_cancellation(old, new, DiffOptions::myers_lines(DiffLimits {
             max_input_bytes: 2 * self.options.limits.max_blob_bytes, max_units: 100_000,
             max_work: self.options.limits.max_diff_work, max_trace_cells: 512_000,
-        })).map_err(ReviewError::Diff)?;
-        // The existing synchronous diff is bounded per invocation. Cancellation
-        // is checked before/after it, not falsely claimed inside every frontier.
+        }), &|| match self.source.checkpoint() {
+            Ok(()) => false,
+            Err(error) => { stopped.set(Some(error)); true }
+        });
+        // Preserve the source's actual cancellation/resource refusal, including
+        // a one-shot stop, instead of flattening it into a diff or missing-object error.
+        if let Some(error) = stopped.into_inner() { return Err(ReviewError::Source(error)); }
         self.source.checkpoint()?;
+        let result = result.map_err(ReviewError::Diff)?;
         let old_lines = line_offsets(old);
         let new_lines = line_offsets(new);
         let (mut additions, mut deletions) = (0, 0);
