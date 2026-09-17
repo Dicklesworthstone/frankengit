@@ -9,7 +9,7 @@ mod refs;
 mod tags;
 mod initial;
 mod history;
-mod review;
+pub(super) mod review;
 
 use std::io::{self, Read, Write};
 use fgit_authority::IdempotencyKey;

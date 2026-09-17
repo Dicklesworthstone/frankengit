@@ -1,12 +1,14 @@
-//! Read-only comparison of two authority-selected refs. The source gateway
-//! authenticates before body intake; neither form fields nor returned diffs
-//! authorize publication, an approval, or an arbitrary-object lookup.
+//! Read-only comparison of authority-selected refs or recorded PR tips. The
+//! owning gateway authenticates before body intake; neither form fields nor
+//! returned diffs authorize publication, approval or arbitrary-object lookup.
 
 mod output;
 
 use std::collections::BTreeMap;
 use std::io::Read;
 
+use fgit_forge::{AggregateVersion, PullRequestNumber};
+use fgit_forge::preparation::MergeSourceError;
 use fgit_forge::review::{ComparisonMode, ReviewError, ReviewOptions, ReviewSelection};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::{BodyFraming, HttpLimits, head::Envelope};
@@ -53,6 +55,9 @@ struct Command {
 }
 impl Command {
     fn parse(bytes: &[u8], format: GitHashAlgorithm) -> Result<Self, ApiError> {
+        Self::parse_for(bytes, format, None)
+    }
+    fn parse_for(bytes: &[u8], format: GitHashAlgorithm, pull: Option<PullRequestNumber>) -> Result<Self, ApiError> {
         let mut fields = BTreeMap::new();
         let mut paths = Vec::new();
         for (name, value) in parse_form(bytes, 80)? {
@@ -61,7 +66,9 @@ impl Command {
                 paths.push(unhex(&value, 4096)?);
                 continue;
             }
-            if !matches!(name.as_str(), "object_format" | "before_ref" | "after_ref" | "mode"
+            let selector = if pull.is_some() { name == "expected_version" }
+                else { matches!(name.as_str(), "before_ref" | "after_ref") };
+            if !selector && !matches!(name.as_str(), "object_format" | "mode"
                 | "expected_head" | "expected_before" | "expected_after" | "context_lines"
                 | "max_tree_entries" | "max_changes" | "max_text_files" | "max_blob_bytes"
                 | "max_output_bytes" | "max_hunks" | "max_diff_work")
@@ -71,16 +78,25 @@ impl Command {
         if take(&mut fields, "object_format")? != format.as_str() {
             return Err(ApiError::bad("object_format_mismatch"));
         }
-        let before = RefName::try_new(take(&mut fields, "before_ref")?.as_bytes())
-            .map_err(|_| ApiError::bad("invalid_ref"))?;
-        let after = RefName::try_new(take(&mut fields, "after_ref")?.as_bytes())
-            .map_err(|_| ApiError::bad("invalid_ref"))?;
+        let selection = if let Some(number) = pull {
+            let expected_version = fields.remove("expected_version").map(|text| {
+                AggregateVersion::try_new(parse_decimal(&text)?).ok_or_else(|| ApiError::bad("invalid_expected_version"))
+            }).transpose()?;
+            ReviewSelection::PullRequest { number, expected_version }
+        } else {
+            let before = RefName::try_new(take(&mut fields, "before_ref")?.as_bytes())
+                .map_err(|_| ApiError::bad("invalid_ref"))?;
+            let after = RefName::try_new(take(&mut fields, "after_ref")?.as_bytes())
+                .map_err(|_| ApiError::bad("invalid_ref"))?;
+            ReviewSelection::References { before, after }
+        };
         let expected_head = fields.remove("expected_head").map(|text| parse_snapshot(&text)).transpose()?;
         let expected_before = fields.remove("expected_before").map(|text| oid(&text, format)).transpose()?;
         let expected_after = fields.remove("expected_after").map(|text| oid(&text, format)).transpose()?;
         let mut options = ReviewOptions::default();
         options.paths = paths;
-        options.mode = match fields.remove("mode").as_deref().unwrap_or("direct") {
+        let default_mode = if pull.is_some() { "merge-base" } else { "direct" };
+        options.mode = match fields.remove("mode").as_deref().unwrap_or(default_mode) {
             "direct" => ComparisonMode::Direct,
             "merge-base" => ComparisonMode::MergeBase,
             _ => return Err(ApiError::bad("invalid_diff_mode")),
@@ -95,8 +111,7 @@ impl Command {
         limits.max_hunks = number(&mut fields, "max_hunks", limits.max_hunks)?;
         limits.max_diff_work = number(&mut fields, "max_diff_work", limits.max_diff_work)?;
         options.validate().map_err(|_| ApiError::bad("invalid_diff_options"))?;
-        Ok(Self { selection: ReviewSelection::References { before, after }, expected_head,
-            expected_before, expected_after, options })
+        Ok(Self { selection, expected_head, expected_before, expected_after, options })
     }
 }
 fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, ApiError> {
@@ -128,6 +143,21 @@ pub(super) fn execute(node: &OneNode, _request: &Request<'_>, session: &Loopback
 ) -> Result<Reply, ApiError> {
     if session.authenticated_session().is_none() { return Err(ApiError::new(Status::Unauthorized, "unauthorized")); }
     let command = Command::parse(&read_form(reader, framing, http)?, node.object_format)?;
+    execute_command(node, &command, maximum_response)
+}
+
+/// Called only after the PR gateway has required both fetch and PR-read grants.
+/// The number is parsed from that route; fields cannot substitute other refs.
+/// It shares the exact native reader and bounded serializer with branch diffs.
+pub(in crate::smart_http::server) fn execute_pull(node: &OneNode, number: PullRequestNumber,
+    session: &LoopbackReceiveSession, framing: BodyFraming, reader: &mut impl Read,
+    http: HttpLimits, maximum_response: u64,
+) -> Result<Reply, ApiError> {
+    if session.authenticated_session().is_none() { return Err(ApiError::new(Status::Unauthorized, "unauthorized")); }
+    let command = Command::parse_for(&read_form(reader, framing, http)?, node.object_format, Some(number))?;
+    execute_command(node, &command, maximum_response)
+}
+fn execute_command(node: &OneNode, command: &Command, maximum_response: u64) -> Result<Reply, ApiError> {
     let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(node.git_daemon_session_timeout, GitDaemonSessionWorkScaling::FLAT);
     let mut live = || !deadline.expired();
@@ -137,7 +167,7 @@ pub(super) fn execute(node: &OneNode, _request: &Request<'_>, session: &Loopback
             failure(error.is_snapshot_moved(), error.is_version_moved(), error.is_unavailable(), error.review_error())
         })?;
     let maximum = usize::try_from(maximum_response).unwrap_or(usize::MAX);
-    let body = output::render(node, &command, &report, maximum, &mut live)?;
+    let body = output::render(node, command, &report, maximum, &mut live)?;
     Ok(Reply { status: Status::Success, body, terminal: None })
 }
 fn failure(snapshot: bool, version: bool, unavailable: bool, cause: Option<&ReviewError>) -> ApiError {
@@ -148,7 +178,8 @@ fn failure(snapshot: bool, version: bool, unavailable: bool, cause: Option<&Revi
         Some(ReviewError::InvalidOptions) => ApiError::bad("invalid_diff_options"),
         Some(ReviewError::NoCommonAncestor) => ApiError::new(Status::Conflict, "no_common_ancestor"),
         Some(ReviewError::MultipleMergeBases(_)) => ApiError::new(Status::Conflict, "multiple_merge_bases"),
-        Some(ReviewError::Budget(_)) => ApiError::too_large(),
+        Some(ReviewError::Budget(_) | ReviewError::Source(MergeSourceError::BudgetExceeded)) => ApiError::too_large(),
+        Some(ReviewError::Source(MergeSourceError::Cancelled)) => ApiError::from_status(Status::Timeout, false),
         // Source failure is not proof that two trees are equal. Never return
         // internal IDs, backend details, or a fabricated successful empty diff.
         _ => ApiError::unavailable(),
@@ -194,6 +225,24 @@ mod tests {
             let bytes = format!("{method} {target} HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n{extra}\r\n");
             let envelope = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
             assert_eq!(Request::parse(&envelope).is_ok_and(|request| request.is_some()), accepted);
+        }
+    }
+    #[test]
+    fn pr_selection_and_version_cannot_be_replaced_by_branch_or_object_fields() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let form = format!("object_format={}&expected_version=1", format.as_str());
+            let command = Command::parse_for(form.as_bytes(), format, Some(PullRequestNumber::FIRST)).unwrap();
+            assert_eq!(command.selection, ReviewSelection::PullRequest { number: PullRequestNumber::FIRST,
+                expected_version: Some(AggregateVersion::FIRST) });
+            assert_eq!(command.options.mode, ComparisonMode::MergeBase);
+            for extra in ["&before_ref=refs/heads/other", "&after_ref=refs/heads/other", "&pull_request=2",
+                "&source_oid=aaaa", "&expected_version=2", "&force=true"] {
+                assert!(Command::parse_for((form.clone() + extra).as_bytes(), format, Some(PullRequestNumber::FIRST)).is_err());
+            }
+            for version in ["0", "01", "-1", "18446744073709551616"] {
+                let form = format!("object_format={}&expected_version={version}", format.as_str());
+                assert!(Command::parse_for(form.as_bytes(), format, Some(PullRequestNumber::FIRST)).is_err());
+            }
         }
     }
 }
