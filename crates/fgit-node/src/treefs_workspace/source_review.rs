@@ -29,6 +29,16 @@ impl std::fmt::Display for NodeReviewRefusal {
     }
 }
 impl std::error::Error for NodeReviewRefusal {}
+impl NodeReviewRefusal {
+    // Transport adapters classify typed failures without parsing Debug text
+    // or exposing the private source owner and backend diagnostics.
+    pub(crate) fn is_snapshot_moved(&self) -> bool { matches!(self, Self::SnapshotMoved) }
+    pub(crate) fn is_version_moved(&self) -> bool { matches!(self, Self::VersionMoved) }
+    pub(crate) fn is_unavailable(&self) -> bool { matches!(self, Self::Unavailable) }
+    pub(crate) fn review_error(&self) -> Option<&ReviewError> {
+        match self { Self::Review(error) => Some(error.as_ref()), _ => None }
+    }
+}
 fn failed(error: ReviewError) -> NodeReviewRefusal { NodeReviewRefusal::Review(Box::new(error)) }
 fn source_failed(error: MergeSourceError) -> NodeReviewRefusal { failed(ReviewError::Source(error)) }
 

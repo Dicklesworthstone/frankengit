@@ -248,6 +248,8 @@ pub enum DiffError {
     InputBytesExceeded { limit: usize, actual: usize },
     UnitsExceeded { limit: usize, actual: usize },
     WorkExceeded { limit: usize },
+    /// Cooperative cancellation observed before a complete result was returned.
+    Cancelled,
     ArithmeticOverflow,
     MalformedScript,
 }
@@ -351,20 +353,30 @@ enum AtomicEdit {
     Insert { new: usize },
 }
 
-struct WorkBudget {
+struct WorkBudget<'a> {
     remaining: usize,
     limit: usize,
+    cancellation: Option<&'a dyn Fn() -> bool>,
 }
 
-impl WorkBudget {
+impl WorkBudget<'_> {
     const fn new(limit: usize) -> Self {
         Self {
             remaining: limit,
             limit,
+            cancellation: None,
         }
     }
 
+    fn checkpoint(&self) -> Result<(), DiffError> {
+        if self.cancellation.is_some_and(|cancelled| cancelled()) {
+            return Err(DiffError::Cancelled);
+        }
+        Ok(())
+    }
+
     fn consume(&mut self, amount: usize) -> Result<(), DiffError> {
+        self.checkpoint()?;
         self.remaining = self
             .remaining
             .checked_sub(amount)
@@ -376,6 +388,39 @@ impl WorkBudget {
 /// Compute a bounded deterministic diff. No algorithm allocates before its
 /// corresponding byte/unit/work limit has been checked.
 pub fn diff(old: &[u8], new: &[u8], options: DiffOptions) -> Result<DiffResult, DiffError> {
+    diff_inner(old, new, options, None)
+}
+
+/// Compute the same deterministic diff with cooperative cancellation.
+///
+/// The probe returns true when the caller's request is cancelled. It is checked
+/// before preparation, between preparation stages, at every algorithm work
+/// charge (including linear-space refinement), and before returning a result.
+/// Cancellation returns `DiffError::Cancelled`; no partial script escapes.
+///
+/// A false probe preserves the legacy algorithm, edit ordering and work-limit
+/// accounting. This synchronous API owns no tasks or external effects. Its
+/// checkpoints are not a wall-clock deadline: individual bounded tokenization,
+/// comparison, backtracking and materialization operations are not preempted.
+/// Callers remain responsible for draining their own request scope.
+pub fn diff_with_cancellation(
+    old: &[u8],
+    new: &[u8],
+    options: DiffOptions,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<DiffResult, DiffError> {
+    diff_inner(old, new, options, Some(is_cancelled))
+}
+
+fn diff_inner(
+    old: &[u8],
+    new: &[u8],
+    options: DiffOptions,
+    cancellation: Option<&dyn Fn() -> bool>,
+) -> Result<DiffResult, DiffError> {
+    let mut budget = WorkBudget::new(options.limits.max_work);
+    budget.cancellation = cancellation;
+    budget.checkpoint()?;
     let total_bytes = old
         .len()
         .checked_add(new.len())
@@ -386,6 +431,7 @@ pub fn diff(old: &[u8], new: &[u8], options: DiffOptions) -> Result<DiffResult, 
             actual: total_bytes,
         });
     }
+    budget.checkpoint()?;
     let total_units = unit_count(old, options.granularity)
         .checked_add(unit_count(new, options.granularity))
         .ok_or(DiffError::ArithmeticOverflow)?;
@@ -395,10 +441,12 @@ pub fn diff(old: &[u8], new: &[u8], options: DiffOptions) -> Result<DiffResult, 
             actual: total_units,
         });
     }
+    budget.checkpoint()?;
     let old_tokens = TokenStream::new(old, options.granularity);
+    budget.checkpoint()?;
     let new_tokens = TokenStream::new(new, options.granularity);
 
-    let mut budget = WorkBudget::new(options.limits.max_work);
+    budget.checkpoint()?;
     let (atoms, algorithm) = match options.profile {
         DiffProfile::MyersMinimal => minimal_atoms(
             &old_tokens,
@@ -438,11 +486,13 @@ pub fn diff(old: &[u8], new: &[u8], options: DiffOptions) -> Result<DiffResult, 
         ),
     };
     budget.consume(atoms.len())?;
+    let edits = materialize_edits(&old_tokens, &new_tokens, &atoms)?;
+    budget.checkpoint()?;
     Ok(DiffResult {
         profile: options.profile,
         granularity: options.granularity,
         algorithm,
-        edits: materialize_edits(&old_tokens, &new_tokens, &atoms)?,
+        edits,
     })
 }
 
