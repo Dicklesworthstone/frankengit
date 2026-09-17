@@ -48,6 +48,27 @@ pub enum RebasePreparationRefusal {
     InvalidInput(&'static str),
     BudgetExceeded,
 }
+impl RebasePreparationRefusal {
+    /// Transport classification without exposing backend details or object IDs.
+    pub fn is_snapshot_moved(&self) -> bool { matches!(self, Self::SnapshotMoved) }
+    pub fn is_tip_moved(&self) -> bool { matches!(self, Self::TipMoved) }
+    pub fn is_unavailable(&self) -> bool { matches!(self, Self::RefUnavailable) }
+    pub fn is_invalid_input(&self) -> bool { matches!(self, Self::InvalidInput(_)) }
+    pub fn is_resource_refusal(&self) -> bool {
+        matches!(self, Self::BudgetExceeded | Self::Source(MergeSourceError::BudgetExceeded)
+            | Self::Validation(ProjectionFailure::Unavailable(fgit_types::RefusalCode::ResourceBudgetExceeded)))
+    }
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Source(MergeSourceError::Cancelled)
+            | Self::Validation(ProjectionFailure::Unavailable(fgit_types::RefusalCode::CancellationInProgress)))
+    }
+    pub fn preparation_refusal(&self) -> Option<&RebaseError> {
+        match self { Self::Preparation(error) => Some(error), _ => None }
+    }
+    pub fn source_refusal(&self) -> Option<&MergeSourceError> {
+        match self { Self::Source(error) => Some(error), _ => None }
+    }
+}
 impl From<MergeSourceError> for RebasePreparationRefusal {
     fn from(error: MergeSourceError) -> Self {
         Self::Source(error)
