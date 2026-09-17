@@ -8,7 +8,7 @@ use fgit_forge::source_search::{SearchCompletion, SearchError, SearchLimits, Sou
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body, parse_tree};
 use fgit_treefs::{BaseView, ObjectSource, ObjectSourceError, PathPolicy, ReadGrant,
     TreeCapability, TreePath, WorkspaceId};
-use fgit_types::{ByteCount, GitHashAlgorithm as Format, GitOid, RefName};
+use fgit_types::{ByteCount, GitHashAlgorithm as Format, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_wire::visibility::RefVisibility;
 use crate::{ClosureSelectionSource, NodeRequestContext, OneNode, VerifiedFabricPackSource};
@@ -49,16 +49,41 @@ impl OneNode {
         &self, request: &NodeRequestContext, reference: &RefName,
         query: &SourceQuery, limits: SearchLimits,
     ) -> Result<SourceSearchReport, NodeWorkspaceRefusal> {
+        self.search_source_snapshot_local_in(request, reference, None, None, query, limits)
+            .await.map(|(_, report)| report)
+    }
+
+    /// The same repository-wide read with explicit snapshot preconditions and
+    /// the EXACT authority head that selected its source. A caller must already
+    /// own repository read permission; query text, paths and OIDs grant nothing.
+    /// A transport may expose this only after its own independent authorization.
+    ///
+    /// The pins are checked inside the single materialization used for the
+    /// entire scan. A separate preliminary head read would introduce a TOCTOU
+    /// gap and could attach the wrong token to the returned search results.
+    /// Missing/corrupt objects never become an empty successful search. A match
+    /// ceiling remains an explicit partial result, not a fabricated completion.
+    pub async fn search_source_snapshot_local_in(
+        &self, request: &NodeRequestContext, reference: &RefName,
+        expected_head: Option<RepositoryAuthorityHeadId>, expected_commit: Option<GitOid>,
+        query: &SourceQuery, limits: SearchLimits,
+    ) -> Result<(RepositoryAuthorityHeadId, SourceSearchReport), NodeWorkspaceRefusal> {
+        if expected_commit.is_some_and(|id| id.is_zero() || id.algorithm() != self.object_format) {
+            return Err(search_error(SearchError::InvalidObjectFormat));
+        }
         match self.object_format {
-            Format::Sha1 => self.search_local_format::<Sha1>(request, reference, query, limits).await,
-            Format::Sha256 => self.search_local_format::<Sha256>(request, reference, query, limits).await,
+            Format::Sha1 => self.search_local_format::<Sha1>(request, reference, expected_head,
+                expected_commit, query, limits).await,
+            Format::Sha256 => self.search_local_format::<Sha256>(request, reference, expected_head,
+                expected_commit, query, limits).await,
         }
     }
 
     async fn search_local_format<A: GitHashAlgorithm>(
         &self, request: &NodeRequestContext, reference: &RefName,
+        expected_head: Option<RepositoryAuthorityHeadId>, expected_commit: Option<GitOid>,
         query: &SourceQuery, limits: SearchLimits,
-    ) -> Result<SourceSearchReport, NodeWorkspaceRefusal> {
+    ) -> Result<(RepositoryAuthorityHeadId, SourceSearchReport), NodeWorkspaceRefusal> {
         limits.validate().map_err(search_error)?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         let selected = self.materialize_admission_in(request).await
@@ -67,6 +92,15 @@ impl OneNode {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
         let commit = *selected.snapshot().refs.get(reference).ok_or(NodeWorkspaceRefusal::RefUnavailable)?;
+        let head = selected.basis().id();
+        if expected_head.is_some_and(|expected| expected != head) {
+            return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
+                fgit_forge::source_browse::SourceBrowseError::SnapshotMoved)));
+        }
+        if expected_commit.is_some_and(|expected| expected != commit) {
+            return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
+                fgit_forge::source_browse::SourceBrowseError::CommitMoved)));
+        }
         let rcr = match selected.selected_closure().source() {
             ClosureSelectionSource::RepositoryCommit(rcr)
             | ClosureSelectionSource::CumulativeHistory { latest: rcr, .. } => rcr,
@@ -122,9 +156,9 @@ impl OneNode {
         if prefixes.len() > 4096 { return Err(search_error(SearchError::Budget("root scopes; narrow the query"))); }
         if !workspace_request_live(request) { return Err(search_error(SearchError::Cancelled)); }
         if prefixes.is_empty() {
-            return Ok(SourceSearchReport { repository: self.repository_id, source_rcr: rcr,
+            return Ok((head, SourceSearchReport { repository: self.repository_id, source_rcr: rcr,
                 source_commit: commit, source_tree: tree, matches: Vec::new(), completion: SearchCompletion::Complete,
-                files_selected: 0, files_read: 0, bytes_read: 0, bytes_searched: 0, non_regular_entries: 0 });
+                files_selected: 0, files_read: 0, bytes_read: 0, bytes_searched: 0, non_regular_entries: 0 }));
         }
         let metadata_bytes = commit_body.len() + tree_body.len();
         let bytes = ByteCount::try_new("source_search_reads", (READ_BYTES - metadata_bytes) as u64, READ_BYTES as u64)
@@ -142,7 +176,7 @@ impl OneNode {
         let result = search_source(&base, &source, &mut capability, 0, query, limits,
             &|| !workspace_request_live(request)).map_err(search_error);
         if !workspace_request_live(request) { return Err(search_error(SearchError::Cancelled)); }
-        result
+        result.map(|report| (head, report))
     }
 }
 
