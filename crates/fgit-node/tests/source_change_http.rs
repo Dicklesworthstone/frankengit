@@ -87,8 +87,9 @@ fn competing_remote_edits_keep_expected_old_and_stable_terminal_retries() {
         let (a, b) = std::thread::scope(|scope| {
             let first = Arc::clone(&barrier); let second = Arc::clone(&barrier);
             let client = &server.client;
-            let a = scope.spawn(|| { first.wait(); apply(client, base, &left, "editor-left", false) });
-            let b = scope.spawn(|| { second.wait(); apply(client, base, &right, "editor-right", true) });
+            let left = &left; let right = &right;
+            let a = scope.spawn(move || { first.wait(); apply(client, base, left, "editor-left", false) });
+            let b = scope.spawn(move || { second.wait(); apply(client, base, right, "editor-right", true) });
             (a.join().unwrap(), b.join().unwrap())
         }); // 1, 2
         let (winner, winner_key, winner_reply, loser) = match (a.status, b.status) {
