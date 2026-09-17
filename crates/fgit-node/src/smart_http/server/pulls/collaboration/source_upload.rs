@@ -90,7 +90,7 @@ mod tests {
         }
     }
     #[test]
-    fn_source_uploads_require_one_nonempty_payload_of_the_selected_kind() {
+    fn source_uploads_require_one_nonempty_payload_of_the_selected_kind() {
         for bytes in [input("bundle", b"data", false), input("patch", b"", false), input("file_0", b"data", true)] {
             assert!(source_upload(&bytes, "source", SourceUploadKind::Patch, &mut || true).is_err());
         }
@@ -110,5 +110,14 @@ mod tests {
         let mut trailing = bytes.clone(); trailing.extend_from_slice(b"NEXT");
         assert!(source_upload(&trailing, "source", SourceUploadKind::Patch, &mut || true).is_err());
         assert!(source_upload(&bytes, "source", SourceUploadKind::Patch, &mut || false).is_err());
+    }
+    #[test]
+    fn payload_profiles_cannot_widen_native_or_http_envelopes() {
+        assert!(SourceUploadKind::Patch.maximum() < SourceUploadKind::Bundle.maximum());
+        assert_eq!(SourceUploadKind::Bundle.maximum(), multipart::MAX_UPLOAD_BYTES);
+        let limits = HttpLimits { max_body_bytes: 2, ..HttpLimits::default() };
+        assert!(read_source_upload(&mut std::io::Cursor::new(b"abc"), BodyFraming::ContentLength(3), limits, SourceUploadKind::Patch).is_err());
+        assert!(!SourceUploadKind::Patch.media("application/x-git-bundle"));
+        assert!(!SourceUploadKind::Bundle.media("text/x-diff"));
     }
 }
