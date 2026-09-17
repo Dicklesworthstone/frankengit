@@ -162,7 +162,7 @@ mod tests {
         assert!(out.hex(&vec![0xff; 32_000]).is_err());
     }
     #[test]
-    fn_empty_or_non_atomic_receipts_cannot_claim_tag_publication() {
+    fn empty_or_non_atomic_receipts_cannot_claim_tag_publication() {
         let result = AdmissionResult { session: fgit_admission::SessionMapping { atomic: false, tx_ids: Vec::new() }, commands: Vec::new() };
         assert!(terminal(&result).unwrap_err().outcome_unknown);
     }
