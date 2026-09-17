@@ -6,6 +6,8 @@
 //! of how the native receive bytes arrived. The legacy daemon is not redirected
 //! by this module: callers must select the new session API explicitly.
 
+mod bounded_intake;
+
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 
@@ -95,8 +97,8 @@ impl OneNode {
     /// and the exact node-owned materialization authorizing external pack bases.
     /// Principal, retry key, policy and object-format authority are never inferred
     /// from PACK bytes or transport headers. The native machine enforces its
-    /// immutable ReceiveContext limits; this method does not buffer a second
-    /// request copy or synthesize validation receipts.
+    /// immutable ReceiveContext limits; this method feeds at most 16 KiB between
+    /// cancellation checkpoints and introduces no second whole-request copy.
     ///
     /// Authentication, quota, cell intake, format and cancellation checks precede
     /// untrusted-byte retention. Production quarantine validates and stages the
@@ -152,7 +154,7 @@ impl OneNode {
             materialized, receive_context.limits.pack.clone(), parse_limits,
         ).map_err(ReceiveError::AuthoritativeRefusal)?;
         let mut receive = ReceivePack::new(receive_context)?;
-        receive.push_bytes(input)?;
+        bounded_intake::push(&mut receive, input, &mut live)?;
         let mut handoff = ProductionReceiveQuarantineHandoff::new(
             validator, materialized.basis().clone(),
         );
