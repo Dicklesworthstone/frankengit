@@ -114,14 +114,7 @@ impl CredentialSource {
     }
 
     pub fn authenticate(&self, authorization: Option<&str>) -> Result<Grant, CredentialFailure> {
-        let (scheme, token) = authorization.and_then(|value| value.split_once(' '))
-            .ok_or(CredentialFailure::UnknownCredential)?;
-        if !scheme.eq_ignore_ascii_case("bearer") || token.len() != 64
-            || !token.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(CredentialFailure::UnknownCredential);
-        }
-        let candidate = sha256_digest(token.as_bytes());
+        let candidate = credential_digest(authorization)?;
         match self {
             Self::Static { digest, principal } => {
                 if !verify_mac(digest, &candidate) {
@@ -149,6 +142,88 @@ impl CredentialSource {
             }
         }
     }
+}
+
+// Basic transports the existing token as the password for ordinary Git
+// credential helpers. The username is syntax only: it MUST NOT select a
+// principal or widen a grant. This remains the loopback/TLS-proxy profile;
+// base64 does not protect a credential on an unencrypted network.
+const MAX_BASIC_USERNAME_BYTES: usize = 256;
+const MAX_BASIC_BYTES: usize = MAX_BASIC_USERNAME_BYTES + 1 + 64;
+
+fn credential_digest(authorization: Option<&str>) -> Result<[u8; 32], CredentialFailure> {
+    let (scheme, value) = authorization.and_then(|value| value.split_once(' '))
+        .ok_or(CredentialFailure::UnknownCredential)?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        return token_digest(value.as_bytes());
+    }
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return Err(CredentialFailure::UnknownCredential);
+    }
+    let mut decoded = [0_u8; MAX_BASIC_BYTES];
+    let length = decode_basic(value.as_bytes(), &mut decoded)
+        .ok_or(CredentialFailure::UnknownCredential)?;
+    let user_pass = &decoded[..length];
+    let separator = user_pass.iter().position(|byte| *byte == b':')
+        .ok_or(CredentialFailure::UnknownCredential)?;
+    if separator == 0 || separator > MAX_BASIC_USERNAME_BYTES
+        || user_pass[..separator].iter().any(u8::is_ascii_control)
+        || std::str::from_utf8(&user_pass[..separator]).is_err()
+    {
+        return Err(CredentialFailure::UnknownCredential);
+    }
+    token_digest(&user_pass[separator + 1..])
+}
+
+fn token_digest(token: &[u8]) -> Result<[u8; 32], CredentialFailure> {
+    if token.len() != 64
+        || !token.iter().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err(CredentialFailure::UnknownCredential);
+    }
+    Ok(sha256_digest(token))
+}
+
+// A fixed-size RFC 4648 decoder for the bounded Basic user-pass field only.
+// Reject truncated input, whitespace, URL-safe alphabets, internal/extra
+// padding and nonzero unused bits. No allocation depends on hostile input.
+fn decode_basic(input: &[u8], output: &mut [u8; MAX_BASIC_BYTES]) -> Option<usize> {
+    if input.is_empty() || input.len() > MAX_BASIC_BYTES.div_ceil(3) * 4
+        || !input.len().is_multiple_of(4)
+    {
+        return None;
+    }
+    fn sextet(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut written = 0;
+    for (index, quartet) in input.chunks_exact(4).enumerate() {
+        let a = sextet(quartet[0])?;
+        let b = sextet(quartet[1])?;
+        let last = index + 1 == input.len() / 4;
+        let (c, d, count) = match (quartet[2], quartet[3]) {
+            (b'=', b'=') if last && b & 15 == 0 => (0, 0, 1),
+            (c, b'=') if last => {
+                let c = sextet(c)?;
+                if c & 3 != 0 { return None; }
+                (c, 0, 2)
+            }
+            (c, d) => (sextet(c)?, sextet(d)?, 3),
+        };
+        if written + count > output.len() { return None; }
+        output[written] = (a << 2) | (b >> 4);
+        if count > 1 { output[written + 1] = (b << 4) | (c >> 2); }
+        if count > 2 { output[written + 2] = (c << 6) | d; }
+        written += count;
+    }
+    Some(written)
 }
 
 fn safe_metadata(metadata: &Metadata) -> Result<(), CredentialFailure> {
@@ -301,6 +376,111 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         }
     }
+    fn basic(user_pass: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut encoded = String::from("Basic ");
+        for chunk in user_pass.chunks(3) {
+            let first = chunk[0];
+            let second = chunk.get(1).copied().unwrap_or(0);
+            let third = chunk.get(2).copied().unwrap_or(0);
+            encoded.push(char::from(ALPHABET[usize::from(first >> 2)]));
+            encoded.push(char::from(ALPHABET[usize::from(((first & 3) << 4) | (second >> 4))]));
+            encoded.push(if chunk.len() > 1 {
+                char::from(ALPHABET[usize::from(((second & 15) << 2) | (third >> 6))])
+            } else { '=' });
+            encoded.push(if chunk.len() > 2 {
+                char::from(ALPHABET[usize::from(third & 63)])
+            } else { '=' });
+        }
+        encoded
+    }
+
+    #[test]
+    fn basic_decoder_matches_rfc_vectors_and_checks_all_padding_forms() {
+        let mut output = [0; MAX_BASIC_BYTES];
+        for (encoded, decoded) in [
+            ("Zg==", "f"), ("Zm8=", "fo"), ("Zm9v", "foo"),
+            ("Zm9vYg==", "foob"), ("Zm9vYmE=", "fooba"), ("Zm9vYmFy", "foobar"),
+            ("QWxhZGRpbjpvcGVuIHNlc2FtZQ==", "Aladdin:open sesame"),
+        ] {
+            let length = decode_basic(encoded.as_bytes(), &mut output).unwrap();
+            assert_eq!(&output[..length], decoded.as_bytes());
+        }
+        for invalid in ["", "Zg", "Zg=", "Zg===", "Zh==", "Zm9=", "Zg==AAAA",
+            "Zm=8", "=m9v", "Zm9v\n", "Zm9v YmFy", "____", "----", "===="]
+        {
+            assert!(decode_basic(invalid.as_bytes(), &mut output).is_none());
+        }
+        // Exercise every byte value and every possible final-quantum length.
+        for length in 1..=MAX_BASIC_BYTES {
+            let original: Vec<u8> = (0..length).map(|index| index.to_le_bytes()[0]).collect();
+            let encoded = basic(&original);
+            let size = decode_basic(encoded[6..].as_bytes(), &mut output).unwrap();
+            assert_eq!(&output[..size], original);
+        }
+        assert!(decode_basic(basic(&vec![b'x'; MAX_BASIC_BYTES + 1])[6..].as_bytes(), &mut output).is_none());
+    }
+
+    #[test]
+    fn basic_and_bearer_select_the_same_token_not_the_supplied_username() {
+        let token = "a".repeat(64);
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let source = CredentialSource::Static { digest: sha256_digest(token.as_bytes()), principal };
+        for username in ["git".to_owned(), "admin".to_owned(), PrincipalId::from_bytes([9; 16]).to_string(),
+            "u".repeat(MAX_BASIC_USERNAME_BYTES), "utilisateur-é".to_owned()]
+        {
+            let authorization = basic(format!("{username}:{token}").as_bytes());
+            let selected = source.authenticate(Some(&authorization)).unwrap();
+            assert_eq!(selected.principal, principal);
+            assert!(selected.permits(Service::UploadPack) && selected.permits(Service::ReceivePack));
+            assert!(!selected.permits_issues(false) && !selected.permits_issues(true));
+            assert!(!selected.permits_pulls(false) && !selected.permits_pulls(true));
+            assert!(!selected.permits_reviews(false) && !selected.permits_reviews(true));
+            assert!(!selected.permits_outcomes() && !selected.permits_reviewed_merge());
+            assert_eq!(credential_digest(Some(&authorization)), credential_digest(Some(&format!("bEaReR {token}"))));
+            assert!(source.authenticate(Some(&authorization.replacen("Basic", "bAsIc", 1))).is_ok());
+        }
+        for user_pass in [format!(":{token}"), format!("{}:{token}", "u".repeat(MAX_BASIC_USERNAME_BYTES + 1)),
+            format!("user\n:{token}"), format!("user\0:{token}"), format!("user\u{7f}:{token}"),
+            format!("user:{token}:extra"), format!("user:{}", "a".repeat(63)),
+            format!("user:{}", "A".repeat(64)), token.clone(), format!("user:{}", "b".repeat(64))]
+        {
+            assert!(matches!(source.authenticate(Some(&basic(user_pass.as_bytes()))), Err(CredentialFailure::UnknownCredential)));
+        }
+        assert!(matches!(source.authenticate(Some(&basic(&[0xff, b':', b'a']))), Err(CredentialFailure::UnknownCredential)));
+        for authorization in [None, Some(""), Some("Basic"), Some("Digest token"), Some("Basic  Zg=="), Some("Bearer invalid")] {
+            assert!(matches!(source.authenticate(authorization), Err(CredentialFailure::UnknownCredential)));
+        }
+    }
+
+    #[test]
+    fn basic_file_grants_preserve_scopes_rotation_revocation_and_incarnation_binding() {
+        let path = std::env::temp_dir().join(format!("fg-http-basic-grants-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let source = CredentialSource::File { path: path.clone(), binding: binding() };
+        let first = basic(format!("admin:{}", "a".repeat(64)).as_bytes());
+        let rotated = basic(format!("other:{}", "b".repeat(64)).as_bytes());
+        private_write(&path, (header() + &row(&"a".repeat(64), 4, "read")).as_bytes());
+        let selected = source.authenticate(Some(&first)).unwrap();
+        assert_eq!(selected.principal, PrincipalId::from_bytes([4; 16]));
+        assert!(selected.permits(Service::UploadPack));
+        assert!(!selected.permits(Service::ReceivePack) && !selected.permits_reviewed_merge());
+        let mut foreign = binding();
+        foreign.incarnation = RepositoryIncarnationId::from_bytes([9; 16]);
+        assert!(matches!(CredentialSource::File { path: path.clone(), binding: foreign }.authenticate(Some(&first)), Err(CredentialFailure::WrongRepository)));
+        private_write(&path, (header() + &row(&"b".repeat(64), 4, "outcomes-read")).as_bytes());
+        assert!(matches!(source.authenticate(Some(&first)), Err(CredentialFailure::UnknownCredential)));
+        let recovery = source.authenticate(Some(&rotated)).unwrap();
+        assert_eq!(recovery.principal, selected.principal);
+        assert!(recovery.permits_outcomes());
+        assert!(!recovery.permits(Service::UploadPack) && !recovery.permits(Service::ReceivePack));
+        private_write(&path, b"malformed");
+        assert!(matches!(source.authenticate(Some(&rotated)), Err(CredentialFailure::InvalidFile)));
+        private_write(&path, header().as_bytes());
+        assert!(matches!(source.authenticate(Some(&rotated)), Err(CredentialFailure::UnknownCredential)));
+        fs::remove_file(path).unwrap();
+        assert!(matches!(source.authenticate(Some(&rotated)), Err(CredentialFailure::Unavailable)));
+    }
+
     #[test]
     fn scopes_are_explicit_and_receive_does_not_imply_fetch() {
         let text = header() + &row(&"a".repeat(64), 4, "read")
