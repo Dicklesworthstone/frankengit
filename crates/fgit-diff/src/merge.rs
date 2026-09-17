@@ -12,7 +12,8 @@ use std::{
 
 use crate::{
     CommitGraph, DiffError, DiffHunk, DiffOptions, DiffProfile, Edit, MergeBaseError,
-    MergeBaseLimits, MergeBaseResult, Span, TreeEntry, TreeMode, diff, merge_bases_all,
+    MergeBaseLimits, MergeBaseResult, Span, TreeEntry, TreeMode, diff_with_cancellation,
+    merge_bases_all,
 };
 
 /// Versioned selection rules for a merge proposal.
@@ -185,7 +186,10 @@ pub enum ContentMergeError {
 
 impl From<DiffError> for ContentMergeError {
     fn from(error: DiffError) -> Self {
-        Self::Diff(error)
+        match error {
+            DiffError::Cancelled => Self::Cancelled,
+            error => Self::Diff(error),
+        }
     }
 }
 
@@ -370,9 +374,15 @@ where
         return binary_conflict(base, ours, theirs, options, receipt);
     }
 
-    let ours_diff = diff(base, ours, options.profile.diff_options)?;
+    // Forward the same request probe into both expensive diff computations.
+    // A check only between them cannot interrupt Myers/LCS/anchor work.
+    let is_cancelled = || cancellation.is_cancelled();
+    let ours_diff =
+        diff_with_cancellation(base, ours, options.profile.diff_options, &is_cancelled)?;
     check_cancelled(cancellation)?;
-    let theirs_diff = diff(base, theirs, options.profile.diff_options)?;
+    let theirs_diff =
+        diff_with_cancellation(base, theirs, options.profile.diff_options, &is_cancelled)?;
+    check_cancelled(cancellation)?;
     let ours_changes = changes_from_hunks(ours_diff.hunks(), options.limits.max_hunks)?;
     let theirs_changes = changes_from_hunks(theirs_diff.hunks(), options.limits.max_hunks)?;
     merge_change_lists(
