@@ -9,6 +9,7 @@ mod refs;
 mod tags;
 mod initial;
 mod history;
+mod review;
 
 use std::io::{self, Read, Write};
 use fgit_authority::IdempotencyKey;
@@ -33,9 +34,13 @@ enum RequestKind<'a> {
     Tags(tags::Request<'a>),
     Initial(initial::Request<'a>),
     History(history::Request<'a>),
+    Review(review::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = review::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::Review(request)));
+        }
         if let Some(request) = history::Request::parse(envelope)? {
             return Ok(Self(RequestKind::History(request)));
         }
@@ -55,7 +60,7 @@ impl<'a> Request<'a> {
     }
     pub(super) fn is_mutation(&self) -> bool {
         match &self.0 {
-            RequestKind::Read(_) | RequestKind::History(_) => false,
+            RequestKind::Read(_) | RequestKind::History(_) | RequestKind::Review(_) => false,
             RequestKind::Change(request) => request.is_mutation(),
             RequestKind::Refs(request) => request.is_mutation(),
             RequestKind::Tags(request) => request.is_mutation(),
@@ -70,6 +75,7 @@ impl<'a> Request<'a> {
             RequestKind::Tags(request) => request.route(),
             RequestKind::Initial(request) => request.repository_route,
             RequestKind::History(request) => request.repository_route,
+            RequestKind::Review(request) => request.repository_route,
         }
     }
 }
@@ -115,6 +121,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
+        RequestKind::Review(request) => return review::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::History(request) => return history::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Initial(request) => return initial::execute(node, request, session, framing, reader, http, maximum_response),
         RequestKind::Tags(request) => return tags::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
@@ -209,6 +216,7 @@ mod tests {
     fn branch_tag_and_candidate_mutations_acquire_the_same_write_semantics() {
         for (action, media, mutation) in [("tree", "application/x-www-form-urlencoded", false),
             ("log", "application/x-www-form-urlencoded", false),
+            ("diff", "application/x-www-form-urlencoded", false),
             ("refs", "application/x-www-form-urlencoded", false),
             ("branches/create", "application/x-www-form-urlencoded", true),
             ("branches/update", "application/x-www-form-urlencoded", true),
