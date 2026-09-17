@@ -324,7 +324,7 @@ product.
 - Phase 1 (all agents, parallel): claim the assigned bead with
   `br update <id> --claim --actor <AgentName>`, write the real code AND its
   real tests in the same bead, run at most the syntax gate
-  `RCH_CARGO_WRAPPER_BYPASS=1 cargo check -p <crate>`, commit immediately,
+  `cargo check -p <crate>` (offloaded; do not add the bypass), commit immediately,
   move the bead to `batch_pending` with `--transition-comment` only when
   substantively complete (code + tests + bead-linked commit + every
   acceptance line mapped to a concrete test + no known defect).
@@ -342,8 +342,15 @@ product.
   path, self-closes, and stale gate results.
 - `batch_pending` earns no capability credit; it frees claim capacity.
   Commit rate is a saturation signal, never a KPI (SM-1/RH-4).
-- Builds run locally (128 cores): always set `RCH_CARGO_WRAPPER_BYPASS=1` so
-  the rch offload wrapper is bypassed.
+- Builds OFFLOAD by default: do **not** set `RCH_CARGO_WRAPPER_BYPASS=1`.
+  (2026-09-17) "128 cores, just build locally" does not hold with ~16 panes: each
+  local `cargo` also spawns a `rust-lld` whose thread pool is sized to nproc, so
+  six concurrent links alone put 150+ runnable threads on 128 CPUs. Measured on
+  trj that day: load 148, zero idle CPUs, and `execve` 29x slower than on css
+  (8221us vs 288us) — every keystroke, prompt and `ssh trj <cmd>` queued behind it.
+  The rch shim fails OPEN, so if the fleet is down the build still runs locally;
+  you do not need to force it. Use the bypass only for the two narrow cases
+  below.
 - Every pane uses its OWN target directory: cargo serializes on
   `target/debug/.cargo-lock`, so sixteen panes sharing one `target/` queue behind
   each other for tens of minutes. Prefix every cargo invocation with
