@@ -29,6 +29,8 @@ pub(crate) use sessions::NodeWorkspaceSessions;
 pub use sessions::{MergeWorkspaceReceipt, WorkspaceShutdownBlocked};
 #[cfg(target_os = "linux")]
 mod trusted_tool;
+#[cfg(target_os = "linux")]
+mod trusted_workflow;
 
 use crate::{
     AdmissionMaterializationRefusal, AuthoritySelectedClosure, ClosureSelectionSource,
