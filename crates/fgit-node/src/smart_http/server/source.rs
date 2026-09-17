@@ -1,11 +1,12 @@
-//! Repository source reads, branch lifecycle and exact candidate operations.
-//! Read grants never imply publication. Branch mutation and bundle application
-//! require receive scope and the explicit Git-write deployment switch.
+//! Repository source reads, ref lifecycle and exact candidate operations.
+//! Read grants never imply publication. Branch/tag mutation and bundle
+//! application require receive scope and the explicit Git-write switch.
 
 mod request;
 mod output;
 mod changes;
 mod refs;
+mod tags;
 
 use std::io::{self, Read, Write};
 use fgit_authority::IdempotencyKey;
@@ -27,9 +28,13 @@ enum RequestKind<'a> {
     Read(request::Request<'a>),
     Change(changes::Request<'a>),
     Refs(refs::Request<'a>),
+    Tags(tags::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = tags::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::Tags(request)));
+        }
         if let Some(request) = refs::Request::parse(envelope)? {
             return Ok(Self(RequestKind::Refs(request)));
         }
@@ -43,6 +48,7 @@ impl<'a> Request<'a> {
             RequestKind::Read(_) => false,
             RequestKind::Change(request) => request.is_mutation(),
             RequestKind::Refs(request) => request.is_mutation(),
+            RequestKind::Tags(request) => request.is_mutation(),
         }
     }
     fn route(&self) -> &str {
@@ -50,6 +56,7 @@ impl<'a> Request<'a> {
             RequestKind::Read(request) => request.repository_route,
             RequestKind::Change(request) => request.repository_route,
             RequestKind::Refs(request) => request.route(),
+            RequestKind::Tags(request) => request.route(),
         }
     }
 }
@@ -91,6 +98,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
+        RequestKind::Tags(request) => return tags::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Refs(request) => return refs::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Change(request) => return changes::execute(node, request, session, framing, reader, http, maximum_response),
         RequestKind::Read(request) => request,
@@ -179,13 +187,17 @@ mod tests {
         }
     }
     #[test]
-    fn branch_mutations_and_candidate_apply_acquire_the_same_write_semantics() {
+    fn branch_tag_and_candidate_mutations_acquire_the_same_write_semantics() {
         for (action, media, mutation) in [("tree", "application/x-www-form-urlencoded", false),
             ("refs", "application/x-www-form-urlencoded", false),
             ("branches/create", "application/x-www-form-urlencoded", true),
             ("branches/update", "application/x-www-form-urlencoded", true),
             ("branches/delete", "application/x-www-form-urlencoded", true),
             ("branches/rename", "application/x-www-form-urlencoded", true),
+            ("tags/lightweight", "application/x-www-form-urlencoded", true),
+            ("tags/annotated", "application/x-www-form-urlencoded", true),
+            ("tags/delete", "application/x-www-form-urlencoded", true),
+            ("tags/inspect", "application/x-www-form-urlencoded", false),
             ("prepare", "multipart/form-data; boundary=x", false),
             ("inspect", "multipart/form-data; boundary=x", false),
             ("apply", "multipart/form-data; boundary=x", true)] {
