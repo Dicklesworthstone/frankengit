@@ -57,21 +57,20 @@
 //!
 //! # What "end to end" does and does not mean here
 //!
-//! The wire test drives `serve_git_daemon_upload_pack`, which is the exact
-//! function `fg serve` calls at `src/lib.rs:6266` after materializing, over
-//! in-memory streams instead of a TCP socket, answering the exact `ls-refs`
-//! command `git ls-remote` sends over protocol v2. What is NOT covered is the
-//! socket and the CLI: **`fg` has no command that stores a hidden-ref policy**
-//! (its usage line offers `init`, `import`, `doctor`, `export`, `serve` and
-//! nothing else), so a shell-level `git ls-remote` against `fg serve` cannot be
-//! made to hide anything today. These tests stage the policy through the same
-//! authority API a configuration command would have to use. That gap is
-//! recorded on the bead rather than papered over with a fixture.
+//! The upload wire test drives `serve_git_daemon_upload_pack` over in-memory
+//! streams, answering the `ls-refs` command `git ls-remote` sends over protocol
+//! v2. The receive test additionally drives real TCP sessions against
+//! `OneNode::serve_git_daemon_once_with_limits`, checking both advertisement
+//! visibility and durable publication. These tests stage the stored policy
+//! through the authority API, not a CLI configuration command; they do not
+//! establish shell-level CLI coverage.
 
 use std::convert::Infallible;
-use std::io::Cursor;
+use std::io::{self, Cursor, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::Duration;
 
 use fgit_admission::AdmissionLimits;
@@ -88,7 +87,7 @@ use fgit_codec::{
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest};
 use fgit_git_object::ParseLimits;
 use fgit_node::{
-    GitDaemonSessionOutcome, LoopbackReceiveSession, NodeConfig, OneNode,
+    GitDaemonSessionOutcome, GitDaemonSessionTimeout, LoopbackReceiveSession, NodeConfig, OneNode,
     serve_git_daemon_upload_pack,
 };
 use fgit_runtime::{BudgetClass, RuntimeProfile};
@@ -868,6 +867,152 @@ fn a_stored_policy_refuses_a_push_beneath_the_hidden_prefix_and_admits_its_twin(
     );
 
     node.shutdown().expect("the node quiesces");
+}
+
+#[test]
+fn a_stored_policy_filters_live_daemon_receive_and_refuses_hidden_publication() {
+    fn read_through_flush(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+        let mut collected = Vec::new();
+        loop {
+            let mut header = [0_u8; 4];
+            stream.read_exact(&mut header)?;
+            collected.extend_from_slice(&header);
+            if &header == b"0000" {
+                return Ok(collected);
+            }
+            let text = std::str::from_utf8(&header).map_err(io::Error::other)?;
+            let length = usize::from_str_radix(text, 16).map_err(io::Error::other)?;
+            if length < 4 || collected.len() + length > 64 * 1024 {
+                return Err(io::Error::other("invalid or oversized fixture response"));
+            }
+            let start = collected.len();
+            collected.resize(start + length - 4, 0);
+            stream.read_exact(&mut collected[start..])?;
+        }
+    }
+
+    fn session(scratch: &ScratchDirectory, target: &[u8]) -> io::Result<(Vec<u8>, Vec<u8>)> {
+        let timeout = Duration::from_secs(30);
+        let oid = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, REFUSED_BLOB);
+        let target = std::str::from_utf8(target).map_err(io::Error::other)?;
+        // Both pushes carry the same valid blob; only the destination differs.
+        let mut body = frame(format!("{ZERO_OID} {oid} {target}\0report-status").as_bytes());
+        body.extend_from_slice(b"0000");
+        body.extend_from_slice(&blob_pack(&[REFUSED_BLOB]));
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        // Queue the connection before starting the server, so accept cannot be
+        // stranded by a client-side connect failure.
+        let mut client = TcpStream::connect_timeout(&listener.local_addr()?, timeout)?;
+        client.set_read_timeout(Some(timeout))?;
+        client.set_write_timeout(Some(timeout))?;
+        let configuration = config(scratch.0.clone())
+            .with_git_daemon_receive_principal(PrincipalId::from_bytes([0x73; 16]))
+            .with_git_daemon_session_timeout(
+                GitDaemonSessionTimeout::try_new(timeout).map_err(io::Error::other)?,
+            );
+        let mut node = OneNode::open_existing(configuration).map_err(io::Error::other)?;
+        if let Err(error) = node.bring_into_service(HeadGeneration::FIRST) {
+            let shutdown = node.shutdown();
+            shutdown.map_err(io::Error::other)?;
+            return Err(io::Error::other(error));
+        }
+        let mut greeting = b"git-receive-pack ".to_vec();
+        greeting.extend_from_slice(node.git_daemon_repository_path().as_bytes());
+        greeting.extend_from_slice(b"\0host=loopback\0");
+        let greeting = frame(&greeting);
+        let server = thread::spawn(move || {
+            // Even a server panic must release the repository before the test
+            // observes it; client errors below likewise cannot bypass joining.
+            let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                node.serve_git_daemon_once_with_limits(&listener, WireLimits::default())
+                    .map(|_| ())
+                    .map_err(io::Error::other)
+            }));
+            let shutdown = node.shutdown().map_err(io::Error::other);
+            shutdown?;
+            served.map_err(|_| io::Error::other("receive daemon panicked"))?
+        });
+        let exchange = (|| {
+            client.write_all(&greeting)?;
+            let advertisement = read_through_flush(&mut client)?;
+            client.write_all(&body)?;
+            let report = read_through_flush(&mut client)?;
+            Ok((advertisement, report))
+        })();
+        let _ = client.shutdown(Shutdown::Both);
+        drop(client);
+        let served = server.join().map_err(|_| io::Error::other("server thread panicked"));
+        // All assertions in the caller happen after socket cleanup, join, and
+        // node shutdown, including when a read or write has timed out.
+        served??;
+        exchange
+    }
+
+    let (without_scratch, without_node) = open_repository(None);
+    without_node.shutdown().expect("the no-policy fixture quiesces");
+    let without = session(&without_scratch, REFUSED_REF)
+        .expect("the no-policy daemon completes a valid push");
+
+    let (scratch, node) = open_repository(Some(&[HIDE_RULE]));
+    node.shutdown().expect("the stored-policy fixture quiesces");
+    let refused = session(&scratch, REFUSED_REF)
+        .expect("the daemon reports the hidden target refusal");
+    let admitted = session(&scratch, ADMITTED_REF)
+        .expect("the same daemon policy admits the permitted twin");
+
+    let mut node = OneNode::open_existing(config(scratch.0.clone()))
+        .expect("the daemon's persisted head reopens");
+    let refs = node
+        .bring_into_service(HeadGeneration::FIRST)
+        .map_err(|error| error.to_string())
+        .and_then(|()| {
+            node.runtime()
+                .block_on(node.materialize_admission_in(&node.request_context()))
+                .map(|materialized| materialized.snapshot().refs.clone())
+                .map_err(|error| error.to_string())
+        });
+    let shutdown = node.shutdown();
+    shutdown.expect("the verifying node quiesces before assertions");
+    let refs = refs.expect("the reopened authenticated head materializes");
+
+    let hidden_oid_text = hidden_oid().to_string();
+    let visible_oid_text = visible_oid().to_string();
+    assert!(contains(&without.0, HIDDEN_REF));
+    assert!(contains(&without.0, hidden_oid_text.as_bytes()));
+    assert!(contains(&without.0, VISIBLE_REF));
+    assert!(contains(&without.0, visible_oid_text.as_bytes()));
+    for advertisement in [&refused.0, &admitted.0] {
+        assert!(!contains(advertisement, HIDDEN_REF));
+        assert!(!contains(advertisement, hidden_oid_text.as_bytes()));
+        assert!(contains(advertisement, VISIBLE_REF));
+        assert!(contains(advertisement, visible_oid_text.as_bytes()));
+        assert!(contains(advertisement, b"report-status"));
+    }
+
+    let refused_name = std::str::from_utf8(REFUSED_REF).expect("ASCII fixture ref");
+    let admitted_name = std::str::from_utf8(ADMITTED_REF).expect("ASCII fixture ref");
+    assert!(contains(&without.1, &frame(b"unpack ok\n")));
+    assert!(contains(&without.1, &frame(format!("ok {refused_name}\n").as_bytes())));
+    assert!(contains(&refused.1, &frame(b"unpack ok\n")));
+    assert!(contains(&refused.1, format!("ng {refused_name} ").as_bytes()));
+    assert!(!contains(&refused.1, &frame(format!("ok {refused_name}\n").as_bytes())));
+    assert!(contains(&admitted.1, &frame(b"unpack ok\n")));
+    assert!(contains(&admitted.1, &frame(format!("ok {admitted_name}\n").as_bytes())));
+    for report in [&refused.1, &admitted.1] {
+        // Echoing REFUSED_REF is not disclosure: the client supplied it. The
+        // existing hidden name and its current object id were never supplied.
+        assert!(!contains(report, HIDDEN_REF));
+        assert!(!contains(report, hidden_oid_text.as_bytes()));
+    }
+
+    let hidden = fgit_types::RefName::try_new(HIDDEN_REF).expect("valid fixture ref");
+    let attempted = fgit_types::RefName::try_new(REFUSED_REF).expect("valid fixture ref");
+    let allowed = fgit_types::RefName::try_new(ADMITTED_REF).expect("valid fixture ref");
+    assert_eq!(refs.get(&hidden), Some(&hidden_oid()));
+    assert!(!refs.contains_key(&attempted));
+    let expected = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, REFUSED_BLOB);
+    assert_eq!(refs.get(&allowed), Some(&expected));
 }
 
 /// Ref names as lossy text, so an assertion failure is readable.
