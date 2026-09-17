@@ -3,6 +3,7 @@
 //! never gain authority from each other or from request text.
 
 mod collaboration;
+mod diff;
 mod inspection;
 mod output;
 mod preparation;
@@ -33,9 +34,13 @@ pub(super) enum Request<'a> {
     Collaboration(collaboration::Request<'a>),
     Preparation(preparation::Request<'a>),
     Inspection(inspection::Request<'a>),
+    Diff(diff::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
+        if let Some(request) = diff::Request::parse(envelope)? {
+            return Ok(Some(Self::Diff(request)));
+        }
         if let Some(request) = inspection::Request::parse(envelope)? {
             return Ok(Some(Self::Inspection(request)));
         }
@@ -50,12 +55,12 @@ impl<'a> Request<'a> {
     pub(super) fn is_mutation(&self) -> bool {
         match self { Self::Metadata(request) => request.is_mutation(),
             Self::Collaboration(request) => request.is_mutation(),
-            Self::Preparation(_) | Self::Inspection(_) => false }
+            Self::Preparation(_) | Self::Inspection(_) | Self::Diff(_) => false }
     }
-    /// Preparation and inspection spend bounded work on a POST body, but
-    /// neither acquires transaction responsibility or a retry-key binding.
+    /// Preparation, inspection and diff spend bounded work on a POST body,
+    /// but acquire neither transaction responsibility nor a retry-key binding.
     pub(super) fn accepts_body(&self) -> bool {
-        self.is_mutation() || matches!(self, Self::Preparation(_) | Self::Inspection(_))
+        self.is_mutation() || matches!(self, Self::Preparation(_) | Self::Inspection(_) | Self::Diff(_))
     }
 }
 
@@ -76,6 +81,7 @@ pub(super) fn authenticate(
     request: &Request<'_>, envelope: &Envelope<'_>, raw_head: &[u8], profile: &Profile,
 ) -> Result<LoopbackReceiveSession, ApiError> {
     let request = match request {
+        Request::Diff(request) => return diff::authenticate(request, envelope, raw_head, profile),
         Request::Inspection(request) => return inspection::authenticate(request, envelope, raw_head, profile),
         Request::Preparation(request) => return preparation::authenticate(request, envelope, raw_head, profile),
         Request::Collaboration(request) => return collaboration::authenticate(request, envelope, raw_head, profile),
@@ -102,6 +108,7 @@ pub(super) fn execute(
     framing: BodyFraming, reader: &mut impl Read, limits: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     match request {
+        Request::Diff(request) => diff::execute(node, request, session, framing, reader, limits, maximum_response).map(Reply::Json),
         Request::Inspection(request) => inspection::execute(node, request, session, framing, reader, limits, maximum_response).map(Reply::Json),
         Request::Preparation(request) => preparation::execute(node, request, session, framing, reader, limits, maximum_response).map(Reply::Preparation),
         Request::Collaboration(request) => collaboration::execute(node, request, session, framing, reader, limits, maximum_response).map(Reply::Json),
@@ -186,11 +193,12 @@ mod routing_tests {
     }
     #[test]
     fn body_bearing_preparation_and_inspection_never_acquire_publication_semantics() {
-        for (action, media) in [("prepare", "application/x-www-form-urlencoded"), ("inspect", "multipart/form-data; boundary=x")] {
+        for (action, media) in [("prepare", "application/x-www-form-urlencoded"),
+            ("inspect", "multipart/form-data; boundary=x"), ("diff", "application/x-www-form-urlencoded")] {
             let bytes = format!("POST /repo.git/api/v1/pulls/1/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: {media}\r\nContent-Length: 1\r\n\r\n");
             let envelope = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
             let request = Request::parse(&envelope).unwrap().unwrap();
-            assert!(matches!(request, Request::Preparation(_) | Request::Inspection(_)));
+            assert!(matches!(request, Request::Preparation(_) | Request::Inspection(_) | Request::Diff(_)));
             assert!(request.accepts_body());
             assert!(!request.is_mutation());
         }
