@@ -116,7 +116,6 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
                 node.search_source_snapshot_local_in(&context, &selection.reference,
                     selection.expected_head, selection.expected_commit, query, *limits), &mut live)
                 .map_err(read_error)?;
-            output::search(node, selection, query, *limits, head, &report, maximum, &mut live)?;
             output::search(node, selection, query, *limits, head, &report, maximum, &mut live)?
         }
     };
