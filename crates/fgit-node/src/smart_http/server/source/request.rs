@@ -9,14 +9,14 @@ use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 use super::super::issues::{ApiError, MAX_FORM_BYTES, parse_decimal, parse_form, parse_snapshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Operation { Tree, Blob, Search }
+pub(crate) enum Operation { Tree, Blob, Search }
 #[derive(Debug)]
-pub(super) struct Request<'a> {
+pub(crate) struct Request<'a> {
     pub repository_route: &'a str,
     pub operation: Operation,
 }
 impl<'a> Request<'a> {
-    pub fn parse(head: &Envelope<'a>) -> Result<Self, ApiError> {
+    pub(crate) fn parse(head: &Envelope<'a>) -> Result<Self, ApiError> {
         let (path, query) = head.target.split_once('?').map_or((head.target, None), |(p, q)| (p, Some(q)));
         let (repository_route, action) = path.split_once("/api/v1/source/").ok_or_else(ApiError::not_found)?;
         if repository_route.len() < 2 || !repository_route.starts_with('/')
@@ -38,7 +38,7 @@ impl<'a> Request<'a> {
         Ok(Self { repository_route, operation })
     }
 
-    pub fn command(&self, bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> {
+    pub(super) fn command(&self, bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> {
         let mut fields = BTreeMap::new();
         let mut prefixes = Vec::new();
         for (name, value) in parse_form(bytes, 140)? {
@@ -154,7 +154,7 @@ mod tests {
         }
     }
     #[test]
-    fn_continuations_require_a_snapshot_and_unknown_fields_never_grant_authority() {
+    fn continuations_require_a_snapshot_and_unknown_fields_never_grant_authority() {
         let valid = form(GitHashAlgorithm::Sha1);
         for (operation, extra) in [
             (Operation::Tree, "&after_hex=61"), (Operation::Blob, "&path_hex=61&offset=1"),
