@@ -196,15 +196,15 @@ pub fn post(endpoint: &Endpoint, number: u64, action: &str, token: char, key: &s
     let headers = format!("Content-Type: application/x-www-form-urlencoded\r\n{framing}Idempotency-Key: {key}\r\n");
     exchange(endpoint, &request(endpoint, "POST", &format!("/api/v1/pulls/{number}/{action}"), token, &headers, &wire), true)
 }
-fn encode(text: &str) -> String {
-    text.bytes().map(|byte| if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+fn encode(bytes: &[u8]) -> String {
+    bytes.iter().copied().map(|byte| if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
         (byte as char).to_string()
     } else { format!("%{byte:02X}") }).collect()
 }
 pub fn form(data: &PullRequestData, version: u64) -> String {
     format!("expected_version={version}&object_format={}&source_ref={}&target_ref={}&source_tip={}&target_tip={}&title={}&body={}",
-        data.source_tip.algorithm().as_str(), encode(data.source_ref.as_str()), encode(data.target_ref.as_str()),
-        data.source_tip, data.target_tip, encode(&data.title), encode(&data.body))
+        data.source_tip.algorithm().as_str(), encode(data.source_ref.as_bytes()), encode(data.target_ref.as_bytes()),
+        data.source_tip, data.target_tip, encode(data.title.as_bytes()), encode(data.body.as_bytes()))
 }
 pub fn status(reply: &Reply, expected: u16) { assert_eq!(reply.status, expected, "{}", reply.raw); }
 pub fn committed(reply: &Reply) {
