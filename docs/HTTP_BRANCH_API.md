@@ -65,7 +65,9 @@ curl --fail-with-body --header @/secure/source-reader.headers \
 
 The `source_refs` JSON response contains repository/incarnation/hash domain,
 source_head, snapshot_token, namespace, after, limit, next_after and `refs`.
-Each row has the exact `ref`, byte-preserving `ref_hex`, and native `object_id`.
+Each row has `ref`, authoritative lowercase `ref_hex`, and native `object_id`.
+`ref` retains the original UTF-8 text or is null for a non-UTF-8 name; `ref_hex`
+always preserves the exact bytes. Branch-publication updates use the same pair.
 Rows are byte-ordered and current canonical hidden-ref rules apply before
 counting disclosed rows. No symbolic HEAD row or implicit tag peeling is added;
 a direct tag can point at a tag object rather than a commit.
@@ -76,6 +78,9 @@ rows. These are strict current-head pins, not retained historical pagination.
 Any intervening publication can return 409 `source_snapshot_moved`, rather than
 mixing pages. Reopening preserves a token only while that head remains current.
 Unknown/corrupt evidence is an error, never an empty ref list.
+The request accepts only UTF-8 `after`, not a byte cursor. If a page would need
+a non-UTF-8 continuation, it returns 503 `repository_unavailable`, never a null
+cursor falsely indicating completion. Non-UTF-8 rows otherwise remain readable.
 
 ## Create a topic branch
 

@@ -107,6 +107,9 @@ is `metadata` (`application/json`), and its second is `bundle`
 version 1, exact `source_head`, `snapshot_token`, object format, complete review
 subject, candidate base/commit/tree, and new-object count. Its bundle descriptor
 contains exact byte length and a SHA-256 transport checksum.
+Every result's subject preserves exact native reference bytes in authoritative
+lowercase `source_ref_hex` and `target_ref_hex`. `source_ref` and `target_ref`
+retain UTF-8 text or are null when the corresponding bytes are not UTF-8.
 
 The bundle is ordinary native Git bundle framing: SHA-1 uses v2; SHA-256 uses v3
 with an explicit object-format declaration. It names both parent prerequisites

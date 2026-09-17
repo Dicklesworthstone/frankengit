@@ -91,6 +91,9 @@ type is `source_preparation`. It contains source_commit, source_rcr,
 candidate_commit, root_tree, patch_sha256, object_count, bundle byte length and
 SHA-256 transport checksum, and path receipts with old/new blob IDs, mode and
 hunk count. Paths use byte-exact `path_hex`.
+Preparation, inspection and publication replies include authoritative lowercase
+`ref_hex` for exact native reference bytes; `ref` retains UTF-8 text or is null
+when those bytes are not UTF-8.
 
 The bundle has exactly one prerequisite and the candidate has the expected base
 as its sole parent. SHA-1 uses bundle v2; SHA-256 declares the native format in

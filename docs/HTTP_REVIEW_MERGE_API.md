@@ -192,6 +192,9 @@ selected head, reviewer-stream version, complete subject, candidate (or null
 for a legacy source-only review), decision, reason, freshness and opener status.
 There is no approval count over a partial page. `merge_authorized: false` makes
 clear that a page is not a publication capability.
+Subjects in pages and publication receipts preserve exact native reference bytes
+in authoritative lowercase `source_ref_hex` and `target_ref_hex`. `source_ref`
+and `target_ref` retain UTF-8 text or are null when those bytes are not UTF-8.
 
 ```text
 GET {REPO_URL}/api/v1/pulls/41/reviews?limit=50

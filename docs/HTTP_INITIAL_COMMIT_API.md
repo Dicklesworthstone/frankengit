@@ -108,6 +108,9 @@ head, snapshot token, candidate commit, tree, empty parent/prerequisite lists,
 patch checksum, object count, full native commit body as hexadecimal bytes,
 transport checksum/length, and byte-exact file paths with blob IDs, modes and
 lengths. SHA-1 bundles use v2; SHA-256 bundles declare their native format in v3.
+Preparation metadata and publication receipts include authoritative lowercase
+`ref_hex` for exact native reference bytes; `ref` retains UTF-8 text or is null
+when those bytes are not UTF-8.
 
 Preparation stages no objects, binds no idempotency key, creates no seal, moves
 no ref and publishes no forge or outbox work. `publication_authorized: false`

@@ -219,7 +219,7 @@ mod tests {
         bytes.extend(part("bundle", "application/octet-stream", &b"\r\n--exampl".repeat(30_000)));
         bytes.extend_from_slice(b"--example--\r\n");
         let mut calls = 0;
-        assert_eq!(parse(&bytes, "example", &mut || { calls += 1; calls < 7; }).unwrap_err(), Error::Cancelled);
+        assert_eq!(parse(&bytes, "example", &mut || { calls += 1; calls < 7 }).unwrap_err(), Error::Cancelled);
         assert_eq!(parse(&bytes, "", &mut || true).unwrap_err(), Error::Framing);
     }
     #[test]

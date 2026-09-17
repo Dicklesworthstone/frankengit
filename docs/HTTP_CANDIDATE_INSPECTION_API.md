@@ -87,6 +87,10 @@ HTTP 200 returns JSON with `type: "candidate_inspection"`. It includes:
 - `comparison`: direct before/after commits and trees, and every changed entry
   in raw-path byte order. Directory records are entries, not regular-file counts.
 
+The subject's authoritative lowercase `source_ref_hex` and `target_ref_hex`
+preserve exact native bytes. `source_ref` and `target_ref` retain UTF-8 text or
+are null when the corresponding bytes are not UTF-8.
+
 Each entry has `path_hex`, change kind, and before/after OID plus numeric Git
 mode (or null for an absent side). Text entries include native algorithm label,
 addition/deletion counts, and hunks with `before_hex`/`after_hex`. Hunk coordinates

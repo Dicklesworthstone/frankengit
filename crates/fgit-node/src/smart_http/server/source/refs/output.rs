@@ -8,7 +8,7 @@ use fgit_types::{DecisionOutcome, GitOid, PrincipalId, RefName, RepositoryAuthor
 
 use crate::OneNode;
 use super::request::{Operation, Page};
-use super::super::super::issues::{ApiError, Reply, quote};
+use super::super::super::issues::{ApiError, Reply, quote, ref_fields};
 use super::super::super::Status;
 
 pub(super) const MAX_REPLY_BYTES: usize = 1024 * 1024;
@@ -26,8 +26,14 @@ fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), ApiError> {
     if live() { Ok(()) } else { Err(ApiError::from_status(Status::Timeout, false)) }
 }
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
-fn optional_ref(reference: Option<&RefName>) -> String {
-    reference.map_or_else(|| "null".into(), |reference| quote(reference.as_str()))
+// The request grammar accepts only UTF-8 `after`, so native byte cursors
+// must refuse the page rather than masquerade as end-of-pagination.
+fn cursor(reference: Option<&RefName>) -> Result<String, ApiError> {
+    match reference {
+        None => Ok("null".into()),
+        Some(reference) => reference.as_str().map(quote)
+            .ok_or_else(ApiError::unavailable),
+    }
 }
 fn metadata(node: &OneNode) -> String {
     format!(concat!("\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},",
@@ -58,12 +64,12 @@ pub(super) fn page(node: &OneNode, query: &Page, head: RepositoryAuthorityHeadId
         "\"source_head\":{},\"snapshot_token\":{},\"after\":{},\"limit\":{},\"next_after\":{},",
         "\"read_only\":true,\"transaction_created\":false,\"published\":false,",
         "\"direct_refs_only\":true,\"refs\":["), metadata(node), quote(query.namespace.as_str()),
-        quote(&head.to_string()), quote(&token), optional_ref(query.after.as_ref()), query.limit,
-        optional_ref(next)), maximum)?;
+        quote(&head.to_string()), quote(&token), cursor(query.after.as_ref())?, query.limit,
+        cursor(next)?), maximum)?;
     for (index, (name, oid)) in rows.iter().enumerate() {
         checkpoint(live)?;
-        append(&mut out, &format!("{}{{\"ref\":{},\"ref_hex\":{},\"object_id\":{}}}",
-            if index == 0 { "" } else { "," }, quote(name.as_str()), quote(&hex(name.as_bytes())),
+        append(&mut out, &format!("{}{{{},\"object_id\":{}}}",
+            if index == 0 { "" } else { "," }, ref_fields("ref", name),
             quote(&oid.to_string())), maximum)?;
     }
     append(&mut out, "]}", maximum)?;
@@ -111,8 +117,8 @@ pub(super) fn publication(node: &OneNode, principal: PrincipalId, operation: Ope
             let new = match command.proposed_new {
                 ProposedNew::Delete => "null".into(), ProposedNew::Update(oid) => quote(&oid.to_string()),
             };
-            append(&mut out, &format!("{}{{\"ref\":{},\"expected_commit\":{},\"new_commit\":{},\"force\":false}}",
-                if index == 0 { "" } else { "," }, quote(command.name.as_str()), old, new), maximum)?;
+            append(&mut out, &format!("{}{{{},\"expected_commit\":{},\"new_commit\":{},\"force\":false}}",
+                if index == 0 { "" } else { "," }, ref_fields("ref", &command.name), old, new), maximum)?;
         }
         append(&mut out, "]}", maximum)?;
         Ok(out)
@@ -132,6 +138,15 @@ pub(super) fn publication(node: &OneNode, principal: PrincipalId, operation: Ope
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn text_only_cursors_refuse_native_bytes_instead_of_reporting_end_of_page() {
+        let native = RefName::try_new(b"refs/heads/topic\xff").unwrap();
+        let error = cursor(Some(&native)).unwrap_err();
+        assert_eq!(error.status, Status::Unavailable);
+        let text = RefName::try_new(b"refs/heads/topic").unwrap();
+        assert_eq!(cursor(Some(&text)).unwrap(), "\"refs/heads/topic\"");
+        assert_eq!(cursor(None).unwrap(), "null");
+    }
     #[test]
     fn size_refusal_does_not_leave_a_successfully_truncated_response() {
         let mut out = "abc".to_owned();

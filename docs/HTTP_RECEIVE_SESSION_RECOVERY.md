@@ -38,6 +38,8 @@ observations retain the same seal, transaction ID, canonical request digest,
 decision sequence, and committed/refused/nonterminal vocabulary as individual
 lookup. Ref names come from the caller's verified submitted request, not from
 current ref enumeration.
+Each command's authoritative lowercase `ref_name_hex` preserves its exact native
+reference bytes. `ref_name` retains UTF-8 text or is null for a non-UTF-8 name.
 
 | Session state | Command count | Meaning |
 |---|---|---|

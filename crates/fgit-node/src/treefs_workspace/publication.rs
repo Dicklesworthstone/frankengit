@@ -10,7 +10,7 @@
 mod bundle_review;
 #[path = "rebase_apply.rs"]
 mod rebase_apply;
-pub(super) use bundle_review::BundleInspectionRefusal;
+pub(crate) use bundle_review::BundleInspectionRefusal;
 
 use super::{NodeWorkspaceRefusal, workspace_request_live};
 use crate::quarantine_validator::ProductionReceiveQuarantineHandoff;

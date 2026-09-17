@@ -10,7 +10,7 @@ use fgit_pack::full_bundle::FullBundle;
 use fgit_types::{DecisionOutcome, GitOid, PrincipalId, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::HttpVersion;
 use crate::OneNode;
-use super::super::super::{Status, issues::{ApiError, Reply, quote}};
+use super::super::super::{Status, issues::{ApiError, Reply, quote, ref_fields}};
 
 const MAX_METADATA: usize = 1024 * 1024;
 const MAX_BUNDLE: usize = 64 * 1024 * 1024;
@@ -90,13 +90,13 @@ pub(super) fn prepared(node: &OneNode, reference: &RefName, head: RepositoryAuth
     let id = head.as_internal_object_id();
     let token = format!("alg:{}:{}", id.algorithm().code_point(), hex(id.digest().as_bytes()));
     let mut metadata = String::new();
-    append(&mut metadata, &format!(concat!("{{\"type\":\"initial_source_preparation\",{},\"ref\":{},",
+    append(&mut metadata, &format!(concat!("{{\"type\":\"initial_source_preparation\",{},{},",
         "\"source_head\":{},\"snapshot_token\":{},\"expected_absent\":true,\"parents\":[],\"prerequisites\":[],",
         "\"candidate_commit\":{},\"root_tree\":{},\"patch_sha256\":{},\"object_count\":{},",
         "\"read_only\":true,\"objects_staged\":false,\"transaction_created\":false,\"published\":false,",
         "\"publication_authorized\":false,\"default_branch_changed\":false,",
         "\"bundle\":{{\"bytes\":{},\"sha256\":{}}},\"candidate_commit_body_hex\":"),
-        scope(node), quote(reference.as_str()), quote(&head.to_string()), quote(&token),
+        scope(node), ref_fields("ref", reference), quote(&head.to_string()), quote(&token),
         quote(&plan.commit.to_string()), quote(&plan.tree.to_string()), quote(&hex(&plan.patch_sha256)),
         plan.objects.len(), bundle.bytes().len(), quote(&digest)), MAX_METADATA)?;
     hex_field(&mut metadata, &commit.body, live)?;
@@ -147,11 +147,11 @@ pub(super) fn publication(node: &OneNode, principal: PrincipalId, reference: &Re
             format!("{{\"code\":{},\"code_point\":{},\"refusal_record_id\":{}}}",
                 quote(&format!("{code:?}")), code.code_point(), quote(&refusal_record_id.to_string()))),
     };
-    let body = format!(concat!("{{\"type\":\"initial_source_publication\",{},\"principal_id\":{},\"ref\":{},",
+    let body = format!(concat!("{{\"type\":\"initial_source_publication\",{},\"principal_id\":{},{},",
         "\"expected_absent\":true,\"candidate_commit\":{},\"tx_id\":{},\"decision_sequence\":{},",
         "\"outcome\":{},\"decision\":{},\"atomic\":true,\"terminal\":true,",
         "\"receipt_confirms_transport_revalidation\":false,\"default_branch_changed\":false}}"),
-        scope(node), quote(&principal.to_string()), quote(reference.as_str()), quote(&candidate.to_string()),
+        scope(node), quote(&principal.to_string()), ref_fields("ref", reference), quote(&candidate.to_string()),
         quote(&command.tx_id.to_string()), terminal.decision_sequence.get(), quote(outcome), decision);
     if body.len() > maximum {
         eprintln!("Initial source receipt exceeded response limit after canonical transaction {}; recover the original key", command.tx_id);

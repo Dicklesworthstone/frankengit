@@ -7,7 +7,7 @@ use fgit_forge::source_search::{SearchCase, SearchCompletion, SearchLimits, Sour
 use fgit_types::{GitOid, RepositoryAuthorityHeadId, RepositoryCommitId};
 use crate::OneNode;
 use super::request::Selection;
-use super::super::issues::{ApiError, quote};
+use super::super::issues::{ApiError, quote, ref_fields};
 
 pub(super) const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
 fn append(out: &mut String, part: &str, maximum: usize) -> Result<(), ApiError> {
@@ -33,12 +33,12 @@ fn selection(node: &OneNode, requested: &Selection, head: RepositoryAuthorityHea
     let internal = head.as_internal_object_id();
     let token = format!("alg:{}:{}", internal.algorithm().code_point(), hex(internal.digest().as_bytes()));
     Ok(format!(concat!("\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},",
-        "\"repository_incarnation\":{},\"object_format\":{},\"ref\":{},\"source_head\":{},",
+        "\"repository_incarnation\":{},\"object_format\":{},{},\"source_head\":{},",
         "\"snapshot_token\":{},\"source_rcr\":{},\"source_commit\":{},\"root_tree\":{},",
         "\"read_only\":true,\"transaction_created\":false,\"published\":false"),
         quote(&node.tenant_id.to_string()), quote(&node.repository_id.to_string()),
         quote(&node.repository_incarnation_id().to_string()), quote(node.object_format.as_str()),
-        quote(requested.reference.as_str()), quote(&head.to_string()), quote(&token),
+        ref_fields("ref", &requested.reference), quote(&head.to_string()), quote(&token),
         quote(&rcr.to_string()), quote(&commit.to_string()), quote(&tree.to_string())))
 }
 

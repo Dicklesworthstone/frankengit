@@ -8,7 +8,7 @@ use fgit_forge::event::review::{ReviewDecision, ReviewFreshness, ReviewSubject};
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
 use crate::OneNode;
 use super::{ApiError, request::{Command, Page}};
-use super::super::super::issues::quote;
+use super::super::super::issues::{quote, ref_fields};
 
 pub(super) const MAX_REPLY_BYTES: usize = 16 * 1024 * 1024;
 fn append(out: &mut String, part: &str, maximum: usize) -> Result<(), ApiError> {
@@ -29,9 +29,9 @@ fn head_token(head: RepositoryAuthorityHeadId) -> String {
 }
 fn subject(value: &ReviewSubject) -> String {
     format!(concat!("{{\"number\":{},\"pull_request_version\":{},\"policy_epoch\":{},",
-        "\"source_ref\":{},\"target_ref\":{},\"source_tip\":{},\"target_tip\":{}}}"),
+        "{},{},\"source_tip\":{},\"target_tip\":{}}}"),
         value.pull_request.get(), value.pull_request_version.get(), value.policy_epoch.get(),
-        quote(value.source_ref.as_str()), quote(value.target_ref.as_str()),
+        ref_fields("source_ref", &value.source_ref), ref_fields("target_ref", &value.target_ref),
         quote(&value.source_tip.to_string()), quote(&value.target_tip.to_string()))
 }
 fn decision(value: ReviewDecision) -> &'static str {

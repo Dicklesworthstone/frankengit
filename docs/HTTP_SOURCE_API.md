@@ -81,6 +81,8 @@ ref, exact `source_head`, algorithm-qualified `snapshot_token`, `source_rcr`,
 `source_commit`, root-tree OID and explicit read-only/non-publication flags.
 Search's snapshot token is taken from the same native materialization that
 supplies the scan, not a separate preliminary head read.
+The selected `ref` retains UTF-8 text or is null for a non-UTF-8 native name;
+authoritative lowercase `ref_hex` always preserves the exact reference bytes.
 
 **Source pins are strict current-head comparisons, not retained pagination.**
 An intervening publication, even an unrelated issue edit, makes an old

@@ -27,6 +27,20 @@ pub(super) fn quote(text: &str) -> String {
     out.push('"');
     out
 }
+
+/// Native reference bytes are authoritative; text is present only for UTF-8.
+pub(super) fn ref_fields(name: &'static str, reference: &fgit_types::RefName) -> String {
+    let mut out = format!("\"{name}\":{},\"{name}_hex\":\"",
+        reference.as_str().map_or_else(|| "null".into(), quote));
+    out.reserve(reference.len() * 2 + 1);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in reference.as_bytes() {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    out.push('"');
+    out
+}
 fn labels(values: &[String]) -> String {
     format!("[{}]", values.iter().map(|value| quote(value)).collect::<Vec<_>>().join(","))
 }

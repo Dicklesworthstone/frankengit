@@ -8,7 +8,7 @@ use fgit_forge::{AggregateId, ExpectedVersion, ForgeEventPayload, PullRequestNum
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
 
 use crate::OneNode;
-use super::super::issues::{ApiError, Page, quote};
+use super::super::issues::{ApiError, Page, quote, ref_fields};
 
 pub(super) const MAX_REPLY_BYTES: usize = 48 * 1024 * 1024;
 
@@ -17,9 +17,9 @@ pub(super) fn action(value: PullRequestAction) -> &'static str {
 }
 fn data(value: &PullRequestData) -> Result<String, ApiError> {
     value.validate().map_err(|_| ApiError::unavailable())?;
-    Ok(format!(concat!("{{\"source_ref\":{},\"target_ref\":{},\"object_format\":{},",
+    Ok(format!(concat!("{{{},{},\"object_format\":{},",
         "\"source_tip\":{},\"target_tip\":{},\"title\":{},\"body\":{}}}"),
-        quote(value.source_ref.as_str()), quote(value.target_ref.as_str()), quote(value.source_tip.algorithm().as_str()),
+        ref_fields("source_ref", &value.source_ref), ref_fields("target_ref", &value.target_ref), quote(value.source_tip.algorithm().as_str()),
         quote(&value.source_tip.to_string()), quote(&value.target_tip.to_string()), quote(&value.title), quote(&value.body)))
 }
 fn view(value: &PullRequestView) -> Result<String, ApiError> {
@@ -34,9 +34,9 @@ fn view(value: &PullRequestView) -> Result<String, ApiError> {
             if value.data.as_ref().is_some_and(|data| !data.matches_merge(merge)) {
                 return Err(ApiError::unavailable());
             }
-            ("merged", format!(concat!("{{\"object_format\":{},\"source_ref\":{},\"target_ref\":{},",
+            ("merged", format!(concat!("{{\"object_format\":{},{},{},",
                 "\"source_tip\":{},\"target_tip_before\":{},\"base_tip\":{},\"merge_commit\":{}}}"),
-                quote(merge.merge_commit.algorithm().as_str()), quote(merge.source_ref.as_str()), quote(merge.target_ref.as_str()),
+                quote(merge.merge_commit.algorithm().as_str()), ref_fields("source_ref", &merge.source_ref), ref_fields("target_ref", &merge.target_ref),
                 quote(&merge.source_tip.to_string()), quote(&merge.target_tip_before.to_string()),
                 quote(&merge.base_tip.to_string()), quote(&merge.merge_commit.to_string())))
         }
@@ -156,6 +156,22 @@ mod tests {
         assert!(encoded.contains("\\u000a\\\"\\\\\\u202e"));
         row.data = None;
         assert!(view(&row).is_err(), "metadata events cannot lose their matching content");
+    }
+    #[test]
+    fn native_reference_identity_survives_non_utf8_and_text_stays_compatible() {
+        let mut value = PullRequestData {
+            source_ref: RefName::try_new(b"refs/heads/topic\xff").unwrap(),
+            target_ref: RefName::try_new(b"refs/heads/main").unwrap(),
+            source_tip: GitOid::from_hex(GitHashAlgorithm::Sha1, &"a".repeat(40)).unwrap(),
+            target_tip: GitOid::from_hex(GitHashAlgorithm::Sha1, &"b".repeat(40)).unwrap(),
+            title: "Native refs".into(), body: String::new(),
+        };
+        let encoded = data(&value).unwrap();
+        assert!(encoded.contains("\"source_ref\":null,\"source_ref_hex\":\"726566732f68656164732f746f706963ff\""));
+        assert!(encoded.contains("\"target_ref\":\"refs/heads/main\",\"target_ref_hex\":\"726566732f68656164732f6d61696e\""));
+        value.source_ref = RefName::try_new(b"refs/heads/topic").unwrap();
+        let encoded = data(&value).unwrap();
+        assert!(encoded.contains("\"source_ref\":\"refs/heads/topic\",\"source_ref_hex\":\"726566732f68656164732f746f706963\""));
     }
     #[test]
     fn reply_limit_never_leaves_a_partially_appended_record() {

@@ -10,7 +10,7 @@ use fgit_forge::preparation::resolution::{ResolutionKind, ResolvedMerge, Resolve
 use fgit_types::RepositoryAuthorityHeadId;
 use fgit_wire::smart_http::HttpVersion;
 use crate::OneNode;
-use super::super::super::{Status, issues::{ApiError, quote}};
+use super::super::super::{Status, issues::{ApiError, quote, ref_fields}};
 
 const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
@@ -116,11 +116,11 @@ fn build_inner(node: &OneNode, head: RepositoryAuthorityHeadId, subject: &Review
         "\"profile\":\"path-merge-v1\",\"read_only\":true,\"objects_staged\":false,",
         "\"transaction_created\":false,\"published\":false,\"merge_authorized\":false,",
         "\"subject\":{{\"pull_request\":{},\"pull_request_version\":{},\"policy_epoch\":{},",
-        "\"source_ref\":{},\"target_ref\":{},\"source_tip\":{},\"target_tip\":{}}},"),
+        "{},{},\"source_tip\":{},\"target_tip\":{}}},"),
         quote(&node.tenant_id.to_string()), quote(&node.repository_id.to_string()),
         quote(&node.repository_incarnation_id().to_string()), quote(node.object_format.as_str()),
         quote(&head.to_string()), quote(&token), subject.pull_request.get(), subject.pull_request_version.get(),
-        subject.policy_epoch.get(), quote(subject.source_ref.as_str()), quote(subject.target_ref.as_str()),
+        subject.policy_epoch.get(), ref_fields("source_ref", &subject.source_ref), ref_fields("target_ref", &subject.target_ref),
         quote(&subject.source_tip.to_string()), quote(&subject.target_tip.to_string()));
     if let Some(paths) = resolutions { resolution_metadata(&mut metadata, paths, live)?; }
     let status = match outcome {

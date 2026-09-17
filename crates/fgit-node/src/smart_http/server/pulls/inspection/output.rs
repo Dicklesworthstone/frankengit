@@ -6,7 +6,7 @@ use fgit_forge::review::{ChangeKind, ComparisonMode, EntryIdentity, ReviewConten
 use fgit_types::GitOid;
 use crate::OneNode;
 use crate::treefs_workspace::candidate_inspection::PullRequestInspection;
-use super::super::super::issues::{ApiError, quote};
+use super::super::super::issues::{ApiError, quote, ref_fields};
 use super::super::super::Status;
 
 pub(super) const MAX_REPLY_BYTES: usize = 32 * 1024 * 1024;
@@ -128,14 +128,14 @@ pub(super) fn build(node: &OneNode, value: &PullRequestInspection, maximum: usiz
         "\"merge_authorized\":false,\"all_changed_paths\":true,\"binary_bodies_included\":false,",
         "\"comparison_profile\":\"full-tree-direct-path-myers-v1\",\"context_lines\":3,",
         "\"subject\":{{\"pull_request\":{},\"pull_request_version\":{},\"policy_epoch\":{},",
-        "\"source_ref\":{},\"target_ref\":{},\"source_tip\":{},\"target_tip\":{}}},",
+        "{},{},\"source_tip\":{},\"target_tip\":{}}},",
         "\"merge_base\":{},\"candidate_commit\":{},\"parents\":{},\"prerequisites\":{},",
         "\"candidate_commit_body_hex\":"),
         quote(&node.tenant_id.to_string()), quote(&node.repository_id.to_string()),
         quote(&node.repository_incarnation_id().to_string()), quote(node.object_format.as_str()),
         quote(&review.source_head.to_string()), quote(&token), subject.pull_request.get(),
-        subject.pull_request_version.get(), subject.policy_epoch.get(), quote(subject.source_ref.as_str()),
-        quote(subject.target_ref.as_str()), quote(&subject.source_tip.to_string()), quote(&subject.target_tip.to_string()),
+        subject.pull_request_version.get(), subject.policy_epoch.get(), ref_fields("source_ref", &subject.source_ref),
+        ref_fields("target_ref", &subject.target_ref), quote(&subject.source_tip.to_string()), quote(&subject.target_tip.to_string()),
         quote(&value.candidate.merge_base.to_string()), quote(&value.candidate.commit.to_string()),
         oids(&value.parents), oids(&value.prerequisites)))?;
     out.hex(&value.candidate_commit_body)?;

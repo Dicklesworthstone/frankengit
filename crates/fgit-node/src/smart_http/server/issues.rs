@@ -33,6 +33,9 @@ pub(super) fn parse_snapshot(text: &str) -> Result<fgit_types::RepositoryAuthori
     request::parse_head_token(text)
 }
 pub(super) fn quote(text: &str) -> String { output::quote(text) }
+pub(super) fn ref_fields(name: &'static str, reference: &fgit_types::RefName) -> String {
+    output::ref_fields(name, reference)
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ApiError {

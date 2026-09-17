@@ -6,6 +6,7 @@ use fgit_types::PrincipalId;
 
 use crate::{GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession, OneNode};
 use super::{ApiError, Reply, Status, drive_request_while, quote, render};
+use super::super::issues::ref_fields;
 
 const MAX_SESSION_REPLY_BYTES: usize = 1024 * 1024;
 
@@ -60,9 +61,9 @@ fn render_session(
     append(&mut out, &header, maximum)?;
     if let Some(session) = session {
         for command in session.commands() {
-            let row = format!("{}{{\"command_index\":{},\"ref_name\":{},\"observation\":{}}}",
+            let row = format!("{}{{\"command_index\":{},{},\"observation\":{}}}",
                 if command.index() == 0 { "" } else { "," }, command.index(),
-                quote(command.reference().as_str()),
+                ref_fields("ref_name", command.reference()),
                 render(node, principal, Some(command.index()), command.recovery()));
             append(&mut out, &row, maximum)?;
         }

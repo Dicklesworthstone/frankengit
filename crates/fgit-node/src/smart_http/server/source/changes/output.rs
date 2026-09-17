@@ -8,7 +8,7 @@ use fgit_forge::review::{ChangeKind, ComparisonMode, EntryIdentity, ReviewConten
 use fgit_types::{DecisionOutcome, GitOid, PrincipalId, RefName};
 use fgit_wire::smart_http::HttpVersion;
 use crate::{OneNode, treefs_workspace::WorkspacePatchCandidate};
-use super::super::super::{Status, issues::{ApiError, Reply as JsonReply, quote}};
+use super::super::super::{Status, issues::{ApiError, Reply as JsonReply, quote, ref_fields}};
 
 const MAX_BUNDLE: usize = 64 * 1024 * 1024;
 const MAX_METADATA: usize = 1024 * 1024;
@@ -79,11 +79,11 @@ pub(super) fn prepared(node: &OneNode, reference: &RefName, base: GitOid,
     let bytes = candidate.bundle_bytes();
     if bytes.is_empty() || bytes.len() > MAX_BUNDLE { return Err(ApiError::too_large()); }
     let digest = hex(&sha256_digest(bytes));
-    let mut metadata = format!(concat!("{{\"type\":\"source_preparation\",{},\"ref\":{},\"source_commit\":{},",
+    let mut metadata = format!(concat!("{{\"type\":\"source_preparation\",{},{},\"source_commit\":{},",
         "\"source_rcr\":{},\"candidate_commit\":{},\"root_tree\":{},\"patch_sha256\":{},\"object_count\":{},",
         "\"read_only\":true,\"objects_staged\":false,\"transaction_created\":false,\"published\":false,",
         "\"publication_authorized\":false,\"bundle\":{{\"bytes\":{},\"sha256\":{}}},\"paths\":["),
-        scope(node), quote(reference.as_str()), quote(&base.to_string()), quote(&candidate.source_rcr.to_string()),
+        scope(node), ref_fields("ref", reference), quote(&base.to_string()), quote(&candidate.source_rcr.to_string()),
         quote(&candidate.candidate_commit.to_string()), quote(&candidate.root_tree.to_string()),
         quote(&hex(&candidate.patch_sha256)), candidate.object_count, bytes.len(), quote(&digest));
     for (index, path) in candidate.paths.iter().enumerate() {
@@ -138,11 +138,11 @@ pub(super) fn inspection(node: &OneNode, reference: &RefName, base: GitOid, cand
     let head = review.source_head.as_internal_object_id();
     let token = format!("alg:{}:{}", head.algorithm().code_point(), hex(head.digest().as_bytes()));
     let mut out = String::new();
-    append(&mut out, &format!(concat!("{{\"type\":\"source_inspection\",{},\"ref\":{},\"source_head\":{},\"snapshot_token\":{},",
+    append(&mut out, &format!(concat!("{{\"type\":\"source_inspection\",{},{},\"source_head\":{},\"snapshot_token\":{},",
         "\"expected_commit\":{},\"candidate_commit\":{},\"parents\":[{}],\"bundle_bytes\":{},\"bundle_sha256\":{},",
         "\"read_only\":true,\"objects_staged\":false,\"transaction_created\":false,\"published\":false,",
         "\"publication_authorized\":false,\"all_changed_paths\":true,\"binary_bodies_included\":false,",
-        "\"candidate_commit_body_hex\":"), scope(node), quote(reference.as_str()), quote(&review.source_head.to_string()),
+        "\"candidate_commit_body_hex\":"), scope(node), ref_fields("ref", reference), quote(&review.source_head.to_string()),
         quote(&token), quote(&base.to_string()), quote(&candidate.to_string()), quote(&base.to_string()), bundle_bytes, quote(&hex(bundle_digest))), maximum)?;
     append_hex(&mut out, commit, maximum, live)?;
     append(&mut out, &format!(",\"comparison\":{{\"mode\":\"direct\",\"before_tree\":{},\"after_tree\":{},\"entry_count\":{},\"entries\":[",
@@ -190,10 +190,10 @@ pub(super) fn publication(node: &OneNode, principal: PrincipalId, reference: &Re
         DecisionOutcome::Committed { repository_commit_id } => (Status::Success, "committed", quote(&repository_commit_id.to_string()), "null".to_owned()),
         DecisionOutcome::Refused { code, refusal_record_id } => (Status::Conflict, "refused", quote(&refusal_record_id.to_string()), quote(&format!("{code:?}"))),
     };
-    let body = format!(concat!("{{\"type\":\"source_publication\",{},\"principal_id\":{},\"ref\":{},\"expected_commit\":{},",
+    let body = format!(concat!("{{\"type\":\"source_publication\",{},\"principal_id\":{},{},\"expected_commit\":{},",
         "\"candidate_commit\":{},\"tx_id\":{},\"outcome\":{},\"decision_sequence\":{},\"decision_record\":{},",
         "\"refusal_code\":{},\"delivery_acknowledged\":null}}"), scope(node), quote(&principal.to_string()),
-        quote(reference.as_str()), quote(&base.to_string()), quote(&candidate.to_string()), quote(&command.tx_id.to_string()),
+        ref_fields("ref", reference), quote(&base.to_string()), quote(&candidate.to_string()), quote(&command.tx_id.to_string()),
         quote(outcome), command.terminal.decision_sequence.get(), record, code);
     if body.len() > maximum {
         eprintln!("Source reply limit after canonical transaction {}; recover the original key", command.tx_id);

@@ -142,7 +142,7 @@ fn complete_mixed_session_recovers_original_order_after_reopening_without_servin
         for (index, name) in ["refs/tags/z-stale", "refs/tags/a-good", "refs/tags/m-good"].into_iter().enumerate() {
             let command = &receipt.commands()[index];
             assert_eq!(command.index(), index);
-            assert_eq!(command.reference().as_str(), name);
+            assert_eq!(command.reference().as_str(), Some(name));
             let RequestRecovery::Recovered(known) = command.recovery() else { panic!("all commands must be sealed") };
             assert_eq!(known.tx_id(), original.commands[index].tx_id);
             assert_eq!(known.outcome(), OutcomeLookup::Decided(original.commands[index].terminal));

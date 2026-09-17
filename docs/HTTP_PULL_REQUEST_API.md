@@ -181,6 +181,9 @@ complete PR data, opener and last metadata actor when known. Existing native
 merge-only receipts remain explicitly `merge_only: true`; the API does not invent
 a title, opener or historical PR lifecycle for them. Reading a merged record does
 not grant permission to publish a merge.
+PR data and merge records preserve reference bytes in authoritative lowercase
+`source_ref_hex` and `target_ref_hex`. The existing `source_ref` and `target_ref`
+fields retain UTF-8 text and are null only when those bytes are not UTF-8.
 
 An individual read returns `pull_request` with `found` and `pull_request` fields.
 A missing or undisclosed number returns 404 and null, never the next visible PR.
