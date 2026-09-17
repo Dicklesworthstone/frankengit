@@ -21,6 +21,7 @@ mod source_review;
 mod source_search;
 mod tags;
 mod transaction_outcome;
+mod workflow_command;
 #[cfg(target_os = "linux")]
 mod workspace;
 #[cfg(target_os = "linux")]
@@ -30,6 +31,18 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "workflow") {
+        return match workflow_command::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!(
+                    "{{\"type\":\"workflow_error\",\"schema_version\":1,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "serve-http") {
         return match smart_http_server::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
