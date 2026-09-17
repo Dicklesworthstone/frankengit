@@ -2,6 +2,8 @@
 //! the outer source gateway grants reads before consuming the form. The only
 //! object selector is a current visible ref; pagination binds its exact head.
 
+mod blame;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
@@ -20,12 +22,13 @@ const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug)]
 pub(super) struct Request<'a> {
     pub repository_route: &'a str,
+    blame: bool,
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
         let (path, query) = head.target.split_once('?').map_or((head.target, None), |(p, q)| (p, Some(q)));
         let Some((repository_route, action)) = path.split_once("/api/v1/source/") else { return Ok(None); };
-        if action != "log" { return Ok(None); }
+        if !matches!(action, "log" | "blame") { return Ok(None); }
         if repository_route.len() < 2 || !repository_route.starts_with('/')
             || repository_route[1..].split('/').any(|part| part.is_empty() || matches!(part, "." | "..")
                 || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)))
@@ -40,7 +43,7 @@ impl<'a> Request<'a> {
         if matches!(head.body, BodyFraming::ContentLength(n) if n > MAX_FORM_BYTES as u64) {
             return Err(ApiError::too_large());
         }
-        Ok(Some(Self { repository_route }))
+        Ok(Some(Self { repository_route, blame: action == "blame" }))
     }
 }
 
@@ -104,11 +107,13 @@ fn selection(fields: &mut BTreeMap<String, String>, format: GitHashAlgorithm) ->
     Ok(Selection { reference, expected_head, expected_commit })
 }
 
-pub(super) fn execute(node: &OneNode, _request: &Request<'_>, session: &LoopbackReceiveSession,
+pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackReceiveSession,
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     if session.authenticated_session().is_none() { return Err(ApiError::new(Status::Unauthorized, "unauthorized")); }
-    let command = Command::parse(&read_form(reader, framing, http)?, node.object_format)?;
+    let bytes = read_form(reader, framing, http)?;
+    if request.blame { return blame::execute(node, &bytes, maximum_response); }
+    let command = Command::parse(&bytes, node.object_format)?;
     let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(node.git_daemon_session_timeout, GitDaemonSessionWorkScaling::FLAT);
     let mut live = || !deadline.expired();
@@ -285,6 +290,9 @@ mod tests {
             ("POST", "/r.git/api/v1/source/log?after=1", "", false),
             ("POST", "/../r.git/api/v1/source/log", "", false),
             ("POST", "/r.git/api/v1/source/log", "Git-Protocol: version=2\r\n", false),
+            ("POST", "/r.git/api/v1/source/blame", "", true),
+            ("GET", "/r.git/api/v1/source/blame", "", false),
+            ("POST", "/r.git/api/v1/source/blame?path=secret", "", false),
         ] {
             let bytes = format!("{method} {target} HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n{extra}\r\n");
             let envelope = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
