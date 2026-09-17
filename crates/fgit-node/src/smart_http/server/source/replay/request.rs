@@ -31,7 +31,7 @@ impl Command {
         Self::from_fields(fields, format, direction)
     }
 
-    fn from_fields(mut fields: BTreeMap<String, String>, format: GitHashAlgorithm,
+    pub(super) fn from_fields(mut fields: BTreeMap<String, String>, format: GitHashAlgorithm,
         direction: ReplayDirection,
     ) -> Result<Self, ApiError> {
         if take(&mut fields, "profile")? != "path-v1" { return Err(ApiError::bad("unsupported_replay_profile")); }
@@ -95,7 +95,7 @@ fn oid(text: &str, format: GitHashAlgorithm) -> Result<GitOid, ApiError> {
     if id.is_zero() { return Err(ApiError::bad("invalid_native_oid")); }
     Ok(id)
 }
-fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
+pub(super) fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
     if text.is_empty() || text.len() % 2 != 0 || text.len() > maximum * 2
         || !text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     { return Err(ApiError::bad("invalid_hex_bytes")); }

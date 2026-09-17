@@ -3,6 +3,7 @@
 
 use fgit_forge::preparation::{ConflictKind, MergeConflict, MergeEntry};
 use fgit_forge::preparation::replay::{ReplayCoordinates, ReplayDirection, ReplayPreparation, ReplayRequest};
+use fgit_forge::preparation::resolution::{ConflictResolution, ResolvedPath};
 use fgit_types::{GitHashAlgorithm, GitOid, RepositoryAuthorityHeadId};
 use crate::OneNode;
 use super::request::Command;
@@ -19,7 +20,7 @@ fn coordinates(value: ReplayCoordinates, requested: ReplayRequest) -> Result<(),
     { return Err(ApiError::unavailable()); }
     Ok(())
 }
-fn entry(value: Option<&MergeEntry>, path: &[u8], format: GitHashAlgorithm) -> Result<String, ApiError> {
+pub(super) fn entry(value: Option<&MergeEntry>, path: &[u8], format: GitHashAlgorithm) -> Result<String, ApiError> {
     let Some(value) = value else { return Ok("null".into()); };
     if !valid_oid(format, value.oid) || path.rsplit(|b| *b == b'/').next() != Some(value.name.as_slice())
         || !matches!(value.mode, 0o040000 | 0o100644 | 0o100755 | 0o120000 | 0o160000)
@@ -34,7 +35,7 @@ fn kind(value: ConflictKind) -> &'static str {
         ConflictKind::AttributesRequireDriver => "attributes_require_driver",
     }
 }
-fn conflict(value: &MergeConflict, format: GitHashAlgorithm, max_path: usize) -> Result<String, ApiError> {
+pub(super) fn conflict(value: &MergeConflict, format: GitHashAlgorithm, max_path: usize) -> Result<String, ApiError> {
     if value.path.is_empty() || value.path.len() > max_path || value.path.contains(&0)
         || value.path.split(|b| *b == b'/').any(|part| part.is_empty() || part == b"." || part == b"..")
     { return Err(ApiError::unavailable()); }
@@ -45,10 +46,13 @@ fn conflict(value: &MergeConflict, format: GitHashAlgorithm, max_path: usize) ->
 
 pub(super) fn build(node: &OneNode, command: &Command, head: RepositoryAuthorityHeadId,
     outcome: &ReplayPreparation, bundle: Option<Vec<u8>>, counts: (usize, usize),
+    resolutions: Option<(&[ConflictResolution], &[ResolvedPath])>,
     maximum: usize, live: &mut impl FnMut() -> bool,
 ) -> Result<PreparedReply, ApiError> {
     checkpoint(live)?;
-    if command.expected_head.is_some_and(|expected| expected != head) { return Err(ApiError::unavailable()); }
+    if command.expected_head.is_some_and(|expected| expected != head)
+        || (resolutions.is_some() && matches!(outcome, ReplayPreparation::Conflicted { .. }))
+    { return Err(ApiError::unavailable()); }
     let point = match outcome {
         ReplayPreparation::Clean(plan) => plan.coordinates,
         ReplayPreparation::Conflicted { coordinates, .. } | ReplayPreparation::NoChange { coordinates } => *coordinates,
@@ -74,6 +78,9 @@ pub(super) fn build(node: &OneNode, command: &Command, head: RepositoryAuthority
         quote(&point.request.source_tip.to_string()), quote(&point.request.selected_commit.to_string()),
         point.selected_parent.map_or_else(|| "null".into(), |id| quote(&id.to_string())),
         point.selected_mainline.map_or_else(|| "null".into(), |n| n.to_string())))?;
+    if let Some((choices, paths)) = resolutions {
+        super::resolution::append_receipts(&mut metadata, choices, paths, node.object_format, command.limits, live)?;
+    }
     let status = match outcome {
         ReplayPreparation::Clean(plan) => {
             let bytes = bundle.as_ref().ok_or_else(ApiError::unavailable)?;
@@ -83,9 +90,10 @@ pub(super) fn build(node: &OneNode, command: &Command, head: RepositoryAuthority
                 || pack_objects == 0 || pack_objects > command.limits.max_objects || borrowed_objects > pack_objects
             { return Err(ApiError::unavailable()); }
             append(&mut metadata, &format!(concat!(
-                "\"state\":\"clean\",\"candidate_commit\":{},\"root_tree\":{},\"parents\":[{}],",
+                "\"state\":{},\"candidate_commit\":{},\"root_tree\":{},\"parents\":[{}],",
                 "\"generated_objects\":{},\"pack_objects\":{},\"borrowed_objects\":{},",
                 "\"bundle\":{{\"bytes\":{},\"sha256\":{}}},\"conflicts\":[]}}"),
+                quote(if resolutions.is_some() { "resolved" } else { "clean" }),
                 quote(&plan.commit.to_string()), quote(&plan.tree.to_string()), quote(&command.inputs.target.to_string()),
                 plan.objects.len(), pack_objects, borrowed_objects, bytes.len(), quote(&bytes.digest_hex())))?;
             Status::Success

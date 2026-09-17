@@ -2,29 +2,35 @@
 
 ## Implemented boundary
 
-The explicit source service exposes two body-bearing read operations:
+The explicit source service exposes body-bearing read operations:
 
 ```text
 POST {repository-route}/api/v1/source/cherry-pick/prepare
 POST {repository-route}/api/v1/source/revert/prepare
-Content-Type: application/x-www-form-urlencoded
+POST {repository-route}/api/v1/source/cherry-pick/resolve
+POST {repository-route}/api/v1/source/revert/resolve
 Authorization: Bearer <read-scoped credential>
 ```
 
-They call `OneNode::prepare_replay_bundle_in`, which uses the existing native
-path-v1 replay planner and independently validates the resulting single-parent
-candidate. No second Git engine, mutable checkout, process, or new publication
-primitive participates. This is one historical commit, not a range sequencer.
+Preparation accepts `application/x-www-form-urlencoded`. Resolution accepts
+that media type for side choices, or `multipart/form-data` for exact file bytes.
+The operations call `OneNode::prepare_replay_bundle_in` and
+`OneNode::prepare_resolved_replay_bundle_in`, using the existing native path-v1
+planner and independently validating the single-parent candidate. No second
+Git engine, mutable checkout, process, or new publication primitive participates.
+This is one historical commit, not a range sequencer.
 
 The source-service switch must be enabled. Credentials must explicitly grant
 `read`; `receive` does not imply read permission. Authentication and read quota
 precede body intake and `100 Continue`. An `Idempotency-Key` is rejected because
-preparation does not create a transaction. Hidden and absent refs are
+neither operation creates a transaction. Hidden and absent refs are
 indistinguishable. Repository-incarnation credential binding remains in force.
+Sharing the established PR resolution multipart parser does not enable PR
+operations or confer PR-read, review, or merge permissions.
 
 ## Explicit input
 
-Required form fields:
+Required common form fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -40,10 +46,11 @@ Required form fields:
 | `message` or `message_hex` | Exactly one encoding of the new commit message. |
 
 `committer` optionally differs from the supplied author. Neither identity is
-an authentication claim. `expected_head` optionally pins the exact authority
-head using the returned `snapshot_token`. `mainline` selects a positive,
-one-based stored parent of a merge commit; it is required for merges, defaults
-to one for a single-parent commit, and is inapplicable to a root commit.
+an authentication claim. `expected_head` pins the exact authority head using
+the returned `snapshot_token`: optional for automatic preparation, mandatory
+for resolution. `mainline` selects a positive, one-based stored parent of a
+merge commit; it is required for merges, defaults to one for a single-parent
+commit, and is inapplicable to a root commit.
 
 Refs must be fully qualified branch names. Text form values use ordinary
 percent encoding; the `*_hex` fields accept bounded lowercase hexadecimal and
@@ -63,6 +70,46 @@ snake-case field: `max_commits`, `max_edges`, `max_tree_entries`, `max_depth`,
 refuses. The existing form/HTTP limits also apply; a theoretical native maximum
 is not a promise that every encoding fits the smaller transport envelope.
 
+## Explicit conflict resolution
+
+Retain the automatic conflict response's exact snapshot token and replay
+coordinates. Send those common inputs to the corresponding `/resolve` endpoint
+with one repeated `resolution` field for every actual conflict:
+
+```text
+resolution=<lowercase-path-hex>:base
+resolution=<lowercase-path-hex>:ours
+resolution=<lowercase-path-hex>:theirs
+resolution=<lowercase-path-hex>:delete
+resolution=<lowercase-path-hex>:file:100644:file_0
+resolution=<lowercase-path-hex>:file:100755:file_1
+```
+
+For file choices, send a multipart `command` part containing the URL-encoded
+form, plus named `file_0` through `file_127` parts with media type
+`application/octet-stream`. Multipart filename parameters are not host paths.
+Empty and binary bodies are exact data. Each file part must be referenced
+exactly once; missing, reused, duplicate and unreferenced parts refuse. File
+mode is explicitly regular (`100644`) or executable (`100755`). Neither a
+symlink upload nor implicit newline or marker normalization is supported.
+
+The existing MIME policy caps each file at 1 MiB, total file content at 32 MiB,
+and files at 128, plus bounded form/header overhead. The caller's native limits
+can be smaller. Checks precede copying the file bodies into native choices;
+the transport buffer is released before native planning and packing.
+
+The native planner reproduces conflicts from the pinned replay. Choices cannot
+change clean paths, select a missing side as deletion, overlap, or omit an
+actual conflict. Unknown choices do not fall back to automatic preparation.
+A source/target or authority change rejects the old resolution. Selecting ours
+can legitimately reproduce the target tree and return `no_change` without an
+empty commit; the explicit resolution receipts are still returned.
+
+For cherry-pick, base is the selected commit's parent and theirs is the selected
+commit. For revert, base is the selected commit and theirs is its selected
+parent. Ours is always the target. Choosing `theirs` in a revert must not be
+interpreted as accepting the original selected commit's content.
+
 ## Complete results
 
 A clean replay returns HTTP 200 `multipart/mixed` with JSON `metadata` and a
@@ -70,6 +117,13 @@ binary `application/x-git-bundle` attachment. Metadata binds repository,
 incarnation, authority snapshot, direction, refs, exact source/target/selected
 commit, chosen parent/mainline, candidate commit/tree, and bundle length/SHA-256.
 The response includes generated, packed, and borrowed object counts.
+
+A resolved candidate uses `state: resolved` and
+`resolution_profile: exact-path-resolutions-v1`. Each sorted receipt includes
+the reproduced conflict, applied choice, and resulting native entry or null
+for deletion. The adapter checks receipt paths, choices, side identities and,
+for uploaded files, native blob hash and mode against the exact submitted bytes.
+A resolved response cannot carry outstanding conflicts.
 
 The candidate has exactly one parent: `expected_target`. Its bundle includes
 all required source-side objects absent from the target's reachable closure;
@@ -79,21 +133,20 @@ bundles at 64 MiB, and the configured complete-response bound can be smaller.
 The binary attachment is not duplicated into a hexadecimal response buffer.
 Multipart delimiters are checked against both payloads before success.
 
-Conflicts return HTTP 409 JSON with `state: conflicted`, exact raw path bytes,
-conflict kind, and actual base/ours/theirs native entries. There is no candidate
-commit, partial pack, or staged object. For revert, base is the selected commit
-and theirs is its selected parent; ours is always the target.
+Automatic conflicts return HTTP 409 JSON with `state: conflicted`, exact raw
+path bytes, conflict kind, and actual base/ours/theirs native entries. There is
+no candidate commit, partial pack, or staged object. An unchanged output tree
+returns HTTP 200 JSON with `state: no_change` and no bundle. It is not proof
+that a patch appeared earlier in history, and it does not manufacture an empty
+commit. Non-clean shapes explicitly use null candidate/bundle fields.
 
-An unchanged output tree returns HTTP 200 JSON with `state: no_change` and no
-bundle. It is not proof that a patch appeared earlier in history, and it does
-not manufacture an empty commit. Both non-clean shapes explicitly use null
-candidate/bundle fields.
-
-Malformed inputs and mainlines produce 400; missing/hidden refs and commits
-outside the authorized source history produce 404; moved tips/head and missing
-merge mainline produce 409; resource refusals produce 413. Required-object,
-validation, and infrastructure failures are not successful empty results.
-No preparation error asserts a canonical committed/refused transaction.
+Malformed inputs, missing snapshot/choices and invalid mainlines produce 400;
+missing/hidden refs and commits outside the authorized source history produce
+404; moved tips/head, missing merge mainline, clean-path choices, absent sides,
+unresolved conflicts and a request to resolve an already clean replay produce
+409; resource refusals produce 413. Required-object, reconstruction, validation,
+and infrastructure failures are not successful empty results. No preparation
+or resolution error asserts a canonical committed/refused transaction.
 
 ## Inspection and publication are separate
 
@@ -111,8 +164,8 @@ bundle:  <exact candidate bundle bytes>
 independent `receive` grant, enabled Git writes, and an `Idempotency-Key`.
 It reuses ordinary sealed workspace admission, current policy and expected-old
 checks, and outcome recovery. A completed same-key retry remains the original
-transaction even after restart or target advancement. Preparing or downloading
-a candidate never grants that write permission.
+transaction even after restart or target advancement. Preparing, resolving or
+downloading a candidate never grants that write permission.
 
 ## Evidence and non-claims
 
@@ -120,13 +173,18 @@ a candidate never grants that write permission.
 both hash formats: reproducible native preparation, borrowed dependencies,
 no-change/inverse/conflict outcomes, source-history authorization, native bounds,
 read-scope and pre-body key refusal, credential rotation, independent inspection,
-explicit publication, and restart/terminal retry. Focused parser, response and
-framing tests cover malformed coordinates, lossless paths, cancellation,
-metadata bounds, and write failure.
+explicit publication, and restart/terminal retry.
+
+`crates/fgit-node/tests/source_replay_resolution_http.rs` adds all side choices,
+delete and no-change resolution, exact empty/binary/executable files, independent
+inspection and apply, stale snapshot refusal after restart, same-key recovery,
+missing/reused/unused file rejection, narrowed budgets, and authorization before
+body intake. Focused parser, receipt, response and framing tests cover malformed
+coordinates, byte paths, cancellation, metadata bounds, and write failure.
 
 These new tests were authored but not executed in the implementation environment:
 `cargo`, `rustc`, and `rustfmt` were unavailable. No compilation, conformance,
 Clippy, performance or repository-gate pass is claimed. The authoritative
 implementation remains the owning native replay/admission engines; this adapter
-does not complete the broad API bridge, rebase, a multi-commit sequencer, hosted
-IAM, conflict resolution transport, or general Git compatibility.
+does not complete the broad API bridge, remote rebase, a multi-commit sequencer,
+hosted IAM, or general Git compatibility.

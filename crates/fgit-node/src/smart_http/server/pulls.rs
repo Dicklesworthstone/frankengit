@@ -15,6 +15,24 @@ pub(super) use collaboration::source_upload::{
     SourceUploadKind, read_source_upload, source_upload, source_upload_boundary,
 };
 
+// Replay resolution uses exactly the existing resolution part policy. Expose
+// byte-only adapters, not a PR request, subject, credential or execution method.
+pub(super) const MAX_RESOLUTION_UPLOAD_BYTES: usize = collaboration::resolution_upload::MAX_UPLOAD_BYTES;
+pub(super) fn resolution_upload_boundary(media: &str) -> Result<&str, ApiError> {
+    collaboration::resolution_upload::boundary(media)
+}
+pub(super) fn read_resolution_upload(reader: &mut impl Read, framing: BodyFraming,
+    limits: HttpLimits,
+) -> Result<Vec<u8>, ApiError> {
+    collaboration::read_upload_bounded(reader, framing, limits, MAX_RESOLUTION_UPLOAD_BYTES)
+}
+pub(super) fn resolution_upload<'a>(bytes: &'a [u8], boundary: &str,
+    live: &mut impl FnMut() -> bool,
+) -> Result<(&'a [u8], std::collections::BTreeMap<&'a str, &'a [u8]>), ApiError> {
+    let upload = collaboration::resolution_upload::parse(bytes, boundary, live)?;
+    Ok((upload.command, upload.files))
+}
+
 use std::io::{self, Read, Write};
 
 use fgit_authority::IdempotencyKey;
