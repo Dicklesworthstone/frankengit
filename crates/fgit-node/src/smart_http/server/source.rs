@@ -1,10 +1,11 @@
-//! Repository source reads and exact candidate operations. Read grants never
-//! imply publication. Applying a bundle additionally requires receive scope
-//! and the explicit Git-write deployment switch, through native admission.
+//! Repository source reads, branch lifecycle and exact candidate operations.
+//! Read grants never imply publication. Branch mutation and bundle application
+//! require receive scope and the explicit Git-write deployment switch.
 
 mod request;
 mod output;
 mod changes;
+mod refs;
 
 use std::io::{self, Read, Write};
 use fgit_authority::IdempotencyKey;
@@ -22,20 +23,34 @@ use request::Command;
 #[derive(Debug)]
 pub(super) struct Request<'a>(RequestKind<'a>);
 #[derive(Debug)]
-enum RequestKind<'a> { Read(request::Request<'a>), Change(changes::Request<'a>) }
+enum RequestKind<'a> {
+    Read(request::Request<'a>),
+    Change(changes::Request<'a>),
+    Refs(refs::Request<'a>),
+}
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = refs::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::Refs(request)));
+        }
         if let Some(request) = changes::Request::parse(envelope)? {
             return Ok(Self(RequestKind::Change(request)));
         }
         request::Request::parse(envelope).map(|request| Self(RequestKind::Read(request)))
     }
     pub(super) fn is_mutation(&self) -> bool {
-        matches!(&self.0, RequestKind::Change(request) if request.is_mutation())
+        match &self.0 {
+            RequestKind::Read(_) => false,
+            RequestKind::Change(request) => request.is_mutation(),
+            RequestKind::Refs(request) => request.is_mutation(),
+        }
     }
     fn route(&self) -> &str {
-        match &self.0 { RequestKind::Read(request) => request.repository_route,
-            RequestKind::Change(request) => request.repository_route }
+        match &self.0 {
+            RequestKind::Read(request) => request.repository_route,
+            RequestKind::Change(request) => request.repository_route,
+            RequestKind::Refs(request) => request.route(),
+        }
     }
 }
 
@@ -76,6 +91,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
+        RequestKind::Refs(request) => return refs::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Change(request) => return changes::execute(node, request, session, framing, reader, http, maximum_response),
         RequestKind::Read(request) => request,
     };
@@ -100,6 +116,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
                 node.search_source_snapshot_local_in(&context, &selection.reference,
                     selection.expected_head, selection.expected_commit, query, *limits), &mut live)
                 .map_err(read_error)?;
+            output::search(node, selection, query, *limits, head, &report, maximum, &mut live)?;
             output::search(node, selection, query, *limits, head, &report, maximum, &mut live)?
         }
     };
@@ -163,8 +180,13 @@ mod tests {
         }
     }
     #[test]
-    fn only_explicit_source_apply_acquires_mutation_semantics() {
+    fn branch_mutations_and_candidate_apply_acquire_the_same_write_semantics() {
         for (action, media, mutation) in [("tree", "application/x-www-form-urlencoded", false),
+            ("refs", "application/x-www-form-urlencoded", false),
+            ("branches/create", "application/x-www-form-urlencoded", true),
+            ("branches/update", "application/x-www-form-urlencoded", true),
+            ("branches/delete", "application/x-www-form-urlencoded", true),
+            ("branches/rename", "application/x-www-form-urlencoded", true),
             ("prepare", "multipart/form-data; boundary=x", false),
             ("inspect", "multipart/form-data; boundary=x", false),
             ("apply", "multipart/form-data; boundary=x", true)] {
