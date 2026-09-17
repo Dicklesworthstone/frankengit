@@ -8,6 +8,12 @@ mod output;
 mod preparation;
 mod request;
 
+// Source editing shares the established ingress/MIME implementation, not PR
+// authorization. These helpers parse bytes and confer no publication authority.
+pub(super) use collaboration::source_upload::{
+    SourceUploadKind, read_source_upload, source_upload, source_upload_boundary,
+};
+
 use std::io::{self, Read, Write};
 
 use fgit_authority::IdempotencyKey;
