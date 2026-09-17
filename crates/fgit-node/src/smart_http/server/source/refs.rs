@@ -96,7 +96,7 @@ fn publication_error(error: NodeWorkspaceRefusal) -> ApiError {
 mod tests {
     use super::*;
     #[test]
-    fn_preflight_refusals_and_ambiguous_authority_work_are_not_conflated() {
+    fn preflight_refusals_and_ambiguous_authority_work_are_not_conflated() {
         for error in [NodeWorkspaceRefusal::RefUnavailable, NodeWorkspaceRefusal::CommitRequired,
             NodeWorkspaceRefusal::BranchOperation("default branch"), NodeWorkspaceRefusal::ObjectFormatMismatch] {
             assert!(!publication_error(error).outcome_unknown);
