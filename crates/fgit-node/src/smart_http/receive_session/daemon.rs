@@ -8,7 +8,7 @@ use std::io::{self, Cursor, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
-use fgit_admission::{AdmissionLimits, AdmissionResult};
+use fgit_admission::{AdmissionLimits, AdmissionResult, BasisBoundValidatedReceive};
 use fgit_authority::IdempotencyKey;
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_git_object::ParseLimits;
@@ -124,9 +124,29 @@ impl OneNode {
     }
 
     fn serve_guarded_git_daemon_stream_in(
-        &self, mut stream: TcpStream, ingress: GitDaemonSessionDeadline,
+        &self, stream: TcpStream, ingress: GitDaemonSessionDeadline,
         shared_quota: Option<&crate::PushQuota>,
     ) -> Result<Option<AdmissionResult>, NodeSmartHttpRefusal> {
+        self.serve_guarded_git_daemon_stream_with_admission(stream, ingress, shared_quota,
+            |request, session, validated, live| {
+                let mut checkpoint = || live();
+                drive_request_while(self, request,
+                    self.admit_receive_session_durable_in(request, session, validated, AdmissionLimits::default()),
+                    &mut checkpoint)
+            })
+    }
+
+    // Private composition seam: production always supplies the guarded driver
+    // above. Fault tests substitute only an unavailable projection operation,
+    // retaining the real socket parser, quarantine, authority and final response.
+    fn serve_guarded_git_daemon_stream_with_admission<F>(
+        &self, mut stream: TcpStream, ingress: GitDaemonSessionDeadline,
+        shared_quota: Option<&crate::PushQuota>, admit: F,
+    ) -> Result<Option<AdmissionResult>, NodeSmartHttpRefusal>
+    where F: FnOnce(&NodeRequestContext, &LoopbackReceiveSession,
+        &BasisBoundValidatedReceive, &mut dyn FnMut() -> bool)
+        -> Result<AdmissionResult, NodeSmartHttpRefusal>,
+    {
         let limits = WireLimits::default();
         if !is_receive(self, &stream, &ingress, &limits)? {
             return self.serve_git_daemon_stream_with_limits(stream, limits)
@@ -216,8 +236,7 @@ impl OneNode {
             let validated = handoff.into_validated_receive()?;
             drop(machine);
             admission_started = true;
-            let outcome = drive_request_while(self, &request,
-                self.admit_receive_session_durable_in(&request, &session, &validated, AdmissionLimits::default()), &mut live)?;
+            let outcome = admit(&request, &session, &validated, &mut live)?;
             // A late deadline or socket failure cannot erase canonical knowledge.
             final_attempted = true;
             writer.restart_deadline(GitDaemonSessionDeadline::new(self.git_daemon_session_timeout,
@@ -286,3 +305,6 @@ mod tests {
         assert_ne!(retry_key(route, commands).unwrap(), retry_key(route, b"0001").unwrap());
     }
 }
+
+#[cfg(test)]
+mod fault_tests;
