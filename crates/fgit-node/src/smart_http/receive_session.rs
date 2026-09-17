@@ -1,12 +1,12 @@
 //! Shared node-owned receive admission and native byte intake.
 //!
-//! HTTP and embedding transports use the same exact-basis coordinator. The
-//! historical `NodeSmartHttpRefusal` name is retained as the public error family;
-//! its interrupted-session variant preserves canonical outcomes independently
-//! of how the native receive bytes arrived. The legacy daemon is not redirected
-//! by this module: callers must select the new session API explicitly.
+//! HTTP, guarded raw TCP and embedding transports share the exact-basis
+//! coordinator. The historical `NodeSmartHttpRefusal` name is retained as the
+//! public error family; interrupted outcomes do not depend on transport framing.
+//! Older node compatibility methods remain distinct from the guarded service.
 
 mod bounded_intake;
+mod daemon;
 
 use std::future::{Future, poll_fn};
 use std::pin::pin;
