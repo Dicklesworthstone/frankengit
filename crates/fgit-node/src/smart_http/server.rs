@@ -10,6 +10,7 @@ mod credentials;
 mod issues;
 mod outcomes;
 mod pulls;
+mod source;
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -49,11 +50,13 @@ struct Profile {
     allow_issues: bool,
     allow_outcomes: bool,
     allow_pulls: bool,
+    allow_source: bool,
     http: HttpLimits,
     maximum_response_bytes: u64,
     timeout: GitDaemonSessionTimeout,
     quota: Arc<PushQuota>,
     outcome_quota: Arc<PushQuota>,
+    source_quota: Arc<PushQuota>,
 }
 
 struct PendingSession {
@@ -116,7 +119,7 @@ impl OneNode {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits,
             CredentialSource::Static { digest: credential_digest, principal },
-            allow_receive, false, false, false, idle_timeout,
+            allow_receive, false, false, false, false, idle_timeout,
         )
     }
 
@@ -156,7 +159,7 @@ impl OneNode {
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, false, false, false, idle_timeout,
+            allow_receive, false, false, false, false, idle_timeout,
         )
     }
 
@@ -184,7 +187,7 @@ impl OneNode {
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, true, false, false, idle_timeout,
+            allow_receive, true, false, false, false, idle_timeout,
         )
     }
 
@@ -213,7 +216,7 @@ impl OneNode {
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, allow_issues, allow_outcomes, false, idle_timeout,
+            allow_receive, allow_issues, allow_outcomes, false, false, idle_timeout,
         )
     }
 
@@ -238,7 +241,24 @@ impl OneNode {
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
             listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, allow_issues, allow_outcomes, true, idle_timeout,
+            allow_receive, allow_issues, allow_outcomes, true, false, idle_timeout,
+        )
+    }
+
+    /// Enable repository source browsing and literal-byte search for read-scoped
+    /// credentials, independently of all mutation services. Every source query
+    /// is a bounded read, including body-bearing POSTs. Current canonical hidden
+    /// refs apply; paths cannot select host files or arbitrary admitted objects.
+    /// Source reads have their own principal quota. Older entrypoints keep this
+    /// feature disabled, including the static-token compatibility profile.
+    pub fn serve_repository_http_with_source_bounded(
+        &self, listener: &TcpListener, server_limits: GitDaemonServerLimits,
+        credentials_file: &Path, allow_receive: bool, allow_issues: bool,
+        allow_outcomes: bool, allow_pulls: bool, idle_timeout: Duration,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        self.serve_smart_http_with_source_bounded(
+            listener, server_limits, self.smart_http_credentials_source(credentials_file),
+            allow_receive, allow_issues, allow_outcomes, allow_pulls, true, idle_timeout,
         )
     }
 
@@ -262,6 +282,7 @@ impl OneNode {
         allow_issues: bool,
         allow_outcomes: bool,
         allow_pulls: bool,
+        allow_source: bool,
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         let address = listener.local_addr().map_err(|source| io_error("inspect HTTP listener", source))?;
@@ -301,11 +322,13 @@ impl OneNode {
             allow_issues,
             allow_outcomes,
             allow_pulls,
+            allow_source,
             http,
             maximum_response_bytes,
             timeout: self.git_daemon_session_timeout,
             quota: Arc::new(PushQuota::default()),
             outcome_quota: Arc::new(PushQuota::default()),
+            source_quota: Arc::new(PushQuota::default()),
         });
         listener.set_nonblocking(true).map_err(|source| io_error("configure HTTP listener", source))?;
         let completed = Arc::new(AtomicUsize::new(0));
@@ -604,6 +627,7 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
     let mut native = false;
     let mut native_mutation = false;
     let mut pull_api = false;
+    let mut source_api = false;
     let mut api_error = None;
     let mut recovery = false;
     let mut recovery_error = None;
@@ -619,26 +643,32 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
                 &bytes[envelope.consumed..], &mut writer)
                 .map_err(|error| { recovery_error = Some(error); error.status });
         }
+        source_api = envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/source"));
         pull_api = envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/pulls"));
-        native = pull_api || envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/issues"));
-        native_mutation = native && envelope.method == "POST";
-        let pull_request = pulls::Request::parse(&envelope).map_err(|error| {
-            api_error = Some(error);
-            error.status
-        })?;
+        native = source_api || pull_api || envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/issues"));
+        native_mutation = native && envelope.method == "POST" && !source_api;
+        let source_request = if source_api {
+            Some(source::Request::parse(&envelope).map_err(|error| { api_error = Some(error); error.status })?)
+        } else { None };
+        let pull_request = if source_request.is_none() {
+            pulls::Request::parse(&envelope).map_err(|error| { api_error = Some(error); error.status })?
+        } else { None };
         if let Some(request) = &pull_request {
             native_mutation = request.is_mutation();
         }
-        let issue_request = if pull_request.is_none() {
+        let issue_request = if source_request.is_none() && pull_request.is_none() {
             issues::Request::parse(&envelope).map_err(|error| {
                 api_error = Some(error);
                 error.status
             })?
         } else { None };
-        let git_request = if issue_request.is_none() && pull_request.is_none() {
+        let git_request = if source_request.is_none() && issue_request.is_none() && pull_request.is_none() {
             Some(parse_head(&bytes, profile.http)?.ok_or(Status::BadRequest)?)
         } else { None };
-        let session = if let Some(request) = &pull_request {
+        let session = if let Some(request) = &source_request {
+            source::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                .map_err(|error| { api_error = Some(error); error.status })?
+        } else if let Some(request) = &pull_request {
             pulls::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
                 .map_err(|error| { api_error = Some(error); error.status })?
         } else if let Some(request) = &issue_request {
@@ -648,9 +678,11 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
             authenticated_session(git_request.as_ref().ok_or(Status::BadRequest)?, &bytes[..envelope.consumed], profile)?
         };
         let mutation = native_mutation || git_request.as_ref().is_some_and(|request| request.operation == Operation::Rpc(Service::ReceivePack));
-        // Preparation spends bounded work but never acquires mutation outcome
-        // semantics. Apply the same intake quota before reading its POST body.
-        if mutation || pull_request.as_ref().is_some_and(|request| request.accepts_body()) {
+        if source_request.is_some() {
+            let principal = session.authenticated_session().ok_or(Status::Unauthorized)?.principal_id();
+            profile.source_quota.evaluate(&principal).map_err(|_| Status::RateLimited)?;
+        } else if mutation || pull_request.as_ref().is_some_and(|request| request.accepts_body()) {
+            // Source browsing/search must not consume mutation or recovery quotas.
             let principal = session.authenticated_session().ok_or(Status::Unauthorized)?.principal_id();
             profile.quota.evaluate(&principal).map_err(|_| Status::RateLimited)?;
         }
@@ -674,7 +706,12 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
                 writer.inner.flush()?;
             }
             let mut body = io::Cursor::new(initial).chain(&mut reader);
-            if let Some(request) = &pull_request {
+            if let Some(request) = &source_request {
+                let reply = source::execute(&node, request, &session, envelope.body, &mut body,
+                    profile.http, profile.maximum_response_bytes)
+                    .map_err(|error| { api_error = Some(error); error.status })?;
+                reply.send(&mut writer, version).map_err(|_| Status::Unavailable)?;
+            } else if let Some(request) = &pull_request {
                 let reply = pulls::execute(&node, request, &session, envelope.body, &mut body,
                     profile.http, profile.maximum_response_bytes)
                     .map_err(|error| { api_error = Some(error); error.status })?;
@@ -733,7 +770,9 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
                 let _ = error.send(&mut writer, version);
             } else if native {
                 let error = api_error.unwrap_or_else(|| issues::ApiError::from_status(status, native_mutation));
-                if pull_api {
+                if source_api {
+                    let _ = error.send_named(&mut writer, version, "source_error");
+                } else if pull_api {
                     let _ = error.send_named(&mut writer, version, "pull_request_error");
                 } else {
                     let _ = error.send(&mut writer, version);
@@ -786,11 +825,13 @@ mod tests {
             allow_issues: false,
             allow_outcomes: false,
             allow_pulls: false,
+            allow_source: false,
             http: HttpLimits::default(),
             maximum_response_bytes: 1024,
             timeout: GitDaemonSessionTimeout::DEFAULT,
             quota: Arc::new(PushQuota::default()),
             outcome_quota: Arc::new(PushQuota::default()),
+            source_quota: Arc::new(PushQuota::default()),
         }
     }
     fn head(extra: &str) -> Vec<u8> {
