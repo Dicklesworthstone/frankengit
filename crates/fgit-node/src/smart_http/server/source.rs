@@ -10,6 +10,9 @@ mod tags;
 mod initial;
 mod history;
 pub(super) mod review;
+mod artifact;
+mod replay;
+mod rebase;
 
 use std::io::{self, Read, Write};
 use fgit_authority::IdempotencyKey;
@@ -35,9 +38,17 @@ enum RequestKind<'a> {
     Initial(initial::Request<'a>),
     History(history::Request<'a>),
     Review(review::Request<'a>),
+    Replay(replay::Request<'a>),
+    Rebase(rebase::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = rebase::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::Rebase(request)));
+        }
+        if let Some(request) = replay::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::Replay(request)));
+        }
         if let Some(request) = review::Request::parse(envelope)? {
             return Ok(Self(RequestKind::Review(request)));
         }
@@ -60,7 +71,8 @@ impl<'a> Request<'a> {
     }
     pub(super) fn is_mutation(&self) -> bool {
         match &self.0 {
-            RequestKind::Read(_) | RequestKind::History(_) | RequestKind::Review(_) => false,
+            RequestKind::Read(_) | RequestKind::History(_) | RequestKind::Review(_) | RequestKind::Replay(_) => false,
+            RequestKind::Rebase(request) => request.is_mutation(),
             RequestKind::Change(request) => request.is_mutation(),
             RequestKind::Refs(request) => request.is_mutation(),
             RequestKind::Tags(request) => request.is_mutation(),
@@ -76,21 +88,25 @@ impl<'a> Request<'a> {
             RequestKind::Initial(request) => request.repository_route,
             RequestKind::History(request) => request.repository_route,
             RequestKind::Review(request) => request.repository_route,
+            RequestKind::Replay(request) => request.repository_route,
+            RequestKind::Rebase(request) => request.repository_route,
         }
     }
 }
 
 pub(super) struct Reply(ReplyBody);
-enum ReplyBody { Json(JsonReply), Patch(changes::PatchReply), Initial(initial::Prepared) }
+enum ReplyBody { Json(JsonReply), Patch(changes::PatchReply), Initial(initial::Prepared), Candidate(artifact::PreparedReply) }
 impl Reply {
     fn json(reply: JsonReply) -> Self { Self(ReplyBody::Json(reply)) }
     fn patch(reply: changes::PatchReply) -> Self { Self(ReplyBody::Patch(reply)) }
     fn initial(reply: initial::Prepared) -> Self { Self(ReplyBody::Initial(reply)) }
+    fn candidate(reply: artifact::PreparedReply) -> Self { Self(ReplyBody::Candidate(reply)) }
     pub(super) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
         match &self.0 {
             ReplyBody::Json(reply) => reply.send(writer, version),
             ReplyBody::Patch(reply) => reply.send(writer, version),
             ReplyBody::Initial(reply) => reply.send(writer, version),
+            ReplyBody::Candidate(reply) => reply.send(writer, version),
         }
     }
 }
@@ -121,6 +137,8 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
+        RequestKind::Rebase(request) => return rebase::execute(node, request, session, framing, reader, http, maximum_response),
+        RequestKind::Replay(request) => return replay::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::candidate),
         RequestKind::Review(request) => return review::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::History(request) => return history::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Initial(request) => return initial::execute(node, request, session, framing, reader, http, maximum_response),
@@ -217,6 +235,10 @@ mod tests {
         for (action, media, mutation) in [("tree", "application/x-www-form-urlencoded", false),
             ("log", "application/x-www-form-urlencoded", false),
             ("diff", "application/x-www-form-urlencoded", false),
+            ("cherry-pick/prepare", "application/x-www-form-urlencoded", false),
+            ("revert/prepare", "application/x-www-form-urlencoded", false),
+            ("rebase/prepare", "application/x-www-form-urlencoded", false),
+            ("rebase/apply", "multipart/form-data; boundary=x", true),
             ("refs", "application/x-www-form-urlencoded", false),
             ("branches/create", "application/x-www-form-urlencoded", true),
             ("branches/update", "application/x-www-form-urlencoded", true),
