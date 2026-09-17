@@ -8,6 +8,7 @@ mod changes;
 mod refs;
 mod tags;
 mod initial;
+mod history;
 
 use std::io::{self, Read, Write};
 use fgit_authority::IdempotencyKey;
@@ -31,9 +32,13 @@ enum RequestKind<'a> {
     Refs(refs::Request<'a>),
     Tags(tags::Request<'a>),
     Initial(initial::Request<'a>),
+    History(history::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = history::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::History(request)));
+        }
         if let Some(request) = initial::Request::parse(envelope)? {
             return Ok(Self(RequestKind::Initial(request)));
         }
@@ -50,7 +55,7 @@ impl<'a> Request<'a> {
     }
     pub(super) fn is_mutation(&self) -> bool {
         match &self.0 {
-            RequestKind::Read(_) => false,
+            RequestKind::Read(_) | RequestKind::History(_) => false,
             RequestKind::Change(request) => request.is_mutation(),
             RequestKind::Refs(request) => request.is_mutation(),
             RequestKind::Tags(request) => request.is_mutation(),
@@ -64,6 +69,7 @@ impl<'a> Request<'a> {
             RequestKind::Refs(request) => request.route(),
             RequestKind::Tags(request) => request.route(),
             RequestKind::Initial(request) => request.repository_route,
+            RequestKind::History(request) => request.repository_route,
         }
     }
 }
@@ -109,6 +115,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
+        RequestKind::History(request) => return history::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Initial(request) => return initial::execute(node, request, session, framing, reader, http, maximum_response),
         RequestKind::Tags(request) => return tags::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Refs(request) => return refs::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
@@ -201,6 +208,7 @@ mod tests {
     #[test]
     fn branch_tag_and_candidate_mutations_acquire_the_same_write_semantics() {
         for (action, media, mutation) in [("tree", "application/x-www-form-urlencoded", false),
+            ("log", "application/x-www-form-urlencoded", false),
             ("refs", "application/x-www-form-urlencoded", false),
             ("branches/create", "application/x-www-form-urlencoded", true),
             ("branches/update", "application/x-www-form-urlencoded", true),

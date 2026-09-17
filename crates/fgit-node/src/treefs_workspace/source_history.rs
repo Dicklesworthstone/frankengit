@@ -19,6 +19,34 @@ pub enum NodeHistoryRefusal {
     /// A hidden ref and a missing ref intentionally have the same response.
     Unavailable,
 }
+impl NodeHistoryRefusal {
+    /// Let transports classify a pinned-read failure without scraping Debug
+    /// text or disclosing the contents of an authority/storage failure.
+    #[must_use]
+    pub const fn is_snapshot_moved(&self) -> bool {
+        matches!(self, Self::SnapshotMoved)
+    }
+
+    #[must_use]
+    pub const fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Unavailable)
+    }
+
+    #[must_use]
+    pub const fn is_unpinned_continuation(&self) -> bool {
+        matches!(self, Self::UnpinnedContinuation)
+    }
+
+    /// The typed native-reader cause, when one exists. A missing/corrupt
+    /// required object remains an error, not an empty history page.
+    #[must_use]
+    pub fn history_error(&self) -> Option<&HistoryError> {
+        match self {
+            Self::History(error) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+}
 impl std::fmt::Display for NodeHistoryRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "source history unavailable: {self:?}")
@@ -152,5 +180,18 @@ mod tests {
         assert!(matches!(node.runtime().block_on(node.blame_source_in(&request, &reference,
             &RefVisibility::new(), None, &options)), Err(NodeHistoryRefusal::History(_))));
         node.shutdown().unwrap();
+    }
+
+    #[test]
+    fn transport_classification_preserves_hidden_and_missing_indistinguishability() {
+        let missing = NodeHistoryRefusal::Unavailable;
+        assert!(missing.is_unavailable());
+        assert!(!missing.is_snapshot_moved());
+        assert!(missing.history_error().is_none());
+        assert!(NodeHistoryRefusal::SnapshotMoved.is_snapshot_moved());
+        assert!(NodeHistoryRefusal::UnpinnedContinuation.is_unpinned_continuation());
+        let corrupt = failed(HistoryError::CyclicHistory);
+        assert!(!corrupt.is_unavailable());
+        assert_eq!(corrupt.history_error(), Some(&HistoryError::CyclicHistory));
     }
 }
