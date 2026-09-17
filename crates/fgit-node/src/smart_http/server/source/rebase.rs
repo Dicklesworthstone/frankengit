@@ -1,8 +1,9 @@
-//! Native linear rebase over the existing source gateway. Preparation is a
-//! read; publication is an independent exact-old, write-scoped transaction.
+//! Native linear rebase over the existing source gateway. Preparation and
+//! resolution are reads; publication is an independent exact-old transaction.
 
 mod request;
 mod output;
+mod resolution;
 
 use std::io::Read;
 use fgit_forge::preparation::{MergeSourceError, PreparationError};
@@ -13,10 +14,11 @@ use crate::{GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackRecei
 use crate::smart_http::drive_request_while;
 use super::Reply;
 use super::super::{Status, issues::{ApiError, MAX_FORM_BYTES, admission_error, read_form},
-    pulls::{SourceUploadKind, read_source_upload, source_upload, source_upload_boundary}};
+    pulls::{SourceUploadKind, read_source_upload, source_upload, source_upload_boundary,
+        MAX_RESOLUTION_UPLOAD_BYTES, read_resolution_upload, resolution_upload_boundary}};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Operation { Prepare, Apply }
+enum Operation { Prepare, Resolve, Apply }
 #[derive(Debug)]
 pub(super) struct Request<'a> {
     pub(super) repository_route: &'a str,
@@ -29,6 +31,7 @@ impl<'a> Request<'a> {
         let Some((repository_route, action)) = path.split_once("/api/v1/source/") else { return Ok(None); };
         let operation = match action {
             "rebase/prepare" => Operation::Prepare,
+            "rebase/resolve" => Operation::Resolve,
             "rebase/apply" => Operation::Apply,
             _ => return Ok(None),
         };
@@ -42,12 +45,17 @@ impl<'a> Request<'a> {
         }
         let media = head.content_type.ok_or_else(ApiError::media)?;
         let boundary = match operation {
-            Operation::Prepare if media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+            Operation::Prepare | Operation::Resolve if media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
                 || media.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8") => None,
+            Operation::Resolve => Some(resolution_upload_boundary(media)?),
             Operation::Apply => Some(source_upload_boundary(media)?),
             _ => return Err(ApiError::media()),
         };
-        let maximum = if operation == Operation::Apply { SourceUploadKind::Bundle.maximum() } else { MAX_FORM_BYTES };
+        let maximum = match operation {
+            Operation::Apply => SourceUploadKind::Bundle.maximum(),
+            Operation::Resolve if boundary.is_some() => MAX_RESOLUTION_UPLOAD_BYTES,
+            _ => MAX_FORM_BYTES,
+        };
         if matches!(head.body, BodyFraming::ContentLength(n) if n > maximum as u64) { return Err(ApiError::too_large()); }
         Ok(Some(Self { repository_route, operation, boundary }))
     }
@@ -59,6 +67,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
 ) -> Result<Reply, ApiError> {
     let authenticated = session.authenticated_session().ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
     let bytes = if request.is_mutation() { read_source_upload(reader, framing, http, SourceUploadKind::Bundle)? }
+        else if request.boundary.is_some() { read_resolution_upload(reader, framing, http)? }
         else { read_form(reader, framing, http)? };
     let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(node.git_daemon_session_timeout, GitDaemonSessionWorkScaling::FLAT);
@@ -77,24 +86,37 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
             .map_err(publication_error)?;
         return output::publication(node, authenticated.principal_id(), &command, result, maximum).map(Reply::json);
     }
-    let command = request::Prepare::parse(&bytes, node.object_format)?;
+    let (command, recipes) = if request.operation == Operation::Resolve {
+        let (command, recipes) = resolution::parse(&bytes, request.boundary, node.object_format, &mut live)?;
+        (command, Some(recipes))
+    } else { (request::Prepare::parse(&bytes, node.object_format)?, None) };
+    // Recipes own only their exact bounded file bytes, not a second MIME copy.
     drop(bytes);
-    let artifact = drive_request_while(node, &context,
-        node.prepare_rebase_bundle_in(&context, &command.source, &command.onto_ref, command.inputs,
-            &Default::default(), command.expected_head, &command.committer, command.limits), &mut live)
-        .map_err(|error| {
-            if error.is_snapshot_moved() { ApiError::new(Status::Conflict, "source_snapshot_moved") }
-            else if error.is_tip_moved() { ApiError::new(Status::Conflict, "rebase_tip_moved") }
-            else if error.is_unavailable() { ApiError::not_found() }
-            else if error.is_invalid_input() { ApiError::bad("invalid_rebase_inputs") }
-            else if error.is_resource_refusal() { ApiError::too_large() }
-            else if error.is_cancelled() { ApiError::from_status(Status::Timeout, false) }
-            else if let Some(cause) = error.preparation_refusal() { rebase_error(cause) }
-            else if let Some(cause) = error.source_refusal() { source_error(cause) }
-            else { ApiError::unavailable() }
-        })?;
+    let prepared = if let Some(recipes) = recipes.as_deref() {
+        drive_request_while(node, &context,
+            node.prepare_resolved_rebase_bundle_in(&context, &command.source, &command.onto_ref,
+                command.inputs, &Default::default(), command.expected_head, &command.committer,
+                command.limits, recipes), &mut live)
+    } else {
+        drive_request_while(node, &context,
+            node.prepare_rebase_bundle_in(&context, &command.source, &command.onto_ref, command.inputs,
+                &Default::default(), command.expected_head, &command.committer, command.limits), &mut live)
+            .map(|artifact| (artifact, Vec::new()))
+    };
+    let (artifact, receipts) = prepared.map_err(|error| {
+        if error.is_snapshot_moved() { ApiError::new(Status::Conflict, "source_snapshot_moved") }
+        else if error.is_tip_moved() { ApiError::new(Status::Conflict, "rebase_tip_moved") }
+        else if error.is_unavailable() { ApiError::not_found() }
+        else if error.is_invalid_input() { ApiError::bad("invalid_rebase_inputs") }
+        else if error.is_resource_refusal() { ApiError::too_large() }
+        else if error.is_cancelled() { ApiError::from_status(Status::Timeout, false) }
+        else if let Some(cause) = error.preparation_refusal() { rebase_error(cause) }
+        else if let Some(cause) = error.source_refusal() { source_error(cause) }
+        else { ApiError::unavailable() }
+    })?;
+    let resolution = recipes.as_deref().map(|recipes| (recipes, receipts.as_slice()));
     output::build(node, &command, artifact.source_head, &artifact.outcome, artifact.bundle,
-        (artifact.pack_objects, artifact.borrowed_objects), maximum, &mut live).map(Reply::candidate)
+        (artifact.pack_objects, artifact.borrowed_objects), resolution, maximum, &mut live).map(Reply::candidate)
 }
 fn source_error(error: &MergeSourceError) -> ApiError {
     match error { MergeSourceError::Cancelled => ApiError::from_status(Status::Timeout, false),
@@ -146,7 +168,9 @@ mod tests {
     use fgit_wire::smart_http::head;
     #[test]
     fn prepare_and_apply_keep_distinct_media_and_mutation_semantics() {
-        for (action, media, mutation) in [("prepare", "application/x-www-form-urlencoded", false), ("apply", "multipart/form-data; boundary=x", true)] {
+        for (action, media, mutation) in [("prepare", "application/x-www-form-urlencoded", false),
+            ("resolve", "application/x-www-form-urlencoded", false), ("resolve", "multipart/form-data; boundary=x", false),
+            ("apply", "multipart/form-data; boundary=x", true)] {
             let bytes = format!("POST /r.git/api/v1/source/rebase/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: {media}\r\nContent-Length: 1\r\n\r\n");
             let parsed = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
             assert_eq!(Request::parse(&parsed).unwrap().unwrap().is_mutation(), mutation);

@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use fgit_admission::AdmissionResult;
 use fgit_forge::preparation::{ConflictKind, MergeConflict, MergeEntry};
 use fgit_forge::preparation::rebase::{EmptyCommitPolicy, RebasePreparation, RebaseStep, RebaseStepKind, RebaseStop};
+use fgit_forge::preparation::rebase::resolutions::{RebaseCommitResolution, RebaseResolvedStep};
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RepositoryAuthorityHeadId};
 use crate::OneNode;
 use super::request::{Apply, Prepare};
@@ -20,6 +21,7 @@ fn scope(node: &OneNode) -> String {
 
 pub(super) fn build(node: &OneNode, command: &Prepare, head: RepositoryAuthorityHeadId,
     outcome: &RebasePreparation, bundle: Option<Vec<u8>>, counts: (usize, usize),
+    resolutions: Option<(&[RebaseCommitResolution], &[RebaseResolvedStep])>,
     maximum: usize, live: &mut impl FnMut() -> bool,
 ) -> Result<PreparedReply, ApiError> {
     checkpoint(live)?;
@@ -83,6 +85,9 @@ pub(super) fn build(node: &OneNode, command: &Prepare, head: RepositoryAuthority
             (Status::Conflict, None)
         }
     };
+    if let Some((recipes, receipts)) = resolutions {
+        super::resolution::append_receipts(&mut body, command, outcome, recipes, receipts, live)?;
+    }
     append(&mut body, &format!("\"step_count\":{},\"steps\":[", steps.len()))?;
     for (index, step) in steps.iter().enumerate() {
         checkpoint(live)?;
