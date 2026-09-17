@@ -12,12 +12,12 @@ use super::super::super::pulls::{SourceUploadKind, source_upload_boundary};
 pub(super) enum Operation { Prepare, Inspect, Apply }
 #[derive(Debug)]
 pub(in crate::smart_http::server::source) struct Request<'a> {
-    pub repository_route: &'a str,
-    pub operation: Operation,
-    pub boundary: &'a str,
+    pub(in crate::smart_http::server::source) repository_route: &'a str,
+    pub(super) operation: Operation,
+    pub(super) boundary: &'a str,
 }
 impl<'a> Request<'a> {
-    pub fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
+    pub(in crate::smart_http::server::source) fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
         let (path, query) = head.target.split_once('?').map_or((head.target, None), |(path, query)| (path, Some(query)));
         let Some((repository_route, action)) = path.split_once("/api/v1/source/") else { return Ok(None); };
         let operation = match action {
@@ -40,11 +40,11 @@ impl<'a> Request<'a> {
         }
         Ok(Some(request))
     }
-    pub fn is_mutation(&self) -> bool { self.operation == Operation::Apply }
-    pub fn kind(&self) -> SourceUploadKind {
+    pub(in crate::smart_http::server::source) fn is_mutation(&self) -> bool { self.operation == Operation::Apply }
+    pub(super) fn kind(&self) -> SourceUploadKind {
         match self.operation { Operation::Prepare => SourceUploadKind::Patch, _ => SourceUploadKind::Bundle }
     }
-    pub fn command(&self, bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> {
+    pub(super) fn command(&self, bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> {
         let mut fields = BTreeMap::new();
         for (name, value) in parse_form(bytes, 7)? {
             let common = matches!(name.as_str(), "ref" | "object_format" | "expected_commit");
@@ -136,17 +136,14 @@ mod tests {
             let bytes = format!("POST /repo.git/api/v1/source/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: multipart/form-data; boundary=x\r\nContent-Length: 1\r\n\r\n");
             let envelope = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
             assert_eq!(Request::parse(&envelope).unwrap().unwrap().is_mutation(), mutation);
-            for invalid in [bytes.replace("POST ", "GET "), bytes.replace("/{action}", "/{action}?x=y"),
+            for invalid in [bytes.replace("POST ", "GET "),
+                bytes.replace(&format!("/{action} HTTP"), &format!("/{action}?x=y HTTP")),
                 bytes.replace("multipart/form-data; boundary=x", "application/x-www-form-urlencoded")]
             {
-                // The query case is constructed explicitly below; no literal-template substitution.
-                if invalid == bytes { continue; }
+                assert_ne!(invalid, bytes);
                 let head = head::parse(invalid.as_bytes(), HttpLimits::default()).unwrap().unwrap();
                 assert!(Request::parse(&head).is_err());
             }
-            let bytes = bytes.replace(&format!("/{action} HTTP"), &format!("/{action}?x=y HTTP"));
-            let head = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
-            assert!(Request::parse(&head).is_err());
         }
     }
 }
