@@ -18,7 +18,7 @@ use crate::publication_support::quote;
 
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
-  [--allow-receive] [--allow-issues] [--allow-outcomes] [--allow-pulls]
+  [--allow-receive] [--allow-issues] [--allow-outcomes] [--allow-pulls] [--allow-source]
   [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
@@ -28,11 +28,12 @@ Provisioning (reads/authenticates the repository, opens no listener):
   fg serve-http <storage-root> <tenant-id> <repository-id> 127.0.0.1:0
     --trusted-local --print-credentials-header [--expected-incarnation <id>]
 
-Requires an existing repository. Git pushes, issue APIs, PR APIs and outcome
-queries are disabled by default. --allow-receive enables Git pushes for
-receive-scoped tokens. --allow-issues, --allow-outcomes and --allow-pulls require
---credentials-file and the token's independent scopes. No switch enables another
-service; PR write grants cannot merge, review, push Git refs, or mutate issues.
+Requires an existing repository. Git pushes, issue APIs, PR APIs, source APIs
+and outcome queries are disabled by default. --allow-receive enables Git pushes
+for receive-scoped tokens. --allow-issues, --allow-outcomes, --allow-pulls and
+--allow-source require --credentials-file and the token's appropriate scopes.
+No switch enables another service. --allow-source exposes read-only source
+queries to read-scoped tokens; it does not grant any mutation permission.
 
 --token-file keeps the static Git-only profile and contains 64 lowercase hex
 characters, optionally followed by one newline. --credentials-file is reloaded
@@ -40,7 +41,7 @@ for every request and contains token HASHES, never plaintext bearer secrets:
   frankengit-http-credentials-v1 <tenant-id> <repository-id> <incarnation-id>
   <sha256-of-64-character-token> <principal-id> <comma-separated-scopes>
 Choose scopes once in this order:
-  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write
+  read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write,reviews-read,reviews-write,merges-write
 No scope implies another. The header must match the exact repository incarnation.
 At most 256 entries and 64 KiB are accepted; a header alone revokes all tokens.
 Duplicate hashes or malformed rows refuse the entire table. Files must be private
@@ -66,12 +67,26 @@ The independently enabled native PR API is at <repository-url>/api/v1/pulls:
   GET /api/v1/pulls[?limit=50&after=N&expected_head=TOKEN]
   GET /api/v1/pulls/N[?expected_head=TOKEN]
   POST /api/v1/pulls/N/<open|update|close>
-Each PR POST is a complete URL-encoded command containing expected_version,
+Each metadata POST is a complete URL-encoded command containing expected_version,
 object_format (sha1 or sha256), source_ref, target_ref, source_tip, target_tip,
 title and body. Closing preserves the exact prior data. No latest-tip lookup,
-implicit partial edit, automatic issue number, cross-repository PR, review or
-merge operation is supplied. PR pages retain snapshots and current hidden-ref
-policy. Use pulls-read/pulls-write grants; write does not imply read.
+implicit partial edit, automatic issue number or cross-repository PR is supplied.
+PR pages retain snapshots and current hidden-ref policy. Use pulls-read/pulls-write
+grants; write does not imply read. Candidate preparation/resolution/inspection
+require read AND pulls-read on one token. Review and merge endpoints use their
+own reviews-read/reviews-write/merges-write grants; see docs/HTTP_REVIEW_MERGE_API.md.
+
+Read-only source queries use body-bearing POSTs with NO Idempotency-Key:
+  POST /api/v1/source/tree    (ref, object_format; optional path_hex, limit, after_hex)
+  POST /api/v1/source/blob    (ref, object_format, path_hex; optional offset, limit)
+  POST /api/v1/source/search  (ref, object_format, needle_hex; optional case, path_prefix_hex)
+Bodies use application/x-www-form-urlencoded, not URL query parameters. Raw paths,
+file bytes and search excerpts use hexadecimal byte encoding. Every response names
+its source commit and exact snapshot_token. Supply expected_head for continuation;
+source browsing uses strict current-head pins, not retained historical pagination.
+expected_commit can additionally compare the selected ref tip. Source reads never
+stage objects or create transactions. Search match limits are explicitly partial,
+not complete no-match results. See docs/HTTP_SOURCE_API.md for limits and examples.
 
 Outcome lookup uses a bodyless POST and the ORIGINAL Idempotency-Key:
   POST /api/v1/outcomes                 (metadata transaction or atomic push)
@@ -88,7 +103,8 @@ TLS. Use an authenticated external TLS terminator for nonlocal access.
 Default bounds: 1024 requests, 4 in flight, 300-second phases, 128 MiB Git envelopes;
 metadata forms have a separate 256 KiB ceiling and pages contain at most 100 entries.
 Outcome replies have a separate per-principal quota; single-transaction replies
-are capped at 16 KiB and whole-session replies at 1 MiB.
+are capped at 16 KiB and whole-session replies at 1 MiB. Source reads have another
+independent quota, 1 MiB maximum file slices, and an 8 MiB JSON response ceiling.
 ";
 
 enum CredentialInput {
@@ -106,6 +122,7 @@ struct Options {
     allow_issues: bool,
     allow_outcomes: bool,
     allow_pulls: bool,
+    allow_source: bool,
     limits: GitDaemonServerLimits,
     idle_timeout: Duration,
 }
@@ -124,7 +141,7 @@ fn number(flags: &BTreeMap<&str, &str>, name: &str, default: u64, maximum: u64) 
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
     if arguments.len() < 4 { return Err(USAGE.into()); }
-    if arguments.len() > 40 || arguments.iter().any(|arg| arg.len() > 4096)
+    if arguments.len() > 41 || arguments.iter().any(|arg| arg.len() > 4096)
         || arguments.iter().map(String::len).sum::<usize>() > 32768
     {
         return Err("serve-http arguments exceed the bounded profile".into());
@@ -140,7 +157,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         let name = arguments[index].as_str();
         index += 1;
         let boolean = matches!(name, "--trusted-local" | "--allow-receive" | "--allow-issues"
-            | "--allow-outcomes" | "--allow-pulls" | "--print-credentials-header");
+            | "--allow-outcomes" | "--allow-pulls" | "--allow-source" | "--print-credentials-header");
         if !boolean && !matches!(name, "--token-file" | "--principal" | "--credentials-file" | "--expected-incarnation"
             | "--max-sessions" | "--max-in-flight" | "--idle-timeout-secs"
             | "--session-timeout-secs" | "--processing-timeout-secs"
@@ -180,8 +197,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let allow_issues = flags.contains_key("--allow-issues");
     let allow_outcomes = flags.contains_key("--allow-outcomes");
     let allow_pulls = flags.contains_key("--allow-pulls");
-    if (allow_issues || allow_outcomes || allow_pulls) && !matches!(&credentials, CredentialInput::Reloadable(_)) {
-        return Err("issue/PR/outcome endpoints require explicit scopes in --credentials-file".into());
+    let allow_source = flags.contains_key("--allow-source");
+    if (allow_issues || allow_outcomes || allow_pulls || allow_source) && !matches!(&credentials, CredentialInput::Reloadable(_)) {
+        return Err("issue/PR/source/outcome endpoints require explicit scopes in --credentials-file".into());
     }
     let sessions = number(&flags, "--max-sessions", 1024, 1_000_000)? as usize;
     let in_flight = number(&flags, "--max-in-flight", 4, 16)? as usize;
@@ -206,7 +224,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         );
     }
     Ok(Options { config, tenant, repository, listen, credentials,
-        allow_receive: flags.contains_key("--allow-receive"), allow_issues, allow_outcomes, allow_pulls, limits, idle_timeout })
+        allow_receive: flags.contains_key("--allow-receive"), allow_issues, allow_outcomes, allow_pulls,
+        allow_source, limits, idle_timeout })
 }
 
 fn token_digest(bytes: &[u8]) -> Result<[u8; 32], String> {
@@ -271,15 +290,19 @@ pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
         let url = format!("http://{address}{route}");
         let mode = match &options.credentials { CredentialInput::Reloadable(_) => "reloadable", _ => "static" };
         let mut output = io::stdout().lock();
-        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{}}}",
+        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
-            quote(&node.repository_incarnation_id().to_string()), quote(mode))
+            options.allow_source, quote(&node.repository_incarnation_id().to_string()), quote(mode))
             .and_then(|()| output.flush()).map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
         drop(output);
         match &options.credentials {
             CredentialInput::Static { principal, .. } => node.serve_smart_http_bounded(
                 &listener, options.limits, credential.ok_or("static credential missing")?, *principal,
                 options.allow_receive, options.idle_timeout,
+            ),
+            CredentialInput::Reloadable(path) if options.allow_source => node.serve_repository_http_with_source_bounded(
+                &listener, options.limits, path, options.allow_receive, options.allow_issues,
+                options.allow_outcomes, options.allow_pulls, options.idle_timeout,
             ),
             CredentialInput::Reloadable(path) if options.allow_pulls => node.serve_repository_http_with_pull_requests_bounded(
                 &listener, options.limits, path, options.allow_receive, options.allow_issues,
@@ -318,6 +341,7 @@ mod tests {
         assert!(!options.allow_issues);
         assert!(!options.allow_outcomes);
         assert!(!options.allow_pulls);
+        assert!(!options.allow_source);
         assert_eq!(options.limits.max_sessions(), 1024);
         assert_eq!(options.limits.max_in_flight(), 4);
         let mut args = arguments();
@@ -403,6 +427,25 @@ mod tests {
         assert!(options.allow_pulls);
         assert!(!options.allow_receive && !options.allow_issues && !options.allow_outcomes);
         args.push("--allow-pulls".into());
+        assert!(parse(&args).is_err());
+    }
+    #[test]
+    fn source_reads_are_opt_in_and_do_not_enable_publication_or_other_apis() {
+        let mut static_args = arguments();
+        static_args.push("--allow-source".into());
+        assert!(parse(&static_args).is_err());
+        let mut args = arguments()[..5].to_vec();
+        args.extend(["--credentials-file".into(), "grants".into()]);
+        assert!(!parse(&args).unwrap().allow_source);
+        args.push("--allow-source".into());
+        let options = parse(&args).unwrap();
+        assert!(options.allow_source);
+        assert!(!options.allow_receive && !options.allow_issues && !options.allow_outcomes && !options.allow_pulls);
+        let mut all = args.clone();
+        all.extend(["--allow-pulls".into(), "--allow-issues".into(), "--allow-outcomes".into(), "--allow-receive".into()]);
+        let all = parse(&all).unwrap();
+        assert!(all.allow_source && all.allow_pulls && all.allow_issues && all.allow_outcomes && all.allow_receive);
+        args.push("--allow-source".into());
         assert!(parse(&args).is_err());
     }
     #[test]
