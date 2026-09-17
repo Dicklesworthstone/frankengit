@@ -2,8 +2,9 @@
 
 `OneNode::receive_pack_session_durable_in` accepts native receive-pack bytes
 without an HTTP envelope. It shares the continuing coordinator with Smart HTTP.
-This is an embedding API, not a new network listener, authentication service, or
-replacement of the historical daemon's wire protocol.
+This is an embedding API, not an authentication service. The subsequently added
+[guarded raw TCP service](GUARDED_GIT_DAEMON.md) uses the same admission entry
+point and is now selected by the `fg serve` executable.
 
 ## Entry points
 
@@ -41,7 +42,8 @@ original key, semantic commands, options and original wire order match. Changing
 transport framing does not create a fresh operation. Whole-session recovery is
 available through `recover_receive_session_in`; atomic input uses the ordinary
 `recover_transaction_in` API. Those recovery calls read existing evidence and do
-not require a replacement pack.
+not require a replacement pack. Binary native keys must not be confused with
+the bytes of their printed hex encodings in ASCII-only HTTP headers.
 
 ## Intake and cancellation
 
@@ -74,35 +76,41 @@ have published. An empty prefix is not evidence that no command committed.
 Do not turn this error into an all-ref rejection report. In particular, sending
 `ng` for a ref with a known committed outcome contradicts the authority result.
 A transport must preserve ambiguity, retain the error for recovery, and avoid
-writing a second response after any final response has begun. This API returns
-structured results; it does not own network report-status delivery.
+writing a second response after any final response has begun. This embedding API
+returns structured results; the guarded TCP binding owns its network response
+and emits a fatal unknown-outcome record for interrupted admission.
 
 ## Deliberate migration boundary
 
-The legacy `receive_loopback_pack_durable_in`, the historical generic/basis-bound
-admission entry points, and the existing raw TCP daemon are NOT redirected by
-this change. Their full migration needs the coordinated admission/error/report
-changes described in the earlier prepared migration, including fatal unknown
-reporting after interrupted prefixes. Do not describe the raw daemon as fixed
-merely because this new API is available. The earlier exact-blob-pinned migration
-bundle also needs rebasing over changes to the shared node module.
+The `fg serve` executable now selects `serve_guarded_git_daemon_bounded`, whose
+receive lane invokes the shared guarded admission entry point. Upload-pack
+continues through the existing native implementation. See
+[the raw-service contract](GUARDED_GIT_DAEMON.md) for its caps and trust boundary.
+
+Historical library calls to `fgit_cli::run` with `serve`, the old
+`OneNode::serve_git_daemon_*` methods, `receive_loopback_pack_durable_in`, and the
+generic/basis-bound admission entry points are NOT redirected. Embedders must
+select the guarded APIs explicitly. Their full coordinated migration, and the
+earlier exact-blob-pinned migration bundle's rebase, remain separate work.
 
 ## Verification
 
 The committed regression targets are:
 
 ```sh
-cargo test -p fgit-node --test receive_transport_parity
+cargo test -p fgit-node --test receive_transport_parity --test guarded_git_daemon
 cargo test -p fgit-node --lib smart_http::receive_session
 cargo test -p fgit-node --test smart_http_non_atomic --test smart_http_atomic \
   --test smart_http_session_binding --test receive_session_http
+cargo test -p fgit-cli --test guarded_serve
 ```
 
 The parity tests exercise actual production quarantine and embedded authority in
 both native hash formats, including mixed create/delete sessions, cross-adapter
 retries, changed-session rejection, atomic refusal, restart, malformed packs,
 limits and early authentication/cancellation. The bounded-intake unit tests
-exercise the native framing machine, not a substitute parser. These tests have
-not been compiled or executed in the editing environment because its Rust
-toolchain is unavailable. Independent Git checks of reconstructed fixture packs
-are fixture evidence only, not FrankenGit runtime or admission verification.
+exercise the native framing machine, not a substitute parser. The TCP regression
+includes a real interrupted committed prefix; the executable test launches `fg`.
+These tests have not been compiled or executed in the editing environment because
+its Rust toolchain is unavailable. Independent Git fixture/protocol checks are
+not FrankenGit runtime or admission verification.
