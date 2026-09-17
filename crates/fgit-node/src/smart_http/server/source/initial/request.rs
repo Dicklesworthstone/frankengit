@@ -47,7 +47,7 @@ impl<'a> Request<'a> {
     }
 
     pub(crate) fn is_mutation(&self) -> bool { self.operation == Operation::Apply }
-    pub(crate) fn kind(&self) -> SourceUploadKind {
+    pub(super) fn kind(&self) -> SourceUploadKind {
         match self.operation { Operation::Prepare => SourceUploadKind::Patch, Operation::Apply => SourceUploadKind::Bundle }
     }
 
@@ -138,6 +138,18 @@ mod tests {
                 assert!(command(Operation::Apply, bad.as_bytes(), format).is_err());
             }
         }
+    }
+    #[test]
+    fn snapshot_pins_are_preparation_preconditions_not_publication_leases() {
+        let token = format!("alg:1:{}", "a".repeat(64));
+        let mut pinned = PREPARE.to_vec();
+        pinned.extend_from_slice(format!("&expected_head={token}").as_bytes());
+        let Command::Prepare { expected_head, .. } = command(Operation::Prepare, &pinned, GitHashAlgorithm::Sha1).unwrap() else { panic!("prepare") };
+        assert_eq!(expected_head, Some(parse_snapshot(&token).unwrap()));
+        pinned.extend_from_slice(format!("&expected_head={token}").as_bytes());
+        assert!(command(Operation::Prepare, &pinned, GitHashAlgorithm::Sha1).is_err());
+        let apply = format!("object_format=sha1&ref=refs/heads/main&expected_absent=true&candidate_commit={}&expected_head={token}", "a".repeat(40));
+        assert!(command(Operation::Apply, apply.as_bytes(), GitHashAlgorithm::Sha1).is_err());
     }
     #[test]
     fn initial_routes_do_not_steal_existing_source_operations() {
