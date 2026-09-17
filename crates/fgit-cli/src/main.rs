@@ -4,6 +4,7 @@ mod branches;
 mod bundle;
 mod commit_replay;
 mod events;
+mod guarded_git_server;
 mod issues;
 mod merge_apply;
 mod patch_command;
@@ -321,7 +322,12 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    match fgit_cli::run(&arguments) {
+    let outcome = if arguments.first().is_some_and(|argument| argument == "serve") {
+        guarded_git_server::run(&arguments)
+    } else {
+        fgit_cli::run(&arguments).map_err(|error| error.to_string())
+    };
+    match outcome {
         Ok(fgit_cli::CliOutcome::Initialized(fgit_node::NodeInitialization::Created)) => {
             println!("initialized authority head");
             ExitCode::SUCCESS
