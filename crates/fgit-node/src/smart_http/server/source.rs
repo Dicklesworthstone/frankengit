@@ -7,6 +7,7 @@ mod output;
 mod changes;
 mod refs;
 mod tags;
+mod initial;
 
 use std::io::{self, Read, Write};
 use fgit_authority::IdempotencyKey;
@@ -29,9 +30,13 @@ enum RequestKind<'a> {
     Change(changes::Request<'a>),
     Refs(refs::Request<'a>),
     Tags(tags::Request<'a>),
+    Initial(initial::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = initial::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::Initial(request)));
+        }
         if let Some(request) = tags::Request::parse(envelope)? {
             return Ok(Self(RequestKind::Tags(request)));
         }
@@ -49,6 +54,7 @@ impl<'a> Request<'a> {
             RequestKind::Change(request) => request.is_mutation(),
             RequestKind::Refs(request) => request.is_mutation(),
             RequestKind::Tags(request) => request.is_mutation(),
+            RequestKind::Initial(request) => request.is_mutation(),
         }
     }
     fn route(&self) -> &str {
@@ -57,18 +63,23 @@ impl<'a> Request<'a> {
             RequestKind::Change(request) => request.repository_route,
             RequestKind::Refs(request) => request.route(),
             RequestKind::Tags(request) => request.route(),
+            RequestKind::Initial(request) => request.repository_route,
         }
     }
 }
 
 pub(super) struct Reply(ReplyBody);
-enum ReplyBody { Json(JsonReply), Patch(changes::PatchReply) }
+enum ReplyBody { Json(JsonReply), Patch(changes::PatchReply), Initial(initial::Prepared) }
 impl Reply {
     fn json(reply: JsonReply) -> Self { Self(ReplyBody::Json(reply)) }
     fn patch(reply: changes::PatchReply) -> Self { Self(ReplyBody::Patch(reply)) }
+    fn initial(reply: initial::Prepared) -> Self { Self(ReplyBody::Initial(reply)) }
     pub(super) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
-        match &self.0 { ReplyBody::Json(reply) => reply.send(writer, version),
-            ReplyBody::Patch(reply) => reply.send(writer, version) }
+        match &self.0 {
+            ReplyBody::Json(reply) => reply.send(writer, version),
+            ReplyBody::Patch(reply) => reply.send(writer, version),
+            ReplyBody::Initial(reply) => reply.send(writer, version),
+        }
     }
 }
 
@@ -98,6 +109,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
+        RequestKind::Initial(request) => return initial::execute(node, request, session, framing, reader, http, maximum_response),
         RequestKind::Tags(request) => return tags::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Refs(request) => return refs::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Change(request) => return changes::execute(node, request, session, framing, reader, http, maximum_response),
@@ -200,7 +212,9 @@ mod tests {
             ("tags/inspect", "application/x-www-form-urlencoded", false),
             ("prepare", "multipart/form-data; boundary=x", false),
             ("inspect", "multipart/form-data; boundary=x", false),
-            ("apply", "multipart/form-data; boundary=x", true)] {
+            ("apply", "multipart/form-data; boundary=x", true),
+            ("initial/prepare", "multipart/form-data; boundary=x", false),
+            ("initial/apply", "multipart/form-data; boundary=x", true)] {
             let bytes = format!("POST /repo.git/api/v1/source/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: {media}\r\nContent-Length: 1\r\n\r\n");
             let envelope = fgit_wire::smart_http::head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
             assert_eq!(Request::parse(&envelope).unwrap().is_mutation(), mutation);
