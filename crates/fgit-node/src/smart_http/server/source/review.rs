@@ -3,6 +3,7 @@
 //! returned diffs authorize publication, approval or arbitrary-object lookup.
 
 mod output;
+pub(super) mod inspected;
 
 use std::collections::BTreeMap;
 use std::io::Read;

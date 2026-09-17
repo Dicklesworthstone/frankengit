@@ -1,9 +1,10 @@
-//! Native linear rebase over the existing source gateway. Preparation and
-//! resolution are reads; publication is an independent exact-old transaction.
+//! Native linear rebase over the existing source gateway. Preparation,
+//! resolution and inspection are reads; publication is an exact-old transaction.
 
 mod request;
 mod output;
 mod resolution;
+mod inspection;
 
 use std::io::Read;
 use fgit_forge::preparation::{MergeSourceError, PreparationError};
@@ -18,7 +19,7 @@ use super::super::{Status, issues::{ApiError, MAX_FORM_BYTES, admission_error, r
         MAX_RESOLUTION_UPLOAD_BYTES, read_resolution_upload, resolution_upload_boundary}};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Operation { Prepare, Resolve, Apply }
+enum Operation { Prepare, Resolve, Inspect, Apply }
 #[derive(Debug)]
 pub(super) struct Request<'a> {
     pub(super) repository_route: &'a str,
@@ -32,6 +33,7 @@ impl<'a> Request<'a> {
         let operation = match action {
             "rebase/prepare" => Operation::Prepare,
             "rebase/resolve" => Operation::Resolve,
+            "rebase/inspect" => Operation::Inspect,
             "rebase/apply" => Operation::Apply,
             _ => return Ok(None),
         };
@@ -48,11 +50,11 @@ impl<'a> Request<'a> {
             Operation::Prepare | Operation::Resolve if media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
                 || media.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8") => None,
             Operation::Resolve => Some(resolution_upload_boundary(media)?),
-            Operation::Apply => Some(source_upload_boundary(media)?),
+            Operation::Inspect | Operation::Apply => Some(source_upload_boundary(media)?),
             _ => return Err(ApiError::media()),
         };
         let maximum = match operation {
-            Operation::Apply => SourceUploadKind::Bundle.maximum(),
+            Operation::Inspect | Operation::Apply => SourceUploadKind::Bundle.maximum(),
             Operation::Resolve if boundary.is_some() => MAX_RESOLUTION_UPLOAD_BYTES,
             _ => MAX_FORM_BYTES,
         };
@@ -65,6 +67,10 @@ impl<'a> Request<'a> {
 pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackReceiveSession,
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
+    if request.operation == Operation::Inspect {
+        return inspection::execute(node, request.boundary.ok_or_else(ApiError::media)?, session,
+            framing, reader, http, maximum_response).map(Reply::json);
+    }
     let authenticated = session.authenticated_session().ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?;
     let bytes = if request.is_mutation() { read_source_upload(reader, framing, http, SourceUploadKind::Bundle)? }
         else if request.boundary.is_some() { read_resolution_upload(reader, framing, http)? }
@@ -170,6 +176,7 @@ mod tests {
     fn prepare_and_apply_keep_distinct_media_and_mutation_semantics() {
         for (action, media, mutation) in [("prepare", "application/x-www-form-urlencoded", false),
             ("resolve", "application/x-www-form-urlencoded", false), ("resolve", "multipart/form-data; boundary=x", false),
+            ("inspect", "multipart/form-data; boundary=x", false),
             ("apply", "multipart/form-data; boundary=x", true)] {
             let bytes = format!("POST /r.git/api/v1/source/rebase/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: {media}\r\nContent-Length: 1\r\n\r\n");
             let parsed = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
@@ -182,6 +189,9 @@ mod tests {
                 assert!(Request::parse(&parsed).is_err());
             }
         }
+        let bytes = b"POST /r.git/api/v1/source/rebase/inspect HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n";
+        let parsed = head::parse(bytes, HttpLimits::default()).unwrap().unwrap();
+        assert!(Request::parse(&parsed).is_err(), "an inspection cannot omit its actual bundle");
     }
     #[test]
     fn preparation_errors_are_not_terminal_transactions_or_partial_successes() {
