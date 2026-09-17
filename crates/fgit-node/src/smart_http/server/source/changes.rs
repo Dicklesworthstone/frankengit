@@ -43,7 +43,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
             // The input lifetime ends before output framing. The native bundle
             // stays owned by its candidate, not copied into a response buffer.
             drop(bytes);
-            output::prepared(node, &reference, base, candidate, maximum, &mut live).map(Reply::Patch)
+            output::prepared(node, &reference, base, candidate, maximum, &mut live).map(Reply::patch)
         }
         Command::Candidate { reference, base, candidate } if request.operation == Operation::Inspect => {
             let inspected = drive_request_while(node, &context,
@@ -56,7 +56,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
             let body = output::inspection(node, &reference, base, candidate, &inspected.review,
                 &inspected.parents, &inspected.candidate_commit_body, &inspected.bundle_sha256,
                 inspected.bundle_bytes, maximum, &mut live)?;
-            Ok(Reply::Json(JsonReply { status: Status::Success, body, terminal: None }))
+            Ok(Reply::json(JsonReply { status: Status::Success, body, terminal: None }))
         }
         Command::Candidate { reference, base, candidate } if request.operation == Operation::Apply => {
             // No preliminary freshness read can replace canonical expected-old
@@ -73,7 +73,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
                     _ => ApiError::unknown(),
                 })?;
             output::publication(node, authenticated.principal_id(), &reference, base, candidate, result, maximum)
-                .map(Reply::Json)
+                .map(Reply::json)
         }
         _ => Err(ApiError::bad("source_operation_mismatch")),
     }
