@@ -253,7 +253,7 @@ impl WorkflowPlan {
                                             StepOutcome::OutputLimit => JobOutcome::OutputLimit,
                                             _ => JobOutcome::Failed,
                                         };
-                                        if outcome == StepOutcome::Failed && !observed.retain_workspace {
+                                        if outcome == StepOutcome::Failed && !containment_lost {
                                             // Ordinary command failure is inspectable state, not
                                             // cancellation or lost containment. Later failure()/always()
                                             // diagnostics may run in the SAME job workspace.
