@@ -213,7 +213,7 @@ fn yaml_constructs_outside_the_subset_are_refused_by_name() {
             "yaml.document-marker",
         ),
         (
-            "name: ci\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: |\n",
+            "name: ci\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - run: >\n          folded\n",
             "yaml.block-scalar",
         ),
         (
@@ -281,10 +281,6 @@ fn workflow_constructs_outside_the_subset_are_refused_by_name() {
             "job.permissions",
         ),
         (
-            "name: ci\non: push\njobs:\n  a:\n    runs-on: linux\n    if: always\n    steps:\n      - run: x\n",
-            "job.if",
-        ),
-        (
             "name: ci\non: push\njobs:\n  a:\n    runs-on: linux\n    container: img\n    steps:\n      - run: x\n",
             "job.container",
         ),
@@ -319,23 +315,19 @@ fn workflow_constructs_outside_the_subset_are_refused_by_name() {
 }
 
 #[test]
-fn an_ambiguous_construct_is_distinguishable_from_an_unsupported_one() {
-    // `if` is Ambiguous and `strategy` is Unsupported. Both refuse, but the
-    // registry keeps them apart: unsupported is work nobody has done, ambiguous
-    // is work nobody should do until the semantics are pinned.
-    assert_eq!(
-        registry::lookup("job.if").expect("registered").status,
-        ConstructStatus::Ambiguous
-    );
+fn condition_and_literal_profiles_are_normalized_while_broader_constructs_still_refuse() {
+    for key in ["job.if", "step.if", "yaml.block-scalar"] {
+        assert_eq!(
+            registry::lookup(key).expect("registered").status,
+            ConstructStatus::Normalized
+        );
+    }
     assert_eq!(
         registry::lookup("job.strategy").expect("registered").status,
         ConstructStatus::Unsupported
     );
-    assert!(ConstructStatus::Ambiguous.refuses());
-    assert!(ConstructStatus::Unsupported.refuses());
-    // ... and the accepted ones do not, so `refuses()` is not constant.
-    assert!(!ConstructStatus::Accepted.refuses());
     assert!(!ConstructStatus::Normalized.refuses());
+    assert!(ConstructStatus::Unsupported.refuses());
 }
 
 #[test]
@@ -578,9 +570,10 @@ fn the_construct_registry_is_sorted_complete_and_reasoned() {
         registry::CONSTRUCTS.len(),
         "the tally must account for every row"
     );
-    // Both refusing statuses are populated, so the distinction is not
-    // theoretical.
-    for (status, count) in tally {
+    // The registry need not keep a row in every historical status. What matters
+    // is that the active accepted/normalized/refusing classes are real.
+    for status in [ConstructStatus::Accepted, ConstructStatus::Normalized, ConstructStatus::Unsupported] {
+        let count = tally.iter().find(|(kind, _)| *kind == status).unwrap().1;
         assert!(count > 0, "{} has no rows", status.as_str());
     }
 }
@@ -603,13 +596,11 @@ fn every_construct_the_lowerer_names_exists_in_the_registry() {
         "job.container",
         "job.continue-on-error",
         "job.environment",
-        "job.if",
         "job.outputs",
         "job.permissions",
         "job.services",
         "job.strategy",
         "job.timeout-minutes",
-        "step.if",
         "step.uses",
         "step.with",
         "workflow.concurrency",
@@ -619,10 +610,14 @@ fn every_construct_the_lowerer_names_exists_in_the_registry() {
         let entry = registry::lookup(key).unwrap_or_else(|| {
             panic!("{key} is named by the lowerer but absent from the registry")
         });
-        assert!(
-            entry.status.refuses(),
-            "{key} is named in a refusal path but the registry marks it accepted"
-        );
+        if key == "yaml.block-scalar" {
+            assert_eq!(entry.status, ConstructStatus::Normalized);
+        } else {
+            assert!(
+                entry.status.refuses(),
+                "{key} is named in an unconditional refusal path but the registry marks it accepted"
+            );
+        }
     }
 }
 

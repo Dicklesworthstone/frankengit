@@ -4,9 +4,9 @@
   "title": "FrankenGit workflow construct registry",
   "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
   "count_accepted": 12,
-  "count_normalized": 2,
-  "count_unsupported": 22,
-  "count_ambiguous": 2,
+  "count_normalized": 5,
+  "count_unsupported": 21,
+  "count_ambiguous": 0,
   "constructs": [
     {
       "key": "job.container",
@@ -28,9 +28,9 @@
     },
     {
       "key": "job.if",
-      "status": "ambiguous",
-      "refuses": true,
-      "reason": "expression truthiness has several context-dependent coercions; refusing beats guessing which one a reader meant"
+      "status": "normalized",
+      "refuses": false,
+      "reason": "only the closed native predicates success(), failure(), and always() are accepted; all other expressions refuse"
     },
     {
       "key": "job.needs",
@@ -82,9 +82,9 @@
     },
     {
       "key": "step.if",
-      "status": "ambiguous",
-      "refuses": true,
-      "reason": "same expression semantics as job.if"
+      "status": "normalized",
+      "refuses": false,
+      "reason": "only success(), failure(), and always() are accepted; conditions observe native terminal outcomes and grant no authority"
     },
     {
       "key": "step.name",
@@ -166,9 +166,9 @@
     },
     {
       "key": "yaml.block-scalar",
-      "status": "unsupported",
-      "refuses": true,
-      "reason": "the folding and chomping indicators have several spellings with subtly different results, so accepting them would mean accepting an ambiguity"
+      "status": "normalized",
+      "refuses": false,
+      "reason": "bare literal | is accepted with clip semantics; folded > and all chomping/indent modifiers remain refused"
     },
     {
       "key": "yaml.block-sequence",
