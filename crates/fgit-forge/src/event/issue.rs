@@ -227,3 +227,208 @@ pub fn apply_event(previous: Option<&IssueSnapshot>, event: &ForgeEvent) -> Resu
 
 #[cfg(test)]
 mod tests;
+
+/// Maximum UTF-8 bytes in a literal title/body search. No regex, query language,
+/// stemming or ambient locale affects matching.
+pub const MAX_QUERY_BYTES: usize = 256;
+
+/// A conjunction of filters over an authority-selected issue snapshot.
+///
+/// Labels are an exact, sorted, duplicate-free set and ALL must be present.
+/// Text matches either title or body, never across their boundary. Comments
+/// are intentionally excluded: their text lives in the versioned event stream.
+/// Default text matching folds ASCII only; non-ASCII UTF-8 stays byte-exact.
+/// This is a derived read predicate, not an authorization or publication grant.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IssueQuery {
+    pub state: Option<IssueState>,
+    pub opened_by: Option<PrincipalId>,
+    pub labels: Vec<String>,
+    pub text: Option<String>,
+    pub case_sensitive: bool,
+}
+
+impl IssueQuery {
+    /// Validate the bounded query and compile a linear-time literal matcher.
+    ///
+    /// # Errors
+    /// Empty/oversized/NUL text and noncanonical label sets are refused before
+    /// allocating the matcher. Absence of text means no text restriction.
+    pub fn compile(self) -> Result<CompiledIssueQuery, CodecRefusal> {
+        validate_labels(&self.labels)?;
+        if self.text.as_ref().is_some_and(|text|
+            text.is_empty() || text.len() > MAX_QUERY_BYTES || text.contains('\0'))
+        {
+            return Err(invalid_native("issue.query"));
+        }
+        let needle: Vec<u8> = self.text.as_deref().unwrap_or_default().bytes()
+            .map(|byte| if self.case_sensitive { byte } else { byte.to_ascii_lowercase() })
+            .collect();
+        let mut failure = vec![0; needle.len()];
+        let mut matched = 0;
+        for index in 1..needle.len() {
+            while matched > 0 && needle[index] != needle[matched] {
+                matched = failure[matched - 1];
+            }
+            if needle[index] == needle[matched] { matched += 1; }
+            failure[index] = matched;
+        }
+        Ok(CompiledIssueQuery { query: self, needle, failure })
+    }
+}
+
+/// A validated predicate reusable across bounded pages from ONE selected head.
+/// The caller owns disclosure, snapshot pinning, scan limits and cancellation.
+/// Matching allocates no per-issue text copy and takes linear text work even
+/// for adversarial repeated-prefix needles.
+#[derive(Clone, Debug)]
+pub struct CompiledIssueQuery {
+    query: IssueQuery,
+    needle: Vec<u8>,
+    failure: Vec<usize>,
+}
+
+impl CompiledIssueQuery {
+    #[must_use]
+    pub const fn query(&self) -> &IssueQuery { &self.query }
+
+    /// Evaluate a validated snapshot; malformed state is never an empty result.
+    ///
+    /// # Errors
+    /// Snapshot text, labels or comment counts violating the issue contract
+    /// refuse, including snapshots that would fail an inexpensive filter.
+    pub fn matches(&self, issue: &IssueSnapshot) -> Result<bool, CodecRefusal> {
+        validate_title(&issue.title)?;
+        validate_body(&issue.body)?;
+        validate_labels(&issue.labels)?;
+        if issue.comments >= issue.version.get() {
+            return Err(invalid_native("issue.comments"));
+        }
+        if self.query.state.is_some_and(|state| state != issue.state)
+            || self.query.opened_by.is_some_and(|actor| actor != issue.opened_by)
+            || !self.query.labels.iter().all(|label| issue.labels.binary_search(label).is_ok())
+        {
+            return Ok(false);
+        }
+        Ok(self.contains(issue.title.as_bytes()) || self.contains(issue.body.as_bytes()))
+    }
+
+    fn contains(&self, bytes: &[u8]) -> bool {
+        if self.needle.is_empty() { return true; }
+        let mut matched = 0;
+        for &byte in bytes {
+            let byte = if self.query.case_sensitive { byte } else { byte.to_ascii_lowercase() };
+            while matched > 0 && byte != self.needle[matched] {
+                matched = self.failure[matched - 1];
+            }
+            if byte == self.needle[matched] { matched += 1; }
+            if matched == self.needle.len() { return true; }
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+
+    fn snapshot() -> IssueSnapshot {
+        IssueSnapshot {
+            number: IssueNumber::FIRST, version: AggregateVersion::FIRST,
+            title: "Fix HTTP".into(), body: "café\nbody needle".into(),
+            labels: vec!["bug".into(), "urgent".into()], state: IssueState::Open,
+            opened_by: PrincipalId::from_bytes([1; 16]),
+            last_actor: PrincipalId::from_bytes([2; 16]), comments: 0,
+        }
+    }
+
+    #[test]
+    fn query_filters_are_conjoined_and_author_is_not_last_actor() {
+        let query = IssueQuery {
+            state: Some(IssueState::Open), opened_by: Some(PrincipalId::from_bytes([1; 16])),
+            labels: vec!["bug".into(), "urgent".into()], text: Some("http".into()),
+            case_sensitive: false,
+        };
+        let compiled = query.clone().compile().unwrap();
+        assert_eq!(compiled.query(), &query);
+        assert!(compiled.matches(&snapshot()).unwrap());
+        for changed in [
+            IssueQuery { state: Some(IssueState::Closed), ..query.clone() },
+            IssueQuery { opened_by: Some(PrincipalId::from_bytes([2; 16])), ..query.clone() },
+            IssueQuery { labels: vec!["bug".into(), "missing".into()], ..query.clone() },
+            IssueQuery { text: Some("absent".into()), ..query },
+        ] {
+            assert!(!changed.compile().unwrap().matches(&snapshot()).unwrap());
+        }
+        assert!(IssueQuery::default().compile().unwrap().matches(&snapshot()).unwrap());
+    }
+
+    #[test]
+    fn literal_matching_is_ascii_only_and_does_not_join_fields() {
+        for (text, case_sensitive, expected) in [
+            ("http", false, true), ("http", true, false), ("HTTP", true, true),
+            ("CAFé", false, true), ("CAFÉ", false, false), ("body needle", true, true),
+            ("HTTPcafé", false, false), (".*", false, false), ("é\nbody", true, true),
+        ] {
+            let query = IssueQuery { text: Some(text.into()), case_sensitive, ..Default::default() };
+            assert_eq!(query.compile().unwrap().matches(&snapshot()).unwrap(), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn query_bounds_and_canonical_labels_have_permitted_twins() {
+        for text in [String::new(), "a".repeat(MAX_QUERY_BYTES + 1), "a\0b".into()] {
+            assert!(IssueQuery { text: Some(text), ..Default::default() }.compile().is_err());
+        }
+        assert!(IssueQuery { text: Some("a".repeat(MAX_QUERY_BYTES)), ..Default::default() }.compile().is_ok());
+        for labels in [vec!["b".into(), "a".into()], vec!["a".into(), "a".into()],
+            vec![" ".into()], vec!["a".repeat(MAX_LABEL_BYTES + 1)], vec!["a\nb".into()]]
+        {
+            assert!(IssueQuery { labels, ..Default::default() }.compile().is_err());
+        }
+        let labels: Vec<_> = (0..MAX_LABELS).map(|n| format!("{n:02}")).collect();
+        assert!(IssueQuery { labels: labels.clone(), ..Default::default() }.compile().is_ok());
+        let mut oversized = labels;
+        oversized.push("zz".into());
+        assert!(IssueQuery { labels: oversized, ..Default::default() }.compile().is_err());
+    }
+
+    #[test]
+    fn malformed_snapshots_refuse_before_filtering_or_text_work() {
+        let query = IssueQuery { state: Some(IssueState::Closed), ..Default::default() }.compile().unwrap();
+        let valid = snapshot();
+        for invalid in [
+            IssueSnapshot { body: "a".repeat(MAX_BODY_BYTES + 1), ..valid.clone() },
+            IssueSnapshot { title: String::new(), ..valid.clone() },
+            IssueSnapshot { labels: vec!["z".into(), "a".into()], ..valid.clone() },
+            IssueSnapshot { comments: 1, ..valid },
+        ] {
+            assert!(query.matches(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn linear_matcher_agrees_with_scalar_literal_oracle() {
+        fn word(bits: u32, length: usize) -> Vec<u8> {
+            (0..length).map(|n| if bits & (1 << n) == 0 { b'A' } else { b'b' }).collect()
+        }
+        for case_sensitive in [false, true] {
+            for needle_len in 1..=4 {
+                for needle_bits in 0..(1 << needle_len) {
+                    let needle = word(needle_bits, needle_len);
+                    let query = IssueQuery { text: Some(String::from_utf8(needle.clone()).unwrap()),
+                        case_sensitive, ..Default::default() }.compile().unwrap();
+                    for hay_len in 0..=7 {
+                        for hay_bits in 0..(1 << hay_len) {
+                            let hay = word(hay_bits, hay_len);
+                            let expected = hay.windows(needle.len()).any(|window| if case_sensitive {
+                                window == needle.as_slice()
+                            } else { window.eq_ignore_ascii_case(&needle) });
+                            assert_eq!(query.contains(&hay), expected, "{hay:?} / {needle:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
