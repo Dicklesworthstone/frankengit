@@ -82,8 +82,8 @@ pub static CONSTRUCTS: &[Construct] = &[
     },
     Construct {
         key: "job.if",
-        status: ConstructStatus::Ambiguous,
-        reason: "expression truthiness has several context-dependent coercions; refusing beats guessing which one a reader meant",
+        status: ConstructStatus::Normalized,
+        reason: "only the closed native predicates success(), failure(), and always() are accepted; all other expressions refuse",
     },
     Construct {
         key: "job.needs",
@@ -127,8 +127,8 @@ pub static CONSTRUCTS: &[Construct] = &[
     },
     Construct {
         key: "step.if",
-        status: ConstructStatus::Ambiguous,
-        reason: "same expression semantics as job.if",
+        status: ConstructStatus::Normalized,
+        reason: "only success(), failure(), and always() are accepted; conditions observe native terminal outcomes and grant no authority",
     },
     Construct {
         key: "step.name",

@@ -30,7 +30,7 @@ pub mod graph;
 pub mod registry;
 pub mod yaml;
 
-pub use graph::{Job, Step, Trigger, WorkflowGraph};
+pub use graph::{Condition, Job, Step, Trigger, WorkflowGraph};
 pub use registry::{CONSTRUCTS, ConstructStatus};
 pub use yaml::{Limits, Node, Span};
 

@@ -36,6 +36,38 @@ pub struct Trigger {
     pub span: Span,
 }
 
+/// Closed condition profile. This is deliberately not a general expression
+/// evaluator: repository text can choose only terminal-state predicates whose
+/// meaning is fixed by the native scheduler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Condition {
+    Success,
+    Failure,
+    Always,
+}
+impl Condition {
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Success => "success()",
+            Self::Failure => "failure()",
+            Self::Always => "always()",
+        }
+    }
+}
+fn condition(node: Option<&Node>, span: Span) -> Result<Condition, WorkflowRefusal> {
+    let Some(node) = node else { return Ok(Condition::Success); };
+    match expect_scalar(node, "if")?.trim() {
+        "success()" => Ok(Condition::Success),
+        "failure()" => Ok(Condition::Failure),
+        "always()" => Ok(Condition::Always),
+        _ => Err(WorkflowRefusal::Malformed {
+            expected: "one of success(), failure(), or always()",
+            span: if node.span().is_empty() { span } else { node.span() },
+        }),
+    }
+}
+
 /// One step of a job.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Step {
@@ -43,6 +75,8 @@ pub struct Step {
     pub name: Option<String>,
     /// The command line, preserved verbatim.
     pub run: String,
+    /// Native terminal-state predicate. Default is success().
+    pub condition: Condition,
     /// Where the step came from.
     pub span: Span,
 }
@@ -58,6 +92,8 @@ pub struct Job {
     pub needs: Vec<String>,
     /// Steps in source order, which is execution order.
     pub steps: Vec<Step>,
+    /// Dependency terminal-state predicate. Default is success().
+    pub condition: Condition,
     /// Where the job came from.
     pub span: Span,
 }
@@ -108,6 +144,9 @@ impl WorkflowGraph {
                 escape(&job.id),
                 escape(&job.runs_on)
             ));
+            if job.condition != Condition::Success {
+                lines.push(format!("job-if\t{}\t{}", escape(&job.id), job.condition.token()));
+            }
             for need in &job.needs {
                 lines.push(format!("need\t{}\t{}", escape(&job.id), escape(need)));
             }
@@ -118,6 +157,9 @@ impl WorkflowGraph {
                     escape(step.name.as_deref().unwrap_or("")),
                     escape(&step.run)
                 ));
+                if step.condition != Condition::Success {
+                    lines.push(format!("step-if\t{}\t{index}\t{}", escape(&job.id), step.condition.token()));
+                }
             }
         }
         lines.join("\n") + "\n"
@@ -212,11 +254,10 @@ fn lower_step(node: &Node) -> Result<Step, WorkflowRefusal> {
     check_keys(
         node,
         "a step",
-        &["name", "run"],
+        &["name", "run", "if"],
         &[
             ("uses", "step.uses"),
             ("with", "step.with"),
-            ("if", "step.if"),
         ],
     )?;
     let Node::Mapping { .. } = node else {
@@ -242,6 +283,7 @@ fn lower_step(node: &Node) -> Result<Step, WorkflowRefusal> {
     Ok(Step {
         name,
         run,
+        condition: condition(node.get("if"), node.span())?,
         span: node.span(),
     })
 }
@@ -251,14 +293,13 @@ fn lower_job(id: &str, node: &Node, span: Span) -> Result<Job, WorkflowRefusal> 
     check_keys(
         node,
         "a job",
-        &["runs-on", "needs", "steps"],
+        &["runs-on", "needs", "steps", "if"],
         &[
             ("strategy", "job.strategy"),
             ("permissions", "job.permissions"),
             ("environment", "job.environment"),
             ("services", "job.services"),
             ("container", "job.container"),
-            ("if", "job.if"),
             ("outputs", "job.outputs"),
             ("timeout-minutes", "job.timeout-minutes"),
             ("continue-on-error", "job.continue-on-error"),
@@ -307,6 +348,7 @@ fn lower_job(id: &str, node: &Node, span: Span) -> Result<Job, WorkflowRefusal> 
         runs_on,
         needs,
         steps,
+        condition: condition(node.get("if"), span)?,
         span,
     })
 }
