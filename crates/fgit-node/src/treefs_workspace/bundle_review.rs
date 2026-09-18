@@ -6,6 +6,8 @@
 mod pack;
 #[path = "bundle_review/rebase.rs"]
 mod rebase;
+#[path = "bundle_review/candidate_inputs.rs"]
+mod candidate_inputs;
 #[cfg(test)]
 #[path = "bundle_review/tests.rs"]
 mod tests;

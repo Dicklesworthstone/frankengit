@@ -1,6 +1,9 @@
 //! Repository-bound execution of the existing trusted workflow profile.
 //! Never expose this local-owner operation as a remote or hostile CI endpoint.
 
+mod candidate;
+use candidate::WorkflowInputs;
+
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -40,6 +43,7 @@ const MAX_REPLICATED_ENTRIES: usize = 100_000;
 pub enum TrustedWorkflowFailure {
     InvalidInput(&'static str),
     Source(NodeWorkspaceRefusal),
+    Candidate(Box<super::candidate_inspection::BundleInspectionRefusal>),
     Workflow(fgit_runner::workflow::WorkflowError),
     Host(HostRefusal),
     /// Never reuse an occupied slot: it can contain an interrupted execution.
@@ -56,8 +60,17 @@ impl std::fmt::Display for TrustedWorkflowFailure {
 }
 impl std::error::Error for TrustedWorkflowFailure {}
 
+/// Exact unpublished inputs, not an RCR admitting their native identities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TrustedWorkflowCandidate {
+    pub commit: GitOid,
+    pub tree: GitOid,
+    pub bundle_sha256: [u8; 32],
+}
+
 /// A local observation, not a forge check, approval, or signed runner evidence.
-/// Fields selecting source are taken from one authenticated authority head.
+/// Source fields identify the canonical BASE from one authenticated head.
+/// A candidate is recorded separately; executed_commit/tree identify actual input.
 #[derive(Debug)]
 pub struct TrustedWorkflowRun {
     pub tenant: TenantId,
@@ -68,6 +81,7 @@ pub struct TrustedWorkflowRun {
     pub source_commit: GitOid,
     pub source_tree: GitOid,
     pub source_reference: Vec<u8>,
+    pub candidate: Option<TrustedWorkflowCandidate>,
     pub workflow_blob: GitOid,
     pub workflow_path: Vec<u8>,
     pub read_prefixes: Vec<Vec<u8>>,
@@ -81,19 +95,26 @@ impl TrustedWorkflowRun {
     pub fn succeeded(&self) -> bool {
         self.workspaces_closed && !self.request_interrupted && self.execution.succeeded()
     }
+    pub fn executed_commit(&self) -> GitOid { self.candidate.map_or(self.source_commit, |c| c.commit) }
+    pub fn executed_tree(&self) -> GitOid { self.candidate.map_or(self.source_tree, |c| c.tree) }
     fn identity_json(&self) -> String {
         let prefixes = self.read_prefixes.iter().map(|p| format!("\"{}\"", hex(p)))
             .collect::<Vec<_>>().join(",");
+        let candidate = self.candidate.map_or_else(|| "null".to_owned(), |c|
+            format!("{{\"commit\":\"{}\",\"tree\":\"{}\",\"bundle_sha256\":\"{}\",\"admitted\":false}}", c.commit, c.tree, hex(&c.bundle_sha256)));
         format!(concat!("\"schema_version\":1,\"tenant_id\":\"{}\",\"repository_id\":\"{}\",",
             "\"repository_incarnation\":\"{}\",\"source_head\":\"{}\",\"source_rcr\":\"{}\",",
             "\"object_format\":\"{}\",\"source_commit\":\"{}\",\"source_tree\":\"{}\",\"source_ref_hex\":\"{}\",",
             "\"workflow_blob\":\"{}\",\"workflow_path_hex\":\"{}\",\"read_prefixes_hex\":[{}],",
             "\"run_id\":\"{}\",\"run_directory_hex\":\"{}\",",
-            "\"hostile_code_isolated\":false,\"authoritative_check\":false,\"published\":false"),
+            "\"hostile_code_isolated\":false,\"authoritative_check\":false,\"published\":false,",
+            "\"input_kind\":\"{}\",\"executed_commit\":\"{}\",\"executed_tree\":\"{}\",\"candidate\":{}"),
             self.tenant, self.repository, self.incarnation, self.source_head, self.source_rcr,
             self.source_commit.algorithm().as_str(), self.source_commit, self.source_tree,
             hex(&self.source_reference), self.workflow_blob, hex(&self.workflow_path), prefixes,
-            hex(&self.run_id), hex(self.run_directory.as_os_str().as_bytes()))
+            hex(&self.run_id), hex(self.run_directory.as_os_str().as_bytes()),
+            if self.candidate.is_some() { "unpublished_candidate" } else { "canonical" },
+            self.executed_commit(), self.executed_tree(), candidate)
     }
     /// Output stays bounded by the native workflow report and source profile.
     /// All arbitrary source/output/path bytes use lossless hexadecimal encoding.
@@ -212,11 +233,24 @@ fn run_at<A: GitHashAlgorithm>(node: &OneNode, request: &NodeRequestContext,
     declared: &[Vec<u8>], run_id: [u8; 16], parent: &Path,
     limits: WorkflowLimits, started: Instant,
 ) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
-    let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
-    if !live() { return Err(TrustedWorkflowFailure::InvalidInput("request stopped before source discovery")); }
+    if !workspace_request_live(request) || started.elapsed() >= limits.run_timeout {
+        return Err(TrustedWorkflowFailure::InvalidInput("request stopped before source discovery"));
+    }
     let manifest = Arc::new(SparseManifest::build(base, source, capability, 0, SOURCE_LIMITS)
         .map_err(|error| TrustedWorkflowFailure::Source(NodeWorkspaceRefusal::Manifest(error)))?);
-    let entry = manifest.entries().iter().find(|entry| entry.path().as_bytes() == workflow_path)
+    run_inputs(node, request, WorkflowInputs::Canonical(manifest), capability, head,
+        reference, workflow_path, declared, run_id, parent, limits, started)
+}
+
+fn run_inputs<A: GitHashAlgorithm>(node: &OneNode, request: &NodeRequestContext,
+    inputs: WorkflowInputs<A>, capability: &TreeCapability,
+    head: RepositoryAuthorityHeadId, reference: &RefName, workflow_path: &[u8],
+    declared: &[Vec<u8>], run_id: [u8; 16], parent: &Path,
+    limits: WorkflowLimits, started: Instant,
+) -> Result<TrustedWorkflowRun, TrustedWorkflowFailure> {
+    let live = || workspace_request_live(request) && started.elapsed() < limits.run_timeout;
+    if !live() { return Err(TrustedWorkflowFailure::InvalidInput("request stopped before workflow preflight")); }
+    let entry = inputs.entries().iter().find(|entry| entry.path().as_bytes() == workflow_path)
         .ok_or(TrustedWorkflowFailure::InvalidInput("workflow is not in the selected inputs"))?;
     let SparseEntryKind::File { body, .. } = entry.kind() else {
         return Err(TrustedWorkflowFailure::InvalidInput("workflow must be a regular file"));
@@ -224,22 +258,21 @@ fn run_at<A: GitHashAlgorithm>(node: &OneNode, request: &NodeRequestContext,
     let plan = WorkflowPlan::compile(std::str::from_utf8(body)
         .map_err(|_| TrustedWorkflowFailure::InvalidInput("workflow is not UTF-8"))?)
         .map_err(TrustedWorkflowFailure::Workflow)?;
-    if manifest.receipt().payload_bytes().checked_mul(plan.graph().jobs.len())
+    if inputs.payload_bytes().checked_mul(plan.graph().jobs.len())
         .is_none_or(|n| n > MAX_REPLICATED_BYTES)
-        || manifest.entries().len().checked_mul(plan.graph().jobs.len())
+        || inputs.entries().len().checked_mul(plan.graph().jobs.len())
         .is_none_or(|n| n > MAX_REPLICATED_ENTRIES)
     { return Err(TrustedWorkflowFailure::InvalidInput("aggregate job materialization exceeds profile")); }
     // Refuse unsupported host entries before even the first independent job.
-    SparseWorkspacePlan::new(Arc::clone(&manifest), Vec::new(), capability, 0, SOURCE_LIMITS)
-        .map_err(TrustedWorkflowFailure::Host)?;
+    // Each job clones this immutable plan, then rechecks capability at materialize.
+    let host_plan = inputs.host_plan(capability).map_err(TrustedWorkflowFailure::Host)?;
     let format = node.object_format;
     let native = |bytes: &[u8]| GitOid::from_hex(format, &hex(bytes))
         .map_err(|_| TrustedWorkflowFailure::InvalidInput("source identity width"));
+    let (source_rcr, source_commit, source_tree, candidate) = inputs.coordinates(format)?;
     let mut report = TrustedWorkflowRun {
         tenant: node.tenant_id, repository: node.repository_id(), incarnation: node.repository_incarnation_id(),
-        source_head: head, source_rcr: manifest.receipt().source_rcr_id(),
-        source_commit: native(manifest.receipt().source_commit_oid().digest_bytes())?,
-        source_tree: native(manifest.receipt().source_tree_oid().digest_bytes())?,
+        source_head: head, source_rcr, source_commit, source_tree, candidate,
         source_reference: reference.as_bytes().to_vec(), workflow_blob: native(entry.source_oid().digest_bytes())?,
         workflow_path: workflow_path.to_vec(), read_prefixes: declared.to_vec(),
         run_id, run_directory: parent.join(format!("workflow-{}", hex(&run_id))),
@@ -266,7 +299,7 @@ fn run_at<A: GitHashAlgorithm>(node: &OneNode, request: &NodeRequestContext,
     write_new(&report.run_directory.join("attempt.json"), marker.as_bytes())
         .and_then(|()| root.sync_all()).and_then(|()| File::open(parent)?.sync_all())
         .map_err(|e| journal_error(format!("attempt marker durability failed before any job: {e}")))?;
-    let mut worker = Executor { manifest, capability, parent: root, directory: report.run_directory.clone(),
+    let mut worker = Executor { plan: host_plan, capability, parent: root, directory: report.run_directory.clone(),
         current: None, capture_paths: Vec::new(), retained: false, job_index: 0 };
     // This outer predicate also charges source discovery against the run budget.
     // The scheduler owns every begun job and always calls non-cancellable close.
@@ -297,7 +330,7 @@ fn publish_report(root: &File, directory: &Path, bytes: &[u8]) -> std::io::Resul
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
 
 struct Executor<'a, A: GitHashAlgorithm> {
-    manifest: Arc<SparseManifest<A>>,
+    plan: SparseWorkspacePlan<A>,
     capability: &'a TreeCapability,
     parent: File,
     directory: PathBuf,
@@ -310,8 +343,7 @@ impl<A: GitHashAlgorithm> WorkflowExecutor for Executor<'_, A> {
     fn begin_job(&mut self, index: usize, _job: &WorkflowJob, live: &dyn Fn() -> bool) -> Result<(), WorkerFailure> {
         if self.current.is_some() || self.retained { return Err(WorkerFailure::new("previous job is not quiescent", true)); }
         self.job_index = index;
-        let plan = SparseWorkspacePlan::new(Arc::clone(&self.manifest), Vec::new(), self.capability, 0, SOURCE_LIMITS)
-            .map_err(|e| WorkerFailure::new(e.to_string(), false))?;
+        let plan = self.plan.clone();
         let parent = self.parent.try_clone().map_err(|e| WorkerFailure::new(e.to_string(), false))?;
         let slot = TreePath::parse_default(format!("job-{index:03}").as_bytes())
             .map_err(|e| WorkerFailure::new(e.to_string(), false))?;
