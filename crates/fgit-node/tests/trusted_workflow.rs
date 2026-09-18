@@ -176,3 +176,54 @@ fn timeout_retains_workspace_and_does_not_start_other_jobs() {
     assert!(fs::read_to_string(result.run_directory.join("report.json")).unwrap().contains("\"workspaces_closed\":false"));
     assert_eq!(generation(f.node()), before);
 }
+
+
+#[test]
+fn failure_and_always_diagnostics_execute_in_real_workspaces_and_persist_without_greenwashing() {
+    let workflow = "on: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf primary; exit 9\n      - run: printf forbidden-success\n      - if: failure()\n        run: printf same-job-diagnostic\n      - if: always()\n        run: printf same-job-cleanup\n  postmortem:\n    runs-on: fgit-trusted-local\n    needs: build\n    if: failure()\n    steps:\n      - run: printf dependent-diagnostic\n  cleanup:\n    runs-on: fgit-trusted-local\n    needs: build\n    if: always()\n    steps:\n      - run: printf dependent-cleanup\n  success-only:\n    runs-on: fgit-trusted-local\n    needs: build\n    steps:\n      - run: printf forbidden-dependent\n";
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = Fixture::new(format, workflow);
+        let before = generation(f.node());
+        let run = f.node().runtime().block_on(f.node().run_trusted_workflow_in(
+            &f.node().request_context(), &reference(), b"workflow.yml", [7; 16],
+            &f.parent(), &inputs(), (None, Some(f.tip)), Default::default()
+        )).unwrap();
+        assert!(!run.succeeded());
+        assert!(run.workspaces_closed);
+        assert_eq!(run.execution.jobs.iter().map(|job| job.outcome).collect::<Vec<_>>(),
+            [JobOutcome::Failed, JobOutcome::Succeeded, JobOutcome::Succeeded, JobOutcome::Skipped]);
+        assert_eq!(run.execution.jobs[0].steps.len(), 3);
+        assert_eq!(run.execution.jobs[0].steps[0].observation.stdout, b"primary");
+        assert_eq!(run.execution.jobs[0].steps[1].observation.stdout, b"same-job-diagnostic");
+        assert_eq!(run.execution.jobs[0].steps[2].observation.stdout, b"same-job-cleanup");
+        assert_eq!(run.execution.jobs[1].steps[0].observation.stdout, b"dependent-cleanup");
+        assert_eq!(run.execution.jobs[2].steps[0].observation.stdout, b"dependent-diagnostic");
+        assert!(run.execution.jobs[3].steps.is_empty());
+        let saved = fs::read_to_string(run.run_directory.join("report.json")).unwrap();
+        assert_eq!(saved, run.to_json());
+        assert!(saved.contains("\"succeeded\":false"));
+        assert!(saved.contains("\"authoritative_check\":false"));
+        assert_eq!(generation(f.node()), before);
+    }
+}
+
+#[test]
+fn always_condition_cannot_escape_timeout_containment_in_real_process_execution() {
+    let workflow = "on: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: while true; do true; done\n      - if: always()\n        run: printf forbidden-after-timeout\n  cleanup:\n    runs-on: fgit-trusted-local\n    needs: build\n    if: always()\n    steps:\n      - run: printf forbidden-dependent-cleanup\n";
+    let f = Fixture::new(GitHashAlgorithm::Sha1, workflow);
+    let limits = WorkflowLimits {
+        step_timeout: Duration::from_millis(50),
+        run_timeout: Duration::from_secs(30),
+        ..Default::default()
+    };
+    let run = f.node().runtime().block_on(f.node().run_trusted_workflow_in(
+        &f.node().request_context(), &reference(), b"workflow.yml", [8; 16],
+        &f.parent(), &inputs(), (None, None), limits
+    )).unwrap();
+    assert!(!run.succeeded());
+    assert!(!run.workspaces_closed);
+    assert_eq!(run.execution.jobs[0].steps.len(), 1);
+    assert!(run.execution.jobs[1].steps.is_empty());
+    assert!(!run.run_directory.join("job-001").exists());
+    assert_eq!(fs::read_to_string(run.run_directory.join("report.json")).unwrap(), run.to_json());
+}
