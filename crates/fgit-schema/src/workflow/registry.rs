@@ -197,8 +197,8 @@ pub static CONSTRUCTS: &[Construct] = &[
     },
     Construct {
         key: "yaml.block-scalar",
-        status: ConstructStatus::Unsupported,
-        reason: "the folding and chomping indicators have several spellings with subtly different results, so accepting them would mean accepting an ambiguity",
+        status: ConstructStatus::Normalized,
+        reason: "bare literal | is accepted with clip semantics; folded > and all chomping/indent modifiers remain refused",
     },
     Construct {
         key: "yaml.block-sequence",

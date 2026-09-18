@@ -237,18 +237,64 @@ fn strip_comment(text: &str) -> &str {
 }
 
 /// Splits the source into significant lines, refusing tabs and markers.
+fn literal_parent_indent(text: &str, indent: usize) -> Option<usize> {
+    let trimmed = text.trim_start();
+    let (candidate, offset) = if let Some(rest) = trimmed.strip_prefix("- ") {
+        let rest = rest.trim_start();
+        (rest, text.len().saturating_sub(rest.len()))
+    } else {
+        (trimmed, text.len().saturating_sub(trimmed.len()))
+    };
+    split_entry(candidate)
+        .filter(|(_, value)| *value == "|")
+        .map(|_| indent.saturating_add(offset))
+}
+
+/// Split significant syntax lines while treating a bare literal block's body as
+/// opaque source bytes. Blank literal lines need not enter the syntax stream:
+/// the block decoder reads them directly from the original source.
 fn significant_lines(source: &str, limits: &Limits) -> Result<Vec<Line>, WorkflowRefusal> {
     let mut lines = Vec::new();
     let mut offset = 0_usize;
+    let mut literal_parent = None;
     for (index, raw) in source.split('\n').enumerate() {
         let line_number = u32::try_from(index + 1).unwrap_or(u32::MAX);
         let line_start = offset;
-        offset += raw.len() + 1;
-
+        offset = offset.saturating_add(raw.len()).saturating_add(1);
         let indent = raw.len() - raw.trim_start_matches(' ').len();
-        let after_indent = &raw[indent..];
 
-        // A tab anywhere in the indentation makes depth depend on tab width.
+        if let Some(parent) = literal_parent {
+            if raw.trim().is_empty() {
+                continue;
+            }
+            if indent > parent {
+                // Literal content is data. Shell comments, document markers,
+                // colons, quotes and tabs after the required space indentation
+                // are not YAML syntax and must survive byte-for-byte.
+                lines.push(Line {
+                    indent,
+                    text: raw[indent..].to_owned(),
+                    span: Span::new(
+                        line_start + indent,
+                        line_start + raw.len(),
+                        line_number,
+                        u32::try_from(indent + 1).unwrap_or(u32::MAX),
+                    ),
+                });
+                if lines.len() > limits.max_lines {
+                    return Err(WorkflowRefusal::LimitExceeded {
+                        limit: "lines",
+                        allowed: limits.max_lines,
+                        observed: lines.len(),
+                        span: lines[lines.len() - 1].span,
+                    });
+                }
+                continue;
+            }
+            literal_parent = None;
+        }
+
+        let after_indent = &raw[indent..];
         if let Some(tab_at) = raw[..indent.min(raw.len())].find('\t') {
             return Err(refuse(
                 "yaml.tab-indent",
@@ -301,6 +347,7 @@ fn significant_lines(source: &str, limits: &Limits) -> Result<Vec<Line>, Workflo
                 span: lines[lines.len() - 1].span,
             });
         }
+        literal_parent = literal_parent_indent(content, indent);
     }
     Ok(lines)
 }
@@ -379,6 +426,7 @@ fn split_entry(text: &str) -> Option<(&str, &str)> {
 
 /// Recursive-descent state, carrying the node budget across the whole document.
 struct Scanner<'a> {
+    source: &'a str,
     lines: &'a [Line],
     limits: &'a Limits,
     nodes: usize,
@@ -498,6 +546,13 @@ impl Scanner<'_> {
                 line.span.line,
                 line.span.column + u32::try_from(line.text.len() - raw_value.len()).unwrap_or(0),
             );
+            if raw_value == "|" {
+                self.charge(value_span)?;
+                let (value, after) = self.literal_block(at, indent, value_span)?;
+                entries.push((key, value, key_span));
+                at = after;
+                continue;
+            }
             self.charge(value_span)?;
             let value = Node::Scalar {
                 value: scalar(raw_value, value_span, self.limits)?,
@@ -513,6 +568,113 @@ impl Scanner<'_> {
             },
             at,
         ))
+    }
+
+    fn literal_block(
+        &self,
+        at: usize,
+        parent_indent: usize,
+        marker: Span,
+    ) -> Result<(Node, usize), WorkflowRefusal> {
+        let line = &self.lines[at];
+        let tail = &self.source[line.span.end.min(self.source.len())..];
+        let Some(relative_newline) = tail.find('\n') else {
+            return Err(WorkflowRefusal::Malformed {
+                expected: "an indented line after literal |",
+                span: marker,
+            });
+        };
+        let mut cursor = line.span.end + relative_newline + 1;
+        let mut content_indent = None;
+        let mut end = cursor;
+        let mut total = 0_usize;
+        while cursor <= self.source.len() {
+            let rest = &self.source[cursor..];
+            let next = rest.find('\n').map_or(self.source.len(), |n| cursor + n);
+            let raw = &self.source[cursor..next];
+            if raw.trim().is_empty() {
+                total = total.checked_add(1).ok_or(WorkflowRefusal::LimitExceeded {
+                    limit: "scalar bytes", allowed: self.limits.max_scalar_bytes,
+                    observed: usize::MAX, span: marker,
+                })?;
+                if total > self.limits.max_scalar_bytes {
+                    return Err(WorkflowRefusal::LimitExceeded {
+                        limit: "scalar bytes", allowed: self.limits.max_scalar_bytes,
+                        observed: total, span: marker,
+                    });
+                }
+                end = if next < self.source.len() { next + 1 } else { next };
+            } else {
+                let indent = raw.len() - raw.trim_start_matches(' ').len();
+                if indent <= parent_indent {
+                    break;
+                }
+                let required = *content_indent.get_or_insert(indent);
+                if indent < required {
+                    return Err(WorkflowRefusal::Malformed {
+                        expected: "literal block indentation not less than its first content line",
+                        span: Span::new(cursor, next, marker.line.saturating_add(1), 1),
+                    });
+                }
+                let bytes = raw.len() - required;
+                total = total.checked_add(bytes).and_then(|n| n.checked_add(1))
+                    .ok_or(WorkflowRefusal::LimitExceeded {
+                        limit: "scalar bytes", allowed: self.limits.max_scalar_bytes,
+                        observed: usize::MAX, span: marker,
+                    })?;
+                if total > self.limits.max_scalar_bytes {
+                    return Err(WorkflowRefusal::LimitExceeded {
+                        limit: "scalar bytes", allowed: self.limits.max_scalar_bytes,
+                        observed: total, span: marker,
+                    });
+                }
+                end = if next < self.source.len() { next + 1 } else { next };
+            }
+            if next == self.source.len() { break; }
+            cursor = next + 1;
+        }
+        let Some(required) = content_indent else {
+            return Err(WorkflowRefusal::Malformed {
+                expected: "at least one non-empty indented literal line",
+                span: marker,
+            });
+        };
+
+        let tail = &self.source[line.span.end..];
+        let relative_newline = tail.find('\n').expect("checked above");
+        let mut cursor = line.span.end + relative_newline + 1;
+        let mut out = String::with_capacity(total.min(self.limits.max_scalar_bytes));
+        while cursor < end {
+            let rest = &self.source[cursor..end];
+            let next = rest.find('\n').map_or(end, |n| cursor + n);
+            let raw = &self.source[cursor..next];
+            if !raw.trim().is_empty() {
+                if raw.len() < required {
+                    return Err(WorkflowRefusal::Malformed {
+                        expected: "literal block indentation",
+                        span: marker,
+                    });
+                }
+                out.push_str(&raw[required..]);
+            }
+            out.push('\n');
+            if next >= end || next == self.source.len() { break; }
+            cursor = next + 1;
+        }
+        // Bare | uses clip semantics: internal blank lines remain, while any
+        // trailing blank run normalizes to exactly one final newline.
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+
+        let mut after = at + 1;
+        while after < self.lines.len() && self.lines[after].span.start < end {
+            after += 1;
+        }
+        Ok((Node::Scalar {
+            value: out,
+            span: Span::new(marker.start, end, marker.line, marker.column),
+        }, after))
     }
 
     fn sequence(
@@ -619,6 +781,7 @@ impl Scanner<'_> {
             consumed += 1;
         }
         let mut inner = Scanner {
+            source: self.source,
             lines: &rewritten,
             limits: self.limits,
             nodes: self.nodes,
@@ -651,6 +814,7 @@ pub fn scan(source: &str, limits: &Limits) -> Result<Node, WorkflowRefusal> {
     }
     let base = lines[0].indent;
     let mut scanner = Scanner {
+        source,
         lines: &lines,
         limits,
         nodes: 0,
