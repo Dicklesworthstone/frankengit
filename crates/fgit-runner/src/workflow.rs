@@ -7,7 +7,7 @@
 
 use crate::Commitment;
 pub use fgit_schema::workflow::Job as WorkflowJob;
-use fgit_schema::workflow::{self, Job, WorkflowGraph};
+use fgit_schema::workflow::{self, Condition, Job, WorkflowGraph};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -166,11 +166,7 @@ impl WorkflowPlan {
                 } else {
                     stopped()
                 };
-            } else if job
-                .needs
-                .iter()
-                .any(|need| completed.get(need.as_str()) != Some(&JobOutcome::Succeeded))
-            {
+            } else if !job_condition(job.condition, &job.needs, &completed) {
                 result.outcome = JobOutcome::Skipped;
             } else {
                 match executor.begin_job(index, job, &run_live) {
@@ -181,10 +177,14 @@ impl WorkflowPlan {
                             Some(WorkerFailure::new(failure.detail, failure.retain_workspace));
                     }
                     Ok(()) => {
+                        let mut ordinary_failed = false;
                         for (step_index, step) in job.steps.iter().enumerate() {
                             if !run_live() {
                                 result.outcome = stopped();
                                 break;
+                            }
+                            if !step_condition(step.condition, ordinary_failed) {
+                                continue;
                             }
                             if remaining < 2 {
                                 result.outcome = JobOutcome::OutputLimit;
@@ -253,6 +253,13 @@ impl WorkflowPlan {
                                             StepOutcome::OutputLimit => JobOutcome::OutputLimit,
                                             _ => JobOutcome::Failed,
                                         };
+                                        if outcome == StepOutcome::Failed && !observed.retain_workspace {
+                                            // Ordinary command failure is inspectable state, not
+                                            // cancellation or lost containment. Later failure()/always()
+                                            // diagnostics may run in the SAME job workspace.
+                                            ordinary_failed = true;
+                                            continue;
+                                        }
                                         break;
                                     }
                                 }
@@ -283,6 +290,32 @@ impl WorkflowPlan {
             report.jobs.push(result);
         }
         Ok(report)
+    }
+}
+
+fn job_condition(
+    condition: Condition,
+    needs: &[String],
+    completed: &BTreeMap<&str, JobOutcome>,
+) -> bool {
+    let states = needs.iter().filter_map(|need| completed.get(need.as_str()).copied()).collect::<Vec<_>>();
+    if states.len() != needs.len() {
+        return false;
+    }
+    let unsafe_terminal = states.iter().any(|state| matches!(state, JobOutcome::Cancelled | JobOutcome::Refused));
+    match condition {
+        Condition::Success => states.iter().all(|state| *state == JobOutcome::Succeeded),
+        Condition::Failure => !unsafe_terminal && states.iter().any(|state|
+            matches!(state, JobOutcome::Failed | JobOutcome::TimedOut | JobOutcome::OutputLimit)),
+        Condition::Always => !unsafe_terminal,
+    }
+}
+
+const fn step_condition(condition: Condition, ordinary_failed: bool) -> bool {
+    match condition {
+        Condition::Success => !ordinary_failed,
+        Condition::Failure => ordinary_failed,
+        Condition::Always => true,
     }
 }
 
