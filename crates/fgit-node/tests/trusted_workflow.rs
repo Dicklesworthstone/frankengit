@@ -227,3 +227,25 @@ fn always_condition_cannot_escape_timeout_containment_in_real_process_execution(
     assert!(!run.run_directory.join("job-001").exists());
     assert_eq!(fs::read_to_string(run.run_directory.join("report.json")).unwrap(), run.to_json());
 }
+
+
+#[test]
+fn literal_multiline_script_executes_exact_decoded_bytes_and_persists_commitment() {
+    let workflow = "on: push\njobs:\n  a:\n    runs-on: fgit-trusted-local\n    steps:\n      - name: multiline\n        run: |\n          printf 'first\\n'\n          value='a: b'\n          # this is shell data, not a YAML comment\n          printf '%s\\n' \"$value\"\n";
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let f = Fixture::new(format, workflow);
+        let before = generation(f.node());
+        let run = f.node().runtime().block_on(f.node().run_trusted_workflow_in(
+            &f.node().request_context(), &reference(), b"workflow.yml", [9; 16],
+            &f.parent(), &inputs(), (None, Some(f.tip)), Default::default()
+        )).unwrap();
+        assert!(run.succeeded());
+        assert_eq!(run.execution.jobs[0].steps.len(), 1);
+        assert_eq!(run.execution.jobs[0].steps[0].observation.stdout, b"first\na: b\n");
+        assert_eq!(run.execution.jobs[0].steps[0].name.as_deref(), Some("multiline"));
+        let saved = fs::read_to_string(run.run_directory.join("report.json")).unwrap();
+        assert_eq!(saved, run.to_json());
+        assert!(saved.contains("\"succeeded\":true"));
+        assert_eq!(generation(f.node()), before);
+    }
+}
