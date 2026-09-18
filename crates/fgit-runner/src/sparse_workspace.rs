@@ -13,6 +13,9 @@
 //! rename or deletion by other principals. FUSE, reflinks, shared host inodes,
 //! symlink materialization, and gitlinks are not supported by this profile.
 
+mod inputs;
+use inputs::WorkspaceManifest;
+
 use crate::Commitment;
 use fgit_codec::Encoder;
 use fgit_crypto::{GitHashAlgorithm, NativeObjectIdentity};
@@ -126,10 +129,10 @@ impl ObligationKind for SparseDirectoryLease {
 }
 impl InternalEffect for SparseDirectoryLease {}
 
-/// Immutable shared base plus the exact writable-path manifest.
+/// Immutable shared inputs plus the exact writable-path manifest.
 #[derive(Clone, Debug)]
 pub struct SparseWorkspacePlan<A: GitHashAlgorithm> {
-    manifest: Arc<SparseManifest<A>>,
+    manifest: WorkspaceManifest<A>,
     outputs: BTreeSet<TreePath>,
     directories: BTreeSet<TreePath>,
     limits: SparseLimits,
@@ -143,6 +146,16 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
     /// existing input becomes writable only when explicitly listed in outputs.
     pub fn new(
         manifest: Arc<SparseManifest<A>>,
+        outputs: Vec<TreePath>,
+        capability: &TreeCapability,
+        now: u64,
+        limits: SparseLimits,
+    ) -> Result<Self, HostRefusal> {
+        Self::from_manifest(WorkspaceManifest::Canonical(manifest), outputs, capability, now, limits)
+    }
+
+    fn from_manifest(
+        manifest: WorkspaceManifest<A>,
         outputs: Vec<TreePath>,
         capability: &TreeCapability,
         now: u64,
@@ -227,6 +240,7 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
             &mut bytes,
             manifest.receipt().source_tree_oid().digest_bytes(),
         )?;
+        manifest.bind_candidate(&mut bytes)?;
         bytes.write_scalar(manifest.entries().len() as u64);
         for entry in manifest.entries() {
             frame(&mut bytes, entry.path().as_bytes())?;
@@ -574,12 +588,15 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
     /// Successful logs consume the lease's cumulative import allowance even
     /// when a caller repeats the same edit. Refused/cancelled logs are not
     /// admitted; unchanged reads remain available after the allowance is spent.
+    /// Candidate-input plans refuse with IdentityMismatch before any read: an
+    /// unpublished tree is not a canonical base for an imported edit log.
     pub fn import(
         &mut self,
         capability: &TreeCapability,
         now: u64,
         cancelled: &dyn Fn(HostEpoch) -> bool,
     ) -> Result<IntentLog, HostRefusal> {
+        if self.plan.manifest.is_candidate() { return Err(HostRefusal::IdentityMismatch); }
         self.plan.authorize(capability, now)?;
         check_marker(&self.root, &self.plan.marker)?;
         let inputs: BTreeMap<_, _> = self
