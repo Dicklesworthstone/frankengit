@@ -1,11 +1,17 @@
 //! Candidate execution enters the same preflight, journal and job driver as
 //! canonical source. Only input provenance and the host plan constructor differ.
+mod merge;
 use super::*;
+use fgit_forge::event::NativeMerge;
 use fgit_treefs::{SparseCandidateManifest, SparseEntry};
 
 pub(super) enum WorkflowInputs<A: GitHashAlgorithm> {
     Canonical(Arc<SparseManifest<A>>),
-    Candidate { manifest: Arc<SparseCandidateManifest<A>>, bundle_sha256: [u8; 32] },
+    Candidate {
+        manifest: Arc<SparseCandidateManifest<A>>,
+        bundle_sha256: [u8; 32],
+        merge: Option<NativeMerge>,
+    },
 }
 impl<A: GitHashAlgorithm> WorkflowInputs<A> {
     pub(super) fn entries(&self) -> &[SparseEntry<A>] {
@@ -20,6 +26,9 @@ impl<A: GitHashAlgorithm> WorkflowInputs<A> {
             Self::Candidate { manifest, .. } => SparseWorkspacePlan::for_candidate(Arc::clone(manifest), capability, 0, SOURCE_LIMITS),
         }
     }
+    pub(super) fn merge(&self) -> Option<&NativeMerge> {
+        match self { Self::Canonical(_) => None, Self::Candidate { merge, .. } => merge.as_ref() }
+    }
     pub(super) fn coordinates(&self, format: Format)
         -> Result<(RepositoryCommitId, GitOid, GitOid, Option<TrustedWorkflowCandidate>), TrustedWorkflowFailure>
     {
@@ -29,12 +38,30 @@ impl<A: GitHashAlgorithm> WorkflowInputs<A> {
             Self::Canonical(m) => Ok((m.receipt().source_rcr_id(),
                 native(m.receipt().source_commit_oid().digest_bytes())?,
                 native(m.receipt().source_tree_oid().digest_bytes())?, None)),
-            Self::Candidate { manifest: m, bundle_sha256 } => Ok((m.base_rcr_id(),
-                native(m.base_commit_oid().digest_bytes())?, native(m.base_tree_oid().digest_bytes())?,
-                Some(TrustedWorkflowCandidate { commit: native(m.candidate_commit_oid().digest_bytes())?,
-                    tree: native(m.candidate_tree_oid().digest_bytes())?, bundle_sha256: *bundle_sha256 }))),
+            Self::Candidate { manifest: m, bundle_sha256, merge } => {
+                let base = native(m.base_commit_oid().digest_bytes())?;
+                let commit = native(m.candidate_commit_oid().digest_bytes())?;
+                let parents = m.parents().iter().map(|id| native(id.digest_bytes())).collect::<Result<Vec<_>, _>>()?;
+                match merge {
+                    Some(merge) if base == merge.target_tip_before && commit == merge.merge_commit
+                        && parents == [merge.target_tip_before, merge.source_tip] => {}
+                    None if parents == [base] => {}
+                    _ => return Err(TrustedWorkflowFailure::InvalidInput("workflow provenance differs from verified native parents")),
+                }
+                Ok((m.base_rcr_id(), base, native(m.base_tree_oid().digest_bytes())?,
+                    Some(TrustedWorkflowCandidate { commit,
+                        tree: native(m.candidate_tree_oid().digest_bytes())?, bundle_sha256: *bundle_sha256 })))
+            }
         }
     }
+}
+pub(super) fn merge_json(merge: Option<&NativeMerge>) -> String {
+    merge.map_or_else(|| "null".to_owned(), |m| format!(concat!(
+        "{{\"target_ref_hex\":\"{}\",\"target_tip\":\"{}\",\"source_ref_hex\":\"{}\",",
+        "\"source_tip\":\"{}\",\"merge_base\":\"{}\",\"candidate_commit\":\"{}\",",
+        "\"parents\":[\"{}\",\"{}\"],\"published\":false,\"approval_created\":false}}"),
+        hex(m.target_ref.as_bytes()), m.target_tip_before, hex(m.source_ref.as_bytes()),
+        m.source_tip, m.base_tip, m.merge_commit, m.target_tip_before, m.source_tip))
 }
 
 impl OneNode {
@@ -80,7 +107,7 @@ impl OneNode {
             reference, coordinates.0, coordinates.1, bundle, &Default::default(), expected_head,
             &mut capability, 0, SOURCE_LIMITS).await
             .map_err(|error| TrustedWorkflowFailure::Candidate(Box::new(error)))?;
-        run_inputs(self, request, WorkflowInputs::Candidate { manifest: Arc::new(manifest), bundle_sha256 },
+        run_inputs(self, request, WorkflowInputs::Candidate { manifest: Arc::new(manifest), bundle_sha256, merge: None },
             &capability, head, reference, workflow_path, &declared, run_id, parent, limits, started)
     }
 }

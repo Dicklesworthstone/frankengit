@@ -82,6 +82,9 @@ pub struct TrustedWorkflowRun {
     pub source_tree: GitOid,
     pub source_reference: Vec<u8>,
     pub candidate: Option<TrustedWorkflowCandidate>,
+    /// Both branch selections and native ancestry checked before merge execution.
+    /// This is not a PR-version attestation or authorization to publish.
+    pub merge: Option<fgit_forge::event::NativeMerge>,
     pub workflow_blob: GitOid,
     pub workflow_path: Vec<u8>,
     pub read_prefixes: Vec<Vec<u8>>,
@@ -108,13 +111,13 @@ impl TrustedWorkflowRun {
             "\"workflow_blob\":\"{}\",\"workflow_path_hex\":\"{}\",\"read_prefixes_hex\":[{}],",
             "\"run_id\":\"{}\",\"run_directory_hex\":\"{}\",",
             "\"hostile_code_isolated\":false,\"authoritative_check\":false,\"published\":false,",
-            "\"input_kind\":\"{}\",\"executed_commit\":\"{}\",\"executed_tree\":\"{}\",\"candidate\":{}"),
+            "\"input_kind\":\"{}\",\"executed_commit\":\"{}\",\"executed_tree\":\"{}\",\"candidate\":{},\"merge\":{}"),
             self.tenant, self.repository, self.incarnation, self.source_head, self.source_rcr,
             self.source_commit.algorithm().as_str(), self.source_commit, self.source_tree,
             hex(&self.source_reference), self.workflow_blob, hex(&self.workflow_path), prefixes,
             hex(&self.run_id), hex(self.run_directory.as_os_str().as_bytes()),
             if self.candidate.is_some() { "unpublished_candidate" } else { "canonical" },
-            self.executed_commit(), self.executed_tree(), candidate)
+            self.executed_commit(), self.executed_tree(), candidate, candidate::merge_json(self.merge.as_ref()))
     }
     /// Output stays bounded by the native workflow report and source profile.
     /// All arbitrary source/output/path bytes use lossless hexadecimal encoding.
@@ -272,7 +275,7 @@ fn run_inputs<A: GitHashAlgorithm>(node: &OneNode, request: &NodeRequestContext,
     let (source_rcr, source_commit, source_tree, candidate) = inputs.coordinates(format)?;
     let mut report = TrustedWorkflowRun {
         tenant: node.tenant_id, repository: node.repository_id(), incarnation: node.repository_incarnation_id(),
-        source_head: head, source_rcr, source_commit, source_tree, candidate,
+        source_head: head, source_rcr, source_commit, source_tree, candidate, merge: inputs.merge().cloned(),
         source_reference: reference.as_bytes().to_vec(), workflow_blob: native(entry.source_oid().digest_bytes())?,
         workflow_path: workflow_path.to_vec(), read_prefixes: declared.to_vec(),
         run_id, run_directory: parent.join(format!("workflow-{}", hex(&run_id))),
