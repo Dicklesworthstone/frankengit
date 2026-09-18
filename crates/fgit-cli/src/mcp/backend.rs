@@ -1,5 +1,7 @@
 //! Real node reads, not fixtures or a CLI subprocess. Scope is fixed at launch.
 mod issues;
+mod pulls;
+mod source;
 use fgit_node::{IssueReadRefusal, NodeConfig, OneNode};
 use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, RepositoryAuthorityHeadId};
 use super::Options;
@@ -15,9 +17,10 @@ impl NodeTools {
             if options.incarnation.is_some_and(|id| id != node.repository_incarnation_id()) {
                 return Err("MCP repository incarnation does not match launch binding".into());
             }
-            let head = node.runtime().block_on(node.authenticate_authority_head())
-                .map_err(|_| "MCP authority authentication failed")?;
-            node.bring_into_service(head.receipt().generation()).map_err(|_| "MCP repository read service unavailable")?;
+            // Use the same authenticated readiness boundary as the existing
+            // CLI. Each tool subsequently authenticates its own selected head.
+            node.bring_into_service(fgit_types::HeadGeneration::FIRST)
+                .map_err(|_| "MCP repository read service unavailable")?;
             Ok(())
         })();
         if let Err(error) = startup {
@@ -47,11 +50,19 @@ impl ReadTools for NodeTools {
     fn tools(&self) -> Vec<Tool> {
         let mut tools = Vec::new();
         if self.options.issues { tools.extend(issues::tools()); }
+        if self.options.pulls { tools.extend(pulls::tools()); }
+        if self.options.source { tools.extend(source::tools()); }
         tools
     }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
         if self.options.issues && matches!(name, "frankengit_issue_list" | "frankengit_issue_show") {
             return issues::call(self, name, args);
+        }
+        if self.options.pulls && matches!(name, "frankengit_pull_list" | "frankengit_pull_show") {
+            return pulls::call(self, name, args);
+        }
+        if self.options.source && matches!(name, "frankengit_source_tree" | "frankengit_source_blob") {
+            return source::call(self, name, args);
         }
         Err(ToolError::invalid("tool_not_granted"))
     }

@@ -11,7 +11,8 @@ repository content, client capabilities, and tool arguments cannot expand them.
 ```sh
 cargo run --locked -p fgit-cli --bin fg-mcp -- \
   /absolute/path/to/existing-node TENANT_HEX REPOSITORY_HEX \
-  --trusted-local --allow-issues --expected-incarnation INCARNATION_HEX
+  --trusted-local --allow-issues --allow-pulls --allow-source \
+  --expected-incarnation INCARNATION_HEX
 ```
 
 Use `--object-format sha256` for a SHA-256 repository. Ordinary `cargo run -p
@@ -21,8 +22,10 @@ not environment-driven repository discovery, client roots, or request bodies.
 The repository must already exist, authenticate, and match its supplied IDs.
 An optional incarnation pin is checked before any MCP tool is available.
 
-The connected process receives repository-wide **issue read** access only when
-`--allow-issues` is supplied. The local operator must trust the process receiving
+The operator independently selects **issue reads** (`--allow-issues`), **PR reads**
+(`--allow-pulls`), and **source reads** (`--allow-source`). At least one grant is
+required. A disabled group is absent from discovery and refused at dispatch; no
+group implies another and none permits mutation. The local operator must trust the process receiving
 these bytes. This is not remote authentication, per-issue ACLs, hostile process
 isolation, or a full Intent Run/effect-broker capability. Do not proxy stdio to
 untrusted remote clients or treat returned text as executable instructions.
@@ -44,6 +47,36 @@ than refreshing silently. `complete=false` and a non-null cursor mean more
 source rows remain; they are not complete snapshots. Missing issues are explicit
 `found=false` results. Storage/corruption/budget failures are tool errors, not
 successful empty lists. Both structured content and JSON text are returned.
+
+## Source and PR tools
+
+`frankengit_pull_list` accepts `after`, `limit` and `expected_head` like issue
+lists. `frankengit_pull_show` accepts only `number` and optional `expected_head`.
+Native metadata and explicit merge-only receipts remain distinct. Reads retain
+current canonical hidden-ref filtering even at a retained head; missing and
+hidden PRs are not distinguished. Metadata is not an approval count or merge
+permission (`merge_permission` is explicitly null).
+
+`frankengit_source_tree` accepts required `reference` (full UTF-8 ref such as
+`refs/heads/main`), optional `path_hex` (omitted for the root), `limit` (1..100,
+default 50), `after_hex` (one immediate child), `expected_head`, and
+`expected_commit`. Directory names are sorted raw bytes and returned as hex.
+`frankengit_source_blob` uses the same reference and mandatory `path_hex`, with
+`offset` (decimal string, default zero), `max_bytes` (1..65536, default 16384),
+and optional expected head/commit. It returns `bytes_hex` without loss and a
+convenience `text_utf8` only when the exact slice is valid UTF-8. Byte ranges
+can split a Unicode character; concatenate exact bytes, not nullable text.
+Symlink payloads are data and never followed; gitlinks cannot be read as files.
+
+Every source reply binds the selected commit, root tree, source RCR, object ID,
+and path. `next_after_hex` and `next_offset` require the same head token on the
+next call. Unlike metadata retained-head pagination, source browsing uses strict
+current-head pins; an intervening publication refuses continuation rather than
+mixing snapshots. A supplied commit ID compares the visible ref; it is not an
+arbitrary object lookup or a bypass for current hidden-ref policy. Repository
+paths never become host paths. Existing native object/read budgets apply in
+addition to output page ceilings. All source and PR tools use the same error,
+structured-content, and read-only session boundary as issue tools.
 
 ## Session and resource boundaries
 
@@ -78,7 +111,13 @@ The checked-in tests cover JSON boundaries, Unicode and exact numbers, handshake
 registry isolation, injection-shaped fields, late notifications, duplicate IDs,
 framing, failed output, and response limits. A real-node test seeds canonical
 issues, closes/reopens SHA-1 and SHA-256 repositories, calls the MCP handlers,
-checks pagination and exact text, and verifies unchanged authority head.
+checks pagination and exact text, and verifies unchanged authority head. Another
+real-node test publishes a native initial patch, creates a branch/PR, reopens
+both hash domains, reads actual source ranges and PR metadata, verifies denied
+issue access and unchanged authority, and checks strict source versus retained
+PR behavior across a later ordinary write. Unit tests cover all eight grant
+combinations, hostile path/authority arguments, byte-exact binary results,
+directory cursors, invalid result bindings and no implied merge approval.
 
 Suggested local command: `cargo test --locked -p fgit-cli --bin fg-mcp`.
 These tests have been written but have not been executed in the development
