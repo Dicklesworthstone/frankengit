@@ -16,6 +16,15 @@ const USAGE: &str = "usage: fg workflow run <storage-root> <tenant-id> <reposito
   [--ref-hex] [--workflow-hex <hex> instead of --workflow]
   [--input-hex <hex> instead of each --input]
 
+Unpublished candidate: replace run with run-candidate and also supply
+  --bundle <stable-local-file> --candidate-commit <reviewed-native-oid>
+  --expected-commit <canonical-base-oid> (mandatory for run-candidate).
+Only an exact single-parent candidate with the base as its prerequisite is
+supported. Workflow scripts AND copied inputs come from the candidate, not the
+base. Review and trust those candidate scripts before invoking. The bundle is
+validated without object import, ref publication, or a canonical green check.
+Canonical base provenance and actual executed candidate remain separate in JSON.
+
 Linux only. The run parent must already exist with mode 0700. Review and trust
 ALL scripts before invoking: jobs run as your host user, not inside a hostile-code
 sandbox. Inputs select copied repository files; they do not restrict host access.
@@ -38,15 +47,17 @@ Exit 0: all jobs succeeded and cleanup completed; 1: non-green completed report;
 2: input, infrastructure, receipt-output or node-cleanup failure.";
 
 #[derive(Debug)]
+struct Candidate { bundle: PathBuf, base: GitOid, commit: GitOid }
+#[derive(Debug)]
 struct Options {
     storage: PathBuf, tenant: TenantId, repository: RepositoryId, reference: RefName,
     format: GitHashAlgorithm, workflow: Vec<u8>, inputs: Vec<Vec<u8>>, parent: PathBuf,
     run_id: [u8; 16], head: Option<RepositoryAuthorityHeadId>, commit: Option<GitOid>,
-    incarnation: Option<RepositoryIncarnationId>,
+    incarnation: Option<RepositoryIncarnationId>, candidate: Option<Candidate>,
 }
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
-    if args == ["--help"] || args == ["run", "--help"] {
+    if args == ["--help"] || args == ["run", "--help"] || args == ["run-candidate", "--help"] {
         writeln!(std::io::stdout().lock(), "{USAGE}").map_err(|e| e.to_string())?;
         return Ok(0);
     }
@@ -58,7 +69,8 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    if args.len() < 5 || args.first().map(String::as_str) != Some("run") { return Err(USAGE.into()); }
+    if args.len() < 5 || !matches!(args.first().map(String::as_str), Some("run" | "run-candidate")) { return Err(USAGE.into()); }
+    let candidate_mode = args[0] == "run-candidate";
     if args.len() > 2100 || args.iter().any(|s| s.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
     { return Err("workflow arguments exceed the bounded profile".into()); }
@@ -75,6 +87,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         if !matches!(flag, "--workflow" | "--workflow-hex" | "--input" | "--input-hex"
             | "--run-parent" | "--run-id" | "--object-format" | "--expected-head"
             | "--expected-commit" | "--expected-incarnation")
+            && !(candidate_mode && matches!(flag, "--bundle" | "--candidate-commit"))
         { return Err(format!("unknown workflow option {flag:?}")); }
         let value = args.get(cursor).ok_or_else(|| format!("missing value for {flag}"))?;
         cursor += 1;
@@ -109,16 +122,27 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let parent = PathBuf::from(value("--run-parent")?);
     if !parent.is_absolute() { return Err("run parent must be an absolute private directory".into()); }
     let head = flags.get("--expected-head").map(|text| parse_head(text)).transpose()?;
-    let commit = flags.get("--expected-commit").map(|text| {
-        if unhex(text, format.digest_len())?.len() != format.digest_len() { return Err("invalid expected commit width".into()); }
-        let oid = GitOid::from_hex(format, text).map_err(|_| "invalid expected commit")?;
-        if oid.is_zero() { return Err("expected commit cannot be zero".into()); }
-        Ok::<_, String>(oid)
-    }).transpose()?;
+    let commit = flags.get("--expected-commit").map(|text| native_oid(text, format)).transpose()?;
     let incarnation = flags.get("--expected-incarnation").map(|text|
         RepositoryIncarnationId::from_hex(text).map_err(|_| "invalid incarnation ID".to_owned())).transpose()?;
+    let candidate = if candidate_mode {
+        let base = commit.ok_or("--expected-commit is mandatory for run-candidate")?;
+        let candidate = native_oid(value("--candidate-commit")?, format)?;
+        let bundle = value("--bundle")?;
+        if bundle.is_empty() || bundle.len() > 4096 { return Err("bundle must be a bounded local file path".into()); }
+        if candidate == base || !reference.as_bytes().starts_with(b"refs/heads/") || reference.as_bytes().len() > 4096 {
+            return Err("candidate requires a bounded branch and must differ from the canonical base".into());
+        }
+        Some(Candidate { bundle: bundle.into(), base, commit: candidate })
+    } else { None };
     Ok(Options { storage: args[1].clone().into(), tenant, repository, reference, format,
-        workflow, inputs: inputs.into_iter().collect(), parent, run_id, head, commit, incarnation })
+        workflow, inputs: inputs.into_iter().collect(), parent, run_id, head, commit, incarnation, candidate })
+}
+fn native_oid(text: &str, format: GitHashAlgorithm) -> Result<GitOid, String> {
+    if unhex(text, format.digest_len())?.len() != format.digest_len() { return Err("invalid expected commit width".into()); }
+    let oid = GitOid::from_hex(format, text).map_err(|_| "invalid expected commit")?;
+    if oid.is_zero() { return Err("expected commit cannot be zero".into()); }
+    Ok(oid)
 }
 fn validate_path(path: &[u8]) -> Result<(), String> {
     if path.is_empty() || path.len() > 4096 || path.contains(&0)
@@ -147,6 +171,10 @@ fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
 #[cfg(target_os = "linux")]
 fn execute(options: Options) -> Result<u8, String> {
     use fgit_node::{NodeConfig, OneNode};
+    // Complete bounded local intake before opening repository state. The file
+    // is transport only; native validation still precedes host execution.
+    let bundle = options.candidate.as_ref().map(|candidate|
+        super::publication_support::read_bundle(&candidate.bundle, 128 * 1024 * 1024)).transpose()?;
     let mut node = OneNode::open_existing(NodeConfig::new(options.storage, options.tenant, options.repository)
         .with_object_format(options.format)).map_err(|e| e.to_string())?;
     let operation = (|| -> Result<_, String> {
@@ -156,9 +184,15 @@ fn execute(options: Options) -> Result<u8, String> {
         let head = node.runtime().block_on(node.authenticate_authority_head()).map_err(|e| e.to_string())?;
         node.bring_into_service(head.receipt().generation()).map_err(|e| e.to_string())?;
         let request = node.request_context();
-        let result = node.runtime().block_on(node.run_trusted_workflow_in(&request, &options.reference,
-            &options.workflow, options.run_id, &options.parent, &options.inputs,
-            (options.head, options.commit), Default::default())).map_err(|e| e.to_string())?;
+        let result = match (&options.candidate, bundle.as_deref()) {
+            (Some(candidate), Some(bytes)) => node.runtime().block_on(node.run_trusted_candidate_workflow_in(
+                &request, &options.reference, (candidate.base, candidate.commit), bytes,
+                &options.workflow, options.run_id, &options.parent, &options.inputs, options.head, Default::default())),
+            (None, None) => node.runtime().block_on(node.run_trusted_workflow_in(&request, &options.reference,
+                &options.workflow, options.run_id, &options.parent, &options.inputs,
+                (options.head, options.commit), Default::default())),
+            _ => return Err("candidate input was not loaded; no workflow started".into()),
+        }.map_err(|e| e.to_string())?;
         Ok((result.to_json(), result.succeeded(), result.run_directory.clone()))
     })();
     let cleanup = node.shutdown().err().map(|e| e.to_string());
@@ -219,5 +253,25 @@ mod tests {
             fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
         }
         assert!(finish(&mut Broken, "{}", true, None).is_err());
+    }
+    #[test]
+    fn candidate_command_requires_independent_base_candidate_and_bundle_before_io() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let mut input = args(); input[0] = "run-candidate".into();
+            let base = "a".repeat(format.digest_len()*2); let candidate = "b".repeat(format.digest_len()*2);
+            input.extend(["--object-format".into(), format.as_str().into(), "--expected-commit".into(), base.clone(),
+                "--candidate-commit".into(), candidate.clone(), "--bundle".into(), "not-opened-at-parse.bundle".into()]);
+            let options = parse(&input).unwrap();
+            let selected = options.candidate.unwrap();
+            assert_eq!(selected.base.to_string(), base); assert_eq!(selected.commit.to_string(), candidate);
+            for flag in ["--bundle", "--expected-commit", "--candidate-commit"] {
+                let mut missing = input.clone(); let at = missing.iter().position(|s| s == flag).unwrap();
+                missing.drain(at..at+2); assert!(parse(&missing).is_err());
+            }
+            let mut canonical = input.clone(); canonical[0] = "run".into(); assert!(parse(&canonical).is_err());
+            let mut untrusted = input.clone(); untrusted.remove(5); assert!(parse(&untrusted).is_err());
+            let mut same = input.clone(); let at = same.iter().position(|s| s == "--candidate-commit").unwrap();
+            same[at+1] = base; assert!(parse(&same).is_err());
+        }
     }
 }
