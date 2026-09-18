@@ -3,6 +3,8 @@
 //! Actual merge validation -> candidate TreeFS -> processes -> persisted report.
 #[path = "trusted_merge_workflow/support.rs"]
 mod support;
+#[path = "trusted_merge_workflow/custom.rs"]
+mod custom;
 use support::*;
 use std::fs;
 use std::time::Duration;

@@ -1,5 +1,4 @@
-//! Real file-backed nodes, imported native histories and native candidate packs.
-use std::collections::BTreeMap;
+//! Real file-backed nodes and imported native histories shared with CLI tests.
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -8,7 +7,6 @@ use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::event::NativeMerge;
 use fgit_forge::preparation::{MergeMetadata, MergePreparation};
 use fgit_node::{NodeConfig, OneNode};
-use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, PackLimits, PackPlanner, PackWriteError, PackWriteProfile, PackWriter};
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefName,
     RepositoryAuthorityHeadId, RepositoryId, TenantId};
 
@@ -79,35 +77,16 @@ impl Fixture {
         NativeMerge { target_ref: target_ref(), target_tip_before: self.target, source_ref: source_ref(),
             source_tip: self.source, base_tip: self.base, merge_commit: candidate }
     }
-    /// Caller-chosen actual merge bytes: deliberately not the automatic planner.
-    pub fn custom(&self, workflow: &str, parents: &[GitOid]) -> (NativeMerge, Vec<u8>) {
-        let format = self.target.algorithm(); let mut objects = Objects(BTreeMap::new());
-        let left = objects.put(format, GitObjectKind::Blob, b"target\n".to_vec());
-        let right = objects.put(format, GitObjectKind::Blob, b"source\n".to_vec());
-        let workflow = objects.put(format, GitObjectKind::Blob, workflow.as_bytes().to_vec());
-        let tree = objects.put(format, GitObjectKind::Tree, tree_bytes(left, right, workflow));
-        let candidate = objects.put(format, GitObjectKind::Commit, commit_bytes(tree, parents, "reviewed custom merge"));
-        let limits = PackLimits::default(); let ids = objects.0.keys().copied().collect::<Vec<_>>();
-        let plan = PackPlanner::new(format, PackWriteProfile::COMPRESSED_NO_DELTA_V1, limits.clone())
-            .plan_selected(&objects, &ids, &mut || true).unwrap();
-        let (pack, _) = PackWriter::new(limits).write(&plan, &mut || true).unwrap();
-        let mut bundle = match format {
-            GitHashAlgorithm::Sha1 => b"# v2 git bundle\n".to_vec(),
-            GitHashAlgorithm::Sha256 => b"# v3 git bundle\n@object-format=sha256\n".to_vec(),
-        };
-        bundle.extend_from_slice(format!("-{} target\n-{} source\n{candidate} refs/heads/main\n\n", self.target, self.source).as_bytes());
-        bundle.extend_from_slice(&pack); (self.coordinates(candidate), bundle)
-    }
 }
 impl Drop for Fixture { fn drop(&mut self) { if let Some(node) = self.node.take() { let _ = node.shutdown(); } let _ = fs::remove_dir_all(&self.root); } }
 pub fn target_ref() -> RefName { RefName::try_new(b"refs/heads/main").unwrap() }
 pub fn source_ref() -> RefName { RefName::try_new(b"refs/heads/topic").unwrap() }
 pub fn inputs() -> Vec<Vec<u8>> { vec![b"left".to_vec(), b"right".to_vec(), b"workflow.yml".to_vec()] }
 pub fn generation(node: &OneNode) -> u64 { node.runtime().block_on(node.authenticate_authority_head()).unwrap().receipt().generation().get() }
-fn tree_bytes(left: GitOid, right: GitOid, workflow: GitOid) -> Vec<u8> {
+pub(super) fn tree_bytes(left: GitOid, right: GitOid, workflow: GitOid) -> Vec<u8> {
     [b"100644 left\0".as_slice(), left.as_bytes(), b"100644 right\0", right.as_bytes(), b"100644 workflow.yml\0", workflow.as_bytes()].concat()
 }
-fn commit_bytes(tree: GitOid, parents: &[GitOid], message: &str) -> Vec<u8> {
+pub(super) fn commit_bytes(tree: GitOid, parents: &[GitOid], message: &str) -> Vec<u8> {
     let mut body = format!("tree {tree}\n");
     for parent in parents { body.push_str(&format!("parent {parent}\n")); }
     body.push_str(&format!("author Test <t@example.invalid> 1 +0000\ncommitter Test <t@example.invalid> 2 +0000\n\n{message}\n")); body.into_bytes()
@@ -121,16 +100,4 @@ fn loose(root: &Path, format: GitHashAlgorithm, kind: GitObjectKind, body: &[u8]
     bytes.extend(((b << 16) | a).to_be_bytes()); let text = id.to_string();
     fs::create_dir_all(root.join("objects").join(&text[..2])).unwrap();
     fs::write(root.join("objects").join(&text[..2]).join(&text[2..]), bytes).unwrap(); id
-}
-struct Objects(BTreeMap<GitOid, (GitObjectKind, Vec<u8>)>);
-impl Objects {
-    fn put(&mut self, format: GitHashAlgorithm, kind: GitObjectKind, body: Vec<u8>) -> GitOid {
-        let id = git_object_id(format, kind, &body); self.0.insert(id, (kind, body)); id
-    }
-}
-impl CanonicalObjectSource for Objects {
-    fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
-        let (kind, body) = self.0.get(id).ok_or(PackWriteError::MissingCanonicalObject(*id))?;
-        Ok(CanonicalPackObject::new(*id, *kind, body.clone(), Vec::new(), 0, 0))
-    }
 }

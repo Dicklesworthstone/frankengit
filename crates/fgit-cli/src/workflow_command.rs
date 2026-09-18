@@ -1,6 +1,7 @@
 //! Explicit local-owner entry point for repository-bound workflow execution.
 //! Parsing never opens a repository or interprets workflow text as authority.
 
+mod merge;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::PathBuf;
@@ -24,6 +25,7 @@ supported. Workflow scripts AND copied inputs come from the candidate, not the
 base. Review and trust those candidate scripts before invoking. The bundle is
 validated without object import, ref publication, or a canonical green check.
 Canonical base provenance and actual executed candidate remain separate in JSON.
+For explicit two-parent merge inputs: fg workflow run-merge-candidate --help.
 
 Linux only. The run parent must already exist with mode 0700. Review and trust
 ALL scripts before invoking: jobs run as your host user, not inside a hostile-code
@@ -57,13 +59,14 @@ struct Options {
 }
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|action| action == "run-merge-candidate") { return merge::run(args); }
     if args == ["--help"] || args == ["run", "--help"] || args == ["run-candidate", "--help"] {
         writeln!(std::io::stdout().lock(), "{USAGE}").map_err(|e| e.to_string())?;
         return Ok(0);
     }
     let options = parse(args)?;
     #[cfg(target_os = "linux")]
-    { execute(options) }
+    { execute(options, None) }
     #[cfg(not(target_os = "linux"))]
     { let _ = options; Err("trusted workflow execution requires Linux; no alternative runner is selected".into()) }
 }
@@ -169,7 +172,7 @@ fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn execute(options: Options) -> Result<u8, String> {
+fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> Result<u8, String> {
     use fgit_node::{NodeConfig, OneNode};
     // Complete bounded local intake before opening repository state. The file
     // is transport only; native validation still precedes host execution.
@@ -184,11 +187,14 @@ fn execute(options: Options) -> Result<u8, String> {
         let head = node.runtime().block_on(node.authenticate_authority_head()).map_err(|e| e.to_string())?;
         node.bring_into_service(head.receipt().generation()).map_err(|e| e.to_string())?;
         let request = node.request_context();
-        let result = match (&options.candidate, bundle.as_deref()) {
-            (Some(candidate), Some(bytes)) => node.runtime().block_on(node.run_trusted_candidate_workflow_in(
+        let result = match (merge.as_ref(), &options.candidate, bundle.as_deref()) {
+            (Some(merge), Some(_), Some(bytes)) => node.runtime().block_on(node.run_trusted_merge_workflow_in(
+                &request, merge, bytes, &options.workflow, options.run_id, &options.parent,
+                &options.inputs, options.head, Default::default())),
+            (None, Some(candidate), Some(bytes)) => node.runtime().block_on(node.run_trusted_candidate_workflow_in(
                 &request, &options.reference, (candidate.base, candidate.commit), bytes,
                 &options.workflow, options.run_id, &options.parent, &options.inputs, options.head, Default::default())),
-            (None, None) => node.runtime().block_on(node.run_trusted_workflow_in(&request, &options.reference,
+            (None, None, None) => node.runtime().block_on(node.run_trusted_workflow_in(&request, &options.reference,
                 &options.workflow, options.run_id, &options.parent, &options.inputs,
                 (options.head, options.commit), Default::default())),
             _ => return Err("candidate input was not loaded; no workflow started".into()),
