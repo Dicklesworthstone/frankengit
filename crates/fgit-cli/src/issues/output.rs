@@ -272,3 +272,50 @@ pub(super) fn history(
     out.push_str("]}");
     Ok((out, if issue.is_some() { 0 } else { 4 }))
 }
+
+pub(super) fn search(
+    options: &Options,
+    read: &ReadOptions,
+    query: &fgit_forge::event::issue::CompiledIssueQuery,
+    max_scan: u16,
+    page: &fgit_forge::issue_search::SearchPage,
+) -> Result<String, String> {
+    use fgit_forge::issue_search::{MAX_RESULTS, MAX_SCAN, SearchStop};
+    let more = page.stop != SearchStop::Exhausted;
+    if read.number.is_some() || !(1..=MAX_RESULTS).contains(&read.limit)
+        || !(1..=MAX_SCAN).contains(&max_scan)
+        || page.issues.len() > usize::from(read.limit)
+        || page.scanned > max_scan || usize::from(page.scanned) < page.issues.len()
+        || page.issues.iter().any(|row| row.number.get() <= read.after)
+        || page.issues.windows(2).any(|pair| pair[0].number >= pair[1].number)
+        || page.next_after.is_some() != more || (more && page.scanned == 0)
+        || page.next_after.is_some_and(|next| next <= read.after || next == u64::MAX
+            || page.issues.last().is_some_and(|row| row.number.get() > next))
+        || (page.stop == SearchStop::ResultLimit && page.issues.len() != usize::from(read.limit))
+        || (page.stop == SearchStop::ScanLimit && (page.scanned != max_scan || page.issues.len() == usize::from(read.limit)))
+    { return Err("issue search violates its pagination contract".into()); }
+    let header = header(options, read, page.source_head)?;
+    let predicate = query.query();
+    let state = predicate.state.map_or_else(|| "null".into(), |state| quote(match state {
+        IssueState::Open => "open", IssueState::Closed => "closed",
+    }));
+    let opener = predicate.opened_by.map_or_else(|| "null".into(), |actor| quote(&actor.to_string()));
+    let text = predicate.text.as_deref().map_or_else(|| "null".into(), quote);
+    let mut out = format!(concat!(
+        "{{\"type\":\"issue_search_page\",{},\"query\":{{\"state\":{},\"opened_by\":{},",
+        "\"labels\":{},\"text\":{},\"case_sensitive\":{},\"text_scope\":\"title_or_body\"}},",
+        "\"after\":{},\"limit\":{},\"max_scan\":{},\"scanned\":{},\"count\":{},",
+        "\"complete\":{},\"stop_reason\":{},\"has_more_candidates\":{},\"next_after\":{},",
+        "\"refs_changed\":false,\"transaction_created\":false,\"issues\":["
+    ), header, state, opener, labels(&predicate.labels), text, predicate.case_sensitive,
+        read.after, read.limit, max_scan, page.scanned, page.issues.len(), !more,
+        quote(page.stop.as_str()), more, page.next_after.map_or_else(|| "null".into(), |n| n.to_string()));
+    for (index, row) in page.issues.iter().enumerate() {
+        if !query.matches(row).map_err(|_| "invalid issue search snapshot")? {
+            return Err("issue search returned a nonmatching issue".into());
+        }
+        append(&mut out, &snapshot(row)?, index != 0)?;
+    }
+    out.push_str("]}");
+    Ok(out)
+}

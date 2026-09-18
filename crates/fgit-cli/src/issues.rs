@@ -1,6 +1,7 @@
 //! Native issue lifecycle through canonical node admission, not a CLI-owned DB.
 mod options;
 mod output;
+mod search;
 #[cfg(test)]
 mod tests;
 use crate::publication_support::{describe, write_terminal_receipt};
@@ -26,6 +27,9 @@ usage: fg issue list <storage-root> <tenant-id> <repository-id> --trusted-local
   [--limit <1..100>] [--after <number> --expected-head <snapshot-token>] [--object-format sha1|sha256]
 usage: fg issue show <storage-root> <tenant-id> <repository-id> <number> --trusted-local
   [--limit <1..100>] [--after-version <version> --expected-head <snapshot-token>] [--object-format sha1|sha256]
+usage: fg issue search <storage-root> <tenant-id> <repository-id> --trusted-local
+  [--query <literal>] [--state open|closed|all] [--opened-by <id>] [--label <text>]...
+  See fg issue search --help for bounded scanning, matching and snapshot continuation.
 
 Edits preserve omitted fields; --body '' clears a body; --clear-labels clears labels.
 Show returns current issue state plus paged, exact actions/comments at one snapshot.
@@ -34,6 +38,9 @@ Exit 0: committed/read; 3: canonical refusal; 4: missing issue; 2: input/infrast
 This is a trusted local repository interface, not remote authentication or an issue ACL.";
 
 pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
+    if arguments.first().is_some_and(|argument| argument == "search") {
+        return search::run(&arguments[1..]);
+    }
     if arguments == ["--help"]
         || (arguments.len() == 2
             && arguments[1] == "--help"

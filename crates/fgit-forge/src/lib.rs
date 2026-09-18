@@ -35,6 +35,7 @@ pub mod bisection;
 pub mod event;
 pub mod history;
 pub mod initial_commit;
+pub mod issue_search;
 pub mod merge;
 pub mod preparation;
 pub mod review;
