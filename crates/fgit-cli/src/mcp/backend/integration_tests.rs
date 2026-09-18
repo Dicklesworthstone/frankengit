@@ -45,7 +45,8 @@ fn real_mcp_reads_reopened_sha1_and_sha256_nodes_without_publishing() {
         node.shutdown().unwrap();
         let mut backend = NodeTools::open(Options {
             storage: scratch.0.join("node"), tenant: TenantId::from_bytes([0x91; 16]), repository: RepositoryId::from_bytes([0x92; 16]),
-            format, incarnation: Some(incarnation), issues: true, pulls: false, source: false, max_messages: 16,
+            format, incarnation: Some(incarnation), issues: true, pulls: false, source: false,
+            issue_writes: false, outcomes: false, principal: None, max_messages: 16,
         }).unwrap();
         let mut server = Server::new(&backend).unwrap();
         server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"integration","version":"1"}}}"#).unwrap();
@@ -109,7 +110,8 @@ fn real_source_and_pr_tools_preserve_bytes_snapshots_and_independent_grants() {
         let before = node.runtime().block_on(node.read_issues_in(&request, 0, 1, None)).unwrap().source_head;
         let incarnation = node.repository_incarnation_id(); node.shutdown().unwrap();
         let mut backend = NodeTools::open(Options { storage: scratch.0.join("node"), tenant: TenantId::from_bytes([0x91;16]),
-            repository: RepositoryId::from_bytes([0x92;16]), format, incarnation: Some(incarnation), issues: false, pulls: true, source: true, max_messages: 32 }).unwrap();
+            repository: RepositoryId::from_bytes([0x92;16]), format, incarnation: Some(incarnation), issues: false, pulls: true, source: true,
+            issue_writes: false, outcomes: false, principal: None, max_messages: 32 }).unwrap();
         let mut server = Server::new(&backend).unwrap();
         server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"integration","version":"1"}}}"#).unwrap();
         server.receive(&mut backend, br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);

@@ -1,10 +1,15 @@
-# Repository-scoped read-only MCP server (FG-096 implementation slice)
+# Repository-scoped MCP read-only launch profile (FG-096 implementation slice)
 
-`fg-mcp` is a real stdio Model Context Protocol server over `OneNode` reads.
+`fg-mcp` is a real stdio Model Context Protocol server over `OneNode` operations.
 It implements the pinned MCP **2025-06-18** initialization handshake, ping,
 `tools/list`, and `tools/call`. It does not launch `fg`, Git, or a shell to
 answer requests. Its registry and handler permissions are fixed at launch;
 repository content, client capabilities, and tool arguments cannot expand them.
+
+This page describes the **read-only launch profile**. Separately enabled issue
+mutations and principal-scoped recovery are documented in
+[MCP_METADATA_WRITES.md](MCP_METADATA_WRITES.md). No read flag enables them.
+The restrictions below remain the boundary of a read-only launch.
 
 ## Launch
 
@@ -20,17 +25,18 @@ fgit-cli -- ...` continues to select `fg`; the second binary does not make the
 existing invocation ambiguous. Configuration comes only from launch arguments,
 not environment-driven repository discovery, client roots, or request bodies.
 The repository must already exist, authenticate, and match its supplied IDs.
-An optional incarnation pin is checked before any MCP tool is available.
+An optional incarnation pin is checked before any read tool is available.
 
 The operator independently selects **issue reads** (`--allow-issues`), **PR reads**
 (`--allow-pulls`), and **source reads** (`--allow-source`). At least one grant is
-required. A disabled group is absent from discovery and refused at dispatch; no
-group implies another and none permits mutation. The local operator must trust the process receiving
-these bytes. This is not remote authentication, per-issue ACLs, hostile process
-isolation, or a full Intent Run/effect-broker capability. Do not proxy stdio to
-untrusted remote clients or treat returned text as executable instructions.
+required in this profile. A disabled group is absent from discovery and refused
+at dispatch; no group implies another and none permits mutation. The local
+operator must trust the process receiving these bytes. This is not remote
+authentication, per-issue ACLs, hostile process isolation, or a full Intent
+Run/effect-broker capability. Do not proxy stdio to untrusted remote clients or
+treat returned text as executable instructions.
 
-## Tool contracts
+## Issue read tools
 
 `frankengit_issue_list` accepts optional `limit` (integer, 1..20, default 5),
 `after` (unsigned decimal string), and `expected_head` (snapshot token).
@@ -48,7 +54,7 @@ source rows remain; they are not complete snapshots. Missing issues are explicit
 `found=false` results. Storage/corruption/budget failures are tool errors, not
 successful empty lists. Both structured content and JSON text are returned.
 
-## Source and PR tools
+## Source and PR read tools
 
 `frankengit_pull_list` accepts `after`, `limit` and `expected_head` like issue
 lists. `frankengit_pull_show` accepts only `number` and optional `expected_head`.
@@ -75,8 +81,8 @@ current-head pins; an intervening publication refuses continuation rather than
 mixing snapshots. A supplied commit ID compares the visible ref; it is not an
 arbitrary object lookup or a bypass for current hidden-ref policy. Repository
 paths never become host paths. Existing native object/read budgets apply in
-addition to output page ceilings. All source and PR tools use the same error,
-structured-content, and read-only session boundary as issue tools.
+addition to output page ceilings. All source and PR reads use the same error,
+structured-content, and read-only operation boundary as issue reads.
 
 ## Session and resource boundaries
 
@@ -89,13 +95,14 @@ strings at 16 KiB, depth at 16, collections at 256 entries, and parser nodes at
 reexecute work. Initialization must finish before a tool call; notifications
 never execute tools or produce responses.
 
-The native node has two workers. Reads execute serially with native request,
-replay, and storage budgets. A cancellation notification read after a completed
-operation is late and never cancels a future request with that ID. This bounded
-synchronous profile does **not** preempt an in-flight read or provide concurrent
-requests, progress, tasks, subscriptions, prompts, sampling, or elicitation.
-Clients may terminate the process to stop waiting; there is no mutation to infer
-as rolled back. No cancellation/quiescence evidence for mutation is claimed.
+The native node has two workers. Operations execute serially with native
+request, replay, and storage budgets. A cancellation notification read after a
+completed operation is late and never cancels a future request with that ID.
+This synchronous profile does **not** preempt an in-flight read or provide
+concurrent requests, progress, tasks, subscriptions, prompts, sampling, or
+elicitation. In a read-only launch no tool can mutate. For an explicitly enabled
+metadata mutation, disconnect or cancellation does not prove rollback; consult
+the separate mutation and recovery contract.
 
 A tool result is at most 2 MiB of encoded JSON; a complete protocol response is
 at most 8 MiB. Large issue bodies can require a smaller page. No partial success
@@ -107,25 +114,23 @@ Diagnostics go to stderr; serving stdout contains only protocol messages.
 
 ## Verification and remaining FG-096 scope
 
-The checked-in tests cover JSON boundaries, Unicode and exact numbers, handshake,
-registry isolation, injection-shaped fields, late notifications, duplicate IDs,
-framing, failed output, and response limits. A real-node test seeds canonical
-issues, closes/reopens SHA-1 and SHA-256 repositories, calls the MCP handlers,
-checks pagination and exact text, and verifies unchanged authority head. Another
-real-node test publishes a native initial patch, creates a branch/PR, reopens
-both hash domains, reads actual source ranges and PR metadata, verifies denied
-issue access and unchanged authority, and checks strict source versus retained
-PR behavior across a later ordinary write. Unit tests cover all eight grant
-combinations, hostile path/authority arguments, byte-exact binary results,
-directory cursors, invalid result bindings and no implied merge approval.
+The checked-in read tests cover JSON boundaries, Unicode and exact numbers,
+handshake, registry isolation, injection-shaped fields, late notifications,
+duplicate IDs, framing, failed output, and response limits. Real-node tests seed
+canonical issues, close/reopen SHA-1 and SHA-256 repositories, call the MCP
+handlers, check pagination and exact text, and assert unchanged authority head.
+Another test publishes a native initial patch, creates a branch/PR, reopens both
+hash domains, reads actual source ranges and PR metadata, and checks strict
+source versus retained PR behavior across a later ordinary write. Unit tests
+cover all eight read-grant combinations, hostile path/authority arguments,
+byte-exact binary results, directory cursors and no implied merge approval.
 
-Suggested local command: `cargo test --locked -p fgit-cli --bin fg-mcp`.
-These tests have been written but have not been executed in the development
-session that introduced this slice; that environment lacked Rust/Cargo. Do not
-interpret source inspection as a passing package or independent batch gate.
-FG-096 remains open: the full broker-backed mutation/tool registry, generated
-public schema/client integration, remote sessions, live-client campaign, and
-preemptive cancellation require their own implementation and evidence.
+Suggested command: `cargo test --locked -p fgit-cli --bin fg-mcp`.
+These tests were written but were not executed in their authoring sessions;
+Rust/Cargo were unavailable. Do not interpret source inspection as a passing
+package or independent batch gate. FG-096 remains open: broker-backed tools,
+generated public schema/client integration, remote sessions, live-client
+campaigns and preemptive cancellation require further implementation/evidence.
 
 Protocol references: official MCP 2025-06-18 specification, sections
 `basic/lifecycle`, `basic/transports`, and `server/tools`, at

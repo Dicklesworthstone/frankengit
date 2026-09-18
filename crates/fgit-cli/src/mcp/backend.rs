@@ -1,7 +1,11 @@
-//! Real node reads, not fixtures or a CLI subprocess. Scope is fixed at launch.
+//! Real node operations, not fixtures or a CLI subprocess. Grants and principal
+//! are fixed at launch; repository text never selects an admission identity.
 mod issues;
 mod pulls;
 mod source;
+mod mutations;
+mod issue_writes;
+mod outcomes;
 use fgit_node::{IssueReadRefusal, NodeConfig, OneNode};
 use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, RepositoryAuthorityHeadId};
 use super::Options;
@@ -11,16 +15,25 @@ use super::protocol::{ReadTools, Tool, ToolError, fields};
 pub(super) struct NodeTools { node: OneNode, options: Options }
 impl NodeTools {
     pub(super) fn open(options: Options) -> Result<Self, String> {
+        options.validate_access()?;
         let mut node = OneNode::open_existing(NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
             .with_object_format(options.format).with_worker_threads(2)).map_err(|_| "MCP repository could not be opened")?;
         let startup = (|| -> Result<(), String> {
             if options.incarnation.is_some_and(|id| id != node.repository_incarnation_id()) {
                 return Err("MCP repository incarnation does not match launch binding".into());
             }
-            // Use the same authenticated readiness boundary as the existing
-            // CLI. Each tool subsequently authenticates its own selected head.
-            node.bring_into_service(fgit_types::HeadGeneration::FIRST)
-                .map_err(|_| "MCP repository read service unavailable")?;
+            // Authenticate even when new-publication intake is stopped. A
+            // missing/corrupt authority cannot become a usable recovery server.
+            let head = node.runtime().block_on(node.authenticate_authority_head())
+                .map_err(|_| "MCP repository authority could not be authenticated")?;
+            if node.bring_into_service(head.receipt().generation()).is_err() {
+                if !(options.issue_writes || options.outcomes) {
+                    return Err("MCP repository read service unavailable".into());
+                }
+                // Historical lookup and identical terminal retries precede
+                // intake inside OneNode. New mutations still hit its own gate.
+                eprintln!("MCP service intake unavailable; historical recovery may remain available");
+            }
             Ok(())
         })();
         if let Err(error) = startup {
@@ -32,7 +45,7 @@ impl NodeTools {
         Ok(Self { node, options })
     }
     pub(super) fn close(self) -> Result<(), String> {
-        self.node.shutdown().map_err(|_| "MCP node shutdown failed".into())
+        self.node.shutdown().map_err(|_| "MCP node shutdown failed; do not infer rollback of submitted mutations".into())
     }
     fn header(&self, head: RepositoryAuthorityHeadId) -> Object {
         let Value::Object(fields) = object([
@@ -52,9 +65,21 @@ impl ReadTools for NodeTools {
         if self.options.issues { tools.extend(issues::tools()); }
         if self.options.pulls { tools.extend(pulls::tools()); }
         if self.options.source { tools.extend(source::tools()); }
+        if self.options.issue_writes { tools.extend(issue_writes::tools()); }
+        if self.options.outcomes { tools.extend(outcomes::tools()); }
         tools
     }
+    fn is_mutation(&self, name: &str) -> bool {
+        self.options.issue_writes && issue_writes::is_tool(name)
+    }
+    fn result_is_error(&self, name: &str, value: &Value) -> bool {
+        self.is_mutation(name) && value.object().and_then(|v| v.get("outcome")).and_then(Value::text) == Some("refused")
+    }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
+        if self.options.issue_writes && issue_writes::is_tool(name) {
+            return issue_writes::call(self, name, args);
+        }
+        if self.options.outcomes && name == outcomes::NAME { return outcomes::call(self, args); }
         if self.options.issues && matches!(name, "frankengit_issue_list" | "frankengit_issue_show") {
             return issues::call(self, name, args);
         }
@@ -163,3 +188,5 @@ mod tests {
 
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod write_tests;
