@@ -1,11 +1,10 @@
-//! Sparse inputs from an unpublished, exact single-parent candidate.
+//! Sparse inputs from unpublished single-parent and two-parent candidates.
 //!
 //! Candidate inputs are NOT a canonical SparseManifest. The authenticated base
-//! and the executed candidate have separate identities, and no conversion to a
-//! canonical manifest or receipt is exposed. The existing sparse discovery and
-//! object verification engine is reused internally; this module does no I/O.
+//! and executed candidate have separate identities. Native sparse discovery
+//! and verification are shared; no conversion to a canonical receipt is exposed.
 
-use fgit_crypto::{GitHashAlgorithm, GitObjectKind, GitOid};
+use fgit_crypto::{GitHashAlgorithm, GitObjectKind, GitOid, NativeObjectIdentity};
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body};
 use fgit_types::{RepositoryCommitId, RepositoryId};
 use crate::{BaseView, ObjectSource, ObjectSourceError, SparseEntry, SparseLimits,
@@ -24,32 +23,59 @@ impl std::fmt::Display for CandidateManifestRefusal {
 }
 impl std::error::Error for CandidateManifestRefusal {}
 
-/// Verified candidate-tree bytes with explicit, independently selected base
-/// provenance. This is neither admission evidence nor an authority snapshot.
-/// The source owner must restrict originals to the selected base's closure and
-/// validate uploaded pack/closure completeness before calling this constructor.
+/// Verified candidate-tree bytes with separately selected canonical provenance.
+/// The source owner authenticates every selected parent and restricts originals
+/// to their closures before calling either constructor. It also validates full
+/// candidate closure, pack coverage and, for merges, common-base ancestry.
+/// This manifest is neither admission evidence nor an authority snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SparseCandidateManifest<A: GitHashAlgorithm> {
     base_rcr: RepositoryCommitId,
     base_commit: GitOid<A>,
     base_tree: GitOid<A>,
-    // A private traversal result, never exported as a canonical source receipt.
+    parents: Vec<GitOid<A>>,
+    // A private traversal cursor, never exported as a canonical source receipt.
     content: SparseManifest<A>,
 }
 impl<A: GitHashAlgorithm> SparseCandidateManifest<A> {
-    /// Discover precisely the capability-visible part of the candidate tree.
-    /// The candidate's native body is identity-checked, charged, and parsed;
-    /// its sole parent must equal the independent canonical base. Callers
-    /// cannot substitute a tree or metadata supplied by a preparation receipt.
-    /// All sparse ordering, path, mode, symlink and payload limits remain native.
+    /// Discover candidate inputs after requiring exactly one parent: the
+    /// independently selected base. The existing single-parent contract never
+    /// silently accepts a merge; callers must explicitly select build_merge.
     pub fn build<S: ObjectSource<A>>(
         base: &BaseView<A>, source: &S, candidate: GitOid<A>,
         capability: &mut TreeCapability, now: u64, parse_limits: ParseLimits,
         limits: SparseLimits,
     ) -> Result<Self, CandidateManifestRefusal> {
+        Self::build_bound(base, source, candidate, &[*base.base_commit_oid()],
+            capability, now, parse_limits, limits)
+    }
+
+    /// Discover the ACTUAL two-parent result, not either input branch's tree.
+    /// Parent order must be target/base first, then the independently selected
+    /// incoming tip. This layer verifies bytes and parent identity only; the
+    /// host must prove incoming disclosure and common-base ancestry beforehand.
+    /// Input-only host plans retain their ordinary import refusal and lifecycle.
+    pub fn build_merge<S: ObjectSource<A>>(
+        base: &BaseView<A>, source: &S, candidate: GitOid<A>, incoming: GitOid<A>,
+        capability: &mut TreeCapability, now: u64, parse_limits: ParseLimits,
+        limits: SparseLimits,
+    ) -> Result<Self, CandidateManifestRefusal> {
+        Self::build_bound(base, source, candidate, &[*base.base_commit_oid(), incoming],
+            capability, now, parse_limits, limits)
+    }
+
+    fn build_bound<S: ObjectSource<A>>(
+        base: &BaseView<A>, source: &S, candidate: GitOid<A>, expected: &[GitOid<A>],
+        capability: &mut TreeCapability, now: u64, parse_limits: ParseLimits,
+        limits: SparseLimits,
+    ) -> Result<Self, CandidateManifestRefusal> {
         let invalid = CandidateManifestRefusal::InvalidCandidate;
-        if candidate == *base.base_commit_oid() || capability.repository_id() != base.repository_id() {
-            return Err(invalid("candidate must differ from its same-repository base"));
+        let zero = |id: &GitOid<A>| id.digest_bytes().iter().all(|byte| *byte == 0);
+        if capability.repository_id() != base.repository_id() || zero(&candidate)
+            || expected.iter().any(|id| zero(id) || *id == candidate)
+            || (expected.len() == 2 && expected[0] == expected[1])
+        {
+            return Err(invalid("distinct nonzero candidate and selected same-repository parents required"));
         }
         let grant = capability.authorize_root(now)
             .map_err(|e| CandidateManifestRefusal::Sparse(SparseRefusal::Capability(e)))?;
@@ -69,20 +95,20 @@ impl<A: GitHashAlgorithm> SparseCandidateManifest<A> {
             A::parse_hex(&text.to_ascii_lowercase()).map_err(|_| invalid("invalid native reference"))
         };
         let mut parents = commit.parent_references();
-        let parent = parse(parents.next().ok_or_else(|| invalid("candidate has no parent"))?)?;
-        if parents.next().is_some() || parent != *base.base_commit_oid() {
-            return Err(invalid("candidate must have exactly the selected base as parent"));
+        for expected in expected {
+            let actual = parse(parents.next().ok_or_else(|| invalid("candidate parent missing"))?)?;
+            if actual != *expected { return Err(invalid("candidate parent order or identity differs")); }
         }
+        if parents.next().is_some() { return Err(invalid("candidate has unexpected additional parents")); }
         let tree = parse(commit.tree_reference().ok_or_else(|| invalid("candidate has no tree"))?)?;
-        // Use BaseView only as the private immutable traversal cursor. Its
-        // candidate coordinates must never escape as an authenticated base:
-        // the public result exposes the real base separately from the candidate.
+        // The traversal cursor is private. Its candidate coordinates never
+        // escape as authenticated base provenance, even for a two-parent input.
         let cursor = BaseView::new(base.repository_id(), base.base_rcr_id(), candidate,
             tree, parse_limits, base.path_policy().clone());
         let content = SparseManifest::build(&cursor, source, capability, now, limits)
             .map_err(CandidateManifestRefusal::Sparse)?;
         Ok(Self { base_rcr: base.base_rcr_id(), base_commit: *base.base_commit_oid(),
-            base_tree: *base.base_tree_oid(), content })
+            base_tree: *base.base_tree_oid(), parents: expected.to_vec(), content })
     }
     pub fn repository_id(&self) -> RepositoryId { self.content.receipt().repository_id() }
     /// Canonical RCR of the BASE, never a record admitting the candidate.
@@ -91,6 +117,8 @@ impl<A: GitHashAlgorithm> SparseCandidateManifest<A> {
     pub fn base_tree_oid(&self) -> &GitOid<A> { &self.base_tree }
     pub fn candidate_commit_oid(&self) -> &GitOid<A> { self.content.receipt().source_commit_oid() }
     pub fn candidate_tree_oid(&self) -> &GitOid<A> { self.content.receipt().source_tree_oid() }
+    /// Verified native order, not parent identities supplied by a report.
+    pub fn parents(&self) -> &[GitOid<A>] { &self.parents }
     pub fn entries(&self) -> &[SparseEntry<A>] { self.content.entries() }
     pub fn payload_bytes(&self) -> usize { self.content.receipt().payload_bytes() }
 }
