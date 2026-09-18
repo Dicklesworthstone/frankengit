@@ -22,6 +22,7 @@ pub(crate) struct Page {
 pub(crate) enum Operation<'a> {
     List(Page),
     Show { number: IssueNumber, page: Page },
+    Search,
     Mutate { number: IssueNumber, action: &'a str },
 }
 
@@ -66,12 +67,16 @@ impl<'a> Request<'a> {
             if matches!(head.body, BodyFraming::ContentLength(n) if n > MAX_FORM_BYTES as u64) {
                 return Err(ApiError::too_large());
             }
-            let (number, action) = suffix.strip_prefix('/').and_then(|s| s.split_once('/'))
-                .ok_or_else(ApiError::not_found)?;
-            if !matches!(action, "open" | "edit" | "close" | "reopen" | "comment") {
-                return Err(ApiError::not_found());
+            if suffix == "/search" {
+                Operation::Search
+            } else {
+                let (number, action) = suffix.strip_prefix('/').and_then(|s| s.split_once('/'))
+                    .ok_or_else(ApiError::not_found)?;
+                if !matches!(action, "open" | "edit" | "close" | "reopen" | "comment") {
+                    return Err(ApiError::not_found());
+                }
+                Operation::Mutate { number: issue_number(number)?, action }
             }
-            Operation::Mutate { number: issue_number(number)?, action }
         } else {
             return Err(ApiError::method());
         };

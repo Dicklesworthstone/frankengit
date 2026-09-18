@@ -185,3 +185,93 @@ mod tests {
         assert_eq!(out, "1234");
     }
 }
+
+pub(super) fn search(node: &OneNode, request: fgit_forge::issue_search::SearchRequest,
+    query: &fgit_forge::event::issue::CompiledIssueQuery,
+    result: &fgit_forge::issue_search::SearchPage, maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
+    let page = Page { after: request.after, limit: request.limit, expected_head: request.expected_head };
+    let header = header(node, page, result.source_head)?;
+    search_body(&header, request, query, result, maximum, live)
+}
+
+fn search_body(header: &str, request: fgit_forge::issue_search::SearchRequest,
+    query: &fgit_forge::event::issue::CompiledIssueQuery,
+    result: &fgit_forge::issue_search::SearchPage, maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
+    use fgit_forge::issue_search::{MAX_RESULTS, MAX_SCAN, SearchStop};
+    let more = result.stop != SearchStop::Exhausted;
+    if !(1..=MAX_RESULTS).contains(&request.limit) || !(1..=MAX_SCAN).contains(&request.max_scan)
+        || result.issues.len() > usize::from(request.limit) || result.scanned > request.max_scan
+        || usize::from(result.scanned) < result.issues.len()
+        || result.issues.iter().any(|row| row.number.get() <= request.after)
+        || result.issues.windows(2).any(|pair| pair[0].number >= pair[1].number)
+        || result.next_after.is_some() != more || (more && result.scanned == 0)
+        || result.next_after.is_some_and(|next| next <= request.after || next == u64::MAX
+            || result.issues.last().is_some_and(|row| row.number.get() > next))
+        || (result.stop == SearchStop::ResultLimit && result.issues.len() != usize::from(request.limit))
+        || (result.stop == SearchStop::ScanLimit && (result.scanned != request.max_scan
+            || result.issues.len() == usize::from(request.limit)))
+    { return Err(ApiError::unavailable()); }
+    if !live() { return Err(ApiError::from_status(super::Status::Timeout, false)); }
+    let predicate = query.query();
+    let state = predicate.state.map_or_else(|| "null".into(), |state| quote(match state {
+        IssueState::Open => "open", IssueState::Closed => "closed",
+    }));
+    let opener = predicate.opened_by.map_or_else(|| "null".into(), |actor| quote(&actor.to_string()));
+    let text = predicate.text.as_deref().map_or_else(|| "null".into(), quote);
+    let mut out = String::new();
+    append(&mut out, &format!(concat!(
+        "{{\"type\":\"issue_search_page\",{},\"scope\":\"repository_issues\",",
+        "\"query\":{{\"state\":{},\"opened_by\":{},\"labels\":{},\"text\":{},",
+        "\"case_sensitive\":{},\"text_scope\":\"title_or_body\"}},",
+        "\"after\":{},\"limit\":{},\"max_scan\":{},\"scanned\":{},\"count\":{},",
+        "\"complete\":{},\"stop_reason\":{},\"has_more_candidates\":{},\"next_after\":{},",
+        "\"refs_changed\":false,\"transaction_created\":false,\"issues\":["
+    ), header, state, opener, labels(&predicate.labels), text, predicate.case_sensitive,
+        request.after, request.limit, request.max_scan, result.scanned, result.issues.len(), !more,
+        quote(result.stop.as_str()), more, optional(result.next_after)), maximum)?;
+    for (index, row) in result.issues.iter().enumerate() {
+        if !live() { return Err(ApiError::from_status(super::Status::Timeout, false)); }
+        if !query.matches(row).map_err(|_| ApiError::unavailable())? { return Err(ApiError::unavailable()); }
+        if index != 0 { append(&mut out, ",", maximum)?; }
+        append(&mut out, &snapshot(row)?, maximum)?;
+    }
+    if !live() { return Err(ApiError::from_status(super::Status::Timeout, false)); }
+    append(&mut out, "]}", maximum)?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use fgit_forge::event::issue::IssueQuery;
+    use fgit_forge::issue_search::{SearchPage, SearchRequest, SearchStop};
+
+    #[test]
+    fn partial_empty_json_respects_exact_output_and_deadline_boundaries() {
+        let head = super::super::request::parse_head_token(&format!("alg:1:{}", "ab".repeat(32))).unwrap();
+        let request = SearchRequest { after: 0, limit: 2, max_scan: 1, expected_head: Some(head) };
+        let result = SearchPage { source_head: head, issues: Vec::new(), scanned: 1,
+            next_after: Some(5), stop: SearchStop::ScanLimit };
+        let query = IssueQuery { text: Some("quoted\"\n".into()), ..Default::default() }.compile().unwrap();
+        let body = search_body("\"schema_version\":1", request, &query, &result, MAX_REPLY_BYTES, &mut || true).unwrap();
+        assert!(body.contains("\"complete\":false"));
+        assert!(body.contains("\"has_more_candidates\":true"));
+        assert!(body.contains("\"next_after\":5"));
+        assert!(body.contains("\"count\":0"));
+        assert!(body.contains(&format!("\"text\":{}", quote("quoted\"\n"))));
+        assert_eq!(search_body("\"schema_version\":1", request, &query, &result, body.len(), &mut || true).unwrap(), body);
+        let error = search_body("\"schema_version\":1", request, &query, &result, body.len() - 1, &mut || true).unwrap_err();
+        assert_eq!(error.status, super::super::Status::TooLarge);
+        assert!(!error.outcome_unknown);
+        let error = search_body("\"schema_version\":1", request, &query, &result, MAX_REPLY_BYTES, &mut || false).unwrap_err();
+        assert_eq!(error.status, super::super::Status::Timeout);
+        assert!(!error.outcome_unknown);
+        let mut corrupt = result;
+        corrupt.stop = SearchStop::Exhausted;
+        assert!(search_body("\"schema_version\":1", request, &query, &corrupt, MAX_REPLY_BYTES, &mut || true).is_err());
+    }
+}

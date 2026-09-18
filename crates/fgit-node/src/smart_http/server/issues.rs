@@ -4,6 +4,7 @@
 
 mod output;
 mod request;
+mod search;
 
 use std::io::{self, Read, Write};
 
@@ -125,6 +126,9 @@ pub(super) fn authenticate(request: &Request<'_>, envelope: &Envelope<'_>,
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
     let key = retry_key(raw_head).map_err(|_| ApiError::bad("invalid_idempotency_key"))?;
+    if matches!(&request.operation, Operation::Search) && key.is_some() {
+        return Err(ApiError::bad("idempotency_key_not_allowed"));
+    }
     let key = if request.is_mutation() { key.ok_or_else(|| ApiError::bad("idempotency_key_required"))? }
         else { b"issue-read-no-publication".as_slice() };
     let key = IdempotencyKey::new(key.to_vec()).map_err(|_| ApiError::bad("invalid_idempotency_key"))?;
@@ -165,6 +169,19 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
                 node.read_issue_history_in(&context, *number, page.after, page.limit, page.expected_head), &mut live)?;
             Ok(Reply { status: if result.issue.is_some() { Status::Success } else { Status::NotFound },
                 body: output::history(node, *number, *page, &result, maximum)?, terminal: None })
+        }
+        Operation::Search => {
+            let (query, parameters) = search::parse(&read_form(reader, framing, limits)?)?;
+            let result = fgit_forge::issue_search::search(&query, parameters, |after, limit, expected_head| {
+                let page = drive_request_while(node, &context,
+                    node.read_issues_in(&context, after, limit, expected_head), &mut live)
+                    .map_err(ApiError::from)?;
+                Ok::<_, ApiError>(fgit_forge::issue_search::SourcePage {
+                    source_head: page.source_head, issues: page.issues, next_after: page.next_after,
+                })
+            }).map_err(search::error)?;
+            Ok(Reply { status: Status::Success,
+                body: output::search(node, parameters, &query, &result, maximum, &mut live)?, terminal: None })
         }
         Operation::Mutate { .. } => {
             let command = command.ok_or_else(|| ApiError::bad("missing_command"))?;

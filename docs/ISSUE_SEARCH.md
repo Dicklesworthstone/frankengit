@@ -1,6 +1,6 @@
 # Bounded native issue search
 
-`fg issue search` filters authority-selected native issue snapshots. It uses the existing retained-head issue reader, not a new database or index. The forge predicate and bounded pagination engine are shared library functionality; the local CLI is its initial adapter.
+`fg issue search` filters authority-selected native issue snapshots. It uses the existing retained-head issue reader, not a new database or index. The forge predicate and bounded pagination engine are shared by the local CLI and authenticated repository HTTP adapters.
 
 ```sh
 fg issue search "$STORAGE" "$TENANT" "$REPOSITORY" --trusted-local \
@@ -29,6 +29,25 @@ A partial result does not prove another match exists. An empty partial page is N
 
 Every page must name the first selected head. An unavailable retained head, changed returned head, invalid ordering/cursor, corrupt examined snapshot, cancellation, or source error refuses the operation; accumulated matches are not emitted as a successful partial result. Ordinary writes do not authorize refreshing a query to a different snapshot. Search changes no refs and creates no transaction.
 
+## Authenticated HTTP adapter
+
+With the repository issue API enabled in the existing server profile, POST `{repository-route}/api/v1/issues/search` accepts an `application/x-www-form-urlencoded` body. Search uses the independent `issues-read` credential grant: Git read/write and issue-write permissions do not imply it. Authentication and repository-route checks run before consuming search input. The endpoint has no publication path and rejects `Idempotency-Key` headers; its errors do not claim an ambiguous mutation or a canonical refusal.
+
+```sh
+curl --request POST \
+  --header "Authorization: Bearer $TOKEN" \
+  --data-urlencode 'query=timeout' \
+  --data-urlencode 'state=open' \
+  --data-urlencode 'label=bug' \
+  --data-urlencode 'limit=25' \
+  --data-urlencode 'max_scan=1000' \
+  "$REPOSITORY_URL/api/v1/issues/search"
+```
+
+Form fields are `query`, `state`, `opened_by`, `case_sensitive` (`true` or `false`), repeated `label`, `limit`, `max_scan`, `after`, and `expected_head`. The eight non-label fields are singletons. All match, limit, and continuation semantics above apply. Predicate text stays in the request body rather than the URL; query-string parameters and GET search are not accepted. Mutation fields, caller-selected principals, storage paths, tenant/repository selectors, duplicate singleton fields, malformed percent encodings, invalid UTF-8 and NUL are refused. `opened_by` is only a filter, never an authentication principal.
+
+The adapter retains the existing body/framing ceilings, response-byte ceiling, no-store/private-authorization response handling, and runtime deadline checks. It rechecks the deadline during response rendering and assembles a complete bounded JSON body before emitting success. The existing listener remains a loopback capability profile with externally terminated TLS, repository-wide issue grants, and no new per-issue ACL or hosted-IAM claim.
+
 ## Verification scope
 
-Tests cover predicate boundaries and ASCII/UTF-8 behavior, scalar literal equivalence, exact-head continuation, sparse issue numbering, empty partial pages, result/scan-limit interactions, source errors, malformed pages, exhausted tails, parser rejection, and JSON completeness metadata. Exhaustive small-pattern pagination tests compare all eight-issue match patterns across result and scan limits against a scalar filter. These are deterministic unit/contract tests, not a claim of a completed discussion/inbox product or indexed search.
+Tests cover predicate boundaries and ASCII/UTF-8 behavior, scalar literal equivalence, exact-head continuation, sparse issue numbering, empty partial pages, result/scan-limit interactions, source errors, malformed pages, exhausted tails, parser rejection, and JSON completeness metadata. Exhaustive small-pattern pagination tests compare all eight-issue match patterns across result and scan limits against a scalar filter. HTTP tests cover read-only route classification, bounded form semantics, authority-field rejection, error outcomes, exact response ceilings, and deadline refusal. These are deterministic unit/contract tests, not a claim of a completed discussion/inbox product, indexed search, or executed deployment conformance.
