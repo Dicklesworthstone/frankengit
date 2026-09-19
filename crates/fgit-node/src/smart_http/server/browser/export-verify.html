@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FrankenGit — export verification</title><link rel="stylesheet" href="../../browser.css">
+<script type="module" src="export-verify.mjs"></script></head>
+<body><main>
+<header><h1>Export and verify a repository snapshot</h1><p><a href="../../">Source</a> · <a href="../">Portable transfers</a></p></header>
+<p>Read-only Git interchange. This does not back up issues, pull requests, accounts, policy, credentials or default-branch configuration. Checksums do not replace native object validation or signed backup evidence.</p>
+<section aria-labelledby="live-heading"><h2 id="live-heading">Export every visible direct reference at one snapshot</h2>
+<label>Read-scoped access token<input id="export-token" type="password" autocomplete="off" spellcheck="false"></label>
+<label>Native object format<select id="export-format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
+<button id="export-connect" type="button">Connect</button><button id="export-disconnect" type="button">Disconnect and clear</button>
+<button id="export-build" type="button" disabled>Build audited snapshot export</button><button id="export-cancel" type="button">Cancel and clear results</button>
+<p>The token stays only in page memory. All reference pages and bundle export use one explicit authority-head comparison. Changed snapshots, incomplete listings or mismatching refs refuse; nothing is silently refreshed.</p>
+<p id="export-status" role="status" aria-live="polite">Connect to export, or use offline verification below without a token.</p>
+<div id="export-report"></div>
+<button id="export-save-bundle" type="button" disabled>Save repository.bundle</button><button id="export-save-manifest" type="button" disabled>Save repository.export.json</button>
+<p>Keep both files. The manifest contains repository metadata but no credential. Protect it and the bundle as repository data. The browser limits bundles to 16 MiB, advertised refs to 1,024, and manifest files to 1 MiB.</p>
+</section>
+<section aria-labelledby="offline-heading"><h2 id="offline-heading">Check a saved bundle against its manifest</h2>
+<p>No connection, upload or access token is required. Saved origin and snapshot fields are unsigned provenance, not current authority.</p>
+<label>Saved bundle<input id="verify-bundle" type="file" accept=".bundle,application/x-git-bundle"></label>
+<label>Saved export manifest<input id="verify-manifest" type="file" accept=".json,application/json"></label>
+<button id="verify-files" type="button">Verify local files</button>
+<p id="offline-status" role="status" aria-live="polite">Choose the exact saved pair. Neither file will be uploaded.</p><div id="offline-report"></div>
+</section>
+</main></body></html>
