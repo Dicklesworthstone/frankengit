@@ -215,4 +215,5 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "source_history/path_tests.rs"]
 mod path_tests;
