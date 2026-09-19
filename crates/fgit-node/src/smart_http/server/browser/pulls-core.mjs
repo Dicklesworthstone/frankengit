@@ -188,7 +188,7 @@ export function metadataCommand(action, fields) {
   form(result); return result;
 }
 export function rootFor(href, suffix = '/ui/pulls/') {
-  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/'].includes(suffix)) fail('Unsupported browser profile.');
+  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/', '/ui/transfers/'].includes(suffix)) fail('Unsupported browser profile.');
   const page = new URL(href);
   if (!['https:', 'http:'].includes(page.protocol) || page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(page.hostname)) fail('Use HTTPS outside loopback.');
@@ -226,9 +226,9 @@ export function apiError(status) {
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers;
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/' }) {
-    this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#initial = pageSuffix === '/ui/initial/'; this.#branches = pageSuffix === '/ui/branches/'; this.#search = pageSuffix === '/ui/search/'; this.#fetch = fetchImpl; this.#crypto = cryptoImpl;
+    this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#initial = pageSuffix === '/ui/initial/'; this.#branches = pageSuffix === '/ui/branches/'; this.#search = pageSuffix === '/ui/search/'; this.#transfers = pageSuffix === '/ui/transfers/'; this.#fetch = fetchImpl; this.#crypto = cryptoImpl;
     this.#timeout = integer(timeoutMs, 'timeout', 1, 300_000);
   }
   get connected() { return Boolean(this.#token); }
@@ -245,15 +245,19 @@ export class Transport {
   }
   disconnect() { this.#epoch += 1; for (const c of this.#all) c.abort(); this.#token = ''; this.#fingerprint = ''; }
   cancelReads() { for (const c of this.#reads) c.abort(); }
-  async request(path, { method = 'GET', body, contentType = 'application/x-www-form-urlencoded', key, statuses = [200], maximum = REPLY_LIMIT, read = true, binary = false } = {}) {
+  async request(path, { method = 'GET', body, contentType = 'application/x-www-form-urlencoded', key, statuses = [200], maximum = REPLY_LIMIT, read = true, binary = false, headerNames = [] } = {}) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
+    if (!Array.isArray(headerNames) || headerNames.length > 16 || headerNames.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,64}$/i.test(name))) fail('Invalid response header selection.');
+    const capturedHeaders = [...headerNames];
     const url = new URL(path, this.root.api);
     // The search profile has no write, artifact, recovery or alternate-method lane.
     if (this.#search && (method !== 'POST' || key !== undefined || !read || binary ||
         contentType !== 'application/x-www-form-urlencoded' || typeof body !== 'string' ||
         body.length > FORM_LIMIT || statuses.length !== 1 || statuses[0] !== 200)) fail('Search is a closed read-only profile.');
     if (this.#search) integer(maximum, 'search response limit', 1, REPLY_LIMIT);
-    const allowed = this.#search
+    const allowed = this.#transfers
+      ? /^(?:source\/(?:refs|bundle\/(?:export|import|fetch))|outcomes)$/.test(path)
+      : this.#search
       ? /^source\/(?:search|search-batch|search-regex|blob)$/.test(path)
       : this.#branches
       ? /^(?:source\/(?:refs|branches\/(?:create|update|delete|rename))|outcomes)$/.test(path)
@@ -265,7 +269,7 @@ export class Transport {
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);
     const timer = setTimeout(() => controller.abort(), this.#timeout);
-    const headers = { Authorization: `Bearer ${this.#token}`, Accept: binary ? 'multipart/mixed, application/json' : 'application/json' };
+    const headers = { Authorization: `Bearer ${this.#token}`, Accept: this.#transfers && binary ? 'application/x-git-bundle' : binary ? 'multipart/mixed, application/json' : 'application/json' };
     if (body !== undefined) headers['Content-Type'] = contentType;
     if (key) headers['Idempotency-Key'] = key;
     let response;
@@ -280,7 +284,8 @@ export class Transport {
       if (!binary && !/^application\/json(?:\s*;|$)/i.test(type)) fail('Expected a JSON API response.');
       const bytes = await readBytes(response, controller.signal, maximum);
       if (epoch !== this.#epoch) fail('Connection superseded.');
-      return { status: response.status, type, value: binary ? bytes : json(bytes) };
+      return { status: response.status, type, value: binary ? bytes : json(bytes),
+        ...(capturedHeaders.length ? { headers: Object.fromEntries(capturedHeaders.map(name => [name, response.headers.get(name)])) } : {}) };
     } catch (error) { if (epoch === this.#epoch && error.status === 401) this.disconnect(); throw error; }
     finally {
       clearTimeout(timer); this.#all.delete(controller); this.#reads.delete(controller);
