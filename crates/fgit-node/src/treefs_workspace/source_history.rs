@@ -5,6 +5,7 @@ use super::{Cell, MergeObjectSource, MergeSourceError, ObjectType, ParseLimits,
     RefVisibility, SelectedSource, VerifiedFabricPackSource};
 use fgit_forge::history::{BlameOptions, BlameResult, HistoryError, HistoryLimits,
     HistoryPage, HistorySource, LogOptions, blame, commit_history};
+use fgit_forge::history::path::{PathLogOptions, path_history};
 use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 use fgit_types::{GitOid, RefName, RepositoryAuthorityHeadId};
 use crate::{AdmissionMaterializationRefusal, NodeRequestContext, OneNode};
@@ -74,6 +75,23 @@ impl OneNode {
         }
         self.with_history_source_in(request, reference, visibility, expected_head, options.limits,
             |source, tip| commit_history(source, self.object_format, tip, options)).await
+    }
+
+    /// Exact file/directory change history, filtered before offset pagination.
+    /// The full selected graph and current hidden-ref policy still bound every
+    /// query. A missing path is not a missing ref: deletion history remains
+    /// available, and a never-present path has a complete empty result.
+    /// Continuations must retain the same ref, raw path and authority head.
+    pub async fn read_path_history_in(
+        &self, request: &NodeRequestContext, reference: &RefName, visibility: &RefVisibility,
+        expected_head: Option<RepositoryAuthorityHeadId>, options: &PathLogOptions,
+    ) -> Result<(RepositoryAuthorityHeadId, HistoryPage), NodeHistoryRefusal> {
+        options.validate().map_err(failed)?;
+        if options.log.after != 0 && expected_head.is_none() {
+            return Err(NodeHistoryRefusal::UnpinnedContinuation);
+        }
+        self.with_history_source_in(request, reference, visibility, expected_head, options.log.limits,
+            |source, tip| path_history(source, self.object_format, tip, options)).await
     }
 
     /// Exact same-path line ancestry, including second and later merge parents.
@@ -195,3 +213,6 @@ mod tests {
         assert_eq!(corrupt.history_error(), Some(&HistoryError::CyclicHistory));
     }
 }
+
+#[cfg(test)]
+mod path_tests;
