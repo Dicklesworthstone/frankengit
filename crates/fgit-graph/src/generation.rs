@@ -1,12 +1,12 @@
 //! Immutable graph-generation bodies and their root-last activation path.
 
+mod activation;
+
 use fgit_authority::{
-    AuthorityFailure, AuthorityStore, CasOutcome, HeadInit, HeadKey, HeadRead, ImmutableKey,
-    KeyError, PutOutcome,
+    AuthorityFailure, HeadKey, ImmutableKey, KeyError,
 };
 use fgit_codec::{
-    CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder, body_id,
-    decode_body, encode_body,
+    CanonicalBody, CodecRefusal, CryptoBodyIdentity, Decoder, Encoder, body_id,
 };
 use fgit_types::{
     AsciiSlug, Digest, GenerationId, HeadGeneration, RepositoryCommitId, SchemaFamily, SchemaId,
@@ -333,6 +333,12 @@ pub enum GenerationAuthorityError {
     HeadAlreadyInitialized,
     /// A concurrent activation replaced the observed predecessor.
     ConcurrentActivation,
+    /// An authenticated read did not bind the requested key and exact receipt.
+    /// No conditional publication was attempted from this invalid observation.
+    InvalidHeadReceipt,
+    /// A successful write returned a mismatched receipt. Publication may have
+    /// happened; use read-only recovery, never infer rollback from this error.
+    InvalidActivationReceipt,
 }
 
 impl From<CodecRefusal> for GenerationAuthorityError {
@@ -370,102 +376,16 @@ pub struct GenerationActivation {
 
 /// Exact-predecessor, root-last activation for one graph-view authority head.
 ///
-/// This generic semantic core is intentionally built on [`AuthorityStore`],
-/// the deterministic authority verification surface.  Node-facing callers use
-/// the sibling `AsyncAuthorityStore` adapter; neither path may decide a CAS
-/// differently.  An ambiguous backend result is returned unchanged rather
-/// than relabeled as a rejected activation.
+/// The synchronous reference and asynchronous production surfaces share one
+/// predecessor/view/receipt decision core. Production calls use
+/// [`fgit_authority::AsyncAuthorityStore`] directly with per-request context;
+/// no blocking adapter or alternate runtime is introduced. A backend failure
+/// or ambiguous result never establishes that a generation was not activated.
 pub struct GenerationAuthority<'a, S> {
     store: &'a S,
     head_key: HeadKey,
 }
 
-impl<'a, S: AuthorityStore> GenerationAuthority<'a, S> {
-    /// Binds the graph activation protocol to one authority backend and head key.
-    #[must_use]
-    pub const fn new(store: &'a S, head_key: HeadKey) -> Self {
-        Self { store, head_key }
-    }
-
-    /// Stages `candidate` immutably, then activates it only against its exact predecessor.
-    pub fn stage_and_activate(
-        &self,
-        candidate: &GraphGenerationBody,
-    ) -> Result<GenerationActivation, GenerationAuthorityError> {
-        let generation_id = candidate.generation_id()?;
-        let body = encode_body(candidate)?;
-        let immutable_key = immutable_generation_key(generation_id)?;
-        match self.store.put_if_absent(&immutable_key, &body)? {
-            PutOutcome::Created | PutOutcome::IdenticalRetry => {}
-            PutOutcome::Conflict => {
-                return Err(GenerationAuthorityError::ImmutableConflict {
-                    generation_id: Box::new(generation_id),
-                });
-            }
-        }
-
-        match self.store.read_head(&self.head_key)? {
-            HeadRead::Absent => self.activate_genesis(candidate, generation_id, &body),
-            HeadRead::Present(receipt) => {
-                let active =
-                    decode_body::<GraphGenerationBody>(receipt.body(), DecodeLimits::default())?;
-                if active.graph_view_id != candidate.graph_view_id {
-                    return Err(GenerationAuthorityError::ViewMismatch {
-                        active: Box::new(active.graph_view_id),
-                        proposed: Box::new(candidate.graph_view_id),
-                    });
-                }
-                let active_id = active.generation_id()?;
-                if candidate.predecessor_generation_id != Some(active_id) {
-                    return Err(GenerationAuthorityError::PredecessorMismatch {
-                        expected: Box::new(active_id),
-                        supplied: candidate.predecessor_generation_id.map(Box::new),
-                    });
-                }
-                let next_generation = receipt.generation().next()?;
-                match self.store.compare_exchange_head(
-                    &self.head_key,
-                    receipt.token(),
-                    next_generation,
-                    &body,
-                )? {
-                    CasOutcome::Committed(committed) => Ok(GenerationActivation {
-                        generation_id,
-                        authority_generation: committed.generation(),
-                    }),
-                    CasOutcome::PredecessorMismatch => {
-                        Err(GenerationAuthorityError::ConcurrentActivation)
-                    }
-                }
-            }
-        }
-    }
-
-    fn activate_genesis(
-        &self,
-        candidate: &GraphGenerationBody,
-        generation_id: GraphGenerationId,
-        body: &[u8],
-    ) -> Result<GenerationActivation, GenerationAuthorityError> {
-        if candidate.predecessor_generation_id.is_some() {
-            return Err(GenerationAuthorityError::GenesisHasPredecessor {
-                generation_id: Box::new(generation_id),
-            });
-        }
-        match self
-            .store
-            .initialize_head(&self.head_key, HeadGeneration::FIRST, body)?
-        {
-            HeadInit::Created(receipt) | HeadInit::IdenticalRetry(receipt) => {
-                Ok(GenerationActivation {
-                    generation_id,
-                    authority_generation: receipt.generation(),
-                })
-            }
-            HeadInit::Conflict => Err(GenerationAuthorityError::HeadAlreadyInitialized),
-        }
-    }
-}
 
 fn immutable_generation_key(
     generation_id: GraphGenerationId,
