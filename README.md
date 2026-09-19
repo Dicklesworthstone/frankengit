@@ -144,17 +144,21 @@ name their own revisions and do not replace an independent batch gate.
   composition: `OneNode::admit_merge_durable_in` reached materializer methods
   that returned `DurabilityProfileUnavailable` before publication. The six synchronous
   admission race tests cited in the previous snapshot do not establish a
-  durable OneNode merge. `frankengit-asa3` retains both this integration and
-  coherent forge/outbox delivery; neither is declared complete here.
-  The native implementation candidate now couples the actual merge event,
+  durable OneNode merge. The subsequent `frankengit-asa3` implementation
+  couples the actual merge event,
   forge position, and canonical outbox state at one authority CAS, with an
   authenticated delivery reader and persisted reconciliation worker. Native
   packages through the original sealed API now enter that same driver with
   their original transaction identity and node-owned object revalidation.
-  Historical Digest-valued packages retain the unavailable legacy route. Its
-  current scope and remaining acceptance are in the
+  Node-owned TreeFS sessions additionally bind real edits, exported trees,
+  and interrupted-request recovery to the admitted workspace snapshot.
+  Admission and node all-target tests passed through RCH at
+  `55e1da66626c014202eee91f9282b251594c91f4`, including actual authority races,
+  process-death recovery and outbox delivery. Independent batch verification
+  remains outstanding. Historical Digest-valued packages retain the
+  unavailable legacy route. Exact execution evidence and scope are in the
   [delivery contract](docs/MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md#13-current-implementation-boundaries);
-  this source update does not advance the dated snapshot's verification claim.
+  this focused result does not establish a complete forge or release gate.
 - `fg at` has a real historical path and a nonempty durable-history E2E
   scenario in `scripts/e2e/suites/node/time_travel.sh`. The 2026-09-07
   assessment exercised its 15 acceptance IDs, including both diff endpoints

@@ -341,12 +341,11 @@ establish a distributed GC or checkpoint-pruning integration; such a collector
 must preserve the complete live outbox and reconciliation closure before it
 can be admitted.
 
-The code and tests in this section do not close `frankengit-asa3`. The new
-sync/async and scheduled-concurrency tests require revision-bound execution.
-The new supervised workspace composition and the complete batch gate require
-revision-bound execution before acceptance. Model fault tests and file-backed process-death
-tests have different evidence classes; neither implies host power-loss or
-filesystem fault coverage.
+The focused execution in §13.2 covers the sync/async, scheduled-concurrency,
+and supervised-workspace tests. It does not close `frankengit-asa3`; the
+independent batch gate remains required. Model fault tests and file-backed
+process-death tests have different evidence classes; neither implies host
+power-loss or filesystem fault coverage.
 
 ### 13.1 Original sealed-package integration
 
@@ -382,8 +381,42 @@ self-check actual native bytes; canonical HEAD is established in authenticated
 genesis rather than assumed from the imported source's `HEAD` file. Existing
 integration and process-death tests are retained.
 
-Verification for these commits is limited to source review, lexical/delimiter
-checks, and remote commit/blob inspection. Cargo, rustc, Rust compilation,
-Clippy, and runtime tests were unavailable in the editing environment. This
-integration is not a passing test report and does not satisfy the revision-bound
-batch gate or close `frankengit-asa3`.
+These commits initially had source-only verification because the editing
+environment lacked Rust execution. The subsequent integrated runtime result
+below covers their regressions; independent batch verification remains required.
+
+### 13.2 Focused execution: 2026-09-09
+
+At source revision `55e1da66626c014202eee91f9282b251594c91f4`, RCH worker
+`hz4` completed the following focused invocation with remote exit 0 at
+`2026-09-09T04:14:22.535844Z`:
+
+```bash
+env CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo test -j 2 -p fgit-admission -p fgit-node \
+  --all-targets --locked --no-fail-fast -- --test-threads=1
+```
+
+The run used `nightly-2026-08-31`, an isolated remote target and the locked
+FrankenSQLite 0.3.7 / Asupersync 0.4.9 constellation. Debug assertions remained
+enabled; debug symbols and incremental artifacts were disabled. The log reports
+513 passed, zero failed and one ignored across 45 target summaries. The ignored
+`node_workspace_reopen_driver` is invoked by its parent process-recovery test.
+The full command, worker settings, raw log path and acceptance-to-test mapping
+are recorded in `frankengit-asa3`.
+
+This execution includes the actual original-seal authority race, immutable
+staging and pre/post-CAS process deaths, receiver death before and after its
+effect, all nine supervised-workspace integration cases, native sync/async
+equivalence and exact supplied-evidence checks. It also confirms that both
+legacy facades refuse native packages before acquiring a seal. A corrected
+positive fixture now supplies strict-valid native objects and independently
+derived full-fold evidence; its paired predecessor-evidence case is refused.
+
+The preceding seven-crate run at
+`38150949e8219867fed97cc7f3f6e98b813122f9` ended with four failures, corrected
+before this run. Its unaffected authority-store, codec, schema, resource and
+TreeFS targets passed, but that command as a whole failed. Earlier pooled-target
+linker bus errors and the historical `e8104199` filesystem-probe cancellation
+are retained in the bead's execution history. This focused result is not the
+current-main union gate, Clippy, a release gate, or a power-loss claim.
