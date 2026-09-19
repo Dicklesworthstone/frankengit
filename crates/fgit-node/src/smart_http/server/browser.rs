@@ -5,6 +5,7 @@
 mod pulls;
 
 mod source_edit;
+mod initial;
 
 use std::io::Write;
 use fgit_wire::smart_http::{BodyFraming, HttpVersion, head::Envelope};
@@ -71,6 +72,7 @@ pub(super) fn serve(
     trailing: &[u8],
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
+    if initial::serve(profile, request, trailing, writer)? { return Ok(true); }
     if source_edit::serve(profile, request, trailing, writer)? { return Ok(true); }
     if pulls::serve(profile, request, trailing, writer)? { return Ok(true); }
     let Some((media, body)) = checked_asset(
