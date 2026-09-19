@@ -235,8 +235,8 @@ export class Transport {
   get epoch() { return this.#epoch; }
   get crypto() { return this.#crypto; }
   async connect(token, requiredFingerprint = null) {
-    if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('A 64-character lowercase hexadecimal token is required.');
     this.disconnect(); const epoch = this.#epoch;
+    if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) fail('A 64-character lowercase hexadecimal token is required.');
     const fingerprint = hex(new Uint8Array(await this.#crypto.subtle.digest('SHA-256', utf8.encode(token))));
     if (epoch !== this.#epoch) fail('Connection superseded.');
     if (requiredFingerprint !== null && fingerprint !== requiredFingerprint) fail('Unresolved request belongs to another credential.');
@@ -247,7 +247,7 @@ export class Transport {
   async request(path, { method = 'GET', body, contentType = 'application/x-www-form-urlencoded', key, statuses = [200], maximum = REPLY_LIMIT, read = true, binary = false } = {}) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
     const url = new URL(path, this.root.api);
-    if (!/^(pulls(?:\/[^?#]*)?(?:\?[^#]*)?|outcomes)$/.test(path) || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
+    if (!/^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|prepare|resolve|inspect|merge|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path) || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);
     const timer = setTimeout(() => controller.abort(), this.#timeout);
     const headers = { Authorization: `Bearer ${this.#token}`, Accept: binary ? 'multipart/mixed, application/json' : 'application/json' };
