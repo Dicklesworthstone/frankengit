@@ -46,7 +46,7 @@ fn real_mcp_reads_reopened_sha1_and_sha256_nodes_without_publishing() {
         let mut backend = NodeTools::open(Options {
             storage: scratch.0.join("node"), tenant: TenantId::from_bytes([0x91; 16]), repository: RepositoryId::from_bytes([0x92; 16]),
             format, incarnation: Some(incarnation), issues: true, pulls: false, source: false,
-            issue_writes: false, outcomes: false, principal: None, max_messages: 16,
+            writes: Default::default(), outcomes: false, principal: None, max_messages: 16,
         }).unwrap();
         let mut server = Server::new(&backend).unwrap();
         server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"integration","version":"1"}}}"#).unwrap();
@@ -111,7 +111,7 @@ fn real_source_and_pr_tools_preserve_bytes_snapshots_and_independent_grants() {
         let incarnation = node.repository_incarnation_id(); node.shutdown().unwrap();
         let mut backend = NodeTools::open(Options { storage: scratch.0.join("node"), tenant: TenantId::from_bytes([0x91;16]),
             repository: RepositoryId::from_bytes([0x92;16]), format, incarnation: Some(incarnation), issues: false, pulls: true, source: true,
-            issue_writes: false, outcomes: false, principal: None, max_messages: 32 }).unwrap();
+            writes: Default::default(), outcomes: false, principal: None, max_messages: 32 }).unwrap();
         let mut server = Server::new(&backend).unwrap();
         server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"integration","version":"1"}}}"#).unwrap();
         server.receive(&mut backend, br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);

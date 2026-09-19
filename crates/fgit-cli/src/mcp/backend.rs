@@ -7,6 +7,7 @@ mod review;
 mod history;
 mod mutations;
 mod issue_writes;
+mod pull_writes;
 mod outcomes;
 use fgit_node::{IssueReadRefusal, NodeConfig, OneNode};
 use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, RepositoryAuthorityHeadId};
@@ -29,7 +30,7 @@ impl NodeTools {
             let head = node.runtime().block_on(node.authenticate_authority_head())
                 .map_err(|_| "MCP repository authority could not be authenticated")?;
             if node.bring_into_service(head.receipt().generation()).is_err() {
-                if !(options.issue_writes || options.outcomes) {
+                if !(options.writes.any() || options.outcomes) {
                     return Err("MCP repository read service unavailable".into());
                 }
                 // Historical lookup and identical terminal retries precede
@@ -67,22 +68,25 @@ impl ReadTools for NodeTools {
         if self.options.issues { tools.extend(issues::tools()); }
         if self.options.pulls { tools.extend(pulls::tools()); }
         if self.options.source { tools.extend(source::tools()); }
-        if self.options.issue_writes { tools.extend(issue_writes::tools()); }
+        if self.options.writes.issues { tools.extend(issue_writes::tools()); }
+        if self.options.writes.pulls { tools.extend(pull_writes::tools()); }
         if self.options.outcomes { tools.extend(outcomes::tools()); }
         tools.extend(review::tools(self.options.source, self.options.pulls));
         if self.options.source { tools.extend(history::tools()); }
         tools
     }
     fn is_mutation(&self, name: &str) -> bool {
-        self.options.issue_writes && issue_writes::is_tool(name)
+        (self.options.writes.issues && issue_writes::is_tool(name))
+            || (self.options.writes.pulls && pull_writes::is_tool(name))
     }
     fn result_is_error(&self, name: &str, value: &Value) -> bool {
         self.is_mutation(name) && value.object().and_then(|v| v.get("outcome")).and_then(Value::text) == Some("refused")
     }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
-        if self.options.issue_writes && issue_writes::is_tool(name) {
+        if self.options.writes.issues && issue_writes::is_tool(name) {
             return issue_writes::call(self, name, args);
         }
+        if self.options.writes.pulls && pull_writes::is_tool(name) { return pull_writes::call(self, name, args); }
         if self.options.outcomes && name == outcomes::NAME { return outcomes::call(self, args); }
         if self.options.issues && matches!(name, "frankengit_issue_list" | "frankengit_issue_show") {
             return issues::call(self, name, args);

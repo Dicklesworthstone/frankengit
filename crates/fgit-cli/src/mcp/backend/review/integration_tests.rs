@@ -19,7 +19,7 @@ impl Scratch {
     fn options(&self, format: GitHashAlgorithm) -> Options {
         Options { storage: self.0.join("node"), tenant: TenantId::from_bytes([0xd1; 16]),
             repository: RepositoryId::from_bytes([0xd2; 16]), format, incarnation: None,
-            issues: false, pulls: true, source: true, issue_writes: false, outcomes: false, principal: None, max_messages: 32 }
+            issues: false, pulls: true, source: true, writes: Default::default(), outcomes: false, principal: None, max_messages: 32 }
     }
 }
 impl Drop for Scratch { fn drop(&mut self) { fs::remove_dir_all(&self.0).unwrap(); } }
