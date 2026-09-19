@@ -1,0 +1,20 @@
+# FG-043c expected-suite manifest -- profile: policy
+#
+# Columns and semantics match manifests/harness.tsv (FG-091): this profile
+# owns the top-level `suites/policy` area and pins its exact release
+# surface by full-corpus suite id. Set equality is enforced against discovery:
+# no missing, no unregistered, no renamed alias.
+#
+# columns, tab-separated:
+#   suite_id           the id run_all derives from the script path
+#   owning_bead        the capability bead that owns the suite
+#   gate               the gate/profile this entry belongs to
+#   script_path        repository-relative path
+#   targets            supported target classes, or "any"
+#   classification     required | optional
+#   proof_class        what a pass establishes, in claim-lattice terms
+#   expected_terminal  the terminal status a pass must carry
+#
+suites-policy-policy_eval	frankengit-fg043a-policy-impl-b5n	g5	scripts/e2e/suites/policy/policy_eval.sh	any	required	mechanism	pass
+suites-policy-policy_rollout_replay	frankengit-fg043c-policy-evidence-vfrn	g5	scripts/e2e/suites/policy/policy_rollout_replay.sh	any	required	mechanism	pass
+suites-policy-protected_refs_breakglass	frankengit-fg043c-policy-evidence-vfrn	g5	scripts/e2e/suites/policy/protected_refs_breakglass.sh	any	required	mechanism	pass
