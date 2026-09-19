@@ -1,0 +1,22 @@
+[package]
+name = "fgit-ssh"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+description = "Pure-Rust SSH transport service for Git operations."
+
+[dependencies]
+asupersync.workspace = true
+chacha20 = { version = "0.10.1", default-features = false, features = ["legacy"] }
+curve25519-dalek = { version = "4.1.3", default-features = false }
+ed25519-dalek.workspace = true
+fgit-crypto.workspace = true
+fgit-identity.workspace = true
+fgit-types.workspace = true
+fgit-wire.workspace = true
+poly1305 = { version = "0.9.1", default-features = false }
+
+[lints]
+workspace = true
