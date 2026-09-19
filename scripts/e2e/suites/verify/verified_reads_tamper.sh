@@ -44,7 +44,7 @@ fge_init verified-reads-tamper
 # suite, so I shipped it red. The count assertion did its job; I just did not
 # look. Changing a case count in those files means changing this list.
 TARGETS=(
-  "fgit-verified-read:tamper_campaign:8"
+  "fgit-verified-read:tamper_campaign:10"
   "fgit-verified-read:head_chain_freshness:7"
   "fgit-verified-read:proof_cost:10"
   "fgit-node:verified_read_served_tamper:4"
@@ -55,13 +55,15 @@ TARGETS=(
 # function count cannot see a class being removed; the Rust denominator guard
 # emits this
 # marker and the assertion below reads it.
-EXPECTED_TAMPER_CLASSES=13
+EXPECTED_TAMPER_CLASSES=20
 
 # The cases whose absence would hollow out this bead, asserted individually.
 LOAD_BEARING=(
   detections_are_spread_across_distinct_checks_not_funnelled_through_one
   envelope_verification_alone_accepts_the_replay_which_is_why_freshness_exists
   the_honest_answer_is_accepted_so_the_rate_is_not_a_client_that_refuses_everything
+  the_honest_object_answers_are_accepted
+  an_object_envelope_is_checked_against_the_object_closure_root
   a_replayed_older_head_is_refused_even_though_it_is_perfectly_valid
   two_heads_claiming_one_generation_are_a_fork_and_not_staleness
   a_forged_head_at_a_higher_generation_is_caught_by_continuity
