@@ -1,0 +1,206 @@
+// DOM-only read interface. Repository bytes never become markup or navigation URLs.
+import { CodeSearch } from './search.mjs';
+import { byteInput } from './search-data.mjs';
+import { decimal, fail, unhex } from './pulls-core.mjs';
+
+const PREVIEW_BYTES = 4096, PAGE_MATCHES = 50;
+export function display(bytes, multiline = false) {
+  try {
+    const value = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    return value.replace(/[\\\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, ch => {
+      if (multiline && ch === '\n') return ch;
+      if (ch === '\\') return '\\\\';
+      return `\\u{${ch.codePointAt(0).toString(16)}}`;
+    });
+  } catch {
+    return Array.from(bytes, b => b >= 32 && b <= 126 && b !== 92 ? String.fromCharCode(b) : `\\x${b.toString(16).padStart(2, '0')}`).join('');
+  }
+}
+const safe = value => display(new TextEncoder().encode(String(value)));
+export function preview(bytes, hit) {
+  const start = Math.max(0, hit.offset - 160);
+  const end = Math.min(bytes.length, start + PREVIEW_BYTES, hit.offset + hit.length + 160);
+  const matchEnd = Math.min(end, hit.offset + hit.length);
+  return { start, end, truncated: matchEnd < hit.offset + hit.length,
+    before: display(bytes.subarray(start, hit.offset), true),
+    matched: hit.length === 0 ? '▏' : display(bytes.subarray(hit.offset, matchEnd), true),
+    after: display(bytes.subarray(matchEnd, end), true) };
+}
+function lines(value, maximum) {
+  if (value.length > 128 * 8193) fail('Input exceeds the browser form limit.');
+  const result = value.replace(/\r?\n$/u, '').split(/\r?\n/u);
+  if (result.length > maximum) fail('Too many input lines.');
+  return result;
+}
+export function readQuery(document) {
+  const value = id => document.getElementById(id).value;
+  const mode = value('mode'), encoding = value('encoding');
+  const raw = value('query'), prefixes = value('prefixes');
+  const input = { mode, case: value('case'), prefixesHex: prefixes === '' ? [] : lines(prefixes, 128)
+    .map(line => byteInput(line, value('prefix-encoding'), 4096)),
+    maxMatches: decimal(value('max-matches'), 'match limit', 1),
+    maxFileBytes: decimal(value('max-file-bytes'), 'file byte limit', 1),
+    maxBytes: decimal(value('max-bytes'), 'source byte limit', 1) };
+  if (mode === 'regex') {
+    input.patternHex = byteInput(raw, encoding, 256);
+    input.maxSteps = decimal(value('max-steps'), 'VM work limit', 1);
+  } else input.needlesHex = (mode === 'batch' ? lines(raw, 32) : [raw]).map(line => byteInput(line, encoding, 256));
+  return input;
+}
+export function mount(document, location, options = {}) {
+  const { urlApi = globalThis.URL, ...clientOptions } = options;
+  const client = new CodeSearch({ ...clientOptions, href: location.href });
+  const get = id => document.getElementById(id);
+  const element = (tag, text = '') => { const el = document.createElement(tag); el.textContent = text; return el; };
+  const button = (label, action) => { const el = element('button', label); el.type = 'button'; el.addEventListener('click', action); return el; };
+  let work = 0, resultVersion = 0, busy = false, result = null, verified = null, downloadUrl = null, resultButtons = new Set();
+  const status = message => { get('status').textContent = message; };
+  function clearFile() {
+    verified = null; get('file').replaceChildren();
+    if (downloadUrl !== null) { urlApi.revokeObjectURL(downloadUrl); downloadUrl = null; }
+  }
+  function clearResults() { resultVersion++; result = null; resultButtons = new Set(); get('results').replaceChildren(); clearFile(); }
+  function sync() {
+    get('submit-search').disabled = !client.connected || busy;
+    get('refresh').disabled = !client.connected || busy;
+    get('cancel').disabled = !busy;
+    for (const b of resultButtons) b.disabled = !client.connected || busy;
+    const regex = get('mode').value === 'regex';
+    get('max-steps').disabled = !regex;
+    get('regex-help').hidden = !regex;
+    get('query-help').textContent = get('mode').value === 'batch'
+      ? 'One literal per line, up to 32. Order and duplicate queries are preserved. A final separator newline is ignored.'
+      : regex ? 'Native byte regex, up to 256 bytes. One leftmost-longest span per physical line, not JavaScript/PCRE semantics.'
+        : 'One literal, up to 256 bytes. Use lowercase hex for binary bytes; matches may overlap.';
+  }
+  function showPin() {
+    const state = client.state;
+    get('snapshot').textContent = state.pin
+      ? `Reference ${safe(state.selection.reference)} · ${state.scope.format}\nRepository ${safe(state.scope.repository)} · incarnation ${safe(state.scope.incarnation)}\nCommit ${state.pin.commit}\nTree ${state.pin.tree}\nSnapshot ${state.pin.head}`
+      : client.connected ? 'The next successful search will select the current snapshot.' : '';
+  }
+  function disconnect(message = 'Disconnected. Token, queries, results and source bytes discarded.') {
+    work++; busy = false; client.disconnect(); clearResults();
+    get('token').value = ''; get('query').value = ''; get('prefixes').value = ''; showPin(); sync(); status(message);
+  }
+  function invalidate() {
+    work++; busy = false; client.discardResults(); clearResults(); sync();
+    status(client.connected ? 'Query changed. Search again; the existing snapshot remains pinned.' : 'Enter a read-scoped token to begin.');
+  }
+  function cancel() { work++; busy = false; client.cancel(); clearFile(); sync(); status('Read canceled. No write or retry was attempted.'); }
+  function refresh() {
+    work++; busy = false; client.refreshSnapshot(); clearResults(); showPin(); sync();
+    status('Snapshot released. The next search selects current state; repository identity must still match.');
+  }
+  function errorAt(error, id) {
+    if (id !== work) return;
+    if (!client.connected) { disconnect(`Disconnected: ${safe(error.message)}`); return; }
+    busy = false; clearFile();
+    if (error.status === 409) { client.discardResults(); clearResults(); }
+    const message = {
+      400: 'Native query or request refused. Check the byte encoding, supported syntax and input limits.',
+      404: 'Selected repository, reference or path is unavailable. Hidden references are not disclosed.',
+      413: 'A source, result or VM work limit was exceeded. Narrow the query or path scope, or adjust the bounded limits.',
+    }[error.status] ?? error.message;
+    sync(); status(error.name === 'AbortError' ? 'Read canceled. No write was attempted.' : safe(message));
+  }
+  async function connect() {
+    const token = get('token').value, reference = get('reference').value, format = get('format').value;
+    get('token').value = ''; work++; const id = work;
+    busy = true; client.disconnect(); clearResults(); showPin(); sync(); status('Connecting read-only client…');
+    try {
+      await client.connect(token, reference, format);
+      if (id !== work) return;
+      busy = false; showPin(); sync(); status('Read token ready. Submit a search to select a repository snapshot.');
+    } catch (error) { errorAt(error, id); }
+  }
+  function renderGroup(group, index, version) {
+    const section = element('section'); section.className = 'query-group';
+    const label = result.query.mode === 'regex' ? display(unhex(result.query.patternHex)) : display(unhex(group.needleHex));
+    section.append(element('h3', `Query ${index + 1}: ${label}`), element('p', group.complete
+      ? `Server reports complete: ${group.matches.length} match${group.matches.length === 1 ? '' : 'es'}.`
+      : `Limited: ${group.matches.length} matches shown; at least one additional match exists. Narrow the query or raise its bounded limit.`));
+    const rows = element('div'), paging = element('nav');
+    let pageButtons = []; paging.setAttribute('aria-label', `Query ${index + 1} result pages`);
+    function page(at) {
+      if (version !== resultVersion) return;
+      for (const b of pageButtons) resultButtons.delete(b);
+      pageButtons = []; rows.replaceChildren(); paging.replaceChildren();
+      const end = Math.min(group.matches.length, at + PAGE_MATCHES);
+      for (let i = at; i < end; i++) {
+        const hit = group.matches[i], article = element('article'); article.className = 'match';
+        const open = button(`${display(unhex(hit.pathHex))} : ${hit.line}:${hit.column}`, () => {
+          if (version === resultVersion && !busy) void openMatch(index, i);
+        });
+        resultButtons.add(open); pageButtons.push(open);
+        article.append(open, element('p', `Byte ${hit.offset}, length ${hit.length}${hit.truncated ? ' · excerpt truncates the span' : ''}`),
+          element('pre', display(unhex(hit.excerptHex), true)));
+        rows.append(article);
+      }
+      if (!group.matches.length) rows.append(element('p', 'No matching source in the selected scope.'));
+      if (at > 0) paging.append(button('Previous results', () => page(Math.max(0, at - PAGE_MATCHES))));
+      if (end < group.matches.length) paging.append(button('Next results', () => page(end)));
+      if (group.matches.length) paging.append(element('span', ` ${at + 1}–${end} of ${group.matches.length}`));
+      sync();
+    }
+    section.append(rows, paging); page(0); return section;
+  }
+  function renderSearch(value) {
+    const stats = value.stats, region = get('results'), version = resultVersion;
+    region.append(element('h2', `${value.totalMatches} returned matches`),
+      element('p', `${stats.filesRead}/${stats.filesSelected} regular files read · ${stats.bytesRead} bytes read · ${stats.bytesSearched} bytes searched · ${stats.nonRegular} symlink/gitlink entries not followed.`));
+    if (value.query.mode === 'batch') region.append(element('p', 'One shared source scan. Completion is reported separately for each query.'));
+    if (value.query.mode === 'regex') region.append(element('p', `${stats.steps} native VM steps · ${stats.states} program states · ${stats.lines} lines searched.`));
+    for (const [index, group] of value.groups.entries()) region.append(renderGroup(group, index, version));
+  }
+  async function search() {
+    work++; const id = work; busy = true; client.discardResults(); clearResults(); sync(); status('Searching the selected repository…');
+    try {
+      const value = await client.search(readQuery(document));
+      if (id !== work) return;
+      busy = false; result = value; renderSearch(value); showPin(); sync();
+      status(value.groups.every(g => g.complete) ? 'Server scan complete. Open a result to verify its file bytes.' : 'Search returned limited results. See each query’s completion status.');
+    } catch (error) { errorAt(error, id); }
+  }
+  function renderFile(value) {
+    const hit = value.hit, region = get('file'), part = preview(value.bytes, hit);
+    region.append(element('h2', display(unhex(hit.pathHex))), element('p', `Native blob verified (${value.scope.format}): ${hit.blob}`),
+      element('p', `Full file: ${value.bytes.length} bytes. Line ${hit.line}, byte column ${hit.column}; span [${hit.offset}, ${hit.offset + hit.length}).`),
+      element('p', value.literalVerified ? 'Literal bytes, excerpt and coordinates reproduced from the verified file.' : 'Excerpt and coordinates reproduced. Regex selection and completeness are reported by the native server, not re-evaluated here.'),
+      element('p', `Escaped byte preview [${part.start}, ${part.end}); control/bidi bytes are escaped.${part.truncated ? ' The match continues beyond this preview.' : ''}${hit.length === 0 ? ' The marker shows a zero-length span.' : ''}`));
+    const pre = element('pre'); pre.append(element('span', part.before), element('mark', part.matched), element('span', part.after)); region.append(pre);
+    const download = button('Download verified file bytes', () => {
+      if (verified !== value || busy) return;
+      if (downloadUrl !== null) urlApi.revokeObjectURL(downloadUrl);
+      downloadUrl = urlApi.createObjectURL(new Blob([value.bytes], { type: 'application/octet-stream' }));
+      const anchor = element('a'); anchor.href = downloadUrl; anchor.download = 'snapshot-source.bin'; anchor.rel = 'noopener';
+      region.append(anchor); anchor.click(); anchor.remove();
+    });
+    region.append(download); region.focus();
+  }
+  async function openMatch(group, index) {
+    if (!result) return;
+    work++; const id = work; busy = true; clearFile(); sync(); status('Reading pinned file pages and checking its complete native blob identity…');
+    try {
+      const value = await client.openMatch(group, index);
+      if (id !== work) return;
+      busy = false; verified = value; renderFile(value); sync(); status('File bytes and search coordinates verified against the returned native blob identity.');
+    } catch (error) { errorAt(error, id); }
+  }
+  for (const [id, action] of [['connection', connect], ['search-form', search]]) get(id).addEventListener('submit', event => { event.preventDefault(); void action(); });
+  get('disconnect').addEventListener('click', () => disconnect());
+  get('cancel').addEventListener('click', cancel); get('refresh').addEventListener('click', refresh);
+  for (const id of ['mode', 'encoding', 'case', 'query', 'prefixes', 'prefix-encoding', 'max-matches', 'max-file-bytes', 'max-bytes', 'max-steps']) {
+    get(id).addEventListener('input', invalidate); get(id).addEventListener('change', invalidate);
+  }
+  const connectionChanged = () => {
+    work++; busy = false; client.disconnect(); clearResults(); showPin(); sync(); status('Connection settings changed. Connect explicitly before searching.');
+  };
+  for (const id of ['reference', 'format', 'token']) {
+    get(id).addEventListener('input', connectionChanged); get(id).addEventListener('change', connectionChanged);
+  }
+  document.defaultView?.addEventListener('pagehide', () => disconnect());
+  sync();
+  return { connect, search, openMatch, cancel, refresh, disconnect };
+}
+if (typeof document !== 'undefined') mount(document, globalThis.location);
