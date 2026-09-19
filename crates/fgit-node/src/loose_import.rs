@@ -1566,6 +1566,23 @@ mod tests {
         .0
     }
 
+    fn write_loose_commit_repository(root: &Path) -> GitOid {
+        write_branch_head(root);
+        let blob = write_loose_object(root, GitObjectKind::Blob, b"first clone fixture\n");
+        let mut tree = b"100644 README\0".to_vec();
+        tree.extend_from_slice(blob.require_sha1().expect("fixture is SHA-1").as_bytes());
+        let tree = write_loose_object(root, GitObjectKind::Tree, &tree);
+        let commit = format!(
+            "tree {tree}\nauthor FrankenGit <fg@example.invalid> 0 +0000\ncommitter FrankenGit <fg@example.invalid> 0 +0000\n\nfirst clone fixture\n"
+        );
+        let commit = write_loose_object(root, GitObjectKind::Commit, commit.as_bytes());
+        let ref_path = root.join("refs/heads/main");
+        fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
+            .expect("ref directory creates");
+        fs::write(ref_path, format!("{commit}\n")).expect("fixture ref writes");
+        commit
+    }
+
     fn write_loose_blob_repository(root: &Path) -> GitOid {
         write_branch_head(root);
         let oid = GitOid::from_hex(
@@ -1644,14 +1661,14 @@ mod tests {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
         fs::create_dir_all(&source).expect("source directory creates");
-        let oid = write_loose_blob_repository(&source);
+        let oid = write_loose_commit_repository(&source);
         let node = node(scratch.0.join("node"));
 
         let staged = node
             .stage_loose_git_import(&source)
             .expect("reachable loose object stages through verified fabric");
-        assert_eq!(staged.object_count(), 1);
-        assert_eq!(staged.total_object_bytes(), 5);
+        assert_eq!(staged.object_count(), 3);
+        assert_eq!(staged.total_object_bytes(), 218);
         assert_eq!(
             staged
                 .refs()
@@ -1659,10 +1676,8 @@ mod tests {
                 .get(&fgit_types::RefName::try_new(b"refs/heads/main").expect("fixed ref parses")),
             Some(&oid)
         );
-        assert_eq!(
-            staged.closure().objects(),
-            &std::collections::BTreeSet::from([oid])
-        );
+        assert_eq!(staged.closure().objects().len(), 3);
+        assert!(staged.closure().objects().contains(&oid));
         assert!(node.read_git_object(oid).is_ok());
 
         let materialized = node
@@ -1685,7 +1700,7 @@ mod tests {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
         fs::create_dir_all(&source).expect("source directory creates");
-        let _ = write_loose_blob_repository(&source);
+        let _ = write_loose_commit_repository(&source);
         let node = node(scratch.0.join("node"));
 
         let staged = node
@@ -1760,7 +1775,7 @@ mod tests {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
         fs::create_dir_all(&source).expect("source directory creates");
-        let oid = write_loose_blob_repository(&source);
+        let oid = write_loose_commit_repository(&source);
         fs::remove_file(source.join("refs/heads/main")).expect("direct ref is removed");
         fs::write(
             source.join("packed-refs"),
@@ -1772,7 +1787,7 @@ mod tests {
         let staged = node
             .stage_loose_git_import(&source)
             .expect("a packed ref still names the same verified loose closure");
-        assert_eq!(staged.object_count(), 1);
+        assert_eq!(staged.object_count(), 3);
         assert_eq!(
             staged
                 .refs()
@@ -1789,7 +1804,7 @@ mod tests {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
         fs::create_dir_all(&source).expect("source directory creates");
-        let _ = write_loose_blob_repository(&source);
+        let _ = write_loose_commit_repository(&source);
         let alternates = source.join("objects/info/alternates");
         fs::create_dir_all(alternates.parent().expect("alternates parent exists"))
             .expect("alternates parent creates");
@@ -2123,11 +2138,15 @@ mod tests {
         let tree = decode_hex(include_str!(
             "../../fgit-git-object/tests/corpus/malformed/tree-truncated-reference.hex"
         ));
-        let oid = write_loose_object(&source, GitObjectKind::Tree, &tree);
+        let tree_oid = write_loose_object(&source, GitObjectKind::Tree, &tree);
+        let commit = format!(
+            "tree {tree_oid}\nauthor FrankenGit <fg@example.invalid> 0 +0000\ncommitter FrankenGit <fg@example.invalid> 0 +0000\n\ntruncated tree fixture\n"
+        );
+        let commit_oid = write_loose_object(&source, GitObjectKind::Commit, commit.as_bytes());
         let ref_path = source.join("refs/heads/main");
         fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
             .expect("ref directory creates");
-        fs::write(&ref_path, format!("{oid}\n")).expect("fixture ref writes");
+        fs::write(&ref_path, format!("{commit_oid}\n")).expect("fixture ref writes");
         let node = node(scratch.0.join("node"));
 
         assert!(matches!(
