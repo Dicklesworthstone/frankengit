@@ -12,6 +12,7 @@ mod source_writes;
 mod review_writes;
 mod merge_writes;
 mod outcomes;
+pub(super) mod protection;
 use fgit_node::{IssueReadRefusal, NodeConfig, OneNode};
 use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, RepositoryAuthorityHeadId};
 use super::Options;
@@ -22,6 +23,12 @@ pub(super) struct NodeTools { node: OneNode, options: Options }
 impl NodeTools {
     pub(super) fn open(options: Options) -> Result<Self, String> {
         options.validate_access()?;
+        let allow_stopped_intake = options.writes.any() || options.outcomes;
+        Self::open_authorized(options, allow_stopped_intake)
+    }
+    // Each profile validates its own launch grants before sharing this node
+    // lifecycle. This helper never registers tools or creates capabilities.
+    fn open_authorized(options: Options, allow_stopped_intake: bool) -> Result<Self, String> {
         let mut node = OneNode::open_existing(NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
             .with_object_format(options.format).with_worker_threads(2)).map_err(|_| "MCP repository could not be opened")?;
         let startup = (|| -> Result<(), String> {
@@ -33,7 +40,7 @@ impl NodeTools {
             let head = node.runtime().block_on(node.authenticate_authority_head())
                 .map_err(|_| "MCP repository authority could not be authenticated")?;
             if node.bring_into_service(head.receipt().generation()).is_err() {
-                if !(options.writes.any() || options.outcomes) {
+                if !allow_stopped_intake {
                     return Err("MCP repository read service unavailable".into());
                 }
                 // Historical lookup and identical terminal retries precede

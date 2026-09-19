@@ -52,7 +52,13 @@ impl Options {
     }
 }
 pub(super) fn run(arguments: &[String]) -> Result<(), String> {
-    if arguments == ["--help"] { eprintln!("{USAGE}"); return Ok(()); }
+    if arguments.first().is_some_and(|value| value == "--protection-admin") {
+        return backend::protection::run(&arguments[1..]);
+    }
+    if arguments == ["--help"] {
+        eprintln!("{USAGE}\n\nSeparate policy-inspection profile: fg-mcp --protection-admin --help");
+        return Ok(());
+    }
     let options = parse_options(arguments)?;
     let maximum = options.max_messages;
     let mut backend = backend::NodeTools::open(options)?;
