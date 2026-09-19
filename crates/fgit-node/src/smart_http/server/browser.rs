@@ -1,6 +1,8 @@
-//! Static source and issue browser shells. This shell holds no repository data or
-//! authority. Its same-origin API calls authenticate through existing grants.
-//! Each shell is exposed only by its explicitly enabled API profile.
+//! Static source, issue and PR shells hold no repository data or authority.
+//! Same-origin API calls authenticate through existing grants. Each shell is
+//! independently enabled by its existing gateway profile.
+
+mod pulls;
 
 use std::io::Write;
 use fgit_wire::smart_http::{BodyFraming, HttpVersion, head::Envelope};
@@ -67,6 +69,7 @@ pub(super) fn serve(
     trailing: &[u8],
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
+    if pulls::serve(profile, request, trailing, writer)? { return Ok(true); }
     let Some((media, body)) = checked_asset(
         &profile.route, profile.allow_source, profile.allow_issues, profile.maximum_response_bytes,
         request, !trailing.is_empty(),
