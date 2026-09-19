@@ -9,6 +9,7 @@ mod initial;
 mod history;
 mod branches;
 mod search;
+mod transfers;
 
 use std::io::Write;
 use fgit_wire::smart_http::{BodyFraming, HttpVersion, head::Envelope};
@@ -75,6 +76,7 @@ pub(super) fn serve(
     trailing: &[u8],
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
+    if transfers::serve(profile, request, trailing, writer)? { return Ok(true); }
     if search::serve(profile, request, trailing, writer)? { return Ok(true); }
     if branches::serve(profile, request, trailing, writer)? { return Ok(true); }
     if history::serve(profile, request, trailing, writer)? { return Ok(true); }

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FrankenGit · Portable transfers</title>
+  <link rel="stylesheet" href="../browser.css">
+  <link rel="stylesheet" href="./transfers.css">
+  <script type="module" src="./transfers-view.mjs"></script>
+</head>
+<body>
+  <header><strong>FrankenGit</strong><span>Portable Git transfers</span><a href="../">Source</a><a href="../branches/">Branches</a></header>
+  <main>
+    <h1>Move Git history without losing its identity</h1>
+    <p>Export a pinned snapshot or import a full Git bundle. Git objects and direct refs are transferred; issues, reviews, credentials and the default HEAD are not. Every publication uses the existing native authority.</p>
+    <section aria-label="Connection">
+      <label>Access token<input id="transfer-token" type="password" maxlength="64" autocomplete="off" spellcheck="false"></label>
+      <button id="transfer-connect" type="button">Connect</button><button id="transfer-disconnect" type="button">Disconnect</button>
+      <label>Repository object format<select id="transfer-format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
+      <button id="select-target" type="button">Select target snapshot</button><button id="cancel-transfer-read" type="button">Cancel read</button>
+      <p class="hint">Source-read is required for selection/export, source-write for import/fetch, and outcomes-read for recovery. Deployment switches and native policy still apply. Tokens remain in page memory only. Use HTTPS outside trusted loopback.</p>
+    </section>
+    <div id="transfer-status" role="status" aria-live="polite">Connect an explicitly scoped repository token.</div>
+    <section id="transfer-selection" aria-label="Selected target identity"></section>
+    <section aria-labelledby="export-heading">
+      <h2 id="export-heading">Export this snapshot</h2>
+      <button id="export-bundle" type="button">Export pinned Git bundle</button><button id="download-bundle" type="button">Download complete bundle</button>
+      <div id="export-info"></div>
+      <p class="hint">Downloads appear only after complete bounded transfer and identity checks. A Git bundle is not a forge backup or repository capsule.</p>
+    </section>
+    <section aria-labelledby="intake-heading">
+      <h2 id="intake-heading">Inspect a full bundle</h2>
+      <label>Git bundle (up to 16 MiB)<input id="bundle-file" type="file" accept=".bundle,application/x-git-bundle"></label>
+      <button id="load-bundle" type="button">Load and inspect selected bytes</button>
+      <p class="hint">Self-contained v2/v3 bundles only. Header and pack-checksum validation is not object or closure admission. The native service verifies objects and policy before publishing. Prerequisite/filter bundles are not accepted by this profile.</p>
+      <div id="bundle-info"></div><div id="bundle-refs"></div>
+      <h3>Explicit fetch destinations</h3>
+      <p>Use “Map this reference” for each source to import. Supply a complete destination ref and either <code>absent</code> or its exact old native OID. No destination or old tip is inferred; at most 64 mappings. One source may be mapped to several distinct destinations.</p>
+      <div id="mapping-rows"></div>
+      <button id="stage-fetch" type="button">Prepare mapped fetch — do not send</button>
+      <h3>Or import all advertised direct refs</h3>
+      <p>All destinations must be absent. No existing ref is overwritten and advertised HEAD is not installed. This operation supports at most 64 direct refs; use mapped fetch for a subset of larger bundles.</p>
+      <button id="stage-import" type="button">Prepare absent-ref import — do not send</button>
+    </section>
+    <section aria-labelledby="pending-heading">
+      <h2 id="pending-heading">Exact pending publication</h2>
+      <pre id="pending-transfer"></pre>
+      <p class="warning">Save the recovery receipt before sending. It contains private bundle bytes and exact mappings, but not the token. A timeout, disconnect or missing outcome never proves non-commit. An exported receipt may be sent by another session and cannot be discarded as unsent.</p>
+      <label><input id="confirm-transfer" type="checkbox">I confirm the displayed target, operation, complete ref effects and original request key.</label>
+      <button id="send-transfer" type="button">Send prepared transfer</button><button id="recover-transfer" type="button">Check canonical outcome</button>
+      <button id="save-transfer" type="button">Save recovery receipt</button><button id="discard-transfer" type="button">Discard unsent preparation</button>
+    </section>
+    <section aria-labelledby="restore-heading">
+      <h2 id="restore-heading">Recover an interrupted transfer</h2>
+      <p>Connect the original valid credential, then restore its saved receipt. A successful ref listing is not required for recovery. Restore checks the exact request commitment but never dispatches it. Keep the credential bound to the original principal.</p>
+      <label>Original receipt (up to 24 MiB)<input id="receipt-file" type="file" accept=".json,application/json"></label>
+      <button id="restore-transfer" type="button">Restore original request — do not send</button>
+    </section>
+  </main>
+  <footer>No external requests, persistent credentials, implicit force, automatic retries, or client-side publication authority.</footer>
+</body>
+</html>
