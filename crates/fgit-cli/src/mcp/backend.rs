@@ -4,6 +4,7 @@ mod issues;
 mod pulls;
 mod source;
 mod review;
+mod history;
 mod mutations;
 mod issue_writes;
 mod outcomes;
@@ -69,6 +70,7 @@ impl ReadTools for NodeTools {
         if self.options.issue_writes { tools.extend(issue_writes::tools()); }
         if self.options.outcomes { tools.extend(outcomes::tools()); }
         tools.extend(review::tools(self.options.source, self.options.pulls));
+        if self.options.source { tools.extend(history::tools()); }
         tools
     }
     fn is_mutation(&self, name: &str) -> bool {
@@ -93,6 +95,9 @@ impl ReadTools for NodeTools {
         }
         if review::permitted(self.options.source, self.options.pulls, name) {
             return review::call(self, name, args);
+        }
+        if self.options.source && matches!(name, history::LOG | history::BLAME) {
+            return history::call(self, name, args);
         }
         Err(ToolError::invalid("tool_not_granted"))
     }

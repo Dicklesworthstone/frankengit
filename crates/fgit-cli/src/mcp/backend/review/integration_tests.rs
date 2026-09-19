@@ -153,3 +153,78 @@ fn reopened_nodes_review_real_changes_and_recorded_pr_tips_without_publication()
         backend.close().unwrap();
     }
 }
+
+#[test]
+fn history_and_blame_page_reopened_native_nodes_with_exact_line_origins() {
+    use super::super::history::{BLAME, LOG};
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new(); let mut options = scratch.options(format); options.pulls = false;
+        let (mut node, _) = OneNode::init(NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
+            .with_object_format(format).with_worker_threads(2)).unwrap();
+        node.bring_into_service(HeadGeneration::FIRST).unwrap();
+        let reference = RefName::try_new(b"refs/heads/main").unwrap();
+        let patch = b"diff --git a/file b/file\nnew file mode 100644\n--- /dev/null\n+++ b/file\n@@ -0,0 +1,2 @@\n+old\n+stable\n";
+        let request = node.request_context();
+        let (_, root, bundle) = node.runtime().block_on(node.prepare_trusted_initial_patch_in(
+            &request, &reference, patch, &metadata(1), Default::default(), None,
+        )).unwrap();
+        let published = node.runtime().block_on(node.apply_initial_patch_bundle_durable_in(
+            &request, &session("initial"), &reference, root.commit, bundle.bytes(), Default::default(),
+        )).unwrap();
+        assert!(matches!(published.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
+        let tip = edit(&node, &reference, root.commit, "old", "new", 2);
+        let original = authority(&node); options.incarnation = Some(node.repository_incarnation_id());
+        node.shutdown().unwrap();
+        let mut backend = NodeTools::open(options).unwrap();
+        let mut server = Server::new(&backend).unwrap();
+        server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"history-test","version":"1"}}}"#).unwrap();
+        server.receive(&mut backend, br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+        let first = invoke(&mut server, &mut backend, 2, LOG, object([
+            ("reference", text("refs/heads/main")), ("limit", json::number(1)),
+        ]));
+        assert_eq!(result(&first)["total_commits"].text(), Some("2"));
+        assert_eq!(result(&first)["next_after"].text(), Some("1"));
+        let Value::Array(rows) = &result(&first)["commits"] else { panic!("commits") };
+        assert_eq!(rows[0].object().unwrap()["id"].text(), Some(tip.to_string().as_str()));
+        let tail = invoke(&mut server, &mut backend, 3, LOG, object([
+            ("reference", text("refs/heads/main")), ("after", text("1")),
+            ("expected_head", result(&first)["snapshot_token"].clone()),
+        ]));
+        let Value::Array(rows) = &result(&tail)["commits"] else { panic!("commits") };
+        assert_eq!(rows[0].object().unwrap()["id"].text(), Some(root.commit.to_string().as_str()));
+        assert_eq!(result(&tail)["complete"], Value::Bool(true));
+        let first_line = invoke(&mut server, &mut backend, 4, BLAME, object([
+            ("reference", text("refs/heads/main")), ("path_hex", text("66696c65")), ("limit", json::number(1)),
+        ]));
+        assert_eq!(result(&first_line)["total_lines"].text(), Some("2"));
+        assert_eq!(result(&first_line)["bytes_hex"].text(), Some("6e65770a"));
+        assert_eq!(result(&first_line)["next_first_line"].text(), Some("1"));
+        let Value::Array(lines) = &result(&first_line)["lines"] else { panic!("lines") };
+        assert_eq!(lines[0].object().unwrap()["origin_commit"].text(), Some(tip.to_string().as_str()));
+        // Default 100-line page clamps at EOF rather than refusing a short file.
+        let last_line = invoke(&mut server, &mut backend, 5, BLAME, object([
+            ("reference", text("refs/heads/main")), ("path_hex", text("66696c65")), ("first_line", text("1")),
+            ("expected_head", result(&first_line)["snapshot_token"].clone()),
+        ]));
+        assert_eq!(result(&last_line)["bytes_hex"].text(), Some("737461626c650a"));
+        assert_eq!(result(&last_line)["complete"], Value::Bool(true));
+        let Value::Array(lines) = &result(&last_line)["lines"] else { panic!("lines") };
+        assert_eq!(lines[0].object().unwrap()["origin_commit"].text(), Some(root.commit.to_string().as_str()));
+        assert_eq!(result(&last_line)["human_authorship_proven"], Value::Bool(false));
+        assert_eq!(authority(&backend.node), original);
+        let _later = edit(&backend.node, &reference, tip, "new", "later", 3);
+        let current = authority(&backend.node);
+        let stale = invoke(&mut server, &mut backend, 6, BLAME, object([
+            ("reference", text("refs/heads/main")), ("path_hex", text("66696c65")), ("first_line", text("1")),
+            ("expected_head", result(&first_line)["snapshot_token"].clone()),
+        ]));
+        tool_error(&stale);
+        backend.options.source = false; backend.options.pulls = true;
+        for name in [LOG, BLAME] {
+            assert!(!backend.tools().iter().any(|tool| tool.name == name));
+            assert!(backend.call(name, &Object::new()).is_err());
+        }
+        assert_eq!(authority(&backend.node), current);
+        backend.close().unwrap();
+    }
+}

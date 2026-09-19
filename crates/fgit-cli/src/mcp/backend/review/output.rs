@@ -55,6 +55,7 @@ fn check_span(span: ReviewSpan, bytes: &[u8], total: usize) -> Result<(), ToolEr
     let lines = bytes.iter().filter(|byte| **byte == b'\n').count()
         + usize::from(!bytes.is_empty() && bytes.last() != Some(&b'\n'));
     if span.byte_end > total || length != bytes.len() || span.line_count != lines
+        || span.line_start > span.byte_start
         || span.line_start.checked_add(span.line_count).is_none() {
         return Err(invalid());
     }

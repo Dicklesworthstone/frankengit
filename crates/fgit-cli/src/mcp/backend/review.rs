@@ -173,7 +173,11 @@ fn input_schema(pr: bool) -> Value {
             ("description", text("Optional nonzero native commit comparison pin. Does not select objects or grant access."))]));
     }
     if pr {
-        for name in ["number", "expected_version"] { properties.insert(name.into(), decimal_schema()); }
+        for name in ["number", "expected_version"] {
+            properties.insert(name.into(), object([("type", text("string")),
+                ("pattern", text("^[1-9][0-9]{0,19}$")),
+                ("description", text("Positive exact unsigned decimal string; bounded by u64, never a JSON number."))]));
+        }
     } else {
         for name in ["before_ref", "after_ref"] {
             properties.insert(name.into(), object([("type", text("string")),
