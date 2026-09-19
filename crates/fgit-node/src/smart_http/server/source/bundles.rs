@@ -2,6 +2,8 @@
 //! The source gateway authenticates and assigns read/write quotas. Bundle bytes
 //! never select a host path, mint a grant, or constitute forge-state recovery.
 
+mod intake;
+
 use std::io::{self, Read, Write};
 
 use fgit_crypto::sha256_digest;
@@ -17,12 +19,13 @@ use super::{Reply, read_error};
 use super::super::{Status, issues::{ApiError, MAX_FORM_BYTES, parse_form, parse_snapshot, read_form}};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Operation { Export }
+enum Operation { Export, Import, Fetch }
 
 #[derive(Debug)]
 pub(super) struct Request<'a> {
     pub(super) repository_route: &'a str,
     operation: Operation,
+    boundary: Option<&'a str>,
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
@@ -35,23 +38,36 @@ impl<'a> Request<'a> {
         { return Err(ApiError::not_found()); }
         let operation = match action {
             "export" => Operation::Export,
+            "import" => Operation::Import,
+            "fetch" => Operation::Fetch,
             _ => return Err(ApiError::not_found()),
         };
         if head.method != "POST" { return Err(ApiError::method()); }
         if head.body == BodyFraming::Empty || head.git_protocol.is_some() {
             return Err(ApiError::bad("invalid_bundle_envelope"));
         }
-        if !head.content_type.is_some_and(|media| media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
-            || media.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8"))
-        { return Err(ApiError::media()); }
-        if matches!(head.body, BodyFraming::ContentLength(n) if n > MAX_FORM_BYTES as u64) {
+        let (boundary, maximum) = match operation {
+            Operation::Export => {
+                if !head.content_type.is_some_and(|media| media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+                    || media.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8"))
+                { return Err(ApiError::media()); }
+                (None, MAX_FORM_BYTES)
+            }
+            Operation::Import | Operation::Fetch => {
+                use super::super::pulls::{SourceUploadKind, source_upload_boundary};
+                let boundary = source_upload_boundary(head.content_type.ok_or_else(ApiError::media)?)?;
+                (Some(boundary), SourceUploadKind::Bundle.maximum())
+            }
+        };
+        if head.body == BodyFraming::ContentLength(0) { return Err(ApiError::bad("empty_bundle_request")); }
+        if matches!(head.body, BodyFraming::ContentLength(n) if n > maximum as u64) {
             return Err(ApiError::too_large());
         }
-        Ok(Some(Self { repository_route, operation }))
+        Ok(Some(Self { repository_route, operation, boundary }))
     }
 
     pub(super) const fn is_mutation(&self) -> bool {
-        match self.operation { Operation::Export => false }
+        match self.operation { Operation::Export => false, Operation::Import | Operation::Fetch => true }
     }
 }
 
@@ -79,6 +95,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
     match request.operation {
+        Operation::Import | Operation::Fetch => intake::execute(node, request, session, framing, reader, http, maximum_response),
         Operation::Export => {
             // Resolve format and the snapshot precondition before object work.
             // Complete framing precedes even this read-only native operation.
@@ -178,6 +195,19 @@ mod tests {
             ("POST", "/r.git/api/v1/source/bundle/export", "Git-Protocol: version=2\r\n"),
         ] {
             let bytes = envelope(method, path, extra);
+            let head = head::parse(&bytes, HttpLimits::default()).unwrap().unwrap();
+            assert!(Request::parse(&head).is_err());
+        }
+    }
+    #[test]
+    fn import_and_fetch_are_mutations_with_multipart_envelopes_only() {
+        for action in ["import", "fetch"] {
+            let bytes = format!("POST /r.git/api/v1/source/bundle/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: multipart/form-data; boundary=x\r\nContent-Length: 1\r\n\r\n");
+            let head = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+            let request = Request::parse(&head).unwrap().unwrap();
+            assert!(request.is_mutation());
+            assert_eq!(request.boundary, Some("x"));
+            let bytes = envelope("POST", &format!("/r.git/api/v1/source/bundle/{action}"), "");
             let head = head::parse(&bytes, HttpLimits::default()).unwrap().unwrap();
             assert!(Request::parse(&head).is_err());
         }

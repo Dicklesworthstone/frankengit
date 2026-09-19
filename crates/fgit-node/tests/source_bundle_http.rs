@@ -142,3 +142,6 @@ fn export_requires_source_enablement_and_read_scope_before_continue_or_disclosur
     assert_eq!(export(&server.client, 'a', "object_format=sha1", "", false).status, 403);
     assert_eq!(server.finish().accepted_sessions(), 1);
 }
+
+#[path = "source_bundle_http/intake_tests.rs"]
+mod intake_tests;
