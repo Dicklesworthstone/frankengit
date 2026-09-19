@@ -75,7 +75,7 @@ pub(super) fn parse(name: &str, args: &Object) -> Result<IssueCommand, ToolError
     Ok(IssueCommand { number, expected_version, action })
 }
 pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
-    if !backend.options.issue_writes { return Err(ToolError::invalid("tool_not_granted")); }
+    if !backend.options.writes.issues { return Err(ToolError::invalid("tool_not_granted")); }
     let command = parse(name, args)?;
     let session = common::session(backend, common::key(args)?)?;
     let principal = session.authenticated_session().ok_or(ToolError::invalid("principal_not_bound"))?.principal_id();

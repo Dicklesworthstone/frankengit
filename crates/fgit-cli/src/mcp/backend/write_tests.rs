@@ -26,7 +26,7 @@ impl Fixture {
     fn options(&self, writes: bool, outcomes: bool, reads: bool, principal: u8) -> Options {
         Options { storage: self.root.join("node"), tenant: TenantId::from_bytes([0xa1; 16]),
             repository: RepositoryId::from_bytes([0xa2; 16]), format: self.format, incarnation: Some(self.incarnation),
-            issues: reads, pulls: false, source: false, issue_writes: writes, outcomes,
+            issues: reads, pulls: false, source: false, writes: super::super::WriteGrants { issues: writes, ..Default::default() }, outcomes,
             principal: (writes || outcomes).then_some(PrincipalId::from_bytes([principal; 16])), max_messages: 128 }
     }
 }
