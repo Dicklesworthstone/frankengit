@@ -322,31 +322,41 @@ fn missing_wrong_kind_undeclared_and_deleted_prerequisites_never_stage_the_candi
         );
         assert_eq!(snapshot(&destination).basis(), selected_unrelated.basis());
         assert!(destination.read_git_object(child).is_err());
-        for name in ["refs/heads/main", "refs/heads/seed"] {
-            accepted(apply(
-                &destination,
-                &[RefCommand {
-                    name: reference(name),
-                    expected_old: ExpectedOld::Exactly(base),
-                    proposed_new: ProposedNew::Delete,
-                    force: false,
-                }],
-                &format!("delete-{name}"),
-            ));
-        }
-        let deleted = snapshot(&destination);
-        assert!(destination.read_git_object(base).is_ok());
+        let c = Scratch::new();
+        let disconnected_dest = empty_node(&c, format);
+        let mut visibility = RefVisibility::new();
+        visibility
+            .push_rule(b"refs/heads/main", &Default::default())
+            .unwrap();
+        accepted(import(
+            &disconnected_dest,
+            export(&source, &visibility).bytes(),
+            "seed-transfer",
+        ));
+        accepted(apply(
+            &disconnected_dest,
+            &[RefCommand {
+                name: reference("refs/heads/seed"),
+                expected_old: ExpectedOld::Exactly(base),
+                proposed_new: ProposedNew::Delete,
+                force: false,
+            }],
+            "delete-seed",
+        ));
+        let deleted = snapshot(&disconnected_dest);
+        assert!(disconnected_dest.read_git_object(base).is_ok());
         assert!(
             sync_import(
-                &destination,
+                &disconnected_dest,
                 artifact.bytes(),
                 &[("refs/heads/main", None)],
                 "disconnected-base"
             )
             .is_err()
         );
-        assert_eq!(snapshot(&destination).basis(), deleted.basis());
-        assert!(destination.read_git_object(child).is_err());
+        assert_eq!(snapshot(&disconnected_dest).basis(), deleted.basis());
+        assert!(disconnected_dest.read_git_object(child).is_err());
+        disconnected_dest.shutdown().unwrap();
         destination.shutdown().unwrap();
         source.shutdown().unwrap();
     }
