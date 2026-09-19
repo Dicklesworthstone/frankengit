@@ -3,7 +3,7 @@
 import { Transport, fail, keys, record, copy, format, pinned, hex, utf8, form, opaque, principal } from './pulls-core.mjs';
 import { multipart, digest } from './pulls-candidate.mjs';
 import { recovery, receiptScope, base64, fromBase64, RECEIPT_LIMIT } from './pulls-actions.mjs';
-import { inspectBundle, transferCommand, exportIdentity, transferPublication, EXPORT_HEADERS, BUNDLE_LIMIT } from './transfers-protocol.mjs';
+import { inspectBundle, transferCommand, exportIdentity, transferPublication, EXPORT_HEADERS, BUNDLE_LIMIT, exportInventory, exportManifest } from './transfers-protocol.mjs';
 async function requestKey(root, fingerprint, scope, operation, nonce, upload, crypto) {
   const input = JSON.stringify(['frankengit-portable-bundle-v1', root.origin, root.route, fingerprint,
     [scope.tenant, scope.repository, scope.incarnation, scope.format], operation, nonce, upload.contentType, await digest(upload.bytes, crypto)]);
@@ -57,22 +57,35 @@ export class TransferClient {
       this.#bundle = plan; return this.bundle;
     });
   }
-  async exportBundle() {
+  async exportBundle({ verifyInventory = false } = {}) {
     return this.#exclusive(async () => {
       this.#noPending(); this.#exported = null;
       if (!this.#selected) fail('Select a repository snapshot before exporting.');
       const selected = this.selection, serial = this.#serial, epoch = this.#transport.epoch;
+      if (typeof verifyInventory !== 'boolean') fail('Choose explicit export inventory verification.');
+      const inventory = verifyInventory ? await exportInventory(this.#transport, selected, () => this.#check(serial, epoch)) : null;
       const response = await this.#transport.request('source/bundle/export', { method: 'POST', binary: true,
         body: form({ object_format: selected.scope.format, expected_head: selected.head }), maximum: BUNDLE_LIMIT, headerNames: EXPORT_HEADERS });
       const identity = exportIdentity(response, selected);
       const plan = await inspectBundle(response.value, this.#transport.crypto, () => this.#check(serial, epoch));
       if (plan.summary.sha256 !== identity.sha256 || plan.summary.object_format !== selected.scope.format) fail('Export bytes do not match their transport identity.');
       this.#check(serial, epoch);
-      this.#exported = { bytes: plan.bytes, summary: { ...plan.summary, scope: identity.scope, snapshot: identity.head } };
+      if (inventory && (response.headers['x-fgit-source-head'] !== inventory.source_head ||
+          JSON.stringify(plan.summary.refs) !== JSON.stringify(inventory.refs))) fail('Export bundle does not match every ref in the selected snapshot.');
+      this.#exported = { bytes: plan.bytes, summary: { ...plan.summary, scope: identity.scope, snapshot: identity.head,
+        ...(inventory ? { source_head: inventory.source_head, snapshot_refs_checked: true } : {}) } };
+      if (inventory) {
+        try { exportManifest(this.#transport.root, this.#exported.summary); }
+        catch (error) { this.#exported = null; throw error; }
+      }
       return this.exported;
     });
   }
   exportBytes() { if (!this.connected || !this.#exported) fail('No complete verified export is available.'); return this.#exported.bytes.slice(); }
+  exportManifest() {
+    if (this.#busy || !this.connected || !this.#exported) fail('No stable verified snapshot export is available.');
+    return exportManifest(this.#transport.root, this.#exported.summary);
+  }
   async stage(operation, mappings = []) {
     return this.#exclusive(async () => {
       this.#noPending(); if (!this.#bundle || !this.#selected) fail('Select a target and inspect the exact bundle first.');

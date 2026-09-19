@@ -1,6 +1,6 @@
 // Portable Git bytes, not a repository capsule or client-side object admission.
 import { fail, keys, record, integer, hex, unhex, utf8, format, oid, binding, pinned,
-  opaque, principal, form } from './pulls-core.mjs';
+  opaque, principal, form, rootFor, snapshot as snapshotToken } from './pulls-core.mjs';
 import { digest, BUNDLE_LIMIT } from './pulls-candidate.mjs';
 export { BUNDLE_LIMIT };
 export const HEADER_LIMIT = 256 * 1024, REF_LIMIT = 1024, MAPPING_LIMIT = 64;
@@ -117,4 +117,81 @@ export function transferPublication(reply, pending, status) {
   }
   return { terminal: true, outcome: reply.outcome, tx: reply.tx_id, principal: reply.principal_id,
     rcr: decision.repository_commit_id ?? null, refusal: decision.code ?? null, deliveryAcknowledged: null };
+}
+
+// A full export must match every visible direct ref, not merely a sampled ref
+// or a self-consistent pack checksum. All pages compare the selected head.
+export async function exportInventory(transport, selection, checkpoint = () => {}) {
+  const selected = structuredClone(selection), refs = []; let after = null, sourceHead = null, bytes = 0;
+  do {
+    checkpoint();
+    const query = { object_format: selected.scope.format, namespace: 'all', limit: 100, expected_head: selected.head };
+    if (after !== null) query.after = after;
+    const { value: page } = await transport.request('source/refs', { method: 'POST', body: form(query), maximum: 1024 * 1024 });
+    checkpoint(); pinned(page, selected.scope, selected.head);
+    if (page.type !== 'source_refs' || page.namespace !== 'all' || page.after !== after || page.limit !== 100 ||
+        page.read_only !== true || page.transaction_created !== false || page.published !== false ||
+        page.direct_refs_only !== true || !Array.isArray(page.refs) || page.refs.length > 100 ||
+        (sourceHead !== null && page.source_head !== sourceHead)) fail('Invalid full-export reference page.');
+    sourceHead = page.source_head;
+    for (const row of page.refs) {
+      record(row); const name = bundleRef(row.ref_hex); bytes += name.length / 2;
+      let decoded = null;
+      try { decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(unhex(name, 4096)); } catch {}
+      if (row.ref !== decoded || (refs.length && refs.at(-1).ref_hex >= name) ||
+          refs.length === REF_LIMIT || bytes > HEADER_LIMIT) fail('Invalid, repeated or oversized export inventory.');
+      refs.push({ ref_hex: name, object_id: oid(row.object_id, selected.scope.format) });
+    }
+    if (page.next_after !== null) {
+      if (typeof page.next_after !== 'string') fail('Unrepresentable export continuation.');
+      const cursor = bundleRef(hex(utf8.encode(page.next_after)));
+      if (page.refs.length !== 100 || refs.at(-1)?.ref_hex !== cursor || refs.length >= REF_LIMIT) fail('Incomplete or oversized export inventory.');
+    }
+    after = page.next_after;
+  } while (after !== null);
+  if (!refs.length) fail('The selected snapshot has no direct refs to export.');
+  checkpoint(); return { refs, source_head: sourceHead };
+}
+export const EXPORT_MANIFEST_LIMIT = 1024 * 1024;
+const manifestKeys = (value, names) => {
+  keys(value, names); if (Object.keys(value).length !== names.length) fail('Incomplete export manifest.');
+};
+export function exportManifest(root, summary) {
+  if (summary.snapshot_refs_checked !== true) fail('Export with a complete reference inventory before saving a manifest.');
+  const { scope, snapshot, source_head, snapshot_refs_checked, ...bundle } = summary;
+  const value = { type: 'frankengit-export-manifest-v1', schema_version: 1, origin: root.origin, route: root.route,
+    scope, snapshot, source_head, snapshot_refs_checked, bundle, forge_state_included: false, independently_authenticated: false };
+  const encoded = JSON.stringify(value, null, 2);
+  if (utf8.encode(encoded).length > EXPORT_MANIFEST_LIMIT) fail('Export manifest exceeds 1 MiB.');
+  return encoded;
+}
+export async function verifyExportManifest(input, encoded, crypto, checkpoint = () => {}) {
+  if (typeof encoded !== 'string' || encoded.length > EXPORT_MANIFEST_LIMIT || utf8.encode(encoded).length > EXPORT_MANIFEST_LIMIT) fail('Export manifest exceeds 1 MiB.');
+  const saved = JSON.parse(encoded);
+  manifestKeys(saved, ['type', 'schema_version', 'origin', 'route', 'scope', 'snapshot', 'source_head',
+    'snapshot_refs_checked', 'bundle', 'forge_state_included', 'independently_authenticated']);
+  if (saved.type !== 'frankengit-export-manifest-v1' || saved.schema_version !== 1 || saved.snapshot_refs_checked !== true ||
+      saved.forge_state_included !== false || saved.independently_authenticated !== false) fail('Unsupported export manifest claims.');
+  manifestKeys(saved.scope, ['tenant', 'repository', 'incarnation', 'format']);
+  for (const name of ['tenant', 'repository', 'incarnation']) opaque(saved.scope[name]);
+  format(saved.scope.format); opaque(saved.source_head);
+  // Reuse the existing route validator; no URL in a manifest is ever fetched.
+  const root = rootFor(`${saved.origin}${saved.route}/ui/transfers/`, '/ui/transfers/');
+  if (root.origin !== saved.origin || root.route !== saved.route) fail('Invalid export provenance route.');
+  snapshotToken(saved.snapshot); checkpoint();
+  const { summary } = await inspectBundle(input, crypto, checkpoint);
+  if (summary.object_format !== saved.scope.format) fail('Manifest hash domain changed.');
+  manifestKeys(saved.bundle, Object.keys(summary));
+  for (const name of Object.keys(summary)) {
+    if (name !== 'refs') { if (saved.bundle[name] !== summary[name]) fail(`Export manifest mismatch: ${name}.`); continue; }
+    if (!Array.isArray(saved.bundle.refs) || saved.bundle.refs.length !== summary.refs.length) fail('Export manifest ref set changed.');
+    for (let i = 0; i < summary.refs.length; i++) {
+      const row = saved.bundle.refs[i]; manifestKeys(row, ['ref_hex', 'object_id']);
+      if (row.ref_hex !== summary.refs[i].ref_hex || row.object_id !== summary.refs[i].object_id) fail('Export manifest ref identity changed.');
+    }
+  }
+  checkpoint();
+  // Matching bytes and an unsigned record do not authenticate its origin,
+  // establish currentness, or repeat the original server-side inventory read.
+  return { manifest: saved, live_snapshot_rechecked: false, independently_authenticated: false, objects_verified: false };
 }
