@@ -14,6 +14,7 @@ pub(super) mod review;
 mod artifact;
 mod replay;
 mod rebase;
+mod bundles;
 
 use std::io::{self, Read, Write};
 use fgit_authority::IdempotencyKey;
@@ -42,9 +43,13 @@ enum RequestKind<'a> {
     Review(review::Request<'a>),
     Replay(replay::Request<'a>),
     Rebase(rebase::Request<'a>),
+    Bundle(bundles::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = bundles::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::Bundle(request)));
+        }
         if let Some(request) = historical::Request::parse(envelope)? {
             return Ok(Self(RequestKind::Historical(request)));
         }
@@ -78,6 +83,7 @@ impl<'a> Request<'a> {
         match &self.0 {
             RequestKind::Read(_) | RequestKind::History(_) | RequestKind::Historical(_)
             | RequestKind::Review(_) | RequestKind::Replay(_) => false,
+            RequestKind::Bundle(request) => request.is_mutation(),
             RequestKind::Rebase(request) => request.is_mutation(),
             RequestKind::Change(request) => request.is_mutation(),
             RequestKind::Refs(request) => request.is_mutation(),
@@ -96,24 +102,27 @@ impl<'a> Request<'a> {
             RequestKind::Historical(request) => request.repository_route,
             RequestKind::Review(request) => request.repository_route,
             RequestKind::Replay(request) => request.repository_route,
+            RequestKind::Bundle(request) => request.repository_route,
             RequestKind::Rebase(request) => request.repository_route,
         }
     }
 }
 
 pub(super) struct Reply(ReplyBody);
-enum ReplyBody { Json(JsonReply), Patch(changes::PatchReply), Initial(initial::Prepared), Candidate(artifact::PreparedReply) }
+enum ReplyBody { Json(JsonReply), Patch(changes::PatchReply), Initial(initial::Prepared), Candidate(artifact::PreparedReply), BundleExport(bundles::Export) }
 impl Reply {
     fn json(reply: JsonReply) -> Self { Self(ReplyBody::Json(reply)) }
     fn patch(reply: changes::PatchReply) -> Self { Self(ReplyBody::Patch(reply)) }
     fn initial(reply: initial::Prepared) -> Self { Self(ReplyBody::Initial(reply)) }
     fn candidate(reply: artifact::PreparedReply) -> Self { Self(ReplyBody::Candidate(reply)) }
+    fn bundle_export(reply: bundles::Export) -> Self { Self(ReplyBody::BundleExport(reply)) }
     pub(super) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
         match &self.0 {
             ReplyBody::Json(reply) => reply.send(writer, version),
             ReplyBody::Patch(reply) => reply.send(writer, version),
             ReplyBody::Initial(reply) => reply.send(writer, version),
             ReplyBody::Candidate(reply) => reply.send(writer, version),
+            ReplyBody::BundleExport(reply) => reply.send(writer, version),
         }
     }
 }
@@ -144,6 +153,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
+        RequestKind::Bundle(request) => return bundles::execute(node, request, session, framing, reader, http, maximum_response),
         RequestKind::Historical(request) => return historical::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Rebase(request) => return rebase::execute(node, request, session, framing, reader, http, maximum_response),
         RequestKind::Replay(request) => return replay::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::candidate),
@@ -250,6 +260,7 @@ mod tests {
         for (action, media, mutation) in [("tree", "application/x-www-form-urlencoded", false),
             ("log", "application/x-www-form-urlencoded", false),
             ("search-batch", "application/x-www-form-urlencoded", false),
+            ("bundle/export", "application/x-www-form-urlencoded", false),
             ("historical-tree", "application/x-www-form-urlencoded", false),
             ("historical-blob", "application/x-www-form-urlencoded", false),
             ("diff", "application/x-www-form-urlencoded", false),
