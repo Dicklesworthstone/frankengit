@@ -188,7 +188,7 @@ export function metadataCommand(action, fields) {
   form(result); return result;
 }
 export function rootFor(href, suffix = '/ui/pulls/') {
-  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/', '/ui/transfers/', '/ui/tags/'].includes(suffix)) fail('Unsupported browser profile.');
+  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/', '/ui/branches/', '/ui/search/', '/ui/transfers/', '/ui/tags/', '/ui/replay/'].includes(suffix)) fail('Unsupported browser profile.');
   const page = new URL(href);
   if (!['https:', 'http:'].includes(page.protocol) || page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(page.hostname)) fail('Use HTTPS outside loopback.');
@@ -226,9 +226,9 @@ export function apiError(status) {
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial; #branches; #search; #transfers; #tags; #replay;
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/' }) {
-    this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#initial = pageSuffix === '/ui/initial/'; this.#branches = pageSuffix === '/ui/branches/'; this.#search = pageSuffix === '/ui/search/'; this.#transfers = pageSuffix === '/ui/transfers/'; this.#tags = pageSuffix === '/ui/tags/'; this.#fetch = fetchImpl; this.#crypto = cryptoImpl;
+    this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#initial = pageSuffix === '/ui/initial/'; this.#branches = pageSuffix === '/ui/branches/'; this.#search = pageSuffix === '/ui/search/'; this.#transfers = pageSuffix === '/ui/transfers/'; this.#tags = pageSuffix === '/ui/tags/'; this.#replay = pageSuffix === '/ui/replay/'; this.#fetch = fetchImpl; this.#crypto = cryptoImpl;
     this.#timeout = integer(timeoutMs, 'timeout', 1, 300_000);
   }
   get connected() { return Boolean(this.#token); }
@@ -262,7 +262,15 @@ export class Transport {
           (path === 'outcomes' ? body !== undefined : typeof body !== 'string' || utf8.encode(body).length > FORM_LIMIT)) fail('Invalid tag-profile request.');
       integer(maximum, 'tag response limit', 1, REPLY_LIMIT);
     }
-    const allowed = this.#tags
+    if (this.#replay) {
+      const write = path === 'source/apply' || path === 'outcomes';
+      if (method !== 'POST' || (write ? (typeof key !== 'string' || !key || read) : (key !== undefined || !read)) ||
+          (path === 'outcomes' ? body !== undefined : body === undefined)) fail('Invalid replay-profile request.');
+      integer(maximum, 'replay response limit', 1, 18 * 1024 * 1024);
+    }
+    const allowed = this.#replay
+      ? /^(?:source\/(?:tree|inspect|apply|(?:cherry-pick|revert)\/(?:prepare|resolve))|outcomes)$/.test(path)
+      : this.#tags
       ? /^(?:source\/(?:refs|tags\/(?:inspect|lightweight|annotated|delete))|outcomes)$/.test(path)
       : this.#transfers
       ? /^(?:source\/(?:refs|bundle\/(?:export|import|fetch))|outcomes)$/.test(path)
