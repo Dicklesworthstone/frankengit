@@ -1,6 +1,8 @@
 //! Read-only source search at one authenticated selection. No index, seal,
 //! object staging or authority mutation is performed by any entrypoint.
 
+mod regex;
+
 use std::cell::Cell;
 use fgit_crypto::{GitHashAlgorithm, GitObjectKind, Sha1, Sha256};
 use fgit_forge::source_search::{SearchCompletion, SearchError, SearchLimits, SourceQuery,

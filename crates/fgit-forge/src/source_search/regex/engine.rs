@@ -8,12 +8,14 @@ pub(super) const MAX_PATTERN: usize = 256;
 pub(super) const MAX_STATES: usize = 512;
 pub(super) const MAX_NESTING: usize = 16;
 const MAX_REPEAT: usize = 64;
+const MAX_COMPILE_STEPS: usize = 8192;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegexErrorKind {
     EmptyPattern,
     PatternLimit,
     StateLimit,
+    CompileWorkLimit,
     NestingLimit,
     UnexpectedToken,
     UnclosedGroup,
@@ -268,7 +270,8 @@ impl Program {
         let expression = parser.expression(0)?;
         if parser.at != pattern.len() { return Err(parser.error(RegexErrorKind::UnexpectedToken)); }
         let mut program = Self { states: vec![State::Accept], start: 0 };
-        program.start = program.compile_expr(&expression, 0)?;
+        let mut work = 0;
+        program.start = program.compile_expr(&expression, 0, &mut work)?;
         Ok(program)
     }
     pub(super) fn states(&self) -> usize { self.states.len() }
@@ -278,7 +281,13 @@ impl Program {
         }
         let at = self.states.len(); self.states.push(state); Ok(at)
     }
-    fn compile_expr(&mut self, expr: &Expr, next: usize) -> Result<usize, RegexError> {
+    fn compile_expr(&mut self, expr: &Expr, next: usize, work: &mut usize) -> Result<usize, RegexError> {
+        // Empty/zero-count expressions can expand without emitting a state.
+        // State bounds alone therefore do not bound nested repetition work.
+        if *work == MAX_COMPILE_STEPS {
+            return Err(RegexError { byte_offset: 0, kind: RegexErrorKind::CompileWorkLimit });
+        }
+        *work += 1;
         match expr {
             Expr::Empty => Ok(next),
             Expr::Byte(bytes) => self.emit(State::Byte(*bytes, next)),
@@ -287,13 +296,13 @@ impl Program {
             Expr::Boundary(positive) => self.emit(State::Boundary(*positive, next)),
             Expr::Sequence(items) => {
                 let mut start = next;
-                for item in items.iter().rev() { start = self.compile_expr(item, start)?; }
+                for item in items.iter().rev() { start = self.compile_expr(item, start, work)?; }
                 Ok(start)
             }
             Expr::Alternative(items) => {
-                let mut start = self.compile_expr(&items[0], next)?;
+                let mut start = self.compile_expr(&items[0], next, work)?;
                 for item in &items[1..] {
-                    let branch = self.compile_expr(item, next)?;
+                    let branch = self.compile_expr(item, next, work)?;
                     start = self.emit(State::Split(start, branch))?;
                 }
                 Ok(start)
@@ -302,16 +311,16 @@ impl Program {
                 let mut start = next;
                 if let Some(maximum) = maximum {
                     for _ in *minimum..*maximum {
-                        let branch = self.compile_expr(item, start)?;
+                        let branch = self.compile_expr(item, start, work)?;
                         start = self.emit(State::Split(branch, start))?;
                     }
-                    for _ in 0..*minimum { start = self.compile_expr(item, start)?; }
+                    for _ in 0..*minimum { start = self.compile_expr(item, start, work)?; }
                 } else {
                     let split = self.emit(State::Split(next, next))?;
-                    let body = self.compile_expr(item, split)?;
+                    let body = self.compile_expr(item, split, work)?;
                     self.states[split] = State::Split(body, next);
                     start = if *minimum == 0 { split } else { body };
-                    for _ in 1..*minimum { start = self.compile_expr(item, start)?; }
+                    for _ in 1..*minimum { start = self.compile_expr(item, start, work)?; }
                 }
                 Ok(start)
             }
@@ -468,6 +477,26 @@ mod tests {
             RegexErrorKind::StateLimit);
         let deep = format!("{}a{}", "(".repeat(MAX_NESTING + 1), ")".repeat(MAX_NESTING + 1));
         assert_eq!(Program::compile(deep.as_bytes(), false).unwrap_err().kind, RegexErrorKind::NestingLimit);
+    }
+    #[test]
+    fn nested_empty_repetition_has_a_compile_work_bound_without_state_growth() {
+        for pattern in [
+            b"((((){64}){64}){64})".as_slice(),
+            b"((((a{0}){64}){64}){64})",
+            b"((((a|){0}){64}){64}){64}",
+        ] {
+            assert_eq!(Program::compile(pattern, false).unwrap_err().kind,
+                RegexErrorKind::CompileWorkLimit);
+        }
+        // The corresponding bounded expansion is valid and still matches.
+        assert_eq!(find(b"((){64}){64}", b"x", false), Some((0, 0)));
+        assert_eq!(find(b"((a{0}){64})b", b"xb", false), Some((1, 2)));
+        let mut program = Program { states: vec![State::Accept], start: 0 };
+        let mut work = MAX_COMPILE_STEPS - 1;
+        assert_eq!(program.compile_expr(&Expr::Empty, 0, &mut work).unwrap(), 0);
+        assert_eq!(work, MAX_COMPILE_STEPS);
+        assert_eq!(program.compile_expr(&Expr::Empty, 0, &mut work).unwrap_err().kind,
+            RegexErrorKind::CompileWorkLimit);
     }
     #[test]
     fn budget_has_an_exact_permitted_twin_and_cancellation_is_not_absence() {
