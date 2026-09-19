@@ -62,3 +62,35 @@ hash computations and actual client/validator modules, but HTTP responses are
 explicit doubles. They do not establish live Rust-node ancestry, browser
 rendering, authorization deployment, full-workspace, or release conformance.
 No production Git subprocess or dependency is introduced.
+
+## Browser workflow
+
+The source-enabled gateway serves `<repository-route>/ui/history/`, linked
+from the current source browser. Connect a source-read token and explicitly
+open a full reference. Use the path form for exact file/directory history,
+then browse a commit's tree and its immutable file ranges. Byte-valued paths
+can be entered as lowercase hex and stay lossless during navigation.
+
+Blame always names the selected current ref tip, not whichever historical
+file happens to be on screen. Supply zero-based first/end line coordinates,
+with an exclusive end or a blank end for the complete remaining file. Origin
+buttons verify the exact old bytes before displaying a historical source view.
+Current ref tip and historical commit remain separately labeled.
+
+Blame tables show at most 200 rows at once with local pagination over the
+already validated response. Source previews are capped at 64 KiB and commit
+previews are narrower; explicit clipping messages and a complete validated
+JSON download preserve the distinction between a preview and a full result.
+Downloads contain repository data, not credentials. No repository markup is
+interpreted as HTML, Markdown, paths on the host, or executable commands.
+
+Static assets use the existing CSP/no-store/same-origin policy and require the
+source endpoint switch. Existing PR, issue, initial-authoring, and source-write
+gates are unchanged. Three Rust handler tests exercise exact routes, disabled
+profiles, framing, body limits and inert assets; Rust/Cargo was unavailable in
+this implementation environment, so these tests were not executed.
+
+The focused JavaScript suite is
+`node --test tests/browser/history.test.mjs tests/browser/history-view.test.mjs`.
+It exercises actual client, validator and controller modules with HTTP/DOM
+doubles, not browser-rendering or native-node deployment evidence.

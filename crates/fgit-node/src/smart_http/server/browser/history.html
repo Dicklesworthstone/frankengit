@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FrankenGit · History and blame</title>
+  <link rel="stylesheet" href="../browser.css">
+  <script type="module" src="./history-view.mjs"></script>
+</head>
+<body>
+  <header><strong>FrankenGit</strong><span>History and line provenance</span><span class="badge">Read only</span><a href="../">Current source</a></header>
+  <main>
+    <h1>Investigate an exact repository snapshot</h1>
+    <p>Follow commit history, inspect historical files, and trace exact lines through all merge parents. Names, messages and source are inert data. Commit identity does not authenticate its author.</p>
+    <form id="history-connect">
+      <label>Source-read token<input id="history-token" type="password" autocomplete="off" maxlength="64" spellcheck="false" required></label>
+      <label>Full reference<input id="history-ref" value="refs/heads/main" autocomplete="off" spellcheck="false" maxlength="1024" required></label>
+      <label>Object format<select id="history-format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
+      <button type="submit">Connect and open</button><button id="history-open" type="button">Reopen reference explicitly</button><button id="history-disconnect" type="button">Disconnect</button>
+    </form>
+    <p class="hint">Tokens remain only in page memory. HTTPS is required outside trusted loopback. Changing the reference field does not change the selected snapshot until you reopen it.</p>
+    <pre id="history-snapshot" aria-label="Pinned repository snapshot"></pre>
+    <form id="history-query">
+      <label>Exact file or directory path (blank means all history)<input id="history-path" autocomplete="off" spellcheck="false" maxlength="8192"></label>
+      <label>Path encoding<select id="history-path-kind"><option value="text">UTF-8 text</option><option value="hex">Raw lowercase hex bytes</option></select></label>
+      <label>Commits per page<input id="history-limit" inputmode="numeric" value="20" required></label>
+      <button id="history-log" type="submit">Show history</button>
+      <label>Blame first line (zero-based)<input id="history-first" inputmode="numeric" value="0"></label>
+      <label>Blame end line (exclusive; blank means end of file)<input id="history-end" inputmode="numeric"></label>
+      <button id="history-blame" type="button">Blame file at selected ref tip</button>
+    </form>
+    <p class="hint">Path history compares exact entries against every parent, without rename guesses. Blame is same-path line provenance, not proof of human authorship. A moved snapshot is refused rather than silently refreshed.</p>
+    <div id="history-status" role="status" aria-live="polite">Connect an explicitly scoped repository token to begin.</div>
+    <nav><button id="history-cancel" type="button">Cancel read</button><button id="history-download" type="button" disabled>Download validated response</button></nav>
+    <nav id="history-breadcrumbs" aria-label="Historical path"></nav>
+    <section id="history-content" aria-label="History, blame or historical source"></section>
+    <nav id="history-paging" aria-label="Result pages"></nav>
+  </main>
+  <footer>No writes, persistent credentials, executable repository markup, automatic retries, or third-party requests. Native authority still governs every read.</footer>
+</body>
+</html>
