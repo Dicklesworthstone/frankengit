@@ -1,6 +1,6 @@
-//! Static read-only source browser. This shell holds no repository data or
+//! Static source and issue browser shells. This shell holds no repository data or
 //! authority. Its same-origin API calls authenticate through existing grants.
-//! It is exposed only by the explicitly source-enabled gateway profile.
+//! Each shell is exposed only by its explicitly enabled API profile.
 
 use std::io::Write;
 use fgit_wire::smart_http::{BodyFraming, HttpVersion, head::Envelope};
@@ -9,6 +9,12 @@ use super::{Profile, Status};
 const HTML: &str = include_str!("browser/index.html");
 const SCRIPT: &str = include_str!("browser/browser.mjs");
 const STYLE: &str = include_str!("browser/browser.css");
+const ISSUES_HTML: &str = include_str!("browser/issues.html");
+const ISSUES_CLIENT: &str = include_str!("browser/issues.mjs");
+const ISSUES_VIEW: &str = include_str!("browser/issues-view.mjs");
+
+#[derive(Clone, Copy)]
+enum AssetScope { Source, Issues, Shared }
 const SECURITY: &str = concat!(
     "Cache-Control: no-store\r\n",
     "X-Content-Type-Options: nosniff\r\n",
@@ -19,23 +25,32 @@ const SECURITY: &str = concat!(
     "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'\r\n",
 );
 
-fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
+fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str, AssetScope)> {
     match target.split('?').next()?.as_bytes().strip_prefix(route)? {
-        b"/ui/" => Some(("text/html; charset=utf-8", HTML)),
-        b"/ui/browser.mjs" => Some(("text/javascript; charset=utf-8", SCRIPT)),
-        b"/ui/browser.css" => Some(("text/css; charset=utf-8", STYLE)),
+        b"/ui/" => Some(("text/html; charset=utf-8", HTML, AssetScope::Source)),
+        b"/ui/browser.mjs" => Some(("text/javascript; charset=utf-8", SCRIPT, AssetScope::Source)),
+        b"/ui/browser.css" => Some(("text/css; charset=utf-8", STYLE, AssetScope::Shared)),
+        b"/ui/issues/" => Some(("text/html; charset=utf-8", ISSUES_HTML, AssetScope::Issues)),
+        b"/ui/issues.mjs" => Some(("text/javascript; charset=utf-8", ISSUES_CLIENT, AssetScope::Issues)),
+        b"/ui/issues-view.mjs" => Some(("text/javascript; charset=utf-8", ISSUES_VIEW, AssetScope::Issues)),
         _ => None,
     }
 }
 
 fn checked_asset(
     route: &[u8],
-    enabled: bool,
+    source_enabled: bool,
+    issues_enabled: bool,
     maximum: u64,
     request: &Envelope<'_>,
     has_trailing_bytes: bool,
 ) -> Result<Option<(&'static str, &'static str)>, Status> {
-    let Some(found @ (_, body)) = asset(route, request.target) else { return Ok(None); };
+    let Some((media, body, scope)) = asset(route, request.target) else { return Ok(None); };
+    let enabled = match scope {
+        AssetScope::Source => source_enabled,
+        AssetScope::Issues => issues_enabled,
+        AssetScope::Shared => source_enabled || issues_enabled,
+    };
     if !enabled { return Err(Status::NotFound); }
     if request.method != "GET" { return Err(Status::Method); }
     if request.target.contains('?') || request.git_protocol.is_some()
@@ -43,7 +58,7 @@ fn checked_asset(
         || !matches!(request.body, BodyFraming::Empty | BodyFraming::ContentLength(0))
     { return Err(Status::BadRequest); }
     if body.len() as u64 > maximum { return Err(Status::TooLarge); }
-    Ok(Some(found))
+    Ok(Some((media, body)))
 }
 
 pub(super) fn serve(
@@ -53,7 +68,7 @@ pub(super) fn serve(
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
     let Some((media, body)) = checked_asset(
-        &profile.route, profile.allow_source, profile.maximum_response_bytes,
+        &profile.route, profile.allow_source, profile.allow_issues, profile.maximum_response_bytes,
         request, !trailing.is_empty(),
     )? else { return Ok(false); };
     let version = match request.version { HttpVersion::Http10 => "HTTP/1.0", HttpVersion::Http11 => "HTTP/1.1" };
@@ -68,7 +83,7 @@ mod tests {
     use super::*;
     #[test]
     fn static_assets_are_exactly_repository_scoped() {
-        for suffix in ["/ui/", "/ui/browser.mjs", "/ui/browser.css"] {
+        for suffix in ["/ui/", "/ui/browser.mjs", "/ui/browser.css", "/ui/issues/", "/ui/issues.mjs", "/ui/issues-view.mjs"] {
             assert!(asset(b"/repo.git", &format!("/repo.git{suffix}")).is_some());
             assert!(asset(b"/repo.git", &format!("/other.git{suffix}")).is_none());
             assert!(asset(b"/repo.git", &format!("/repo.git-more{suffix}")).is_none());
@@ -86,6 +101,12 @@ mod tests {
         assert!(!SCRIPT.contains("innerHTML"));
         assert!(!SCRIPT.contains("localStorage"));
         assert!(!SCRIPT.contains("sessionStorage"));
+        for script in [ISSUES_CLIENT, ISSUES_VIEW] {
+            assert!(!script.contains("innerHTML"));
+            assert!(!script.contains("localStorage"));
+            assert!(!script.contains("sessionStorage"));
+        }
+        assert!(!ISSUES_HTML.contains("<script>"));
     }
     #[test]
     fn shell_never_relaxes_endpoint_framing_or_source_enablement() {
@@ -104,8 +125,44 @@ mod tests {
         ] {
             let bytes = format!("{method} /repo.git{suffix} HTTP/1.1\r\nHost: local\r\n{extra}\r\n");
             let request = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
-            assert_eq!(checked_asset(b"/repo.git", enabled, maximum, &request, trailing).is_ok(), allowed);
+            assert_eq!(checked_asset(b"/repo.git", enabled, false, maximum, &request, trailing).is_ok(), allowed);
         }
+    }
+
+    #[test]
+    fn issue_and_source_shells_keep_independent_profile_ceilings() {
+        use fgit_wire::smart_http::{HttpLimits, head};
+        for source in [false, true] {
+            for issues in [false, true] {
+                for (suffix, allowed) in [
+                    ("/ui/", source), ("/ui/browser.mjs", source),
+                    ("/ui/issues/", issues), ("/ui/issues.mjs", issues),
+                    ("/ui/issues-view.mjs", issues), ("/ui/browser.css", source || issues),
+                ] {
+                    let bytes = format!("GET /repo.git{suffix} HTTP/1.1\r\nHost: local\r\n\r\n");
+                    let envelope = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+                    assert_eq!(checked_asset(b"/repo.git", source, issues, u64::MAX, &envelope, false).is_ok(), allowed);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn issue_shell_cannot_smuggle_bodies_queries_or_native_mutations() {
+        use fgit_wire::smart_http::{HttpLimits, head};
+        for (method, suffix, header, trailing, maximum) in [
+            ("POST", "/ui/issues/", "", false, u64::MAX),
+            ("GET", "/ui/issues/?token=secret", "", false, u64::MAX),
+            ("GET", "/ui/issues/", "Content-Length: 1\r\n", false, u64::MAX),
+            ("GET", "/ui/issues.mjs", "Git-Protocol: version=2\r\n", false, u64::MAX),
+            ("GET", "/ui/issues-view.mjs", "", true, u64::MAX),
+            ("GET", "/ui/issues/", "", false, 1),
+        ] {
+            let bytes = format!("{method} /repo.git{suffix} HTTP/1.1\r\nHost: local\r\n{header}\r\n");
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+            assert!(checked_asset(b"/repo.git", false, true, maximum, &envelope, trailing).is_err());
+        }
+        assert!(asset(b"/repo.git", "/repo.git/api/v1/issues/1/open").is_none());
     }
 
 }
