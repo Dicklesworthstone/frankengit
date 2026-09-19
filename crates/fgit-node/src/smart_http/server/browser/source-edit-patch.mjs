@@ -1,7 +1,6 @@
 // Exact full-file patches for native source admission. No host worktree or Git
 // subprocess is involved; byte paths and file modes remain explicit inputs.
 import { fail, keys, hex, unhex, utf8 } from './pulls-core.mjs';
-import { joinBytes } from './pulls-candidate.mjs';
 export const FILE_LIMIT = 256 * 1024;
 export const PATCH_LIMIT = 1024 * 1024;
 export const EDIT_LIMIT = 64;
@@ -17,9 +16,12 @@ export function sourcePath(value) {
   }
   return bytes;
 }
-export function fileBytes(value) {
+// Binary content is an explicit caller profile, not a change to text editors
+// or initial-history consumers of these shared helpers.
+export function fileBytes(value, allowBinary = false) {
+  if (typeof allowBinary !== 'boolean') fail('Choose an explicit file-byte profile.');
   if (!(value instanceof Uint8Array) || value.length > FILE_LIMIT) fail('File exceeds the 256 KiB editor limit.');
-  if (value.includes(0)) fail('NUL-containing files require a different native profile; binary patches are not supported.');
+  if (!allowBinary && value.includes(0)) fail('This text profile refuses NUL bytes; choose binary-safe authoring.');
   return value;
 }
 export function fileMode(value) {
@@ -36,7 +38,10 @@ export function quotePath(prefix, bytes) {
   return out + '"';
 }
 function same(a, b) { return a.length === b.length && a.every((byte, i) => byte === b[i]); }
-export function normalizeEdits(edits) {
+export function normalizeEdits(edits, options = {}) {
+  keys(options, ['allowBinary']);
+  const allowBinary = options.allowBinary === undefined ? false : options.allowBinary;
+  if (typeof allowBinary !== 'boolean') fail('Choose an explicit file-byte profile.');
   if (!Array.isArray(edits) || !edits.length || edits.length > EDIT_LIMIT) fail('Choose 1 through 64 complete edits.');
   const paths = new Set(); let bytes = 0, lines = 0;
   const normalized = edits.map(edit => {
@@ -47,7 +52,7 @@ export function normalizeEdits(edits) {
       const value = edit[side];
       if (value === null) result[side] = null;
       else {
-        keys(value, ['bytes', 'mode']); fileBytes(value.bytes); fileMode(value.mode);
+        keys(value, ['bytes', 'mode']); fileBytes(value.bytes, allowBinary); fileMode(value.mode);
         bytes += value.bytes.length;
         lines += value.bytes.reduce((n, byte) => n + Number(byte === 10), 0) + Number(value.bytes.length > 0 && value.bytes.at(-1) !== 10);
         if (bytes > PATCH_LIMIT || lines > LINE_LIMIT) fail('Combined edits exceed the patch byte or line budget.');
@@ -65,8 +70,8 @@ export function normalizeEdits(edits) {
   return normalized;
 }
 function lineCount(bytes) { return bytes.reduce((n, byte) => n + Number(byte === 10), 0) + Number(bytes.length > 0 && bytes.at(-1) !== 10); }
-export function fullFilePatch(edits) {
-  const normalized = normalizeEdits(edits), parts = []; let size = 0;
+export function fullFilePatch(edits, options = {}) {
+  const normalized = normalizeEdits(edits, options), parts = []; let size = 0;
   const put = value => {
     const bytes = typeof value === 'string' ? utf8.encode(value) : value;
     if ((size += bytes.length) > PATCH_LIMIT) fail('Encoded patch exceeds 1 MiB.');
@@ -93,5 +98,9 @@ export function fullFilePatch(edits) {
       }
     }
   }
-  return { bytes: joinBytes(...parts), edits: normalized };
+  // Avoid a variadic spread: a permitted many-line file can exceed JavaScript's
+  // argument limit even while remaining inside all patch and line budgets.
+  const bytes = new Uint8Array(size); let offset = 0;
+  for (const part of parts) { bytes.set(part, offset); offset += part.length; }
+  return { bytes, edits: normalized };
 }

@@ -88,7 +88,7 @@ export class SourceEditClient {
           oid(reply.source_commit, selection.scope.format) !== selection.fields.expected_commit ||
           oid(reply.root_tree, selection.scope.format) !== selection.tree) fail('A complete ordinary file at the selected base is required.');
       integer(reply.total_bytes, 'complete file size', 0, FILE_LIMIT);
-      const bytes = fileBytes(unhex(reply.content_hex, FILE_LIMIT));
+      const bytes = fileBytes(unhex(reply.content_hex, FILE_LIMIT), true);
       if (reply.total_bytes !== bytes.length || reply.returned_bytes !== bytes.length ||
           await objectHash('blob', bytes, selection.scope.format, this.#transport.crypto) !== oid(reply.object_id, selection.scope.format)) fail('File bytes do not match their native identity.');
       this.#check(serial, epoch);
@@ -98,7 +98,9 @@ export class SourceEditClient {
   async prepareEdits(edits, metadata) {
     return this.#exclusive(async () => {
       this.#noPending(); this.invalidateCandidate();
-      const patch = fullFilePatch(edits), meta = commitMetadata(metadata);
+      // Literal byte hunks are already owned by the native exact patch engine.
+      // NUL bytes are payload, not Git binary-patch control records.
+      const patch = fullFilePatch(edits, { allowBinary: true }), meta = commitMetadata(metadata);
       return this.#prepare(patch.bytes, meta, patch.edits);
     });
   }

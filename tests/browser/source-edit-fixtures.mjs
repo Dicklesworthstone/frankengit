@@ -24,12 +24,12 @@ export function decodeUpload(options) {
   const payloadEnd = bytes.lastIndexOf(`\r\n--${boundary}--\r\n`);
   return { command: new URLSearchParams(bytes.subarray(separator, middle).toString()), payload: new Uint8Array(bytes.subarray(payloadStart, payloadEnd)) };
 }
-export async function fixture(algorithm = 'sha1', edits = [edit()]) {
+export async function fixture(algorithm = 'sha1', edits = [edit()], patchOptions = {}) {
   const width = algorithm === 'sha1' ? 40 : 64;
   const base = 'a'.repeat(width), tree = 'b'.repeat(width), oldTree = 'c'.repeat(width);
   const commit = utf8.encode(`tree ${tree}\nparent ${base}\nauthor Alice <a@example.invalid> 1 +0000\ncommitter Alice <a@example.invalid> 1 +0000\n\nExact source edit\n`);
   const candidate = await objectHash('commit', commit, algorithm, crypto);
-  const patch = fullFilePatch(edits), manifest = await editManifest(patch.edits, algorithm, crypto);
+  const patch = fullFilePatch(edits, patchOptions), manifest = await editManifest(patch.edits, algorithm, crypto);
   const bundle = utf8.encode('# synthetic bounded native-bundle fixture\nPACK\n'), sha256 = await digest(bundle, crypto);
   const common = { schema_version: 1, tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32), repository_incarnation: '3'.repeat(32), object_format: algorithm };
   const selection = { ...common, source_head: 'head-1', snapshot_token: `alg:1:${'4'.repeat(64)}`, source_rcr: 'rcr-base',
