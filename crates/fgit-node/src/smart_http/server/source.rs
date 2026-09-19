@@ -9,6 +9,7 @@ mod refs;
 mod tags;
 mod initial;
 mod history;
+mod historical;
 pub(super) mod review;
 mod artifact;
 mod replay;
@@ -37,12 +38,16 @@ enum RequestKind<'a> {
     Tags(tags::Request<'a>),
     Initial(initial::Request<'a>),
     History(history::Request<'a>),
+    Historical(historical::Request<'a>),
     Review(review::Request<'a>),
     Replay(replay::Request<'a>),
     Rebase(rebase::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = historical::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::Historical(request)));
+        }
         if let Some(request) = rebase::Request::parse(envelope)? {
             return Ok(Self(RequestKind::Rebase(request)));
         }
@@ -71,7 +76,8 @@ impl<'a> Request<'a> {
     }
     pub(super) fn is_mutation(&self) -> bool {
         match &self.0 {
-            RequestKind::Read(_) | RequestKind::History(_) | RequestKind::Review(_) | RequestKind::Replay(_) => false,
+            RequestKind::Read(_) | RequestKind::History(_) | RequestKind::Historical(_)
+            | RequestKind::Review(_) | RequestKind::Replay(_) => false,
             RequestKind::Rebase(request) => request.is_mutation(),
             RequestKind::Change(request) => request.is_mutation(),
             RequestKind::Refs(request) => request.is_mutation(),
@@ -87,6 +93,7 @@ impl<'a> Request<'a> {
             RequestKind::Tags(request) => request.route(),
             RequestKind::Initial(request) => request.repository_route,
             RequestKind::History(request) => request.repository_route,
+            RequestKind::Historical(request) => request.repository_route,
             RequestKind::Review(request) => request.repository_route,
             RequestKind::Replay(request) => request.repository_route,
             RequestKind::Rebase(request) => request.repository_route,
@@ -137,6 +144,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
+        RequestKind::Historical(request) => return historical::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Rebase(request) => return rebase::execute(node, request, session, framing, reader, http, maximum_response),
         RequestKind::Replay(request) => return replay::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::candidate),
         RequestKind::Review(request) => return review::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
@@ -162,6 +170,13 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
                 node.browse_source_local_in(&context, &selection.reference, query), &mut live)
                 .map_err(read_error)?;
             output::browse(node, selection, query, &report, maximum, &mut live)?
+        }
+        Command::SearchBatch { selection, query, limits } => {
+            let (head, report) = drive_request_while(node, &context,
+                node.search_source_batch_snapshot_local_in(&context, &selection.reference,
+                    selection.expected_head, selection.expected_commit, query, *limits), &mut live)
+                .map_err(read_error)?;
+            output::search_batch(node, selection, query, *limits, head, &report, maximum, &mut live)?
         }
         Command::Search { selection, query, limits } => {
             let (head, report) = drive_request_while(node, &context,
@@ -234,6 +249,9 @@ mod tests {
     fn branch_tag_and_candidate_mutations_acquire_the_same_write_semantics() {
         for (action, media, mutation) in [("tree", "application/x-www-form-urlencoded", false),
             ("log", "application/x-www-form-urlencoded", false),
+            ("search-batch", "application/x-www-form-urlencoded", false),
+            ("historical-tree", "application/x-www-form-urlencoded", false),
+            ("historical-blob", "application/x-www-form-urlencoded", false),
             ("diff", "application/x-www-form-urlencoded", false),
             ("cherry-pick/prepare", "application/x-www-form-urlencoded", false),
             ("revert/prepare", "application/x-www-form-urlencoded", false),

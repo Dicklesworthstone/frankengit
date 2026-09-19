@@ -1,0 +1,24 @@
+:root { font-family: ui-sans-serif, system-ui, sans-serif; color: #e5edf7; background: #101720; color-scheme: dark; line-height: 1.55; }
+* { box-sizing: border-box; }
+body { max-width: 1320px; padding: 1.4rem; margin: auto; }
+header { border-bottom: 1px solid #44566b; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+header h1 { font-size: 2.6rem; margin: .4rem 0; }
+h2 { margin-top: .3rem; } h3, h4 { overflow-wrap: anywhere; }
+a { color: #b4d8ff; }
+section, details { background: #19232f; border: 1px solid #36465a; border-radius: .6rem; padding: 1.15rem; margin-bottom: 1.1rem; min-width: 0; }
+section section { background: #101720; }
+.columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.65fr); gap: 1.1rem; }
+.fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem 1.1rem; }
+label { display: block; margin: .7rem 0; }
+input:not([type=checkbox]), textarea, select { width: 100%; display: block; margin-top: .25rem; padding: .55rem; background: #101720; color: inherit; border: 1px solid #617286; border-radius: .25rem; font: inherit; }
+textarea { resize: vertical; } input[type=file] { overflow: hidden; }
+button { padding: .55rem .85rem; margin: .35rem .45rem .35rem 0; border-radius: .3rem; border: 1px solid #809fbe; color: #e8f4ff; background: #253d53; font: inherit; cursor: pointer; }
+button:hover:not(:disabled) { background: #345570; } button:disabled { opacity: .48; cursor: not-allowed; }
+:focus-visible { outline: 3px solid #ffda88; outline-offset: 3px; }
+pre { font-family: ui-monospace, monospace; font-size: .86rem; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; background: #0d141c; padding: .9rem; max-height: 36rem; overflow: auto; border: 1px solid #36465a; }
+#pr-list button { display: block; text-align: left; width: 100%; overflow-wrap: anywhere; }
+#status { border-left: 4px solid #ffda88; padding: .7rem; background: #101720; min-height: 3rem; }
+.publication { border: 2px solid #ad864e; } .confirmation { padding: .7rem; border: 1px solid #ad864e; }
+.identity, footer { overflow-wrap: anywhere; color: #b9c7d6; }
+summary { cursor: pointer; font-weight: 650; } footer { text-align: center; margin: 2rem 0; }
+@media (max-width: 760px) { .columns, .fields { grid-template-columns: minmax(0, 1fr); } body { padding: .65rem; } section, details { padding: .85rem; } }

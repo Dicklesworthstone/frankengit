@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FrankenGit · Issues</title>
+  <link rel="stylesheet" href="../browser.css">
+  <script type="module" src="../issues-view.mjs"></script>
+</head>
+<body>
+  <header><strong>FrankenGit</strong><span>Issue collaboration</span><a href="../">Source browser</a></header>
+  <main>
+    <h1>Repository issues</h1>
+    <p>Read issue history at one snapshot. Every change names an exact previous version and is published only by the existing canonical admission service.</p>
+    <form id="issue-connection">
+      <label>Access token<input id="issue-token" type="password" maxlength="64" autocomplete="off" spellcheck="false" required></label>
+      <button type="submit">Connect</button><button type="button" id="issue-disconnect">Disconnect</button>
+    </form>
+    <p class="hint">Independent grants: issues-read to browse, issues-write to change, outcomes-read to recover. No token is stored in a URL, file, cookie, or browser storage.</p>
+    <div id="issue-status" role="status" aria-live="polite">Connect an explicitly scoped repository token.</div>
+    <section id="issue-snapshot" aria-label="Issue snapshot"></section>
+    <nav aria-label="Issue navigation"><button type="button" id="issue-list">Reload issue list</button></nav>
+    <form id="issue-show"><label>Issue number<input id="show-number" inputmode="numeric" autocomplete="off" required></label><button type="submit">Reload issue</button></form>
+    <section id="issue-content" aria-label="Issue list or history"></section>
+    <nav id="issue-paging" aria-label="Issue pagination"></nav>
+
+    <section aria-labelledby="change-heading">
+      <h2 id="change-heading">Prepare a version-checked change</h2>
+      <p class="hint">New issue numbers are explicit, not guessed from a page. Choose open with version 0 for a new issue. Existing issues require their exact version; reopening or editing never bypasses a conflict.</p>
+      <form id="issue-change" class="issue-editor">
+        <label>Issue number<input id="change-number" inputmode="numeric" autocomplete="off" required></label>
+        <label>Expected version<input id="change-version" inputmode="numeric" autocomplete="off" required></label>
+        <label>Action<select id="change-action"><option value="open">Open new issue</option><option value="edit">Edit fields</option><option value="comment">Comment</option><option value="close">Close issue</option><option value="reopen">Reopen issue</option></select></label>
+        <fieldset id="title-field"><legend>Title (256 UTF-8 bytes maximum)</legend><label><input type="checkbox" id="replace-title" checked>Replace title when editing</label><input id="change-title" maxlength="256" autocomplete="off"></fieldset>
+        <fieldset id="body-field"><legend>Body or comment (64 KiB maximum)</legend><label id="replace-body-label"><input type="checkbox" id="replace-body" checked>Replace body when editing</label><textarea id="change-body" rows="8" maxlength="65536"></textarea></fieldset>
+        <fieldset id="labels-field"><legend>Labels (one per line; at most 32, each 64 UTF-8 bytes)</legend><label><input type="checkbox" id="replace-labels" checked>Replace labels when editing (empty clears all)</label><textarea id="change-labels" rows="3" maxlength="4096"></textarea></fieldset>
+        <button type="submit" id="prepare-change">Prepare change — do not send yet</button>
+      </form>
+    </section>
+    <section id="prepared-change" aria-labelledby="prepared-heading" hidden>
+      <h2 id="prepared-heading">Exact prepared request</h2>
+      <pre id="prepared-summary"></pre>
+      <p class="warning">Save the recovery receipt before sending. It contains private draft text and a retry key, but no token. A timeout or missing lookup result never proves that a change was not committed. Reloading this page loses its in-memory request unless you saved the receipt.</p>
+      <div class="issue-actions"><button type="button" id="save-receipt">Save recovery receipt</button><button type="button" id="send-change">Send prepared change</button><button type="button" id="check-outcome">Check canonical outcome</button><button type="button" id="discard-change">Discard unsent preparation</button></div>
+    </section>
+    <section aria-labelledby="restore-heading"><h2 id="restore-heading">Restore an unresolved request</h2>
+      <p class="hint">Connect the original credential, then load its saved receipt. Restoring never sends a change. Keep that credential bound to the same principal; this browser cannot authenticate an operator’s reassignment of a token.</p>
+      <label>Saved receipt<input id="restore-receipt" type="file" accept="application/json,.json"></label>
+    </section>
+  </main>
+  <footer>Texts are inert, not rendered Markdown. Disconnect clears authentication and visible issue data; an unresolved token-free request remains in memory until resolved. Save its receipt before leaving.</footer>
+</body>
+</html>

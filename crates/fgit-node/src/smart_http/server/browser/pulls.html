@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FrankenGit · Pull requests</title>
+  <link rel="stylesheet" href="../pulls.css">
+  <script type="module" src="../pulls-view.mjs"></script>
+</head>
+<body id="pr-collaboration">
+<header><a href="../">Source browser</a><h1>Pull requests</h1>
+  <p>Inspect exact candidate bytes. Record a review. Publish through the native repository authority.</p>
+</header>
+<main>
+  <section aria-labelledby="connection-heading">
+    <h2 id="connection-heading">Repository connection</h2>
+    <p>The same-origin APIs enforce independent Git-read, PR-read/write, review, merge, and outcome-recovery grants. No displayed approval grants merge authority.</p>
+    <form id="connection" autocomplete="off">
+      <label>Repository token <input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64" required></label>
+      <button type="submit">Connect</button><button id="disconnect" type="button">Disconnect and clear views</button>
+    </form>
+    <p>Use HTTPS outside loopback. The token is kept only in this page’s memory, not in cookies, URLs, or saved receipts.</p>
+    <p id="status" role="status" aria-live="polite"></p>
+  </section>
+  <div class="columns">
+    <section aria-labelledby="list-heading">
+      <h2 id="list-heading">Find a pull request</h2>
+      <button id="refresh" type="button">Refresh PR list</button>
+      <div id="pr-list"></div><div id="list-paging"></div>
+      <form id="select-pr">
+        <label>PR number <input id="select-number" inputmode="numeric" pattern="[1-9][0-9]*" required></label>
+        <button type="submit">Load latest PR snapshot</button>
+      </form>
+      <button id="new-pr" type="button">Compose a new PR</button>
+    </section>
+    <section aria-label="Selected pull request">
+      <p id="snapshot" class="identity"></p><div id="selected"></div>
+      <button id="reviews-load" type="button">Load reviews at this snapshot</button>
+      <div id="reviews"></div><div id="review-paging"></div>
+    </section>
+  </div>
+  <details>
+    <summary>Open, update, or close PR metadata</summary>
+    <p>This proposal does not change the observed PR above. Even closing submits the complete explicit metadata and expected version. There is no implicit tip refresh.</p>
+    <form id="metadata">
+      <div class="fields">
+        <label>PR number <input id="pr-number" inputmode="numeric" required></label>
+        <label>Action <select id="metadata-action"><option value="open">Open</option><option value="update">Update</option><option value="close">Close</option></select></label>
+        <label>Expected PR version (0 for new) <input id="expected-version" inputmode="numeric" required></label>
+        <label>Object format <select id="object-format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
+        <label>Source ref <input id="source-ref" placeholder="refs/heads/topic" spellcheck="false" required></label>
+        <label>Target ref <input id="target-ref" placeholder="refs/heads/main" spellcheck="false" required></label>
+        <label>Exact source tip <input id="source-tip" spellcheck="false" required></label>
+        <label>Exact target tip <input id="target-tip" spellcheck="false" required></label>
+      </div>
+      <label>Title <input id="title" maxlength="256" required></label>
+      <label>Body <textarea id="body" rows="6" maxlength="65536"></textarea></label>
+      <button id="metadata-stage" type="submit">Prepare metadata request — do not send</button>
+    </form>
+  </details>
+  <section aria-labelledby="prepare-heading">
+    <h2 id="prepare-heading">1. Prepare and inspect candidate</h2>
+    <p>Uses the selected open PR’s exact version and tips. Git-read and PR-read grants are required on the same token. This operation does not stage objects, record a vote, or move a ref.</p>
+    <form id="prepare">
+      <div class="fields">
+        <label>Explicit policy epoch <input id="policy-epoch" inputmode="numeric" required></label>
+        <label>Author <input id="author" placeholder="Name &lt;email@example.org&gt;" required></label>
+        <label>Committer <input id="committer" placeholder="Name &lt;email@example.org&gt;" required></label>
+        <label>Explicit Unix timestamp (seconds) <input id="timestamp" inputmode="numeric" required></label>
+      </div>
+      <label>Commit message <textarea id="message" rows="3" maxlength="65536" required></textarea></label>
+      <button id="prepare-candidate" type="submit">Prepare and inspect — read only</button>
+    </form>
+    <form id="candidate-import">
+      <label>Or import a shared candidate receipt (up to 24 MiB) <input id="candidate-import-file" type="file" accept="application/json,.json" required></label>
+      <button type="submit">Reinspect imported candidate — read only</button>
+    </form>
+    <p>Browser candidate bundles are capped at 16 MiB. Conflicted preparations expose explicit per-path choices below; resolved candidates must pass native reinspection before any review.</p>
+    <button id="candidate-download" type="button">Download candidate receipt</button>
+    <button id="inspection-download" type="button">Download full inspection JSON</button>
+    <div id="candidate"></div>
+    <form id="resolution" hidden>
+      <h3>Resolve the exact reported conflicts</h3>
+      <p>Choose base, ours (target), theirs (source), explicit deletion, or custom regular-file bytes for every conflicted path. There is no default choice. Unchanged paths cannot be edited here.</p>
+      <p>The original PR version, source/target tips, policy epoch, merge base and commit metadata remain fixed. Editing candidate inputs clears these choices. Custom files are limited to 1 MiB each and 16 MiB total; file uploads preserve exact binary bytes.</p>
+      <div id="resolution-paths"></div>
+      <button id="resolve-candidate" type="submit">Construct resolved candidate and inspect — read only</button>
+    </form>
+  </section>
+  <section aria-labelledby="review-heading">
+    <h2 id="review-heading">2. Prepare review or merge</h2>
+    <p>The candidate identity shown above is fixed. Preparing a request does not send it. The node independently checks all permissions, reviewer independence, expected versions, and current policy.</p>
+    <div class="columns">
+      <form id="review">
+        <h3>Candidate-bound review</h3>
+        <label>Decision <select id="review-action"><option value="approve">Approve</option><option value="request-changes">Request changes</option><option value="withdraw">Withdraw</option></select></label>
+        <label>Your expected reviewer-stream version (0 only for a new stream) <input id="review-version" inputmode="numeric" required></label>
+        <label>Reason <textarea id="reason" rows="4" maxlength="4096" required></textarea></label>
+        <p>The credential selects the reviewer. An empty or paginated review list does not establish your stream version. Withdrawal requires a positive existing version.</p>
+        <button id="review-stage" type="submit">Prepare review — do not send</button>
+      </form>
+      <form id="merge">
+        <h3>Reviewed merge</h3>
+        <label>Required reviewer IDs, one per line <textarea id="required-reviewers" rows="5" spellcheck="false" required></textarea></label>
+        <p>Enter 1–32 distinct 32-character lowercase hexadecimal principal IDs explicitly. Displayed reviews never fill this field automatically. The opener and submitter cannot provide independent approval.</p>
+        <button id="merge-stage" type="submit">Prepare merge — do not send</button>
+      </form>
+    </div>
+  </section>
+  <section class="publication" aria-labelledby="publish-heading">
+    <h2 id="publish-heading">3. Send or recover the exact request</h2>
+    <pre id="pending"></pre>
+    <label class="confirmation"><input id="confirm" type="checkbox"> I reviewed this saved action, PR number, versions, candidate, and reviewer requirements. Send or retry these exact bytes.</label>
+    <button id="send" type="button">Send / retry exact request</button>
+    <button id="recover" type="button">Check original outcome — read only</button>
+    <button id="receipt-download" type="button">Download recovery receipt</button>
+    <button id="discard" type="button">Discard never-exported, unsent draft</button>
+    <p>A lost response does not prove failure. Sent or exported requests remain pending until a canonical terminal outcome is observed. No retries run automatically.</p>
+    <form id="receipt-import">
+      <label>Restore a saved request using its original token <input id="receipt-import-file" type="file" accept="application/json,.json" required></label>
+      <button type="submit">Restore exact request — do not send</button>
+    </form>
+    <p>Recovery copies contain private proposal and candidate bytes, but no access token. Export before leaving this page. A downloaded copy might be dispatched elsewhere, so it can no longer be treated as a disposable draft.</p>
+  </section>
+</main>
+<footer>One repository authority. Separate observation, intent, publication, and delivery acknowledgement.</footer>
+</body>
+</html>

@@ -4,6 +4,8 @@
 //! Unicode case-folding service. A complete answer covers only regular files
 //! inside BOTH the caller's capability and the query's slash-bounded prefixes.
 
+pub mod batch;
+
 use std::collections::BTreeMap;
 
 use fgit_crypto::{GitHashAlgorithm, GitObjectKind, NativeObjectIdentity};
@@ -333,6 +335,7 @@ mod tests {
         assert!(query.includes(&TreePath::parse_default(b"src/a.rs").unwrap()));
         assert!(!query.includes(&TreePath::parse_default(b"src2/a.rs").unwrap()));
         for needle in [b"".as_slice(), b"a\nb", &[b'a';257]] {
+            assert!(SourceQuery::new(b"a", SearchCase::Exact, &[]).is_ok());
             assert!(SourceQuery::new(needle, SearchCase::Exact, &[]).is_err());
         }
         for prefix in [b"../secret".as_slice(), b"/absolute", b".git/config"] {

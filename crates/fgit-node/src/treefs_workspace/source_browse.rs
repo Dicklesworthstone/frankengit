@@ -1,6 +1,8 @@
 //! Exact, bounded repository browsing over verified immutable TreeFS objects.
 //! No host paths, worktree, object-ID lookup oracle, or publication effects.
 
+mod ancestor;
+
 use std::cell::Cell;
 use fgit_crypto::{GitHashAlgorithm, GitObjectKind, GitOid, NativeObjectIdentity, Sha1, Sha256};
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body, parse_tree};
@@ -77,15 +79,19 @@ impl OneNode {
         &self, request: &NodeRequestContext, reference: &RefName, query: &SourceBrowseQuery,
     ) -> Result<SourceBrowseReport, NodeWorkspaceRefusal> {
         match self.object_format {
-            Format::Sha1 => self.browse_local_format::<Sha1>(request, reference, query).await,
-            Format::Sha256 => self.browse_local_format::<Sha256>(request, reference, query).await,
+            Format::Sha1 => self.browse_local_format::<Sha1>(request, reference, query, None).await,
+            Format::Sha256 => self.browse_local_format::<Sha256>(request, reference, query, None).await,
         }
     }
 
     async fn browse_local_format<A: GitHashAlgorithm>(
         &self, request: &NodeRequestContext, reference: &RefName, query: &SourceBrowseQuery,
+        ancestor: Option<ancestor::Selection>,
     ) -> Result<SourceBrowseReport, NodeWorkspaceRefusal> {
         let path = query.validate(self.object_format).map_err(error)?;
+        if let Some(selection) = ancestor {
+            selection.validate(self.object_format, query)?;
+        }
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         live(request)?;
         let selected = self.materialize_admission_in(request).await
@@ -93,11 +99,15 @@ impl OneNode {
         if selected.snapshot().hidden_refs.hides(reference.as_bytes()) {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
-        let commit = *selected.snapshot().refs.get(reference).ok_or(NodeWorkspaceRefusal::RefUnavailable)?;
+        let tip = *selected.snapshot().refs.get(reference).ok_or(NodeWorkspaceRefusal::RefUnavailable)?;
         let head = selected.basis().id();
         if query.expected_head.is_some_and(|expected| expected != head) {
             return Err(error(SourceBrowseError::SnapshotMoved));
         }
+        if ancestor.is_some_and(|selection| selection.expected_ref_tip != tip) {
+            return Err(error(SourceBrowseError::CommitMoved));
+        }
+        let commit = ancestor.map_or(tip, |selection| selection.commit);
         if query.expected_commit.is_some_and(|expected| expected != commit) {
             return Err(error(SourceBrowseError::CommitMoved));
         }
@@ -125,7 +135,17 @@ impl OneNode {
             if kind != expected { return Err(NodeWorkspaceRefusal::CommitRequired); }
             Ok(body)
         };
-        let commit_body = read(commit, ObjectType::Commit)?;
+        // An admitted object elsewhere in the repository is not an ancestor
+        // of this ref. Establish that relationship BEFORE any tree/blob read.
+        // The receipt retains the verified target body, avoiding a second read.
+        let (commit_body, ancestry_bytes) = match ancestor {
+            Some(_) => {
+                let proof = ancestor::select(&source, request, tip, commit)?;
+                let additional = proof.bytes - proof.body.len() as u64;
+                (proof.body, additional)
+            }
+            None => (read(commit, ObjectType::Commit)?, 0),
+        };
         let parse = ParseLimits { max_object_bytes: source.inner.maximum_object_bytes,
             max_tree_entries: MAX_ENTRIES, tree_reference_bytes: self.object_format.digest_len(),
             ..ParseLimits::default() };
@@ -135,7 +155,9 @@ impl OneNode {
         let tree = parsed.tree_reference().and_then(|b| std::str::from_utf8(b).ok())
             .and_then(|s| Oid::from_hex(self.object_format, &s.to_ascii_lowercase()).ok())
             .ok_or(NodeWorkspaceRefusal::CommitRequired)?;
-        let mut metadata_bytes = commit_body.len() as u64;
+        // Ancestry has a separate 4096-commit work ceiling, but its bytes
+        // still consume the SAME 64 MiB allowance as subsequent source reads.
+        let mut metadata_bytes = commit_body.len() as u64 + ancestry_bytes;
         let mut metadata_objects = 1;
         let prefixes = if let Some(path) = &path {
             vec![TreePath::parse_default(path.components().next().unwrap_or_default())
