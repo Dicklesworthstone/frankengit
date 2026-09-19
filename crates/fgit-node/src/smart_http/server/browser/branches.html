@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FrankenGit — branches</title><link rel="stylesheet" href="../browser.css">
+<script type="module" src="branches-view.mjs"></script></head>
+<body><main>
+<header><h1>Branches and references</h1><p><a href="../">Browse source</a> · <a href="../source/">Edit files</a> · <a href="../initial/">Create initial history</a> · <a href="../pulls/">Pull requests</a></p></header>
+<p>Create a feature branch before editing, advance an existing branch to a selected tip, or atomically rename/delete a branch. Native permissions and policy still apply. No force option, default-branch change, PR retargeting, or tag mutation is performed.</p>
+<section><h2>Connect</h2><label>Repository token <input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64"></label>
+<button id="connect" type="button">Connect</button> <button id="disconnect" type="button">Disconnect and clear views</button>
+<p>Read access lists references. Changes additionally require receive permission and operator Git-write enablement. Outcome recovery requires outcomes-read. Tokens stay in this page's memory.</p></section>
+<section><h2>Choose a pinned reference snapshot</h2>
+<label>Object format <select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
+<label>Namespace <select id="namespace"><option value="branches">Branches</option><option value="tags">Tags (read only)</option><option value="all">All direct references</option></select></label>
+<label>Page size <input id="page-size" type="number" min="1" max="100" value="50"></label>
+<button id="load" type="button">Load a fresh snapshot</button> <button id="more" type="button">Next pinned page</button> <button id="cancel" type="button">Cancel reads and clear snapshot</button>
+<pre id="snapshot"></pre><p id="page-state"></p><ul id="refs"></ul>
+<p>A page is not a complete repository inventory. Hidden references are not disclosed. Byte-only reference names are displayed as hex and cannot be submitted through this text-form API.</p></section>
+<section><h2>Prepare a branch change</h2>
+<label>Operation <select id="operation"><option value="create">Create a branch from the selected branch tip</option><option value="update">Advance the selected branch to another listed tip</option><option value="rename">Rename the selected branch atomically</option><option value="delete">Delete the selected branch</option></select></label>
+<label>Selected branch <select id="selected"><option value="">Choose a listed branch</option></select></label>
+<label>New full branch name (create/rename) <input id="destination" placeholder="refs/heads/my-feature" maxlength="4096" spellcheck="false"></label>
+<label>New tip from branch (update only) <select id="target"><option value="">Choose a listed branch</option></select></label>
+<pre id="selection"></pre><button id="prepare" type="button">Prepare exact request — do not send</button>
+<p>Creating or renaming requires an absent destination at admission, not merely absence from this page. Updating/deleting requires the exact old tip. A rename is one atomic delete-and-create. Protected/default branches may be refused; this page never bypasses those checks.</p></section>
+<section><h2>Review and send the frozen request</h2><pre id="pending">No outstanding branch request.</pre>
+<label><input id="confirm-send" type="checkbox"> I reviewed these exact ref changes, including any deletion.</label>
+<button id="send" type="button">Send exact request</button> <button id="recover" type="button">Look up original outcome — read only</button>
+<button id="discard" type="button">Discard unsent, unexported request</button> <button id="save" type="button">Download recovery receipt</button>
+<p>Lost replies remain unknown. Retry sends the same saved bytes and key without a branch-presence pre-read. Downloaded receipts contain repository metadata, not the token; protect them. Restoring a receipt does not send it.</p>
+<label>Recovery receipt (at most 64 KiB) <input id="receipt-file" type="file" accept="application/json,.json"></label><button id="restore" type="button">Restore original request</button></section>
+<p id="status" role="status" aria-live="polite">Connect, then load a reference snapshot or restore a recovery receipt.</p>
+</main></body></html>
