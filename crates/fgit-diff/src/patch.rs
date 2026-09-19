@@ -183,11 +183,22 @@ fn diff_paths(bytes: &[u8], at: usize, limit: usize) -> Result<Vec<u8>, PatchErr
         } else { rest.to_vec() };
         (left, right)
     } else {
-        // Git leaves ordinary spaces unquoted. Require a unique b/ boundary;
-        // ambiguous headers refuse instead of guessing a destination.
-        let boundaries = bytes.windows(3).enumerate().filter(|(_, part)| *part == b" b/").map(|(i, _)| i).collect::<Vec<_>>();
-        if boundaries.len() != 1 { return Err(syntax(at, "ambiguous diff paths")); }
-        let split = boundaries[0]; (bytes[..split].to_vec(), bytes[split + 1..].to_vec())
+        // In this non-rename profile the two raw paths must be identical.
+        // Their lengths therefore determine the sole possible separator, even
+        // when the filename itself contains " b/". Check that exact spelling
+        // before considering the ordinary single-boundary refusal path.
+        let middle = bytes.len() / 2;
+        if bytes.starts_with(b"a/")
+            && bytes.get(middle..middle + 3) == Some(b" b/".as_slice())
+            && bytes[2..middle] == bytes[middle + 3..]
+        {
+            return strip_path(&bytes[..middle], b"a/", limit);
+        }
+        let mut boundaries = bytes.windows(3).enumerate()
+            .filter(|(_, part)| *part == b" b/").map(|(i, _)| i);
+        let split = boundaries.next().ok_or_else(|| syntax(at, "ambiguous diff paths"))?;
+        if boundaries.next().is_some() { return Err(syntax(at, "ambiguous diff paths")); }
+        (bytes[..split].to_vec(), bytes[split + 1..].to_vec())
     };
     let left = strip_path(&left, b"a/", limit)?;
     let right = strip_path(&right, b"b/", limit)?;
@@ -200,7 +211,15 @@ fn file_path(bytes: &[u8], prefix: &[u8], at: usize, limit: usize) -> Result<Opt
     let decoded = if bytes.first() == Some(&b'"') {
         let (decoded, used) = unquote(bytes, at)?;
         if used != bytes.len() { return Err(syntax(at, "trailing file header bytes")); } decoded
-    } else { bytes.to_vec() };
+    } else {
+        // Git terminates an unquoted ---/+++ path containing spaces with a
+        // tab. Remove only that delimiter, never filename spaces. Actual tabs
+        // in a pathname are quoted; timestamps and other suffixes are outside
+        // this profile and must not be mistaken for part of a destination.
+        let path = bytes.strip_suffix(b"\t").unwrap_or(bytes);
+        if path.contains(&b'\t') { return Err(syntax(at, "unsupported file header suffix")); }
+        path.to_vec()
+    };
     strip_path(&decoded, prefix, limit).map(Some)
 }
 fn index(bytes: &[u8], at: usize) -> Result<(IndexExpectation, Option<u32>), PatchError> {
@@ -355,8 +374,7 @@ impl FilePatch<'_> {
         check_path(&self.path, limits.max_path_bytes)?;
         if self.hunks.len() > limits.max_hunks { return Err(PatchError::Budget("patch hunks")); }
         if self.hunks.iter().map(|hunk| hunk.lines.len()).sum::<usize>() > limits.max_lines {
-            return Err(PatchError::Budget("hunk lines"));
-        }
+            return Err(PatchError::Budget("hunk lines")); }
         if (self.change == FileChange::Create) != source.is_none() { return Err(PatchError::SourcePresence); }
         let (old_mode, body) = source.unwrap_or((0o100644, b""));
         if !matches!(old_mode, 0o100644 | 0o100755) || self.old_mode.is_some_and(|mode| mode != old_mode) { return Err(PatchError::SourceMode); }
@@ -415,3 +433,135 @@ mod tests;
 #[cfg(test)]
 #[path = "patch/octal_tests.rs"]
 mod octal_tests;
+
+#[cfg(test)]
+mod path_header_regressions {
+    use super::*;
+
+    fn edit(path: &str) -> String {
+        format!(
+            "diff --git a/{path} b/{path}\n--- a/{path}\t\n+++ b/{path}\t\n@@ -1 +1 @@\n-old\n+new\n"
+        )
+    }
+
+    #[test]
+    fn git_space_terminated_headers_apply_to_the_exact_filename() {
+        for path in [
+            "ordinary space", " leading", "trailing ", "  ",
+            "a b/x", "nested b/name", "x b/y b/z", "café b/file ",
+        ] {
+            let bytes = edit(path);
+            let patch = UnifiedPatch::parse(bytes.as_bytes(), PatchLimits::default(), &|| false).unwrap();
+            assert_eq!(patch.files().len(), 1);
+            let file = &patch.files()[0];
+            assert_eq!(file.path(), path.as_bytes());
+            assert_eq!(file.change(), FileChange::Modify);
+            assert_eq!(file.apply(Some((0o100644, b"old\n")), patch.limits(), &|| false).unwrap(),
+                Some(PatchedFile { mode: 0o100644, content: b"new\n".to_vec() }));
+            assert!(matches!(file.apply(Some((0o100644, b"wrong\n")), patch.limits(), &|| false),
+                Err(PatchError::ContextMismatch { .. })));
+        }
+    }
+
+    #[test]
+    fn space_paths_work_for_creation_deletion_and_mode_only_changes() {
+        let path = "nested b/file with spaces ";
+        for (metadata, headers, hunk, source, expected, change) in [
+            ("new file mode 100755\n", format!("--- /dev/null\n+++ b/{path}\t\n"),
+                "@@ -0,0 +1 @@\n+new\n", None,
+                Some(PatchedFile { mode: 0o100755, content: b"new\n".to_vec() }), FileChange::Create),
+            ("deleted file mode 100644\n", format!("--- a/{path}\t\n+++ /dev/null\n"),
+                "@@ -1 +0,0 @@\n-old\n", Some((0o100644, b"old\n".as_slice())),
+                None, FileChange::Delete),
+            ("old mode 100644\nnew mode 100755\n", String::new(), "",
+                Some((0o100644, b"old\n".as_slice())),
+                Some(PatchedFile { mode: 0o100755, content: b"old\n".to_vec() }), FileChange::Modify),
+        ] {
+            let bytes = format!("diff --git a/{path} b/{path}\n{metadata}{headers}{hunk}");
+            let patch = UnifiedPatch::parse(bytes.as_bytes(), PatchLimits::default(), &|| false).unwrap();
+            let file = &patch.files()[0];
+            assert_eq!(file.path(), path.as_bytes());
+            assert_eq!(file.change(), change);
+            assert_eq!(file.apply(source, patch.limits(), &|| false).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn quoted_trailing_tabs_remain_filename_bytes() {
+        let bytes = b"diff --git \"a/name\\t\" \"b/name\\t\"\n--- \"a/name\\t\"\n+++ \"b/name\\t\"\n@@ -1 +1 @@\n-old\n+new\n";
+        let patch = UnifiedPatch::parse(bytes, PatchLimits::default(), &|| false).unwrap();
+        let file = &patch.files()[0];
+        assert_eq!(file.path(), b"name\t");
+        assert_eq!(file.apply(Some((0o100644, b"old\n")), patch.limits(), &|| false).unwrap().unwrap().content,
+            b"new\n");
+    }
+
+    #[test]
+    fn file_header_suffixes_are_not_silently_discarded() {
+        for bytes in [
+            b"a/name\t2000-01-01".as_slice(), b"a/name\t\t",
+            b"a/inner\ttab\t", b"a/name\tgarbage\t", b"\"a/name\"\t",
+        ] {
+            assert!(matches!(file_path(bytes, b"a/", 0, 4096), Err(PatchError::Syntax { .. })));
+        }
+        assert_eq!(file_path(b"/dev/null", b"a/", 0, 4096).unwrap(), None);
+        assert_eq!(file_path(b"/dev/null\t", b"a/", 0, 4096), Err(PatchError::InvalidPath));
+        assert_eq!(file_path(b"a/name \t", b"a/", 0, 4096).unwrap(), Some(b"name ".to_vec()));
+    }
+
+    #[test]
+    fn unquoted_separator_resolution_does_not_allow_renames_or_traversal() {
+        assert!(matches!(diff_paths(b"a/old b/new", 0, 4096),
+            Err(PatchError::Unsupported { feature: "rename or copy", .. })));
+        for bytes in [b"a/old b/one b/two".as_slice(), b"a/x b/y b/x b/z", b"a/x"] {
+            assert!(matches!(diff_paths(bytes, 0, 4096), Err(PatchError::Syntax { .. })));
+        }
+        for path in ["x b/../outside", "x b/.git/config", "x b//file", "x b/./file"] {
+            let bytes = format!("a/{path} b/{path}");
+            assert_eq!(diff_paths(bytes.as_bytes(), 0, 4096), Err(PatchError::InvalidPath));
+        }
+        assert_eq!(diff_paths(b"a/x\0 b/y b/x\0 b/y", 0, 4096), Err(PatchError::InvalidPath));
+    }
+
+    #[test]
+    fn file_headers_must_still_agree_with_the_complete_diff_path() {
+        for (path, old, new) in [
+            ("trailing ", "trailing", "trailing "),
+            ("nested b/name", "name", "nested b/name"),
+            ("nested b/name", "nested b/name", "another"),
+        ] {
+            let bytes = format!("diff --git a/{path} b/{path}\n--- a/{old}\t\n+++ b/{new}\t\n@@ -1 +1 @@\n-old\n+new\n");
+            assert!(matches!(UnifiedPatch::parse(bytes.as_bytes(), PatchLimits::default(), &|| false),
+                Err(PatchError::Syntax { reason: "file paths disagree", .. })));
+        }
+    }
+
+    #[test]
+    fn filename_limit_excludes_the_git_header_delimiter() {
+        let path = "a b/x";
+        let bytes = edit(path);
+        let limits = PatchLimits { max_path_bytes: path.len(), ..PatchLimits::default() };
+        assert!(UnifiedPatch::parse(bytes.as_bytes(), limits, &|| false).is_ok());
+        assert_eq!(UnifiedPatch::parse(bytes.as_bytes(),
+            PatchLimits { max_path_bytes: path.len() - 1, ..limits }, &|| false), Err(PatchError::InvalidPath));
+        let path = format!("{} b/x", "x".repeat(4092));
+        assert_eq!(path.len(), 4096);
+        let bytes = edit(&path);
+        assert!(UnifiedPatch::parse(bytes.as_bytes(), PatchLimits::default(), &|| false).is_ok());
+        let bytes = edit(&(path + "x"));
+        assert_eq!(UnifiedPatch::parse(bytes.as_bytes(), PatchLimits::default(), &|| false),
+            Err(PatchError::InvalidPath));
+    }
+
+    #[test]
+    fn repeated_separator_fragments_have_one_exact_interpretation() {
+        for count in 1..=32 {
+            let path = format!("{}leaf ", "x b/".repeat(count));
+            let bytes = edit(&path);
+            let first = UnifiedPatch::parse(bytes.as_bytes(), PatchLimits::default(), &|| false).unwrap();
+            let second = UnifiedPatch::parse(bytes.as_bytes(), PatchLimits::default(), &|| false).unwrap();
+            assert_eq!(first, second);
+            assert_eq!(first.files()[0].path(), path.as_bytes());
+        }
+    }
+}
