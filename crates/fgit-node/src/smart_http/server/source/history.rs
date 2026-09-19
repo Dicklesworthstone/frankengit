@@ -4,11 +4,15 @@
 
 mod blame;
 
+#[cfg(test)]
+mod path_tests;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::history::{HistoryCommit, HistoryError, HistoryLimits, HistoryPage, LogOptions};
+use fgit_forge::history::path::PathLogOptions;
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::{BodyFraming, HttpLimits, head::Envelope};
 use fgit_wire::visibility::RefVisibility;
@@ -57,21 +61,29 @@ struct Selection {
 struct Command {
     selection: Selection,
     options: LogOptions,
+    path: Option<Vec<u8>>,
 }
 impl Command {
     fn parse(bytes: &[u8], format: GitHashAlgorithm) -> Result<Self, ApiError> {
         let mut fields = BTreeMap::new();
         for (name, value) in parse_form(bytes, 16)? {
             if !matches!(name.as_str(), "ref" | "object_format" | "expected_head" | "expected_commit"
-                | "after" | "limit" | "max_commits" | "max_edges" | "max_metadata_bytes")
+                | "after" | "limit" | "max_commits" | "max_edges" | "max_metadata_bytes"
+                | "path_hex" | "max_tree_entries" | "max_cached_bytes")
             { return Err(ApiError::bad("unknown_or_inapplicable_field")); }
             if fields.insert(name, value).is_some() { return Err(ApiError::bad("duplicate_field")); }
         }
         let selection = selection(&mut fields, format)?;
+        let path = fields.remove("path_hex").map(|text| path_hex(&text)).transpose()?;
+        if path.is_none() && (fields.contains_key("max_tree_entries") || fields.contains_key("max_cached_bytes")) {
+            return Err(ApiError::bad("unknown_or_inapplicable_field"));
+        }
         let mut limits = HistoryLimits::default();
         limits.max_commits = number(&mut fields, "max_commits", limits.max_commits)?;
         limits.max_edges = number(&mut fields, "max_edges", limits.max_edges)?;
         limits.max_metadata_bytes = number(&mut fields, "max_metadata_bytes", limits.max_metadata_bytes)?;
+        limits.max_tree_entries = number(&mut fields, "max_tree_entries", limits.max_tree_entries)?;
+        limits.max_cached_bytes = number(&mut fields, "max_cached_bytes", limits.max_cached_bytes)?;
         let options = LogOptions {
             after: number(&mut fields, "after", 0)?,
             limit: number(&mut fields, "limit", LogOptions::default().limit)?,
@@ -81,8 +93,21 @@ impl Command {
         if options.after != 0 && selection.expected_head.is_none() {
             return Err(ApiError::bad("history_continuation_requires_snapshot"));
         }
-        Ok(Self { selection, options })
+        if let Some(path) = &path {
+            PathLogOptions { path: path.clone(), log: options }.validate()
+                .map_err(|_| ApiError::bad("invalid_history_path"))?;
+        }
+        Ok(Self { selection, options, path })
     }
+}
+// Canonical hex carries arbitrary Git name bytes, without UTF-8 conversion or
+// URI/host-path normalization. Bound expansion before allocating the path.
+fn path_hex(text: &str) -> Result<Vec<u8>, ApiError> {
+    if text.is_empty() || text.len() > 8192 || text.len() % 2 != 0
+        || !text.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    { return Err(ApiError::bad("invalid_history_path")); }
+    let nibble = |byte: u8| if byte <= b'9' { byte - b'0' } else { byte - b'a' + 10 };
+    Ok(text.as_bytes().chunks_exact(2).map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1])).collect())
 }
 fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, ApiError> {
     fields.remove(name).ok_or_else(|| ApiError::bad("missing_history_field"))
@@ -117,12 +142,20 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(node.git_daemon_session_timeout, GitDaemonSessionWorkScaling::FLAT);
     let mut live = || !deadline.expired();
-    let (head, page) = drive_request_while(node, &context,
-        node.read_commit_history_in(&context, &command.selection.reference, &RefVisibility::new(),
-            command.selection.expected_head, command.options), &mut live).map_err(|error| {
-                failure(error.is_snapshot_moved(), error.is_unavailable(),
-                    error.is_unpinned_continuation(), error.history_error())
-            })?;
+    let result = if let Some(path) = &command.path {
+        let options = PathLogOptions { path: path.clone(), log: command.options };
+        drive_request_while(node, &context,
+            node.read_path_history_in(&context, &command.selection.reference, &RefVisibility::new(),
+                command.selection.expected_head, &options), &mut live)
+    } else {
+        drive_request_while(node, &context,
+            node.read_commit_history_in(&context, &command.selection.reference, &RefVisibility::new(),
+                command.selection.expected_head, command.options), &mut live)
+    };
+    let (head, page) = result.map_err(|error| {
+        failure(error.is_snapshot_moved(), error.is_unavailable(),
+            error.is_unpinned_continuation(), error.history_error())
+    })?;
     let maximum = usize::try_from(maximum_response).unwrap_or(usize::MAX).min(MAX_REPLY_BYTES);
     let body = render_log(node, &command, head, &page, maximum, &mut live)?;
     Ok(Reply { status: Status::Success, body, terminal: None })
@@ -226,13 +259,15 @@ fn commit(out: &mut Output, row: &HistoryCommit, format: GitHashAlgorithm,
     out.hex(&row.body, live)?;
     out.append("}")
 }
-fn validate_page(page: &HistoryPage, options: LogOptions, format: GitHashAlgorithm) -> Result<(), ApiError> {
+// Filtered pages may have no matches or omit the selected tip. Keep the
+// stronger whole-graph invariants in validate_page rather than weakening them.
+fn validate_page_bounds(page: &HistoryPage, options: LogOptions, format: GitHashAlgorithm) -> Result<(), ApiError> {
+    options.validate().map_err(|_| ApiError::unavailable())?;
     let end = page.after.checked_add(page.commits.len()).ok_or_else(ApiError::unavailable)?;
-    if !valid_oid(format, page.tip) || page.total_commits == 0 || page.total_commits > options.limits.max_commits
+    if !valid_oid(format, page.tip) || page.total_commits > options.limits.max_commits
         || page.after != options.after || page.after > page.total_commits || end > page.total_commits
         || page.commits.len() != options.limit.min(page.total_commits - page.after)
         || page.next_after != (end < page.total_commits).then_some(end)
-        || (page.after == 0 && page.commits.first().map(|row| row.id) != Some(page.tip))
     { return Err(ApiError::unavailable()); }
     let mut ids = BTreeSet::new();
     let mut bytes = 0_usize;
@@ -243,13 +278,29 @@ fn validate_page(page: &HistoryPage, options: LogOptions, format: GitHashAlgorit
     }
     Ok(())
 }
+fn validate_page(page: &HistoryPage, options: LogOptions, format: GitHashAlgorithm) -> Result<(), ApiError> {
+    validate_page_bounds(page, options, format)?;
+    if page.total_commits == 0
+        || (page.after == 0 && page.commits.first().map(|row| row.id) != Some(page.tip))
+    { return Err(ApiError::unavailable()); }
+    Ok(())
+}
 fn render_log(node: &OneNode, command: &Command, head: RepositoryAuthorityHeadId, page: &HistoryPage,
     maximum: usize, live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
     checkpoint(live)?;
-    validate_page(page, command.options, node.object_format)?;
+    let kind = if command.path.is_some() {
+        validate_page_bounds(page, command.options, node.object_format)?;
+        "source_path_log"
+    } else {
+        validate_page(page, command.options, node.object_format)?;
+        "source_log"
+    };
     let mut out = Output::new(maximum);
-    identity(&mut out, node, &command.selection, head, page.tip, "source_log", live)?;
+    identity(&mut out, node, &command.selection, head, page.tip, kind, live)?;
+    if let Some(path) = &command.path {
+        render_path_selection(&mut out, path, live)?;
+    }
     out.append(&format!(concat!(",\"ordering\":\"child-before-parent-native-id-v1\",\"page_complete\":true,",
         "\"after\":{},\"limit\":{},\"total_commits\":{},\"next_after\":{},\"commits\":["),
         page.after, command.options.limit, page.total_commits,
@@ -260,6 +311,13 @@ fn render_log(node: &OneNode, command: &Command, head: RepositoryAuthorityHeadId
     }
     out.append("]}")?;
     out.finish(live)
+}
+
+fn render_path_selection(out: &mut Output, path: &[u8], live: &mut impl FnMut() -> bool) -> Result<(), ApiError> {
+    out.append(",\"path_hex\":")?;
+    out.hex(path, live)?;
+    out.append(concat!(",\"path_selection\":\"changed-against-any-parent-v1\",",
+        "\"total_commits_scope\":\"matching-path\",\"history_simplified\":false,\"renames_followed\":false"))
 }
 
 #[cfg(test)]
@@ -275,7 +333,7 @@ mod tests {
             assert!(Command::parse(base.as_bytes(), format).is_ok());
             for extra in ["&after=1", "&after=-1", "&limit=0", "&limit=101", "&max_commits=4097",
                 "&max_edges=0", "&max_metadata_bytes=4194305", "&ref=refs/heads/other", "&commit=abcd",
-                "&principal=admin", "&first_parent=true", "&path_hex=61"]
+                "&principal=admin", "&first_parent=true", "&path_prefix_hex=61"]
             { assert!(Command::parse((base.clone() + extra).as_bytes(), format).is_err(), "{extra}"); }
             let valid = format!("{base}&after=1&expected_head=alg:1:{}", "a".repeat(64));
             assert_eq!(Command::parse(valid.as_bytes(), format).unwrap().options.after, 1);

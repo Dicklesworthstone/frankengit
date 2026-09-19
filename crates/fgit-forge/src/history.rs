@@ -4,6 +4,9 @@
 //! Blame follows exact line matches through all parents, in stored parent order.
 //! It does not guess renames, copies, whitespace equivalence or human authorship.
 
+/// Exact file and directory change history, without history simplification.
+pub mod path;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use fgit_crypto::{GitObjectKind, git_object_id};
