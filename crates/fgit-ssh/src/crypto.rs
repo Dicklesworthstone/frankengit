@@ -10,7 +10,6 @@ use core::fmt::{self, Display, Formatter};
 
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::{ChaCha20Legacy, LegacyNonce};
-use curve25519_dalek::montgomery::MontgomeryPoint;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use fgit_crypto::sha256_digest;
 use poly1305::universal_hash::KeyInit;
@@ -19,6 +18,7 @@ use poly1305::Poly1305;
 use crate::wire::{
     MAX_PACKET_BYTES, MIN_PADDING_BYTES, PACKET_BLOCK_ALIGN, WireReader, WireWriter,
 };
+use crate::x25519::{x25519, x25519_base};
 
 /// SSH Ed25519 key algorithm name.
 pub const SSH_ED25519_ALGORITHM: &str = "ssh-ed25519";
@@ -93,7 +93,7 @@ impl Curve25519Kex {
     /// Generates an ephemeral key pair from 32 bytes of private randomness.
     #[must_use]
     pub fn from_private_bytes(private_key: [u8; 32]) -> Self {
-        let public_key = MontgomeryPoint::mul_base_clamped(private_key).0;
+        let public_key = x25519_base(&private_key);
         Self {
             private_key,
             public_key,
@@ -113,8 +113,7 @@ impl Curve25519Kex {
     /// Fails with [`CryptoError::WeakKeyExchange`] if the resulting shared secret is all zeros,
     /// as mandated by RFC 8731 section 3.
     pub fn compute_shared_secret(&self, peer_pub_bytes: &[u8; 32]) -> Result<[u8; 32], CryptoError> {
-        let peer_point = MontgomeryPoint(*peer_pub_bytes);
-        let shared = peer_point.mul_clamped(self.private_key).0;
+        let shared = x25519(&self.private_key, peer_pub_bytes);
 
         // RFC 8731 §3: "With Curve25519 and Curve448, the server MUST check whether the shared key
         // is the all-zero value and abort if so."

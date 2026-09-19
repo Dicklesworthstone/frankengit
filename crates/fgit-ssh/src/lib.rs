@@ -14,6 +14,7 @@ pub mod command;
 pub mod crypto;
 pub mod session;
 pub mod wire;
+pub mod x25519;
 
 pub use auth::{AuthRefusal, authorize_deploy_key, verify_client_signature};
 pub use command::{CommandParseRefusal, SshGitCommand, SshGitService};

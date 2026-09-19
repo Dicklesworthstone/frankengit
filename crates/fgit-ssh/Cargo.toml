@@ -10,7 +10,6 @@ description = "Pure-Rust SSH transport service for Git operations."
 [dependencies]
 asupersync.workspace = true
 chacha20 = { version = "0.10.1", default-features = false, features = ["legacy"] }
-curve25519-dalek = { version = "4.1.3", default-features = false }
 ed25519-dalek.workspace = true
 fgit-crypto.workspace = true
 fgit-identity.workspace = true

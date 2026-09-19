@@ -1054,7 +1054,6 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "chacha20",
- "curve25519-dalek",
  "ed25519-dalek",
  "fgit-crypto",
  "fgit-identity",
