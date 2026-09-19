@@ -20,6 +20,17 @@
     <section id="issue-snapshot" aria-label="Issue snapshot"></section>
     <nav aria-label="Issue navigation"><button type="button" id="issue-list">Reload issue list</button></nav>
     <form id="issue-show"><label>Issue number<input id="show-number" inputmode="numeric" autocomplete="off" required></label><button type="submit">Reload issue</button></form>
+    <form id="issue-search" role="search" aria-label="Issue triage filters">
+      <h2>Find and triage issues</h2>
+      <label>Literal title or body text<input id="issue-search-query" type="search" maxlength="256" autocomplete="off" placeholder="Up to 256 UTF-8 bytes"></label>
+      <label>State<select id="issue-search-state"><option value="all">Any state</option><option value="open">Open</option><option value="closed">Closed</option></select></label>
+      <label>Opening principal<input id="issue-search-opener" maxlength="32" autocomplete="off" spellcheck="false" placeholder="Optional 32-character hexadecimal ID"></label>
+      <label>All required labels (one per line)<textarea id="issue-search-labels" rows="2" maxlength="4096" autocomplete="off"></textarea></label>
+      <label><input id="issue-search-case" type="checkbox">Case-sensitive literal text</label>
+      <label>Maximum examined candidates per page<input id="issue-search-scan" type="number" min="1" max="1000" value="200" required></label>
+      <button type="submit">Search current snapshot</button><button type="button" id="issue-search-cancel">Cancel issue read</button>
+      <p class="hint">Filters combine with AND. Labels are exact; text matches title or body, not comments. Case-insensitive text folds ASCII only. Empty scan-limited pages may still have candidates to examine. Continuations keep the applied filters and original snapshot even when these fields change.</p>
+    </form>
     <section id="issue-content" aria-label="Issue list or history"></section>
     <nav id="issue-paging" aria-label="Issue pagination"></nav>
 

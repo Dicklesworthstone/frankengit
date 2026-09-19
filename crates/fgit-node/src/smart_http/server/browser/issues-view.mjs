@@ -1,4 +1,4 @@
-import { IssueClient, MAX_RECEIPT_BYTES, decimal } from './issues.mjs';
+import { IssueClient, MAX_RECEIPT_BYTES, decimal, issueSearchQuery } from './issues.mjs';
 
 function visible(value) {
   return String(value).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu,
@@ -46,6 +46,16 @@ export function mountIssues(document, location, options = {}) {
     for (const field of ['replace-title', 'replace-body', 'replace-labels']) byId(field).checked = true;
     configureEditor(); status(`Preparing against issue #${issue.number} version ${issue.version}. Nothing sent.`);
   }
+  function issueTable(issues, head) {
+    const table = node('table');
+    const header = node('tr'); header.append(node('th', 'Issue'), node('th', 'State / version')); table.append(header);
+    for (const issue of issues) {
+      const row = node('tr'), title = node('td');
+      title.append(button(`#${issue.number} ${issue.title}`, () => { void read(issue.number, 0, head); }));
+      row.append(title, node('td', `${issue.state} · version ${issue.version}`)); table.append(row);
+    }
+    return table;
+  }
   async function read(number, after = 0, head = null) {
     const currentSession = session, currentView = ++view;
     client.cancelReads(); clearView(); status('Reading one issue snapshot…');
@@ -55,14 +65,7 @@ export function mountIssues(document, location, options = {}) {
       const reply = result.reply;
       const content = node('div');
       if (number === null) {
-        const table = node('table');
-        const header = node('tr'); header.append(node('th', 'Issue'), node('th', 'State / version')); table.append(header);
-        for (const issue of reply.issues) {
-          const row = node('tr'), title = node('td');
-          title.append(button(`#${issue.number} ${issue.title}`, () => { void read(issue.number, 0, result.head); }));
-          row.append(title, node('td', `${issue.state} · version ${issue.version}`)); table.append(row);
-        }
-        content.append(table);
+        content.append(issueTable(reply.issues, result.head));
         if (!reply.issues.length) content.append(node('p', 'No issues on this snapshot page.'));
         if (reply.next_after !== null) byId('issue-paging').append(button('Next issue page', () => { void read(null, reply.next_after, result.head); }));
       } else if (!reply.found) {
@@ -99,9 +102,48 @@ export function mountIssues(document, location, options = {}) {
       clearView(); status(error.message); syncPending();
     }
   }
+  async function search(input, after = 0, head = null, maxScan = 200) {
+    const currentSession = session, currentView = ++view;
+    client.cancelReads(); clearView(); status('Searching a bounded issue snapshot…');
+    try {
+      const query = issueSearchQuery(input);
+      const result = await client.search(query, { after, limit: 20, head, maxScan });
+      if (session !== currentSession || view !== currentView) return;
+      const reply = result.reply, content = node('div');
+      content.append(node('h2', 'Issue search results'),
+        node('p', `Applied filters: ${JSON.stringify(query)}`),
+        node('p', `Examined ${reply.scanned} candidates; ${reply.count} matches on this page.`),
+        issueTable(reply.issues, result.head));
+      if (!reply.issues.length) content.append(node('p', reply.complete
+        ? 'No matches in the remaining snapshot suffix.'
+        : 'No matches in this bounded scan. Unexamined candidates remain.'));
+      if (reply.next_after !== null) {
+        // Capture the applied predicate, native candidate cursor, original
+        // snapshot and scan bound, never the subsequently edited form fields.
+        byId('issue-paging').append(button('Continue searching this snapshot', () => {
+          void search(query, reply.next_after, result.head, maxScan);
+        }));
+      }
+      byId('issue-content').append(content);
+      byId('issue-snapshot').textContent = `Repository ${result.binding.repository}\nSnapshot ${result.head}`;
+      status(reply.complete ? 'Search complete for this snapshot suffix. No repository-wide total is implied.'
+        : `Search paused at ${reply.stop_reason === 'scan_limit' ? 'the scan limit' : 'the result limit'}. More candidates remain; another match is not guaranteed.`);
+    } catch (error) {
+      if (session !== currentSession || view !== currentView) return;
+      if (!client.connected) disconnect();
+      clearView(); status(error.message); syncPending();
+    }
+  }
+  function cancelView() {
+    view += 1; client.cancelReads(); clearView();
+    status('Issue read cancelled. Any prepared or dispatched change is unchanged.');
+  }
   function disconnect() {
     session += 1; view += 1; client.disconnect(); clearView();
-    for (const id of ['issue-token', 'change-title', 'change-body', 'change-labels', 'change-number', 'change-version', 'show-number', 'restore-receipt']) byId(id).value = '';
+    for (const id of ['issue-token', 'change-title', 'change-body', 'change-labels', 'change-number', 'change-version', 'show-number', 'restore-receipt',
+      'issue-search-query', 'issue-search-labels', 'issue-search-opener']) byId(id).value = '';
+    byId('issue-search-state').value = 'all'; byId('issue-search-case').checked = false;
+    byId('issue-search-scan').value = '200';
     status(client.pending ? 'Disconnected. An unresolved request is retained locally; save its recovery receipt before leaving.' : 'Disconnected. Token and displayed issue data discarded.');
     syncPending();
   }
@@ -123,6 +165,20 @@ export function mountIssues(document, location, options = {}) {
     event.preventDefault();
     try { void read(decimal(byId('show-number').value, 'issue number', 1)); } catch (error) { status(error.message); }
   });
+  byId('issue-search').addEventListener('submit', event => {
+    event.preventDefault();
+    try {
+      const labels = byId('issue-search-labels').value;
+      const state = byId('issue-search-state').value;
+      void search({ state: state === 'all' ? null : state,
+        text: byId('issue-search-query').value || null,
+        opened_by: byId('issue-search-opener').value || null,
+        labels: labels === '' ? [] : labels.split('\n'),
+        case_sensitive: byId('issue-search-case').checked }, 0, null,
+        decimal(byId('issue-search-scan').value, 'search scan limit', 1));
+    } catch (error) { cancelView(); status(error.message); }
+  });
+  byId('issue-search-cancel').addEventListener('click', cancelView);
   byId('change-action').addEventListener('change', configureEditor);
   byId('issue-change').addEventListener('submit', async event => {
     event.preventDefault();
@@ -200,6 +256,6 @@ export function mountIssues(document, location, options = {}) {
     if (client.pending) { event.preventDefault(); event.returnValue = ''; }
   });
   configureEditor(); syncPending();
-  return { client, disconnect, read };
+  return { client, disconnect, read, search };
 }
 if (typeof document !== 'undefined') mountIssues(document, window.location);
