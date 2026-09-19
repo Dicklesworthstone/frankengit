@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FrankenGit — cherry-pick and revert</title><link rel="stylesheet" href="../browser.css">
+<script type="module" src="replay-view.mjs"></script></head>
+<body><main>
+<header><h1>Cherry-pick and revert</h1><p><a href="../">Source</a> · <a href="../history/">History and blame</a> · <a href="../branches/">Branches</a> · <a href="../source/">Source editor</a></p></header>
+<p>Apply or undo one exact commit on a selected destination branch. Preparation and inspection never publish. Native permissions, branch protection, and conditional publication remain in charge.</p>
+<section><h2>Select one immutable snapshot</h2>
+<label>Repository token<input id="token" type="password" autocomplete="off" spellcheck="false"></label>
+<button id="connect" type="button">Connect</button><button id="disconnect" type="button">Disconnect</button><button id="cancel" type="button">Cancel read work</button>
+<label>Destination branch<input id="target" value="refs/heads/main" maxlength="1024" spellcheck="false" autocomplete="off"></label>
+<label>Source-history branch<input id="source" value="refs/heads/topic" maxlength="1024" spellcheck="false" autocomplete="off"></label>
+<label>Native object format<select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
+<button id="select" type="button">Select both branch tips</button><pre id="selection"></pre>
+<p>For a revert on the same branch, use that branch for both fields. Credentials remain in page memory; HTTPS is required outside loopback. A known object ID alone does not grant access to its history.</p></section>
+<section><h2>Choose the exact change</h2>
+<label>Operation<select id="direction"><option value="cherry-pick">Cherry-pick (apply)</option><option value="revert">Revert (undo)</option></select></label>
+<label>Full commit object ID<input id="commit" maxlength="64" spellcheck="false" autocomplete="off"></label>
+<label>Mainline parent for a merge commit (blank for ordinary commits)<input id="mainline" inputmode="numeric" maxlength="5" autocomplete="off"></label>
+<label>Author (Name &lt;email&gt;)<input id="author" maxlength="1024" autocomplete="off"></label>
+<label>Committer (Name &lt;email&gt;)<input id="committer" maxlength="1024" autocomplete="off"></label>
+<label>Unix timestamp (UTC)<input id="timestamp" inputmode="numeric" autocomplete="off"></label>
+<label>Exact new commit message<textarea id="message" maxlength="65536"></textarea></label>
+<button id="prepare" type="button">Prepare and inspect replay</button><pre id="report"></pre>
+<p>Merge commits require an explicitly chosen parent number. The new commit has the destination tip as its only parent. Author text is not authenticated identity or a signature.</p></section>
+<section><h2>Resolve reported conflicts</h2>
+<p>No resolution is selected by default. During a revert, “theirs” is the selected parent (the undo side), not the source branch tip. An absent side never implies deletion. Custom files allow exact binary bytes, at most 256 KiB each and 1 MiB combined.</p>
+<div id="conflicts"></div><button id="resolve" type="button">Resolve and inspect candidate</button></section>
+<section><h2>Inspect the complete changed-path report</h2><div id="candidate"></div>
+<p>Text previews have a combined 256 KiB display limit. Binary and opaque content are identified, not rendered as source. Inspect the native candidate before preparing publication.</p>
+<button id="stage" type="button">Prepare publication locally</button></section>
+<section><h2>Publish or recover the original request</h2><pre id="pending"></pre>
+<label><input id="confirm" type="checkbox">I confirm the displayed branch, exact old tip, candidate and original request key.</label>
+<button id="send" type="button">Send or retry exact publication</button><button id="recover" type="button">Read original outcome</button><button id="discard" type="button">Discard unsent, unexported request</button>
+<button id="save-receipt" type="button">Save token-free recovery file</button>
+<label>Existing source/replay recovery file<input id="receipt-file" type="file"></label><button id="restore" type="button">Restore without sending</button>
+<p>A timeout or disconnected reply never proves rollback. Preserve the original key; do not prepare a replacement transaction. Recovery files contain repository bytes and must be protected. Their checksums are not signatures.</p></section>
+<p id="status" role="status" aria-live="polite">Connect a scoped repository token to begin.</p>
+</main></body></html>
