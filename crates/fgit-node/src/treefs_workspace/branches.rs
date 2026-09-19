@@ -107,8 +107,9 @@ impl OneNode {
             if materialized.snapshot().hidden_refs.hides(command.name.as_bytes()) {
                 return Err(NodeWorkspaceRefusal::RefUnavailable);
             }
-            if matches!(command.proposed_new, ProposedNew::Delete)
-                && materialized.snapshot().head_target.as_ref() == Some(&command.name) {
+            let is_default = materialized.snapshot().head_target.as_ref() == Some(&command.name)
+                || (materialized.snapshot().head_target.is_none() && command.name.as_bytes() == b"refs/heads/main");
+            if matches!(command.proposed_new, ProposedNew::Delete) && is_default {
                 return Err(invalid("the authority-selected default branch cannot be deleted or renamed"));
             }
         }
@@ -125,6 +126,20 @@ impl OneNode {
             database_context: request.authority(), database_exhaustion: &exhaustion, session_is_live: None,
         };
         let mut live = || workspace_request_live(request);
+        // Check branch kinds using verified object bytes, not object-ID shape.
+        // The materialized basis closure already established visible reachability before kind disclosure.
+        for command in attempt.request.ref_commands() {
+            if let ProposedNew::Update(oid) = command.proposed_new {
+                if !materialized.selected_closure().closure().objects().contains(&oid) {
+                    return Err(NodeWorkspaceRefusal::RefUnavailable);
+                }
+                if !live() { return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: exhaustion.get() }); }
+                let object = source.read_object(&oid);
+                if !live() { return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: exhaustion.get() }); }
+                let (kind, _) = object.map_err(|_| invalid("branch target could not be verified"))?;
+                if kind != ObjectType::Commit { return Err(NodeWorkspaceRefusal::CommitRequired); }
+            }
+        }
         let capability_bytes = format!("report-status atomic delete-refs object-format={}", self.object_format.as_str());
         let capabilities = Capabilities::parse_v1(capability_bytes.as_bytes(), &receive_limits.wire)
             .map_err(|_| invalid("branch receive capabilities could not be encoded"))?;
@@ -158,20 +173,6 @@ impl OneNode {
         let mut handoff = ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
         receive.finish_with_handoff(&mut handoff, &mut live).map_err(receive_error)?;
         let validated = handoff.into_validated_receive().map_err(receive_error)?;
-        // Check branch kinds using verified object bytes, not object-ID shape.
-        // Quarantine already established visible reachability, before kind disclosure.
-        for command in attempt.request.ref_commands() {
-            if let ProposedNew::Update(oid) = command.proposed_new {
-                if !materialized.selected_closure().closure().objects().contains(&oid) {
-                    return Err(NodeWorkspaceRefusal::RefUnavailable);
-                }
-                if !live() { return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: exhaustion.get() }); }
-                let object = source.read_object(&oid);
-                if !live() { return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: exhaustion.get() }); }
-                let (kind, _) = object.map_err(|_| invalid("branch target could not be verified"))?;
-                if kind != ObjectType::Commit { return Err(NodeWorkspaceRefusal::CommitRequired); }
-            }
-        }
         let context = AdmissionContext { head_key: self.head_key.clone(), tenant_id: self.tenant_id,
             repository_id: self.repository_id, principal_id: authenticated.principal_id(),
             idempotency_key: authenticated.client_idempotency_key().clone(), object_format: self.object_format };
