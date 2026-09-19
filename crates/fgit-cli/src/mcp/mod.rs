@@ -6,16 +6,17 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use fgit_types::{GitHashAlgorithm, PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
-const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-pull-writes] [--allow-outcomes]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Read groups, issue/PR writes and outcome recovery are\nINDEPENDENT grants. Writes or recovery require both a launch-bound principal\nand an exact incarnation pin. A write grant never implies a read or recovery grant.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor version.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nNo Git mutation, review approval, merge, shell, secret, network listener, sampling,\nor ambient filesystem tool is available. MCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
+const USAGE: &str = "usage: fg-mcp <storage-root> <tenant-id> <repository-id>\n  --trusted-local [--allow-issues] [--allow-pulls] [--allow-source]\n  [--allow-issue-writes] [--allow-pull-writes] [--allow-source-writes] [--allow-outcomes]\n  [--principal <id> --expected-incarnation <id>]\n  [--object-format sha1|sha256] [--max-messages <1..100000>]\n\nAn existing repository only. Read groups, issue/PR/source writes and outcome recovery are\nINDEPENDENT grants. Writes or recovery require both a launch-bound principal\nand an exact incarnation pin. A write grant never implies a read or recovery grant.\nThe operator sponsors every mutation as that principal; this is not remote IAM\nor a broker-backed Intent Run. Never proxy this process to untrusted clients.\nEvery mutation requires an original client key and exact predecessor or absent-ref condition.\nA lost response, timeout or disconnect does not prove rollback. Recover the key\nor retry the identical command with a NEW JSON-RPC ID and the SAME durable key.\nSource writes use non-forced native admission. Bundles are bounded to 24 KiB.\nNo review approval, coupled merge, shell, secret, network listener, sampling,\nor ambient filesystem tool is available. MCP protocol remains 2025-06-18.\nComplete newline-delimited messages only; operations are serial and native-budget\nbounded. Late cancellation does not undo a canonical decision or preempt work.\nEOF, output failure, or the message bound closes the node explicitly.\nRepository text and client capabilities cannot change identity or grants.";
 
 /// Independent launch-time mutation ceilings. None implies a read/recovery grant.
 #[derive(Clone, Copy, Debug, Default)]
 struct WriteGrants {
     issues: bool,
     pulls: bool,
+    source: bool,
 }
 impl WriteGrants {
-    fn any(self) -> bool { self.issues || self.pulls }
+    fn any(self) -> bool { self.issues || self.pulls || self.source }
 }
 
 #[derive(Clone, Debug)]
@@ -71,7 +72,7 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
         let name = arguments[at].as_str(); at += 1;
         let value = match name {
             "--trusted-local" | "--allow-issues" | "--allow-pulls" | "--allow-source"
-                | "--allow-issue-writes" | "--allow-pull-writes" | "--allow-outcomes" => "",
+                | "--allow-issue-writes" | "--allow-pull-writes" | "--allow-source-writes" | "--allow-outcomes" => "",
             "--object-format" | "--expected-incarnation" | "--max-messages" | "--principal" => {
                 let value = arguments.get(at).ok_or("missing option value")?; at += 1; value.as_str()
             }
@@ -93,7 +94,8 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
     let options = Options { storage: arguments[0].clone().into(), tenant, repository, format, incarnation,
         issues: flags.contains_key("--allow-issues"), pulls: flags.contains_key("--allow-pulls"),
         source: flags.contains_key("--allow-source"),
-        writes: WriteGrants { issues: flags.contains_key("--allow-issue-writes"), pulls: flags.contains_key("--allow-pull-writes") },
+        writes: WriteGrants { issues: flags.contains_key("--allow-issue-writes"), pulls: flags.contains_key("--allow-pull-writes"),
+            source: flags.contains_key("--allow-source-writes") },
         outcomes: flags.contains_key("--allow-outcomes"), principal, max_messages: maximum as usize };
     options.validate_access()?;
     Ok(options)
@@ -117,7 +119,7 @@ mod tests {
     }
     #[test]
     fn write_and_recovery_grants_require_identity_and_incarnation_but_imply_no_reads() {
-        for flag in ["--allow-issue-writes", "--allow-pull-writes", "--allow-outcomes"] {
+        for flag in ["--allow-issue-writes", "--allow-pull-writes", "--allow-source-writes", "--allow-outcomes"] {
             let mut args = arguments(); args.retain(|s| s != "--allow-issues"); args.push(flag.into());
             assert!(parse_options(&args).is_err());
             args.extend(["--principal".into(), "33".repeat(16)]);
@@ -127,6 +129,7 @@ mod tests {
             assert!(!options.issues && !options.pulls && !options.source);
             assert_eq!(options.writes.issues, flag == "--allow-issue-writes");
             assert_eq!(options.writes.pulls, flag == "--allow-pull-writes");
+            assert_eq!(options.writes.source, flag == "--allow-source-writes");
             assert_eq!(options.outcomes, flag == "--allow-outcomes");
         }
         let mut args = arguments(); args.extend(["--principal".into(), "33".repeat(16)]);
@@ -161,11 +164,11 @@ mod mutation_grant_tests {
     use super::*;
     #[test]
     fn all_launch_grant_combinations_preserve_independent_write_ceilings() {
-        let flags = ["--allow-issues", "--allow-pulls", "--allow-source", "--allow-issue-writes", "--allow-pull-writes", "--allow-outcomes"];
-        for mask in 0_u8..64 {
+        let flags = ["--allow-issues", "--allow-pulls", "--allow-source", "--allow-issue-writes", "--allow-pull-writes", "--allow-source-writes", "--allow-outcomes"];
+        for mask in 0_u8..128 {
             let mut args = vec!["/unused".into(), "11".repeat(16), "22".repeat(16), "--trusted-local".into()];
             for (bit, flag) in flags.iter().enumerate() { if mask & (1 << bit) != 0 { args.push((*flag).into()); } }
-            let scoped = mask & 0b111000 != 0;
+            let scoped = mask & 0b1111000 != 0;
             if scoped {
                 assert!(parse_options(&args).is_err());
                 args.extend(["--principal".into(), "33".repeat(16), "--expected-incarnation".into(), "44".repeat(16)]);
@@ -178,8 +181,9 @@ mod mutation_grant_tests {
             assert_eq!(options.source, mask & 4 != 0);
             assert_eq!(options.writes.issues, mask & 8 != 0);
             assert_eq!(options.writes.pulls, mask & 16 != 0);
-            assert_eq!(options.outcomes, mask & 32 != 0);
-            assert_eq!(options.writes.any(), mask & 24 != 0);
+            assert_eq!(options.writes.source, mask & 32 != 0);
+            assert_eq!(options.outcomes, mask & 64 != 0);
+            assert_eq!(options.writes.any(), mask & 56 != 0);
         }
     }
 }
