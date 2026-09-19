@@ -14,7 +14,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("fg-replay-node-{}-{}",
+        let root = std::env::temp_dir().join(format!("fg-commit-replay-node-{}-{}",
             std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         fs::create_dir(&root).unwrap(); Self(root)
     }

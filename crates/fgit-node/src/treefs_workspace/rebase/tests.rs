@@ -15,7 +15,7 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "fg-replay-node-{}-{}",
+            "fg-rebase-node-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
