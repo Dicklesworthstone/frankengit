@@ -10,6 +10,7 @@ mod issue_writes;
 mod pull_writes;
 mod source_writes;
 mod review_writes;
+mod merge_writes;
 mod outcomes;
 use fgit_node::{IssueReadRefusal, NodeConfig, OneNode};
 use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, RepositoryAuthorityHeadId};
@@ -74,6 +75,7 @@ impl ReadTools for NodeTools {
         if self.options.writes.pulls { tools.extend(pull_writes::tools()); }
         if self.options.writes.source { tools.extend(source_writes::tools()); }
         if self.options.writes.reviews { tools.extend(review_writes::tools()); }
+        if self.options.writes.merges { tools.extend(merge_writes::tools()); }
         if self.options.outcomes { tools.extend(outcomes::tools()); }
         tools.extend(review::tools(self.options.source, self.options.pulls));
         if self.options.source { tools.extend(history::tools()); }
@@ -84,6 +86,7 @@ impl ReadTools for NodeTools {
             || (self.options.writes.pulls && pull_writes::is_tool(name))
             || (self.options.writes.source && source_writes::is_tool(name))
             || (self.options.writes.reviews && name == review_writes::NAME)
+            || (self.options.writes.merges && name == merge_writes::NAME)
     }
     fn result_is_error(&self, name: &str, value: &Value) -> bool {
         self.is_mutation(name) && value.object().and_then(|v| v.get("outcome")).and_then(Value::text) == Some("refused")
@@ -95,6 +98,7 @@ impl ReadTools for NodeTools {
         if self.options.writes.pulls && pull_writes::is_tool(name) { return pull_writes::call(self, name, args); }
         if self.options.writes.source && source_writes::is_tool(name) { return source_writes::call(self, name, args); }
         if self.options.writes.reviews && name == review_writes::NAME { return review_writes::call(self, args); }
+        if self.options.writes.merges && name == merge_writes::NAME { return merge_writes::call(self, args); }
         if self.options.outcomes && name == outcomes::NAME { return outcomes::call(self, args); }
         if self.options.issues && matches!(name, "frankengit_issue_list" | "frankengit_issue_show") {
             return issues::call(self, name, args);
@@ -212,3 +216,5 @@ mod tests {
 mod integration_tests;
 #[cfg(test)]
 mod write_tests;
+#[cfg(test)]
+mod candidate_workflow_tests;
