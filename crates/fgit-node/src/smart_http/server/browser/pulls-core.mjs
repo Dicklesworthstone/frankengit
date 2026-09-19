@@ -188,7 +188,7 @@ export function metadataCommand(action, fields) {
   form(result); return result;
 }
 export function rootFor(href, suffix = '/ui/pulls/') {
-  if (!['/ui/pulls/', '/ui/source/'].includes(suffix)) fail('Unsupported browser profile.');
+  if (!['/ui/pulls/', '/ui/source/', '/ui/initial/'].includes(suffix)) fail('Unsupported browser profile.');
   const page = new URL(href);
   if (!['https:', 'http:'].includes(page.protocol) || page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(page.hostname)) fail('Use HTTPS outside loopback.');
@@ -226,9 +226,9 @@ export function apiError(status) {
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source; #initial;
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/' }) {
-    this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#fetch = fetchImpl; this.#crypto = cryptoImpl;
+    this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#initial = pageSuffix === '/ui/initial/'; this.#fetch = fetchImpl; this.#crypto = cryptoImpl;
     this.#timeout = integer(timeoutMs, 'timeout', 1, 300_000);
   }
   get connected() { return Boolean(this.#token); }
@@ -248,7 +248,9 @@ export class Transport {
   async request(path, { method = 'GET', body, contentType = 'application/x-www-form-urlencoded', key, statuses = [200], maximum = REPLY_LIMIT, read = true, binary = false } = {}) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
     const url = new URL(path, this.root.api);
-    const allowed = this.#source
+    const allowed = this.#initial
+      ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
+      : this.#source
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
       : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|prepare|resolve|inspect|merge|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
