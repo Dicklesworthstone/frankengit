@@ -13,6 +13,9 @@ mod architecture;
 mod generation;
 mod temporal;
 
+/// Persistent lexical document/term graph primitives.
+pub mod lexical;
+
 pub use crate::algorithms::{
     AdvisoryRank, ArticulationBridgeReport, BetweennessCentrality, BipartiteMatching,
     ComplexityTerm, CriticalPath, DeterministicGraph, FlowCost, GraphAlgorithm, GraphBuilder,
