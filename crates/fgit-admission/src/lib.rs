@@ -1249,12 +1249,31 @@ impl CanonicalRefState {
     }
 
     fn apply(&self, effects: &BTreeMap<RefName, RefEffect>) -> Result<Self, RefusalCode> {
-        if self
-            .head_target
-            .as_ref()
-            .is_some_and(|target| matches!(effects.get(target), Some(RefEffect::Delete)))
-        {
-            return Err(RefusalCode::ProtectedRefTransitionDenied);
+        if let Some(target) = &self.head_target {
+            if matches!(effects.get(target), Some(RefEffect::Delete)) {
+                // Evaluated through fg043 PolicySnapshot via evaluate_protection,
+                // replacing the ad-hoc inline check with deterministic policy evaluation.
+                let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
+                let policy = crate::policy_bridge::compile_branch_protection_policy(
+                    std::str::from_utf8(target.as_bytes()).unwrap_or("refs/heads/*"),
+                )
+                .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?;
+                let id = source.pin(policy);
+                let verdict = crate::policy_bridge::evaluate_effects_protection(
+                    &source,
+                    &id,
+                    &crate::policy_bridge::SubjectCodeMap::default(),
+                    fgit_types::PrincipalId::from_bytes([0; 16]),
+                    crate::policy_bridge::default_principal_snapshot_id(),
+                    &self.refs,
+                    effects,
+                    fgit_policy::PolicyInstant::from_seconds(0),
+                )
+                .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?;
+                if let Some(code) = verdict.refusal {
+                    return Err(code);
+                }
+            }
         }
         let mut refs = self.refs.clone();
         for (name, effect) in effects {
@@ -2440,6 +2459,34 @@ fn prepare_publication_from_snapshot(
         return Ok(PublicationPreparation::Refuse(
             RefusalCode::HiddenRefUnauthorized,
         ));
+    }
+    // Wire receive-pack protection checks through fg043 PolicySnapshot via evaluate_protection:
+    if let Some(target) = &snapshot.head_target {
+        let targets_head_delete = lowered.semantic.ref_commands().iter().any(|cmd| {
+            cmd.name == *target && matches!(cmd.proposed_new, fgit_authority::ProposedNew::Delete)
+        });
+        if targets_head_delete {
+            let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
+            if let Ok(policy) = crate::policy_bridge::compile_branch_protection_policy(
+                std::str::from_utf8(target.as_bytes()).unwrap_or("refs/heads/*"),
+            ) {
+                let id = source.pin(policy);
+                if let Ok(verdict) = crate::policy_bridge::evaluate_receive_pack_protection(
+                    &source,
+                    &id,
+                    &crate::policy_bridge::SubjectCodeMap::default(),
+                    context.principal_id,
+                    crate::policy_bridge::default_principal_snapshot_id(),
+                    &snapshot.refs,
+                    lowered.semantic.ref_commands(),
+                    fgit_policy::PolicyInstant::from_seconds(0),
+                ) {
+                    if let Some(code) = verdict.refusal {
+                        return Ok(PublicationPreparation::Refuse(code));
+                    }
+                }
+            }
+        }
     }
     let fold = IntentEvaluator::new().evaluate(snapshot.as_fold_basis(), &model_request);
     match &fold.outcome {

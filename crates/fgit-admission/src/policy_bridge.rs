@@ -125,6 +125,7 @@ impl Default for SubjectCodeMap {
 }
 
 /// The outcome of one protection evaluation, ready for decision binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtectionVerdict {
     /// Identity of the snapshot the decision is replayable against.
     pub snapshot_id: PolicySnapshotId,
@@ -181,10 +182,235 @@ fn first_refusal(evaluation: &PolicyEvaluation, codes: &SubjectCodeMap) -> Optio
     // names the surfaced code (a deny of one command denies the whole root).
     for subject in evaluation.subjects() {
         if matches!(subject.decision(), Decision::Deny) {
+            if let Some(reason) = subject.reason() {
+                let text = reason.as_str();
+                if text.contains("fast_forward")
+                    || text.contains("fast-forward")
+                    || text.contains("non_fast_forward")
+                {
+                    return Some(codes.not_fast_forward);
+                }
+                if text.contains("force") {
+                    return Some(codes.force_not_permitted);
+                }
+            }
             return Some(codes.transition_denied);
         }
     }
     Some(codes.transition_denied)
+}
+
+/// Adapts an [`fgit_authority::AuthorityStore`] as a [`PolicySnapshotSource`].
+pub struct AuthorityPolicySource<'a, S: ?Sized> {
+    pub store: &'a S,
+    pub limits: persisted::PolicyStoreLimits,
+}
+
+impl<'a, S: fgit_authority::AuthorityStore + ?Sized> AuthorityPolicySource<'a, S> {
+    #[must_use]
+    pub fn new(store: &'a S) -> Self {
+        Self {
+            store,
+            limits: persisted::PolicyStoreLimits::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_limits(store: &'a S, limits: persisted::PolicyStoreLimits) -> Self {
+        Self { store, limits }
+    }
+}
+
+impl<'a, S: fgit_authority::AuthorityStore + ?Sized> PolicySnapshotSource
+    for AuthorityPolicySource<'a, S>
+{
+    fn snapshot_by_id(
+        &self,
+        id: &PolicySnapshotId,
+    ) -> Result<fgit_policy::PolicySnapshot, PolicySourceRefusal> {
+        persisted::read_policy(self.store, *id, self.limits, &|| Ok(())).map_err(|err| match err {
+            persisted::PolicyStoreError::Missing { .. } => {
+                PolicySourceRefusal::UnknownSnapshot { id: id.to_string() }
+            }
+            persisted::PolicyStoreError::IdentityMismatch { requested, observed } => {
+                PolicySourceRefusal::IdentityMismatch { requested, observed }
+            }
+            _ => PolicySourceRefusal::Undecodable { id: id.to_string() },
+        })
+    }
+}
+
+/// Provides a canonical default principal snapshot ID for baseline evaluation.
+#[must_use]
+pub fn default_principal_snapshot_id() -> fgit_types::PrincipalSnapshotId {
+    let digest_bytes = fgit_types::DigestBytes::try_new(&[0u8; 32]).expect("valid digest bytes");
+    let algorithm = fgit_types::DigestAlgorithmId::try_new(2).expect("valid algorithm id");
+    fgit_types::PrincipalSnapshotId::from_internal_object_id(
+        fgit_types::InternalObjectId::new(
+            algorithm,
+            fgit_types::PrincipalSnapshotId::DOMAIN_TAG,
+            fgit_types::CANONICAL_CODEC_VERSION,
+            digest_bytes,
+        ),
+    )
+    .expect("valid default principal snapshot id")
+}
+
+/// Builds a [`fgit_policy::PolicyInputRoot`] from admission facts.
+pub fn build_input_root(
+    principal_id: fgit_types::PrincipalId,
+    snapshot_id: fgit_types::PrincipalSnapshotId,
+    updates: Vec<fgit_policy::RefUpdateFact>,
+    instant: fgit_policy::PolicyInstant,
+) -> Result<fgit_policy::PolicyInputRoot, fgit_policy::error::PolicyInputRefusal> {
+    let principal = fgit_policy::PrincipalFacts::try_new(
+        principal_id,
+        snapshot_id,
+        fgit_policy::PrincipalKind::Human,
+        fgit_policy::AuthenticationStrength::MultiFactor,
+        &[],
+        &[],
+    )?;
+    fgit_policy::PolicyInputRoot::try_new(principal, updates, &[], &[], instant)
+}
+
+/// Translates materialized ref effects into policy engine ref update facts.
+pub fn ref_updates_from_effects(
+    refs_before: &BTreeMap<fgit_types::RefName, fgit_types::GitOid>,
+    effects: &BTreeMap<fgit_types::RefName, fgit_reference::effect::RefEffect>,
+) -> Result<Vec<fgit_policy::RefUpdateFact>, fgit_policy::error::PolicyInputRefusal> {
+    let mut facts = Vec::with_capacity(effects.len());
+    for (name, effect) in effects {
+        let previous = refs_before.get(name).copied();
+        let (next, kind) = match effect {
+            fgit_reference::effect::RefEffect::Delete => (None, fgit_policy::RefUpdateKind::Delete),
+            fgit_reference::effect::RefEffect::Set(oid) => {
+                if previous.is_some() {
+                    (Some(*oid), fgit_policy::RefUpdateKind::FastForward)
+                } else {
+                    (Some(*oid), fgit_policy::RefUpdateKind::Create)
+                }
+            }
+        };
+        facts.push(fgit_policy::RefUpdateFact::try_new(
+            name.clone(),
+            previous,
+            next,
+            kind,
+            false,
+        )?);
+    }
+    Ok(facts)
+}
+
+/// Translates wire receive commands into policy engine ref update facts.
+pub fn ref_updates_from_commands(
+    refs_before: &BTreeMap<fgit_types::RefName, fgit_types::GitOid>,
+    commands: &[fgit_authority::RefCommand],
+) -> Result<Vec<fgit_policy::RefUpdateFact>, fgit_policy::error::PolicyInputRefusal> {
+    let mut facts = Vec::with_capacity(commands.len());
+    for command in commands {
+        let previous = refs_before.get(&command.name).copied().or_else(|| {
+            match command.expected_old {
+                fgit_authority::ExpectedOld::Exactly(oid) => Some(oid),
+                _ => None,
+            }
+        });
+        let (next, kind) = match command.proposed_new {
+            fgit_authority::ProposedNew::Delete => (None, fgit_policy::RefUpdateKind::Delete),
+            fgit_authority::ProposedNew::Update(oid) => {
+                if previous.is_some() {
+                    if command.force {
+                        (Some(oid), fgit_policy::RefUpdateKind::NonFastForward)
+                    } else {
+                        (Some(oid), fgit_policy::RefUpdateKind::FastForward)
+                    }
+                } else {
+                    (Some(oid), fgit_policy::RefUpdateKind::Create)
+                }
+            }
+        };
+        facts.push(fgit_policy::RefUpdateFact::try_new(
+            command.name.clone(),
+            previous,
+            next,
+            kind,
+            command.force,
+        )?);
+    }
+    Ok(facts)
+}
+
+/// Compiles a policy snapshot that prohibits deletion of branches matching `pattern`.
+pub fn compile_branch_protection_policy(
+    pattern: &str,
+) -> Result<fgit_policy::PolicySnapshot, fgit_policy::error::PolicyCompileRefusal> {
+    let source = format!(
+        "policy branch_protection {{\n    rule protect {{\n        when ref.name matches \"{pattern}\" and ref.update == delete\n        then deny \"ref deletion is prohibited\"\n    }}\n    default allow\n}}"
+    );
+    fgit_policy::compile_and_seal(&source)
+}
+
+/// Compiles a policy snapshot that prohibits direct updates to named protected branches.
+pub fn compile_protected_branch_rules<'a, I>(
+    branches: I,
+) -> Result<fgit_policy::PolicySnapshot, fgit_policy::error::PolicyCompileRefusal>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut rules = String::new();
+    let mut idx = 0;
+    for branch in branches {
+        idx += 1;
+        let pattern = if branch.starts_with("refs/") {
+            branch.to_string()
+        } else {
+            format!("refs/heads/{branch}")
+        };
+        rules.push_str(&format!(
+            "    rule protect_branch_{idx} {{\n        when ref.name matches \"{pattern}\"\n        then deny \"direct update to protected branch {branch} prohibited\"\n    }}\n"
+        ));
+    }
+    let source = format!(
+        "policy forge_branch_protection {{\n{rules}    default allow\n}}"
+    );
+    fgit_policy::compile_and_seal(&source)
+}
+
+/// Evaluates receive-pack ref protection against a pinned snapshot.
+pub fn evaluate_receive_pack_protection(
+    source: &dyn PolicySnapshotSource,
+    id: &PolicySnapshotId,
+    codes: &SubjectCodeMap,
+    principal_id: fgit_types::PrincipalId,
+    principal_snapshot_id: fgit_types::PrincipalSnapshotId,
+    refs_before: &BTreeMap<fgit_types::RefName, fgit_types::GitOid>,
+    commands: &[fgit_authority::RefCommand],
+    instant: fgit_policy::PolicyInstant,
+) -> Result<ProtectionVerdict, PolicySourceRefusal> {
+    let updates = ref_updates_from_commands(refs_before, commands)
+        .map_err(|_| PolicySourceRefusal::Undecodable { id: id.to_string() })?;
+    let input = build_input_root(principal_id, principal_snapshot_id, updates, instant)
+        .map_err(|_| PolicySourceRefusal::Undecodable { id: id.to_string() })?;
+    evaluate_protection(source, id, codes, &input)
+}
+
+/// Evaluates ref effects protection against a pinned snapshot.
+pub fn evaluate_effects_protection(
+    source: &dyn PolicySnapshotSource,
+    id: &PolicySnapshotId,
+    codes: &SubjectCodeMap,
+    principal_id: fgit_types::PrincipalId,
+    principal_snapshot_id: fgit_types::PrincipalSnapshotId,
+    refs_before: &BTreeMap<fgit_types::RefName, fgit_types::GitOid>,
+    effects: &BTreeMap<fgit_types::RefName, fgit_reference::effect::RefEffect>,
+    instant: fgit_policy::PolicyInstant,
+) -> Result<ProtectionVerdict, PolicySourceRefusal> {
+    let updates = ref_updates_from_effects(refs_before, effects)
+        .map_err(|_| PolicySourceRefusal::Undecodable { id: id.to_string() })?;
+    let input = build_input_root(principal_id, principal_snapshot_id, updates, instant)
+        .map_err(|_| PolicySourceRefusal::Undecodable { id: id.to_string() })?;
+    evaluate_protection(source, id, codes, &input)
 }
 
 #[cfg(test)]

@@ -224,14 +224,36 @@ where
         .await
         .map_err(infrastructure)?;
     if let Some(policy) = selected.protection() {
-        if effects
+        let has_protected = effects
             .refs
             .keys()
-            .any(|name| policy.branch(name).is_some())
-        {
-            return Err(ProjectionFailure::Refuse(
-                RefusalCode::ProtectedRefTransitionDenied,
-            ));
+            .any(|name| policy.branch(name).is_some());
+        if has_protected {
+            // Evaluated through fg043 PolicySnapshot via evaluate_protection
+            let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
+            let branch_strings: Vec<String> = policy
+                .branches
+                .iter()
+                .filter_map(|b| std::str::from_utf8(b.name.as_bytes()).ok().map(ToOwned::to_owned))
+                .collect();
+            let branch_refs: Vec<&str> = branch_strings.iter().map(String::as_str).collect();
+            let compiled = crate::policy_bridge::compile_protected_branch_rules(branch_refs)
+                .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+            let id = source.pin(compiled);
+            let verdict = crate::policy_bridge::evaluate_effects_protection(
+                &source,
+                &id,
+                &crate::policy_bridge::SubjectCodeMap::default(),
+                PrincipalId::from_bytes([0; 16]),
+                crate::policy_bridge::default_principal_snapshot_id(),
+                &std::collections::BTreeMap::new(),
+                &effects.refs,
+                fgit_policy::PolicyInstant::from_seconds(0),
+            )
+            .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+            if let Some(code) = verdict.refusal {
+                return Err(ProjectionFailure::Refuse(code));
+            }
         }
     }
     live(cancelled).map_err(infrastructure)
