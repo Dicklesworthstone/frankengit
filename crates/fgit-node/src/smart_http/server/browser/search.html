@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FrankenGit · Code search</title>
+  <link rel="stylesheet" href="./search.css">
+  <script type="module" src="./search-view.mjs"></script>
+</head>
+<body>
+  <header><strong>FrankenGit</strong><span>Code search</span><span class="badge">Read only</span><nav aria-label="Repository navigation"><a href="../">Source browser</a><a href="../history/">History and blame</a></nav></header>
+  <main>
+    <h1>Search source. Inspect exact bytes.</h1>
+    <p>Search one repository snapshot using literals, a shared batch of terms, or bounded native byte regexes. Open a result to verify its complete file against the returned native blob identity.</p>
+    <form id="connection" autocomplete="off">
+      <label>Read token<input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64" required></label>
+      <label>Reference<input id="reference" value="refs/heads/main" autocomplete="off" spellcheck="false" maxlength="1024" required></label>
+      <label>Object format<select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
+      <div class="actions"><button type="submit">Connect</button><button type="button" id="disconnect">Disconnect</button></div>
+    </form>
+    <p class="hint">The token stays in page memory, is cleared from its input on Connect, and is discarded on disconnect or page exit. HTTPS is required outside loopback. No writes or automatic retries are available here.</p>
+    <form id="search-form" role="search" autocomplete="off">
+      <div class="controls">
+        <label>Search mode<select id="mode"><option value="literal">Single literal</option><option value="batch">Batch of literals</option><option value="regex">Native byte regex</option></select></label>
+        <label>Query encoding<select id="encoding"><option value="utf8">UTF-8 text</option><option value="hex">Lowercase hex bytes</option></select></label>
+        <label>Case<select id="case"><option value="exact">Exact bytes</option><option value="ascii-insensitive">Ignore ASCII case</option></select></label>
+      </div>
+      <label>Query<textarea id="query" rows="3" maxlength="16416" spellcheck="false" required aria-describedby="query-help"></textarea></label>
+      <p id="query-help" class="hint"></p>
+      <p id="regex-help" class="hint" hidden>Examples: \b(struct|enum)\b or ^pub\s+fn\s+\w+. Regexes do not cross LF; CR remains a byte. Lookaround, backreferences, Unicode properties and lazy quantifiers are not supported.</p>
+      <div class="controls">
+        <label>Path prefixes (optional, one per line)<textarea id="prefixes" rows="2" maxlength="66048" spellcheck="false" placeholder="crates/fgit-node"></textarea></label>
+        <label>Prefix encoding<select id="prefix-encoding"><option value="utf8">UTF-8 text</option><option value="hex">Lowercase hex bytes</option></select></label>
+        <label>Matches per query<input id="max-matches" type="number" min="1" max="4096" value="100" required></label>
+      </div>
+      <details><summary>Bounded work limits</summary><div class="controls">
+        <label>Source bytes<input id="max-bytes" type="number" min="1" max="67108864" value="67108864" required></label>
+        <label>Bytes per file<input id="max-file-bytes" type="number" min="1" max="8388608" value="8388608" required></label>
+        <label>Regex VM steps<input id="max-steps" type="number" min="1" max="67108864" value="67108864" required disabled></label>
+      </div></details>
+      <div class="actions"><button id="submit-search" type="submit" disabled>Search snapshot</button><button id="cancel" type="button" disabled>Cancel read</button><button id="refresh" type="button" disabled>Release snapshot</button></div>
+    </form>
+    <div id="status" role="status" aria-live="polite">Enter a read-scoped token to begin.</div>
+    <pre id="snapshot" aria-label="Selected snapshot"></pre>
+    <section id="results" aria-label="Search results"></section>
+    <section id="file" aria-label="Verified file preview" tabindex="-1"></section>
+    <p class="hint">Search coverage and regex evaluation are native-server claims. Blob verification detects mismatched file bytes; it is not a signed authority-root proof. Hidden refs, source limits and existing read grants still apply.</p>
+  </main>
+  <footer>Byte-exact source reads · No credential persistence · No third-party requests</footer>
+</body>
+</html>

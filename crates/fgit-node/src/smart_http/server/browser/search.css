@@ -1,0 +1,29 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.5; }
+* { box-sizing: border-box; }
+body { margin: 0; background: light-dark(#f7f8fa, #11161e); color: light-dark(#172235, #e1e7ee); }
+header { display: flex; gap: 1.5rem; align-items: center; flex-wrap: wrap; padding: 1rem 3vw; border-bottom: 1px solid #748298; }
+header nav { display: flex; gap: 1rem; margin-left: auto; }
+a { color: light-dark(#145cba, #8bbdff); }
+main { max-width: 1100px; margin: 2rem auto; padding: 0 1.25rem; }
+h1 { font-size: clamp(1.6rem, 4vw, 2.4rem); line-height: 1.2; }
+form, .query-group, #file:not(:empty) { background: light-dark(#fff, #19212d); border: 1px solid #748298; border-radius: .5rem; padding: 1rem; margin: 1.2rem 0; }
+.controls, #connection { display: flex; gap: 1rem; flex-wrap: wrap; align-items: end; }
+label { display: flex; flex-direction: column; gap: .3rem; flex: 1 1 200px; min-width: 0; }
+input, select, textarea, button { font: inherit; border: 1px solid #748298; border-radius: .3rem; padding: .55rem; }
+input, select, textarea { width: 100%; color: inherit; background: light-dark(#fff, #11161e); }
+textarea { font-family: ui-monospace, monospace; resize: vertical; }
+button { cursor: pointer; color: inherit; background: light-dark(#eaf0f8, #27374d); }
+button:disabled { opacity: .55; cursor: default; }
+:focus-visible { outline: 3px solid #4288e8; outline-offset: 2px; }
+.actions { display: flex; gap: .6rem; flex-wrap: wrap; margin-top: 1rem; }
+.badge { border: 1px solid #748298; border-radius: 1rem; padding: .1rem .7rem; }
+.hint { font-size: .9rem; color: light-dark(#4b596b, #b1bdcc); }
+#status { border-left: 4px solid #4288e8; padding: .75rem 1rem; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; font-family: ui-monospace, monospace; font-size: .87rem; tab-size: 4; }
+.match { padding: .7rem 0; border-top: 1px solid #748298; }
+.match button { text-align: left; overflow-wrap: anywhere; max-width: 100%; }
+.match p { font-size: .8rem; margin: .4rem 0; }
+mark { color: #172235; background: #ffe292; }
+summary { cursor: pointer; margin: .7rem 0; }
+footer { text-align: center; padding: 2rem; font-size: .85rem; }
+[hidden] { display: none !important; }
