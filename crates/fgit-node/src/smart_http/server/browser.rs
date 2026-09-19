@@ -4,6 +4,8 @@
 
 mod pulls;
 
+mod source_edit;
+
 use std::io::Write;
 use fgit_wire::smart_http::{BodyFraming, HttpVersion, head::Envelope};
 use super::{Profile, Status};
@@ -69,6 +71,7 @@ pub(super) fn serve(
     trailing: &[u8],
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
+    if source_edit::serve(profile, request, trailing, writer)? { return Ok(true); }
     if pulls::serve(profile, request, trailing, writer)? { return Ok(true); }
     let Some((media, body)) = checked_asset(
         &profile.route, profile.allow_source, profile.allow_issues, profile.maximum_response_bytes,
