@@ -67,8 +67,18 @@ impl OneNode {
         }
         self.with_workspace_snapshot_in::<A, _>(request, reference, visibility, capability, now,
             query.expected_head, query.expected_commit, MAX_OBJECT_BYTES,
-            |base, source, capability, head, metadata_bytes| browse_at(base, source, request, capability,
-                now, head, query, path.as_ref(), ReadBudget::new(metadata_bytes, 1)),
+            |base, source, capability, head, metadata_bytes| {
+                let params = BrowseParams {
+                    request,
+                    capability,
+                    now,
+                    head,
+                    query,
+                    path: path.as_ref(),
+                    budget: ReadBudget::new(metadata_bytes, 1),
+                };
+                browse_at(base, source, params)
+            },
         ).await
     }
 
@@ -188,8 +198,16 @@ impl OneNode {
             A::parse_hex(&commit.to_string()).map_err(|_| NodeWorkspaceRefusal::ObjectFormatMismatch)?,
             A::parse_hex(&tree.to_string()).map_err(|_| NodeWorkspaceRefusal::ObjectFormatMismatch)?,
             parse, PathPolicy::default());
-        browse_at(&base, &source, request, &mut capability, 0, head, query, path.as_ref(),
-            ReadBudget::new(metadata_bytes, metadata_objects))
+        let params = BrowseParams {
+            request,
+            capability: &mut capability,
+            now: 0,
+            head,
+            query,
+            path: path.as_ref(),
+            budget: ReadBudget::new(metadata_bytes, metadata_objects),
+        };
+        browse_at(&base, &source, params)
     }
 }
 
@@ -245,29 +263,38 @@ impl<A: GitHashAlgorithm> ObjectSource<A> for BoundedSource<'_, '_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn browse_at<A: GitHashAlgorithm>(base: &BaseView<A>, original: &NodeTreeSource<'_>,
-    request: &NodeRequestContext, capability: &mut TreeCapability, now: u64,
-    head: RepositoryAuthorityHeadId, query: &SourceBrowseQuery, path: Option<&TreePath>,
+struct BrowseParams<'a> {
+    request: &'a NodeRequestContext,
+    capability: &'a mut TreeCapability,
+    now: u64,
+    head: RepositoryAuthorityHeadId,
+    query: &'a SourceBrowseQuery,
+    path: Option<&'a TreePath>,
     budget: ReadBudget,
+}
+
+fn browse_at<A: GitHashAlgorithm>(
+    base: &BaseView<A>,
+    original: &NodeTreeSource<'_>,
+    mut params: BrowseParams<'_>,
 ) -> Result<SourceBrowseReport, NodeWorkspaceRefusal> {
-    live(request)?;
-    let source = BoundedSource { inner: original, request, budget };
+    live(params.request)?;
+    let source = BoundedSource { inner: original, request: params.request, budget: params.budget };
     let result = (|| {
-        let entry = match path {
-            Some(path) => base.resolve(&source, capability, path, now).map_err(base_error)?,
+        let entry = match params.path {
+            Some(path) => base.resolve(&source, params.capability, path, params.now).map_err(base_error)?,
             None => BaseEntry::Directory { oid: *base.base_tree_oid() },
         };
         let object_id = oid::<A>(entry.oid(), original.inner.object_format)?;
-        let content = match &query.action {
+        let content = match &params.query.action {
             SourceBrowseAction::List { after, limit } => {
-                let mut entries = base.list(&source, capability, path, now).map_err(base_error)?;
+                let mut entries = base.list(&source, params.capability, params.path, params.now).map_err(base_error)?;
                 if entries.len() > MAX_ENTRIES { return Err(error(SourceBrowseError::Budget("directory entries"))); }
                 entries.sort_by(|a, b| a.0.cmp(&b.0));
                 let mut rows = Vec::with_capacity(usize::from(*limit));
                 let mut next_after = None;
                 for (name, entry) in entries {
-                    live(request)?;
+                    live(params.request)?;
                     if after.as_ref().is_some_and(|cursor| name <= *cursor) { continue; }
                     if rows.len() == usize::from(*limit) {
                         next_after = rows.last().map(|row: &SourceDirectoryEntry| row.name.clone()); break;
@@ -281,11 +308,11 @@ fn browse_at<A: GitHashAlgorithm>(base: &BaseView<A>, original: &NodeTreeSource<
                 if !matches!(entry_kind, SourceEntryKind::File | SourceEntryKind::Executable | SourceEntryKind::Symlink) {
                     return Err(error(SourceBrowseError::ExpectedFile));
                 }
-                let path = path.ok_or_else(|| error(SourceBrowseError::ExpectedFile))?;
-                let grant = capability.authorize_read(path, now).map_err(|e| base_error(e.into()))?;
+                let path = params.path.ok_or_else(|| error(SourceBrowseError::ExpectedFile))?;
+                let grant = params.capability.authorize_read(path, params.now).map_err(|e| base_error(e.into()))?;
                 let body = base.read_object(&source, entry.oid(), GitObjectKind::Blob, &grant)
                     .map_err(NodeWorkspaceRefusal::Object)?;
-                capability.charge_fetch(body.len() as u64).map_err(|e| base_error(e.into()))?;
+                params.capability.charge_fetch(body.len() as u64).map_err(|e| base_error(e.into()))?;
                 let start = usize::try_from(*offset).ok().filter(|start| *start <= body.len())
                     .ok_or_else(|| error(SourceBrowseError::RangeOutsideFile))?;
                 let end = start.saturating_add(*limit as usize).min(body.len());
@@ -294,12 +321,12 @@ fn browse_at<A: GitHashAlgorithm>(base: &BaseView<A>, original: &NodeTreeSource<
                     next_offset: (end < body.len()).then_some(end as u64) }
             }
         };
-        Ok(SourceBrowseReport { repository_id: base.repository_id(), source_head: head,
+        Ok(SourceBrowseReport { repository_id: base.repository_id(), source_head: params.head,
             source_rcr: base.base_rcr_id(), source_commit: oid::<A>(base.base_commit_oid(), original.inner.object_format)?,
             root_tree: oid::<A>(base.base_tree_oid(), original.inner.object_format)?, object_id,
-            path: query.path.clone(), content })
+            path: params.query.path.clone(), content })
     })();
-    live(request)?;
+    live(params.request)?;
     result
 }
 
