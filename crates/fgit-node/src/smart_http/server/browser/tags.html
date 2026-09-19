@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FrankenGit · Tags</title><link rel="stylesheet" href="../browser.css">
+<script type="module" src="tags-view.mjs"></script></head>
+<body><main>
+<header><h1>Repository tags</h1><nav><a href="../">Source</a> · <a href="../branches/">Branches</a> · <a href="../history/">History</a> · <a href="../transfers/">Transfers</a></nav></header>
+<p>Create lightweight or annotated tags, inspect original annotation bytes, or delete an exact tag. Tags are not releases. Tagger text and signature markers are not authenticated identities.</p>
+<section><h2>1. Connect and select a snapshot</h2>
+<form id="connection"><label>Repository token<input id="token" type="password" autocomplete="off" spellcheck="false" required></label><button type="submit">Connect</button></form>
+<label>Object format<select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
+<button id="load" type="button">Load references</button><button id="next" type="button">Next reference page</button><button id="cancel" type="button">Cancel reads</button><button id="disconnect" type="button">Disconnect</button>
+<p>Tokens stay in page memory. Read permission does not grant publication permission. Connect alone does not read refs, so saved requests can be recovered independently.</p>
+<p id="snapshot"></p></section>
+<section><h2>2. Inspect an existing tag</h2>
+<label>Tag<select id="tag"></select></label><button id="inspect" type="button">Inspect and verify annotation bytes</button>
+<div id="inspection"></div></section>
+<section><h2>3. Prepare an exact change</h2>
+<label>Operation<select id="operation"><option value="annotated">Create annotated tag</option><option value="lightweight">Create lightweight tag</option><option value="delete">Delete selected tag</option></select></label>
+<label>Source reference<select id="source"></select></label>
+<label>New full tag name<input id="destination" maxlength="8192" placeholder="refs/tags/v1.0" autocomplete="off" spellcheck="false"></label>
+<label>Name encoding<select id="name-encoding"><option value="text">UTF-8 text</option><option value="hex">Exact hexadecimal bytes</option></select></label>
+<label>Annotated target kind<select id="kind"><option value="commit">Commit</option><option value="tag">Tag</option><option value="tree">Tree</option><option value="blob">Blob</option></select></label>
+<label>Tagger<input id="tagger" maxlength="1024" placeholder="Name &lt;email&gt;" autocomplete="off"></label>
+<label>Unix timestamp (UTC +0000)<input id="timestamp" inputmode="numeric" placeholder="Explicit seconds since epoch" autocomplete="off"></label>
+<label>Message<textarea id="message" rows="7" maxlength="131072" spellcheck="false"></textarea></label>
+<label>Message encoding<select id="message-encoding"><option value="text">UTF-8 text with LF</option><option value="crlf">UTF-8 text with CRLF</option><option value="hex">Exact hexadecimal bytes</option></select></label>
+<p>Empty messages and missing final newlines are preserved. Hex accepts non-UTF-8 messages; NUL is unsupported. A target kind is an explicit claim that native admission must verify. Creation requires an absent name; no force or replacement is performed.</p>
+<button id="prepare" type="button">Prepare locally — do not send</button></section>
+<section><h2>4. Review and publish</h2><pre id="pending">No saved request.</pre>
+<label><input id="confirm" type="checkbox">I checked the saved operation, exact name, old/new object IDs and metadata above.</label>
+<button id="send" type="button">Send saved request</button><button id="recover" type="button">Look up original outcome</button><button id="discard" type="button">Discard unsent, unexported request</button>
+<p>A lost reply is an unknown outcome, not rollback. Retry only this saved request. Deletion uses the direct tag object, never its peeled target.</p></section>
+<section><h2>Recovery across reloads</h2><button id="save" type="button">Save token-free retry file</button>
+<label>Saved retry file<input id="receipt" type="file" accept="application/json,.json"></label><button id="restore" type="button">Restore without sending</button>
+<p>Retry files contain repository metadata. Protect them. Restore requires the original credential and endpoint and does not refresh the expected tag.</p></section>
+<p id="status" role="status" aria-live="polite">Connect to begin.</p>
+</main></body></html>
