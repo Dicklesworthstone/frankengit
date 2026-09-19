@@ -1,10 +1,11 @@
 //! Bounded literal-byte search of an immutable, capability-visible source tree.
 //!
-//! This is a derived read, not an index, authority decision, regex engine or
-//! Unicode case-folding service. A complete answer covers only regular files
+//! Literal search is a derived read, not an index or authority decision.
+//! It performs no Unicode case folding. A complete answer covers regular files
 //! inside BOTH the caller's capability and the query's slash-bounded prefixes.
 
 pub mod batch;
+pub mod regex;
 
 use std::collections::BTreeMap;
 
