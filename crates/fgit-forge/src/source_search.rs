@@ -180,7 +180,16 @@ pub fn search_source<A: GitHashAlgorithm, S: ObjectSource<A>>(
     checkpoint(cancelled)?;
     capability.authorize_root(now).map_err(SearchError::Capability)?;
     let mut discovery = Discovery { files: BTreeMap::new(), entries: 0, excluded: 0 };
-    discover(base, source, capability, now, query, limits, cancelled, None, 0, &mut discovery)?;
+    let mut ctx = DiscoveryContext {
+        base,
+        source,
+        capability,
+        now,
+        query,
+        limits,
+        cancelled,
+    };
+    discover(&mut ctx, None, 0, &mut discovery)?;
     let mut report = SourceSearchReport {
         repository: base.repository_id(), source_rcr: base.base_rcr_id(),
         source_commit: oid::<A>(base.base_commit_oid())?, source_tree: oid::<A>(base.base_tree_oid())?,
@@ -226,38 +235,48 @@ struct Discovery<A: GitHashAlgorithm> {
     entries: usize,
     excluded: usize,
 }
-#[allow(clippy::too_many_arguments)]
+
+struct DiscoveryContext<'a, 'c, A: GitHashAlgorithm, S: ObjectSource<A>> {
+    base: &'a BaseView<A>,
+    source: &'a S,
+    capability: &'c mut TreeCapability,
+    now: u64,
+    query: &'a SourceQuery,
+    limits: SearchLimits,
+    cancelled: &'a dyn Fn() -> bool,
+}
+
 fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
-    base: &BaseView<A>, source: &S, capability: &mut TreeCapability, now: u64,
-    query: &SourceQuery, limits: SearchLimits, cancelled: &dyn Fn() -> bool,
-    directory: Option<&TreePath>, depth: usize, discovery: &mut Discovery<A>,
+    ctx: &mut DiscoveryContext<'_, '_, A, S>,
+    directory: Option<&TreePath>,
+    depth: usize,
+    discovery: &mut Discovery<A>,
 ) -> Result<(), SearchError> {
-    checkpoint(cancelled)?;
-    if depth > limits.max_depth { return Err(SearchError::Budget("directory depth")); }
-    let children = base.list(source, capability, directory, now)
+    checkpoint(ctx.cancelled)?;
+    if depth > ctx.limits.max_depth { return Err(SearchError::Budget("directory depth")); }
+    let children = ctx.base.list(ctx.source, ctx.capability, directory, ctx.now)
         .map_err(|e| SearchError::Base(Box::new(e)))?;
     for (name, entry) in children {
-        checkpoint(cancelled)?;
+        checkpoint(ctx.cancelled)?;
         discovery.entries += 1;
-        if discovery.entries > limits.max_entries { return Err(SearchError::Budget("tree entries")); }
+        if discovery.entries > ctx.limits.max_entries { return Err(SearchError::Budget("tree entries")); }
         let path = match directory {
-            Some(parent) => parent.join(&name, base.path_policy()),
-            None => TreePath::parse(&name, base.path_policy()),
+            Some(parent) => parent.join(&name, ctx.base.path_policy()),
+            None => TreePath::parse(&name, ctx.base.path_policy()),
         }.map_err(|e| SearchError::Base(Box::new(BaseError::Path(e))))?;
         match entry {
-            BaseEntry::Directory { .. } if query.descends(&path) => {
-                discover(base, source, capability, now, query, limits, cancelled,
-                    Some(&path), depth + 1, discovery)?;
+            BaseEntry::Directory { .. } if ctx.query.descends(&path) => {
+                discover(ctx, Some(&path), depth + 1, discovery)?;
             }
-            BaseEntry::File { oid, mode } if query.includes(&path) => {
+            BaseEntry::File { oid, mode } if ctx.query.includes(&path) => {
                 if mode != b"100644" && mode != b"100755" { return Err(SearchError::Budget("unsupported file mode")); }
                 // An ancestor can be disclosable without granting its content.
                 // A requested descendant under a FILE is not a readable file.
-                if !capability.admits_disclosure(&path) { continue; }
-                if discovery.files.len() == limits.max_files { return Err(SearchError::Budget("files")); }
+                if !ctx.capability.admits_disclosure(&path) { continue; }
+                if discovery.files.len() == ctx.limits.max_files { return Err(SearchError::Budget("files")); }
                 if discovery.files.insert(path, oid).is_some() { return Err(SearchError::Budget("duplicate path")); }
             }
-            BaseEntry::Symlink { .. } | BaseEntry::Submodule { .. } if query.includes(&path) => {
+            BaseEntry::Symlink { .. } | BaseEntry::Submodule { .. } if ctx.query.includes(&path) => {
                 discovery.excluded += 1;
             }
             _ => {}
