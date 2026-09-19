@@ -8,6 +8,9 @@
 //! This derived graph cannot authorize a read or publish repository state.
 
 mod encoding;
+mod stored;
+pub use stored::{IndexError, IndexedLexicalReport, LexicalIndexStore, LexicalReadLimits,
+    LexicalSelection, LexicalSource, PreparedLexicalIndex};
 #[cfg(test)]
 mod tests;
 
@@ -86,7 +89,9 @@ impl From<fgit_codec::CodecRefusal> for LexicalError {
     fn from(error: fgit_codec::CodecRefusal) -> Self { Self::Codec(error) }
 }
 impl std::fmt::Display for LexicalError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "lexical index refused: {self:?}") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "lexical index refused: {self:?}")
+    }
 }
 impl std::error::Error for LexicalError {}
 
