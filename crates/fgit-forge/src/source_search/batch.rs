@@ -97,8 +97,16 @@ pub fn search_source_batch<A: GitHashAlgorithm, S: ObjectSource<A>>(
     capability.authorize_root(now).map_err(SearchError::Capability)?;
     let machine = Matcher::new(queries, cancelled)?;
     let mut discovery = Discovery { files: BTreeMap::new(), entries: 0, excluded: 0 };
-    discover(base, source, capability, now, queries.scope(), limits, cancelled,
-        None, 0, &mut discovery)?;
+    let mut ctx = DiscoveryContext {
+        base,
+        source,
+        capability,
+        now,
+        query: queries.scope(),
+        limits,
+        cancelled,
+    };
+    discover(&mut ctx, None, 0, &mut discovery)?;
     let mut report = queries.empty_report(base.repository_id(), base.base_rcr_id(),
         oid::<A>(base.base_commit_oid())?, oid::<A>(base.base_tree_oid())?);
     report.files_selected = discovery.files.len();

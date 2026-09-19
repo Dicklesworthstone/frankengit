@@ -10,7 +10,7 @@ mod engine;
 pub use engine::{RegexError, RegexErrorKind};
 
 use super::{SearchCase, SearchCompletion, SearchError, SearchLimits, SourceMatch,
-    SourceQuery, SourceSearchReport, Discovery, checkpoint, discover, oid};
+    SourceQuery, SourceSearchReport, Discovery, DiscoveryContext, checkpoint, discover, oid};
 use fgit_crypto::{GitHashAlgorithm, GitObjectKind};
 use fgit_treefs::{BaseView, ObjectSource, TreeCapability, TreePath};
 use std::collections::BTreeMap;
@@ -103,7 +103,16 @@ pub fn search_source_regex<A: GitHashAlgorithm, S: ObjectSource<A>>(
     checkpoint(cancelled)?;
     capability.authorize_root(now).map_err(SearchError::Capability)?;
     let mut discovery = Discovery { files: BTreeMap::new(), entries: 0, excluded: 0 };
-    discover(base, source, capability, now, &query.scope, limits, cancelled, None, 0, &mut discovery)?;
+    let mut ctx = DiscoveryContext {
+        base,
+        source,
+        capability,
+        now,
+        query: &query.scope,
+        limits,
+        cancelled,
+    };
+    discover(&mut ctx, None, 0, &mut discovery)?;
     let mut report = RegexSearchReport {
         source: SourceSearchReport {
             repository: base.repository_id(), source_rcr: base.base_rcr_id(),

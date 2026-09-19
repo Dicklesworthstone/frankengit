@@ -230,23 +230,23 @@ pub fn search_source<A: GitHashAlgorithm, S: ObjectSource<A>>(
     Ok(report)
 }
 
-struct Discovery<A: GitHashAlgorithm> {
-    files: BTreeMap<TreePath, fgit_crypto::GitOid<A>>,
-    entries: usize,
-    excluded: usize,
+pub(super) struct Discovery<A: GitHashAlgorithm> {
+    pub(super) files: BTreeMap<TreePath, fgit_crypto::GitOid<A>>,
+    pub(super) entries: usize,
+    pub(super) excluded: usize,
 }
 
-struct DiscoveryContext<'a, 'c, A: GitHashAlgorithm, S: ObjectSource<A>> {
-    base: &'a BaseView<A>,
-    source: &'a S,
-    capability: &'c mut TreeCapability,
-    now: u64,
-    query: &'a SourceQuery,
-    limits: SearchLimits,
-    cancelled: &'a dyn Fn() -> bool,
+pub(super) struct DiscoveryContext<'a, 'c, A: GitHashAlgorithm, S: ObjectSource<A>> {
+    pub(super) base: &'a BaseView<A>,
+    pub(super) source: &'a S,
+    pub(super) capability: &'c mut TreeCapability,
+    pub(super) now: u64,
+    pub(super) query: &'a SourceQuery,
+    pub(super) limits: SearchLimits,
+    pub(super) cancelled: &'a dyn Fn() -> bool,
 }
 
-fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
+pub(super) fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
     ctx: &mut DiscoveryContext<'_, '_, A, S>,
     directory: Option<&TreePath>,
     depth: usize,
