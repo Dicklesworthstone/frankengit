@@ -1,0 +1,8 @@
+header{flex-wrap:wrap}main>section{margin:1.8rem 0;padding-top:1rem;border-top:1px solid var(--line)}
+label{margin:.8rem 0}input,select{max-width:100%}input[type=checkbox]{min-width:0;width:1.2rem;height:1.2rem;padding:0}
+button{margin:.25rem .25rem .25rem 0}button:disabled{cursor:not-allowed}
+#transfer-status{padding:1rem;border-left:3px solid var(--accent);overflow-wrap:anywhere}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:40rem}fieldset{margin:1rem 0;border:1px solid var(--line);min-width:0}
+legend{overflow-wrap:anywhere;max-width:100%}table td:first-child,table th:first-child{width:45%}
+table td:last-child,table th:last-child{width:20%}#bundle-refs{max-height:32rem;overflow:auto}
+@media(max-width:650px){button{max-width:100%}table{font-size:.8rem}table td,table th{padding:.3rem}input,select{min-width:0;width:100%}}

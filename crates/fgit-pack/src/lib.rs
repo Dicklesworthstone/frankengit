@@ -5,6 +5,7 @@
 //! hashing: callers supply those dependency-owned operations at the
 //! quarantine boundary.
 
+pub mod binary_patch;
 mod bitmap;
 mod bundle;
 pub mod full_bundle;

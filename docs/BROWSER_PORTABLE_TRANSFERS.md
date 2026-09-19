@@ -79,3 +79,53 @@ actual Git-produced SHA-1/SHA-256 bundles, unchanged exports, mirror clone/fsck,
 binary blobs, annotated tags, reordered advertisements and corruption refusal.
 Neither lane proves live Rust-node admission, deployment authorization, actual
 browser rendering, full-workspace or release conformance.
+
+## Browser workflow
+
+The source-enabled gateway serves `<repository-route>/ui/transfers/`, linked
+from source browsing. Its static shell uses the existing no-store/CSP and
+same-origin boundaries. Source, issue, PR, search and authoring gates are not
+changed. The helper assets do not enable any other API profile.
+
+Connect and explicitly select the repository hash domain and snapshot. Export
+first performs the complete read and transport checks; a separate Download
+button becomes available only after success. Downloads contain unchanged native
+bundle bytes. Re-export failure, cancellation or disconnect removes the old
+artifact from the view rather than offering it as a new successful result.
+
+Select a local full bundle and load it explicitly. File sizes are checked before
+reading, and both byte count and selection generation are checked afterward.
+The advertised-ref table is bounded and scrollable; arbitrary byte names remain
+hex-addressable and control/directional characters are escaped. No local file
+name becomes a destination ref. Native object/closure verification is explicitly
+not claimed by the browser inspection summary.
+
+Use Map this reference to add up to 64 destination editors. Every editor starts
+with a blank destination and blank old-tip requirement; the user must supply
+both. Text and raw-hex destinations are supported. Multiple destinations may
+use the same advertised source, but duplicate destinations refuse. Alternatively,
+choose the distinct absent-ref import operation for all advertised refs. Neither
+preparation sends a mutation. Once prepared, effects and original key are fixed;
+separate confirmation is required for every Send and identical retry.
+
+Saving a receipt is explicit and makes the request potentially sendable from
+another session. Restore does not require a successful ref listing and does not
+send; it permits an original-credential outcome lookup or explicit retry. Read
+cancellation never cancels a dispatched publication. Disconnect clears visible
+bundle data, credentials and file controls while retaining a private unresolved
+request so its token-free receipt can still be saved. Pending effects are hidden
+until the original credential reconnects. Download URLs are revoked on clearing
+or page exit and expire after 30 seconds; no persistent browser storage is used.
+
+Run the combined interaction lane with
+`node --test tests/browser/transfers.test.mjs tests/browser/transfers-view.test.mjs`.
+The UI tests exercise actual controllers/clients with explicit DOM, File and
+HTTP doubles. Three Rust static-handler tests cover scope, framing, resource
+limits and inert assets; they were added but not run in this environment because
+Rust/Cargo is unavailable. Live native-node and full-workspace acceptance remain
+unverified. No bead is marked complete on this evidence.
+
+A Chromium 144.0.7559.96 smoke attempt was blocked by environment browser policy
+(`ERR_BLOCKED_BY_ADMINISTRATOR`) before the loopback page loaded. It is not a
+passing rendering or browser-interaction result. The executable DOM/HTTP suite
+and separate pinned-Git transport oracle are the evidence available here.
