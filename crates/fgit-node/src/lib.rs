@@ -3665,7 +3665,8 @@ impl LoopbackReceiveSession {
         Self::Anonymous
     }
 
-    const fn authenticated_session(&self) -> Option<&AuthenticatedReceiveSession> {
+    #[must_use]
+    pub const fn authenticated_session(&self) -> Option<&AuthenticatedReceiveSession> {
         match self {
             Self::Authenticated(session) => Some(session),
             Self::Anonymous => None,
