@@ -1248,7 +1248,7 @@ impl CanonicalRefState {
         self.head_target.as_ref()
     }
 
-    fn apply(&self, effects: &BTreeMap<RefName, RefEffect>) -> Result<Self, RefusalCode> {
+    pub fn apply(&self, effects: &BTreeMap<RefName, RefEffect>) -> Result<Self, RefusalCode> {
         if let Some(target) = &self.head_target {
             if matches!(effects.get(target), Some(RefEffect::Delete)) {
                 // Evaluated through fg043 PolicySnapshot via evaluate_protection,
