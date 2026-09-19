@@ -1049,6 +1049,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-ssh"
+version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "chacha20",
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "fgit-crypto",
+ "fgit-identity",
+ "fgit-types",
+ "fgit-wire",
+ "poly1305",
+]
+
+[[package]]
 name = "fgit-statistics"
 version = "0.0.1"
 dependencies = [
