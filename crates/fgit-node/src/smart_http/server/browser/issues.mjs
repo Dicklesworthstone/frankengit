@@ -145,6 +145,91 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
   }
   return { reply, binding: observed, head: snapshot };
 }
+// The exact native issue predicate, not a query language or an access grant.
+// A frozen copy prevents edits to a form/array from changing an in-flight query.
+export function issueSearchQuery(input = {}) {
+  object(input);
+  if (Object.keys(input).some(key => !['state', 'opened_by', 'labels', 'text', 'case_sensitive'].includes(key))) {
+    fail('Unknown issue search field.');
+  }
+  const state = input.state ?? null, opened_by = input.opened_by ?? null;
+  const needle = input.text ?? null, case_sensitive = input.case_sensitive ?? false;
+  if (state !== null && !['open', 'closed'].includes(state)) fail('Invalid issue search state.');
+  if (opened_by !== null && (typeof opened_by !== 'string' || !/^[0-9a-f]{32}$/.test(opened_by))) {
+    fail('Opening principal must be 32 lowercase hexadecimal characters.');
+  }
+  if (needle !== null) {
+    text(needle, 256, 'search text');
+    if (!needle.length) fail('Search text must not be empty; omit it to match any text.');
+  }
+  if (typeof case_sensitive !== 'boolean' || (case_sensitive && needle === null)) {
+    fail('Case-sensitive matching requires literal search text.');
+  }
+  return Object.freeze({ state, opened_by, text: needle, case_sensitive,
+    labels: Object.freeze(checkedLabels(input.labels ?? [])) });
+}
+function searchParameters({ after = 0, limit = 20, head = null, maxScan = 200 } = {}) {
+  natural(after, 'search cursor'); natural(limit, 'search result limit', 1, 100);
+  natural(maxScan, 'search scan limit', 1, 1000);
+  if (head !== null) snapshotToken(head);
+  if (after && head === null) fail('Search continuation requires its original snapshot.');
+  return { after, limit, head, maxScan };
+}
+function matchesSearch(row, query) {
+  if ((query.state !== null && row.state !== query.state) ||
+      (query.opened_by !== null && row.opened_by !== query.opened_by) ||
+      !query.labels.every(label => row.labels.includes(label))) return false;
+  if (query.text === null) return true;
+  // Match the engine's ASCII-only fold. Unicode case folding would change
+  // which native results pass, and joining title/body would invent matches.
+  const fold = value => query.case_sensitive ? value : value.replace(/[A-Z]/g, c => c.toLowerCase());
+  const needle = fold(query.text);
+  return fold(row.title).includes(needle) || fold(row.body).includes(needle);
+}
+export function issueSearchPage(reply, input, options = {}) {
+  const query = issueSearchQuery(input);
+  const { after, limit, head, maxScan } = searchParameters(options);
+  const observed = identity(reply, options.binding ?? null);
+  const snapshot = snapshotToken(reply.snapshot_token);
+  if (head !== null && snapshot !== head) fail('Issue search snapshot moved. Reload explicitly.');
+  const echo = object(reply.query);
+  if (reply.type !== 'issue_search_page' || reply.scope !== 'repository_issues' ||
+      echo.text_scope !== 'title_or_body' || echo.state !== query.state ||
+      echo.opened_by !== query.opened_by || echo.text !== query.text ||
+      echo.case_sensitive !== query.case_sensitive || reply.refs_changed !== false ||
+      reply.transaction_created !== false) fail('Issue search response changed its predicate or read-only contract.');
+  checkedLabels(echo.labels, true);
+  if (echo.labels.length !== query.labels.length || echo.labels.some((label, i) => label !== query.labels[i])) {
+    fail('Issue search response changed its label predicate.');
+  }
+  if (reply.after !== after || reply.limit !== limit || reply.max_scan !== maxScan ||
+      !Array.isArray(reply.issues) || reply.issues.length > limit || reply.count !== reply.issues.length) {
+    fail('Invalid issue search page.');
+  }
+  natural(reply.scanned, 'examined issue count', reply.issues.length, maxScan);
+  if (!['exhausted', 'result_limit', 'scan_limit'].includes(reply.stop_reason)) fail('Invalid search stopping reason.');
+  const more = reply.stop_reason !== 'exhausted';
+  if (reply.complete !== !more || reply.has_more_candidates !== more || (reply.next_after !== null) !== more ||
+      (more && reply.scanned === 0) ||
+      (reply.stop_reason === 'result_limit' && reply.issues.length !== limit) ||
+      (reply.stop_reason === 'scan_limit' && (reply.scanned !== maxScan || reply.issues.length === limit))) {
+    fail('Inconsistent issue search completion.');
+  }
+  if (more) {
+    natural(reply.next_after, 'search continuation', 1);
+    if (reply.next_after <= after || reply.next_after - after < reply.scanned) fail('Invalid search continuation.');
+  }
+  let previous = after;
+  for (const row of reply.issues) {
+    issueState(row);
+    if (row.number <= previous || (more && row.number > reply.next_after) || !matchesSearch(row, query)) {
+      fail('Issue search returned unordered or nonmatching results.');
+    }
+    previous = row.number;
+  }
+  return { reply, binding: observed, head: snapshot, query };
+}
+
 export function publication(reply, pending, status = 200) {
   identity(reply, pending.binding);
   if (reply.type !== 'issue_publication' || reply.number !== pending.number ||
@@ -314,6 +399,23 @@ export class IssueClient {
     const raw = await this.#request(`issues${number === null ? '' : `/${number}`}?${query}`, { view: true });
     const options = { after, limit, head, binding: this.#binding };
     const checked = number === null ? issuePage(raw, options) : issueHistory(raw, number, options);
+    this.#binding = checked.binding;
+    return checked;
+  }
+  // POST is a bounded read, not a publication. It must never attach the
+  // pending change's key, mark it sent, or spend mutation retry responsibility.
+  async search(input = {}, options = {}) {
+    const query = issueSearchQuery(input), parameters = searchParameters(options);
+    const { after, limit, head, maxScan } = parameters;
+    const body = new URLSearchParams({ state: query.state ?? 'all',
+      case_sensitive: String(query.case_sensitive), after: String(after),
+      limit: String(limit), max_scan: String(maxScan) });
+    if (query.text !== null) body.append('query', query.text);
+    if (query.opened_by !== null) body.append('opened_by', query.opened_by);
+    for (const label of query.labels) body.append('label', label);
+    if (head !== null) body.append('expected_head', head);
+    const raw = await this.#request('issues/search', { method: 'POST', body: body.toString(), view: true });
+    const checked = issueSearchPage(raw, query, { ...parameters, binding: this.#binding });
     this.#binding = checked.binding;
     return checked;
   }
