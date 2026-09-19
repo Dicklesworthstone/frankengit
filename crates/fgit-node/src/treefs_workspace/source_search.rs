@@ -1,10 +1,11 @@
 //! Read-only source search at one authenticated selection. No index, seal,
-//! object staging or authority mutation is performed by either entrypoint.
+//! object staging or authority mutation is performed by any entrypoint.
 
 use std::cell::Cell;
 use fgit_crypto::{GitHashAlgorithm, GitObjectKind, Sha1, Sha256};
 use fgit_forge::source_search::{SearchCompletion, SearchError, SearchLimits, SourceQuery,
     SourceSearchReport, search_source};
+use fgit_forge::source_search::batch::{SourceQueryBatch, SourceSearchBatchReport, search_source_batch};
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body, parse_tree};
 use fgit_treefs::{BaseView, ObjectSource, ObjectSourceError, PathPolicy, ReadGrant,
     TreeCapability, TreePath, WorkspaceId};
@@ -72,18 +73,54 @@ impl OneNode {
             return Err(search_error(SearchError::InvalidObjectFormat));
         }
         match self.object_format {
-            Format::Sha1 => self.search_local_format::<Sha1>(request, reference, expected_head,
+            Format::Sha1 => self.search_local_format::<Sha1, _>(request, reference, expected_head,
                 expected_commit, query, limits).await,
-            Format::Sha256 => self.search_local_format::<Sha256>(request, reference, expected_head,
+            Format::Sha256 => self.search_local_format::<Sha256, _>(request, reference, expected_head,
                 expected_commit, query, limits).await,
         }
     }
 
-    async fn search_local_format<A: GitHashAlgorithm>(
+    /// Search several literals under one caller capability and one authority
+    /// selection. File reads and fetch-budget charges are shared by the batch.
+    pub async fn search_source_batch_in<A: GitHashAlgorithm>(
+        &self, request: &NodeRequestContext, reference: &RefName,
+        visibility: &RefVisibility, capability: &mut TreeCapability, now: u64,
+        query: &SourceQueryBatch, limits: SearchLimits,
+    ) -> Result<SourceSearchBatchReport, NodeWorkspaceRefusal> {
+        limits.validate().map_err(search_error)?;
+        self.with_workspace_base_in::<A, _>(request, reference, visibility, capability, now,
+            |base, original, capability| {
+                let source = bounded_source(original, request, limits);
+                search_source_batch(base, &source, capability, now, query, limits,
+                    &|| !workspace_request_live(request)).map_err(search_error)
+            },
+        ).await
+    }
+
+    /// Repository-wide batch read for an independently authorized operator or
+    /// transport. All needles use the SAME materialization and snapshot pins;
+    /// this is not a loop over separately selected single-query operations.
+    pub async fn search_source_batch_snapshot_local_in(
         &self, request: &NodeRequestContext, reference: &RefName,
         expected_head: Option<RepositoryAuthorityHeadId>, expected_commit: Option<GitOid>,
-        query: &SourceQuery, limits: SearchLimits,
-    ) -> Result<(RepositoryAuthorityHeadId, SourceSearchReport), NodeWorkspaceRefusal> {
+        query: &SourceQueryBatch, limits: SearchLimits,
+    ) -> Result<(RepositoryAuthorityHeadId, SourceSearchBatchReport), NodeWorkspaceRefusal> {
+        if expected_commit.is_some_and(|id| id.is_zero() || id.algorithm() != self.object_format) {
+            return Err(search_error(SearchError::InvalidObjectFormat));
+        }
+        match self.object_format {
+            Format::Sha1 => self.search_local_format::<Sha1, _>(request, reference, expected_head,
+                expected_commit, query, limits).await,
+            Format::Sha256 => self.search_local_format::<Sha256, _>(request, reference, expected_head,
+                expected_commit, query, limits).await,
+        }
+    }
+
+    async fn search_local_format<A: GitHashAlgorithm, Q: LocalSearch>(
+        &self, request: &NodeRequestContext, reference: &RefName,
+        expected_head: Option<RepositoryAuthorityHeadId>, expected_commit: Option<GitOid>,
+        query: &Q, limits: SearchLimits,
+    ) -> Result<(RepositoryAuthorityHeadId, Q::Report), NodeWorkspaceRefusal> {
         limits.validate().map_err(search_error)?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         let selected = self.materialize_admission_in(request).await
@@ -146,7 +183,7 @@ impl OneNode {
         // TreeFS traversal remains authorized, but avoid scanning unrelated
         // root scopes for a path-restricted query. This is not a delegation.
         let prefixes: Vec<_> = entries.iter().filter(|entry| {
-            query.prefixes().is_empty() || query.prefixes().iter()
+            query.scope().prefixes().is_empty() || query.scope().prefixes().iter()
                 .any(|prefix| prefix.components().next() == Some(entry.name.as_slice()))
         }).map(|entry| TreePath::parse_default(&entry.name))
             .collect::<Result<_, _>>().map_err(|_| NodeWorkspaceRefusal::Object(
@@ -156,9 +193,9 @@ impl OneNode {
         if prefixes.len() > 4096 { return Err(search_error(SearchError::Budget("root scopes; narrow the query"))); }
         if !workspace_request_live(request) { return Err(search_error(SearchError::Cancelled)); }
         if prefixes.is_empty() {
-            return Ok((head, SourceSearchReport { repository: self.repository_id, source_rcr: rcr,
+            return Ok((head, query.empty(SourceSearchReport { repository: self.repository_id, source_rcr: rcr,
                 source_commit: commit, source_tree: tree, matches: Vec::new(), completion: SearchCompletion::Complete,
-                files_selected: 0, files_read: 0, bytes_read: 0, bytes_searched: 0, non_regular_entries: 0 }));
+                files_selected: 0, files_read: 0, bytes_read: 0, bytes_searched: 0, non_regular_entries: 0 })));
         }
         let metadata_bytes = commit_body.len() + tree_body.len();
         let bytes = ByteCount::try_new("source_search_reads", (READ_BYTES - metadata_bytes) as u64, READ_BYTES as u64)
@@ -173,10 +210,47 @@ impl OneNode {
         let base = BaseView::<A>::new(self.repository_id, rcr, commit_oid, tree_oid, parse, PathPolicy::default());
         let original = NodeTreeSource { inner, selected: selected.selected_closure(), workspace };
         let source = bounded_source(&original, request, limits);
-        let result = search_source(&base, &source, &mut capability, 0, query, limits,
+        let result = query.run(&base, &source, &mut capability, 0, limits,
             &|| !workspace_request_live(request)).map_err(search_error);
         if !workspace_request_live(request) { return Err(search_error(SearchError::Cancelled)); }
         result.map(|report| (head, report))
+    }
+}
+
+// Single and batch retrieval share exactly one authority/visibility/object
+// selection implementation. This private dispatch changes only the matcher and
+// result shape; it cannot replace the selected source or mint new read grants.
+trait LocalSearch: Sync {
+    type Report;
+    fn scope(&self) -> &SourceQuery;
+    fn empty(&self, source: SourceSearchReport) -> Self::Report;
+    fn run<A: GitHashAlgorithm, S: ObjectSource<A>>(&self,
+        base: &BaseView<A>, source: &S, capability: &mut TreeCapability, now: u64,
+        limits: SearchLimits, cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self::Report, SearchError>;
+}
+impl LocalSearch for SourceQuery {
+    type Report = SourceSearchReport;
+    fn scope(&self) -> &SourceQuery { self }
+    fn empty(&self, source: SourceSearchReport) -> Self::Report { source }
+    fn run<A: GitHashAlgorithm, S: ObjectSource<A>>(&self,
+        base: &BaseView<A>, source: &S, capability: &mut TreeCapability, now: u64,
+        limits: SearchLimits, cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self::Report, SearchError> {
+        search_source(base, source, capability, now, self, limits, cancelled)
+    }
+}
+impl LocalSearch for SourceQueryBatch {
+    type Report = SourceSearchBatchReport;
+    fn scope(&self) -> &SourceQuery { SourceQueryBatch::scope(self) }
+    fn empty(&self, source: SourceSearchReport) -> Self::Report {
+        self.empty_report(source.repository, source.source_rcr, source.source_commit, source.source_tree)
+    }
+    fn run<A: GitHashAlgorithm, S: ObjectSource<A>>(&self,
+        base: &BaseView<A>, source: &S, capability: &mut TreeCapability, now: u64,
+        limits: SearchLimits, cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self::Report, SearchError> {
+        search_source_batch(base, source, capability, now, self, limits, cancelled)
     }
 }
 

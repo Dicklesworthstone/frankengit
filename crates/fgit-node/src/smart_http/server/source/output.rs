@@ -3,8 +3,9 @@
 
 use fgit_forge::source_browse::{SourceBrowseAction, SourceBrowseContent, SourceBrowseQuery,
     SourceBrowseReport, SourceEntryKind};
-use fgit_forge::source_search::{SearchCase, SearchCompletion, SearchLimits, SourceQuery, SourceSearchReport};
-use fgit_types::{GitOid, RepositoryAuthorityHeadId, RepositoryCommitId};
+use fgit_forge::source_search::{SearchCase, SearchCompletion, SearchLimits, SourceMatch, SourceQuery, SourceSearchReport};
+use fgit_forge::source_search::batch::{SourceQueryBatch, SourceQueryResult, SourceSearchBatchReport};
+use fgit_types::{GitHashAlgorithm, GitOid, RepositoryAuthorityHeadId, RepositoryCommitId};
 use crate::OneNode;
 use super::request::Selection;
 use super::super::issues::{ApiError, quote, ref_fields};
@@ -119,24 +120,92 @@ pub(super) fn search(node: &OneNode, requested: &Selection, query: &SourceQuery,
         identity, quote(case), quote(completion), report.completion == SearchCompletion::Complete,
         limits.max_matches, report.matches.len(), report.files_selected, report.files_read,
         report.bytes_read, report.bytes_searched, report.non_regular_entries), maximum)?;
-    for (index, row) in report.matches.iter().enumerate() {
+    append_search_matches(&mut out, query, &report.matches, node.object_format, maximum, live)?;
+    append(&mut out, "]}", maximum)?;
+    checkpoint(live)?;
+    Ok(out)
+}
+
+/// Render one same-snapshot batch before writing any successful HTTP response.
+/// All source coordinates and physical-work counters are shared. Per-query
+/// limits/completion remain independent and preserve submitted query order.
+pub(super) fn search_batch(node: &OneNode, requested: &Selection, queries: &SourceQueryBatch,
+    limits: SearchLimits, head: RepositoryAuthorityHeadId, report: &SourceSearchBatchReport,
+    maximum: usize, live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
+    checkpoint(live)?;
+    if report.repository != node.repository_id || report.results.len() != queries.queries().len()
+        || report.files_read > report.files_selected || report.bytes_searched > report.bytes_read
+        || report.bytes_read > limits.max_total_bytes || report.files_selected > limits.max_files
+        || (report.results.iter().any(|result| result.completion == SearchCompletion::Complete)
+            && report.files_read != report.files_selected)
+    { return Err(ApiError::unavailable()); }
+    let identity = selection(node, requested, head, report.source_rcr, report.source_commit, report.source_tree)?;
+    let case = match queries.scope().case() { SearchCase::Exact => "exact", SearchCase::AsciiInsensitive => "ascii-insensitive" };
+    let mut out = String::new();
+    append(&mut out, &format!(concat!("{{\"type\":\"source_search_batch\",{},",
+        "\"profile\":\"literal-bytes-batch-v1\",\"shared_scan\":true,\"case\":{},",
+        "\"query_count\":{},\"max_matches\":{},\"files_selected\":{},\"files_read\":{},",
+        "\"bytes_read\":{},\"bytes_searched\":{},\"non_regular_entries\":{},\"path_prefixes_hex\":["),
+        identity, quote(case), queries.queries().len(), limits.max_matches,
+        report.files_selected, report.files_read, report.bytes_read, report.bytes_searched,
+        report.non_regular_entries), maximum)?;
+    for (index, prefix) in queries.scope().prefixes().iter().enumerate() {
+        checkpoint(live)?;
+        append(&mut out, &format!("{}{}", if index == 0 { "" } else { "," }, quote(&hex(prefix.as_bytes()))), maximum)?;
+    }
+    append(&mut out, "],\"results\":[", maximum)?;
+    append_batch_results(&mut out, queries, &report.results, limits, node.object_format, maximum, live)?;
+    append(&mut out, "]}", maximum)?;
+    checkpoint(live)?;
+    Ok(out)
+}
+
+fn append_batch_results(out: &mut String, queries: &SourceQueryBatch, results: &[SourceQueryResult],
+    limits: SearchLimits, format: GitHashAlgorithm, maximum: usize, live: &mut impl FnMut() -> bool,
+) -> Result<(), ApiError> {
+    if results.len() != queries.queries().len() { return Err(ApiError::unavailable()); }
+    for (index, (query, result)) in queries.queries().iter().zip(results).enumerate() {
+        checkpoint(live)?;
+        if result.needle.as_slice() != query.needle() || result.matches.len() > limits.max_matches
+            || (result.completion == SearchCompletion::MatchLimit && result.matches.len() != limits.max_matches)
+        { return Err(ApiError::unavailable()); }
+        let complete = result.completion == SearchCompletion::Complete;
+        append(out, &format!(concat!("{}{{\"query_index\":{},\"needle_hex\":{},",
+            "\"completion\":{},\"complete\":{},\"returned_matches\":{},\"matches\":["),
+            if index == 0 { "" } else { "," }, index, quote(&hex(query.needle())),
+            quote(if complete { "complete" } else { "match_limit" }), complete,
+            result.matches.len()), maximum)?;
+        append_search_matches(out, query, &result.matches, format, maximum, live)?;
+        append(out, "]}", maximum)?;
+    }
+    Ok(())
+}
+
+// One lossless row protocol for single and batch retrieval. Keeping this shared
+// prevents the batch surface from weakening byte/identity/order validation.
+fn append_search_matches(out: &mut String, query: &SourceQuery, matches: &[SourceMatch],
+    format: GitHashAlgorithm, maximum: usize, live: &mut impl FnMut() -> bool,
+) -> Result<(), ApiError> {
+    if matches.windows(2).any(|pair| (&pair[0].path, pair[0].byte_offset) >= (&pair[1].path, pair[1].byte_offset)) {
+        return Err(ApiError::unavailable());
+    }
+    for (index, row) in matches.iter().enumerate() {
         checkpoint(live)?;
         let excerpt_end = row.excerpt_offset.checked_add(row.excerpt.len()).ok_or_else(ApiError::unavailable)?;
         let match_end = row.byte_offset.checked_add(row.match_length).ok_or_else(ApiError::unavailable)?;
         if row.path.is_empty() || row.path.len() > 4096 || row.excerpt.len() > 416
             || row.match_length != query.needle().len() || row.line == 0 || row.byte_column == 0
             || row.byte_offset < row.excerpt_offset || match_end > excerpt_end
-            || row.blob.is_zero() || row.blob.algorithm() != node.object_format
+            || row.blob.is_zero() || row.blob.algorithm() != format
         { return Err(ApiError::unavailable()); }
-        append(&mut out, &format!(concat!("{}{{\"path_hex\":{},\"blob\":{},\"byte_offset\":{},",
+        append(out, &format!(concat!("{}{{\"path_hex\":{},\"blob\":{},\"byte_offset\":{},",
             "\"line\":{},\"byte_column\":{},\"match_length\":{},\"excerpt_offset\":{},\"excerpt_hex\":{}}}"),
             if index == 0 { "" } else { "," }, quote(&hex(&row.path)), quote(&row.blob.to_string()),
             row.byte_offset, row.line, row.byte_column, row.match_length, row.excerpt_offset,
             quote(&hex(&row.excerpt))), maximum)?;
     }
-    append(&mut out, "]}", maximum)?;
-    checkpoint(live)?;
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -157,5 +226,58 @@ mod tests {
         append(&mut out, "d", 4).unwrap();
         assert_eq!(out, "abcd");
         assert!(checkpoint(&mut || false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    fn query() -> SourceQueryBatch {
+        SourceQueryBatch::new(&[b"\0\xff".to_vec(), b"absent".to_vec()], SearchCase::Exact, &[]).unwrap()
+    }
+    fn rows() -> Vec<SourceQueryResult> {
+        vec![SourceQueryResult { needle: b"\0\xff".to_vec(), completion: SearchCompletion::MatchLimit,
+            matches: vec![SourceMatch { path: b"<file>\xff".to_vec(),
+                blob: GitOid::from_hex(GitHashAlgorithm::Sha1, &"a".repeat(40)).unwrap(),
+                byte_offset: 0, line: 1, byte_column: 1, excerpt: b"\0\xff".to_vec(),
+                excerpt_offset: 0, match_length: 2 }] },
+            SourceQueryResult { needle: b"absent".to_vec(), completion: SearchCompletion::Complete, matches: vec![] }]
+    }
+    fn render(results: &[SourceQueryResult], maximum: usize) -> Result<String, ApiError> {
+        let mut out = String::new();
+        append_batch_results(&mut out, &query(), results,
+            SearchLimits { max_matches: 1, ..SearchLimits::default() },
+            GitHashAlgorithm::Sha1, maximum, &mut || true)?;
+        Ok(out)
+    }
+    #[test]
+    fn batch_results_bind_order_needles_independent_completion_and_raw_bytes() {
+        let body = render(&rows(), MAX_REPLY_BYTES).unwrap();
+        assert!(body.starts_with("{\"query_index\":0,\"needle_hex\":\"00ff\",\"completion\":\"match_limit\",\"complete\":false"));
+        assert!(body.contains("\"path_hex\":\"3c66696c653eff\""));
+        assert!(!body.contains("<file>"));
+        assert!(body.ends_with("{\"query_index\":1,\"needle_hex\":\"616273656e74\",\"completion\":\"complete\",\"complete\":true,\"returned_matches\":0,\"matches\":[]}"));
+    }
+    #[test]
+    fn mismatched_batch_results_cannot_be_serialized_as_success() {
+        assert!(render(&rows()[..1], MAX_REPLY_BYTES).is_err());
+        let mut results = rows(); results.swap(0, 1);
+        assert!(render(&results, MAX_REPLY_BYTES).is_err());
+        let mut results = rows(); results[0].matches.clear();
+        assert!(render(&results, MAX_REPLY_BYTES).is_err());
+        let mut results = rows(); results[0].matches[0].excerpt.clear();
+        assert!(render(&results, MAX_REPLY_BYTES).is_err());
+        let mut results = rows(); results[0].matches[0].blob = GitOid::from_hex(GitHashAlgorithm::Sha256, &"a".repeat(64)).unwrap();
+        assert!(render(&results, MAX_REPLY_BYTES).is_err());
+    }
+    #[test]
+    fn response_byte_boundaries_and_cancellation_fail_the_whole_render() {
+        let results = rows(); let exact = render(&results, MAX_REPLY_BYTES).unwrap();
+        assert_eq!(render(&results, exact.len()).unwrap(), exact);
+        assert!(render(&results, exact.len() - 1).is_err());
+        let mut out = String::new();
+        assert!(append_batch_results(&mut out, &query(), &results, SearchLimits::default(),
+            GitHashAlgorithm::Sha1, MAX_REPLY_BYTES, &mut || false).is_err());
+        assert!(out.is_empty());
     }
 }

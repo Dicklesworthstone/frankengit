@@ -171,6 +171,13 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
                 .map_err(read_error)?;
             output::browse(node, selection, query, &report, maximum, &mut live)?
         }
+        Command::SearchBatch { selection, query, limits } => {
+            let (head, report) = drive_request_while(node, &context,
+                node.search_source_batch_snapshot_local_in(&context, &selection.reference,
+                    selection.expected_head, selection.expected_commit, query, *limits), &mut live)
+                .map_err(read_error)?;
+            output::search_batch(node, selection, query, *limits, head, &report, maximum, &mut live)?
+        }
         Command::Search { selection, query, limits } => {
             let (head, report) = drive_request_while(node, &context,
                 node.search_source_snapshot_local_in(&context, &selection.reference,
@@ -242,6 +249,7 @@ mod tests {
     fn branch_tag_and_candidate_mutations_acquire_the_same_write_semantics() {
         for (action, media, mutation) in [("tree", "application/x-www-form-urlencoded", false),
             ("log", "application/x-www-form-urlencoded", false),
+            ("search-batch", "application/x-www-form-urlencoded", false),
             ("historical-tree", "application/x-www-form-urlencoded", false),
             ("historical-blob", "application/x-www-form-urlencoded", false),
             ("diff", "application/x-www-form-urlencoded", false),
