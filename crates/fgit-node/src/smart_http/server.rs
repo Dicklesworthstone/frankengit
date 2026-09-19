@@ -7,6 +7,7 @@
 //! headers never authenticate. Git RPCs stream to native machines; metadata
 //! forms have a separate small envelope. Outcome queries never mutate state.
 
+mod browser;
 mod credentials;
 mod issues;
 mod outcomes;
@@ -649,6 +650,9 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
         let bytes = read_head(&mut reader, profile.http)?;
         let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
         version = envelope.version;
+        if browser::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer)? {
+            return Ok(());
+        }
         recovery = envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/outcomes"));
         if recovery {
             // This read-only child has no mutation intake/Serving transition.
