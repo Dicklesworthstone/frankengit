@@ -155,6 +155,14 @@ export async function inspectionReply(reply, artifact, crypto) {
   if (comparison.mode !== 'direct' || oid(comparison.before, algorithm) !== fields.target_tip || oid(comparison.after, algorithm) !== fields.candidate_commit ||
       !Array.isArray(comparison.entries) || comparison.entries.length > 512 || comparison.entry_count !== comparison.entries.length) fail('Incomplete or wrong candidate comparison.');
   oid(comparison.before_tree, algorithm); oid(comparison.after_tree, algorithm);
+  comparisonEntries(comparison, algorithm);
+  return { ...selected, reply };
+}
+
+// Shared byte-only diff validation. Each caller retains its own authority and subject checks.
+export function comparisonEntries(comparison, algorithm) {
+  record(comparison);
+  if (!Array.isArray(comparison.entries) || comparison.entries.length > 512 || comparison.entry_count !== comparison.entries.length) fail('Incomplete comparison entries.');
   let previous = '';
   for (const entry of comparison.entries) {
     checkedPath(entry.path_hex); if (entry.path_hex <= previous) fail('Unordered or duplicate changed paths.'); previous = entry.path_hex;
@@ -180,5 +188,4 @@ export async function inspectionReply(reply, artifact, crypto) {
       default: fail('Unknown content type cannot be presented as an empty diff.');
     }
   }
-  return { ...selected, reply };
 }

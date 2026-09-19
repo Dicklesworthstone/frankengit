@@ -187,9 +187,10 @@ export function metadataCommand(action, fields) {
   if (result.source_ref === result.target_ref) fail('Source and target must differ.');
   form(result); return result;
 }
-export function rootFor(href) {
-  const page = new URL(href), suffix = '/ui/pulls/';
-  if (!['https:', 'http:'].includes(page.protocol) || page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix)) fail('Open the exact repository /ui/pulls/ endpoint.');
+export function rootFor(href, suffix = '/ui/pulls/') {
+  if (!['/ui/pulls/', '/ui/source/'].includes(suffix)) fail('Unsupported browser profile.');
+  const page = new URL(href);
+  if (!['https:', 'http:'].includes(page.protocol) || page.search || page.hash || page.username || page.password || !page.pathname.endsWith(suffix)) fail(`Open the exact repository ${suffix} endpoint.`);
   if (page.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(page.hostname)) fail('Use HTTPS outside loopback.');
   const route = page.pathname.slice(0, -suffix.length);
   if (!/^\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+$/.test(route) || route.split('/').some(part => part === '.' || part === '..')) fail('Invalid repository route.');
@@ -225,9 +226,9 @@ export function apiError(status) {
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
-  #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout;
-  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000 }) {
-    this.root = Object.freeze(rootFor(href)); this.#fetch = fetchImpl; this.#crypto = cryptoImpl;
+  #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #all = new Set(); #reads = new Set(); #timeout; #source;
+  constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000, pageSuffix = '/ui/pulls/' }) {
+    this.root = Object.freeze(rootFor(href, pageSuffix)); this.#source = pageSuffix === '/ui/source/'; this.#fetch = fetchImpl; this.#crypto = cryptoImpl;
     this.#timeout = integer(timeoutMs, 'timeout', 1, 300_000);
   }
   get connected() { return Boolean(this.#token); }
@@ -247,7 +248,10 @@ export class Transport {
   async request(path, { method = 'GET', body, contentType = 'application/x-www-form-urlencoded', key, statuses = [200], maximum = REPLY_LIMIT, read = true, binary = false } = {}) {
     if (!this.connected) fail('Connect an explicitly scoped token first.');
     const url = new URL(path, this.root.api);
-    if (!/^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|prepare|resolve|inspect|merge|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path) || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
+    const allowed = this.#source
+      ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
+      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|prepare|resolve|inspect|merge|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
+    if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);
     const timer = setTimeout(() => controller.abort(), this.#timeout);
     const headers = { Authorization: `Bearer ${this.#token}`, Accept: binary ? 'multipart/mixed, application/json' : 'application/json' };
