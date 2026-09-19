@@ -30,8 +30,9 @@ pub use crate::architecture::{
 };
 pub use crate::generation::{
     BuilderProfileId, ExactGraphGeneration, GenerationActivation, GenerationAuthority,
-    GenerationAuthorityError, GraphAuthorityClass, GraphAuthorityClassRefusal, GraphGenerationBody,
-    GraphGenerationId, GraphSchemaId, GraphSourceStamp, GraphViewId,
+    GenerationAuthorityError, GenerationReadLimits, GenerationRecovery, GraphAuthorityClass,
+    GraphAuthorityClassRefusal, GraphGenerationBody, GraphGenerationId, GraphSchemaId,
+    GraphSourceStamp, GraphViewId, SelectedGeneration,
 };
 pub use crate::temporal::{
     BranchAgentOverlay, CrossTimeJoinPolicy, CrossTimeJoinReceipt, CrossTimeJoinRequest,

@@ -57,8 +57,8 @@ pub(in crate::generation) fn key() -> HeadKey {
     HeadKey::new(b"tenant/repository/incarnation/graph/commit-ancestry".to_vec()).unwrap()
 }
 
-/// All adapter futures are immediately ready. A Pending result is a test bug,
-/// not an invitation to spin or install a second production runtime.
+/// The default reference adapter is immediately ready. The explicit suspension
+/// case polls manually; a Pending result here must not spin or install a runtime.
 pub(in crate::generation) fn ready<F: Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);
     match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
@@ -72,6 +72,7 @@ pub(in crate::generation) struct AsyncStore {
     pub(in crate::generation) calls: Mutex<Vec<(&'static str, u64)>>,
     before_failure: Mutex<Option<&'static str>>,
     lose_reply: AtomicBool,
+    pause_before_put: AtomicBool,
     corrupt_reply: AtomicBool,
     foreign_read: Mutex<Option<HeadKey>>,
     race: Mutex<Option<(HeadGeneration, Vec<u8>)>>,
@@ -83,10 +84,14 @@ impl AsyncStore {
             calls: Mutex::new(Vec::new()),
             before_failure: Mutex::new(None),
             lose_reply: AtomicBool::new(false),
+            pause_before_put: AtomicBool::new(false),
             corrupt_reply: AtomicBool::new(false),
             foreign_read: Mutex::new(None),
             race: Mutex::new(None),
         }
+    }
+    pub(in crate::generation) fn lose_next_reply(&self) {
+        self.lose_reply.store(true, Ordering::SeqCst);
     }
     fn observe(&self, cx: u64, operation: &'static str) -> Result<(), AuthorityFailure> {
         self.calls.lock().unwrap().push((operation, cx));
@@ -115,6 +120,15 @@ impl AsyncAuthorityStore for AsyncStore {
     fn instance_id(&self) -> StoreInstanceId { self.inner.instance_id() }
     fn limits(&self) -> AuthorityLimits { self.inner.limits() }
     async fn put_if_absent(&self, cx: &u64, key: &ImmutableKey, body: &[u8]) -> Result<PutOutcome, AuthorityFailure> {
+        if self.pause_before_put.swap(false, Ordering::SeqCst) {
+            let mut pending = true;
+            std::future::poll_fn(|cx| {
+                if std::mem::take(&mut pending) {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else { Poll::Ready(()) }
+            }).await;
+        }
         self.observe(*cx, "put")?;
         self.inner.put_if_absent(key, body)
     }
@@ -309,4 +323,52 @@ fn malformed_success_does_not_claim_either_confirmation_or_rollback() {
     let HeadRead::Present(head) = store.inner.read_head(&key()).unwrap() else { panic!("publication absent") };
     assert_eq!(head.body(), encode_body(&body).unwrap());
     assert_eq!(head.generation(), HeadGeneration::FIRST);
+}
+
+#[test]
+fn a_pending_backend_operation_suspends_without_publishing_or_blocking() {
+    let store = AsyncStore::new();
+    store.pause_before_put.store(true, Ordering::SeqCst);
+    let authority = GenerationAuthority::new(&store, key());
+    let body = candidate(b"suspension", None);
+    let future = authority.stage_and_activate_async(&39, &body);
+    let mut future = std::pin::pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(future.as_mut().poll(&mut context).is_pending());
+    assert!(store.calls.lock().unwrap().is_empty());
+    assert_eq!(store.inner.read_head(&key()).unwrap(), HeadRead::Absent);
+    let Poll::Ready(result) = future.as_mut().poll(&mut context) else { panic!("resume did not finish") };
+    assert_eq!(result.unwrap().generation_id, body.generation_id().unwrap());
+    assert_eq!(store.calls.lock().unwrap().as_slice(), &[("put", 39), ("head", 39), ("initialize", 39)]);
+}
+
+#[test]
+fn interruption_after_staging_does_not_make_the_candidate_visible() {
+    let store = AsyncStore::new();
+    let authority = GenerationAuthority::new(&store, key());
+    let first = candidate(b"first", None);
+    ready(authority.stage_and_activate_async(&1, &first)).unwrap();
+    let before = store.inner.read_head(&key()).unwrap();
+    let next = candidate(b"next", Some(first.generation_id().unwrap()));
+    *store.before_failure.lock().unwrap() = Some("cas");
+    assert!(matches!(ready(authority.stage_and_activate_async(&2, &next)),
+        Err(GenerationAuthorityError::Authority(AuthorityFailure::Ambiguous(AmbiguityReason::Cancelled)))));
+    assert_eq!(store.inner.read_head(&key()).unwrap(), before);
+    assert_eq!(store.inner.read_immutable(&immutable_generation_key(next.generation_id().unwrap()).unwrap()).unwrap(),
+        ImmutableRead::Present(encode_body(&next).unwrap()));
+    assert!(store.before_failure.lock().unwrap().is_none(), "fault must actually fire");
+    let actual = ready(authority.stage_and_activate_async(&3, &next)).unwrap();
+    assert_eq!(actual.generation_id, next.generation_id().unwrap());
+}
+
+#[test]
+fn a_generation_counter_inconsistent_with_genesis_cannot_be_extended() {
+    let store = AsyncStore::new();
+    let first = candidate(b"first", None);
+    store.inner.initialize_head(&key(), HeadGeneration::try_new(2).unwrap(), &encode_body(&first).unwrap()).unwrap();
+    let next = candidate(b"next", Some(first.generation_id().unwrap()));
+    let before = store.inner.read_head(&key()).unwrap();
+    assert!(matches!(ready(GenerationAuthority::new(&store, key()).stage_and_activate_async(&1, &next)),
+        Err(GenerationAuthorityError::HistoryInconsistent)));
+    assert_eq!(store.inner.read_head(&key()).unwrap(), before);
 }

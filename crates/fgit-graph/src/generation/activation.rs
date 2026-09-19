@@ -104,6 +104,9 @@ fn plan(
         return Ok(Step::Initialize);
     };
     let active = decode_body::<GraphGenerationBody>(receipt.body(), DecodeLimits::default())?;
+    if (receipt.generation() == HeadGeneration::FIRST) != active.predecessor_generation_id().is_none() {
+        return Err(GenerationAuthorityError::HistoryInconsistent);
+    }
     if active.graph_view_id() != candidate.graph_view_id() {
         return Err(GenerationAuthorityError::ViewMismatch {
             active: Box::new(active.graph_view_id()),
@@ -217,4 +220,4 @@ impl<S: AsyncAuthorityStore> GenerationAuthority<'_, S> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

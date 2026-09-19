@@ -1,6 +1,9 @@
 //! Immutable graph-generation bodies and their root-last activation path.
 
 mod activation;
+mod recovery;
+
+pub use recovery::{GenerationReadLimits, GenerationRecovery, SelectedGeneration};
 
 use fgit_authority::{
     AuthorityFailure, HeadKey, ImmutableKey, KeyError,
@@ -339,6 +342,24 @@ pub enum GenerationAuthorityError {
     /// A successful write returned a mismatched receipt. Publication may have
     /// happened; use read-only recovery, never infer rollback from this error.
     InvalidActivationReceipt,
+    /// A requested read would widen or disable its bounded profile.
+    InvalidReadLimits,
+    /// An explicit read/cancellation probe stopped the observation.
+    ReadCancelled,
+    /// A complete ancestry observation did not fit the caller's budget.
+    ReadBudgetExceeded(&'static str),
+    /// A body referenced by the selected head or predecessor is unavailable.
+    MissingGeneration { generation_id: Box<GraphGenerationId> },
+    /// Bytes at an immutable predecessor key do not have the committed identity.
+    GenerationIdentityMismatch {
+        expected: Box<GraphGenerationId>,
+        observed: Box<GraphGenerationId>,
+    },
+    /// Canonical encoding, view, link count or predecessor shape is inconsistent.
+    HistoryInconsistent,
+    /// The selected history cannot substantiate a previously observed checkpoint.
+    /// Never fall back to an older valid root when this occurs.
+    CheckpointUnresolved,
 }
 
 impl From<CodecRefusal> for GenerationAuthorityError {
