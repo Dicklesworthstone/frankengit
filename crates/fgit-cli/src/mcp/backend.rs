@@ -3,6 +3,7 @@
 mod issues;
 mod pulls;
 mod source;
+mod review;
 mod mutations;
 mod issue_writes;
 mod outcomes;
@@ -67,6 +68,7 @@ impl ReadTools for NodeTools {
         if self.options.source { tools.extend(source::tools()); }
         if self.options.issue_writes { tools.extend(issue_writes::tools()); }
         if self.options.outcomes { tools.extend(outcomes::tools()); }
+        tools.extend(review::tools(self.options.source, self.options.pulls));
         tools
     }
     fn is_mutation(&self, name: &str) -> bool {
@@ -88,6 +90,9 @@ impl ReadTools for NodeTools {
         }
         if self.options.source && matches!(name, "frankengit_source_tree" | "frankengit_source_blob") {
             return source::call(self, name, args);
+        }
+        if review::permitted(self.options.source, self.options.pulls, name) {
+            return review::call(self, name, args);
         }
         Err(ToolError::invalid("tool_not_granted"))
     }
