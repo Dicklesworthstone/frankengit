@@ -3,7 +3,7 @@
 mod activation;
 mod recovery;
 
-pub use recovery::{GenerationReadLimits, GenerationRecovery, SelectedGeneration};
+pub use recovery::{GenerationReadLimits, GenerationRecovery, PinnedGeneration, SelectedGeneration};
 
 use fgit_authority::{
     AuthorityFailure, HeadKey, ImmutableKey, KeyError,

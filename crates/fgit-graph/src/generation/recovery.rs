@@ -4,6 +4,9 @@
 //! exact immutable predecessor keys reachable from the selected head, never a
 //! listing, a fresh head halfway through the walk, or a local outcome cache.
 
+mod pinned;
+pub use pinned::PinnedGeneration;
+
 use super::{
     GenerationActivation, GenerationAuthority, GenerationAuthorityError, GraphGenerationBody,
     GraphGenerationId, GraphViewId, activation::check_authenticated, immutable_generation_key,
@@ -107,6 +110,7 @@ struct Walk {
     minimum: Option<GenerationActivation>,
     minimum_seen: bool,
     found: Option<GenerationActivation>,
+    found_body: Option<GraphGenerationBody>,
     next: GraphGenerationId,
     position: HeadGeneration,
     visited: BTreeSet<GraphGenerationId>,
@@ -143,7 +147,7 @@ impl Walk {
         Ok(Some(Self {
             next: activation.generation_id, position: activation.authority_generation,
             selected: SelectedGeneration { activation, body, generations_read: 0, bytes_read: 0 },
-            target, minimum: minimum.cloned(), minimum_seen: minimum.is_none(), found: None,
+            target, minimum: minimum.cloned(), minimum_seen: minimum.is_none(), found: None, found_body: None,
             visited: BTreeSet::new(), ended: false, budget,
         }))
     }
@@ -186,6 +190,9 @@ impl Walk {
         }
         if self.target == Some(observed) {
             self.found = Some(GenerationActivation { generation_id: observed, authority_generation: self.position });
+            // Retain at most one bounded body. It remains private until every
+            // requested checkpoint has been verified by this same walk.
+            self.found_body = Some(body.clone());
         }
         self.ended = body.predecessor_generation_id().is_none();
         if self.minimum_seen && (self.target.is_none() || self.found.is_some() || self.ended) {

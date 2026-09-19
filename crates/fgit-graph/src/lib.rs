@@ -32,7 +32,7 @@ pub use crate::generation::{
     BuilderProfileId, ExactGraphGeneration, GenerationActivation, GenerationAuthority,
     GenerationAuthorityError, GenerationReadLimits, GenerationRecovery, GraphAuthorityClass,
     GraphAuthorityClassRefusal, GraphGenerationBody, GraphGenerationId, GraphSchemaId,
-    GraphSourceStamp, GraphViewId, SelectedGeneration,
+    GraphSourceStamp, GraphViewId, PinnedGeneration, SelectedGeneration,
 };
 pub use crate::temporal::{
     BranchAgentOverlay, CrossTimeJoinPolicy, CrossTimeJoinReceipt, CrossTimeJoinRequest,
