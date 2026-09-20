@@ -13,10 +13,11 @@ use fgit_node::{NodeConfig, NodeWorkspaceRefusal, OneNode};
 use fgit_types::{CANONICAL_CODEC_VERSION, DigestBytes, GitHashAlgorithm, InternalObjectId, RefName, RepositoryId, TenantId};
 
 const USAGE: &str = "fg-index ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF build genesis|INDEX_TOKEN\n\
+fg-index ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF refresh INDEX_TOKEN\n\
 fg-index ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF recover CANDIDATE_TOKEN\n\
 fg-index ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF query content|path TOKEN [TOKEN ...]\n\
 Index tokens are alg:CODE:LOWERCASE_HEX, as printed by build and HTTP indexed search.\n\
-Open existing nodes only. Build requires trusted local access and an explicit predecessor.";
+Open existing nodes only. Build/refresh require trusted local access and an explicit predecessor.";
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
 fn token(id: &InternalObjectId) -> String {
     format!("alg:{}:{}", id.algorithm().code_point(), hex(id.digest().as_bytes()))
@@ -40,7 +41,7 @@ fn generation(text: &str) -> Result<GraphGenerationId, String> {
         DigestBytes::try_new(&bytes).map_err(|e| e.to_string())?)).map_err(|e| e.to_string())
 }
 #[derive(Debug)]
-enum Action { Build(Option<GraphGenerationId>), Recover(GraphGenerationId), Query(LexicalQuery) }
+enum Action { Build(Option<GraphGenerationId>), Refresh(GraphGenerationId), Recover(GraphGenerationId), Query(LexicalQuery) }
 struct Command { root: PathBuf, tenant: TenantId, repository: RepositoryId, format: GitHashAlgorithm, reference: RefName, action: Action }
 fn parse(args: &[OsString]) -> Result<Command, String> {
     if args.len() < 7 || args.len() > 39 { return Err(USAGE.to_owned()); }
@@ -52,6 +53,7 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
     let reference = RefName::try_new(text(4)?.as_bytes()).map_err(|e| e.to_string())?;
     let action = match text(5)? {
         "build" if args.len() == 7 => Action::Build(if text(6)? == "genesis" { None } else { Some(generation(text(6)?)?) }),
+        "refresh" if args.len() == 7 => Action::Refresh(generation(text(6)?)?),
         "recover" if args.len() == 7 => Action::Recover(generation(text(6)?)?),
         "query" if args.len() >= 8 => {
             let channel = match text(6)? { "content" => LexicalChannel::Content, "path" => LexicalChannel::Path, _ => return Err(USAGE.to_owned()) };
@@ -73,6 +75,15 @@ fn execute(node: &OneNode, command: &Command) -> Result<String, NodeWorkspaceRef
                 &command.reference, None, None, *predecessor, SearchLimits::default()))?;
             Ok(format!("{{\"type\":\"index_activation\",{},\"snapshot_token\":\"{}\",\"source_commit\":\"{}\",\"root_tree\":\"{}\",\"repository_transaction_created\":false}}",
                 activation_fields(&activation), token(source.source_head.as_internal_object_id()), source.commit, source.tree))
+        }
+        Action::Refresh(predecessor) => {
+            let (source, activation, stats) = node.runtime().block_on(node.refresh_source_index_local_in(&context,
+                &command.reference, None, None, *predecessor, SearchLimits::default(), Default::default()))?;
+            Ok(format!("{{\"type\":\"index_refresh\",{},\"snapshot_token\":\"{}\",\"source_commit\":\"{}\",\"root_tree\":\"{}\",\"reused_documents\":{},\"rebuilt_documents\":{},\"reused_source_bytes\":{},\"rebuilt_source_bytes\":{},\"prior_documents_not_reused\":{},\"previous_payload_bytes_read\":{},\"previous_generation_bytes_read\":{},\"build_work_bytes\":{},\"repository_transaction_created\":false}}",
+                activation_fields(&activation), token(source.source_head.as_internal_object_id()), source.commit, source.tree,
+                stats.reused_documents, stats.rebuilt_documents, stats.reused_source_bytes, stats.rebuilt_source_bytes,
+                stats.prior_documents_not_reused, stats.previous_payload_bytes_read, stats.previous_generation_bytes_read,
+                stats.build_work_bytes))
         }
         Action::Recover(candidate) => {
             let recovered = node.runtime().block_on(node.recover_source_index_local_in(&context, &command.reference, *candidate, None, Default::default()))?;
@@ -151,4 +162,14 @@ mod tests {
         for index in [1,2,3] { let mut a = args(&["build", "genesis"]); a[index] = OsString::from("invalid"); assert!(parse(&a).is_err()); }
         for text in [format!("alg:2:{}", "0".repeat(64)), format!("alg:1:{}", "a".repeat(40)), format!("alg:2:{}", "A".repeat(64))] { assert!(generation(&text).is_err()); }
     }
+    #[test]
+    fn refresh_requires_an_existing_exact_generation_without_implicit_bootstrap_or_force() {
+        let token = format!("alg:2:{}", "b".repeat(64));
+        assert!(matches!(parse(&args(&["refresh", &token])).unwrap().action, Action::Refresh(id) if id == generation(&token).unwrap()));
+        for tail in [&["refresh"][..], &["refresh", "genesis"], &["refresh", "latest"],
+            &["refresh", &token, "force"], &["refresh", &token, "extra"]] {
+            assert!(parse(&args(tail)).is_err());
+        }
+    }
+
 }

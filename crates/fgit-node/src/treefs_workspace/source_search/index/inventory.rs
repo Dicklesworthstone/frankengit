@@ -1,5 +1,7 @@
 //! Complete, bounded native TreeFS enumeration. These are temporary builder
 //! inputs, not storage or a caller-supplied claim of tree completeness.
+mod refresh;
+
 use std::collections::BTreeMap;
 use fgit_crypto::{GitHashAlgorithm, GitObjectKind, NativeObjectIdentity};
 use fgit_treefs::{BaseEntry, BaseError, BaseView, ObjectSource, TreeCapability, TreePath};
