@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 //! Trusted-local symbol index operations over an EXISTING node. Source reads
-//! never create an index; builds require an explicit predecessor and all
+//! never create an index; builds/refreshes require an explicit predecessor and all
 //! original-candidate recovery is read-only. Shutdown is always explicit.
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -15,6 +15,7 @@ use fgit_types::{CANONICAL_CODEC_VERSION, DigestBytes, GitHashAlgorithm, Interna
 
 type Failure = AccessError<NodeWorkspaceRefusal, GenerationAuthorityError>;
 const USAGE: &str = "fg-symbol-index ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF build genesis|INDEX_TOKEN\n\
+fg-symbol-index ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF refresh INDEX_TOKEN\n\
 fg-symbol-index ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF recover CANDIDATE_TOKEN\n\
 fg-symbol-index ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF query exact|prefix NAME\n\
 Index tokens have the form alg:CODE:LOWERCASE_HEX. No latest/force or repository initialization.";
@@ -38,7 +39,7 @@ fn generation(text: &str) -> Result<GraphGenerationId,String> {
         DigestBytes::try_new(&bytes).map_err(|e|e.to_string())?)).map_err(|e|e.to_string())
 }
 #[derive(Debug)]
-enum Action { Build(Option<GraphGenerationId>), Recover(GraphGenerationId), Query(SymbolQuery) }
+enum Action { Build(Option<GraphGenerationId>), Refresh(GraphGenerationId), Recover(GraphGenerationId), Query(SymbolQuery) }
 struct Options {root:PathBuf,tenant:TenantId,repository:RepositoryId,format:GitHashAlgorithm,reference:RefName,action:Action}
 fn parse(args:&[OsString])->Result<Options,String>{
     if !(7..=8).contains(&args.len()) || args.iter().any(|s|s.len()>4096) {return Err(USAGE.to_owned());}
@@ -50,6 +51,7 @@ fn parse(args:&[OsString])->Result<Options,String>{
     if !reference.as_bytes().starts_with(b"refs/"){return Err("A full reference is required.".to_owned());}
     let action=match text(5)?{
         "build" if args.len()==7=>Action::Build(if text(6)?=="genesis"{None}else{Some(generation(text(6)?)?)}),
+        "refresh" if args.len()==7=>Action::Refresh(generation(text(6)?)?),
         "recover" if args.len()==7=>Action::Recover(generation(text(6)?)?),
         "query" if args.len()==8=>{
             let mode=match text(6)?{"exact"=>SymbolMatchMode::Exact,"prefix"=>SymbolMatchMode::Prefix,_=>return Err(USAGE.to_owned())};
@@ -70,6 +72,14 @@ fn execute(node:&OneNode,options:&Options)->Result<String,Failure>{
             Ok(format!("{{\"type\":\"symbol_index_activation\",\"index_token\":\"{}\",\"index_number\":{},\"snapshot_token\":\"{}\",\"source_commit\":\"{}\",\"root_tree\":\"{}\",\"repository_transaction_created\":false}}",
                 token(activation.generation_id.as_internal_object_id()),activation.authority_generation.get(),
                 token(source.head.as_internal_object_id()),source.commit,source.tree))
+        }
+        Action::Refresh(predecessor)=>{
+            let(source,activation,stats)=node.runtime().block_on(node.refresh_source_symbol_index_local_in(&request,
+                &options.reference,None,None,*predecessor,Default::default()))?;
+            Ok(format!("{{\"type\":\"symbol_index_refresh\",\"index_token\":\"{}\",\"index_number\":{},\"snapshot_token\":\"{}\",\"source_commit\":\"{}\",\"root_tree\":\"{}\",\"reused_files\":{},\"source_blobs_read\":{},\"source_bytes_read\":{},\"predecessor_tables_read\":{},\"predecessor_payload_bytes\":{},\"repository_transaction_created\":false}}",
+                token(activation.generation_id.as_internal_object_id()),activation.authority_generation.get(),
+                token(source.head.as_internal_object_id()),source.commit,source.tree,stats.reused_files,
+                stats.source_blobs_read,stats.source_bytes_read,stats.predecessor_tables_read,stats.predecessor_payload_bytes))
         }
         Action::Query(query)=>{
             let report=node.runtime().block_on(node.search_source_symbols_index_snapshot_local_in(&request,
@@ -127,6 +137,14 @@ mod tests{
         assert!(matches!(parse(&args(&["build","genesis"])).unwrap().action,Action::Build(None)));
         let id=format!("alg:2:{}","a".repeat(64));assert!(parse(&args(&["build",&id])).is_ok());assert!(parse(&args(&["recover",&id])).is_ok());
         for tail in [&["build","latest"][..],&["build","genesis","force"],&["recover","genesis"],&["init","genesis"]]{assert!(parse(&args(tail)).is_err());}
+    }
+    #[test]
+    fn refresh_requires_an_exact_existing_generation_token(){
+        let id=format!("alg:2:{}","a".repeat(64));
+        assert!(matches!(parse(&args(&["refresh",&id])).unwrap().action,Action::Refresh(_)));
+        for tail in [&["refresh"][..],&["refresh","genesis"],&["refresh","latest"],&["refresh",&id,"force"]]{
+            assert!(parse(&args(tail)).is_err());
+        }
     }
     #[test]
     fn query_grammar_is_explicit_and_bounded(){

@@ -161,7 +161,7 @@ fn invalid_refs_formats_cancelled_and_unpolled_operations_do_not_initialize_an_i
     assert!(matches!(node.runtime().block_on(node.search_source_symbols_index_snapshot_local_in(&node.request_context(),&missing,
         None,None,None,&ordinary(),Default::default(),data::MAX_INDEX_BYTES)),Err(AccessError::Source(NodeWorkspaceRefusal::RefUnavailable))));
     let foreign=GitOid::from_hex(GitHashAlgorithm::Sha256,&"a".repeat(64)).unwrap();
-    assert!(matches!(node.runtime().block_on(node.build_source_symbol_index_local_in(&node.request_context(),&reference(),None,Some(foreign),None,Default::default())),Err(AccessError::Source(NodeWorkspaceRefusal::ObjectFormatMismatch))));
+    assert!(matches!(node.runtime().block_on(node.build_source_symbol_index_local_in(&node.outbox_delivery_context(),&reference(),None,Some(foreign),None,Default::default())),Err(AccessError::Source(NodeWorkspaceRefusal::ObjectFormatMismatch))));
     assert!(matches!(search(&node,&ordinary(),Default::default(),data::MAX_INDEX_BYTES),Err(AccessError::Uninitialized)));
     assert_eq!(generation(&node),before);build(&node,None);node.shutdown().unwrap();
 }
@@ -210,8 +210,18 @@ fn forge_only_write_invalidates_http_index_without_implicitly_rebuilding_it(){
     let written=exchange(&server.client,&request(&server.client,"/api/v1/issues/1/open",'b',
         &format!("Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nIdempotency-Key: symbols-index-forge-write\r\n",body.len()),body),true);status(&written,200);
     let stale=post(&server.client,"search-symbols-index",'a',&form(format),false);status(&stale,409);assert!(stale.body.contains("symbol_index_stale"));server.finish();
-    let node=reopen(&config);let second=build(&node,Some(&first));let report=search(&node,&ordinary(),Default::default(),data::MAX_INDEX_BYTES).unwrap();
-    assert_eq!(report.source.commit,commit);assert_eq!(report.generation,*second.generation_id.as_internal_object_id());node.shutdown().unwrap();
+    let node=reopen(&config);let before=generation(&node);
+    let(source,second,stats)=node.runtime().block_on(node.refresh_source_symbol_index_local_in(&node.outbox_delivery_context(),
+        &reference(),None,None,first.generation_id,Default::default())).unwrap();
+    assert_eq!(source.commit,commit);assert_eq!(stats.reused_files,3);
+    assert_eq!(stats.source_blobs_read,0);assert_eq!(stats.source_bytes_read,0);
+    let report=search(&node,&ordinary(),Default::default(),data::MAX_INDEX_BYTES).unwrap();
+    assert_eq!(report.source.commit,commit);assert_eq!(report.generation,*second.generation_id.as_internal_object_id());
+    assert_eq!(generation(&node),before);
+    let server=Server::start(node,&path,1,true,false);
+    let current=post(&server.client,"search-symbols-index",'a',&form(format),false);status(&current,200);
+    assert_eq!(text(&current.body,"source_commit"),commit.to_string());assert_eq!(number(&current.body,"source_blobs_read"),0);
+    server.finish();
 }
 #[test]
 fn operator_build_query_and_original_candidate_recovery_use_existing_nodes(){
@@ -233,3 +243,6 @@ fn operator_build_query_and_original_candidate_recovery_use_existing_nodes(){
 
 #[path = "source_symbol_index/refresh.rs"]
 mod refresh;
+
+#[path = "source_symbol_index/operator_refresh.rs"]
+mod operator_refresh;
