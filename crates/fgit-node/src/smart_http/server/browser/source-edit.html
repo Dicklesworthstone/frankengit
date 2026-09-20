@@ -13,15 +13,19 @@
 <label>Object format <select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
 <button id="select-base" type="button">Select current branch base</button><pre id="base"></pre></section>
 <section><h2>Queue exact file edits</h2>
-<p>Regular files only, at most 256 KiB each and 64 paths. NUL-containing files, binary patches, symlinks, gitlinks, copies, and renames are outside this profile. Use a complete replacement-file upload to preserve unusual or non-UTF-8 content exactly.</p>
+<p>Text and binary regular files, at most 256 KiB each and 64 paths. Upload exact bytes or edit them as hex, including NUL and non-UTF-8 content. Symlinks, gitlinks, copies, renames, and compressed GIT binary patch uploads remain outside this profile. All edits still require native candidate inspection and explicit publication.</p>
 <label>Path <input id="path" spellcheck="false"></label><label>Path encoding <select id="path-kind"><option value="utf8">UTF-8 text</option><option value="hex">Exact lowercase hex bytes</option></select></label>
 <label>Action <select id="change-kind"><option value="modify">Edit existing file</option><option value="create">Create absent file</option><option value="delete">Delete existing file</option></select></label>
 <button id="load-file" type="button">Load complete existing file</button>
 <label>New mode <select id="file-mode"><option value="100644">Regular file (100644)</option><option value="100755">Executable file (100755)</option></select></label>
-<label>Edited-text line endings <select id="line-endings"><option value="lf">LF</option><option value="crlf">CRLF</option></select></label>
+<label>Content view <select id="content-mode"><option value="text">UTF-8 text</option><option value="hex">Exact hex bytes</option></select></label>
+<p id="file-info">No file bytes loaded.</p>
+<div id="text-editor"><label>Edited-text line endings <select id="line-endings"><option value="lf">LF</option><option value="crlf">CRLF</option></select></label>
 <p>Unedited loaded content preserves its exact bytes. Editing text deliberately applies the selected line endings. Final-newline presence follows the text you enter. A replacement-file upload performs no newline conversion.</p>
-<label>New file content <textarea id="file-text" rows="14" spellcheck="false"></textarea></label>
+<label>New file content <textarea id="file-text" rows="14" spellcheck="false" maxlength="262144"></textarea></label></div>
+<div id="hex-editor" hidden><label>Complete file bytes (hexadecimal) <textarea id="file-hex" rows="14" spellcheck="false" maxlength="786432"></textarea></label><p>Two hex digits per byte; ASCII spaces, tabs, and line breaks are ignored. Hex edits do not convert line endings. An empty value is an empty file, not a deletion.</p></div>
 <label>Or exact replacement file <input id="replacement" type="file"></label>
+<button id="save-file" type="button">Download exact draft bytes</button>
 <button id="queue-file" type="button">Queue this edit</button><button id="clear-edits" type="button">Clear queued edits</button><ol id="edits"></ol></section>
 <section><h2>Explicit commit metadata</h2>
 <label>Author: Name &lt;email&gt; <input id="author" spellcheck="false"></label>

@@ -21,22 +21,52 @@ export async function chosenBytes(file, maximum, stillCurrent = () => true) {
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength !== file.size || buffer.byteLength > maximum) throw new Error('Selected file bytes changed or exceeded the limit.');
   return new Uint8Array(buffer);
 }
+export const HEX_TEXT_LIMIT = FILE_LIMIT * 3;
+export function hexEditorBytes(value) {
+  if (typeof value !== 'string' || value.length > HEX_TEXT_LIMIT || /[^0-9a-fA-F \t\r\n]/.test(value)) throw new Error('Enter bounded hexadecimal byte pairs, without prefixes or comments.');
+  const digits = value.replace(/[ \t\r\n]/g, '').toLowerCase();
+  return fileBytes(unhex(digits, FILE_LIMIT), true);
+}
+export function formatHexBytes(bytes) {
+  fileBytes(bytes, true); const lines = [];
+  for (let i = 0; i < bytes.length; i += 16) lines.push(Array.from(bytes.subarray(i, i + 16), byte => byte.toString(16).padStart(2, '0')).join(' '));
+  return lines.join('\n');
+}
+export function editableText(bytes) {
+  if (bytes.some(byte => byte < 32 && ![9, 10, 13].includes(byte))) return null;
+  const value = decoded(bytes);
+  return value !== null && !/[\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value) ? value : null;
+}
 function decoded(bytes) {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
   catch { return null; }
 }
 function label(path) {
   const bytes = unhex(path, 4096), value = decoded(bytes);
-  return value === null ? `bytes:${path}` : `${JSON.stringify(value)} [${path}]`;
+  return value === null ? `bytes:${path}` : `${JSON.stringify(value).replace(/[\u202a-\u202e\u2066-\u2069]/gu, c => `\\u${c.charCodeAt(0).toString(16)}`)} [${path}]`;
 }
-function contentLabel(bytes) { return decoded(bytes) ?? `Non-UTF-8 bytes (hex):\n${hex(bytes)}`; }
+function contentLabel(bytes) { return editableText(bytes) ?? `Binary/non-text bytes (hex):\n${hex(bytes)}`; }
 export function mountSourceEditor(doc, options = {}) {
   const client = options.client ?? new SourceEditClient({ href: options.href ?? globalThis.location.href });
   const byId = id => { const element = doc.getElementById(id); if (!element) throw new Error(`Missing source editor control ${id}`); return element; };
   const controls = Object.fromEntries(['token','connect','disconnect','branch','format','select-base','base','path','path-kind','load-file',
-    'change-kind','file-mode','file-text','line-endings','replacement','queue-file','edits','clear-edits','author','committer','timestamp','message',
+    'change-kind','file-mode','file-text','file-hex','content-mode','text-editor','hex-editor','file-info','save-file','line-endings','replacement','queue-file','edits','clear-edits','author','committer','timestamp','message',
     'prepare-edits','patch','prepare-patch','candidate','stage','confirm-send','send','recover','discard','save-receipt','restore-file','restore-receipt','pending','status'].map(id => [id, byId(id)]));
-  let edits = new Map(), loaded = null, replacement = null, revision = 0, textDirty = false, busy = false;
+  let edits = new Map(), loaded = null, replacement = null, replacementFile = null, revision = 0, textDirty = false, busy = false, viewMode = 'text';
+  const urls = options.urls ?? globalThis.URL, timers = options.timers ?? globalThis, downloads = new Map();
+  function releaseDownloads() {
+    for (const [url, timer] of downloads) { timers.clearTimeout(timer); urls.revokeObjectURL(url); }
+    downloads.clear();
+  }
+  function download(value, media, name) {
+    const url = urls.createObjectURL(new Blob([value], { type: media }));
+    try {
+      const link = element('a'); link.href = url; link.download = name; link.click();
+      const timer = timers.setTimeout(() => { urls.revokeObjectURL(url); downloads.delete(url); }, 30_000);
+      timer?.unref?.(); downloads.set(url, timer);
+    } catch (error) { urls.revokeObjectURL(url); throw error; }
+  }
+  controls['content-mode'].value = viewMode;
   const element = (tag, text) => { const node = doc.createElement(tag); if (text !== undefined) node.textContent = text; return node; };
   const status = message => { controls.status.textContent = message; };
   const path = () => {
@@ -44,7 +74,8 @@ export function mountSourceEditor(doc, options = {}) {
     sourcePath(value); return value;
   };
   function clearDraft() {
-    edits.clear(); loaded = null; replacement = null; textDirty = false;
+    edits.clear(); loaded = null; replacement = null; replacementFile = null; textDirty = false; viewMode = 'text';
+    controls['content-mode'].value = viewMode; controls['file-hex'].value = ''; controls['file-info'].textContent = 'No file bytes loaded.'; releaseDownloads();
     controls['file-text'].value = ''; controls.replacement.value = ''; controls.patch.value = '';
     controls.candidate.replaceChildren(); controls.edits.replaceChildren(); controls.base.textContent = '';
   }
@@ -53,7 +84,11 @@ export function mountSourceEditor(doc, options = {}) {
   }
   function render() {
     const pending = client.pending, candidate = client.candidate, connected = client.connected;
-    for (const id of ['branch','format','path','path-kind','change-kind','file-mode','file-text','line-endings','replacement','author','committer','timestamp','message','patch']) controls[id].disabled = busy || !connected || !!pending;
+    for (const id of ['branch','format','path','path-kind','change-kind','file-mode','file-text','file-hex','content-mode','line-endings','replacement','author','committer','timestamp','message','patch']) controls[id].disabled = busy || !connected || !!pending;
+    controls['text-editor'].hidden = viewMode !== 'text'; controls['hex-editor'].hidden = viewMode !== 'hex';
+    controls['file-text'].disabled ||= viewMode !== 'text'; controls['file-hex'].disabled ||= viewMode !== 'hex';
+    controls['line-endings'].disabled ||= viewMode !== 'text';
+    controls['save-file'].disabled = busy || !connected || !!pending || !client.selection;
     controls.connect.disabled = busy; controls['select-base'].disabled = busy || !connected || !!pending;
     for (const id of ['load-file','queue-file','clear-edits','prepare-edits','prepare-patch']) controls[id].disabled = busy || !connected || !!pending || !client.selection;
     controls.stage.disabled = busy || !connected || !!pending || !candidate;
@@ -66,7 +101,7 @@ export function mountSourceEditor(doc, options = {}) {
     controls.edits.replaceChildren();
     for (const [key, edit] of edits) {
       const row = element('li'), remove = element('button', 'Remove'); remove.type = 'button'; remove.disabled = busy || !!pending;
-      row.append(element('span', `${edit.before === null ? 'Create' : edit.after === null ? 'Delete' : 'Edit'} ${label(key)}; ${edit.before?.bytes.length ?? 0} → ${edit.after?.bytes.length ?? 0} bytes `), remove);
+      row.append(element('span', `${edit.before === null ? 'Create' : edit.after === null ? 'Delete' : 'Edit'} ${label(key)}; ${edit.before?.bytes.length ?? 0} → ${edit.after?.bytes.length ?? 0} bytes${editableText(edit.after?.bytes ?? edit.before.bytes) === null ? ' (binary/raw)' : ''} `), remove);
       remove.addEventListener('click', () => { if (busy || client.pending) return; edits.delete(key); changed(); });
       controls.edits.append(row);
     }
@@ -95,6 +130,31 @@ export function mountSourceEditor(doc, options = {}) {
       controls.candidate.append(section);
     }
   }
+  function draftBytes() {
+    if (replacementFile && replacement === null) throw new Error('The selected replacement has not completed validation; choose it again or edit explicitly.');
+    if (replacement !== null) return replacement.slice();
+    if (!textDirty && loaded) return loaded.before.bytes.slice();
+    return viewMode === 'hex' ? hexEditorBytes(controls['file-hex'].value)
+      : editorBytes(controls['file-text'].value, null, true, controls['line-endings'].value);
+  }
+  function showBytes(bytes, requested = null) {
+    const value = editableText(bytes);
+    if (requested === 'text' && value === null) throw new Error('These bytes cannot be edited as safe UTF-8 text. Keep hex view or upload a replacement.');
+    viewMode = requested ?? (value === null ? 'hex' : 'text'); controls['content-mode'].value = viewMode;
+    controls['file-text'].value = value ?? ''; controls['file-hex'].value = formatHexBytes(bytes);
+    controls['line-endings'].value = value?.includes('\r\n') ? 'crlf' : 'lf';
+    controls['file-info'].textContent = `${bytes.length} exact bytes; ${value === null ? 'binary/non-text data' : 'UTF-8 text'}. No content is executed.`;
+  }
+  function uploadBudget(file) {
+    if (!file || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > FILE_LIMIT) throw new Error('Selected file exceeds this operation’s byte limit.');
+    // A user may select bytes before entering a path. Until it is valid,
+    // reserve against every queued edit instead of guessing an override.
+    let selected = null; try { selected = path(); } catch {}
+    const kind = controls['change-kind'].value;
+    let size = file.size + (kind !== 'create' && loaded?.path_hex === selected ? loaded.before.bytes.length : 0);
+    for (const [key, edit] of edits) if (key !== selected) size += (edit.before?.bytes.length ?? 0) + (edit.after?.bytes.length ?? 0);
+    if (size > PATCH_LIMIT || (edits.size >= EDIT_LIMIT && !edits.has(selected))) throw new Error('Replacement exceeds the combined draft byte or path budget.');
+  }
   const metadata = () => ({ author: controls.author.value, committer: controls.committer.value,
     timestamp: decimal(controls.timestamp.value, 'explicit timestamp'), message: controls.message.value });
   controls.connect.addEventListener('click', () => perform(async () => {
@@ -111,36 +171,71 @@ export function mountSourceEditor(doc, options = {}) {
     controls.base.textContent = JSON.stringify(selected, null, 2); status('Immutable base selected. Every queued edit will use this exact parent.');
   }));
   for (const id of ['path','path-kind','change-kind']) controls[id].addEventListener('input', () => {
-    loaded = null; replacement = null; controls.replacement.value = ''; controls['file-text'].value = ''; textDirty = false; changed();
+    loaded = null; replacement = null; replacementFile = null; controls.replacement.value = ''; controls['file-text'].value = ''; controls['file-hex'].value = ''; controls['file-info'].textContent = 'No file bytes loaded.'; textDirty = false; changed();
   });
-  for (const id of ['file-text','line-endings']) controls[id].addEventListener('input', () => { textDirty = true; replacement = null; controls.replacement.value = ''; changed(); });
+  for (const id of ['file-text','file-hex','line-endings']) controls[id].addEventListener('input', () => {
+    if (client.pending || busy || (id === 'file-hex' ? viewMode !== 'hex' : viewMode !== 'text')) return;
+    textDirty = true; replacement = null; replacementFile = null; controls.replacement.value = '';
+    controls['file-info'].textContent = 'Edited draft; queue or download to validate its complete bytes.'; changed();
+  });
+  controls['content-mode'].addEventListener('change', () => {
+    const requested = controls['content-mode'].value;
+    if (busy || client.pending || !client.connected) { controls['content-mode'].value = viewMode; return; }
+    try {
+      if (!['text', 'hex'].includes(requested)) throw new Error('Choose text or exact hex view.');
+      const bytes = draftBytes(); showBytes(bytes, requested);
+      replacement = bytes; replacementFile = null; controls.replacement.value = ''; textDirty = false; changed();
+      status('View changed without converting any bytes. Only explicit text edits apply the selected line endings.');
+    } catch (error) { controls['content-mode'].value = viewMode; status(error.message); render(); }
+  });
   for (const id of ['file-mode','author','committer','timestamp','message']) controls[id].addEventListener('input', changed);
   for (const id of ['branch','format']) controls[id].addEventListener('input', () => { client.clearSelection(); clearDraft(); changed(); status('Select the new branch and format explicitly before editing.'); });
   controls['load-file'].addEventListener('click', () => perform(async () => {
-    const selectedPath = path(), started = ++revision; client.invalidateCandidate(); loaded = null; replacement = null;
+    const selectedPath = path(), started = ++revision; client.invalidateCandidate(); loaded = null; replacement = null; replacementFile = null;
+    controls.replacement.value = ''; controls['file-text'].value = ''; controls['file-hex'].value = '';
+    controls['file-info'].textContent = 'Loading the complete native blob.';
     const file = await client.loadFile(selectedPath); if (started !== revision) throw new Error('Source selection changed while loading.');
-    loaded = file; textDirty = false; const text = decoded(file.before.bytes);
-    controls['file-text'].value = text ?? ''; controls['file-mode'].value = file.before.mode.toString(8);
-    controls['line-endings'].value = text?.includes('\r\n') ? 'crlf' : 'lf';
-    status(text === null ? 'Exact non-UTF-8 file loaded. Upload replacement bytes, delete it, or change only its mode.' : 'Complete native-identity-verified file loaded. Unedited bytes retain their exact newline form.');
+    loaded = file; textDirty = false; showBytes(file.before.bytes); controls['file-mode'].value = file.before.mode.toString(8);
+    status(viewMode === 'hex' ? 'Exact binary/non-text file loaded and native identity verified. Edit hex, upload a replacement, delete, or change its mode.'
+      : 'Complete native-identity-verified file loaded. Unedited bytes retain their exact newline form.');
   }));
-  controls.replacement.addEventListener('change', () => perform(async () => {
-    changed(); const started = revision; const file = controls.replacement.files?.[0];
-    replacement = fileBytes(await chosenBytes(file, FILE_LIMIT, () => started === revision && client.connected));
-    status(`Exact replacement loaded: ${replacement.length} bytes. Queue the edit explicitly.`);
-  }));
+  controls.replacement.addEventListener('change', () => {
+    if (client.pending || !client.connected) { status('Connect and resolve any original publication before replacing file bytes.'); return; }
+    // Invalidate even when an earlier read is still busy. A failed or superseded
+    // selection must never fall back to the previous successful replacement.
+    replacement = null; replacementFile = controls.replacement.files?.[0] ?? null; changed();
+    const file = replacementFile, started = revision;
+    if (!file) { status('Replacement selection cleared. The explicit editor or original bytes will be used.'); return; }
+    return perform(async () => {
+      uploadBudget(file);
+      const bytes = fileBytes(await chosenBytes(file, FILE_LIMIT, () => started === revision && client.connected && controls.replacement.files?.[0] === file), true);
+      replacement = bytes; textDirty = false; showBytes(bytes);
+      status(`Exact replacement loaded: ${replacement.length} bytes. Queue the edit explicitly.`);
+    });
+  });
+  controls['save-file'].addEventListener('click', () => {
+    try {
+      if (busy || !client.connected || client.pending || !client.selection) throw new Error('Select an editable base before downloading a draft.');
+      const bytes = draftBytes();
+      if (options.saveFile) options.saveFile(bytes.slice());
+      else download(bytes, 'application/octet-stream', 'frankengit-file.bin');
+      status(`Downloaded ${bytes.length} exact draft bytes. No repository request was sent.`);
+    } catch (error) { status(error.message); }
+  });
   controls['queue-file'].addEventListener('click', () => perform(async () => {
     if (client.pending) throw new Error('Resolve the original publication before editing.');
     const selectedPath = path(), kind = controls['change-kind'].value;
     if (!['create','modify','delete'].includes(kind)) throw new Error('Choose an explicit file action.');
     if (kind !== 'create' && (!loaded || loaded.path_hex !== selectedPath)) throw new Error('Load the complete existing file at this base first.');
     const before = kind === 'create' ? null : loaded.before;
-    const bytes = replacement?.slice() ?? editorBytes(controls['file-text'].value, before?.bytes, textDirty, controls['line-endings'].value);
-    if (!['100644', '100755'].includes(controls['file-mode'].value)) throw new Error('Choose a supported regular-file mode.');
-    const after = kind === 'delete' ? null : { bytes, mode: Number.parseInt(controls['file-mode'].value, 8) };
+    let after = null;
+    if (kind !== 'delete') {
+      if (!['100644', '100755'].includes(controls['file-mode'].value)) throw new Error('Choose a supported regular-file mode.');
+      after = { bytes: draftBytes(), mode: Number.parseInt(controls['file-mode'].value, 8) };
+    }
     const next = new Map(edits); next.set(selectedPath, { path_hex: selectedPath, before, after });
     // Validate the entire prospective set before changing the queue.
-    fullFilePatch([...next.values()]); if (next.size > EDIT_LIMIT) throw new Error('Too many edited paths.');
+    fullFilePatch([...next.values()], { allowBinary: true }); if (next.size > EDIT_LIMIT) throw new Error('Too many edited paths.');
     edits = next; changed(); status(`${edits.size} exact file edit(s) queued. Nothing has been submitted.`);
   }));
   controls['clear-edits'].addEventListener('click', () => { if (!busy && !client.pending) { edits.clear(); changed(); } });
@@ -173,10 +268,7 @@ export function mountSourceEditor(doc, options = {}) {
     try {
       const value = client.exportReceipt();
       if (options.saveReceipt) options.saveReceipt(value);
-      else {
-        const url = URL.createObjectURL(new Blob([value], { type: 'application/json' })), link = element('a');
-        link.href = url; link.download = 'frankengit-source-retry.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 0);
-      }
+      else download(value, 'application/json', 'frankengit-source-retry.json');
       status('Token-free original-request receipt saved. It contains candidate bytes; treat it as repository data.'); render();
     } catch (error) { status(error.message); }
   });
@@ -188,7 +280,7 @@ export function mountSourceEditor(doc, options = {}) {
   }));
   (options.events ?? globalThis).addEventListener?.('pagehide', disconnect);
   (options.events ?? globalThis).addEventListener?.('beforeunload', event => {
-    if (client.pending || edits.size) { event.preventDefault(); event.returnValue = ''; }
+    if (client.pending || edits.size || replacement !== null || replacementFile || textDirty) { event.preventDefault(); event.returnValue = ''; }
   });
   render(); return { client, disconnect, get queued() { return [...edits.values()].map(edit => structuredClone(edit)); } };
 }

@@ -21,8 +21,10 @@ completion of the forge, `frankengit-asa3`, or the release compatibility matrix.
 ## Exact file changes and preparation
 
 The editor supports create, modify, delete, and regular/executable mode changes
-for up to 64 paths. A complete file is limited to 256 KiB. The generated patch
-is limited to 1 MiB, with an additional 65,536-line combined-input budget.
+for up to 64 paths, including binary regular files containing NUL and arbitrary
+byte values. A complete file is limited to 256 KiB. Both the combined before/after
+input and generated patch are limited to 1 MiB, with an additional 65,536-line
+combined-input budget (lines are delimited by LF bytes).
 Ancestor/descendant conflicts and duplicate paths are refused. Paths are exact
 bytes, including non-UTF-8 names; the browser emits Git C-quoted path headers
 and full-file hunks. File content is not normalized by patch construction.
@@ -36,11 +38,51 @@ an exact replacement-file upload performs no conversion. File sizes are checked
 before asynchronous reads and again after completion. Selection changes and
 disconnects invalidate late file reads and candidate preparation.
 
-The native regular-file patch profile does not support binary patches,
-NUL-containing content, symlinks, gitlinks, copies or renames. This first surface
-requires an existing commit-valued branch; it does not initialize an empty
-repository, rewrite history, or implement directory moves. Unsupported work
-refuses rather than calling Git in production or silently changing semantics.
+The native regular-file literal-hunk parser and applier already compare payloads
+as byte slices, including NUL. The source editor explicitly opts into those byte
+semantics; it does not encode or decode Git's compressed `GIT binary patch`
+format. That compressed format, symlinks, gitlinks, copies and renames remain
+unsupported by this authoring path. Shared patch-helper defaults stay text-only
+unless callers explicitly request binary bytes; the separate initial-history
+browser is not widened by this change. Existing-branch source authoring still
+requires an existing commit-valued branch and does not initialize a repository,
+rewrite history or implement directory moves. Unsupported work refuses rather
+than calling Git in production or silently changing semantics.
+
+### Binary uploads, hex editing and exact downloads
+
+The same existing source page can load, create, replace, delete or change the
+executable bit of a binary file. No additional endpoint or privilege is needed.
+NUL, invalid UTF-8, non-text controls and directional display controls select
+hex view automatically instead of being passed through a lossy text decoder.
+The full bounded hex editor accepts exact byte pairs with ASCII spacing. An
+empty hex value means an empty file, not deletion; deletion is a separate action
+retaining the original verified blob and mode. Path labels retain raw hex
+identities and escape directional display controls.
+
+Switching between text and hex views preserves the complete original or edited
+bytes, including a BOM, CRLF, bare CR and a missing final newline. Switching
+binary/non-text bytes to text refuses. Only an explicit subsequent text edit
+applies the selected LF/CRLF policy. Hex editing and exact replacement uploads
+never perform that conversion. The browser bounds hex text to 786,432 characters
+and decoded bytes to 256 KiB before queueing. A permitted many-line patch is
+assembled iteratively rather than exceeding JavaScript's argument-count limit.
+
+Replacement-file size and the remaining combined draft budget are checked
+before reading its bytes. Failed, truncated or superseded file reads invalidate
+the selected replacement: queueing or downloading cannot silently reuse a previous
+successful replacement or original blob. The user must explicitly reselect,
+clear the failed selection, or edit the draft. Late file and native-read results
+cannot repopulate a cleared or disconnected view. Local draft changes invalidate
+an earlier candidate without modifying an already frozen publication request.
+
+Download exact draft bytes saves an `application/octet-stream` file with the
+fixed name `frankengit-file.bin`. Repository names never choose executable markup
+or a download path, and neither download nor hex editing sends an API request.
+Download object URLs are released after use and on disconnect/page exit. The
+page warns before losing unqueued modified/uploaded bytes as well as queued
+edits or pending publication responsibility. Downloads contain repository data,
+not independently authenticated evidence of native publication.
 
 Preparation sends only the existing closed native form: ref, object format,
 expected commit, author, committer, timestamp and message, plus exact patch
@@ -116,9 +158,37 @@ NUL-free content. The lane reports the concrete binary identity. It is a local
 patch-format differential check, not native Rust conformance or a release gate.
 No production browser code invokes Git.
 
-The authoring-session test report covers the retained selected-file browser
-fixture, not a full current workspace checkout. DOM, HTTP and File test doubles
-exercise the client contracts. Rust static-route tests are included separately;
-Rust compilation, native-node interoperability, real-browser rendering, Clippy,
-full-workspace verification and release acceptance require their actual lanes
-and are not implied by JavaScript or Git-oracle success.
+The binary-authoring lane exercises the same production browser encoder, not a
+parallel patch implementation:
+
+```sh
+node --test tests/browser/source-binary.test.mjs tests/browser/source-binary-view.test.mjs
+node tests/browser/source-binary-git-oracle.mjs \
+  /absolute/path/to/git 'git version <pinned-version>' <binary-sha256>
+cargo test --locked -p fgit-diff --test patch_binary_bytes
+```
+
+The binary-authoring implementation run passed 296 JavaScript tests: 232 retained
+regressions, 35 new binary client/encoder cases and 29 new UI cases, with no
+failures, cancellations or skips. UI tests exercise text-area newline normalization,
+exact hex/byte downloads, mixed text/binary drafts, failed/superseded uploads,
+pre-read aggregate bounds, cancellation, explicit publication confirmation and
+unchanged original-key recovery. HTTP/DOM/File fixtures are test doubles.
+
+Pinned non-production Git 2.47.3 passed 192 binary cases across both hash domains,
+all 256 byte values, unusual raw paths, create/delete/replace/mode changes,
+empty-versus-absent files, CRLF and missing newlines. Each case checks actual
+forward and reverse index application, exact blob bytes/modes/native identities,
+untouched siblings and restoration of the original tree. The retained NUL-free
+Git lane was rerun and passed its 144 cases. Both logs identify the exact Git
+executable SHA-256. These are patch-format interoperability checks, not execution
+of the native Rust source HTTP/admission pipeline or a signature check.
+
+Eight new Rust integration tests pin existing literal-byte hunk behavior,
+including differing context after NUL, control-looking payloads, limits and
+refusals. They were not executed because Rust/Cargo was unavailable. There is
+no native production Rust change or new route in this binary-authoring batch.
+The tests ran in a selected-file browser fixture, not a complete current
+workspace checkout. Native compilation, native-node interoperability, real-browser
+rendering, Clippy, full-workspace verification and release acceptance remain
+unverified; JavaScript or Git-oracle success does not establish those gates.
