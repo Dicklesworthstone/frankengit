@@ -10,7 +10,7 @@
 mod encoding;
 mod stored;
 pub use stored::{IndexError, IndexedLexicalReport, LexicalIndexStore, LexicalReadLimits,
-    LexicalSelection, LexicalSource, PreparedLexicalIndex};
+    LexicalSelection, LexicalSource, PreparedLexicalIndex, LexicalRefreshStats, LexicalReuse, RefreshDocument};
 #[cfg(test)]
 mod tests;
 

@@ -4,6 +4,8 @@
 //! neither object existence nor an interrupted write implies publication.
 
 mod manifest;
+mod refresh;
+pub use refresh::{LexicalRefreshStats, LexicalReuse, RefreshDocument};
 #[cfg(test)]
 mod tests;
 
