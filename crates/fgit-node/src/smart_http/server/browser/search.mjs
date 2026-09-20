@@ -31,16 +31,17 @@ export class CodeSearch {
     if (!this.connected || !this.#selection) fail('Connect a read-scoped token and reference first.');
     this.cancel();
     const generation = this.#generation, epoch = this.#transport.epoch;
+    const deadline = performance.now() + this.#timeout;
     let expired = false;
     const check = () => {
-      if (expired) fail('Search operation exceeded its total time limit.');
+      if (expired || performance.now() >= deadline) fail('Search operation exceeded its total time limit.');
       if (generation !== this.#generation || epoch !== this.#transport.epoch || !this.connected) fail('Read superseded or disconnected.');
     };
     const timer = setTimeout(() => { expired = true; if (generation === this.#generation) this.#transport.cancelReads(); }, this.#timeout);
     try { const result = await action(check); check(); return result; }
     catch (error) {
       if (generation === this.#generation && !this.connected) this.disconnect();
-      if (expired) fail('Search operation exceeded its total time limit.');
+      if (expired || performance.now() >= deadline) fail('Search operation exceeded its total time limit.');
       throw error;
     } finally { clearTimeout(timer); }
   }

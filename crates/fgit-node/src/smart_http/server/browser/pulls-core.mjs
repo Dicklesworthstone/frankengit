@@ -296,7 +296,19 @@ export class Transport {
       controller.signal.throwIfAborted();
       if (epoch !== this.#epoch) fail('Connection superseded.');
       if (response.redirected || (response.url && response.url !== url.href)) fail('API redirect refused.');
-      if (!statuses.includes(response.status)) throw apiError(response.status);
+      if (!statuses.includes(response.status)) {
+        const error = apiError(response.status);
+        // Only this closed read endpoint exposes a small diagnostic code. Never
+        // render server prose, accept an error as a result, or broaden statuses.
+        if (this.#search && path === 'source/search-index' && response.status === 409
+            && /^application\/json(?:\s*;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
+          const bytes = await readBytes(response, controller.signal, 4096);
+          if (epoch !== this.#epoch) fail('Connection superseded.');
+          let detail; try { detail = json(bytes); } catch { /* Keep the HTTP refusal. */ }
+          if (['source_index_uninitialized', 'source_index_stale', 'index_checkpoint_unavailable'].includes(detail?.error)) error.code = detail.error;
+        }
+        throw error;
+      }
       const type = response.headers.get('Content-Type') ?? '';
       if (!binary && !/^application\/json(?:\s*;|$)/i.test(type)) fail('Expected a JSON API response.');
       const bytes = await readBytes(response, controller.signal, maximum);
