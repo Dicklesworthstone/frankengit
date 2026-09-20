@@ -1,0 +1,19 @@
+name: Persistent declaration tables
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fgit-forge/src/source_symbols/**'
+      - 'scripts/verify_symbol_index.sh'
+      - '.github/workflows/symbol-index.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tables:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly-2026-08-31 --profile minimal
+      - run: bash scripts/verify_symbol_index.sh

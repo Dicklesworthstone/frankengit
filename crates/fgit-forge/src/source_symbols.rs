@@ -1,7 +1,10 @@
 //! Bounded Rust declaration retrieval over one verified, capability-visible
 //! tree. This is the `rust-declaration-heads-v1` initial retrieval channel, not a
-//! compiler symbol graph, persistent symbol index or authorization authority.
+//! compiler symbol graph or authorization authority. `index` owns the
+//! separately selected persistent declaration-table profile.
 mod engine;
+mod table;
+pub mod index;
 pub use engine::{Error as SymbolSyntaxError, ErrorKind as SymbolSyntaxErrorKind,
     Kind as SymbolKind, MAX_WORK as MAX_SYMBOL_WORK};
 use crate::source_search::{Discovery, DiscoveryContext, SearchCase, SearchCompletion,
