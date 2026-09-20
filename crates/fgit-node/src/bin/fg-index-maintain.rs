@@ -14,7 +14,7 @@ use std::task::Poll;
 use std::time::Duration;
 use fgit_crypto::{IdentityDomain, internal_algorithm_id, internal_domain_tag};
 use fgit_graph::{GenerationActivation, GenerationAuthorityError, GenerationRecovery, GraphGenerationId};
-use fgit_graph::lexical::IndexError;
+use fgit_graph::lexical::{IndexError, LexicalError};
 use fgit_node::{NodeConfig, NodeRequestContext, NodeWorkspaceRefusal, OneNode};
 use fgit_types::{CANONICAL_CODEC_VERSION, DigestBytes, GitHashAlgorithm, HeadGeneration,
     InternalObjectId, RefName, RepositoryId, TenantId};
@@ -103,6 +103,15 @@ fn definite_race(error: &IndexError) -> bool {
     matches!(error, IndexError::Generation(GenerationAuthorityError::PredecessorMismatch { .. }
         | GenerationAuthorityError::ConcurrentActivation | GenerationAuthorityError::HeadAlreadyInitialized))
 }
+fn candidate_digest(candidate: GraphGenerationId) -> io::Result<[u8; 32]> {
+    let id = candidate.as_internal_object_id();
+    if id.algorithm().code_point() != 2 || id.codec_version() != CANONICAL_CODEC_VERSION {
+        return Err(invalid("Unsupported write-ahead candidate profile."));
+    }
+    let digest: [u8; 32] = id.digest().as_bytes().try_into().map_err(|_| invalid("Unsupported candidate width."))?;
+    if digest == [0; 32] { return Err(invalid("Zero write-ahead candidate.")); }
+    Ok(digest)
+}
 fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Result<bool> {
     let mut stop = Stop::default(); let mut healthy = true;
     'passes: for pass in 0..options.passes {
@@ -110,6 +119,12 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
             stop.observe(&options.directory); if stop.requested { break 'passes; }
             let row = progress.state.rows.get(reference.as_bytes()).ok_or_else(|| invalid("Missing progress row."))?.clone();
             if row.running { return Err(invalid("An interrupted attempt has no recorded candidate. Inspect it before resuming; do not reset the checkpoint.")); }
+            if row.preparing {
+                // The v2 barrier could not permit any index write while this
+                // durable phase remained selected. Legacy running stays blocked.
+                progress.state.abandon_preparation(reference.as_bytes())?;
+                progress.save()?; emit(reference, "preparation_recovered", "")?;
+            }
             let floor = row.floor.as_ref().map(activation).transpose()?;
             // One finite background-controller budget per independent attempt.
             // Never replace the context of an in-flight or draining attempt.
@@ -133,29 +148,58 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                 }
                 continue; // Recovery and a new build are separate invocations.
             }
-            // Persist responsibility before any native maintenance effect.
-            progress.state.begin(reference.as_bytes())?; progress.save()?;
-            let result = drive(node, &request, &options.directory,
-                node.reconcile_source_index_local_in(&request, reference, None, floor.as_ref(), Default::default(), Default::default()), &mut stop);
+            // Guarded preparation is restartable; only a durable original
+            // candidate permits the native builder to proceed to any index put.
+            progress.state.begin_preparation(reference.as_bytes())?; progress.save()?;
+            let mut barrier_error = None;
+            let result = {
+                let mut before_publish = |candidate| {
+                    match candidate_digest(candidate).and_then(|id| progress.arm(reference.as_bytes(), id)) {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            barrier_error = Some(error);
+                            Err(NodeWorkspaceRefusal::SourceIndex(Box::new(IndexError::Lexical(
+                                LexicalError::Invalid("operator write-ahead checkpoint failed")))))
+                        }
+                    }
+                };
+                drive(node, &request, &options.directory,
+                    node.reconcile_source_index_guarded_local_in(&request, reference, None, floor.as_ref(),
+                        Default::default(), Default::default(), &mut before_publish), &mut stop)
+            };
+            // Do not turn a failed checkpoint write into an ordinary refusal
+            // or release its lock, even though the native barrier prevented puts.
+            if let Some(error) = barrier_error { return Err(error); }
+            let armed = progress.state.rows.get(reference.as_bytes())
+                .ok_or_else(|| invalid("Missing progress row after preparation."))?.pending;
             match result {
                 Ok((source, activation)) => {
                     let pin = checkpoint(&activation)?;
-                    progress.state.acknowledge(reference.as_bytes(), pin.clone(), None)?;
+                    progress.state.completed(reference.as_bytes(), pin.clone())?;
                     progress.save()?; // Durably retain the floor BEFORE acknowledging it.
                     emit(reference, "observed_current", &format!("{},\"snapshot_token\":\"{}\",\"source_commit\":\"{}\"",
                         pin_fields(&pin), token(source.source_head.as_internal_object_id()), source.commit))?;
                 }
-                Err(NodeWorkspaceRefusal::SourceIndexPublication { candidate, error }) if !definite_race(&error) => {
-                    let candidate: [u8; 32] = candidate.as_internal_object_id().digest().as_bytes().try_into()
-                        .map_err(|_| invalid("Unsupported candidate width; attempt remains recorded."))?;
-                    progress.state.uncertain(reference.as_bytes(), candidate)?; progress.save()?;
+                Err(NodeWorkspaceRefusal::SourceIndexPublication { candidate, error }) => {
+                    let candidate = candidate_digest(candidate)?;
+                    if armed != Some(candidate) {
+                        return Err(invalid("Publication identity bypassed the durable barrier; preserve progress."));
+                    }
                     healthy = false;
-                    emit(reference, "pending", &format!(",\"candidate_token\":\"alg:2:{}\"", hex(&candidate)))?;
-                    eprintln!("Publication not confirmed; pending candidate retained: {error}");
+                    if definite_race(&error) {
+                        progress.state.publication_refused(reference.as_bytes(), candidate)?; progress.save()?;
+                        emit(reference, "refused", "")?;
+                    } else {
+                        // Already durable BEFORE the first possible publication
+                        // effect. A lost return path needs no second identity write.
+                        emit(reference, "pending", &format!(",\"candidate_token\":\"alg:2:{}\"", hex(&candidate)))?;
+                    }
+                    eprintln!("Index publication not confirmed: {error}");
                 }
                 Err(error) => {
-                    // Non-publication errors precede root publication; the three
-                    // explicitly classified races are known failed preconditions.
+                    if armed.is_some() {
+                        return Err(invalid(format!("Unexpected failure after candidate recording; preserve pending state: {error}")));
+                    }
                     progress.state.refuse(reference.as_bytes())?; progress.save()?;
                     healthy = false; emit(reference, "refused", "")?; eprintln!("Index maintenance: {error}");
                 }
@@ -164,7 +208,7 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
         if pass + 1 < options.passes { wait(node, &options.directory, options.interval, &mut stop); }
     }
     if let Some(error) = stop.error { return Err(invalid(format!("Stop control failed after drain: {error}"))); }
-    Ok(healthy && progress.state.rows.values().all(|row| !row.running && row.pending.is_none()))
+    Ok(healthy && progress.state.rows.values().all(|row| !row.running && !row.preparing && row.pending.is_none()))
 }
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).take(8 + state::MAX_REFS + 1).collect();

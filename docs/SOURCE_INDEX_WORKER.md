@@ -1,21 +1,18 @@
 # Bounded automatic source-index maintenance
 
-`fg-index-maintain` composes the native reconciler with a foreground polling
-controller, operator-owned durable progress, anti-rollback checkpoints, and
-cooperative stop/drain. It keeps explicitly configured references indexed after
-source or forge writes without granting index writes to search requests.
+`fg-index-maintain` reconciles explicitly configured references against canonical
+current source, with bounded foreground polling, operator-owned durable progress,
+anti-rollback checkpoints and cooperative stop/drain. It is not an outbox event
+consumer: several source writes may coalesce into one refresh, and intermediate
+revisions need not be indexed. Repository refs/events/decisions and outbox
+acknowledgements are untouched. Search requests remain read-only. FG-032 is open.
 
-This is a current-state catch-up controller, not an outbox event consumer.
-Several source writes can coalesce into one refresh. It does not acknowledge
-outbox entries, claim to index every intermediate revision, or modify repository
-refs/events/decisions. FG-032 remains open.
+## Run an explicit scope
 
-## Run an explicitly bounded scope
-
-The worker opens an EXISTING node. The progress directory must already exist,
-be a real private directory (mode 0700), and be protected from other writers.
-The initial profile is Unix-only and uses generation codec v1/SHA-256. It rejects
-unsupported platforms/profiles; no weaker checkpoint fallback is selected.
+The worker opens an EXISTING node. Its progress directory must already exist,
+be a real private directory (0700), and be protected from other writers. The
+progress-storage profile is Unix-only and uses SHA-256 generation identities
+at canonical codec v1; unsupported profiles refuse instead of falling back.
 
 ```bash
 cargo build --locked -p fgit-node --bin fg-index-maintain
@@ -25,122 +22,120 @@ fg-index-maintain "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" sha1 \
 ```
 
 This runs at most 60 passes with a 10-second delay AFTER each completed pass,
-over the two named refs in raw-byte order. Use `sha256` for that repository
-format. A single pass uses `1 0`. There are at most 32 unique configured refs,
-3600 passes, 3600 seconds per delay, and 24 hours of configured inter-pass waits.
-These are work/schedule bounds, not a guarantee about total elapsed runtime;
-each native attempt additionally has its finite background-controller budget.
-No work is spawned outside the node-owned runtime.
+in raw reference order. Use `sha256` for that repository format. A single pass
+uses `1 0`. Limits remain 32 unique refs, 3600 passes, 3600 seconds per delay and
+24 hours of configured inter-pass waits. These are schedule/work bounds, not a
+total-runtime guarantee. Every attempt uses one original finite node-owned
+BackgroundController context; a draining attempt never renews its context.
 
-Restart a cleanly stopped worker with the same directory and EXACT reference
-set, using `resume` instead of `init`. Namespace binding includes tenant,
-repository, incarnation and object format. Resume refuses missing, malformed,
-foreign, truncated, reordered or mismatched progress rather than resetting it.
-Init refuses an existing checkpoint. The tool never creates a repository.
+Use `resume` with the same directory and EXACT ref set after a clean stop.
+Namespace binding includes tenant, repository, incarnation and object format.
+Missing, malformed, foreign, reordered or truncated progress refuses; `init`
+refuses an existing checkpoint. No repository is created or reset.
 
-Create `$PROGRESS_DIR/stop` to stop cooperatively. The file's contents and any
-symlink target are never read. The controller checks between attempts, during
-runtime-owned waits, and while an awaited native operation is pending. It
-requests cancellation on that operation's original context and continues
-polling until the node returns; it does not drop an in-flight future. A confirmed
-publication wins over a later stop. Synchronous bounded work cannot be forcibly
-interrupted by a timer, so the 250 ms check interval is not a stop-latency SLO.
+Create `$PROGRESS_DIR/stop` for cooperative stop. Neither its contents nor any
+symlink target is read. The controller checks between attempts, during runtime
+waits, and while a native future is pending. It cancels the original context,
+continues polling the same future, and explicitly shuts down the node. It never
+drops an active operation. Confirmed publication wins over a later stop. The
+250 ms timer is not a latency SLO: bounded synchronous work is not preemptible.
+SIGKILL/default OS termination is not this drain protocol.
 
-The worker then explicitly shuts down the node. SIGKILL/default OS termination
-is not this drain protocol and leaves local responsibility markers behind.
-No signal-handler or crash-containment guarantee is claimed.
+## Candidate recording BEFORE publication
 
-## Checkpoints and unresolved responsibility
+Maintenance now calls `reconcile_source_index_guarded_local_in`, which carries
+one write-ahead barrier through both native build and refresh. After complete
+verified preparation, and BEFORE any successor index put or root write, the
+barrier durably records the ORIGINAL candidate. A failed barrier prevents those
+native effects and stops the worker, preserving the lock and suspect files.
+The existing explicit build/refresh/query APIs and HTTP permissions are unchanged.
 
-The local `checkpoint` is controller progress, never repository authority.
-All authority and source facts are independently revalidated by native APIs.
-It retains a minimum generation identity AND original authority position for
-each configured ref. A missing index under a retained floor cannot cause a new
-genesis, and an older or conflicting index cannot be acknowledged as current.
+The progress codec is `frankengit-index-worker-v2`. It retains the same namespace,
+ordered references, exact generation floor and original position, and separates:
 
-Before invoking maintenance, the worker records a write-ahead `running` marker.
-After success, it persists the verified checkpoint before writing the JSON
-acknowledgement. Replacement writes a new bounded file, synchronizes it, renames
-it over the old checkpoint, and synchronizes the containing directory. A
-checkpoint-write error stops the worker and leaves its ownership lock; it does
-not claim rollback of an already confirmed index activation.
+* **Preparing (`p`)**: the guarded attempt has not passed its durable candidate
+  barrier. After exclusive process ownership is independently recovered, resume
+  may abandon this phase without lowering the floor, report
+  `preparation_recovered`, and begin a fresh bounded attempt.
+* **Pending candidate**: the candidate was synchronized before the first possible
+  index effect. A lost activation reply therefore cannot lose its recovery ID.
+  Direct success must name that exact candidate; verified recovery may instead
+  acknowledge a newer head substantiating its superseded membership.
+* **Legacy running (`1`)**: an older unguarded attempt may already have published
+  without recording a candidate. It remains blocked for operator inspection,
+  never reclassified as safe preparation. Idle remains marker `0` without a
+  pending candidate. Contradictory states are refused.
 
-A publication error retains the exact candidate as `pending`, except for the
-three explicitly identified failed-precondition/CAS-race outcomes. Those are
-returned as refusals and can be reconsidered in a LATER independent pass, never
-by refreshing the predecessor inside an in-flight operation.
+Strict v1 checkpoints are accepted without changing their floor, pending ID or
+legacy-running meaning. The next successful save emits v2. Old readers refuse
+that new version; downgrading cannot silently reinterpret guarded preparation.
+No repository or lexical-index wire schema changes are involved.
 
-For a pending candidate, later passes perform read-only original-candidate
-recovery. Active or superseded membership permits clearing that pending record
-and retaining the verified current head as the new floor. An uninitialized head
-or `NotInSelectedHistory` is NOT proof that an earlier in-flight write failed:
-the candidate remains pending, and that reference receives no new build. Other
-configured references can continue. Recovery and a new build are separate passes.
-Unexpected publication failures are conservatively retained, which can require
-operator intervention even when a lower-level failure preceded the root write.
+Before native work, the worker saves Preparing. Within the native barrier it
+replaces that marker with Pending and synchronizes the replacement file and its
+directory before returning success. Only then can native staging/publication
+begin. After confirmed publication or a no-op, it saves the verified checkpoint
+before emitting the JSON acknowledgement. A failed save is fatal, not a normal
+refusal permitting further work. Output/shutdown failures never imply rollback.
 
-The controller uses `run.lock` solely to exclude another progress writer. It
-never steals or expires a lock. A crash leaves it behind. After independently
-establishing that the prior process is no longer running, an operator must
-inspect its checkpoint and any `checkpoint.next` before deciding how to recover
-local ownership. A durable `running` marker without a candidate blocks automatic
-resumption: the API does not yet expose a pre-publication candidate hook that
-would let the worker resolve every such crash automatically. Do not erase or
-lower checkpoints to make a refusal disappear. Interrupted replacement files
-are never silently overwritten.
+A returned definitive failed-precondition/CAS result can clear this invocation's
+matching candidate, preserving its floor. Other publication failures keep the
+already durable pending ID; they no longer depend on saving an ID after an
+error returns. Unexpected failures after candidate recording also retain it.
 
-Progress locking is not a distributed index lease or a replacement for the
-index authority CAS. The directory is trusted operator state, not a sandbox for
-hostile same-user filesystem races. Multi-process live-node serving alongside
-this worker remains an integration scenario requiring the real backend lane;
-this implementation session has not established that deployment claim.
+Later pending passes perform original-candidate read-only recovery. Active or
+superseded membership permits checkpoint advancement and clearing Pending.
+Uninitialized or `NotInSelectedHistory` results do NOT prove cancellation of an
+earlier write: Pending remains and that ref receives no new build. Other refs
+can continue. Recovery and fresh native publication are separate attempts.
+A candidate recorded before an effect that never happened may consequently need
+operator intervention; this change does not promise all-crash automatic recovery.
 
-## What each pass does
+## Ownership, freshness and remaining deployment limits
 
-Current source/index metadata produces a no-op, with no source-blob scan or
-index-root advance. An uninitialized index builds its verified native inventory;
-a stale index refreshes with exact path/blob posting reuse. Current hidden-ref
-policy precedes index disclosure, and build/refresh retain exact source pins.
-A current-metadata no-op is NOT a full segment-integrity scrub.
+`run.lock` excludes another progress writer; it is not an index lease or
+repository authority. It is never stolen or expired. A crash leaves it behind.
+An operator must independently establish that the previous process is dead and
+inspect `checkpoint` and any `checkpoint.next` before recovering ownership.
+Leftover replacement files are never silently overwritten. The new Preparing
+semantics do not authorize deleting a live owner's lock or resetting a floor.
+The directory is trusted operator state, not a hostile same-user filesystem
+sandbox. Simultaneous live-server/worker use of the same backend remains an
+integration scenario requiring the real backend lane.
 
-Each attempt uses one original finite background-controller context. An expired
-context is not renewed while work drains. Fresh contexts belong to separately
-configured attempts/passes. HTTP search remains read-only and continues to
-refuse stale indexes until a maintenance activation catches up. Existing
-explicit-predecessor `fg-index build`, `refresh`, `query`, and `recover` contracts
-are unchanged.
+Current canonical visibility precedes index disclosure. A verified current index
+is a no-op, without source-blob or posting scans or an index-root advance; it is
+not a full segment-integrity scrub. An uninitialized index builds; a stale one
+refreshes with exact path/blob posting reuse. Source movement or a conflicting
+checkpoint refuses rather than selecting a new basis inside that attempt. HTTP
+queries remain stale until maintenance catches up. `observed_current` describes
+the selected observation, not guaranteed freshness when stdout is written.
 
-Output is one bounded JSON line per observed result, with raw reference hex,
-source/index identities when available, and an explicit state. `observed_current`
-means current at the selected source observation, not an assertion that source
-could not change before printing. Exit status is nonzero after any refusal,
-unresolved candidate, controller failure or shutdown failure. Progress/output
-failures and stop requests cannot turn confirmed publication into rollback.
+Output is bounded JSON per result, with raw reference hex and available source/
+index identities. `preparation_recovered` is not itself an index-freshness claim.
+Any refusal, unresolved candidate, controller or shutdown failure yields nonzero
+exit status. Holding a checkpoint does not pin source/index payloads against GC.
 
-## Verification boundary
+## Verification
 
-The production std-only progress module has twelve tests covering exact codec
-roundtrips, namespace/ref-set binding, all prefix truncations, malformed records,
-monotone checkpoints, write-ahead and pending states, real filesystem save/reopen,
-exclusive/stale locks, interrupted replacement and symlink refusal. Four binary
-unit tests cover bounded arguments, identity conversion and race classification.
-Three native binary integration tests execute the actual operator against the
-file-backed node for both hash formats, restart/no-op, stop, missing resume and
-stale-lock refusal. The native reconciler has seven separate integration tests.
+The standalone command executes the actual std-only production progress module:
+12 retained tests plus 8 new tests for v1 migration, guarded phases, exact
+candidate acknowledgement, all prefix truncations, synchronized arm/reopen,
+failed checkpoint writes and independent ref progress. Six native barrier tests
+and four new operator-restart tests cover native lost replies, restartable
+preparation, legacy refusal and pending-without-publication behavior. The latter
+reuse real node/TreeFS/Fsqlite and progress-file implementations; lost replies
+are explicit simulations, not a power-loss or hostile-filesystem campaign.
 
-The implementation environment has no Rust/Cargo. These Rust tests, compilation,
-rustfmt, Clippy, native-runtime drain, durable-backend behavior and full-workspace/
-release gates were not executed here. Shell syntax, source inspection and Git
-blob comparisons do not substitute for them. The standalone lane below executes
-the actual progress module, not a rewritten model or a substitute native store:
+Rust/Cargo are unavailable locally. Native tests, native compilation, runtime
+drain, durable-backend, Clippy and full-workspace/release gates remain unverified.
+The repository-owned standalone progress lane may run independently on the
+pinned nightly; its result is not a native-node/full-system pass.
 
 ```bash
 ./scripts/verify_index_maintenance.sh
+cargo test --locked -p fgit-node --test source_index_checkpoint --test source_index_worker_checkpoint
 cargo test --locked -p fgit-node --bin fg-index-maintain
 cargo test --locked -p fgit-node --test source_index_reconcile --test source_index_worker
 cargo check --locked -p fgit-node --all-targets
 ```
-
-The accompanying Actions file is only an optional adapter to the repository-owned
-standalone command on the pinned nightly. It is not a dependency for correctness
-or release, and a progress-module pass is not a native-node or full-system pass.

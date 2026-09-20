@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 pub const MAX_REFS: usize = 32;
 pub const MAX_STATE_BYTES: usize = 64 * 1024;
-const MAGIC: &str = "frankengit-index-worker-v1";
+const MAGIC: &str = "frankengit-index-worker-v2";
+const LEGACY_MAGIC: &str = "frankengit-index-worker-v1";
 
 fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
 pub fn hex(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
@@ -30,7 +31,7 @@ fn digest(text: &str) -> io::Result<[u8; 32]> {
     Ok(value)
 }
 
-/// v1 carries the registered SHA-256 generation digest at codec v1, not a Git ID.
+/// Both progress versions carry the registered SHA-256 generation digest at codec v1, not a Git ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pin { pub digest: [u8; 32], pub number: u64 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -40,6 +41,10 @@ pub struct Row {
     /// Durable write-ahead marker. A crash before a candidate was recorded
     /// requires operator investigation, not an automatic reset/retry.
     pub running: bool,
+    /// Guarded native preparation cannot publish until a durable candidate
+    /// replaces this marker. Unlike legacy running, it is safe to abandon
+    /// after independently recovering exclusive process ownership.
+    pub preparing: bool,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct State { binding: String, pub rows: BTreeMap<Vec<u8>, Row> }
@@ -56,16 +61,21 @@ impl State {
         }
         Ok(Self { binding, rows })
     }
-    pub fn encode(&self) -> io::Result<Vec<u8>> {
-        let mut out = format!("{MAGIC} {}\n", self.binding);
+    pub fn encode(&self) -> io::Result<Vec<u8>> { self.encode_version(false) }
+    fn encode_version(&self, legacy: bool) -> io::Result<Vec<u8>> {
+        let magic = if legacy { LEGACY_MAGIC } else { MAGIC };
+        let mut out = format!("{magic} {}\n", self.binding);
         for (reference, row) in &self.rows {
-            if row.running && row.pending.is_some() { return Err(invalid("contradictory attempt state")); }
+            if usize::from(row.running) + usize::from(row.preparing) + usize::from(row.pending.is_some()) > 1
+                || (legacy && row.preparing)
+            { return Err(invalid("contradictory attempt state")); }
             let (floor, number) = row.floor.as_ref().map_or(("-".to_owned(), 0), |p| (hex(&p.digest), p.number));
             if row.floor.as_ref().is_some_and(|p| p.number == 0 || p.digest == [0; 32]) || row.pending == Some([0; 32]) {
                 return Err(invalid("invalid progress generation"));
             }
             let pending = row.pending.as_ref().map_or_else(|| "-".to_owned(), |d| hex(d));
-            out.push_str(&format!("{} {floor} {number} {pending} {}\n", hex(reference), u8::from(row.running)));
+            let phase = if row.preparing { "p" } else if row.running { "1" } else { "0" };
+            out.push_str(&format!("{} {floor} {number} {pending} {phase}\n", hex(reference)));
             if out.len() > MAX_STATE_BYTES { return Err(invalid("progress size limit")); }
         }
         Ok(out.into_bytes())
@@ -74,7 +84,10 @@ impl State {
         if bytes.len() > MAX_STATE_BYTES { return Err(invalid("progress size limit")); }
         let text = std::str::from_utf8(bytes).map_err(|_| invalid("progress is not UTF-8"))?;
         let mut lines = text.lines();
-        if lines.next() != Some(format!("{MAGIC} {}", expected.binding).as_str()) { return Err(invalid("progress namespace mismatch")); }
+        let header = lines.next().ok_or_else(|| invalid("missing progress header"))?;
+        let legacy = if header == format!("{MAGIC} {}", expected.binding) { false }
+            else if header == format!("{LEGACY_MAGIC} {}", expected.binding) { true }
+            else { return Err(invalid("progress namespace mismatch")); };
         let mut result = expected.clone();
         let mut seen = BTreeMap::new();
         for line in lines {
@@ -88,40 +101,85 @@ impl State {
                 (value, number) => Some(Pin { digest: digest(value)?, number }),
             };
             let pending = if fields[3] == "-" { None } else { Some(digest(fields[3])?) };
-            let running = match fields[4] { "0" => false, "1" => true, _ => return Err(invalid("invalid attempt marker")) };
+            let (running, preparing) = match fields[4] {
+                "0" => (false, false), "1" => (true, false), "p" if !legacy => (false, true),
+                _ => return Err(invalid("invalid attempt marker")),
+            };
             if !result.rows.contains_key(&reference) || seen.insert(reference.clone(), ()).is_some() {
                 return Err(invalid("progress reference set mismatch"));
             }
-            result.rows.insert(reference, Row { floor, pending, running });
+            result.rows.insert(reference, Row { floor, pending, running, preparing });
         }
-        if seen.len() != result.rows.len() || result.encode()? != bytes { return Err(invalid("noncanonical or incomplete progress")); }
+        if seen.len() != result.rows.len() || result.encode_version(legacy)? != bytes { return Err(invalid("noncanonical or incomplete progress")); }
         Ok(result)
     }
     fn row(&mut self, reference: &[u8]) -> io::Result<&mut Row> {
         self.rows.get_mut(reference).ok_or_else(|| invalid("unconfigured reference"))
     }
+    #[cfg(test)] // Construct legacy attempt fixtures; production uses the guarded phase.
     pub fn begin(&mut self, reference: &[u8]) -> io::Result<()> {
         let row = self.row(reference)?;
-        if row.running || row.pending.is_some() { return Err(invalid("unresolved previous attempt")); }
+        if row.running || row.preparing || row.pending.is_some() { return Err(invalid("unresolved previous attempt")); }
         row.running = true; Ok(())
     }
     pub fn refuse(&mut self, reference: &[u8]) -> io::Result<()> {
         let row = self.row(reference)?;
-        if !row.running || row.pending.is_some() { return Err(invalid("no running attempt to refuse")); }
-        row.running = false; Ok(())
+        if (!row.running && !row.preparing) || row.pending.is_some() { return Err(invalid("no running attempt to refuse")); }
+        row.running = false; row.preparing = false; Ok(())
     }
+    #[cfg(test)] // Legacy state conversion coverage, never a new publication path.
     pub fn uncertain(&mut self, reference: &[u8], candidate: [u8; 32]) -> io::Result<()> {
         let row = self.row(reference)?;
-        if !row.running || row.pending.is_some() || candidate == [0; 32] { return Err(invalid("invalid pending transition")); }
+        if !row.running || row.preparing || row.pending.is_some() || candidate == [0; 32] { return Err(invalid("invalid pending transition")); }
         row.running = false; row.pending = Some(candidate); Ok(())
+    }
+    pub fn begin_preparation(&mut self, reference: &[u8]) -> io::Result<()> {
+        let row = self.row(reference)?;
+        if row.running || row.preparing || row.pending.is_some() { return Err(invalid("unresolved previous attempt")); }
+        row.preparing = true; Ok(())
+    }
+    pub fn abandon_preparation(&mut self, reference: &[u8]) -> io::Result<()> {
+        let row = self.row(reference)?;
+        if !row.preparing || row.running || row.pending.is_some() { return Err(invalid("not an effect-free preparation")); }
+        row.preparing = false; Ok(())
+    }
+    fn arm(&mut self, reference: &[u8], candidate: [u8; 32]) -> io::Result<()> {
+        let row = self.row(reference)?;
+        if !row.preparing || row.running || row.pending.is_some() || candidate == [0; 32] {
+            return Err(invalid("candidate must replace one guarded preparation"));
+        }
+        row.preparing = false; row.pending = Some(candidate); Ok(())
+    }
+    /// Only a definitive failed-precondition/CAS result from THIS invocation
+    /// authorizes this transition, never a timeout or negative history lookup.
+    pub fn publication_refused(&mut self, reference: &[u8], candidate: [u8; 32]) -> io::Result<()> {
+        let row = self.row(reference)?;
+        if row.running || row.preparing || row.pending != Some(candidate) {
+            return Err(invalid("failed publication does not match recorded candidate"));
+        }
+        row.pending = None; Ok(())
+    }
+    /// A direct success must match the pre-recorded candidate. A current-index
+    /// no-op instead finishes the effect-free preparation. Recovery uses the
+    /// distinct acknowledge(Some(candidate)) path and may retain a newer head.
+    pub fn completed(&mut self, reference: &[u8], pin: Pin) -> io::Result<()> {
+        let row = self.row(reference)?;
+        if row.running || (row.pending.is_none() && !row.preparing)
+            || row.pending.is_some_and(|candidate| candidate != pin.digest)
+        { return Err(invalid("success differs from write-ahead candidate")); }
+        let candidate = row.pending;
+        self.acknowledge(reference, pin, candidate)
     }
     pub fn acknowledge(&mut self, reference: &[u8], pin: Pin, recovered: Option<[u8; 32]>) -> io::Result<()> {
         let row = self.row(reference)?;
-        let allowed = match recovered { None => row.running && row.pending.is_none(), Some(id) => !row.running && row.pending == Some(id) };
+        let allowed = match recovered {
+            None => (row.running || row.preparing) && row.pending.is_none(),
+            Some(id) => !row.running && !row.preparing && row.pending == Some(id),
+        };
         if !allowed || pin.number == 0 || pin.digest == [0; 32] || row.floor.as_ref().is_some_and(|old|
             pin.number < old.number || (pin.number == old.number && pin.digest != old.digest))
         { return Err(invalid("checkpoint regression or unresolved attempt")); }
-        row.floor = Some(pin); row.pending = None; row.running = false; Ok(())
+        row.floor = Some(pin); row.pending = None; row.running = false; row.preparing = false; Ok(())
     }
 }
 
@@ -174,6 +232,13 @@ impl ProgressFile {
         }
         Ok(result)
     }
+    /// Return success ONLY after the candidate file and containing directory
+    /// have been synchronized. A failure is fatal for this controller run;
+    /// keep the lock and any replacement file rather than allowing publication.
+    pub fn arm(&mut self, reference: &[u8], candidate: [u8; 32]) -> io::Result<()> {
+        self.state.arm(reference, candidate)?;
+        self.save()
+    }
     pub fn save(&self) -> io::Result<()> {
         let bytes = self.state.encode()?;
         let next = self.directory.join("checkpoint.next");
@@ -197,3 +262,7 @@ fn private_new(path: &Path) -> io::Result<File> {
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "checkpoint_tests.rs"]
+mod checkpoint_tests;
