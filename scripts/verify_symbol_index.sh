@@ -16,7 +16,7 @@ if [[ "${1:-tables}" == native && $# -eq 1 ]]; then
   # Omit test debug symbols to bound linking memory; no assertions are removed.
   export CARGO_PROFILE_TEST_DEBUG=0
   cargo test --locked -p fgit-forge --lib source_symbols -- --test-threads=1
-  cargo test --locked -p fgit-node --test source_symbol_index --bin fg-symbol-index -- --test-threads=1
+  cargo test --locked -p fgit-node --test source_symbol_index --test source_symbol_reconcile --bin fg-symbol-index -- --test-threads=1
   cargo test --locked -p fgit-node --lib smart_http::server::source::symbols -- --test-threads=1
   cargo test --locked -p fgit-node --lib treefs_workspace::source_search -- --test-threads=1
   exit 0

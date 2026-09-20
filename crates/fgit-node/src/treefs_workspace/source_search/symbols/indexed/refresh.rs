@@ -2,6 +2,8 @@
 //! reused blobs never carry an old path or source stamp into the new manifest.
 use super::*;
 
+mod reconcile;
+
 impl OneNode {
     /// Refresh an existing derived generation, fetching/scanning only current
     /// Rust blobs absent from its verified predecessor. No genesis/latest/force

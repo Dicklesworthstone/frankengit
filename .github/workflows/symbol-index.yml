@@ -11,6 +11,7 @@ on:
       - 'crates/fgit-node/src/bin/fg-symbol-index.rs'
       - 'crates/fgit-node/tests/source_symbol_index.rs'
       - 'crates/fgit-node/tests/source_symbol_index/**'
+      - 'crates/fgit-node/tests/source_symbol_reconcile.rs'
       - 'scripts/verify_symbol_index.sh'
       - '.github/workflows/symbol-index.yml'
   workflow_dispatch:
