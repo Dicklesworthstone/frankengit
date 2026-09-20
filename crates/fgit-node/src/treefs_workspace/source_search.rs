@@ -2,6 +2,7 @@
 //! builder publishes only derived generations; every search remains read-only.
 
 mod regex;
+mod symbols;
 mod index;
 
 use std::cell::Cell;

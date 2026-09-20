@@ -76,3 +76,93 @@ checks are not Rust execution. An optional workflow invokes the standalone
 repository command using `nightly-2026-08-31`; its observed result applies only
 to its exact commit and scanner module, never to TreeFS/native-node integration,
 full-workspace or release gates. No bead is closed by this slice.
+
+## Native node and authenticated HTTP
+
+`OneNode::search_source_symbols_in` uses a caller-owned sparse TreeFS capability
+and an independently supplied visibility restriction. Neither can widen current
+canonical hidden-ref policy. `search_source_symbols_snapshot_local_in` is the
+whole-repository operator read exposed only after independent HTTP read
+permission. Its optional expected head/commit are checked inside the same native
+selection that supplies every file and result. Lexical errors remain typed
+`SymbolReadError::Syntax`; source/authority errors retain the existing node error.
+No workspace, index, transaction, generation activation or outbox effect is
+created, and no error starts a fallback scan or changes the requested source.
+
+```text
+POST {repository-route}/api/v1/source/search-symbols
+Content-Type: application/x-www-form-urlencoded
+Authorization: Bearer <read-scoped credential>
+```
+
+Required fields are `object_format` (`sha1` or `sha256`), full `ref`, and
+`name_hex` (lowercase hex for the ASCII identifier, without a raw `r#` prefix).
+Optional `match` is `exact` (default) or `prefix`. Repeated `kind` accepts only
+`function`, `struct`, `enum`, `trait`, `type`, `module`, `union`, and `macro`.
+Repeated `path_prefix_hex` has the existing 128-prefix/4096-byte-per-path/32-KiB
+aggregate bound and slash-component semantics. These filters never grant access.
+
+Optional `expected_head` and `expected_commit` preserve an exact observation.
+`max_matches` is 1-4096 (default 200); `max_work` is 1-67,108,864 (default maximum).
+`max_bytes` and `max_file_bytes` may narrow the 64-MiB/8-MiB source-read limits.
+Unknown/duplicate singleton fields, noncanonical hex, unsupported query kinds,
+wrong object format, malformed pins or resource widening return HTTP 400.
+No `Idempotency-Key`, URL query, Git-Protocol header, or alternate media type is
+accepted. Fixed-length and chunked forms use the existing bounded framing.
+There is no cursor: the bounded result prefix names its source snapshot and
+reports its limit explicitly. Narrow the query or raise its admitted result
+limit instead of silently continuing on another snapshot.
+
+For example, search declarations beginning with `Thing` beneath `src`:
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer ${FG_READ_TOKEN}" \
+  --data-urlencode 'object_format=sha1' \
+  --data-urlencode 'ref=refs/heads/main' \
+  --data-urlencode 'name_hex=5468696e67' \
+  --data-urlencode 'match=prefix' \
+  --data-urlencode 'path_prefix_hex=737263' \
+  "${FG_URL}${FG_REPOSITORY_ROUTE}/api/v1/source/search-symbols"
+```
+
+The response is `source_search_symbols`, schema 1, with the named scanner
+profile and `authority_class: deterministic-derived`. It explicitly reports
+`compiler_resolved: false`, `macro_expansion: false`, and `cfg_evaluated: false`.
+It retains the repository/incarnation, exact source head/token/RCR/commit/tree,
+normalized query fields, completion, read/work/exclusion counts, and matches.
+Each match includes `name_hex`, kind, raw-identifier flag, `path_hex`, native
+`blob`, byte offset/length, one-based physical line and byte column, and original
+`excerpt_hex` plus excerpt offset. Raw identifiers' spans cover the name only.
+Existing snapshot-pinned source/blob reads can retrieve the complete file.
+
+Response counters describe the scoped selected corpus; unsupported-language
+files count toward selected files but not file reads. Completion covers this
+profile only, not all Rust compiler symbols or other languages. The renderer
+checks namespace, snapshot pins, object formats, ordering, counters, query
+membership, span arithmetic and exact name/excerpt agreement before responding.
+Names, paths, source and error text cannot inject HTML, commands or permissions.
+The complete JSON response must fit the existing source response ceiling.
+
+Unsupported/malformed `.rs` source returns HTTP 409 `symbol_source_unsupported`,
+without echoing source text or diagnostic paths. The typed local error preserves
+its path and byte offset for an already-authorized local caller. Resource limits
+return 413; cancellation returns timeout; unavailable objects remain errors.
+These never produce partial success, fabricated empty results, publication
+ambiguity, implicit compiler execution or an older-source fallback. Existing
+401/403 credential, revocation, service-switch and rate-limit semantics apply.
+
+Four protocol/renderer tests and eight native integration tests are added. They
+use actual OneNode imports, native patch preparation/admission, verified TreeFS,
+and the production authenticated TCP listener. Cases cover both hash formats,
+raw-byte filenames, comments/macros/raw identifiers, scopes, revocation, exact
+limits, syntax errors, cancellation, unpolled work, snapshot movement and reopen.
+They do not replace the separate compiler-resolution, persistent-symbol-index,
+real-browser or full-workspace acceptance campaigns. Rust/Cargo are unavailable
+locally; native compilation and these tests remain unexecuted in this session.
+
+```bash
+cargo test --locked -p fgit-node --test source_symbols_http
+cargo test --locked -p fgit-node --lib smart_http::server::source
+cargo check --locked -p fgit-forge -p fgit-node --all-targets
+```
