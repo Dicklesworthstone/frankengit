@@ -16,7 +16,7 @@ pub struct BinaryPatchUsage {
 /// The declared count reserves equal, nontransferable inflate/delta work shares
 /// before the first decode. Shares are ceilings, not measured work. Unused work
 /// is deliberately not lent to another file; the per-member split in the native
-/// decoder is unchanged. This keeps worst-case work independent of file count.
+/// decoder is unchanged. The sum of decode-work ceilings stays within one envelope.
 /// Source/output sizes and cancellation remain independent bounds.
 ///
 /// Any refusal poisons this attempt, including cancellation or a corrupt reverse

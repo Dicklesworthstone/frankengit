@@ -16,6 +16,8 @@ use fgit_types::{ByteCount, GitHashAlgorithm as ObjectFormat, GitOid, RefName, R
 use fgit_wire::visibility::RefVisibility;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod binary;
+
 const FETCH_BYTES: u64 = 256 * 1024 * 1024;
 const FETCH_OBJECTS: u64 = 100_000;
 const EXPORT_BYTES: usize = 64 * 1024 * 1024;
@@ -110,15 +112,17 @@ impl OneNode {
     /// Explicit regular-file renames read the original source and produce a
     /// source deletion plus destination write in the same candidate. Occupied
     /// destinations, swaps and chains refuse; no sequential overwrite is inferred.
-    /// All files must succeed before any candidate is returned. No fuzzy
-    /// offsets, binary patch, symlink, gitlink or copy is supported.
+    /// Compressed literal/delta records use the native decoder with full old/new
+    /// identities, verified reverse images, and one shared decode budget.
+    /// All files must succeed before any candidate is returned. No fuzzy offsets,
+    /// compressed rename, symlink, gitlink or copy is supported.
     pub async fn prepare_workspace_patch_in<A: GitHashAlgorithm>(
         &self, request: &NodeRequestContext, reference: &RefName, expected_commit: GitOid,
         visibility: &RefVisibility, capability: &mut TreeCapability, patch_bytes: &[u8],
         now: u64, metadata: &MergeMetadata, limits: PatchLimits,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         preflight(reference, expected_commit, self.object_format, metadata)?;
-        let patch = UnifiedPatch::parse_with_renames(patch_bytes, limits, &|| !workspace_request_live(request))
+        let patch = UnifiedPatch::parse_with_binary_and_renames(patch_bytes, limits, &|| !workspace_request_live(request))
             .map_err(patch_error)?;
         let paths = paths(&patch)?;
         authorize_patch(&patch, capability, now)?;
@@ -151,7 +155,7 @@ impl OneNode {
         workspace_id: [u8; 16], patch_bytes: &[u8], metadata: &MergeMetadata, limits: PatchLimits,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         preflight(reference, expected_commit, self.object_format, metadata)?;
-        let patch = UnifiedPatch::parse_with_renames(patch_bytes, limits, &|| !workspace_request_live(request))
+        let patch = UnifiedPatch::parse_with_binary_and_renames(patch_bytes, limits, &|| !workspace_request_live(request))
             .map_err(patch_error)?;
         let paths = paths(&patch)?;
         let touched = touched_paths(&patch)?;
@@ -209,6 +213,7 @@ fn prepare_at_base<A: GitHashAlgorithm>(
     }
     authorize_patch(patch, capability, now)?;
     let limits = patch.limits();
+    let mut decoder = binary::Decoder::new(patch, source.inner.object_format).map_err(patch_error)?;
     let mut log = IntentLog::new();
     let mut receipts = Vec::with_capacity(paths.len());
     let mut total = 0usize;
@@ -268,7 +273,7 @@ fn prepare_at_base<A: GitHashAlgorithm>(
             None => None,
         };
         live(request)?;
-        let output = file.apply(input.as_ref().map(|(mode, bytes)| (*mode, bytes.as_slice())),
+        let output = decoder.apply(file, input.as_ref().map(|(mode, bytes)| (*mode, bytes.as_slice())),
             limits, &|| !workspace_request_live(request)).map_err(patch_error)?;
         let new_blob = output.as_ref().map(|file| git_object_id(source.inner.object_format,
             GitObjectKind::Blob, &file.content));

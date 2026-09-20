@@ -13,7 +13,7 @@
 <label>Object format <select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
 <button id="select-base" type="button">Select current branch base</button><pre id="base"></pre></section>
 <section><h2>Queue exact file edits</h2>
-<p>Text and binary regular files, at most 256 KiB each and 64 paths. Upload exact bytes or edit them as hex, including NUL and non-UTF-8 content. Explicit file renames count as two paths in one candidate. Symlinks, gitlinks, copies, directory moves, and compressed GIT binary patch uploads remain outside this profile. All edits still require native candidate inspection and explicit publication.</p>
+<p>Text and binary regular files, at most 256 KiB each and 64 paths. Upload exact bytes or edit them as hex, including NUL and non-UTF-8 content. Explicit file renames count as two paths in one candidate. Symlinks, gitlinks, copies, and directory moves remain outside this profile. The patch uploader below also accepts native full-index GIT binary patch literals and deltas. All edits still require native candidate inspection and explicit publication.</p>
 <label>Path (source for a rename) <input id="path" spellcheck="false"></label><label>Path encoding <select id="path-kind"><option value="utf8">UTF-8 text</option><option value="hex">Exact lowercase hex bytes</option></select></label>
 <label>Action <select id="change-kind"><option value="modify">Edit existing file</option><option value="create">Create absent file</option><option value="delete">Delete existing file</option><option value="rename">Rename existing file</option></select></label>
 <div id="rename-options" hidden><label>Destination path <input id="rename-path" spellcheck="false" maxlength="8192"></label><label>Destination encoding <select id="rename-path-kind"><option value="utf8">UTF-8 text</option><option value="hex">Exact lowercase hex bytes</option></select></label>
@@ -35,7 +35,8 @@
 <label>Timestamp: Unix seconds <input id="timestamp" inputmode="numeric" spellcheck="false"></label>
 <label>Commit message <textarea id="message" rows="3"></textarea></label>
 <button id="prepare-edits" type="button">Prepare and inspect queued edits</button>
-<label>Alternatively upload a Git unified patch (1 MiB maximum) <input id="patch" type="file"></label>
+<label>Alternatively upload a Git patch, including compressed binary changes (1 MiB maximum) <input id="patch" type="file"></label>
+<p>Compressed changes require full old/new native object IDs in this repository’s hash format. Every supplied reverse image is verified too. A compressed rename record is unsupported; use explicit deletion and creation. Decoding is bounded across all files and never publishes without the separate confirmation below.</p>
 <button id="prepare-patch" type="button">Prepare and inspect uploaded patch</button></section>
 <section><h2>Inspect the native candidate</h2><p>Preparation and inspection stage no objects and publish nothing. The full changed-path report must match the prepared file effects and native commit identity.</p><div id="candidate"></div>
 <button id="stage" type="button">Prepare exact publication request</button></section>
