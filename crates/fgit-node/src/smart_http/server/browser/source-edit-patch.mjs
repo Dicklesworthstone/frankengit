@@ -104,3 +104,15 @@ export function fullFilePatch(edits, options = {}) {
   for (const part of parts) { bytes.set(part, offset); offset += part.length; }
   return { bytes, edits: normalized };
 }
+
+// Git records trees, not a separate move object. Lower the explicit relocation
+// into two disjoint, byte-exact effects for the existing native patch service.
+// The caller must keep this pair together; native preparation checks that the
+// destination is absent and the source belongs to the selected immutable base.
+export function renameEdits(source, destination, before, after = before, options = {}) {
+  if (before == null || after == null) fail('A rename requires complete original and resulting file bytes.');
+  return normalizeEdits([
+    { path_hex: source, before, after: null },
+    { path_hex: destination, before: null, after },
+  ], options);
+}

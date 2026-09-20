@@ -20,8 +20,8 @@ completion of the forge, `frankengit-asa3`, or the release compatibility matrix.
 
 ## Exact file changes and preparation
 
-The editor supports create, modify, delete, and regular/executable mode changes
-for up to 64 paths, including binary regular files containing NUL and arbitrary
+The editor supports create, modify, delete, explicit file rename, and
+regular/executable mode changes for up to 64 touched paths, including binary regular files containing NUL and arbitrary
 byte values. A complete file is limited to 256 KiB. Both the combined before/after
 input and generated patch are limited to 1 MiB, with an additional 65,536-line
 combined-input budget (lines are delimited by LF bytes).
@@ -41,13 +41,45 @@ disconnects invalidate late file reads and candidate preparation.
 The native regular-file literal-hunk parser and applier already compare payloads
 as byte slices, including NUL. The source editor explicitly opts into those byte
 semantics; it does not encode or decode Git's compressed `GIT binary patch`
-format. That compressed format, symlinks, gitlinks, copies and renames remain
-unsupported by this authoring path. Shared patch-helper defaults stay text-only
+format. That compressed format, symlinks, gitlinks, copies and directory moves
+remain unsupported. Explicit regular-file renames are supported as described
+below. Shared patch-helper defaults stay text-only
 unless callers explicitly request binary bytes; the separate initial-history
 browser is not widened by this change. Existing-branch source authoring still
 requires an existing commit-valued branch and does not initialize a repository,
 rewrite history or implement directory moves. Unsupported work refuses rather
 than calling Git in production or silently changing semantics.
+
+### Explicit file renames in one candidate
+
+Select **Rename existing file**, load its complete native source bytes at the
+selected base, and enter a destination using UTF-8 or exact hex bytes. The loaded
+content and mode are preserved unless explicitly edited or replaced. Binary,
+empty and executable regular files use the same inspection/publication workflow.
+
+The editor represents one move as two paired native effects: delete the original
+source and create the absent destination. Both are included in the same patch,
+checked against their expected blob identities and modes, and published through
+one ordinary source command only after separate confirmation. Preparation must
+refuse an occupied destination even if its contents already match. The browser
+never assumes that lack of a listing row proves absence.
+
+The queue shows the two effects as one rename. Removing it removes both. Editing
+or replacing either queued endpoint separately refuses until the move is removed;
+chains, swaps, duplicate endpoints and ancestor overlaps cannot be assembled by
+application order. Two path slots are reserved before reading a replacement
+file, and the same combined before/after byte and line budgets apply. Changing
+the destination invalidates a candidate but does not rewrite queued effects or
+an already frozen publication. Lost replies use unchanged source-retry receipts,
+with no attempt to refresh the now-deleted source path before retrying.
+
+Uploaded Git patches with explicit `rename from` / `rename to` metadata also
+reach the existing native rename parser. The node checks both endpoint rights,
+original source presence, destination absence, exact hunks/modes/index IDs and
+complete directory disclosure before exporting the atomic two-path result.
+The browser's queued moves use ordinary paired delete/create hunks, not similarity
+inference. [Native relocation semantics and tests](NATIVE_PATCH_RENAMES.md) describe
+the boundary; no directory rename or new publication endpoint is introduced.
 
 ### Binary uploads, hex editing and exact downloads
 
@@ -192,3 +224,34 @@ The tests ran in a selected-file browser fixture, not a complete current
 workspace checkout. Native compilation, native-node interoperability, real-browser
 rendering, Clippy, full-workspace verification and release acceptance remain
 unverified; JavaScript or Git-oracle success does not establish those gates.
+
+## Rename implementation checks
+
+```sh
+node --test tests/browser/source-rename.test.mjs
+node tests/browser/source-rename-git-oracle.mjs \
+  /absolute/path/to/git 'git version <pinned-version>' <binary-sha256>
+cargo test --locked -p fgit-node --test workspace_patch
+```
+
+The rename implementation passed 31 new JavaScript cases together with 232
+restored source/issue/PR/authoring regressions (263 passed, zero failures/skips).
+This is a selected-file fixture, not every current browser suite; the later
+branch/tag/replay/search/transfer/initial and binary-specific suites were not
+all present. Core source helper, client, view, HTML and source HTTP-fixture bytes
+were refreshed to their exact named upstream baseline before modifications.
+The interface preserves the additional binary-editor guard at `4fc65a48`.
+The retained shared transport and other helper modules came from the earlier
+authoring delivery, so this is not full-current-head integration validation.
+
+Pinned non-production Git 2.47.3 passed 144 forward/inverse generated-move
+scenarios and 32 occupied-destination refusals across both hash formats. It
+checks exact blob identities, bytes, modes, untouched siblings and complete
+before/after trees. The inverse is another explicitly generated rename patch,
+not a claim about `git apply -R`: a separate diagnostic reproduced an executable
+mode mismatch under `-R` even with that pinned Git's own deletion patch.
+Native rename composition and its integration tests landed concurrently before
+this interface increment; they are preserved rather than replaced by the local
+native draft. This increment adds no native code or Rust tests. Rust/Cargo is
+unavailable: native compilation, live HTTP/browser interoperability, full workspace
+and release acceptance remain unverified.

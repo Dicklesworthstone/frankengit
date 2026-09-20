@@ -13,9 +13,11 @@
 <label>Object format <select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
 <button id="select-base" type="button">Select current branch base</button><pre id="base"></pre></section>
 <section><h2>Queue exact file edits</h2>
-<p>Text and binary regular files, at most 256 KiB each and 64 paths. Upload exact bytes or edit them as hex, including NUL and non-UTF-8 content. Symlinks, gitlinks, copies, renames, and compressed GIT binary patch uploads remain outside this profile. All edits still require native candidate inspection and explicit publication.</p>
-<label>Path <input id="path" spellcheck="false"></label><label>Path encoding <select id="path-kind"><option value="utf8">UTF-8 text</option><option value="hex">Exact lowercase hex bytes</option></select></label>
-<label>Action <select id="change-kind"><option value="modify">Edit existing file</option><option value="create">Create absent file</option><option value="delete">Delete existing file</option></select></label>
+<p>Text and binary regular files, at most 256 KiB each and 64 paths. Upload exact bytes or edit them as hex, including NUL and non-UTF-8 content. Explicit file renames count as two paths in one candidate. Symlinks, gitlinks, copies, directory moves, and compressed GIT binary patch uploads remain outside this profile. All edits still require native candidate inspection and explicit publication.</p>
+<label>Path (source for a rename) <input id="path" spellcheck="false"></label><label>Path encoding <select id="path-kind"><option value="utf8">UTF-8 text</option><option value="hex">Exact lowercase hex bytes</option></select></label>
+<label>Action <select id="change-kind"><option value="modify">Edit existing file</option><option value="create">Create absent file</option><option value="delete">Delete existing file</option><option value="rename">Rename existing file</option></select></label>
+<div id="rename-options" hidden><label>Destination path <input id="rename-path" spellcheck="false" maxlength="8192"></label><label>Destination encoding <select id="rename-path-kind"><option value="utf8">UTF-8 text</option><option value="hex">Exact lowercase hex bytes</option></select></label>
+<p>Load the source at the selected base. Its deletion and the destination creation are one queued move. Native preparation must verify the destination is absent; existing files are never overwritten. Content and mode edits below apply to the destination. Remove a queued move before editing either endpoint separately.</p></div>
 <button id="load-file" type="button">Load complete existing file</button>
 <label>New mode <select id="file-mode"><option value="100644">Regular file (100644)</option><option value="100755">Executable file (100755)</option></select></label>
 <label>Content view <select id="content-mode"><option value="text">UTF-8 text</option><option value="hex">Exact hex bytes</option></select></label>

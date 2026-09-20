@@ -2,7 +2,7 @@
 // text nodes only; credentials and drafts never enter URL or persistent storage.
 import { SourceEditClient } from './source-edit.mjs';
 import { utf8, hex, unhex, decimal, text } from './pulls-core.mjs';
-import { FILE_LIMIT, PATCH_LIMIT, EDIT_LIMIT, sourcePath, fileBytes, fullFilePatch } from './source-edit-patch.mjs';
+import { FILE_LIMIT, PATCH_LIMIT, EDIT_LIMIT, sourcePath, fileBytes, fullFilePatch, renameEdits } from './source-edit-patch.mjs';
 import { RECEIPT_LIMIT } from './pulls-actions.mjs';
 export function editorBytes(value, original, dirty, endings) {
   if (original !== null && original !== undefined) {
@@ -54,9 +54,9 @@ export function mountSourceEditor(doc, options = {}) {
   const client = options.client ?? new SourceEditClient({ href: options.href ?? globalThis.location.href });
   const byId = id => { const element = doc.getElementById(id); if (!element) throw new Error(`Missing source editor control ${id}`); return element; };
   const controls = Object.fromEntries(['token','connect','disconnect','branch','format','select-base','base','path','path-kind','load-file',
-    'change-kind','file-mode','file-text','file-hex','content-mode','text-editor','hex-editor','file-info','save-file','line-endings','replacement','queue-file','edits','clear-edits','author','committer','timestamp','message',
+    'change-kind','rename-options','rename-path','rename-path-kind','file-mode','file-text','file-hex','content-mode','text-editor','hex-editor','file-info','save-file','line-endings','replacement','queue-file','edits','clear-edits','author','committer','timestamp','message',
     'prepare-edits','patch','prepare-patch','candidate','stage','confirm-send','send','recover','discard','save-receipt','restore-file','restore-receipt','pending','status'].map(id => [id, byId(id)]));
-  let edits = new Map(), loaded = null, replacement = null, replacementFile = null, revision = 0, textDirty = false, busy = false, viewMode = 'text';
+  let edits = new Map(), renames = new Map(), loaded = null, replacement = null, replacementFile = null, revision = 0, textDirty = false, busy = false, viewMode = 'text';
   const urls = options.urls ?? globalThis.URL, timers = options.timers ?? globalThis, downloads = new Map();
   function releaseDownloads() {
     for (const [url, timer] of downloads) { timers.clearTimeout(timer); urls.revokeObjectURL(url); }
@@ -77,8 +77,24 @@ export function mountSourceEditor(doc, options = {}) {
     const value = controls['path-kind'].value === 'hex' ? controls.path.value : hex(utf8.encode(text(controls.path.value, 4096, 'path')));
     sourcePath(value); return value;
   };
+  const destinationPath = () => {
+    const encoding = controls['rename-path-kind'].value;
+    if (!['utf8', 'hex'].includes(encoding)) throw new Error('Choose an explicit destination path encoding.');
+    const value = encoding === 'hex' ? controls['rename-path'].value
+      : hex(utf8.encode(text(controls['rename-path'].value, 4096, 'destination path')));
+    sourcePath(value); return value;
+  };
+  function renamePair(key) {
+    for (const [source, destination] of renames) if (key === source || key === destination) return [source, destination];
+    return null;
+  }
+  function removeQueued(key) {
+    const pair = renamePair(key);
+    if (pair) { edits.delete(pair[0]); edits.delete(pair[1]); renames.delete(pair[0]); }
+    else edits.delete(key);
+  }
   function clearDraft() {
-    edits.clear(); loaded = null; replacement = null; replacementFile = null; textDirty = false; viewMode = 'text';
+    edits.clear(); renames.clear(); controls['rename-path'].value = ''; loaded = null; replacement = null; replacementFile = null; textDirty = false; viewMode = 'text';
     controls['content-mode'].value = viewMode; controls['file-hex'].value = ''; controls['file-info'].textContent = 'No file bytes loaded.'; releaseDownloads();
     controls['file-text'].value = ''; controls.replacement.value = ''; controls.patch.value = '';
     controls.candidate.replaceChildren(); controls.edits.replaceChildren(); controls.base.textContent = '';
@@ -88,7 +104,9 @@ export function mountSourceEditor(doc, options = {}) {
   }
   function render() {
     const pending = client.pending, candidate = client.candidate, connected = client.connected;
-    for (const id of ['branch','format','path','path-kind','change-kind','file-mode','file-text','file-hex','content-mode','line-endings','replacement','author','committer','timestamp','message','patch']) controls[id].disabled = busy || !connected || !!pending;
+    for (const id of ['branch','format','path','path-kind','change-kind','rename-path','rename-path-kind','file-mode','file-text','file-hex','content-mode','line-endings','replacement','author','committer','timestamp','message','patch']) controls[id].disabled = busy || !connected || !!pending;
+    controls['rename-options'].hidden = controls['change-kind'].value !== 'rename';
+    for (const id of ['rename-path', 'rename-path-kind']) controls[id].disabled ||= controls['change-kind'].value !== 'rename';
     controls['text-editor'].hidden = viewMode !== 'text'; controls['hex-editor'].hidden = viewMode !== 'hex';
     controls['file-text'].disabled ||= viewMode !== 'text'; controls['file-hex'].disabled ||= viewMode !== 'hex';
     controls['line-endings'].disabled ||= viewMode !== 'text';
@@ -104,9 +122,14 @@ export function mountSourceEditor(doc, options = {}) {
     controls.pending.textContent = pending ? JSON.stringify(pending, null, 2) : 'No outstanding publication.';
     controls.edits.replaceChildren();
     for (const [key, edit] of edits) {
+      const pair = renamePair(key);
+      if (pair && key !== pair[0]) continue;
+      const after = pair ? edits.get(pair[1]).after : edit.after;
+      const action = pair ? `Rename ${label(pair[0])} → ${label(pair[1])} (two paths)`
+        : `${edit.before === null ? 'Create' : edit.after === null ? 'Delete' : 'Edit'} ${label(key)}`;
       const row = element('li'), remove = element('button', 'Remove'); remove.type = 'button'; remove.disabled = busy || !!pending;
-      row.append(element('span', `${edit.before === null ? 'Create' : edit.after === null ? 'Delete' : 'Edit'} ${label(key)}; ${edit.before?.bytes.length ?? 0} → ${edit.after?.bytes.length ?? 0} bytes${editableText(edit.after?.bytes ?? edit.before.bytes) === null ? ' (binary/raw)' : ''} `), remove);
-      remove.addEventListener('click', () => { if (busy || client.pending) return; edits.delete(key); changed(); });
+      row.append(element('span', `${action}; ${edit.before?.bytes.length ?? 0} → ${after?.bytes.length ?? 0} bytes${editableText(after?.bytes ?? edit.before.bytes) === null ? ' (binary/raw)' : ''} `), remove);
+      remove.addEventListener('click', () => { if (busy || client.pending) return; removeQueued(key); changed(); });
       controls.edits.append(row);
     }
   }
@@ -155,9 +178,15 @@ export function mountSourceEditor(doc, options = {}) {
     // reserve against every queued edit instead of guessing an override.
     let selected = null; try { selected = path(); } catch {}
     const kind = controls['change-kind'].value;
+    if (!['create', 'modify', 'delete', 'rename'].includes(kind)) throw new Error('Choose an explicit file action.');
+    let destination = null; if (kind === 'rename') { try { destination = destinationPath(); } catch {} }
+    if (renamePair(selected) || (kind === 'rename' && (edits.has(selected) || edits.has(destination)))) {
+      throw new Error('Remove queued edits touching either rename endpoint first.');
+    }
     let size = file.size + (kind !== 'create' && loaded?.path_hex === selected ? loaded.before.bytes.length : 0);
-    for (const [key, edit] of edits) if (key !== selected) size += (edit.before?.bytes.length ?? 0) + (edit.after?.bytes.length ?? 0);
-    if (size > PATCH_LIMIT || (edits.size >= EDIT_LIMIT && !edits.has(selected))) throw new Error('Replacement exceeds the combined draft byte or path budget.');
+    for (const [key, edit] of edits) if (kind === 'rename' || key !== selected) size += (edit.before?.bytes.length ?? 0) + (edit.after?.bytes.length ?? 0);
+    const paths = edits.size + (kind === 'rename' ? 2 : edits.has(selected) ? 0 : 1);
+    if (size > PATCH_LIMIT || paths > EDIT_LIMIT) throw new Error('Replacement exceeds the combined draft byte or path budget.');
   }
   const metadata = () => ({ author: controls.author.value, committer: controls.committer.value,
     timestamp: decimal(controls.timestamp.value, 'explicit timestamp'), message: controls.message.value });
@@ -192,7 +221,7 @@ export function mountSourceEditor(doc, options = {}) {
       status('View changed without converting any bytes. Only explicit text edits apply the selected line endings.');
     } catch (error) { controls['content-mode'].value = viewMode; status(error.message); render(); }
   });
-  for (const id of ['file-mode','author','committer','timestamp','message']) controls[id].addEventListener('input', changed);
+  for (const id of ['rename-path','rename-path-kind','file-mode','author','committer','timestamp','message']) controls[id].addEventListener('input', changed);
   for (const id of ['branch','format']) controls[id].addEventListener('input', () => { client.clearSelection(); clearDraft(); changed(); status('Select the new branch and format explicitly before editing.'); });
   controls['load-file'].addEventListener('click', () => perform(async () => {
     const selectedPath = path(), started = ++revision; client.invalidateCandidate(); loaded = null; replacement = null; replacementFile = null;
@@ -229,7 +258,7 @@ export function mountSourceEditor(doc, options = {}) {
   controls['queue-file'].addEventListener('click', () => perform(async () => {
     if (client.pending) throw new Error('Resolve the original publication before editing.');
     const selectedPath = path(), kind = controls['change-kind'].value;
-    if (!['create','modify','delete'].includes(kind)) throw new Error('Choose an explicit file action.');
+    if (!['create','modify','delete','rename'].includes(kind)) throw new Error('Choose an explicit file action.');
     if (kind !== 'create' && (!loaded || loaded.path_hex !== selectedPath)) throw new Error('Load the complete existing file at this base first.');
     const before = kind === 'create' ? null : loaded.before;
     let after = null;
@@ -237,12 +266,20 @@ export function mountSourceEditor(doc, options = {}) {
       if (!['100644', '100755'].includes(controls['file-mode'].value)) throw new Error('Choose a supported regular-file mode.');
       after = { bytes: draftBytes(), mode: Number.parseInt(controls['file-mode'].value, 8) };
     }
-    const next = new Map(edits); next.set(selectedPath, { path_hex: selectedPath, before, after });
-    // Validate the entire prospective set before changing the queue.
+    if (renamePair(selectedPath)) throw new Error('Remove the queued rename before changing either endpoint.');
+    const next = new Map(edits), nextRenames = new Map(renames);
+    if (kind === 'rename') {
+      const destination = destinationPath();
+      if (edits.has(selectedPath) || edits.has(destination)) throw new Error('Remove queued edits touching either rename endpoint first.');
+      for (const effect of renameEdits(selectedPath, destination, before, after, { allowBinary: true })) next.set(effect.path_hex, effect);
+      nextRenames.set(selectedPath, destination);
+    } else next.set(selectedPath, { path_hex: selectedPath, before, after });
+    // Validate every effect before changing either the queue or the move groups.
+    // One rename consumes two path slots and cannot be partly removed/replaced.
     fullFilePatch([...next.values()], { allowBinary: true }); if (next.size > EDIT_LIMIT) throw new Error('Too many edited paths.');
-    edits = next; changed(); status(`${edits.size} exact file edit(s) queued. Nothing has been submitted.`);
+    edits = next; renames = nextRenames; changed(); status(`${edits.size} exact file effect(s) queued. Nothing has been submitted.`);
   }));
-  controls['clear-edits'].addEventListener('click', () => { if (!busy && !client.pending) { edits.clear(); changed(); } });
+  controls['clear-edits'].addEventListener('click', () => { if (!busy && !client.pending) { edits.clear(); renames.clear(); changed(); } });
   controls['prepare-edits'].addEventListener('click', () => perform(async () => {
     const prepared = await client.prepareEdits([...edits.values()], metadata()); inspectView(prepared);
     status('Native preparation and inspection completed. Inspect every changed path before preparing publication.');
