@@ -107,5 +107,16 @@ pub(super) fn scan<'a>(input: &'a [u8], first_line: usize, limits: PatchLimits,
     Ok(hunks)
 }
 
+impl<'a> super::UnifiedPatch<'a> {
+    /// Combine literal renames and non-renaming compressed file changes in one
+    /// atomic workspace patch. All original two-path obligations still apply.
+    /// A compressed rename itself remains unsupported; use explicit delete and
+    /// create records instead. Neither existing parser profile is widened.
+    pub fn parse_with_binary_and_renames(input: &'a [u8], limits: PatchLimits,
+        cancelled: &dyn Fn() -> bool) -> Result<Self, PatchError> {
+        Self::parse_profile(input, limits, cancelled, true, true)
+    }
+}
+
 #[cfg(test)]
 mod tests;

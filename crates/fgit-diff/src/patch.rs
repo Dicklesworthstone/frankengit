@@ -287,7 +287,7 @@ impl<'a> UnifiedPatch<'a> {
             records.push(line);
         }
         if records.is_empty() { return Err(syntax(0, "empty patch")); }
-        let mut files = Vec::new(); let mut pos = 0; let mut hunk_count = 0;
+        let mut files = Vec::new(); let mut pos = 0; let mut hunk_count = 0usize;
         let mut binary_expanded = 0usize;
         while pos < records.len() {
             checkpoint(cancelled)?;

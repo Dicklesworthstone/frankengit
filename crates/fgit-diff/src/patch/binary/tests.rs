@@ -124,3 +124,14 @@ fn delta_size_is_a_program_bound_and_binary_output_is_not_line_split() {
     assert_eq!(file.apply_with_binary_decoder(Some((0o100644,b"old")),parsed.limits(),&||false,
         |_,_,_|Ok(vec![0,255,10,0])).unwrap().unwrap().content,vec![0,255,10,0]);
 }
+
+#[test]
+fn combined_profile_retains_rename_obligations_without_enabling_compressed_renames() {
+    let rename="diff --git a/old b/new\nsimilarity index 100%\nrename from old\nrename to new\n";
+    let input=patch(40,"",'a','b',MEMBER)+rename;
+    let parsed=UnifiedPatch::parse_with_binary_and_renames(input.as_bytes(),PatchLimits::default(),&||false).unwrap();
+    assert_eq!(parsed.files()[1].renamed_from(),Some(b"old".as_slice()));
+    assert!(parse(input.as_bytes()).is_err());
+    let binary_rename=patch(40,"rename from file\nrename to other\n",'a','b',MEMBER).replace("a/file b/file","a/file b/other");
+    assert!(UnifiedPatch::parse_with_binary_and_renames(binary_rename.as_bytes(),PatchLimits::default(),&||false).is_err());
+}
