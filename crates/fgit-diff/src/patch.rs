@@ -6,13 +6,17 @@
 //! final newlines. `parse_with_renames` additionally accepts explicit regular-file
 //! renames, including exact text and mode changes. `parse` keeps refusing renames
 //! for callers that do not implement atomic two-path effects. Binary patches,
-//! symlinks, gitlinks and copies refuse in both profiles.
+//! symlinks, gitlinks and copies refuse in both profiles. `parse_with_binary`
+//! separately opts into framed binary hunks requiring an explicit native decoder.
+//! It does not opt into renames or introduce a compression/hash dependency.
 //! `index` names are parsed and exposed as optional identity expectations;
 //! callers with an object store must check them against verified native IDs.
 
 use std::collections::BTreeSet;
 
 mod rename;
+mod binary;
+pub use binary::BinaryHunks;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PatchLimits {
@@ -100,6 +104,7 @@ pub struct FilePatch<'a> {
     new_mode: Option<u32>,
     index: Option<IndexExpectation>,
     hunks: Vec<Hunk<'a>>,
+    binary: Option<BinaryHunks<'a>>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Hunk<'a> { old: usize, old_count: usize, new: usize, new_count: usize, lines: Vec<Line<'a>> }
@@ -246,7 +251,7 @@ fn index(bytes: &[u8], at: usize) -> Result<(IndexExpectation, Option<u32>), Pat
 
 impl<'a> UnifiedPatch<'a> {
     pub fn parse(input: &'a [u8], limits: PatchLimits, cancelled: &dyn Fn() -> bool) -> Result<Self, PatchError> {
-        Self::parse_profile(input, limits, cancelled, false)
+        Self::parse_profile(input, limits, cancelled, false, false)
     }
 
     /// Opt into explicit renames. Callers MUST read `source_path()` from the
@@ -257,21 +262,33 @@ impl<'a> UnifiedPatch<'a> {
     /// used to infer a source or to relax exact hunk/index validation.
     pub fn parse_with_renames(input: &'a [u8], limits: PatchLimits,
         cancelled: &dyn Fn() -> bool) -> Result<Self, PatchError> {
-        Self::parse_profile(input, limits, cancelled, true)
+        Self::parse_profile(input, limits, cancelled, true, false)
+    }
+
+    /// Opt into full-index compressed binary patches without enabling renames.
+    /// Framing is not decompression or identity verification: `apply()` refuses
+    /// binary hunks. Consumers must use `apply_with_binary_decoder()` and verify
+    /// the exact native old/new hashes and every supplied reverse member.
+    pub fn parse_with_binary(input: &'a [u8], limits: PatchLimits,
+        cancelled: &dyn Fn() -> bool) -> Result<Self, PatchError> {
+        Self::parse_profile(input, limits, cancelled, false, true)
     }
 
     fn parse_profile(input: &'a [u8], limits: PatchLimits, cancelled: &dyn Fn() -> bool,
-        allow_renames: bool) -> Result<Self, PatchError> {
+        allow_renames: bool, allow_binary: bool) -> Result<Self, PatchError> {
         limits.validate()?; checkpoint(cancelled)?;
         if input.len() > limits.max_patch_bytes { return Err(PatchError::Budget("patch bytes")); }
         let mut records = Vec::new();
+        let mut offsets = Vec::new(); let mut offset = 0;
         for line in input.split_inclusive(|byte| *byte == b'\n') {
             checkpoint(cancelled)?;
             if records.len() == limits.max_lines { return Err(PatchError::Budget("patch lines")); }
+            if allow_binary { offsets.push(offset); offset += line.len(); }
             records.push(line);
         }
         if records.is_empty() { return Err(syntax(0, "empty patch")); }
         let mut files = Vec::new(); let mut pos = 0; let mut hunk_count = 0;
+        let mut binary_expanded = 0usize;
         while pos < records.len() {
             checkpoint(cancelled)?;
             if files.len() == limits.max_files { return Err(PatchError::Budget("patch files")); }
@@ -286,12 +303,27 @@ impl<'a> UnifiedPatch<'a> {
                 None => (diff_paths(paths, pos, limits.max_path_bytes)?, None),
             };
             let mut file = FilePatch { path, renamed_from, identical_content: similarity == Some(100),
-                change: FileChange::Modify, old_mode: None, new_mode: None, index: None, hunks: Vec::new() };
+                change: FileChange::Modify, old_mode: None, new_mode: None, index: None, hunks: Vec::new(), binary: None };
             let (mut kind, mut index_mode, mut headers) = (None, None, false);
             pos += 1;
             while pos < records.len() && !records[pos].starts_with(b"diff --git ") {
                 checkpoint(cancelled)?;
                 let text = metadata(records[pos], pos)?;
+                if allow_binary && text == b"GIT binary patch" {
+                    if headers || !file.hunks.is_empty() || file.renamed_from.is_some() {
+                        return Err(syntax(pos, "binary and text/rename payloads cannot mix"));
+                    }
+                    let payload = binary::scan(&input[offsets[pos]..], pos, limits, cancelled)?;
+                    hunk_count = hunk_count.checked_add(payload.member_count())
+                        .filter(|count| *count <= limits.max_hunks)
+                        .ok_or(PatchError::Budget("patch hunks"))?;
+                    binary_expanded = binary_expanded.checked_add(payload.declared_inflated_bytes())
+                        .filter(|bytes| *bytes <= limits.max_output_bytes)
+                        .ok_or(PatchError::Budget("binary inflated bytes"))?;
+                    pos += payload.line_count();
+                    file.binary = Some(payload);
+                    break;
+                }
                 if text.starts_with(b"@@ ") {
                     if !headers { return Err(syntax(pos, "hunk before file headers")); }
                     if hunk_count == limits.max_hunks { return Err(PatchError::Budget("patch hunks")); }
@@ -385,7 +417,10 @@ impl<'a> UnifiedPatch<'a> {
                 FileChange::Modify if file.old_mode.is_some() != file.new_mode.is_some() => return Err(syntax(pos.saturating_sub(1), "incomplete mode change")),
                 _ => {}
             }
-            if file.renamed_from.is_none() && file.hunks.is_empty() && file.change == FileChange::Modify && (file.old_mode.is_none() || file.old_mode == file.new_mode) {
+            if file.binary.is_some() {
+                binary::check_index(file.index.as_ref(), file.change)?;
+            }
+            if file.binary.is_none() && file.renamed_from.is_none() && file.hunks.is_empty() && file.change == FileChange::Modify && (file.old_mode.is_none() || file.old_mode == file.new_mode) {
                 return Err(syntax(pos.saturating_sub(1), "file has no hunks or mode change"));
             }
             files.push(file);
@@ -421,11 +456,29 @@ impl FilePatch<'_> {
     /// separately carries its required two-path tree effect.
     pub fn change(&self) -> FileChange { self.change }
     pub fn index(&self) -> Option<&IndexExpectation> { self.index.as_ref() }
-    pub fn hunk_count(&self) -> usize { self.hunks.len() }
+    /// Includes both encoded binary members, when present.
+    pub fn hunk_count(&self) -> usize { self.hunks.len() + self.binary.as_ref().map_or(0, BinaryHunks::member_count) }
+    pub fn binary_hunks(&self) -> Option<&BinaryHunks<'_>> { self.binary.as_ref() }
     /// Apply at the exact declared offsets. The caller must bind the source
     /// to its independently selected immutable commit and verify index names.
     pub fn apply(&self, source: Option<(u32, &[u8])>, limits: PatchLimits,
         cancelled: &dyn Fn() -> bool) -> Result<Option<PatchedFile>, PatchError> {
+        self.apply_with_binary_decoder(source, limits, cancelled, |_, _, _| {
+            Err(PatchError::Unsupported { line: 1, feature: "native binary decoder required" })
+        })
+    }
+
+    /// Apply literal hunks normally, or call the supplied native decoder once.
+    /// Before returning success, the decoder MUST validate the exact full-index
+    /// identities, bounded decompression/deltas, and any reverse image. Returning
+    /// decoded bytes is not authority to stage objects or publish a ref. This
+    /// adapter enforces source presence/mode and final size/deletion constraints;
+    /// consumers still own aggregate work budgets and immutable source selection.
+    pub fn apply_with_binary_decoder(
+        &self, source: Option<(u32, &[u8])>, limits: PatchLimits,
+        cancelled: &dyn Fn() -> bool,
+        decoder: impl FnOnce(&[u8], &IndexExpectation, &[u8]) -> Result<Vec<u8>, PatchError>,
+    ) -> Result<Option<PatchedFile>, PatchError> {
         limits.validate()?; checkpoint(cancelled)?;
         check_path(&self.path, limits.max_path_bytes)?;
         check_path(self.source_path(), limits.max_path_bytes)?;
@@ -436,6 +489,20 @@ impl FilePatch<'_> {
         let (old_mode, body) = source.unwrap_or((0o100644, b""));
         if !matches!(old_mode, 0o100644 | 0o100755) || self.old_mode.is_some_and(|mode| mode != old_mode) { return Err(PatchError::SourceMode); }
         if body.len() > limits.max_file_bytes { return Err(PatchError::Budget("source file bytes")); }
+        if let Some(binary) = &self.binary {
+            binary.check_limits(limits)?;
+            let index = binary::check_index(self.index.as_ref(), self.change)?;
+            let output = decoder(binary.bytes(), index, body)?;
+            checkpoint(cancelled)?;
+            if output.len() > limits.max_file_bytes.min(limits.max_output_bytes) {
+                return Err(PatchError::Budget("result file bytes"));
+            }
+            if self.change == FileChange::Delete {
+                if !output.is_empty() { return Err(PatchError::NonemptyDeletion); }
+                return Ok(None);
+            }
+            return Ok(Some(PatchedFile { mode: self.new_mode.unwrap_or(old_mode), content: output }));
+        }
         let mut old_lines = Vec::new();
         for line in body.split_inclusive(|byte| *byte == b'\n') {
             checkpoint(cancelled)?;
