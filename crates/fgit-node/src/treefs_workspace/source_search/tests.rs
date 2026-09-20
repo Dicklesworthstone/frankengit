@@ -149,3 +149,60 @@ fn revoked_foreign_and_hidden_ref_scopes_fail_closed() {
         &RefName::try_new(b"refs/heads/absent").unwrap(),&query(&[]),SearchLimits::default())),Err(NodeWorkspaceRefusal::RefUnavailable)));
     node.shutdown().unwrap();
 }
+
+#[test]
+fn narrow_blob_limits_do_not_reject_commit_root_or_nested_tree_metadata() {
+    for format in [Format::Sha1, Format::Sha256] {
+        let scratch = Scratch::new();
+        let (node, commit) = fixture(&scratch, format);
+        let q = query(&[b"src".to_vec()]);
+        let baseline = local(&node, &q, SearchLimits::default()).unwrap();
+        let bytes = "éneedle\r\nNEEDLE needle\n".len();
+        // Even the single-entry nested tree is larger than this source blob.
+        // An exact blob/total ceiling must not also become a metadata ceiling.
+        assert!(tree(&[("100644", "file.rs", commit)]).len() > bytes);
+        let limits = SearchLimits { max_file_bytes: bytes, max_total_bytes: bytes,
+            ..SearchLimits::default() };
+        let result = local(&node, &q, limits).unwrap();
+        assert_eq!(result, baseline);
+        assert_eq!(result.source_commit, commit);
+        assert_eq!(result.files_read, 1);
+        assert_eq!(result.bytes_read, bytes);
+        assert_eq!(result.matches.len(), 3);
+
+        // The capability-scoped surface uses the same kind-aware read ceiling.
+        let request = node.request_context();
+        let mut capability = cap(node.repository_id());
+        let scoped = match format {
+            Format::Sha1 => node.runtime().block_on(node.search_source_in::<Sha1>(
+                &request, &reference(), &RefVisibility::new(), &mut capability, 0, &q, limits)),
+            Format::Sha256 => node.runtime().block_on(node.search_source_in::<Sha256>(
+                &request, &reference(), &RefVisibility::new(), &mut capability, 0, &q, limits)),
+        }.unwrap();
+        assert_eq!(scoped, result);
+
+        // Refusing metadata would also produce an error; pin the actual blob
+        // read and semantic-total guards so that cannot pass these negatives.
+        let error = local(&node, &q, SearchLimits { max_file_bytes: bytes - 1, ..limits }).unwrap_err();
+        assert!(matches!(error, NodeWorkspaceRefusal::SourceSearch(ref cause)
+            if matches!(**cause, SearchError::Source(_))));
+        let error = local(&node, &q, SearchLimits { max_total_bytes: bytes - 1, ..limits }).unwrap_err();
+        assert!(matches!(error, NodeWorkspaceRefusal::SourceSearch(ref cause)
+            if matches!(**cause, SearchError::Budget("total bytes"))));
+        assert_eq!(local(&node, &q, limits).unwrap(), baseline);
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn allocation_ceiling_preserves_host_remaining_and_kind_specific_limits() {
+    assert_eq!(METADATA_OBJECT_BYTES, SearchLimits::default().max_file_bytes);
+    for kind in [GitObjectKind::Blob, GitObjectKind::Commit, GitObjectKind::Tree, GitObjectKind::Tag] {
+        let profile = if kind == GitObjectKind::Blob { 23 } else { METADATA_OBJECT_BYTES };
+        assert_eq!(object_read_ceiling(usize::MAX, 23, READ_BYTES, kind), profile);
+        assert_eq!(object_read_ceiling(7, 23, READ_BYTES, kind), 7);
+        assert_eq!(object_read_ceiling(usize::MAX, 23, 1, kind), 1);
+        assert_eq!(object_read_ceiling(usize::MAX, 23, 0, kind), 0);
+        assert_eq!(object_read_ceiling(0, 23, READ_BYTES, kind), 0);
+    }
+}

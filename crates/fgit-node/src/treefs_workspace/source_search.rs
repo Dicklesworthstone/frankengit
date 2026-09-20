@@ -21,6 +21,10 @@ use super::{NodeTreeSource, NodeWorkspaceRefusal, workspace_request_live};
 
 const READ_BYTES: usize = 128 * 1024 * 1024;
 const READ_OBJECTS: usize = 100_000;
+// Keep the default metadata ceiling independent of a caller's narrower blob
+// limit. Commits and directory trees are not source files; host limits and the
+// shared read budget still bound their allocation before they are fetched.
+const METADATA_OBJECT_BYTES: usize = 8 * 1024 * 1024;
 fn search_error(error: SearchError) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::SourceSearch(Box::new(error))
 }
@@ -161,7 +165,7 @@ impl OneNode {
         let inner = VerifiedFabricPackSource {
             fabric: &self.fabric, object_format: self.object_format,
             maximum_object_bytes: usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX)
-                .min(limits.max_file_bytes),
+                .min(METADATA_OBJECT_BYTES),
             database_context: request.authority(), database_exhaustion: &exhaustion,
             session_is_live: None,
         };
@@ -211,8 +215,11 @@ impl OneNode {
                 source_commit: commit, source_tree: tree, matches: Vec::new(), completion: SearchCompletion::Complete,
                 files_selected: 0, files_read: 0, bytes_read: 0, bytes_searched: 0, non_regular_entries: 0 })));
         }
-        let metadata_bytes = commit_body.len() + tree_body.len();
-        let bytes = ByteCount::try_new("source_search_reads", (READ_BYTES - metadata_bytes) as u64, READ_BYTES as u64)
+        let metadata_bytes = commit_body.len().checked_add(tree_body.len())
+            .ok_or_else(|| search_error(SearchError::Budget("metadata bytes")))?;
+        let remaining = READ_BYTES.checked_sub(metadata_bytes)
+            .ok_or_else(|| search_error(SearchError::Budget("metadata bytes")))?;
+        let bytes = ByteCount::try_new("source_search_reads", remaining as u64, READ_BYTES as u64)
             .map_err(|_| search_error(SearchError::Budget("metadata bytes")))?;
         // This ID never leaves the read-only call or enters session storage.
         // It is a local grant namespace, not a resumable workspace capability.
@@ -224,6 +231,11 @@ impl OneNode {
         let base = BaseView::<A>::new(self.repository_id, rcr, commit_oid, tree_oid, parse, PathPolicy::default());
         let original = NodeTreeSource { inner, selected: selected.selected_closure(), workspace };
         let source = bounded_source(&original, request, limits);
+        // The allocation-side budget includes the two metadata reads above,
+        // just as the TreeCapability fetch/file budgets do. Semantic source
+        // counters still count only blobs, not commits or directory entries.
+        source.bytes.set(metadata_bytes);
+        source.objects.set(2);
         let result = query.run(&base, &source, &mut capability, 0, limits,
             &|| !workspace_request_live(request)).map_err(search_error);
         if !workspace_request_live(request) { return Err(search_error(SearchError::Cancelled)); }
@@ -268,6 +280,14 @@ impl LocalSearch for SourceQueryBatch {
     }
 }
 
+fn object_read_ceiling(host: usize, file: usize, remaining: usize, kind: GitObjectKind) -> usize {
+    let profile = match kind {
+        GitObjectKind::Blob => file,
+        GitObjectKind::Commit | GitObjectKind::Tree | GitObjectKind::Tag => METADATA_OBJECT_BYTES,
+    };
+    host.min(profile).min(remaining)
+}
+
 struct SearchSource<'a, 'source> {
     source: &'a NodeTreeSource<'source>,
     request: &'a NodeRequestContext,
@@ -287,7 +307,7 @@ impl<A: GitHashAlgorithm> ObjectSource<A> for SearchSource<'_, '_> {
     {
         let refused = |reason: &str| ObjectSourceError::Refused { reason: reason.to_owned() };
         if !workspace_request_live(self.request) { return Err(refused("search cancelled")); }
-        if self.objects.get() == READ_OBJECTS || self.bytes.get() >= READ_BYTES {
+        if self.objects.get() >= READ_OBJECTS || self.bytes.get() >= READ_BYTES {
             return Err(refused("search object-read budget exceeded"));
         }
         // Bound the actual fabric read before allocation; a post-read file
@@ -296,7 +316,8 @@ impl<A: GitHashAlgorithm> ObjectSource<A> for SearchSource<'_, '_> {
         let bounded = NodeTreeSource {
             inner: VerifiedFabricPackSource {
                 fabric: original.inner.fabric, object_format: original.inner.object_format,
-                maximum_object_bytes: original.inner.maximum_object_bytes.min(self.max_bytes),
+                maximum_object_bytes: object_read_ceiling(original.inner.maximum_object_bytes,
+                    self.max_bytes, READ_BYTES - self.bytes.get(), kind),
                 database_context: original.inner.database_context,
                 database_exhaustion: original.inner.database_exhaustion,
                 session_is_live: original.inner.session_is_live,

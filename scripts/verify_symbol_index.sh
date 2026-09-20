@@ -18,6 +18,7 @@ if [[ "${1:-tables}" == native && $# -eq 1 ]]; then
   cargo test --locked -p fgit-forge --lib source_symbols -- --test-threads=1
   cargo test --locked -p fgit-node --test source_symbol_index --bin fg-symbol-index -- --test-threads=1
   cargo test --locked -p fgit-node --lib smart_http::server::source::symbols -- --test-threads=1
+  cargo test --locked -p fgit-node --lib treefs_workspace::source_search -- --test-threads=1
   exit 0
 fi
 [[ "${1:-tables}" == tables && $# -le 1 ]] || { echo "Usage: $0 [tables|native]" >&2; exit 2; }
