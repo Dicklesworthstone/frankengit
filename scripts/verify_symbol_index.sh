@@ -7,7 +7,7 @@ rustc --version --verbose
 git rev-parse HEAD
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
-if [[ "${1:-tables}" == native && $# -eq 1 ]]; then
+if [[ $# -eq 1 && ( "$1" == native || "$1" == maintenance ) ]]; then
   # Check the real cross-crate composition, including binary/HTTP test targets.
   # The normal rch wrapper is not bypassed; each invocation owns its target.
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$out/native-target}" CARGO_BUILD_JOBS=2
@@ -15,13 +15,20 @@ if [[ "${1:-tables}" == native && $# -eq 1 ]]; then
   # Execute the actual codec, native node, operator and HTTP implementations.
   # Omit test debug symbols to bound linking memory; no assertions are removed.
   export CARGO_PROFILE_TEST_DEBUG=0
-  cargo test --locked -p fgit-forge --lib source_symbols -- --test-threads=1
-  cargo test --locked -p fgit-node --test source_symbol_index --test source_symbol_reconcile --bin fg-symbol-index -- --test-threads=1
-  cargo test --locked -p fgit-node --lib smart_http::server::source::symbols -- --test-threads=1
-  cargo test --locked -p fgit-node --lib treefs_workspace::source_search -- --test-threads=1
+  if [[ "$1" == maintenance ]]; then
+    # Both profiles share the same worker; retain the lexical restart gates.
+    cargo test --locked -p fgit-node --bin fg-index-maintain \
+      --test source_symbol_worker --test source_index_worker \
+      --test source_index_worker_checkpoint -- --test-threads=1
+  else
+    cargo test --locked -p fgit-forge --lib source_symbols -- --test-threads=1
+    cargo test --locked -p fgit-node --test source_symbol_index --test source_symbol_reconcile --bin fg-symbol-index -- --test-threads=1
+    cargo test --locked -p fgit-node --lib smart_http::server::source::symbols -- --test-threads=1
+    cargo test --locked -p fgit-node --lib treefs_workspace::source_search -- --test-threads=1
+  fi
   exit 0
 fi
-[[ "${1:-tables}" == tables && $# -le 1 ]] || { echo "Usage: $0 [tables|native]" >&2; exit 2; }
+[[ "${1:-tables}" == tables && $# -le 1 ]] || { echo "Usage: $0 [tables|native|maintenance]" >&2; exit 2; }
 for file in engine.rs engine_tests.rs table.rs table_tests.rs; do
   sha256sum "crates/fgit-forge/src/source_symbols/$file"
   cp "crates/fgit-forge/src/source_symbols/$file" "$out/$file"

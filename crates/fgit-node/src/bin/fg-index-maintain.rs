@@ -3,6 +3,9 @@
 //! second async runtime, remote index-write grant, or query-side mutation.
 #[path = "index_maintenance/state.rs"]
 mod state;
+#[path = "index_maintenance/backend.rs"]
+mod backend;
+use backend::{IndexKind, AttemptFailure};
 use state::{Pin as IndexPin, ProgressFile, State, decimal, hex, unhex};
 use std::ffi::OsString;
 use std::future::{Future, poll_fn};
@@ -19,14 +22,18 @@ use fgit_node::{NodeConfig, NodeRequestContext, NodeWorkspaceRefusal, OneNode};
 use fgit_types::{CANONICAL_CODEC_VERSION, DigestBytes, GitHashAlgorithm, HeadGeneration,
     InternalObjectId, RefName, RepositoryId, TenantId};
 
-const USAGE: &str = "fg-index-maintain ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 PRIVATE_STATE_DIR init|resume PASSES INTERVAL_SECONDS FULL_REF [FULL_REF ...]\nExplicit scope: 1-32 refs, 1-3600 passes, up to 24 hours of scheduled waits.\nCreate PRIVATE_STATE_DIR with mode 0700. Create its stop file to request drain.\nResume never resets missing progress, takes over a stale lock, or forgets an unresolved attempt.";
+const USAGE: &str = "fg-index-maintain [--symbols] ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 PRIVATE_STATE_DIR init|resume PASSES INTERVAL_SECONDS FULL_REF [FULL_REF ...]\nExplicit scope: 1-32 refs, 1-3600 passes, up to 24 hours of scheduled waits.\nCreate PRIVATE_STATE_DIR with mode 0700. Create its stop file to request drain.\n--symbols selects Rust declarations; use a separate state directory from lexical maintenance.\nResume never resets missing progress, takes over a stale lock, or forgets an unresolved attempt.";
 const TICK: Duration = Duration::from_millis(250);
 struct Options {
     root: PathBuf, tenant: TenantId, repository: RepositoryId, format: GitHashAlgorithm,
     directory: PathBuf, initialize: bool, passes: u64, interval: Duration, refs: Vec<RefName>,
+    profile: IndexKind,
 }
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message.into()) }
 fn parse(args: &[OsString]) -> io::Result<Options> {
+    let (profile,args) = if args.first().is_some_and(|a| a == "--symbols") {
+        (IndexKind::Symbols,&args[1..])
+    } else { (IndexKind::Lexical,args) };
     if args.len() < 9 || args.len() > 8 + state::MAX_REFS || args.iter().any(|a| a.len() > 4096) { return Err(invalid(USAGE)); }
     let text = |n: usize| args[n].to_str().ok_or_else(|| invalid("Only filesystem paths may contain non-UTF-8 bytes."));
     let id = |n| -> io::Result<[u8; 16]> { unhex(text(n)?, 16)?.try_into().map_err(|_| invalid("Identity must be 16 bytes.")) };
@@ -41,7 +48,7 @@ fn parse(args: &[OsString]) -> io::Result<Options> {
     if refs.windows(2).any(|pair| pair[0] == pair[1]) || refs.iter().any(|r| r.as_bytes().len() > 1024 || !r.as_bytes().starts_with(b"refs/"))
         || refs.iter().map(|r| r.as_bytes().len()).sum::<usize>() > 16 * 1024 { return Err(invalid("Invalid or duplicate reference scope.")); }
     Ok(Options { root: PathBuf::from(&args[0]), tenant, repository, format,
-        directory: PathBuf::from(&args[4]), initialize, passes, interval: Duration::from_secs(seconds), refs })
+        directory: PathBuf::from(&args[4]), initialize, passes, interval: Duration::from_secs(seconds), refs, profile })
 }
 fn generation(digest: [u8; 32]) -> io::Result<GraphGenerationId> {
     GraphGenerationId::from_internal_object_id(InternalObjectId::new(internal_algorithm_id(IdentityDomain::Generation),
@@ -95,8 +102,8 @@ fn wait(node: &OneNode, directory: &Path, mut remaining: Duration, stop: &mut St
         remaining = remaining.saturating_sub(step); stop.observe(directory);
     }
 }
-fn emit(reference: &RefName, status: &str, fields: &str) -> io::Result<()> {
-    writeln!(io::stdout().lock(), "{{\"type\":\"index_maintenance\",\"ref_hex\":\"{}\",\"state\":\"{status}\",\"repository_transaction_created\":false{fields}}}", hex(reference.as_bytes()))
+fn emit(profile: IndexKind, reference: &RefName, status: &str, fields: &str) -> io::Result<()> {
+    writeln!(io::stdout().lock(), "{{\"type\":\"index_maintenance\",\"index_kind\":\"{}\",\"ref_hex\":\"{}\",\"state\":\"{status}\",\"repository_transaction_created\":false{fields}}}", profile.name(), hex(reference.as_bytes()))
 }
 fn pin_fields(value: &IndexPin) -> String { format!(",\"index_token\":\"alg:2:{}\",\"index_number\":{}", hex(&value.digest), value.number) }
 fn definite_race(error: &IndexError) -> bool {
@@ -123,7 +130,7 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                 // The v2 barrier could not permit any index write while this
                 // durable phase remained selected. Legacy running stays blocked.
                 progress.state.abandon_preparation(reference.as_bytes())?;
-                progress.save()?; emit(reference, "preparation_recovered", "")?;
+                progress.save()?; emit(options.profile, reference, "preparation_recovered", "")?;
             }
             let floor = row.floor.as_ref().map(activation).transpose()?;
             // One finite background-controller budget per independent attempt.
@@ -131,20 +138,20 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
             let request = node.outbox_delivery_context();
             if let Some(candidate) = row.pending {
                 let result = drive(node, &request, &options.directory,
-                    node.recover_source_index_local_in(&request, reference, generation(candidate)?, floor.as_ref(), Default::default()), &mut stop);
+                    options.profile.recover(node, &request, reference, generation(candidate)?, floor.as_ref()), &mut stop);
                 match result {
                     Ok(GenerationRecovery::Active { selected }) | Ok(GenerationRecovery::Superseded { selected, .. }) => {
                         let pin = checkpoint(selected.activation())?;
                         progress.state.acknowledge(reference.as_bytes(), pin.clone(), Some(candidate))?;
-                        progress.save()?; emit(reference, "recovered", &pin_fields(&pin))?;
+                        progress.save()?; emit(options.profile, reference, "recovered", &pin_fields(&pin))?;
                     }
                     Ok(GenerationRecovery::Uninitialized | GenerationRecovery::NotInSelectedHistory { .. }) => {
                         // Negative selected-history evidence is NOT cancellation
                         // of an earlier write. Keep responsibility and do no build.
                         healthy = false;
-                        emit(reference, "pending", &format!(",\"candidate_token\":\"alg:2:{}\"", hex(&candidate)))?;
+                        emit(options.profile, reference, "pending", &format!(",\"candidate_token\":\"alg:2:{}\"", hex(&candidate)))?;
                     }
-                    Err(error) => { healthy = false; emit(reference, "recovery_unavailable", "")?; eprintln!("Index recovery: {error}"); }
+                    Err(error) => { healthy = false; emit(options.profile, reference, "recovery_unavailable", "")?; eprintln!("Index recovery: {error}"); }
                 }
                 continue; // Recovery and a new build are separate invocations.
             }
@@ -164,8 +171,7 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                     }
                 };
                 drive(node, &request, &options.directory,
-                    node.reconcile_source_index_guarded_local_in(&request, reference, None, floor.as_ref(),
-                        Default::default(), Default::default(), &mut before_publish), &mut stop)
+                    options.profile.reconcile(node, &request, reference, floor.as_ref(), &mut before_publish), &mut stop)
             };
             // Do not turn a failed checkpoint write into an ordinary refusal
             // or release its lock, even though the native barrier prevented puts.
@@ -177,31 +183,31 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                     let pin = checkpoint(&activation)?;
                     progress.state.completed(reference.as_bytes(), pin.clone())?;
                     progress.save()?; // Durably retain the floor BEFORE acknowledging it.
-                    emit(reference, "observed_current", &format!("{},\"snapshot_token\":\"{}\",\"source_commit\":\"{}\"",
+                    emit(options.profile, reference, "observed_current", &format!("{},\"snapshot_token\":\"{}\",\"source_commit\":\"{}\"",
                         pin_fields(&pin), token(source.source_head.as_internal_object_id()), source.commit))?;
                 }
-                Err(NodeWorkspaceRefusal::SourceIndexPublication { candidate, error }) => {
+                Err(AttemptFailure::Publication { candidate, error, definite_race }) => {
                     let candidate = candidate_digest(candidate)?;
                     if armed != Some(candidate) {
                         return Err(invalid("Publication identity bypassed the durable barrier; preserve progress."));
                     }
                     healthy = false;
-                    if definite_race(&error) {
+                    if definite_race {
                         progress.state.publication_refused(reference.as_bytes(), candidate)?; progress.save()?;
-                        emit(reference, "refused", "")?;
+                        emit(options.profile, reference, "refused", "")?;
                     } else {
                         // Already durable BEFORE the first possible publication
                         // effect. A lost return path needs no second identity write.
-                        emit(reference, "pending", &format!(",\"candidate_token\":\"alg:2:{}\"", hex(&candidate)))?;
+                        emit(options.profile, reference, "pending", &format!(",\"candidate_token\":\"alg:2:{}\"", hex(&candidate)))?;
                     }
                     eprintln!("Index publication not confirmed: {error}");
                 }
-                Err(error) => {
+                Err(AttemptFailure::Refused(error)) => {
                     if armed.is_some() {
                         return Err(invalid(format!("Unexpected failure after candidate recording; preserve pending state: {error}")));
                     }
                     progress.state.refuse(reference.as_bytes())?; progress.save()?;
-                    healthy = false; emit(reference, "refused", "")?; eprintln!("Index maintenance: {error}");
+                    healthy = false; emit(options.profile, reference, "refused", "")?; eprintln!("Index maintenance: {error}");
                 }
             }
         }
@@ -211,7 +217,7 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
     Ok(healthy && progress.state.rows.values().all(|row| !row.running && !row.preparing && row.pending.is_none()))
 }
 fn main() -> ExitCode {
-    let args: Vec<_> = std::env::args_os().skip(1).take(8 + state::MAX_REFS + 1).collect();
+    let args: Vec<_> = std::env::args_os().skip(1).take(8 + state::MAX_REFS + 2).collect();
     let options = match parse(&args) { Ok(value) => value, Err(e) => { eprintln!("{e}"); return ExitCode::FAILURE; } };
     if !cfg!(unix) || internal_algorithm_id(IdentityDomain::Generation).code_point() != 2
         || CANONICAL_CODEC_VERSION != fgit_types::CodecVersion::new(1, 0)
@@ -225,7 +231,7 @@ fn main() -> ExitCode {
         if let Err(error) = node.shutdown() { eprintln!("Shutdown also failed: {error}"); }
         return ExitCode::FAILURE;
     }
-    let binding = format!("{} {} {} {}", options.tenant, options.repository, node.repository_incarnation_id(), options.format.as_str());
+    let binding = options.profile.bind(format!("{} {} {} {}", options.tenant, options.repository, node.repository_incarnation_id(), options.format.as_str()));
     let refs = options.refs.iter().map(|r| r.as_bytes().to_vec()).collect::<Vec<_>>();
     let progress = State::new(binding, &refs).and_then(|state| ProgressFile::open(&options.directory, options.initialize, state));
     let mut progress = match progress {

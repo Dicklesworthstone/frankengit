@@ -4,14 +4,20 @@ on:
     branches: [main]
     paths:
       - 'crates/fgit-forge/src/source_symbols/**'
+      - 'crates/fgit-node/src/treefs_workspace/source_search.rs'
+      - 'crates/fgit-node/src/treefs_workspace/source_search/tests.rs'
       - 'crates/fgit-node/src/treefs_workspace/source_search/symbols*'
       - 'crates/fgit-node/src/treefs_workspace/source_search/symbols/**'
       - 'crates/fgit-node/src/smart_http/server/source/symbols*'
       - 'crates/fgit-node/src/smart_http/server/source/symbols/**'
       - 'crates/fgit-node/src/bin/fg-symbol-index.rs'
+      - 'crates/fgit-node/src/bin/fg-index-maintain.rs'
+      - 'crates/fgit-node/src/bin/index_maintenance/**'
       - 'crates/fgit-node/tests/source_symbol_index.rs'
       - 'crates/fgit-node/tests/source_symbol_index/**'
       - 'crates/fgit-node/tests/source_symbol_reconcile.rs'
+      - 'crates/fgit-node/tests/source_symbol_worker.rs'
+      - 'crates/fgit-node/tests/source_index_worker*.rs'
       - 'scripts/verify_symbol_index.sh'
       - '.github/workflows/symbol-index.yml'
   workflow_dispatch:
@@ -32,3 +38,10 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup toolchain install nightly-2026-08-31 --profile minimal
       - run: bash scripts/verify_symbol_index.sh native
+  maintenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly-2026-08-31 --profile minimal
+      - run: bash scripts/verify_symbol_index.sh maintenance
