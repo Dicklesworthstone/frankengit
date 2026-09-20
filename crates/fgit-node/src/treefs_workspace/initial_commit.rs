@@ -8,7 +8,8 @@ use crate::{LoopbackReceiveSession, NodeReceiveTransportRefusal, NodeRequestCont
 use fgit_admission::{AdmissionLimits, AdmissionResult, CommandOutcome, SessionMapping};
 use fgit_authority::{ExpectedOld, OutcomeLookup, ProposedNew, RefCommand, SealAttempt, SemanticRequest, RECEIVE_ADMISSION_SCHEMA};
 use fgit_crypto::{GitObjectKind, git_object_id};
-use fgit_forge::initial_commit::{InitialCommitPlan, MAX_INITIAL_OBJECTS, prepare_initial_commit};
+use fgit_forge::initial_commit::{InitialCommitPlan, MAX_INITIAL_OBJECTS};
+use self::binary::prepare_initial_commit;
 use fgit_forge::{patch::PatchLimits, preparation::MergeMetadata};
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body, parse_tree};
 use fgit_pack::full_bundle::{FullBundle, FullBundleInput, FullBundleLimits};
@@ -16,6 +17,8 @@ use fgit_pack::{BundleReference, CanonicalObjectSource, CanonicalPackObject, Ent
     NativeChecksumVerifier, PackLimits, PackPlanner, PackWriteError, PackWriteProfile, PackWriter, read_verified_pack};
 use fgit_types::{GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_types::cell::{ReadMode, admits_read};
+
+mod binary;
 
 fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::InvalidWorkspaceCandidate(reason)
@@ -46,6 +49,8 @@ impl OneNode {
     /// `expected_head` optionally pins preparation's metadata read. Publication
     /// separately requires branch absence, allowing unrelated intervening work.
     /// No objects, refs, forge records, policy or retry seals are staged here.
+    /// Full-index compressed binary creations share the existing native decoder
+    /// budget; every supplied reverse image must reconstruct the absent source.
     pub async fn prepare_trusted_initial_patch_in(
         &self, request: &NodeRequestContext, reference: &RefName,
         patch: &[u8], metadata: &MergeMetadata, limits: PatchLimits,
