@@ -5,7 +5,7 @@
 use crate::{ClosureSelectionSource, NodeRequestContext, NodeWorkspaceRefusal, OneNode};
 use fgit_forge::source_browse::SourceBrowseError;
 use fgit_forge::source_search::SearchLimits;
-use fgit_graph::GenerationActivation;
+use fgit_graph::{GenerationActivation, GraphGenerationId};
 use fgit_graph::lexical::{IndexError, LexicalIndexStore, LexicalReadLimits, LexicalSource};
 use fgit_types::{RefName, RepositoryAuthorityHeadId};
 use fgit_types::cell::{ReadMode, admits_read, admits_staging_intake};
@@ -41,6 +41,26 @@ impl OneNode {
         minimum: Option<&GenerationActivation>,
         limits: SearchLimits,
         read_limits: LexicalReadLimits,
+    ) -> Result<(LexicalSource, GenerationActivation), NodeWorkspaceRefusal> {
+        self.reconcile_source_index_guarded_local_in(request, reference, expected_head,
+            minimum, limits, read_limits, &mut |_| Ok(())).await
+    }
+
+    /// Reconcile through a durable candidate barrier. A current-index no-op
+    /// never calls the barrier. Genesis and refresh delegate to the SAME
+    /// guarded native builders; neither can publish before the callback returns
+    /// Ok. Source/index pins, minimum checkpoints, and cancellation retain the
+    /// unguarded entrypoint's semantics. No callback follows confirmed success.
+    #[expect(clippy::too_many_arguments, reason = "publication barrier is separate from source selection and maintenance budgets")]
+    pub async fn reconcile_source_index_guarded_local_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        minimum: Option<&GenerationActivation>,
+        limits: SearchLimits,
+        read_limits: LexicalReadLimits,
+        before_publish: &mut (impl FnMut(GraphGenerationId) -> Result<(), NodeWorkspaceRefusal> + Send),
     ) -> Result<(LexicalSource, GenerationActivation), NodeWorkspaceRefusal> {
         limits.validate().map_err(search_error)?;
         live(request)?;
@@ -91,9 +111,10 @@ impl OneNode {
         // TreeFS selection. A write after the observation above cannot be
         // silently accepted as the target of this same attempt.
         match predecessor {
-            None => self.build_source_index_local_in(request, reference, Some(head), Some(commit), None, limits).await,
-            Some(predecessor) => self.refresh_source_index_local_in(request, reference,
-                Some(head), Some(commit), predecessor, limits, read_limits).await
+            None => self.build_source_index_guarded_local_in(request, reference, Some(head), Some(commit),
+                None, limits, before_publish).await,
+            Some(predecessor) => self.refresh_source_index_guarded_local_in(request, reference,
+                Some(head), Some(commit), predecessor, limits, read_limits, before_publish).await
                 .map(|(source, activation, _stats)| (source, activation)),
         }
         // No cancellation probe after the builder confirms root publication.

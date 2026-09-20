@@ -80,6 +80,27 @@ impl OneNode {
         expected_head: Option<RepositoryAuthorityHeadId>, expected_commit: Option<GitOid>,
         predecessor: Option<GraphGenerationId>, limits: SearchLimits,
     ) -> Result<(LexicalSource, GenerationActivation), NodeWorkspaceRefusal> {
+        self.build_source_index_guarded_local_in(request, reference, expected_head,
+            expected_commit, predecessor, limits, &mut |_| Ok(())).await
+    }
+
+    /// Build with a caller-owned write-ahead publication barrier. After complete
+    /// native preparation, call `before_publish` exactly once with the original
+    /// candidate BEFORE this invocation stages any index payload or attempts a
+    /// root write. An error from the barrier prevents those effects entirely.
+    ///
+    /// The callback owns durable recording and must finish it before returning
+    /// Ok. It cannot change source, predecessor, or candidate. This synchronous
+    /// local callback must be bounded; it is not a remote authorization grant.
+    /// After Ok, interruptions require original-candidate recovery, even when
+    /// cancellation or a backend refusal happens before the root write.
+    #[expect(clippy::too_many_arguments, reason = "write-ahead barrier is independent of source pins and build budgets")]
+    pub async fn build_source_index_guarded_local_in(
+        &self, request: &NodeRequestContext, reference: &RefName,
+        expected_head: Option<RepositoryAuthorityHeadId>, expected_commit: Option<GitOid>,
+        predecessor: Option<GraphGenerationId>, limits: SearchLimits,
+        before_publish: &mut (impl FnMut(GraphGenerationId) -> Result<(), NodeWorkspaceRefusal> + Send),
+    ) -> Result<(LexicalSource, GenerationActivation), NodeWorkspaceRefusal> {
         live(request)?;
         fgit_types::cell::admits_staging_intake(self.cell_state()).map_err(NodeWorkspaceRefusal::Cell)?;
         if expected_commit.is_some_and(|id| id.is_zero() || id.algorithm() != self.object_format) {
@@ -105,6 +126,8 @@ impl OneNode {
         let prepared = PreparedLexicalIndex::new(source.clone(), parts, excluded, &mut request_live).map_err(index_error)?;
         let store = LexicalIndexStore::new(&self.authority, source.namespace, reference.clone()).map_err(index_error)?;
         let candidate = store.candidate_id(&prepared, predecessor).map_err(index_error)?;
+        live(request)?;
+        before_publish(candidate)?; // No index staging has occurred in this invocation.
         let activation = store.publish_async(request.authority(), &prepared, predecessor, &mut request_live).await
             .map_err(|error| NodeWorkspaceRefusal::SourceIndexPublication { candidate, error: Box::new(error) })?;
         // No await or cancellation probe after confirmed generation publication.

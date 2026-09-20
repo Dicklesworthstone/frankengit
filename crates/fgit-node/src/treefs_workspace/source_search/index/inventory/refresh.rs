@@ -95,6 +95,22 @@ impl OneNode {
         expected_head: Option<RepositoryAuthorityHeadId>, expected_commit: Option<GitOid>,
         predecessor: GraphGenerationId, limits: SearchLimits, read_limits: LexicalReadLimits,
     ) -> Result<(LexicalSource, GenerationActivation, LexicalRefreshStats), NodeWorkspaceRefusal> {
+        self.refresh_source_index_guarded_local_in(request, reference, expected_head,
+            expected_commit, predecessor, limits, read_limits, &mut |_| Ok(())).await
+    }
+
+    /// Refresh with the same pre-staging write-ahead barrier as
+    /// `build_source_index_guarded_local_in`. Every old segment and the complete
+    /// new inventory are checked before the original candidate is handed out.
+    /// A failed barrier stages nothing; after it succeeds, only recovery can
+    /// determine publication. Existing explicit-predecessor APIs remain intact.
+    #[expect(clippy::too_many_arguments, reason = "write-ahead barrier, source pins, predecessor and resource budgets are independent")]
+    pub async fn refresh_source_index_guarded_local_in(
+        &self, request: &NodeRequestContext, reference: &RefName,
+        expected_head: Option<RepositoryAuthorityHeadId>, expected_commit: Option<GitOid>,
+        predecessor: GraphGenerationId, limits: SearchLimits, read_limits: LexicalReadLimits,
+        before_publish: &mut (impl FnMut(GraphGenerationId) -> Result<(), NodeWorkspaceRefusal> + Send),
+    ) -> Result<(LexicalSource, GenerationActivation, LexicalRefreshStats), NodeWorkspaceRefusal> {
         limits.validate().map_err(search_error)?;
         live(request)?;
         admits_staging_intake(self.cell_state()).map_err(NodeWorkspaceRefusal::Cell)?;
@@ -158,6 +174,8 @@ impl OneNode {
         drop(query);
         drop(reuse); // No old posting buffers or fresh source buffers across staging.
         let candidate = store.candidate_id(&prepared, Some(predecessor)).map_err(index_error)?;
+        live(request)?;
+        before_publish(candidate)?; // Checked original identity, before all successor puts.
         let activation = store.publish_async(request.authority(), &prepared, Some(predecessor), &mut request_live).await
             .map_err(|error| NodeWorkspaceRefusal::SourceIndexPublication { candidate, error: Box::new(error) })?;
         Ok((source, activation, stats))
