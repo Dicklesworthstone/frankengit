@@ -114,9 +114,15 @@ export function mount(document, location, options = {}) {
     busy = false; clearFile();
     if (error.status === 409) { client.discardResults(); clearResults(); }
     const indexed = indexedMode(get('mode').value);
-    const indexFailure = indexed && error.status === 409
+    const indexDiagnostic = indexed && error.status === 409 ? {
+      source_index_uninitialized: 'No persisted source index is initialized. Ask the trusted local operator to build it. No scan or build was attempted by this page.',
+      source_index_stale: 'The persisted index does not match the source selection. Release the snapshot explicitly, or ask the trusted local operator to reconcile the index. No scan fallback was attempted.',
+      index_checkpoint_unavailable: 'The selected index checkpoint cannot be resolved. The operator must recover it; this page will not fall back to an older index.',
+    }[error.code] : null;
+    const indexFailure = indexDiagnostic ?? (indexed && error.status === 409
       ? 'Indexed search refused: the source/index changed, no current index exists, or a checkpoint is unavailable. An authorized operator must build or refresh a missing/stale index. Release snapshot only to explicitly select fresh source. No scan fallback or automatic retry was run.'
-      : null;
+      : indexed && error.status === 503
+        ? 'The persisted index is unavailable or failed verification. No partial result, scan fallback or automatic rebuild was accepted.' : null);
     const message = indexFailure ?? {
       400: 'Native query or request refused. Check the byte encoding, supported syntax and input limits.',
       404: 'Selected repository, reference or path is unavailable. Hidden references are not disclosed.',
@@ -245,9 +251,23 @@ export function mount(document, location, options = {}) {
       element('p', `${value.bytes.length} complete file bytes. All reported first whole-word spans reproduced in ${value.channel}.`),
       element('p', 'This verifies the returned file and word positions, not index coverage, authority signatures or other documents.'));
     const bytes = value.channel === 'path' ? path : value.bytes;
-    for (const span of hit.spans) {
+    const spans = hit.spans.map(span => ({ ...span }));
+    // Query terms are lexically ordered, not source ordered. Scan verified
+    // content once in offset order, then render in the original term order.
+    // Path positions never acquire file line/column coordinates.
+    if (value.channel === 'content') {
+      let offset = 0, line = 1, start = 0;
+      for (const span of [...spans].sort((a, b) => a.offset - b.offset)) {
+        while (offset < span.offset) {
+          if (bytes[offset] === 10) { line++; start = offset + 1; }
+          offset++;
+        }
+        span.line = line; span.column = span.offset - start + 1;
+      }
+    }
+    for (const span of spans) {
       const part = preview(bytes, span), pre = element('pre');
-      region.append(element('h3', `${display(unhex(value.query.termsHex[span.queryIndex]))}: ${value.channel} bytes [${span.offset}, ${span.offset + span.length})`));
+      region.append(element('h3', `${display(unhex(value.query.termsHex[span.queryIndex]))}: ${value.channel} bytes [${span.offset}, ${span.offset + span.length})${value.channel === 'content' ? `; line ${span.line}, byte column ${span.column}` : ''}`));
       pre.append(element('span', part.before), element('mark', part.matched), element('span', part.after)); region.append(pre);
     }
     if (value.channel === 'path') {
