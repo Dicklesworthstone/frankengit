@@ -10,6 +10,8 @@ use fgit_graph::{BuilderProfileId, GenerationActivation, GenerationAuthority,
 use fgit_types::{SchemaFamily, SchemaId};
 use fgit_types::cell::admits_staging_intake;
 
+mod refresh;
+
 type Failure = data::AccessError<NodeWorkspaceRefusal, GenerationAuthorityError>;
 fn live(request: &NodeRequestContext) -> Result<(), Failure> {
     if workspace_request_live(request) { Ok(()) } else { Err(Failure::Index(data::Error::Cancelled)) }
@@ -18,14 +20,23 @@ fn view() -> Result<GraphViewId, Failure> {
     GraphViewId::try_new(b"source-rust-symbols").map_err(|e| Failure::Index(e.into()))
 }
 fn schema() -> SchemaId { SchemaId::new(SchemaFamily::from_static("source-symbol-index"),1,0) }
-struct Build(SourceQuery);
+fn symbol_manifest_root(body: &GraphGenerationBody) -> Result<Digest, Failure> {
+    let root = *body.index_manifest_root();
+    if body.graph_schema_id()!=schema() || body.authority_class()!=GraphAuthorityClass::DeterministicDerived
+        || body.source().builder_profile != BuilderProfileId::try_new(data::INDEX_PROFILE.as_bytes()).map_err(|e|Failure::Index(e.into()))?
+        || body.source().parser_model_root != data::profile_root().map_err(Failure::Index)?
+        || *body.vertices_root()!=root || *body.edges_root()!=root || *body.evidence_root()!=root
+    { return Err(Failure::Index(data::Error::Invalid("generation profile"))); }
+    Ok(root)
+}
+struct Build(SourceQuery, Option<data::VerifiedReuse>);
 impl LocalSearch for Build {
     type Report = Result<data::Corpus, data::Error>;
     fn scope(&self) -> &SourceQuery { &self.0 }
     fn empty(&self, source: SourceSearchReport) -> Self::Report { Ok(data::Corpus::empty(source)) }
     fn run<A: GitHashAlgorithm, S: ObjectSource<A>>(&self, base: &BaseView<A>, source: &S,
         capability: &mut TreeCapability, now: u64, limits: SearchLimits, cancelled: &dyn Fn() -> bool,
-    ) -> Result<Self::Report, SearchError> { Ok(data::prepare(base,source,capability,now,limits,cancelled)) }
+    ) -> Result<Self::Report, SearchError> { Ok(data::prepare_with_reuse(base,source,capability,now,limits,cancelled,self.1.as_ref())) }
 }
 impl OneNode {
     fn symbol_key_prefix(&self, kind: &[u8]) -> Vec<u8> {
@@ -66,12 +77,22 @@ impl OneNode {
         if expected_commit.is_some_and(|id| id.is_zero() || id.algorithm() != self.object_format) {
             return Err(Failure::Source(NodeWorkspaceRefusal::ObjectFormatMismatch));
         }
-        let query = Build(SourceQuery::new(b"symbols",SearchCase::Exact,&[]).map_err(|e| Failure::Index(e.into()))?);
+        let query = Build(SourceQuery::new(b"symbols",SearchCase::Exact,&[]).map_err(|e| Failure::Index(e.into()))?,None);
         let (head,forge,result) = match self.object_format {
             Format::Sha1 => self.select_source_local_format::<Sha1,_>(request,reference,expected_head,expected_commit,&query,limits).await,
             Format::Sha256 => self.select_source_local_format::<Sha256,_>(request,reference,expected_head,expected_commit,&query,limits).await,
         }.map_err(Failure::Source)?;
-        let corpus = result.map_err(Failure::Index)?; live(request)?;
+        let corpus = result.map_err(Failure::Index)?;
+        self.publish_symbol_corpus_in(request,reference,(head,forge,corpus),predecessor,barrier).await
+    }
+    /// Shared by rebuild and refresh: one write-ahead barrier and one root-last
+    /// publication implementation, including original-candidate uncertainty.
+    async fn publish_symbol_corpus_in(&self, request: &NodeRequestContext, reference: &RefName,
+        selected: (RepositoryAuthorityHeadId, Digest, data::Corpus), predecessor: Option<GraphGenerationId>,
+        barrier: &mut (impl FnMut(GraphGenerationId) -> Result<(), NodeWorkspaceRefusal> + Send),
+    ) -> Result<(data::Source, GenerationActivation), Failure> {
+        live(request)?;
+        let (head,forge,corpus) = selected;
         let selected = corpus.source();
         let source = data::Source { tenant:self.tenant_id,repository:self.repository_id,
             incarnation:self.repository_incarnation_id(),format:self.object_format,reference:reference.clone(),head,
@@ -146,21 +167,13 @@ impl OneNode {
         let generation = GenerationAuthority::new(&self.authority,self.symbol_head_key(reference)?)
             .read_active_async(request.authority(),view()?,minimum,GenerationReadLimits::default(),&mut is_live)
             .await.map_err(Failure::Generation)?.ok_or(Failure::Uninitialized)?;
-        let body = generation.body(); let root = *body.index_manifest_root();
-        if body.graph_schema_id()!=schema() || body.authority_class()!=GraphAuthorityClass::DeterministicDerived
-            || body.source().builder_profile != BuilderProfileId::try_new(data::INDEX_PROFILE.as_bytes()).map_err(|e|Failure::Index(e.into()))?
-            || body.source().parser_model_root != data::profile_root().map_err(Failure::Index)?
-            || *body.vertices_root()!=root || *body.edges_root()!=root || *body.evidence_root()!=root
-        { return Err(Failure::Index(data::Error::Invalid("generation profile"))); }
+        let body = generation.body(); let root = symbol_manifest_root(body)?;
         let mut bytes = 0;
         let raw = self.read_symbol_payload(request,root,&mut bytes,maximum_payload_bytes).await?;
         let cancelled = || !workspace_request_live(request);
         let manifest = data::Manifest::decode(&raw,root,&cancelled).map_err(Failure::Index)?;
         let source = manifest.source();
-        if source.tenant!=self.tenant_id || source.repository!=self.repository_id || source.incarnation!=self.repository_incarnation_id()
-            || source.format!=self.object_format || source.reference!=*reference
-            || source.rcr!=body.source().source_rcr_id || source.forge!=body.source().source_forge_position_root
-        {return Err(Failure::Index(data::Error::Invalid("index namespace/source")));}
+        self.validate_symbol_source(source,body,reference)?;
         if source.head!=head || source.commit!=commit || source.rcr!=rcr || source.forge!=selected.basis().body().forge_position_root {
             return Err(Failure::Stale);
         }
@@ -184,6 +197,15 @@ impl OneNode {
         live(request)?;
         Ok(search.finish(&manifest,*generation.activation().generation_id.as_internal_object_id(),
             generation.activation().authority_generation.get(),bytes))
+    }
+    fn validate_symbol_source(&self, source: &data::Source, body: &GraphGenerationBody,
+        reference: &RefName,
+    ) -> Result<(), Failure> {
+        if source.tenant!=self.tenant_id || source.repository!=self.repository_id || source.incarnation!=self.repository_incarnation_id()
+            || source.format!=self.object_format || source.reference!=*reference
+            || source.rcr!=body.source().source_rcr_id || source.forge!=body.source().source_forge_position_root
+        {return Err(Failure::Index(data::Error::Invalid("index namespace/source")));}
+        Ok(())
     }
     async fn read_symbol_payload(&self, request:&NodeRequestContext,root:Digest,bytes:&mut usize,maximum:usize) -> Result<Vec<u8>,Failure> {
         live(request)?;

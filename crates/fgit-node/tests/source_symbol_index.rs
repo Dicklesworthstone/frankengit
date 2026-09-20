@@ -229,3 +229,7 @@ fn operator_build_query_and_original_candidate_recovery_use_existing_nodes(){
         let node=reopen(&config);assert_eq!(generation(&node),before);assert_eq!(search(&node,&ordinary(),Default::default(),data::MAX_INDEX_BYTES).unwrap().matches.len(),5);node.shutdown().unwrap();
     }
 }
+
+
+#[path = "source_symbol_index/refresh.rs"]
+mod refresh;
