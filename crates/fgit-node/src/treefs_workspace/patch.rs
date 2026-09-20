@@ -22,6 +22,8 @@ const EXPORT_BYTES: usize = 64 * 1024 * 1024;
 const EXPORT_OBJECTS: usize = 100_000;
 
 /// Verified before/after file identities. Paths are raw repository bytes.
+/// A rename contributes two entries: deletion at the source and creation at
+/// the destination. Receipts are sorted by raw path and cover every tree effect.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PatchPathReceipt {
     pub path: Vec<u8>,
@@ -67,6 +69,23 @@ fn paths(patch: &UnifiedPatch<'_>) -> Result<Vec<TreePath>, NodeWorkspaceRefusal
     patch.files().iter().map(|file| TreePath::parse_default(file.path())
         .map_err(|_| patch_error(PatchError::InvalidPath))).collect()
 }
+/// Both sides of every relocation are mutation targets. Keeping this separate
+/// from the destination vector avoids silently truncating the file/path zip.
+fn touched_paths(patch: &UnifiedPatch<'_>) -> Result<Vec<TreePath>, NodeWorkspaceRefusal> {
+    patch.files().iter().flat_map(|file| std::iter::once(file.path()).chain(file.renamed_from()))
+        .map(|path| TreePath::parse_default(path).map_err(|_| patch_error(PatchError::InvalidPath)))
+        .collect::<Result<BTreeSet<_>, _>>().map(|paths| paths.into_iter().collect())
+}
+fn authorize_patch(patch: &UnifiedPatch<'_>, capability: &TreeCapability, now: u64)
+    -> Result<(), NodeWorkspaceRefusal>
+{
+    // Write authorization also requires read scope, preventing hidden-source
+    // disclosure and hidden-destination existence probes before any fetch.
+    for path in touched_paths(patch)? {
+        capability.authorize_write(&path, now).map_err(capability_error)?;
+    }
+    Ok(())
+}
 fn preflight(reference: &RefName, expected: GitOid, format: ObjectFormat,
     metadata: &MergeMetadata) -> Result<(), NodeWorkspaceRefusal> {
     if !reference.as_bytes().starts_with(b"refs/heads/") || reference.as_bytes().len() > 4096 {
@@ -88,18 +107,21 @@ impl OneNode {
     /// directory so unselected siblings cannot be silently deleted. A narrow
     /// caller receives a refusal, never an implicitly widened capability.
     /// `index` records, when present, must match both verified blob identities.
+    /// Explicit regular-file renames read the original source and produce a
+    /// source deletion plus destination write in the same candidate. Occupied
+    /// destinations, swaps and chains refuse; no sequential overwrite is inferred.
     /// All files must succeed before any candidate is returned. No fuzzy
-    /// offsets, binary patch, symlink, gitlink, copy or rename is supported.
+    /// offsets, binary patch, symlink, gitlink or copy is supported.
     pub async fn prepare_workspace_patch_in<A: GitHashAlgorithm>(
         &self, request: &NodeRequestContext, reference: &RefName, expected_commit: GitOid,
         visibility: &RefVisibility, capability: &mut TreeCapability, patch_bytes: &[u8],
         now: u64, metadata: &MergeMetadata, limits: PatchLimits,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         preflight(reference, expected_commit, self.object_format, metadata)?;
-        let patch = UnifiedPatch::parse(patch_bytes, limits, &|| !workspace_request_live(request))
+        let patch = UnifiedPatch::parse_with_renames(patch_bytes, limits, &|| !workspace_request_live(request))
             .map_err(patch_error)?;
         let paths = paths(&patch)?;
-        for path in &paths { capability.authorize_write(path, now).map_err(capability_error)?; }
+        authorize_patch(&patch, capability, now)?;
         self.with_workspace_base_in::<A, _>(request, reference, visibility, capability, now,
             |base, source, capability| prepare_at_base(base, source, capability, request,
                 reference, expected_commit, &patch, &paths, patch_bytes, now, metadata),
@@ -129,15 +151,16 @@ impl OneNode {
         workspace_id: [u8; 16], patch_bytes: &[u8], metadata: &MergeMetadata, limits: PatchLimits,
     ) -> Result<WorkspacePatchCandidate, NodeWorkspaceRefusal> {
         preflight(reference, expected_commit, self.object_format, metadata)?;
-        let patch = UnifiedPatch::parse(patch_bytes, limits, &|| !workspace_request_live(request))
+        let patch = UnifiedPatch::parse_with_renames(patch_bytes, limits, &|| !workspace_request_live(request))
             .map_err(patch_error)?;
         let paths = paths(&patch)?;
-        let top = paths.iter().map(|path| {
+        let touched = touched_paths(&patch)?;
+        let top = touched.iter().map(|path| {
             TreePath::parse_default(path.as_bytes().split(|byte| *byte == b'/').next().unwrap_or_default())
                 .map_err(|_| patch_error(PatchError::InvalidPath))
         }).collect::<Result<BTreeSet<_>, _>>()?;
         let mut seed = budgeted(WorkspaceId::from_bytes(workspace_id), self.repository_id(),
-            top.iter().cloned().collect(), paths.clone(), FETCH_BYTES, FETCH_OBJECTS)?;
+            top.iter().cloned().collect(), touched.clone(), FETCH_BYTES, FETCH_OBJECTS)?;
         self.with_workspace_base_in::<A, _>(request, reference, &RefVisibility::new(), &mut seed, 0,
             |base, source, seed| {
                 if expected_commit.as_bytes() != base.base_commit_oid().digest_bytes() {
@@ -157,7 +180,7 @@ impl OneNode {
                         .map_err(|_| invalid("source root has an unsupported path"))?);
                 }
                 let mut owner = budgeted(seed.workspace_id(), self.repository_id(),
-                    complete.into_iter().collect(), paths.clone(),
+                    complete.into_iter().collect(), touched.clone(),
                     FETCH_BYTES.saturating_sub(seed.fetched_bytes()),
                     FETCH_OBJECTS.saturating_sub(seed.fetched_files()))?;
                 prepare_at_base(base, source, &mut owner, request, reference, expected_commit,
@@ -184,14 +207,23 @@ fn prepare_at_base<A: GitHashAlgorithm>(
     if expected_commit.as_bytes() != base.base_commit_oid().digest_bytes() {
         return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
     }
-    for path in paths { capability.authorize_write(path, now).map_err(capability_error)?; }
+    authorize_patch(patch, capability, now)?;
     let limits = patch.limits();
     let mut log = IntentLog::new();
     let mut receipts = Vec::with_capacity(paths.len());
     let mut total = 0usize;
     for (file, path) in patch.files().iter().zip(paths) {
         live(request)?;
-        let existing = match base.resolve(source, capability, path, now) {
+        let source_path = TreePath::parse_default(file.source_path())
+            .map_err(|_| patch_error(PatchError::InvalidPath))?;
+        if file.renamed_from().is_some() {
+            match base.resolve(source, capability, path, now) {
+                Err(BaseError::NotFound { .. }) => {}
+                Ok(_) => return Err(invalid("rename destination already exists")),
+                Err(error) => return Err(NodeWorkspaceRefusal::Manifest(fgit_treefs::SparseRefusal::Base(error))),
+            }
+        }
+        let existing = match base.resolve(source, capability, &source_path, now) {
             Ok(BaseEntry::File { oid, mode }) => {
                 let mode = match FileMode::from_octal_bytes(&mode) {
                     Some(FileMode::Regular) => 0o100644, Some(FileMode::Executable) => 0o100755,
@@ -216,7 +248,7 @@ fn prepare_at_base<A: GitHashAlgorithm>(
         }
         let input = match existing {
             Some((oid, _, mode)) => {
-                let grant = capability.authorize_read(path, now).map_err(capability_error)?;
+                let grant = capability.authorize_read(&source_path, now).map_err(capability_error)?;
                 // The first verified fabric read retains its configured
                 // storage-envelope ceiling. Enforce the narrower patch limit
                 // before copying that verified payload into the patch engine;
@@ -246,7 +278,16 @@ fn prepare_at_base<A: GitHashAlgorithm>(
                 return Err(invalid("patch new index does not match the exact result blob"));
             }
         }
-        receipts.push(PatchPathReceipt { path: path.as_bytes().to_vec(), old_blob, new_blob,
+        // These are only in-memory intents. No source deletion becomes visible
+        // unless every file validates, export succeeds and ordinary admission
+        // later publishes the complete candidate through the existing CAS.
+        let destination_old = if file.renamed_from().is_some() {
+            receipts.push(PatchPathReceipt { path: source_path.as_bytes().to_vec(), old_blob,
+                new_blob: None, new_mode: None, hunks: 0 });
+            log.push(TreeEditIntent::Delete { path: source_path });
+            None
+        } else { old_blob };
+        receipts.push(PatchPathReceipt { path: path.as_bytes().to_vec(), old_blob: destination_old, new_blob,
             new_mode: output.as_ref().map(|file| file.mode), hunks: file.hunk_count() });
         match output {
             Some(file) => {
@@ -260,6 +301,7 @@ fn prepare_at_base<A: GitHashAlgorithm>(
         }
     }
     live(request)?;
+    receipts.sort_by(|left, right| left.path.cmp(&right.path));
     let export = candidate::export_from_base(base, source, capability, &log, expected_commit,
         now, ExportLimits { max_objects: EXPORT_OBJECTS, max_total_bytes: EXPORT_BYTES,
             max_tree_entries: EXPORT_OBJECTS }, &|| !workspace_request_live(request))?;

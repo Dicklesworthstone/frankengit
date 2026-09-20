@@ -183,3 +183,6 @@ fn nested_creation_empty_creation_and_mode_only_changes_preserve_exact_content()
         assert_eq!(f.node().read_git_object(f.kept).unwrap().payload(), b"preserve\0me\n");
     }
 }
+
+#[path = "workspace_patch/renames.rs"]
+mod renames;
