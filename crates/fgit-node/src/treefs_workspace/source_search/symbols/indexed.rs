@@ -95,7 +95,7 @@ impl OneNode {
         let result: Result<GenerationActivation,Failure> = async {
             for payload in tables.iter().chain(std::iter::once(&manifest)) {
                 live(request)?;
-                match self.authority.put_if_absent(request.authority(),&self.symbol_payload_key(payload.root)?,&payload.bytes)
+                match AsyncAuthorityStore::put_if_absent(&self.authority,request.authority(),&self.symbol_payload_key(payload.root)?,&payload.bytes)
                     .await.map_err(Failure::Authority)?
                 {
                     PutOutcome::Created | PutOutcome::IdenticalRetry => {},
@@ -188,7 +188,7 @@ impl OneNode {
     async fn read_symbol_payload(&self, request:&NodeRequestContext,root:Digest,bytes:&mut usize,maximum:usize) -> Result<Vec<u8>,Failure> {
         live(request)?;
         if *bytes>=maximum {return Err(Failure::Index(data::Error::Limit("index read bytes")));}
-        let raw = self.authority.read_immutable(request.authority(),&self.symbol_payload_key(root)?).await.map_err(Failure::Authority)?;
+        let raw = AsyncAuthorityStore::read_immutable(&self.authority,request.authority(),&self.symbol_payload_key(root)?).await.map_err(Failure::Authority)?;
         live(request)?;
         let ImmutableRead::Present(raw)=raw else {return Err(Failure::Missing(root));};
         if raw.len()>data::MAX_PAYLOAD {return Err(Failure::Index(data::Error::Limit("payload bytes")));}

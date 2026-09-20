@@ -54,7 +54,7 @@ impl LocalSearch for InventoryRequest {
         discover(base, source, capability, now, limits, cancelled, None, 0, &mut discovery)?;
         let mut inventory = self.empty(SourceSearchReport {
             repository: base.repository_id(), source_rcr: base.base_rcr_id(),
-            source_commit: native(base.base_commit_oid())?, source_tree: native(base.base_tree_oid())?,
+            source_commit: native::<A>(base.base_commit_oid())?, source_tree: native::<A>(base.base_tree_oid())?,
             matches: Vec::new(), completion: SearchCompletion::Complete,
             files_selected: discovery.files.len(), files_read: 0, bytes_read: 0,
             bytes_searched: 0, non_regular_entries: discovery.excluded,
@@ -70,7 +70,7 @@ impl LocalSearch for InventoryRequest {
             inventory.source.bytes_read = inventory.source.bytes_read.checked_add(body.len())
                 .filter(|n| *n <= limits.max_total_bytes).ok_or(SearchError::Budget("index source bytes"))?;
             inventory.source.files_read += 1;
-            inventory.documents.push(Document { path: path.as_bytes().to_vec(), blob: native(&blob)?, bytes: body });
+            inventory.documents.push(Document { path: path.as_bytes().to_vec(), blob: native::<A>(&blob)?, bytes: body });
         }
         check(cancelled)?;
         inventory.documents.sort_unstable_by(|a, b| a.path.cmp(&b.path));

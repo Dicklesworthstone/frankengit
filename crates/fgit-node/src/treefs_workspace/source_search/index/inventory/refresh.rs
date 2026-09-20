@@ -37,7 +37,7 @@ impl LocalSearch for Request<'_> {
         discover(base, source, capability, now, limits, cancelled, None, 0, &mut discovery)?;
         let mut result = self.empty(SourceSearchReport {
             repository: base.repository_id(), source_rcr: base.base_rcr_id(),
-            source_commit: native(base.base_commit_oid())?, source_tree: native(base.base_tree_oid())?,
+            source_commit: native::<A>(base.base_commit_oid())?, source_tree: native::<A>(base.base_tree_oid())?,
             matches: Vec::new(), completion: SearchCompletion::Complete,
             files_selected: discovery.files.len(), files_read: 0, bytes_read: 0,
             bytes_searched: 0, non_regular_entries: discovery.excluded,
@@ -47,7 +47,7 @@ impl LocalSearch for Request<'_> {
             check(cancelled)?;
             // Reuse never bypasses the independently selected path grant.
             let grant = capability.authorize_read(&path, now).map_err(SearchError::Capability)?;
-            let blob = native(&oid)?;
+            let blob = native::<A>(&oid)?;
             let (bytes, length) = if let Some(length) = self.reuse.document_bytes(path.as_bytes(), blob) {
                 (None, length)
             } else {

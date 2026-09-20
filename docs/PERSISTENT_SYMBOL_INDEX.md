@@ -166,9 +166,11 @@ storage/reopen, TCP listener and operator binaries, not substitute backends.
 
 The implementation container has no Rust/Cargo. Local blob identity, source
 wiring, whitespace and JSON-template checks are static evidence only. The
-optional native script mode checks the real cross-crate target composition; its
-result must be read at its actual commit and cannot be inferred from the table
-suite. It and the table lane are repository-owned commands, not hosted-service
+optional native script mode checks the real cross-crate target composition, then
+runs the forge symbol tests, native index integration tests, operator tests and
+symbol HTTP protocol tests. Test debug symbols are omitted to bound linking
+memory; assertions remain enabled and tests execute one at a time. Results must
+be read at their actual commit and cannot be inferred from the table suite. It and the table lane are repository-owned commands, not hosted-service
 requirements for correctness or release.
 
 ```bash
@@ -182,3 +184,13 @@ cargo test --locked -p fgit-node --lib smart_http::server::source
 
 Native runtime/durable execution, full-workspace, compiler-conformance and release
 gates remain separate. No bead is closed or full FG-032 completion claimed.
+
+The first real native check at `63d6834d34ae202f7e7072f36e3af344c8b42753`
+failed with four compiler errors. Two symbol payload calls selected inherent
+FrankenSQLite methods returning `EngineError` rather than the admitted
+`AsyncAuthorityStore` surface; the calls now name that trait explicitly and
+retain its typed authority-failure contract. Older lexical inventory and refresh
+code also needed explicit `native::<A>` dispatch for native OID associated types.
+Those call sites are corrected without changing identity bytes, read scope,
+publication or cancellation semantics. This negative result is not erased by
+the passing standalone table tests; the corrected native lane must run again.
