@@ -97,10 +97,65 @@ pub fn prepare_initial_commit(
     limits: PatchLimits,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<InitialCommitPlan, InitialCommitError> {
+    prepare(format, patch_bytes, metadata, limits, cancelled, false, |_, _, _| {
+        Err(PatchError::Unsupported { line: 1, feature: "native binary decoder required" })
+    })
+}
+
+/// Opt into compressed creation records without adding a decoder dependency to
+/// the forge. The caller MUST use a native, bounded decoder that verifies the
+/// full index identities and every supplied reverse image, with one shared
+/// allowance for all binary files. The callback is never used for literal hunks.
+///
+/// All records are checked as creations in the selected hash domain before the
+/// first callback. Returned bytes still pass the ordinary exact blob-identity,
+/// aggregate output, complete closure and zero-parent commit checks. Neither
+/// this function nor its callback receives repository publication authority.
+pub fn prepare_initial_commit_with_binary_decoder(
+    format: GitHashAlgorithm,
+    patch_bytes: &[u8],
+    metadata: &MergeMetadata,
+    limits: PatchLimits,
+    cancelled: &dyn Fn() -> bool,
+    decoder: impl FnMut(&[u8], &IndexExpectation, &[u8]) -> Result<Vec<u8>, PatchError>,
+) -> Result<InitialCommitPlan, InitialCommitError> {
+    prepare(format, patch_bytes, metadata, limits, cancelled, true, decoder)
+}
+
+fn prepare(
+    format: GitHashAlgorithm,
+    patch_bytes: &[u8],
+    metadata: &MergeMetadata,
+    limits: PatchLimits,
+    cancelled: &dyn Fn() -> bool,
+    binary: bool,
+    mut decoder: impl FnMut(&[u8], &IndexExpectation, &[u8]) -> Result<Vec<u8>, PatchError>,
+) -> Result<InitialCommitPlan, InitialCommitError> {
     checkpoint(cancelled)?;
     limits.validate()?;
     metadata.validate().map_err(InitialCommitError::Metadata)?;
-    let patch = UnifiedPatch::parse(patch_bytes, limits, cancelled)?;
+    let patch = if binary { UnifiedPatch::parse_with_binary(patch_bytes, limits, cancelled)? }
+        else { UnifiedPatch::parse(patch_bytes, limits, cancelled)? };
+    if binary {
+        // Refuse a late modification/deletion or foreign-width index before any
+        // earlier record can spend the caller's decompression allowance.
+        for file in patch.files() {
+            checkpoint(cancelled)?;
+            if file.change() != FileChange::Create || file.renamed_from().is_some() {
+                return Err(InitialCommitError::CreationRequired);
+            }
+            fgit_treefs::TreePath::parse_default(file.path()).map_err(|_| PatchError::InvalidPath)?;
+            if file.binary_hunks().is_some() {
+                let index = file.index().ok_or(InitialCommitError::IndexMismatch)?;
+                if index.old.len() != format.digest_len() * 2
+                    || index.new.len() != format.digest_len() * 2
+                    || !IndexExpectation::matches(&index.old, None)
+                    || index.new.iter().all(|byte| *byte == b'0') {
+                    return Err(InitialCommitError::IndexMismatch);
+                }
+            }
+        }
+    }
     let mut objects = Objects { format, remaining: limits.max_output_bytes, by_id: BTreeMap::new() };
     let mut directories: BTreeMap<Vec<u8>, Vec<Entry>> = BTreeMap::from([(Vec::new(), Vec::new())]);
     let mut files = Vec::with_capacity(patch.files().len());
@@ -108,9 +163,10 @@ pub fn prepare_initial_commit(
     for file in patch.files() {
         checkpoint(cancelled)?;
         if file.change() != FileChange::Create { return Err(InitialCommitError::CreationRequired); }
-        // Match the ordinary workspace's repository-relative path policy too.
         fgit_treefs::TreePath::parse_default(file.path()).map_err(|_| PatchError::InvalidPath)?;
-        let result = file.apply(None, limits, cancelled)?.ok_or(InitialCommitError::CreationRequired)?;
+        let result = file.apply_with_binary_decoder(None, limits, cancelled,
+            |bytes, index, base| decoder(bytes, index, base))?
+            .ok_or(InitialCommitError::CreationRequired)?;
         expanded_files = expanded_files.checked_add(result.content.len())
             .filter(|n| *n <= limits.max_output_bytes)
             .ok_or(InitialCommitError::Budget("expanded file bytes"))?;
@@ -184,3 +240,6 @@ pub fn prepare_initial_commit(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod binary_tests;
