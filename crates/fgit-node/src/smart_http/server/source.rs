@@ -16,6 +16,7 @@ mod replay;
 mod rebase;
 mod bundles;
 mod regex;
+mod indexed;
 
 use std::io::{self, Read, Write};
 use fgit_authority::IdempotencyKey;
@@ -36,6 +37,7 @@ pub(super) struct Request<'a>(RequestKind<'a>);
 enum RequestKind<'a> {
     Read(request::Request<'a>),
     Regex(regex::Request<'a>),
+    Indexed(indexed::Request<'a>),
     Change(changes::Request<'a>),
     Refs(refs::Request<'a>),
     Tags(tags::Request<'a>),
@@ -49,6 +51,9 @@ enum RequestKind<'a> {
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = indexed::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::Indexed(request)));
+        }
         if let Some(request) = regex::Request::parse(envelope)? {
             return Ok(Self(RequestKind::Regex(request)));
         }
@@ -87,7 +92,7 @@ impl<'a> Request<'a> {
     pub(super) fn is_mutation(&self) -> bool {
         match &self.0 {
             RequestKind::Read(_) | RequestKind::History(_) | RequestKind::Historical(_)
-            | RequestKind::Review(_) | RequestKind::Replay(_) | RequestKind::Regex(_) => false,
+            | RequestKind::Review(_) | RequestKind::Replay(_) | RequestKind::Regex(_) | RequestKind::Indexed(_) => false,
             RequestKind::Bundle(request) => request.is_mutation(),
             RequestKind::Rebase(request) => request.is_mutation(),
             RequestKind::Change(request) => request.is_mutation(),
@@ -100,6 +105,7 @@ impl<'a> Request<'a> {
         match &self.0 {
             RequestKind::Read(request) => request.repository_route,
             RequestKind::Regex(request) => request.repository_route,
+            RequestKind::Indexed(request) => request.repository_route,
             RequestKind::Change(request) => request.repository_route,
             RequestKind::Refs(request) => request.route(),
             RequestKind::Tags(request) => request.route(),
@@ -159,6 +165,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
+        RequestKind::Indexed(request) => return indexed::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Regex(request) => return regex::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Bundle(request) => return bundles::execute(node, request, session, framing, reader, http, maximum_response),
         RequestKind::Historical(request) => return historical::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
@@ -268,6 +275,7 @@ mod tests {
             ("log", "application/x-www-form-urlencoded", false),
             ("search-batch", "application/x-www-form-urlencoded", false),
             ("search-regex", "application/x-www-form-urlencoded", false),
+            ("search-index", "application/x-www-form-urlencoded", false),
             ("bundle/export", "application/x-www-form-urlencoded", false),
             ("historical-tree", "application/x-www-form-urlencoded", false),
             ("historical-blob", "application/x-www-form-urlencoded", false),
