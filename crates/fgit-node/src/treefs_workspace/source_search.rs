@@ -1,7 +1,8 @@
-//! Read-only source search at one authenticated selection. No index, seal,
-//! object staging or authority mutation is performed by any entrypoint.
+//! Source reads share one authenticated selection. The explicit local index
+//! builder publishes only derived generations; every search remains read-only.
 
 mod regex;
+mod index;
 
 use std::cell::Cell;
 use fgit_crypto::{GitHashAlgorithm, GitObjectKind, Sha1, Sha256};
@@ -11,7 +12,7 @@ use fgit_forge::source_search::batch::{SourceQueryBatch, SourceSearchBatchReport
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body, parse_tree};
 use fgit_treefs::{BaseView, ObjectSource, ObjectSourceError, PathPolicy, ReadGrant,
     TreeCapability, TreePath, WorkspaceId};
-use fgit_types::{ByteCount, GitHashAlgorithm as Format, GitOid, RefName, RepositoryAuthorityHeadId};
+use fgit_types::{Digest, ByteCount, GitHashAlgorithm as Format, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_wire::visibility::RefVisibility;
 use crate::{ClosureSelectionSource, NodeRequestContext, OneNode, VerifiedFabricPackSource};
@@ -123,6 +124,15 @@ impl OneNode {
         expected_head: Option<RepositoryAuthorityHeadId>, expected_commit: Option<GitOid>,
         query: &Q, limits: SearchLimits,
     ) -> Result<(RepositoryAuthorityHeadId, Q::Report), NodeWorkspaceRefusal> {
+        self.select_source_local_format::<A, Q>(request, reference, expected_head, expected_commit, query, limits)
+            .await.map(|(head, _, report)| (head, report))
+    }
+
+    async fn select_source_local_format<A: GitHashAlgorithm, Q: LocalSearch>(
+        &self, request: &NodeRequestContext, reference: &RefName,
+        expected_head: Option<RepositoryAuthorityHeadId>, expected_commit: Option<GitOid>,
+        query: &Q, limits: SearchLimits,
+    ) -> Result<(RepositoryAuthorityHeadId, Digest, Q::Report), NodeWorkspaceRefusal> {
         limits.validate().map_err(search_error)?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
         let selected = self.materialize_admission_in(request).await
@@ -132,6 +142,7 @@ impl OneNode {
         }
         let commit = *selected.snapshot().refs.get(reference).ok_or(NodeWorkspaceRefusal::RefUnavailable)?;
         let head = selected.basis().id();
+        let forge_position_root = selected.basis().body().forge_position_root;
         if expected_head.is_some_and(|expected| expected != head) {
             return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
                 fgit_forge::source_browse::SourceBrowseError::SnapshotMoved)));
@@ -195,7 +206,7 @@ impl OneNode {
         if prefixes.len() > 4096 { return Err(search_error(SearchError::Budget("root scopes; narrow the query"))); }
         if !workspace_request_live(request) { return Err(search_error(SearchError::Cancelled)); }
         if prefixes.is_empty() {
-            return Ok((head, query.empty(SourceSearchReport { repository: self.repository_id, source_rcr: rcr,
+            return Ok((head, forge_position_root, query.empty(SourceSearchReport { repository: self.repository_id, source_rcr: rcr,
                 source_commit: commit, source_tree: tree, matches: Vec::new(), completion: SearchCompletion::Complete,
                 files_selected: 0, files_read: 0, bytes_read: 0, bytes_searched: 0, non_regular_entries: 0 })));
         }
@@ -215,7 +226,7 @@ impl OneNode {
         let result = query.run(&base, &source, &mut capability, 0, limits,
             &|| !workspace_request_live(request)).map_err(search_error);
         if !workspace_request_live(request) { return Err(search_error(SearchError::Cancelled)); }
-        result.map(|report| (head, report))
+        result.map(|report| (head, forge_position_root, report))
     }
 }
 

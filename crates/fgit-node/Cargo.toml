@@ -17,6 +17,7 @@ fgit-codec.workspace = true
 fgit-crypto.workspace = true
 fgit-forge.workspace = true
 fgit-git-object.workspace = true
+fgit-graph.workspace = true
 fgit-object-fabric.workspace = true
 fgit-pack.workspace = true
 fgit-resource.workspace = true

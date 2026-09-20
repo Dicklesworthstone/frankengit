@@ -84,6 +84,16 @@ pub enum NodeWorkspaceRefusal {
     Manifest(SparseRefusal),
     /// An immutable source search failed; this is not a no-match result.
     SourceSearch(Box<fgit_forge::source_search::SearchError>),
+    /// Persistent derived-index failure, never an empty search or a rollback claim.
+    SourceIndex(Box<fgit_graph::lexical::IndexError>),
+    /// The index describes different canonical source; explicit rebuilding is required.
+    SourceIndexStale,
+    /// Candidate identity retained when derived publication could not be confirmed.
+    /// Recover this identity instead of interpreting an error as non-publication.
+    SourceIndexPublication {
+        candidate: fgit_graph::GraphGenerationId,
+        error: Box<fgit_graph::lexical::IndexError>,
+    },
     Cancelled {
         exhaustion: Option<Exhaustion>,
     },
