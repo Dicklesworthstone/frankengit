@@ -6,6 +6,9 @@ use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_deflate::{CancellationProbe, InflateLimits, InflateRefusal, Inflater};
 use crate::{Deadline, ObjectId, PackError, PackLimits, apply_delta};
 
+mod batch;
+pub use batch::{BinaryPatchBatch, BinaryPatchUsage};
+
 const ALPHABET: &[u8; 85] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
 const DECODE: [u8; 256] = {
     let mut table = [u8::MAX; 256];
@@ -198,6 +201,15 @@ fn block(input: &mut Input<'_>, base: &[u8], limits: BinaryPatchLimits,
 pub fn apply_binary_patch(bytes: &[u8], old: Option<ObjectId>, new: Option<ObjectId>,
     base: &[u8], limits: BinaryPatchLimits, deadline: &mut impl Deadline,
 ) -> Result<Vec<u8>, BinaryPatchError> {
+    decode(bytes, old, new, base, limits, deadline).map(|(body, _)| body)
+}
+
+// Private accounting comes from the actual decoder, not untrusted hunk sizes.
+// The batch caller consumes these totals only after every original commitment
+// and the optional reverse image have verified.
+fn decode(bytes: &[u8], old: Option<ObjectId>, new: Option<ObjectId>,
+    base: &[u8], limits: BinaryPatchLimits, deadline: &mut impl Deadline,
+) -> Result<(Vec<u8>, BinaryPatchUsage), BinaryPatchError> {
     limits.validate()?; check(deadline)?;
     if bytes.len() > limits.max_input_bytes { return Err(BinaryPatchError::Limit("input bytes")); }
     if base.len() > limits.max_file_bytes { return Err(BinaryPatchError::Limit("source bytes")); }
@@ -226,7 +238,8 @@ pub fn apply_binary_patch(bytes: &[u8], old: Option<ObjectId>, new: Option<Objec
     }
     if input.at != bytes.len() { return Err(BinaryPatchError::Invalid("trailing binary records")); }
     check(deadline)?;
-    Ok(result)
+    Ok((result, BinaryPatchUsage { files: 1, input_bytes: bytes.len(),
+        expanded_bytes: limits.max_expanded_bytes - input.remaining, lines: input.lines }))
 }
 
 #[cfg(test)]
