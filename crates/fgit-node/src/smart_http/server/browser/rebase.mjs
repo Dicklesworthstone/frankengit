@@ -17,6 +17,14 @@ export class RebaseClient {
   get connected() { return this.#transport.connected; }
   get selection() { return copy(this.#selection); }
   get report() { return copy(this.#report); }
+  // Detached display data, not mutable recipes, bundle bytes or credentials.
+  get state() {
+    return { selection: this.selection, report: this.report, candidate: this.candidate,
+      command: copy(this.#command), resolutionCommits: this.#recipes.map(r => r.original),
+      resolutionPaths: this.#recipes.reduce((n, r) => n + r.paths.length, 0),
+      resolutionBytes: this.#recipes.reduce((n, r) => n + r.paths.reduce((m, p) =>
+        m + p.conflict.path_hex.length / 2 + (p.bytes?.length ?? 0), 0), 0) };
+  }
   get candidate() {
     if (!this.#artifact) return null;
     const a = this.#artifact;
@@ -93,6 +101,24 @@ export class RebaseClient {
       this.#artifact = null;
       const recipes = await addResolutions(report, choices, this.#recipes, this.#transport.crypto, check);
       const upload = resolutionUpload(command, recipes, hex(this.#transport.crypto.getRandomValues(new Uint8Array(16))));
+      return this.#prepare(command, recipes, upload, check);
+    });
+  }
+  // Change only the named empty-commit policy, not the selected source/onto,
+  // upstream, committer or earlier resolutions. This remains a read and the
+  // complete resulting bundle must pass inspection again before publication.
+  async continueEmpty(policy) {
+    this.#noPending();
+    if (!['drop', 'keep'].includes(policy)) fail('Choose Drop or Keep explicitly.');
+    if (this.#report?.state !== 'became_empty' || !this.#command || !this.#selection) {
+      fail('Continue an explicitly reported empty-commit stop first.');
+    }
+    return this.#run(async check => {
+      const command = { ...this.#command, empty: policy }, recipes = copy(this.#recipes);
+      this.#artifact = null;
+      const upload = recipes.length
+        ? resolutionUpload(command, recipes, hex(this.#transport.crypto.getRandomValues(new Uint8Array(16))))
+        : { body: form(command), contentType: 'application/x-www-form-urlencoded' };
       return this.#prepare(command, recipes, upload, check);
     });
   }

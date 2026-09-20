@@ -29,7 +29,7 @@ export function rootReply(reply, ref, algorithm, scope = null, head = null) {
   return { scope: selected.binding, head: selected.head, sourceHead: reply.source_head, tree, commit };
 }
 export function prepareCommand(selection, input) {
-  keys(input, ['upstream', 'empty', 'committer', 'timestamp']);
+  keys(input, ['upstream', 'empty', 'committer', 'timestamp', 'max_commits']);
   const { source, onto, scope, head } = selection;
   const committer = text(input.committer, 1024, 'rebase committer', true);
   if (!/^[^<>]+ <[^<>]+>$/.test(committer)) fail('Committer must use Name <email> syntax.');
@@ -37,7 +37,7 @@ export function prepareCommand(selection, input) {
   return { object_format: scope.format, profile: 'linear-v1', source_ref: branch(source.ref), onto_ref: branch(onto.ref),
     expected_source: source.commit, upstream: exactOid(input.upstream, scope.format), expected_onto: onto.commit,
     expected_head: head, empty: input.empty, committer, timestamp: integer(input.timestamp, 'explicit timestamp'),
-    max_commits: MAX_COMMITS, max_conflicts: MAX_CHOICES, max_text_bytes: FILE_BYTES,
+    max_commits: integer(input.max_commits ?? MAX_COMMITS, 'linear commit limit', 1, MAX_COMMITS), max_conflicts: MAX_CHOICES, max_text_bytes: FILE_BYTES,
     max_objects: 4096, max_output_bytes: BUNDLE_BYTES };
 }
 function identity(value, algorithm) {
@@ -53,7 +53,7 @@ function conflict(raw, algorithm) {
     base: identity(raw.base, algorithm), ours: identity(raw.ours, algorithm), theirs: identity(raw.theirs, algorithm) };
 }
 function steps(reply, command, initialTree) {
-  if (!Array.isArray(reply.steps) || reply.steps.length > MAX_COMMITS || reply.step_count !== reply.steps.length) fail('Incomplete rebase step list.');
+  if (!Array.isArray(reply.steps) || reply.steps.length > command.max_commits || reply.step_count !== reply.steps.length) fail('Incomplete rebase step list.');
   const seen = new Set(), rewritten = new Set();
   let parent = command.expected_onto, tree = initialTree;
   for (const step of reply.steps) {
