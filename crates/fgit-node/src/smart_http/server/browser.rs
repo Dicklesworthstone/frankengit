@@ -13,6 +13,7 @@ mod transfers;
 mod export_verify;
 mod tags;
 mod replay;
+mod rebase;
 
 use std::io::Write;
 use fgit_wire::smart_http::{BodyFraming, HttpVersion, head::Envelope};
@@ -79,6 +80,7 @@ pub(super) fn serve(
     trailing: &[u8],
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
+    if rebase::serve(profile, request, trailing, writer)? { return Ok(true); }
     if replay::serve(profile, request, trailing, writer)? { return Ok(true); }
     if tags::serve(profile, request, trailing, writer)? { return Ok(true); }
     if export_verify::serve(profile, request, trailing, writer)? { return Ok(true); }

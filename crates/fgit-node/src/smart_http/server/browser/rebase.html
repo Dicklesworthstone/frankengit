@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FrankenGit — linear branch rebase</title><link rel="stylesheet" href="../browser.css">
+<script type="module" src="rebase-view.mjs"></script></head>
+<body><main>
+<header><h1>Rebase a branch</h1><nav><a href="../">Source</a> · <a href="../history/">History and blame</a> · <a href="../branches/">Branches</a> · <a href="../replay/">Cherry-pick and revert</a> · <a href="../pulls/">Pull requests</a></nav></header>
+<p><strong>This rewrites the selected source branch’s history.</strong> Choose the upstream commit to exclude and the branch to replay onto. Nothing is published until the complete series has been inspected and a separate exact request has been confirmed. Native permissions and branch protection remain authoritative.</p>
+<section><h2>Select two immutable branch tips</h2>
+<label>Repository token <input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64"></label>
+<button id="connect" type="button">Connect</button><button id="disconnect" type="button">Disconnect and clear views</button>
+<label>Source branch to rewrite <input id="source" value="refs/heads/topic" spellcheck="false" maxlength="1024"></label>
+<label>Onto branch <input id="onto" value="refs/heads/main" spellcheck="false" maxlength="1024"></label>
+<label>Object format <select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
+<button id="select" type="button" disabled>Select both branch tips</button><pre id="selection"></pre>
+<p>Tokens remain only in page memory. HTTPS is required outside loopback. A changed tip or snapshot refuses; no hidden refresh, new-key retry or force bypass is performed.</p></section>
+<section><h2>Choose the linear suffix and new committer</h2>
+<label>Upstream commit to exclude (full native object ID) <input id="upstream" spellcheck="false" maxlength="64"></label>
+<p>The native engine verifies that upstream is on the source’s linear history. Merge commits and non-linear ranges are refused. No merge base, upstream, author, timestamp or empty-commit policy is inferred.</p>
+<label>Commits that become empty <select id="empty"><option value="stop">Stop for an explicit decision</option><option value="drop">Drop commits that become empty</option><option value="keep">Keep commits that become empty</option></select></label>
+<label>New committer: Name &lt;email&gt; <input id="committer" spellcheck="false" maxlength="1024"></label>
+<label>New committer timestamp (Unix seconds) <input id="timestamp" inputmode="numeric" spellcheck="false"></label>
+<label>Maximum linear commits (1–32) <input id="max-commits" type="number" min="1" max="32" value="32"></label>
+<button id="prepare" type="button" disabled>Prepare and inspect rebase</button><button id="cancel" type="button" disabled>Cancel read</button></section>
+<section><div id="report"></div><div id="conflicts"></div>
+<p>Conflict sides are relative to each original commit: ours is onto plus the already replayed prefix; theirs is the original change. Missing sides are not deletions. Choose every path explicitly. Exact files and hex support binary/empty content; text applies the selected LF/CRLF conversion. Each resolved file is at most 256 KiB; all cumulative recipes share 1 MiB and 64 choices.</p>
+<button id="resolve" type="button" disabled>Resolve this original commit and continue</button>
+<div id="empty-stop" hidden><label>Explicit policy for the stopped empty commit <select id="empty-policy"><option value="">Choose a policy</option><option value="drop">Drop commits that become empty</option><option value="keep">Keep commits that become empty</option></select></label><button id="continue-empty" type="button" disabled>Continue with this policy</button></div></section>
+<section><div id="inspection"></div><button id="stage" type="button" disabled>Prepare exact history-rewrite request</button></section>
+<section><h2>Confirm publication or recover its original outcome</h2><pre id="pending">No outstanding history rewrite.</pre>
+<label><input id="confirm-send" type="checkbox" disabled>I inspected the complete series and confirm rewriting exactly the displayed source branch from its expected old tip to this candidate. An unchanged retry may recover an already committed operation.</label>
+<button id="send" type="button" disabled>Send / retry exact rewrite</button><button id="recover" type="button" disabled>Look up original outcome (read only)</button>
+<button id="discard" type="button" disabled>Discard unsent, unexported request</button><button id="save-receipt" type="button" disabled>Save original-request receipt</button>
+<p>Lost replies remain unknown. Recovery never reruns the rebase or rereads branch presence. Receipts contain candidate bytes, but no access token; they are not authorization. Use the original token for this bounded recovery profile.</p>
+<label>Original-request receipt <input id="restore-file" type="file"></label><button id="restore" type="button" disabled>Restore without executing</button></section>
+<p id="status" role="status" aria-live="polite">Connect to begin.</p>
+</main></body></html>
