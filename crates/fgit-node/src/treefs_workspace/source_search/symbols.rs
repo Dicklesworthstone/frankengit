@@ -1,5 +1,6 @@
 //! Rust declaration retrieval shares the existing single native source
 //! selection. Neither an error nor the language profile mints a read grant.
+mod indexed;
 use super::*;
 use fgit_forge::source_symbols::{SymbolQuery, SymbolReadError, SymbolSearchReport, search_source_symbols};
 

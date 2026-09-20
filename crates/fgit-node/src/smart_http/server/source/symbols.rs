@@ -1,5 +1,6 @@
 //! Closed, read-only Rust declaration HTTP profile. Credentials, service gates,
 //! request quotas and transaction-key refusal remain in the source gateway.
+mod indexed;
 use std::collections::BTreeMap;
 use std::io::Read;
 use fgit_forge::source_search::{SearchCompletion, SearchLimits};
@@ -16,11 +17,13 @@ use super::request::Selection;
 use super::super::issues::{ApiError, MAX_FORM_BYTES, parse_decimal, parse_form, parse_snapshot, quote, ref_fields};
 
 #[derive(Debug)]
-pub(super) struct Request<'a> { pub repository_route: &'a str }
+pub(super) struct Request<'a> { pub repository_route: &'a str, indexed: bool }
 impl<'a> Request<'a> {
     pub(super) fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
         let (path, query) = head.target.split_once('?').map_or((head.target, None), |(p,q)| (p,Some(q)));
-        let Some(route) = path.strip_suffix("/api/v1/source/search-symbols") else { return Ok(None); };
+        let Some((route, indexed)) = path.strip_suffix("/api/v1/source/search-symbols-index").map(|route| (route, true))
+            .or_else(|| path.strip_suffix("/api/v1/source/search-symbols").map(|route| (route, false)))
+            else { return Ok(None); };
         if route.len() < 2 || !route.starts_with('/') || route[1..].split('/').any(|part|
             part.is_empty() || matches!(part,"."|"..") || !part.bytes().all(|b|b.is_ascii_alphanumeric() || b"-._~".contains(&b)))
         { return Err(ApiError::not_found()); }
@@ -31,7 +34,7 @@ impl<'a> Request<'a> {
         if !head.content_type.is_some_and(|media|media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
             || media.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8")) { return Err(ApiError::media()); }
         if matches!(head.body,BodyFraming::ContentLength(n) if n > MAX_FORM_BYTES as u64) { return Err(ApiError::too_large()); }
-        Ok(Some(Self {repository_route:route}))
+        Ok(Some(Self {repository_route:route,indexed}))
     }
 }
 struct Command { selection: Selection, query: SymbolQuery, limits: SearchLimits }
@@ -56,8 +59,11 @@ fn kind(value: &str) -> Result<SymbolKind,ApiError> {
     }
 }
 fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<Command,ApiError> {
+    command_fields(parse_form(bytes,148)?,format)
+}
+fn command_fields(parsed: Vec<(String,String)>, format: GitHashAlgorithm) -> Result<Command,ApiError> {
     let mut fields=BTreeMap::new();let mut prefixes=Vec::new();let mut kinds=Vec::new();
-    for (name,value) in parse_form(bytes,148)? {
+    for (name,value) in parsed {
         match name.as_str() {
             "path_prefix_hex"=>{if prefixes.len()==128{return Err(ApiError::too_large());}prefixes.push(unhex(&value,4096)?);continue;}
             "kind"=>{if kinds.len()==8{return Err(ApiError::bad("too_many_symbol_kinds"));}kinds.push(kind(&value)?);continue;}
@@ -104,6 +110,7 @@ fn refusal(error: SymbolReadError<NodeWorkspaceRefusal>) -> ApiError {
 pub(super) fn execute(node:&OneNode,_request:&Request<'_>,session:&LoopbackReceiveSession,
     framing:BodyFraming,reader:&mut impl Read,http:HttpLimits,maximum:u64,
 )->Result<JsonReply,ApiError>{
+    if _request.indexed { return indexed::execute(node,session,framing,reader,http,maximum); }
     if session.authenticated_session().is_none(){return Err(ApiError::new(Status::Unauthorized,"unauthorized"));}
     let command=command(&read_form(reader,framing,http)?,node.object_format)?;
     let context=node.request_context();
