@@ -275,7 +275,7 @@ export class Transport {
       : this.#transfers
       ? /^(?:source\/(?:refs|bundle\/(?:export|import|fetch))|outcomes)$/.test(path)
       : this.#search
-      ? /^source\/(?:search|search-batch|search-regex|blob)$/.test(path)
+      ? /^source\/(?:search|search-batch|search-regex|search-index|blob)$/.test(path)
       : this.#branches
       ? /^(?:source\/(?:refs|branches\/(?:create|update|delete|rename))|outcomes)$/.test(path)
       : this.#initial

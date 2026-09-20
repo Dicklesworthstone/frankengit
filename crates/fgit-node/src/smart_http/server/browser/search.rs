@@ -8,6 +8,7 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
     match target.split('?').next()?.as_bytes().strip_prefix(route)? {
         b"/ui/search/" => Some(("text/html; charset=utf-8", include_str!("search.html"))),
         b"/ui/search/search.mjs" => Some(("text/javascript; charset=utf-8", include_str!("search.mjs"))),
+        b"/ui/search/search-index.mjs" => Some(("text/javascript; charset=utf-8", include_str!("search-index.mjs"))),
         b"/ui/search/search-data.mjs" => Some(("text/javascript; charset=utf-8", include_str!("search-data.mjs"))),
         b"/ui/search/search-view.mjs" => Some(("text/javascript; charset=utf-8", include_str!("search-view.mjs"))),
         b"/ui/search/pulls-core.mjs" => Some(("text/javascript; charset=utf-8", include_str!("pulls-core.mjs"))),
@@ -42,7 +43,7 @@ mod tests {
     use fgit_wire::smart_http::{HttpLimits, head};
     #[test]
     fn search_assets_require_exact_source_routes_and_source_enablement() {
-        for suffix in ["", "search.mjs", "search-data.mjs", "search-view.mjs", "pulls-core.mjs", "search.css"] {
+        for suffix in ["", "search.mjs", "search-data.mjs", "search-index.mjs", "search-view.mjs", "pulls-core.mjs", "search.css"] {
             let target = format!("/repo.git/ui/search/{suffix}");
             let bytes = format!("GET {target} HTTP/1.1\r\nHost: local\r\n\r\n");
             let request = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
@@ -73,7 +74,7 @@ mod tests {
     #[test]
     fn search_keeps_repository_text_inert_and_credentials_ephemeral() {
         assert!(!include_str!("search.html").contains("<script>"));
-        for script in [include_str!("search.mjs"), include_str!("search-data.mjs"), include_str!("search-view.mjs")] {
+        for script in [include_str!("search.mjs"), include_str!("search-data.mjs"), include_str!("search-index.mjs"), include_str!("search-view.mjs")] {
             for forbidden in ["innerHTML", "localStorage", "sessionStorage", "document.write"] { assert!(!script.contains(forbidden)); }
         }
         assert!(SECURITY.contains("frame-ancestors 'none'"));
