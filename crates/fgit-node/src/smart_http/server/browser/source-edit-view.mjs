@@ -5,7 +5,11 @@ import { utf8, hex, unhex, decimal, text } from './pulls-core.mjs';
 import { FILE_LIMIT, PATCH_LIMIT, EDIT_LIMIT, sourcePath, fileBytes, fullFilePatch } from './source-edit-patch.mjs';
 import { RECEIPT_LIMIT } from './pulls-actions.mjs';
 export function editorBytes(value, original, dirty, endings) {
-  if (!dirty && original) return original.slice();
+  if (original !== null && original !== undefined) {
+    fileBytes(original, true);
+    if (!dirty) return original.slice();
+    if (editableText(original) === null) throw new Error('Binary/non-text files require exact hex edits or a replacement upload.');
+  }
   if (typeof value !== 'string' || !['lf', 'crlf'].includes(endings)) throw new Error('Choose LF or CRLF explicitly for edited text.');
   text(value, FILE_LIMIT, 'edited text');
   const normalized = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
