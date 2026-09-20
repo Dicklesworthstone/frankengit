@@ -1,0 +1,20 @@
+name: Exact patch regression tests
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fgit-diff/src/patch.rs'
+      - 'crates/fgit-diff/src/patch/**'
+      - 'scripts/verify_exact_patch.sh'
+      - '.github/workflows/exact-patch.yml'
+permissions:
+  contents: read
+jobs:
+  exact-patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/verify_exact_patch.sh --nocapture

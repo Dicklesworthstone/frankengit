@@ -3,11 +3,16 @@
 //!
 //! The supported profile is ordinary `git diff` for regular files, including
 //! creation, deletion, executable-bit changes, quoted raw paths and missing
-//! final newlines. Binary patches, symlinks, gitlinks, copies and renames refuse.
+//! final newlines. `parse_with_renames` additionally accepts explicit regular-file
+//! renames, including exact text and mode changes. `parse` keeps refusing renames
+//! for callers that do not implement atomic two-path effects. Binary patches,
+//! symlinks, gitlinks and copies refuse in both profiles.
 //! `index` names are parsed and exposed as optional identity expectations;
 //! callers with an object store must check them against verified native IDs.
 
 use std::collections::BTreeSet;
+
+mod rename;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PatchLimits {
@@ -88,6 +93,8 @@ pub struct UnifiedPatch<'a> { files: Vec<FilePatch<'a>>, limits: PatchLimits }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FilePatch<'a> {
     path: Vec<u8>,
+    renamed_from: Option<Vec<u8>>,
+    identical_content: bool,
     change: FileChange,
     old_mode: Option<u32>,
     new_mode: Option<u32>,
@@ -239,6 +246,22 @@ fn index(bytes: &[u8], at: usize) -> Result<(IndexExpectation, Option<u32>), Pat
 
 impl<'a> UnifiedPatch<'a> {
     pub fn parse(input: &'a [u8], limits: PatchLimits, cancelled: &dyn Fn() -> bool) -> Result<Self, PatchError> {
+        Self::parse_profile(input, limits, cancelled, false)
+    }
+
+    /// Opt into explicit renames. Callers MUST read `source_path()` from the
+    /// same immutable base, authorize both paths, refuse an occupied destination,
+    /// and remove `renamed_from()` only as part of the complete atomic patch.
+    /// All touched paths are disjoint: swaps, chains and directory/file overlaps
+    /// refuse rather than depending on application order. Similarity is never
+    /// used to infer a source or to relax exact hunk/index validation.
+    pub fn parse_with_renames(input: &'a [u8], limits: PatchLimits,
+        cancelled: &dyn Fn() -> bool) -> Result<Self, PatchError> {
+        Self::parse_profile(input, limits, cancelled, true)
+    }
+
+    fn parse_profile(input: &'a [u8], limits: PatchLimits, cancelled: &dyn Fn() -> bool,
+        allow_renames: bool) -> Result<Self, PatchError> {
         limits.validate()?; checkpoint(cancelled)?;
         if input.len() > limits.max_patch_bytes { return Err(PatchError::Budget("patch bytes")); }
         let mut records = Vec::new();
@@ -254,8 +277,16 @@ impl<'a> UnifiedPatch<'a> {
             if files.len() == limits.max_files { return Err(PatchError::Budget("patch files")); }
             let first = metadata(records[pos], pos)?;
             let paths = first.strip_prefix(b"diff --git ").ok_or_else(|| syntax(pos, "expected diff --git"))?;
-            let path = diff_paths(paths, pos, limits.max_path_bytes)?;
-            let mut file = FilePatch { path, change: FileChange::Modify, old_mode: None, new_mode: None, index: None, hunks: Vec::new() };
+            let relocation = if allow_renames {
+                rename::scan(&records, pos, paths, limits.max_path_bytes, cancelled)?
+            } else { None };
+            let similarity = relocation.as_ref().and_then(|rename| rename.similarity);
+            let (path, renamed_from) = match relocation {
+                Some(rename) => (rename.to, Some(rename.from)),
+                None => (diff_paths(paths, pos, limits.max_path_bytes)?, None),
+            };
+            let mut file = FilePatch { path, renamed_from, identical_content: similarity == Some(100),
+                change: FileChange::Modify, old_mode: None, new_mode: None, index: None, hunks: Vec::new() };
             let (mut kind, mut index_mode, mut headers) = (None, None, false);
             pos += 1;
             while pos < records.len() && !records[pos].starts_with(b"diff --git ") {
@@ -307,11 +338,17 @@ impl<'a> UnifiedPatch<'a> {
                         (None, Some(_)) => FileChange::Create, (Some(_), None) => FileChange::Delete,
                         (Some(_), Some(_)) => FileChange::Modify, _ => return Err(syntax(pos, "two absent file sides")),
                     };
-                    if old.iter().chain(new.iter()).any(|path| path != &file.path) { return Err(syntax(pos, "file paths disagree")); }
+                    if old.as_deref().is_some_and(|path| path != file.source_path())
+                        || new.as_deref().is_some_and(|path| path != file.path()) {
+                        return Err(syntax(pos, "file paths disagree"));
+                    }
                     if kind.is_some_and(|kind| kind != change) { return Err(syntax(pos, "file presence metadata disagrees")); }
                     kind = Some(change); headers = true;
                 } else if headers {
                     return Err(syntax(pos, "expected hunk after file headers"));
+                } else if file.renamed_from.is_some() && rename::is_metadata(text) {
+                    // The bounded pre-scan already checked these exact records,
+                    // including duplicates and agreement with both diff paths.
                 } else if let Some(value) = text.strip_prefix(b"new file mode ") {
                     set(&mut kind, FileChange::Create, pos)?; set(&mut file.new_mode, mode(value, pos)?, pos)?;
                 } else if let Some(value) = text.strip_prefix(b"deleted file mode ") {
@@ -328,6 +365,14 @@ impl<'a> UnifiedPatch<'a> {
                 pos += 1;
             }
             file.change = kind.unwrap_or(FileChange::Modify);
+            if file.renamed_from.is_some() {
+                if file.change != FileChange::Modify {
+                    return Err(syntax(pos.saturating_sub(1), "rename cannot create or delete a file side"));
+                }
+                if file.hunks.is_empty() && similarity.is_some_and(|score| score != 100) {
+                    return Err(syntax(pos.saturating_sub(1), "nonidentical rename needs exact hunks"));
+                }
+            }
             if let Some(mode) = index_mode {
                 if file.old_mode.is_some() || file.new_mode.is_some() || file.change != FileChange::Modify {
                     return Err(syntax(pos.saturating_sub(1), "conflicting index mode"));
@@ -340,7 +385,7 @@ impl<'a> UnifiedPatch<'a> {
                 FileChange::Modify if file.old_mode.is_some() != file.new_mode.is_some() => return Err(syntax(pos.saturating_sub(1), "incomplete mode change")),
                 _ => {}
             }
-            if file.hunks.is_empty() && file.change == FileChange::Modify && (file.old_mode.is_none() || file.old_mode == file.new_mode) {
+            if file.renamed_from.is_none() && file.hunks.is_empty() && file.change == FileChange::Modify && (file.old_mode.is_none() || file.old_mode == file.new_mode) {
                 return Err(syntax(pos.saturating_sub(1), "file has no hunks or mode change"));
             }
             files.push(file);
@@ -350,10 +395,14 @@ impl<'a> UnifiedPatch<'a> {
         for file in &files {
             checkpoint(cancelled)?;
             if !paths.insert(file.path.as_slice()) { return Err(PatchError::DuplicatePath); }
+            if let Some(source) = file.renamed_from() {
+                if !paths.insert(source) { return Err(PatchError::DuplicatePath); }
+            }
         }
-        for file in &files {
-            for (i, byte) in file.path.iter().enumerate() {
-                if *byte == b'/' && paths.contains(&file.path[..i]) { return Err(PatchError::OverlappingPaths); }
+        for path in &paths {
+            checkpoint(cancelled)?;
+            for (i, byte) in path.iter().enumerate() {
+                if *byte == b'/' && paths.contains(&path[..i]) { return Err(PatchError::OverlappingPaths); }
             }
         }
         checkpoint(cancelled)?; Ok(Self { files, limits })
@@ -362,7 +411,14 @@ impl<'a> UnifiedPatch<'a> {
     pub fn limits(&self) -> PatchLimits { self.limits }
 }
 impl FilePatch<'_> {
+    /// Destination path (the deleted path for a deletion).
     pub fn path(&self) -> &[u8] { &self.path }
+    /// Source path to resolve against the original, independently selected tree.
+    pub fn source_path(&self) -> &[u8] { self.renamed_from.as_deref().unwrap_or(&self.path) }
+    /// Additional path to remove atomically after successful rename application.
+    pub fn renamed_from(&self) -> Option<&[u8]> { self.renamed_from.as_deref() }
+    /// File-content presence change. A rename is `Modify`; `renamed_from()`
+    /// separately carries its required two-path tree effect.
     pub fn change(&self) -> FileChange { self.change }
     pub fn index(&self) -> Option<&IndexExpectation> { self.index.as_ref() }
     pub fn hunk_count(&self) -> usize { self.hunks.len() }
@@ -372,6 +428,7 @@ impl FilePatch<'_> {
         cancelled: &dyn Fn() -> bool) -> Result<Option<PatchedFile>, PatchError> {
         limits.validate()?; checkpoint(cancelled)?;
         check_path(&self.path, limits.max_path_bytes)?;
+        check_path(self.source_path(), limits.max_path_bytes)?;
         if self.hunks.len() > limits.max_hunks { return Err(PatchError::Budget("patch hunks")); }
         if self.hunks.iter().map(|hunk| hunk.lines.len()).sum::<usize>() > limits.max_lines {
             return Err(PatchError::Budget("hunk lines")); }
@@ -410,6 +467,9 @@ impl FilePatch<'_> {
         if self.change == FileChange::Delete {
             if !output.is_empty() { return Err(PatchError::NonemptyDeletion); }
             checkpoint(cancelled)?; return Ok(None);
+        }
+        if self.identical_content && output != body {
+            return Err(syntax(0, "identical rename changed file content"));
         }
         checkpoint(cancelled)?;
         Ok(Some(PatchedFile { mode: self.new_mode.unwrap_or(old_mode), content: output }))
@@ -565,3 +625,7 @@ mod path_header_regressions {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "patch/rename_tests.rs"]
+mod rename_tests;
