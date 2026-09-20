@@ -15,6 +15,9 @@ use fgit_types::{Digest, DomainTag, GitHashAlgorithm as Format, GitOid, GitOidSh
 use std::collections::BTreeMap;
 
 pub use super::table::Error as TableError;
+#[path = "index_reuse.rs"]
+mod reuse;
+pub use reuse::{RefreshStats, ReuseVerifier, VerifiedReuse};
 
 pub const INDEX_PROFILE: &str = "rust-declaration-tables-v1";
 pub const MAX_PAYLOAD: usize = 1024 * 1024;
@@ -221,23 +224,42 @@ fn decode_table(doc: &Document, raw: &[u8], cancelled: &dyn Fn() -> bool) -> Res
 }
 
 /// Complete scanner inventory. It cannot be truncated by max_matches.
-pub struct Corpus { source: SourceSearchReport, documents: Vec<Document>, tables: Vec<Payload>, unsupported: usize }
+pub struct Corpus { source: SourceSearchReport, documents: Vec<Document>, tables: Vec<Payload>, unsupported: usize, reused: usize, reuse_scope: Option<Source> }
 impl Corpus {
-    pub fn empty(source: SourceSearchReport) -> Self { Self { source, documents: Vec::new(), tables: Vec::new(), unsupported: 0 } }
+    pub fn empty(source: SourceSearchReport) -> Self { Self { source, documents: Vec::new(), tables: Vec::new(), unsupported: 0, reused: 0, reuse_scope: None } }
     pub fn finish(self, source: Source, cancelled: &dyn Fn() -> bool) -> Result<(Manifest, Vec<Payload>), Error> {
         if source.repository != self.source.repository || source.rcr != self.source.source_rcr
             || source.commit != self.source.source_commit || source.tree != self.source.source_tree
         { return Err(Error::Invalid("native source binding")); }
+        if self.reuse_scope.as_ref().is_some_and(|prior| !reuse::same_namespace(prior, &source)) {
+            return Err(Error::Invalid("reuse namespace"));
+        }
         let manifest = Manifest { source, documents: self.documents, unsupported: self.unsupported, non_regular: self.source.non_regular_entries };
         manifest.encode(cancelled)?; Ok((manifest, self.tables))
     }
     pub fn source(&self) -> &SourceSearchReport { &self.source }
+    /// Current paths whose tables were reused without fetching/scanning blobs.
+    pub fn reused_files(&self) -> usize { self.reused }
 }
 pub fn prepare<A: GitHashAlgorithm, S: ObjectSource<A>>(
     base: &BaseView<A>, source: &S, capability: &mut TreeCapability, now: u64,
     limits: SearchLimits, cancelled: &dyn Fn() -> bool,
 ) -> Result<Corpus, Error> {
+    prepare_with_reuse(base, source, capability, now, limits, cancelled, None)
+}
+/// Enumerate the complete CURRENT tree and authorize each path before reuse.
+/// Resource ceilings apply to the whole resulting corpus, not just changed
+/// blobs. Only newly scanned tables are returned for body-first publication.
+pub fn prepare_with_reuse<A: GitHashAlgorithm, S: ObjectSource<A>>(
+    base: &BaseView<A>, source: &S, capability: &mut TreeCapability, now: u64,
+    limits: SearchLimits, cancelled: &dyn Fn() -> bool, reuse: Option<&VerifiedReuse>,
+) -> Result<Corpus, Error> {
     limits.validate()?; check(cancelled)?;
+    let format = super::oid::<A>(base.base_commit_oid())?.algorithm();
+    if reuse.is_some_and(|prior| prior.source().repository != base.repository_id()
+        || prior.source().format != format) {
+        return Err(Error::Invalid("reuse source format/repository"));
+    }
     capability.authorize_root(now).map_err(SearchError::Capability)?;
     let scope = SourceQuery::new(b"symbols", SearchCase::Exact, &[])?;
     let mut found = Discovery { files: BTreeMap::new(), entries: 0, excluded: 0 };
@@ -249,18 +271,33 @@ pub fn prepare<A: GitHashAlgorithm, S: ObjectSource<A>>(
         files_read: 0, bytes_read: 0, bytes_searched: 0, non_regular_entries: found.excluded });
     let mut files: Vec<_> = found.files.into_iter().collect(); files.sort_by(|a,b| a.0.as_bytes().cmp(b.0.as_bytes()));
     let mut budget = engine::Budget::new(engine::MAX_WORK).map_err(|e| Error::Table(table::Error::Syntax(e)))?;
-    let mut encoded = 0;
+    corpus.reuse_scope = reuse.map(|prior| prior.source().clone());
+    let (mut encoded, mut referenced, mut declarations) = (0, 0, 0);
     for (path, blob) in files {
         check(cancelled)?;
         if !path.as_bytes().ends_with(b".rs") { corpus.unsupported += 1; continue; }
         let grant = capability.authorize_read(&path, now).map_err(SearchError::Capability)?;
+        let native = super::oid::<A>(&blob)?;
+        if let Some(previous) = reuse.and_then(|prior| prior.document(&native)) {
+            if previous.source_bytes > limits.max_file_bytes { return Err(Error::Limit("source file bytes")); }
+            add(&mut referenced, previous.source_bytes, limits.max_total_bytes, "source bytes")?;
+            add(&mut encoded, previous.encoded_bytes, MAX_INDEX_BYTES, "index bytes")?;
+            add(&mut declarations, previous.declarations, engine::MAX_DECLARATIONS, "declarations")?;
+            let mut doc = previous.clone();
+            doc.path = path.as_bytes().to_vec();
+            corpus.documents.push(doc);
+            corpus.reused += 1;
+            continue;
+        }
         let bytes = base.read_object(source, &blob, GitObjectKind::Blob, &grant).map_err(|e| SearchError::Source(Box::new(e)))?;
         capability.charge_fetch(bytes.len() as u64).map_err(SearchError::Capability)?;
         if bytes.len() > limits.max_file_bytes { return Err(Error::Limit("source file bytes")); }
+        add(&mut referenced, bytes.len(), limits.max_total_bytes, "source bytes")?;
         add(&mut corpus.source.bytes_read, bytes.len(), limits.max_total_bytes, "source bytes")?;
-        let blob = super::oid::<A>(&blob)?;
+        let blob = native;
         if git_object_id(blob.algorithm(), GitObjectKind::Blob, &bytes) != blob { return Err(Error::CommitmentMismatch); }
         let table = table::Table::build(&bytes, &mut budget, cancelled)?;
+        add(&mut declarations, table.rows().len(), engine::MAX_DECLARATIONS, "declarations")?;
         let payload = table_payload(blob, &table, cancelled)?;
         add(&mut encoded, payload.bytes.len(), MAX_INDEX_BYTES, "index bytes")?;
         corpus.documents.push(Document { path: path.as_bytes().to_vec(), blob, root: payload.root,
