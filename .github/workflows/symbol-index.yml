@@ -17,6 +17,7 @@ on:
       - 'crates/fgit-node/tests/source_symbol_index/**'
       - 'crates/fgit-node/tests/source_symbol_reconcile.rs'
       - 'crates/fgit-node/tests/source_symbol_worker.rs'
+      - 'crates/fgit-node/tests/source_symbol_worker/**'
       - 'crates/fgit-node/tests/source_index_worker*.rs'
       - 'scripts/verify_symbol_index.sh'
       - '.github/workflows/symbol-index.yml'

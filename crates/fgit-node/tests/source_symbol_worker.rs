@@ -179,3 +179,6 @@ fn stop_and_stale_lock_do_not_initialize_or_reset_symbol_progress() {
     assert_eq!(fs::read(path.join("checkpoint")).unwrap(),checkpoint);
     assert_eq!(fs::read(path.join("run.lock")).unwrap(),b"unresolved owner");
 }
+
+#[path = "source_symbol_worker/crash.rs"]
+mod crash;

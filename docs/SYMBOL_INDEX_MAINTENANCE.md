@@ -26,7 +26,7 @@ omitting it retains lexical maintenance and its existing command grammar.
 Each invocation admits 1-32 full refs, 1-3600 passes and at most 24 hours of
 scheduled waits. A multi-pass invocation requires a positive interval. A host
 scheduler can start subsequent finite `resume` invocations after the previous
-process has exited; overlapping invocations refuse the existing `run.lock`.
+process has exited; overlapping invocations refuse a held nonblocking OS lock.
 There is no implicit ref discovery, scope widening or automatic initialization
 of missing resume progress. A retained `stop` file prevents work until the
 operator removes it after the previous process has quiesced.
@@ -70,8 +70,44 @@ not-in-selected-history observations stay pending and do not trigger a rebuild.
 Recovery and new preparation are separate attempts. Ambiguity and cancellation
 never prove rollback. Only a definite failed-precondition/CAS result from that
 same invocation permits clearing its matching recorded candidate. A checkpoint
-write failure or unexpected post-barrier error preserves the lock for inspection.
-Stale locks and interrupted checkpoint replacements are not automatically removed.
+write failure or unexpected post-barrier error retains ownership until explicit
+shutdown/release or process termination; it never authorizes clearing progress.
+
+## Exclusive restart after process death
+
+New workers use a nonblocking `std::fs::File::try_lock` on a permanent, private
+`owner.lock` file. They also create a synchronized `run.lock` marker binding the
+ownership protocol to that anchor's device and inode. `resume` may reuse a marker
+only after acquiring the same exclusive OS lock and matching its exact binding.
+A PID, heartbeat age, stop file or old timestamp never proves ownership. Failure
+to obtain a supported exclusive lock is an error, not permission to proceed.
+
+After a process dies, the kernel releases its file lock. The ordinary `resume`
+command can then acquire exclusive ownership without deleting any files or
+resetting a candidate. A saved effect-free `preparing` phase can restart through
+the existing guarded builder; a saved `pending` phase goes through original-
+candidate recovery instead. Confirmed publication still wins. A candidate absent
+from selected history remains pending, even though its previous process is dead.
+
+Dropping or unwinding a progress object inside a live process does **not** release
+ownership: the descriptor deliberately stays locked until that process exits.
+This prevents a new worker from racing native work whose shutdown was not
+confirmed. Normal release removes `run.lock` while still locked, synchronizes
+the directory and then closes the lock. **Never delete or replace `owner.lock`**
+to clear a busy worker; it is a stable lock inode, not a disposable stale marker.
+The implementation checks file identities before checkpoint publication/release
+and refuses observed symlinks, hardlinks, nonprivate files or replaced anchors.
+
+This does not turn arbitrary legacy locks into restart permission. Empty old
+sentinels, malformed/foreign markers, missing resume checkpoints, unknown legacy
+`running` phases and interrupted `checkpoint.next` replacements still require
+inspection. A failed wrong-profile/corrupt-checkpoint open preserves an inherited
+crash marker and all checkpoint bytes. Cleanly released v1/v2 checkpoints retain
+their exact codec and lexical/symbol namespace bindings; no migration or floor
+reset is performed. Local progress resides in a trusted operator-owned 0700
+directory. This is a local Unix process-ownership profile, not a distributed
+lease, a network-filesystem assurance, or protection against a privileged actor
+concurrently rewriting the private directory.
 
 ## Output and validation
 
@@ -84,6 +120,7 @@ A pending/refused pass returns a failing process status without erasing its
 checkpoint. Successful shutdown and progress release are explicit.
 
 ```bash
+bash scripts/verify_index_maintenance.sh
 bash scripts/verify_symbol_index.sh native
 bash scripts/verify_symbol_index.sh maintenance
 ```
@@ -93,9 +130,21 @@ suite. The maintenance group executes the actual worker binary, progress codec,
 real symbol restart tests and retained lexical worker/restart tests. It covers
 source edits, stable no-op checkpoints, cross-profile refusal, lost activation
 acknowledgements, unpublished candidates remaining pending, stop controls and
-stale locks in real file-backed nodes. Lost replies are simulated; this is not a
-power-loss or adversarial storage campaign. Results must be read at their exact
-revision; test presence is not evidence of execution.
+stale locks in real file-backed nodes. The process-death tests additionally kill
+a child owning the actual native node and durable progress, with neither node
+shutdown nor progress release. The unchanged operator is then exercised on
+saved preparation, confirmed-but-unacknowledged publication, and recorded-but-
+unpublished candidates in SHA-1 and SHA-256. No operator file edits, replacement
+index or checkpoint resets are used. Losing an acknowledgement is deliberate;
+these are process-death tests at selected boundaries, not a power-loss or
+in-flight-CAS fault campaign.
+
+At `9d4cdee409f37b12b209064264b07884d3b9ee6f`, the repository-owned standalone
+progress command compiled on the pinned nightly and passed all 26 tests, with
+zero failures or ignored tests. This includes actual child-process death and
+live-owner exclusion, plus all retained progress/codec/barrier tests. It does
+not establish results for later native process-death additions. Results must be
+read at their exact revision; test presence is not evidence of execution.
 
 This connects the maintenance worker previously listed as a remaining symbol
 integration gap in `PERSISTENT_SYMBOL_INDEX.md`. In-file incremental parsing,
