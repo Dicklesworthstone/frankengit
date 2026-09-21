@@ -1,16 +1,17 @@
 # Persistent native Rust declaration indexes
 
-`rust-declaration-tables-v1` stores the existing `rust-declaration-heads-v1`
-scanner output behind an immutable, source-bound generation. It connects native
-TreeFS inventory, per-blob declaration tables, the existing asynchronous
-FrankenSQLite authority, a local operator, and an authenticated HTTP reader.
+`rust-declaration-tables-v1` stores `rust-declaration-heads-v1` scanner output
+behind immutable, source-bound generations. Native TreeFS inventory, per-blob
+declaration tables, FrankenSQLite authority, local operators, and authenticated
+HTTP reads use one publication and recovery path. New builds can additionally
+publish the `rust-symbol-name-directory-v1` global lookup layout described below.
 FG-032 remains open. The original `search-symbols` scanning endpoint is unchanged.
 
 ## Build, refresh, query, and recover
 
 The operator opens an existing node with the exact tenant/repository/hash-format
-binding. It does not initialize repositories, derive credentials from source, or
-change Git refs, forge events, repository decisions, or outbox acknowledgements.
+binding. It does not initialize repositories or change Git refs, forge events,
+repository decisions, or outbox acknowledgements.
 
 ```bash
 cargo build --locked -p fgit-node --bin fg-symbol-index
@@ -18,98 +19,124 @@ fg-symbol-index "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" sha1 \
   refs/heads/main build genesis
 fg-symbol-index "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" sha1 \
   refs/heads/main query prefix Thing
-# After a source or forge write, use the exact previously returned index token.
+# Refresh using the exact active index token, not a Git object ID.
 fg-symbol-index "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" sha1 \
   refs/heads/main refresh "$INDEX_TOKEN"
-# An explicit full rescan remains available; use the newly active token.
+# A complete rescan remains an explicit option.
 fg-symbol-index "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" sha1 \
   refs/heads/main build "$REFRESHED_INDEX_TOKEN"
 fg-symbol-index "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" sha1 \
   refs/heads/main recover "$CANDIDATE_TOKEN"
 ```
 
-Use `sha256` for that repository format. Assigned tenant/repository identities
-are exactly 32 lowercase hexadecimal characters. A generation token has the
-registered `alg:CODE:LOWERCASE_HEX` form. `build genesis` requires an uninitialized
-symbol index; subsequent builds require its exact predecessor token. `refresh`
-requires an existing, exact active predecessor, never `genesis`. There is no
-implicit `latest`, force, background maintenance, or retry with a new basis.
-Retain each returned token; old tokens remain useful for read-only recovery but
-cannot authorize a refresh over a newer active generation.
+Use `sha256` for that repository format. Tenant/repository identities contain
+32 lowercase hexadecimal characters. Generation tokens use the registered
+`alg:CODE:LOWERCASE_HEX` form. `build genesis` requires an uninitialized symbol
+index; later builds and `refresh` require its exact active predecessor. There
+is no implicit `latest`, force, or retry with a different basis. Retain returned
+tokens for subsequent operations and read-only recovery.
 
-Builds use one canonical source selection and complete native tree enumeration.
-Regular `.rs` files are read through verified TreeFS and checked against their
-native SHA-1/SHA-256 blob identities. Executable and empty Rust files are included.
-Other regular files are counted but not read; symlinks/gitlinks are counted and
-never followed. Source buffers are dropped per file, not retained during async
-publication. A match ceiling never truncates an index build. Unsupported source,
-missing objects, or resource failure rejects the complete preparation.
+For explicitly scheduled, checkpointed local maintenance, use
+[`fg-index-maintain --symbols`](SYMBOL_INDEX_MAINTENANCE.md). That foreground
+controller owns a separate private state directory, bounded passes, write-ahead
+candidate persistence, cancellation drain and process-death recovery. It is not
+query-triggered maintenance or a remote write grant.
+
+Builds enumerate one complete authenticated native tree. Regular `.rs` files,
+including executable and empty files, are checked against native SHA-1/SHA-256
+blob identities and scanned. Other regular files are counted but not scanned;
+symlinks and gitlinks are counted and never followed. Source buffers are dropped
+per file. Match limits cannot truncate an inventory. Malformed or unsupported
+source, missing objects, cancellation and exhausted bounds refuse preparation.
 
 ### Incremental refresh
 
 Refresh authenticates current ref visibility before selecting the exact active
-predecessor. It verifies the predecessor generation's profile, source namespace,
-manifest commitment and **every distinct native blob's declaration table**.
-Verification is streaming: only one table payload is retained at a time. A
-missing, substituted, corrupt, incomplete or cancelled inventory is an error,
-not an empty cache and not permission to fall back to an implicit full rescan.
+predecessor. It verifies the predecessor generation, source namespace, manifest,
+selected global directory when present, and **every distinct blob's table**.
+Table verification is streaming; decoded source-name/kind summaries are retained
+instead of source bytes. Missing, substituted or corrupt backing is an error,
+not an empty cache or permission to fall back to a full rescan.
 
-After predecessor I/O, refresh reauthenticates the pinned current source head
-and commit, enumerates the complete current native tree, and authorizes each
-current Rust path. Matching native blob identities reuse verified tables without
-fetching or scanning source blobs. New or modified blobs use the production
-scanner. Renamed and copied files reuse tables under their **current** paths;
-deleted paths disappear, including deletion of the entire Rust corpus. No old
-path visibility, source stamp or declaration can survive merely through reuse.
-Tenant, repository, incarnation, format and ref boundaries cannot be crossed.
+After predecessor I/O, refresh reauthenticates the pinned current head/commit,
+enumerates the complete current tree, and authorizes current Rust paths. Matching
+native blobs reuse verified tables and summaries without fetching or scanning
+source blobs. New/modified blobs use the production scanner. Renames and copies
+use their current paths, while deleted paths disappear. Reuse cannot cross tenant,
+repository, incarnation, format or ref boundaries.
 
-The resulting canonical manifest and candidate generation ID are identical to
-a full rebuild at the same current snapshot and exact predecessor. Work counters
-are not part of canonical identity. The operator returns `type: symbol_index_refresh`,
-new index token/number, current source token/commit/tree, and:
+Full rebuild and refresh at the same snapshot, predecessor, implementation and
+host limits produce identical manifest/directory bytes and candidate IDs. Work
+counters are not canonical identity. Refresh output contains `reused_files`,
+`source_blobs_read`, `source_bytes_read`, `predecessor_tables_read` and
+`predecessor_payload_bytes`; the last includes manifest and directory verification.
+A forge-only write can refresh with zero source-blob reads, but authority reads,
+tree enumeration, table verification and publication still occur. All build
+ceilings apply to the entire resulting corpus, including reused files.
 
-- `reused_files`: current Rust paths reusing verified predecessor tables;
-- `source_blobs_read`, `source_bytes_read`: source I/O for newly scanned paths;
-- `predecessor_tables_read`, `predecessor_payload_bytes`: actual predecessor
-  verification work, with the manifest included in the byte count.
+## Global name directory and compatibility
 
-A forge-only write or unchanged source can therefore refresh with **zero source
-blob reads**, while still recording the new source observation. This is not zero
-I/O or constant-time maintenance: current tree enumeration, authority reads,
-predecessor table verification and generation publication still happen. All
-source-file, total-source, file-count, declaration and encoded-data ceilings apply
-to the **whole resulting corpus**, including reused files, not only cache misses.
+The directory maps each case-sensitive declaration name to ordered document
+ordinals, closed kind tags, and declaration counts. Its commitment binds the
+**exact canonical manifest**, including current source observation, raw paths,
+native blob identities and table roots. Only complete production scanner tables
+or completely verified predecessor tables supply these summaries. Counts must
+cover every document's declarations; malformed names, kinds, order, counts and
+ordinals refuse. Duplicate candidate documents are removed without changing
+raw-path order. Returned spans still come from verified original tables.
+
+Two generation layouts are supported under the same `source-rust-symbols` view:
+
+| Graph schema | Builder profile | Payload-root layout |
+| --- | --- | --- |
+| `source-symbol-index` 1.0 | `rust-declaration-tables-v1` | All four roots bind the v1 manifest. |
+| `source-symbol-index` 1.1 | `rust-symbol-name-directory-v1` | `edges_root` binds the name directory; vertices, evidence and index-manifest roots bind the v1 manifest. |
+
+These are closed schema/profile pairs, not heuristics based on payload presence.
+The parser root and all existing table/manifest codecs remain unchanged. The
+name-to-document relation is deterministic-derived, not a call/reference graph
+or authorization decision. Ordinary HTTP/CLI responses retain their v1 table
+and scanner profile fields; they are not a new wire schema.
+
+**New readers support old generations. Old binaries do not support schema 1.1.**
+Upgrade readers before publishing an accelerated generation. An explicit build
+or refresh can upgrade a legacy index while preserving predecessor/checkpoint
+history. Current-index maintenance no-ops do not migrate layouts or advance a
+generation merely to add the optimization. There is no automatic downgrade or
+rewrite of an acknowledged checkpoint when returning to an older binary.
+
+A directory must fit the existing 1 MiB per-payload and 32 MiB total-index
+ceilings, as well as the host authority body limit. If only this additional
+payload would exceed those bounds, preparation explicitly selects schema 1.0
+and preserves the full legacy corpus. It never truncates names or documents.
+Integrity, cancellation and source errors do not take this size-only path.
+Once schema 1.1 is selected, its directory is **mandatory backing**: queries,
+refresh and current reconciliation fail on missing/corrupt/substituted data
+instead of silently reading all tables or rebuilding a replacement.
 
 ## Publication and recovery
 
-New tables and the complete manifest are staged before the existing generation-
-root conditional write. Refresh references already verified immutable tables
-instead of restaging them. Namespace keys include tenant, repository, incarnation
-and object format; each ref has its own generation head. This derived view is
-named `source-rust-symbols`, with schema `source-symbol-index` 1.0 and a named
-parser/index profile. Its document directory, declaration-table directory and
-source metadata are one canonical manifest, so all four graph payload-root fields
-bind that same manifest. They are not four independently materialized graphs,
-and no call/reference graph is implied. Table and manifest frames use distinct
-schema families in the existing generation identity domain.
+New tables, the selected directory and the complete manifest are staged before
+the generation-root conditional write. Reused tables are already verified
+immutable payloads and need not be restaged. Keys include tenant, repository,
+incarnation and native format; every ref has a separate generation head. Frames
+use distinct schema families in the existing generation identity domain.
 
-Native `build_source_symbol_index_guarded_local_in` and
-`refresh_source_symbol_index_guarded_local_in` accept a bounded synchronous
-write-ahead callback. Both use the same publisher. The callback receives the
-original candidate before any table/manifest put or root write; returning an
-error prevents those effects. Refresh verifies the predecessor and prepares the
-complete current corpus before this barrier. The unguarded APIs and simple CLI
-do not themselves create durable controller progress. Publication errors after
-that barrier retain the original candidate, including cancellation before the
-first put. Confirmed publication has no following cancellation probe or await.
-The CLI shuts down the node on operation success or failure; output and shutdown
-failures never imply rollback. Refresh does not write a repository transaction.
+Native guarded build/refresh APIs share one publisher. Their synchronous
+write-ahead callback receives the exact candidate before any payload put or
+root write; callback failure prevents those effects. All source preparation and
+predecessor verification precede the callback. Publication errors after this
+barrier retain the original candidate, even for cancellation before the first
+put. Confirmed publication has no following cancellation probe or await.
+The simple CLI does not itself persist durable controller progress; the
+maintenance controller does. Output/shutdown errors never imply rollback.
 
-Recovery authenticates current ref visibility and checks the original candidate
-against generation history without rebuilding or reexecuting publication.
-Active, superseded, uninitialized and not-in-selected-history observations are
-separate. Negative history observations are not proof of rollback. The caller
-must retain its candidate and its own responsibility for unresolved work.
+Recovery authenticates current ref visibility and examines original-candidate
+generation history without executing another publication. Active, superseded,
+uninitialized and not-in-selected-history observations remain distinct. Negative
+history observations do not prove rollback or erase unresolved responsibility.
+Current reconciliation verifies manifest and selected directory metadata, not
+every table; it is not a complete corruption audit.
 
 ## Authenticated persisted reads
 
@@ -119,23 +146,19 @@ Content-Type: application/x-www-form-urlencoded
 Authorization: Bearer <independently read-scoped credential>
 ```
 
-Required fields are the matching `object_format`, full visible `ref`, and
-lowercase-hex `name_hex` for a 1-128-byte ASCII identifier. The name excludes any
-raw `r#` prefix. Optional `match` is `exact` or `prefix`, case-sensitively. Repeated
-`kind` and `path_prefix_hex` retain the scanning endpoint's closed kinds and
-slash-component path rules. Kinds are function, struct, enum, trait, type, module,
-union and macro. The same bounded request framing, credentials, revocation,
-quotas, service enablement, and transaction-key rejection apply to both routes.
-No indexed read builds, refreshes or activates an index; there is no HTTP write
-route for symbol indexes.
+Required fields are matching `object_format`, full visible `ref`, and lowercase
+hex `name_hex` for a 1-128-byte ASCII identifier without a raw `r#` prefix.
+Optional `match` is case-sensitive `exact` or `prefix`. Repeated `kind` and
+`path_prefix_hex` retain closed kinds and slash-component scopes: `src` does not
+include `src2`. Kinds are function, struct, enum, trait, type, module, union and
+macro. Independent credentials, revocation, framing, quotas, enablement and
+transaction-key rejection remain required. No read builds or refreshes an index.
 
-`expected_head` and `expected_commit` pin the canonical source observation.
-`minimum_index_token` AND `minimum_index_number` optionally carry an independent
-previously observed generation checkpoint. Both are required together; a higher,
-forked, or unavailable checkpoint fails closed. These extra fields belong only
-to the indexed route and remain invalid on the scanning route. There is no
-historical-index selector or pagination cursor in this initial profile: one
-request selects one current immutable generation, with an explicit result limit.
+`expected_head` and `expected_commit` pin canonical source. The paired
+`minimum_index_token` and `minimum_index_number` carry an independent retained
+index checkpoint; higher/forked/unavailable checkpoints fail closed. There is
+no historical-index selector or pagination cursor. One request selects one
+current immutable generation; it cannot mix layouts or source observations.
 
 ```bash
 curl --fail-with-body --silent --show-error \
@@ -148,97 +171,71 @@ curl --fail-with-body --silent --show-error \
   "${FG_URL}${FG_REPOSITORY_ROUTE}/api/v1/source/search-symbols-index"
 ```
 
-The reader first authenticates current source and hidden-ref policy. It then
-selects and verifies the generation, manifest and each required table. Namespace,
-ref, source head/RCR/forge position/commit and table commitments must agree.
-Even a forge-only write makes an old index stale; refresh or full rebuild is an
-explicit operator action. An uninitialized index, stale index and unresolved
-checkpoint return distinct HTTP 409 codes (`symbol_index_uninitialized`,
-`symbol_index_stale`, `index_checkpoint_unavailable`). Corruption and missing
-backing remain errors, not successful empty results or fallback scans.
+Current source and hidden-ref policy precede index data. Namespace, ref, source
+head/RCR/forge/commit and payload commitments must agree. Forge-only writes still
+make old indexes stale. Uninitialized, stale and unresolved checkpoints retain
+HTTP 409 codes `symbol_index_uninitialized`, `symbol_index_stale` and
+`index_checkpoint_unavailable`. Corruption is not a successful empty answer.
 
-Responses identify `type: source_search_symbols_index`, schema 1, both scanner
-and index profiles, exact source head/token/RCR/commit/tree, and index token and
-number. Rows retain original name bytes, kind, raw-identifier flag, raw path,
-native blob, byte offset/length, physical line/byte column and original excerpt.
-Result order is raw path then source offset, not dictionary-name order. An
-extra matching declaration is required before `complete: false` is reported.
-A page exactly filling its limit may still be complete.
+Schema 1.1 uses the verified global directory to select only tables matching
+name, kind and current query path scope. Schema 1.0 retains table-by-table lookup.
+All results retain name/kind/raw-identifier bytes, raw path, native blob, original
+byte offset/length, physical line/byte column and excerpt. Ordering is raw path
+then source offset, not dictionary name. Only an extra actual match proves
+`complete: false`; an exactly filled result limit may still be complete.
 
-`source_blobs_read` and `source_bytes_read` are zero for indexed queries. Source
-state materialization still reads authority/closure metadata; table decoding,
-manifest verification and generation ancestry are real work. `indexed_files`,
-`indexed_declarations` and `indexed_source_bytes` describe the whole recorded
-Rust corpus. `tables_read`, `payload_bytes_read` and `work_units` describe index
-query work, not fresh lexical scanning, exact elapsed CPU, or a latency SLO.
-`max_matches` narrows 1-4096 retained results (default 200). `max_work` narrows the
-67,108,864-unit table/lookup model. `max_bytes` and `max_file_bytes` bound the
-referenced source sizes even though those blobs are not reread. Native APIs can
-also narrow table-read and aggregate payload-byte limits. Budget failure never
-returns a partial successful report.
+`source_blobs_read` and `source_bytes_read` stay zero for persisted queries.
+`indexed_files`, `indexed_declarations` and `indexed_source_bytes` describe the
+whole recorded corpus. `tables_read` counts actual table reads; no-match directory
+queries can return zero. `payload_bytes_read` includes manifest, directory and
+selected tables. Directory decoding/selection and table matching share one
+`max_work` budget. `max_bytes`, `max_file_bytes` and native `max_files` constrain
+the referenced source/table candidates actually read, not skipped nonmatching
+files; build/refresh limits still cover the entire corpus. Directory bytes count
+toward the shared payload budget even when no table is read. Budget failure
+never returns a partial successful report.
 
-## Scope, bounds and verification
+The directory itself and manifest are still fully read, verified and decoded.
+This removes unrelated per-file table I/O, not all corpus-dependent work. It is
+not a paged postings tree with total I/O proportional only to hits, a constant-
+time query claim, or a measured latency SLO. Broad prefixes may still select
+most tables, and the extra directory can cost more for tiny corpora.
 
-This preserves the scanner's language semantics: ASCII declaration names in
-`.rs` files, not compiler name resolution, type checking, cfg evaluation, macro
-expansion, imported references or calls. Literal/comment/attribute/macro contents
-cannot fabricate declarations. Unsupported code identifiers or malformed scanned
-source refuse a build or refresh; they are not silently skipped. Full Rust or
-language-server correctness is not claimed.
+## Bounds, tests and remaining scope
 
-Tables have at most 20,000 declarations across the complete corpus, 128-byte
-names, a 1 MiB encoded-payload ceiling per file and at most 288 original excerpt
-bytes per row. The complete profile admits up to 20,000 regular files, 64 MiB of
-Rust source, 8 MiB per Rust file, a 1 MiB manifest and 32 MiB total encoded data.
-Generation ancestry retains the existing independent bounded read profile.
-Retained result names/paths/excerpts additionally share 2 MiB. Missing required
-payloads, exhausted bounds or cancellation cannot become a complete empty index.
-An actual empty `.rs` corpus instead has a verified initialized empty manifest.
+The scanner recognizes source declaration heads, not compiler name resolution,
+type checking, cfg evaluation, macro expansion, references or calls. Literal,
+comment, attribute and macro-body contents cannot fabricate declarations.
+Unsupported code identifiers and malformed source refuse; they are not skipped.
+The complete profile retains 20,000 declarations, 128-byte names, 20,000 regular
+files, 64 MiB Rust source, 8 MiB per file, 1 MiB payloads and 32 MiB encoded data.
+Retained result names/paths/excerpts share 2 MiB; results are bounded to 1-4096.
+Generation ancestry has its own bounded read contract. No dependencies were added.
 
-Tables contain name directories, not full source files. Exact/prefix lookups use
-those directories after commitment-checked decoding. This avoids source-blob
-I/O and lexical scanning at query time, but still reads and decodes each selected
-file table. It is not a global postings tree with I/O proportional only to hits.
-Refresh reuses complete per-blob tables; it does not incrementally parse edits
-inside a changed file. Delta compaction and the existing lexical maintenance
-worker are not integrated for symbols yet. There is no browser symbol UI,
-multi-language symbol graph or semantic ranking.
-
-The native regression suite compares refresh candidate IDs with a full rebuild
-captured before its write-ahead barrier, and compares refreshed query results
-with the live native scanner. It covers SHA-1/SHA-256, additions, modifications,
-renames/copies, deletion, empty files/corpora, raw paths, storage reopen, independent
-checkpoints, whole-corpus ceilings, source pins, original-candidate recovery,
-cancellation, malformed source, the operator binary and authenticated HTTP.
-Native tests use actual node imports, patch admission, storage, TCP listeners and
-operator processes, not substitute backends. Core tests cover incomplete reuse,
-substitution/corruption, cancellation, duplicate-blob consistency and namespace
-isolation with production codecs and scanner tables.
-
-At commit `974c352209f85d8f26fa61acd04e5d92ee50fdeb`, the actual native lane passed
-all-target compilation, 45 forge symbol tests (including the five new reuse
-unit tests), 11 native index integration tests, three operator parser tests and
-seven symbol HTTP protocol tests. That result applies to the core reuse commit,
-not to later native refresh/operator additions. The standalone scanner/table lane
-also passed separately. The implementation container has no Rust/Cargo; local
-blob identity, source wiring and whitespace checks are static evidence only.
-Read each later native result at its actual commit; it cannot be inferred from
-a preceding commit or the standalone table suite.
-
-The native script checks the real cross-crate target composition and runs the
-forge symbols, native index integration, operator and symbol HTTP protocol tests.
-Test debug symbols are omitted to bound linking memory; assertions remain enabled
-and tests execute one at a time. These are repository-owned commands, not
-hosted-service requirements for correctness or release.
+Core tests compare directory routing against the scalar table-query oracle
+across exact/prefix/kind/path/result-limit combinations in both native formats.
+They cover truncations, corruption, source/path substitution, invalid/incomplete
+counts, shared exact work budgets, verified reuse and size-only compatibility.
+Native tests cover genuine legacy storage/reopen/upgrade, selected-directory
+failure in read/refresh/reconcile, plus existing full-rebuild candidate equivalence,
+source changes, cancellation, write-ahead recovery and maintenance restart.
+The 35-file native/HTTP corpus requires selective one-table and zero-table reads,
+compares results with live scanning, and preserves lookahead, scope and byte limits.
+Test presence is not execution evidence; read results at their exact revisions.
 
 ```bash
 bash scripts/verify_symbol_index.sh tables
 bash scripts/verify_symbol_index.sh native
-cargo test --locked -p fgit-forge source_symbols
-cargo test --locked -p fgit-node --test source_symbol_index
-cargo test --locked -p fgit-node --bin fg-symbol-index
-cargo test --locked -p fgit-node --lib smart_http::server::source
+bash scripts/verify_symbol_index.sh maintenance
+cargo test --locked -p fgit-forge --lib source_symbols
+cargo test --locked -p fgit-node --test source_symbol_directory
 ```
 
-Full-workspace, compiler-conformance and release gates remain separate. No bead
-is closed or full FG-032 completion claimed.
+These repository-owned commands use real production codecs, native storage,
+TCP and operator processes; debug-symbol omission does not remove assertions.
+The editing environment has no Rust toolchain or network access, so local file
+checks cannot establish native execution. Earlier successful scanner, refresh
+and maintenance runs do not establish results for directory additions.
+In-file incremental parsing, paged postings, compaction, multi-language symbol
+graphs, semantic ranking and browser UI remain separate. Full-workspace,
+conformance and release gates are not implied. FG-032 is not closed by this slice.

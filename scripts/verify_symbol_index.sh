@@ -22,7 +22,8 @@ if [[ $# -eq 1 && ( "$1" == native || "$1" == maintenance ) ]]; then
       --test source_index_worker_checkpoint -- --test-threads=1
   else
     cargo test --locked -p fgit-forge --lib source_symbols -- --test-threads=1
-    cargo test --locked -p fgit-node --test source_symbol_index --test source_symbol_reconcile --bin fg-symbol-index -- --test-threads=1
+    cargo test --locked -p fgit-node --test source_symbol_index --test source_symbol_reconcile \
+      --test source_symbol_directory --bin fg-symbol-index -- --test-threads=1
     cargo test --locked -p fgit-node --lib smart_http::server::source::symbols -- --test-threads=1
     cargo test --locked -p fgit-node --lib treefs_workspace::source_search -- --test-threads=1
   fi

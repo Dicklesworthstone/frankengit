@@ -15,6 +15,7 @@ on:
       - 'crates/fgit-node/src/bin/index_maintenance/**'
       - 'crates/fgit-node/tests/source_symbol_index.rs'
       - 'crates/fgit-node/tests/source_symbol_index/**'
+      - 'crates/fgit-node/tests/source_symbol_directory.rs'
       - 'crates/fgit-node/tests/source_symbol_reconcile.rs'
       - 'crates/fgit-node/tests/source_symbol_worker.rs'
       - 'crates/fgit-node/tests/source_symbol_worker/**'
