@@ -15,6 +15,7 @@ mod rebase;
 mod rebase_apply;
 mod review_commands;
 mod smart_http_server;
+mod ssh_server;
 mod source_browse;
 mod source_history;
 mod source_review;
@@ -337,6 +338,8 @@ fn main() -> ExitCode {
     }
     let outcome = if arguments.first().is_some_and(|argument| argument == "serve") {
         guarded_git_server::run(&arguments)
+    } else if arguments.first().is_some_and(|argument| argument == "serve-ssh") {
+        ssh_server::run(&arguments)
     } else {
         fgit_cli::run(&arguments).map_err(|error| error.to_string())
     };

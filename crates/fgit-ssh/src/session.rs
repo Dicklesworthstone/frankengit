@@ -202,6 +202,12 @@ impl SshServerSession {
         self.active_command.as_ref()
     }
 
+    /// The client channel ID, if a channel has been opened.
+    #[must_use]
+    pub const fn client_channel_id(&self) -> Option<u32> {
+        self.client_channel_id
+    }
+
     /// Whether the client sent EOF on the active channel.
     #[must_use]
     pub const fn is_channel_eof_received(&self) -> bool {
@@ -725,5 +731,11 @@ impl SshServerSession {
         close.write_u8(msg::CHANNEL_CLOSE);
         close.write_u32(recipient_channel);
         self.send_packet(&close.into_bytes());
+    }
+
+    /// Closes the active client channel with an exit status code.
+    pub fn send_channel_exit_and_close(&mut self, exit_status: u32) {
+        let recipient = self.client_channel_id.unwrap_or(0);
+        self.send_channel_close(recipient, exit_status);
     }
 }

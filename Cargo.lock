@@ -733,7 +733,9 @@ dependencies = [
  "fgit-codec",
  "fgit-crypto",
  "fgit-forge",
+ "fgit-identity",
  "fgit-node",
+ "fgit-ssh",
  "fgit-types",
 ]
 
@@ -876,6 +878,7 @@ dependencies = [
  "fgit-forge",
  "fgit-git-object",
  "fgit-graph",
+ "fgit-identity",
  "fgit-lab",
  "fgit-object-fabric",
  "fgit-pack",
@@ -883,6 +886,7 @@ dependencies = [
  "fgit-resource",
  "fgit-runner",
  "fgit-runtime",
+ "fgit-ssh",
  "fgit-treefs",
  "fgit-txn",
  "fgit-types",

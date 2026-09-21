@@ -130,6 +130,9 @@ pub use smart_http::{NodeSmartHttpDiscovery, NodeSmartHttpRefusal, NodeSmartHttp
 mod quarantine_validator;
 mod verified_reads;
 mod upload_visibility;
+mod ssh;
+
+pub use ssh::{NodeSshRefusal, SshServerLimits, SshServerReceipt};
 
 pub use loose_import::{LooseGitImportRefusal, StagedLooseGitImport};
 pub use quarantine_validator::ProductionQuarantineValidator;
@@ -153,8 +156,8 @@ const ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX: &[u8] =
 const ADMISSION_RETENTION_DELTA_KEY_PREFIX: &[u8] = b"frankengit/admission/retention-delta/v1/";
 const ADMISSION_CACHE_SCOPE: &[u8] = b"node/admission-cache/v1";
 const AUTHORITY_CONTEXT_BUDGET_CLASS: BudgetClass = BudgetClass::Database;
-const SELECTED_PACK_BUDGET_CLASS: BudgetClass = BudgetClass::Transfer;
-const SELECTED_PACK_MATERIALIZATION_OPERATION: &str = "materialize selected git pack";
+pub(crate) const SELECTED_PACK_BUDGET_CLASS: BudgetClass = BudgetClass::Transfer;
+pub(crate) const SELECTED_PACK_MATERIALIZATION_OPERATION: &str = "materialize selected git pack";
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 const AUTHORITY_DATABASE_FILE: &str = "authority.fsqlite";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -185,7 +188,7 @@ const GIT_DAEMON_CAPABILITIES: &[u8] = b"allow-reachable-sha1-in-want shallow de
 /// Anyone extending this node to protocol v2 must NOT carry the order across.
 /// The same oracle run shows v2 emitting `agent=` first and `object-format=`
 /// last, so the v0/v1 order is not a global Git convention.
-fn git_daemon_capabilities(object_format: GitHashAlgorithm, head_target: Option<&[u8]>) -> Vec<u8> {
+pub(crate) fn git_daemon_capabilities(object_format: GitHashAlgorithm, head_target: Option<&[u8]>) -> Vec<u8> {
     let mut tokens = b"object-format=".to_vec();
     tokens.extend_from_slice(object_format.as_str().as_bytes());
     // `ofs-delta` opens delta-compressed serving: without this token a v0/v1
@@ -1054,7 +1057,7 @@ impl From<PackWriteError> for NodePackMaterializationRefusal {
     }
 }
 
-enum PackContextCheckpoint {
+pub(crate) enum PackContextCheckpoint {
     Live,
     Stopped {
         budget_exhaustion: Option<Exhaustion>,
@@ -1072,7 +1075,7 @@ enum PackContextCheckpoint {
 /// the ordinary `FrankenSQLite` checkpoint fallback. Node authority contexts do
 /// not install `FrankenSQLite`'s optional e-process oracle; adding one requires
 /// an oracle-only probe rather than routing back through this lossy bridge.
-fn checkpoint_pack_context(context: &FsqliteCx) -> PackContextCheckpoint {
+pub(crate) fn checkpoint_pack_context(context: &FsqliteCx) -> PackContextCheckpoint {
     if context.is_cancel_requested() {
         // The already-published local flag keeps this checkpoint on
         // FrankenSQLite's local acknowledgement path; it does not poll native.
@@ -3223,7 +3226,7 @@ fn reachable_within_permitted_closure_bounded(
 /// `ofs-delta` gates the delta-capable interior-match profile; a client that
 /// never echoed it receives structurally delta-free full bases, because a
 /// v0/v1 pack may carry OFS_DELTA entries only under that capability.
-const fn selected_write_profile(ofs_delta_negotiated: bool) -> PackWriteProfile {
+pub(crate) const fn selected_write_profile(ofs_delta_negotiated: bool) -> PackWriteProfile {
     if ofs_delta_negotiated {
         PackWriteProfile::COMPRESSED_V2
     } else {
@@ -4464,6 +4467,16 @@ impl Write for DeadlineTcpStream<'_> {
     }
 }
 
+pub(crate) trait ReceiveResponseWriter: Write {
+    fn restart_deadline(&mut self, deadline: GitDaemonSessionDeadline);
+}
+
+impl ReceiveResponseWriter for DeadlineTcpStream<'_> {
+    fn restart_deadline(&mut self, deadline: GitDaemonSessionDeadline) {
+        self.restart_deadline(deadline);
+    }
+}
+
 impl GitDaemonRequest {
     /// Returns the canonical authority lookup key requested by the client.
     #[must_use]
@@ -4946,7 +4959,7 @@ fn drain_client_request(reader: &mut impl Read, limits: &WireLimits) {
 /// lets a node validate the parsed opaque repository key before it refreshes
 /// authority-backed state, without duplicating any advertisement, negotiation,
 /// or pack-emission behavior from `fgit-wire`.
-fn serve_git_daemon_upload_pack_after_greeting<R, W, BuildPack, Payload, PackError>(
+pub(crate) fn serve_git_daemon_upload_pack_after_greeting<R, W, BuildPack, Payload, PackError>(
     reader: &mut R,
     writer: &mut W,
     request: GitDaemonRequest,
@@ -7677,15 +7690,16 @@ impl OneNode {
     /// The client retry identity is the digest of the exact command section,
     /// so an identical retried push resolves to the same sealed transaction
     /// while any semantic change selects a fresh identity.
-    fn serve_git_daemon_receive_pack_session<R>(
+    pub(crate) fn serve_git_daemon_receive_pack_session<R, W>(
         &self,
         reader: &mut R,
-        writer: &mut DeadlineTcpStream<'_>,
+        writer: &mut W,
         inputs: ReceivePackSessionInputs<'_>,
         limits: &WireLimits,
     ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal>
     where
         R: Read,
+        W: ReceiveResponseWriter,
     {
         let ReceivePackSessionInputs {
             deadline,

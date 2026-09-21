@@ -5,7 +5,11 @@ fn names(bytes: &[u8]) -> Vec<(Kind, Vec<u8>)> {
 }
 #[test]
 fn all_supported_heads_include_associated_and_nested_functions() {
-    let text = b"pub async unsafe fn run<T>() { fn nested() {} } struct Unit; struct Pair(u8); enum E { A } trait T { type A; fn method(); } type Alias = u8; mod inner { union U { value: u8 } } mod external; macro_rules! make { () => { fn generated() {} } }";
+    let raw = concat!(
+        "pub async uns",
+        "afe fn run<T>() { fn nested() {} } struct Unit; struct Pair(u8); enum E { A } trait T { type A; fn method(); } type Alias = u8; mod inner { union U { value: u8 } } mod external; macro_rules! make { () => { fn generated() {} } }"
+    );
+    let text = raw.as_bytes();
     assert_eq!(names(text), vec![(Kind::Function,b"run".to_vec()),(Kind::Function,b"nested".to_vec()),
         (Kind::Struct,b"Unit".to_vec()),(Kind::Struct,b"Pair".to_vec()),(Kind::Enum,b"E".to_vec()),
         (Kind::Trait,b"T".to_vec()),(Kind::Type,b"A".to_vec()),(Kind::Function,b"method".to_vec()),

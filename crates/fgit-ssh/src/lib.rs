@@ -22,4 +22,5 @@ pub use crypto::{
     CIPHER_CHACHA20_POLY1305, CryptoError, Curve25519Kex, KEX_CURVE25519_SHA256,
     KEX_CURVE25519_SHA256_LIBSSH, OpenSshChaCha20Poly1305, SSH_ED25519_ALGORITHM,
 };
+pub use ed25519_dalek::SigningKey;
 pub use session::{SERVER_IDENTIFICATION, SessionPhase, SshServerSession, SshSessionError};

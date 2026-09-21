@@ -21,7 +21,9 @@ fgit-authority.workspace = true
 fgit-codec.workspace = true
 fgit-crypto.workspace = true
 fgit-forge.workspace = true
+fgit-identity.workspace = true
 fgit-node.workspace = true
+fgit-ssh.workspace = true
 fgit-types.workspace = true
 
 [lints]
