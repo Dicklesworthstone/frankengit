@@ -18,6 +18,7 @@ mod bundles;
 mod regex;
 mod indexed;
 mod symbols;
+mod retrieval;
 
 use std::io::{self, Read, Write};
 use fgit_authority::IdempotencyKey;
@@ -40,6 +41,7 @@ enum RequestKind<'a> {
     Regex(regex::Request<'a>),
     Indexed(indexed::Request<'a>),
     Symbols(symbols::Request<'a>),
+    Retrieval(retrieval::Request<'a>),
     Change(changes::Request<'a>),
     Refs(refs::Request<'a>),
     Tags(tags::Request<'a>),
@@ -53,6 +55,9 @@ enum RequestKind<'a> {
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Self, ApiError> {
+        if let Some(request) = retrieval::Request::parse(envelope)? {
+            return Ok(Self(RequestKind::Retrieval(request)));
+        }
         if let Some(request) = symbols::Request::parse(envelope)? {
             return Ok(Self(RequestKind::Symbols(request)));
         }
@@ -97,7 +102,8 @@ impl<'a> Request<'a> {
     pub(super) fn is_mutation(&self) -> bool {
         match &self.0 {
             RequestKind::Read(_) | RequestKind::History(_) | RequestKind::Historical(_)
-            | RequestKind::Review(_) | RequestKind::Replay(_) | RequestKind::Regex(_) | RequestKind::Indexed(_) | RequestKind::Symbols(_) => false,
+            | RequestKind::Review(_) | RequestKind::Replay(_) | RequestKind::Regex(_) | RequestKind::Indexed(_) | RequestKind::Symbols(_)
+            | RequestKind::Retrieval(_) => false,
             RequestKind::Bundle(request) => request.is_mutation(),
             RequestKind::Rebase(request) => request.is_mutation(),
             RequestKind::Change(request) => request.is_mutation(),
@@ -112,6 +118,7 @@ impl<'a> Request<'a> {
             RequestKind::Regex(request) => request.repository_route,
             RequestKind::Indexed(request) => request.repository_route,
             RequestKind::Symbols(request) => request.repository_route,
+            RequestKind::Retrieval(request) => request.repository_route,
             RequestKind::Change(request) => request.repository_route,
             RequestKind::Refs(request) => request.route(),
             RequestKind::Tags(request) => request.route(),
@@ -171,6 +178,7 @@ pub(super) fn execute(node: &OneNode, request: &Request<'_>, session: &LoopbackR
     framing: BodyFraming, reader: &mut impl Read, http: HttpLimits, maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let request = match &request.0 {
+        RequestKind::Retrieval(request) => return retrieval::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Symbols(request) => return symbols::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Indexed(request) => return indexed::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),
         RequestKind::Regex(request) => return regex::execute(node, request, session, framing, reader, http, maximum_response).map(Reply::json),

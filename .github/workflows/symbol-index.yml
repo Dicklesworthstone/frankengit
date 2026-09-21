@@ -4,6 +4,16 @@ on:
     branches: [main]
     paths:
       - 'crates/fgit-forge/src/source_symbols/**'
+      - 'crates/fgit-node/src/lib.rs'
+      - 'crates/fgit-node/src/source_retrieval.rs'
+      - 'crates/fgit-node/src/source_retrieval/**'
+      - 'crates/fgit-node/src/smart_http/server/source.rs'
+      - 'crates/fgit-node/src/smart_http/server/source/indexed.rs'
+      - 'crates/fgit-node/src/smart_http/server/source/retrieval.rs'
+      - 'crates/fgit-node/src/smart_http/server/source/retrieval/**'
+      - 'crates/fgit-node/tests/source_initial_retrieval.rs'
+      - 'crates/fgit-node/tests/source_initial_retrieval/**'
+      - 'scripts/verify_source_initial.sh'
       - 'crates/fgit-node/src/treefs_workspace/source_search.rs'
       - 'crates/fgit-node/src/treefs_workspace/source_search/tests.rs'
       - 'crates/fgit-node/src/treefs_workspace/source_search/symbols*'

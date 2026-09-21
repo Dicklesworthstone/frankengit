@@ -6,7 +6,7 @@ use fgit_graph::{GenerationActivation, GenerationAuthorityError, GraphGeneration
 use fgit_crypto::{IdentityDomain, internal_algorithm_id, internal_domain_tag};
 use fgit_types::{CANONICAL_CODEC_VERSION, DigestBytes, HeadGeneration, InternalObjectId};
 type Failure = AccessError<NodeWorkspaceRefusal,GenerationAuthorityError>;
-fn refusal(error:Failure)->ApiError {
+pub(in super::super) fn refusal(error:Failure)->ApiError {
     match error {
         AccessError::Source(error)=>read_error(error),
         AccessError::Uninitialized=>ApiError::new(Status::Conflict,"symbol_index_uninitialized"),
@@ -107,6 +107,18 @@ fn render(node:&OneNode,command:&Command,report:&data::Report,maximum:usize,live
     for (i,row) in report.matches.iter().enumerate(){check(live)?;if i!=0{append(&mut out,",",maximum)?;}
         append(&mut out,&row_json(row,query,node.object_format,command.limits.max_file_bytes)?,maximum)?;}
     append(&mut out,"]}",maximum)?;check(live)?;Ok(out)
+}
+/// Initial retrieval retains the same symbol row, scope and profile validator.
+pub(in super::super) fn render_initial(node: &OneNode, report: &data::Report, query: &SymbolQuery,
+    budget: (usize, usize), maximum: usize, live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
+    if report.payload_bytes_read > budget.1 { return Err(ApiError::unavailable()); }
+    let command = Command {
+        selection: Selection { reference: report.source.reference.clone(),
+            expected_head: Some(report.source.head), expected_commit: Some(report.source.commit) },
+        query: query.clone(), limits: SearchLimits { max_matches: budget.0, ..Default::default() },
+    };
+    render(node, &command, report, maximum, live)
 }
 #[cfg(test)]
 mod tests {

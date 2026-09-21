@@ -1,6 +1,6 @@
 //! Closed, read-only Rust declaration HTTP profile. Credentials, service gates,
 //! request quotas and transaction-key refusal remain in the source gateway.
-mod indexed;
+pub(super) mod indexed;
 use std::collections::BTreeMap;
 use std::io::Read;
 use fgit_forge::source_search::{SearchCompletion, SearchLimits};
@@ -51,7 +51,7 @@ fn positive(fields: &mut BTreeMap<String,String>, name: &str, default: u64, maxi
     let value=fields.remove(name).map(|v|parse_decimal(&v)).transpose()?.unwrap_or(default);
     if value==0 || value>maximum {return Err(ApiError::bad("invalid_symbol_limit"));} Ok(value)
 }
-fn kind(value: &str) -> Result<SymbolKind,ApiError> {
+pub(super) fn kind(value: &str) -> Result<SymbolKind,ApiError> {
     match value {
         "function"=>Ok(SymbolKind::Function),"struct"=>Ok(SymbolKind::Struct),"enum"=>Ok(SymbolKind::Enum),
         "trait"=>Ok(SymbolKind::Trait),"type"=>Ok(SymbolKind::Type),"module"=>Ok(SymbolKind::Module),

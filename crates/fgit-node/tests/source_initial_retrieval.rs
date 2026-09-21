@@ -196,3 +196,6 @@ fn missing_lexical_index_never_becomes_a_source_scan_or_implicit_build() {
     }
     node.shutdown().unwrap();
 }
+
+#[path = "source_initial_retrieval/http.rs"]
+mod http;

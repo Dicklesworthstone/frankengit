@@ -20,25 +20,31 @@ use super::super::issues::{ApiError, MAX_FORM_BYTES, parse_decimal, parse_form, 
 pub(super) struct Request<'a> { pub repository_route: &'a str }
 impl<'a> Request<'a> {
     pub(super) fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
-        let (path, query) = head.target.split_once('?').map_or((head.target, None), |(p, q)| (p, Some(q)));
-        let Some(route) = path.strip_suffix("/api/v1/source/search-index") else { return Ok(None); };
-        if route.len() < 2 || !route.starts_with('/') || route[1..].split('/').any(|part|
-            part.is_empty() || matches!(part, "." | "..")
-                || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)))
-        { return Err(ApiError::not_found()); }
-        if head.method != "POST" { return Err(ApiError::method()); }
-        if query.is_some() || matches!(head.body, BodyFraming::Empty | BodyFraming::ContentLength(0))
-            || head.git_protocol.is_some()
-        { return Err(ApiError::bad("invalid_index_envelope")); }
-        if !head.content_type.is_some_and(|media|
-            media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
-                || media.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8"))
-        { return Err(ApiError::media()); }
-        if matches!(head.body, BodyFraming::ContentLength(n) if n > MAX_FORM_BYTES as u64) {
-            return Err(ApiError::too_large());
-        }
-        Ok(Some(Self { repository_route: route }))
+        read_route(head, "/api/v1/source/search-index")
+            .map(|route| route.map(|repository_route| Self { repository_route }))
     }
+}
+/// Shared bounded read envelope; the source gateway still owns credentials,
+/// service scope, route binding, and transaction-key refusal.
+pub(super) fn read_route<'a>(head: &Envelope<'a>, suffix: &str) -> Result<Option<&'a str>, ApiError> {
+    let (path, query) = head.target.split_once('?').map_or((head.target, None), |(p, q)| (p, Some(q)));
+    let Some(route) = path.strip_suffix(suffix) else { return Ok(None); };
+    if route.len() < 2 || !route.starts_with('/') || route[1..].split('/').any(|part|
+        part.is_empty() || matches!(part, "." | "..")
+            || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)))
+    { return Err(ApiError::not_found()); }
+    if head.method != "POST" { return Err(ApiError::method()); }
+    if query.is_some() || matches!(head.body, BodyFraming::Empty | BodyFraming::ContentLength(0))
+        || head.git_protocol.is_some()
+    { return Err(ApiError::bad("invalid_index_envelope")); }
+    if !head.content_type.is_some_and(|media|
+        media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+            || media.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8"))
+    { return Err(ApiError::media()); }
+    if matches!(head.body, BodyFraming::ContentLength(n) if n > MAX_FORM_BYTES as u64) {
+        return Err(ApiError::too_large());
+    }
+    Ok(Some(route))
 }
 
 #[derive(Debug)]
@@ -54,12 +60,12 @@ struct Command {
 fn take(fields: &mut BTreeMap<String, String>, name: &str) -> Result<String, ApiError> {
     fields.remove(name).ok_or_else(|| ApiError::bad("missing_index_field"))
 }
-fn positive(fields: &mut BTreeMap<String, String>, name: &str, default: u64, maximum: u64) -> Result<u64, ApiError> {
+pub(super) fn positive(fields: &mut BTreeMap<String, String>, name: &str, default: u64, maximum: u64) -> Result<u64, ApiError> {
     let value = fields.remove(name).map(|v| parse_decimal(&v)).transpose()?.unwrap_or(default);
     if value == 0 || value > maximum { return Err(ApiError::bad("invalid_index_limit")); }
     Ok(value)
 }
-fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
+pub(super) fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
     if text.is_empty() || text.len() % 2 != 0 || text.len() > maximum * 2
         || !text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     { return Err(ApiError::bad("invalid_hex_bytes")); }
@@ -78,7 +84,7 @@ fn generation_id(text: &str) -> Result<GraphGenerationId, ApiError> {
         GraphGenerationId::DOMAIN_TAG, CANONICAL_CODEC_VERSION, digest))
         .map_err(|_| ApiError::bad("invalid_index_generation"))
 }
-fn activation(fields: &mut BTreeMap<String, String>, token: &str, number: &str) -> Result<Option<GenerationActivation>, ApiError> {
+pub(super) fn activation(fields: &mut BTreeMap<String, String>, token: &str, number: &str) -> Result<Option<GenerationActivation>, ApiError> {
     match (fields.remove(token), fields.remove(number)) {
         (None, None) => Ok(None),
         (Some(token), Some(number)) => Ok(Some(GenerationActivation {
@@ -141,7 +147,7 @@ fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> 
     Ok(Command { selection: Selection { reference, expected_head, expected_commit }, generation, minimum, query, after, limits, reads })
 }
 
-fn failure(error: NodeWorkspaceRefusal) -> ApiError {
+pub(super) fn failure(error: NodeWorkspaceRefusal) -> ApiError {
     match error {
         NodeWorkspaceRefusal::SourceIndexStale => ApiError::new(Status::Conflict, "source_index_stale"),
         NodeWorkspaceRefusal::SourceIndex(error) => match *error {
@@ -173,14 +179,14 @@ pub(super) fn execute(node: &OneNode, _request: &Request<'_>, session: &Loopback
     let body = render(node, &command, &report, usize::try_from(maximum).unwrap_or(usize::MAX), &mut live)?;
     Ok(JsonReply { status: Status::Success, body, terminal: None })
 }
-fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
-fn token(id: &InternalObjectId) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
+pub(super) fn token(id: &InternalObjectId) -> String {
     format!("alg:{}:{}", id.algorithm().code_point(), hex(id.digest().as_bytes()))
 }
-fn check(live: &mut impl FnMut() -> bool) -> Result<(), ApiError> {
+pub(super) fn check(live: &mut impl FnMut() -> bool) -> Result<(), ApiError> {
     if live() { Ok(()) } else { Err(ApiError::from_status(Status::Timeout, false)) }
 }
-fn append(out: &mut String, value: &str, maximum: usize) -> Result<(), ApiError> {
+pub(super) fn append(out: &mut String, value: &str, maximum: usize) -> Result<(), ApiError> {
     if out.len().checked_add(value.len()).is_none_or(|n| n > maximum.min(super::output::MAX_REPLY_BYTES)) { return Err(ApiError::too_large()); }
     out.try_reserve(value.len()).map_err(|_| ApiError::unavailable())?;
     out.push_str(value); Ok(())
@@ -226,6 +232,20 @@ fn rows(command: &Command, report: &IndexedLexicalReport, maximum: usize,
     }
     check(live)?; Ok(out)
 }
+/// Reuse the complete single-channel validator for a joined Initial response.
+/// The caller has already validated the complete source/generation vector.
+pub(super) fn render_initial(node: &OneNode, report: &IndexedLexicalReport, query: &LexicalQuery,
+    budget: (LexicalQueryLimits, LexicalReadLimits), maximum: usize, live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
+    let command = Command {
+        selection: Selection { reference: report.source.reference.clone(),
+            expected_head: Some(report.source.source_head), expected_commit: Some(report.source.commit) },
+        generation: Some(report.generation.clone()), minimum: None, query: query.clone(), after: None,
+        limits: budget.0, reads: budget.1,
+    };
+    render(node, &command, report, maximum, live)
+}
+
 fn render(node: &OneNode, command: &Command, report: &IndexedLexicalReport, maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
