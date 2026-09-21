@@ -363,7 +363,29 @@ impl OneNode {
             }
         };
 
-        if child_node.bring_into_service(HeadGeneration::FIRST).is_err() {
+        let head = match child_node.runtime().block_on(child_node.authenticate_authority_head()) {
+            Ok(head) => head,
+            Err(_) => {
+                let recipient = session.client_channel_id().unwrap_or(0);
+                session.send_channel_extended_data(
+                    recipient,
+                    b"ERR: Could not authenticate repository authority head\n",
+                );
+                session.send_channel_exit_and_close(1);
+                let out = session.take_outgoing_bytes();
+                let _ = stream.write_all(&out);
+                let _ = stream.flush();
+                let _ = child_node.shutdown();
+                return false;
+            }
+        };
+
+        if child_node.bring_into_service(head.receipt().generation()).is_err() {
+            let recipient = session.client_channel_id().unwrap_or(0);
+            session.send_channel_extended_data(
+                recipient,
+                b"ERR: Could not bring repository into service\n",
+            );
             session.send_channel_exit_and_close(1);
             let out = session.take_outgoing_bytes();
             let _ = stream.write_all(&out);
@@ -449,7 +471,7 @@ impl OneNode {
 
         let greeting = GitDaemonRequest {
             repository_path: self.git_daemon_repository_path.clone(),
-            service: GitDaemonService::UploadPack(UploadPackVersion::V1),
+            service: GitDaemonService::UploadPack(UploadPackVersion::V0),
         };
 
         let disclosure = self.prepare_visible_upload_pack(
