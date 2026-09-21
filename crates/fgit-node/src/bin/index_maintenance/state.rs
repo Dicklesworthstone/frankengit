@@ -6,6 +6,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+#[path = "ownership.rs"]
+mod ownership;
+
 pub const MAX_REFS: usize = 32;
 pub const MAX_STATE_BYTES: usize = 64 * 1024;
 const MAGIC: &str = "frankengit-index-worker-v2";
@@ -184,9 +187,10 @@ impl State {
 }
 
 /// Exclusive operator progress ownership, not a lock on Git refs or authority.
-/// No Drop cleanup: abnormal exit leaves run.lock so restart cannot erase an
-/// unknown in-flight operation. Release follows explicit native-node shutdown.
-pub struct ProgressFile { directory: PathBuf, _lock: File, pub state: State }
+/// Process-owned locking permits restart after process death, without changing
+/// any pending candidate or checkpoint. Drop never releases a live owner; normal
+/// release follows explicit native-node shutdown. Legacy sentinels stay blocked.
+pub struct ProgressFile { directory: PathBuf, owner: ownership::Owner, pub state: State }
 impl ProgressFile {
     pub fn open(directory: &Path, initialize: bool, expected: State) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(directory)?;
@@ -196,8 +200,8 @@ impl ProgressFile {
             if metadata.permissions().mode() & 0o077 != 0 { return Err(invalid("progress directory must be private (0700)")); }
         }
         if !cfg!(unix) { return Err(io::Error::new(io::ErrorKind::Unsupported, "durable maintenance progress requires the Unix profile")); }
-        let lock = private_new(&directory.join("run.lock"))?;
-        let mut result = Self { directory: directory.to_path_buf(), _lock: lock, state: expected };
+        let owner = ownership::Owner::acquire(directory, initialize)?;
+        let mut result = Self { directory: directory.to_path_buf(), owner, state: expected };
         let load = (|| {
             let path = directory.join("checkpoint");
             if initialize {
@@ -226,8 +230,7 @@ impl ProgressFile {
         if let Err(error) = load {
             // No native operation has started. Leave suspect checkpoint bytes
             // intact, but do not strand our newly acquired local ownership.
-            drop(result._lock);
-            let _ = fs::remove_file(directory.join("run.lock"));
+            result.owner.abort_open();
             return Err(error);
         }
         Ok(result)
@@ -240,17 +243,17 @@ impl ProgressFile {
         self.save()
     }
     pub fn save(&self) -> io::Result<()> {
+        self.owner.check()?;
         let bytes = self.state.encode()?;
         let next = self.directory.join("checkpoint.next");
         let mut file = private_new(&next)?;
         file.write_all(&bytes)?; file.sync_all()?; drop(file);
+        self.owner.check()?;
         fs::rename(&next, self.directory.join("checkpoint"))?;
         File::open(&self.directory)?.sync_all()
     }
     pub fn release(self) -> io::Result<()> {
-        drop(self._lock);
-        fs::remove_file(self.directory.join("run.lock"))?;
-        File::open(self.directory)?.sync_all()
+        self.owner.release()
     }
 }
 fn private_new(path: &Path) -> io::Result<File> {
@@ -266,3 +269,7 @@ mod tests;
 #[cfg(test)]
 #[path = "checkpoint_tests.rs"]
 mod checkpoint_tests;
+
+#[cfg(all(test, unix))]
+#[path = "ownership_tests.rs"]
+mod ownership_tests;
