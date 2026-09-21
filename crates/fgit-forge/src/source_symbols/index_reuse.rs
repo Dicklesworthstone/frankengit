@@ -21,6 +21,7 @@ pub struct ReuseVerifier {
     source: Source,
     pending: BTreeMap<GitOid, Document>,
     verified: BTreeMap<GitOid, Document>,
+    names: BTreeMap<GitOid, directory::Names>,
 }
 
 /// Complete verified predecessor inventory, not repository authority. Its
@@ -28,6 +29,7 @@ pub struct ReuseVerifier {
 pub struct VerifiedReuse {
     source: Source,
     documents: BTreeMap<GitOid, Document>,
+    names: BTreeMap<GitOid, directory::Names>,
 }
 
 fn same_table(left: &Document, right: &Document) -> bool {
@@ -56,7 +58,7 @@ impl ReuseVerifier {
                 pending.insert(doc.blob, doc.clone());
             }
         }
-        Ok(Self { source: manifest.source().clone(), pending, verified: BTreeMap::new() })
+        Ok(Self { source: manifest.source().clone(), pending, verified: BTreeMap::new(), names: BTreeMap::new() })
     }
 
     /// The next exact payload to read, in deterministic native-object order.
@@ -69,10 +71,12 @@ impl ReuseVerifier {
     pub fn verify_next(&mut self, raw: &[u8], cancelled: &dyn Fn() -> bool) -> Result<(), Error> {
         check(cancelled)?;
         let doc = self.next_document().ok_or(Error::Invalid("unexpected reuse table"))?;
-        decode_table(doc, raw, cancelled)?;
+        let table = decode_table(doc, raw, cancelled)?;
+        let names = directory::summarize(&table, cancelled)?;
         check(cancelled)?;
         let doc = doc.clone();
         self.pending.remove(&doc.blob);
+        self.names.insert(doc.blob, names);
         self.verified.insert(doc.blob, doc);
         Ok(())
     }
@@ -83,7 +87,7 @@ impl ReuseVerifier {
         if !self.pending.is_empty() {
             return Err(Error::Invalid("unverified reuse tables"));
         }
-        Ok(VerifiedReuse { source: self.source, documents: self.verified })
+        Ok(VerifiedReuse { source: self.source, documents: self.verified, names: self.names })
     }
 }
 
@@ -92,6 +96,9 @@ impl VerifiedReuse {
 
     pub(super) fn document(&self, blob: &GitOid) -> Option<&Document> {
         self.documents.get(blob)
+    }
+    pub(super) fn names(&self, blob: &GitOid) -> Result<&directory::Names, Error> {
+        self.names.get(blob).ok_or(Error::Invalid("missing verified names"))
     }
 }
 

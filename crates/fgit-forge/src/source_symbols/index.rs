@@ -18,6 +18,7 @@ pub use super::table::Error as TableError;
 #[path = "index_reuse.rs"]
 mod reuse;
 pub use reuse::{RefreshStats, ReuseVerifier, VerifiedReuse};
+pub use directory::{DIRECTORY_PROFILE, NameDirectory};
 
 pub const INDEX_PROFILE: &str = "rust-declaration-tables-v1";
 pub const MAX_PAYLOAD: usize = 1024 * 1024;
@@ -224,9 +225,9 @@ fn decode_table(doc: &Document, raw: &[u8], cancelled: &dyn Fn() -> bool) -> Res
 }
 
 /// Complete scanner inventory. It cannot be truncated by max_matches.
-pub struct Corpus { source: SourceSearchReport, documents: Vec<Document>, tables: Vec<Payload>, unsupported: usize, reused: usize, reuse_scope: Option<Source> }
+pub struct Corpus { source: SourceSearchReport, documents: Vec<Document>, tables: Vec<Payload>, unsupported: usize, reused: usize, reuse_scope: Option<Source>, names: Vec<directory::Names> }
 impl Corpus {
-    pub fn empty(source: SourceSearchReport) -> Self { Self { source, documents: Vec::new(), tables: Vec::new(), unsupported: 0, reused: 0, reuse_scope: None } }
+    pub fn empty(source: SourceSearchReport) -> Self { Self { source, documents: Vec::new(), tables: Vec::new(), unsupported: 0, reused: 0, reuse_scope: None, names: Vec::new() } }
     pub fn finish(self, source: Source, cancelled: &dyn Fn() -> bool) -> Result<(Manifest, Vec<Payload>), Error> {
         if source.repository != self.source.repository || source.rcr != self.source.source_rcr
             || source.commit != self.source.source_commit || source.tree != self.source.source_tree
@@ -236,6 +237,23 @@ impl Corpus {
         }
         let manifest = Manifest { source, documents: self.documents, unsupported: self.unsupported, non_regular: self.source.non_regular_entries };
         manifest.encode(cancelled)?; Ok((manifest, self.tables))
+    }
+    /// Add the optional accelerated layout without changing v1 table/manifest
+    /// identity or reducing its admitted corpus. Only directory-size overflow
+    /// selects legacy layout; integrity, source and cancellation errors refuse.
+    pub fn finish_with_directory(mut self, source: Source, cancelled: &dyn Fn() -> bool)
+        -> Result<(Manifest, Vec<Payload>, Option<Payload>), Error>
+    {
+        let names = std::mem::take(&mut self.names);
+        let (manifest, tables) = self.finish(source, cancelled)?;
+        let directory = NameDirectory::build(&manifest, &names, cancelled)?;
+        let directory = match directory.encode(&manifest, cancelled) {
+            Ok(payload) => Some(payload),
+            Err(Error::Limit("directory bytes")) => None,
+            Err(error) => return Err(error),
+        };
+        check(cancelled)?;
+        Ok((manifest, tables, directory))
     }
     pub fn source(&self) -> &SourceSearchReport { &self.source }
     /// Current paths whose tables were reused without fetching/scanning blobs.
@@ -278,13 +296,14 @@ pub fn prepare_with_reuse<A: GitHashAlgorithm, S: ObjectSource<A>>(
         if !path.as_bytes().ends_with(b".rs") { corpus.unsupported += 1; continue; }
         let grant = capability.authorize_read(&path, now).map_err(SearchError::Capability)?;
         let native = super::oid::<A>(&blob)?;
-        if let Some(previous) = reuse.and_then(|prior| prior.document(&native)) {
+        if let Some((prior, previous)) = reuse.and_then(|prior| prior.document(&native).map(|doc| (prior, doc))) {
             if previous.source_bytes > limits.max_file_bytes { return Err(Error::Limit("source file bytes")); }
             add(&mut referenced, previous.source_bytes, limits.max_total_bytes, "source bytes")?;
             add(&mut encoded, previous.encoded_bytes, MAX_INDEX_BYTES, "index bytes")?;
             add(&mut declarations, previous.declarations, engine::MAX_DECLARATIONS, "declarations")?;
             let mut doc = previous.clone();
             doc.path = path.as_bytes().to_vec();
+            corpus.names.push(prior.names(&native)?.clone());
             corpus.documents.push(doc);
             corpus.reused += 1;
             continue;
@@ -300,6 +319,7 @@ pub fn prepare_with_reuse<A: GitHashAlgorithm, S: ObjectSource<A>>(
         add(&mut declarations, table.rows().len(), engine::MAX_DECLARATIONS, "declarations")?;
         let payload = table_payload(blob, &table, cancelled)?;
         add(&mut encoded, payload.bytes.len(), MAX_INDEX_BYTES, "index bytes")?;
+        corpus.names.push(directory::summarize(&table, cancelled)?);
         corpus.documents.push(Document { path: path.as_bytes().to_vec(), blob, root: payload.root,
             encoded_bytes: payload.bytes.len(), source_bytes: bytes.len(), declarations: table.rows().len(),
             macros: table.macros, attributes: table.attributes });
@@ -362,3 +382,6 @@ impl Query {
 #[cfg(test)]
 #[path = "index_tests.rs"]
 mod tests;
+
+#[path = "index_directory.rs"]
+mod directory;
