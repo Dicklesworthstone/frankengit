@@ -7,7 +7,7 @@ impl OneNode {
     /// or refresh the exact observed predecessor. The caller explicitly owns
     /// local maintenance authority. An HTTP read cannot invoke this operation.
     ///
-    /// A current-index no-op verifies the generation and source-bound manifest;
+    /// A current-index no-op verifies generation, manifest and directory metadata;
     /// it does not read source blobs, audit every table, or advance the index.
     /// `minimum` is an independently retained checkpoint, not a suggested head.
     /// An unresolved checkpoint can never be converted into a new genesis.
@@ -66,6 +66,7 @@ impl OneNode {
                 .map_err(Failure::Index)?;
             let source = manifest.source();
             self.validate_symbol_source(source,body,reference)?;
+            self.verify_symbol_directory_in(request,body,&manifest,&mut bytes,data::MAX_INDEX_BYTES).await?;
             if source.head == head && source.commit == commit && source.rcr == rcr && source.forge == forge {
                 live(request)?;
                 return Ok((source.clone(),generation.activation().clone()));

@@ -11,6 +11,8 @@ use fgit_types::{SchemaFamily, SchemaId};
 use fgit_types::cell::admits_staging_intake;
 
 mod refresh;
+mod directory;
+use directory::{generation_body, symbol_manifest_root, symbol_directory_root};
 
 type Failure = data::AccessError<NodeWorkspaceRefusal, GenerationAuthorityError>;
 fn live(request: &NodeRequestContext) -> Result<(), Failure> {
@@ -18,16 +20,6 @@ fn live(request: &NodeRequestContext) -> Result<(), Failure> {
 }
 fn view() -> Result<GraphViewId, Failure> {
     GraphViewId::try_new(b"source-rust-symbols").map_err(|e| Failure::Index(e.into()))
-}
-fn schema() -> SchemaId { SchemaId::new(SchemaFamily::from_static("source-symbol-index"),1,0) }
-fn symbol_manifest_root(body: &GraphGenerationBody) -> Result<Digest, Failure> {
-    let root = *body.index_manifest_root();
-    if body.graph_schema_id()!=schema() || body.authority_class()!=GraphAuthorityClass::DeterministicDerived
-        || body.source().builder_profile != BuilderProfileId::try_new(data::INDEX_PROFILE.as_bytes()).map_err(|e|Failure::Index(e.into()))?
-        || body.source().parser_model_root != data::profile_root().map_err(Failure::Index)?
-        || *body.vertices_root()!=root || *body.edges_root()!=root || *body.evidence_root()!=root
-    { return Err(Failure::Index(data::Error::Invalid("generation profile"))); }
-    Ok(root)
 }
 struct Build(SourceQuery, Option<data::VerifiedReuse>);
 impl LocalSearch for Build {
@@ -98,23 +90,20 @@ impl OneNode {
             incarnation:self.repository_incarnation_id(),format:self.object_format,reference:reference.clone(),head,
             rcr:selected.source_rcr,forge,commit:selected.source_commit,tree:selected.source_tree };
         let cancelled = || !workspace_request_live(request);
-        let (manifest,tables) = corpus.finish(source.clone(),&cancelled).map_err(Failure::Index)?;
+        let (manifest,tables,directory) = corpus.finish_with_directory(source.clone(),&cancelled).map_err(Failure::Index)?;
         let manifest = manifest.encode(&cancelled).map_err(Failure::Index)?;
+        // The additional lookup is optional only at build time. A smaller host
+        // ceiling retains an explicitly identified legacy generation layout.
+        let directory = directory.filter(|p| p.bytes.len() <= self.authority.limits().body_bytes);
         if tables.iter().chain(std::iter::once(&manifest)).any(|p| p.bytes.len() > self.authority.limits().body_bytes) {
             return Err(Failure::Index(data::Error::Limit("authority body bytes")));
         }
-        let body = GraphGenerationBody::new(view()?,schema(),GraphAuthorityClass::DeterministicDerived,
-            GraphSourceStamp {source_rcr_id:source.rcr,source_forge_position_root:source.forge,
-                builder_profile:BuilderProfileId::try_new(data::INDEX_PROFILE.as_bytes()).map_err(|e|Failure::Index(e.into()))?,
-                parser_model_root:data::profile_root().map_err(Failure::Index)?},
-            // One immutable manifest is this view's document directory,
-            // declaration-table directory, and source/evidence catalog.
-            manifest.root,manifest.root,manifest.root,manifest.root,predecessor);
+        let body = generation_body(&source,manifest.root,directory.as_ref().map(|p| p.root),predecessor)?;
         let candidate = body.generation_id().map_err(Failure::Generation)?;
         let head_key = self.symbol_head_key(reference)?;
         live(request)?; barrier(candidate).map_err(Failure::Source)?;
         let result: Result<GenerationActivation,Failure> = async {
-            for payload in tables.iter().chain(std::iter::once(&manifest)) {
+            for payload in tables.iter().chain(directory.iter()).chain(std::iter::once(&manifest)) {
                 live(request)?;
                 match AsyncAuthorityStore::put_if_absent(&self.authority,request.authority(),&self.symbol_payload_key(payload.root)?,&payload.bytes)
                     .await.map_err(Failure::Authority)?
@@ -179,11 +168,17 @@ impl OneNode {
         }
         drop(raw);
         let mut search = data::Query::new(query,limits.max_matches).map_err(Failure::Index)?;
+        let candidates = if let Some(root) = symbol_directory_root(body)? {
+            let raw = self.read_symbol_payload(request,root,&mut bytes,maximum_payload_bytes).await?;
+            search.directory_candidates(&manifest,&raw,root,&cancelled).map_err(Failure::Index)?
+        } else {
+            manifest.documents().iter().enumerate().filter_map(|(i, doc)| search.includes(doc).then_some(i)).collect()
+        };
         let mut source_bytes = 0usize;
         let mut files = 0usize;
-        for doc in manifest.documents() {
+        for ordinal in candidates {
             live(request)?;
-            if !search.includes(doc) {continue;}
+            let doc = &manifest.documents()[ordinal];
             files += 1;
             if files > limits.max_files {return Err(Failure::Index(data::Error::Limit("table reads")));}
             source_bytes = source_bytes.checked_add(doc.source_bytes).filter(|n|*n<=limits.max_total_bytes)

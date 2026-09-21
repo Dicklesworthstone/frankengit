@@ -63,6 +63,7 @@ impl OneNode {
         let cancelled = || !workspace_request_live(request);
         let manifest = data::Manifest::decode(&raw,root,&cancelled).map_err(Failure::Index)?;
         self.validate_symbol_source(manifest.source(),body,reference)?;
+        self.verify_symbol_directory_in(request,body,&manifest,&mut stats.predecessor_payload_bytes,data::MAX_INDEX_BYTES).await?;
         // Older source head/RCR/forge/commit values are intentional here. Only
         // its verified per-blob tables, not its old visibility, are reusable.
         let mut verifier = data::ReuseVerifier::new(&manifest,&cancelled).map_err(Failure::Index)?;
