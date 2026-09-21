@@ -597,10 +597,20 @@ impl SshServerSession {
                         }
                     };
 
-                    let digest = sha256_digest(parsed_command.repository_path().as_bytes());
-                    let mut repo_bytes = [0u8; 16];
-                    repo_bytes.copy_from_slice(&digest[..16]);
-                    let repo_id = RepositoryId::from_bytes(repo_bytes);
+                    let clean_path = parsed_command
+                        .repository_path()
+                        .trim_start_matches('/')
+                        .strip_suffix(".git")
+                        .unwrap_or_else(|| parsed_command.repository_path().trim_start_matches('/'));
+
+                    let repo_id = if let Ok(id) = RepositoryId::from_hex(&clean_path.to_ascii_lowercase()) {
+                        id
+                    } else {
+                        let digest = sha256_digest(parsed_command.repository_path().as_bytes());
+                        let mut repo_bytes = [0u8; 16];
+                        repo_bytes.copy_from_slice(&digest[..16]);
+                        RepositoryId::from_bytes(repo_bytes)
+                    };
 
                     match authorize_deploy_key(
                         &self.deploy_keys,
