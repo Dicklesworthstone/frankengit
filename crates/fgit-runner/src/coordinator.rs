@@ -720,11 +720,7 @@ impl WorkflowCoordinator {
         let trust_domain = run.trigger_ctx.trust_domain.clone();
         let is_fork = run.trigger_ctx.is_fork;
 
-        let network_policy = if is_fork {
-            NetworkPolicy::Denied
-        } else {
-            NetworkPolicy::Allowlisted
-        };
+        let network_policy = NetworkPolicy::Denied;
 
         let ceilings = ResourceCeilings::new(100_000, 512 * 1024 * 1024, 1024 * 1024 * 1024, 0, 16, 60_000)
             .map_err(CoordinatorRefusal::RunnerRefusal)?;
@@ -858,7 +854,6 @@ impl WorkflowCoordinator {
             timestamp_millis: logical_now,
         });
         self.obligations.check_publications_emitted += 1;
-        self.obligations.check_publications_settled += 2; // settled InProgress + Completed facts
 
         // Check if all jobs in the workflow run are now terminal
         self.check_and_finalize_run(run_id);
@@ -1044,9 +1039,11 @@ impl WorkflowCoordinator {
         self.idempotency_map.get(key).and_then(|id| self.active_runs.get(id))
     }
 
-    /// Drains all emitted check facts for chronicle/forge publication.
+    /// Drains all emitted check facts for chronicle/forge publication, settling their publication obligations.
     pub fn drain_check_facts(&mut self) -> Vec<CheckRunFact> {
-        std::mem::take(&mut self.outbox_facts)
+        let facts = std::mem::take(&mut self.outbox_facts);
+        self.obligations.check_publications_settled += facts.len();
+        facts
     }
 }
 

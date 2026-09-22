@@ -175,6 +175,10 @@ fn state_machine_four_state_lifecycle_and_dag_progression() {
     let run_final = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1)).unwrap();
     assert_eq!(run_final.status, RunStatus::Terminal(RunOutcome::Succeeded));
 
+    // Publish / drain outbox check facts
+    let facts = coordinator.drain_check_facts();
+    assert_eq!(facts.len(), 6);
+
     // Verify all obligations cleanly settled
     coordinator.verify_quiescence().unwrap();
 }
@@ -364,7 +368,8 @@ fn fork_pull_request_attenuation_enforces_isolated_domain_and_denied_network() {
     assert_eq!(receipt.revoked_secrets(), 0);
     assert_eq!(coordinator.obligations().secret_leases_issued, 0);
 
-    // Verified quiescence
+    // Drain outbox facts and verify clean quiescence
+    let _ = coordinator.drain_check_facts();
     coordinator.verify_quiescence().unwrap();
 }
 
