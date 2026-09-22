@@ -50,14 +50,16 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
             .map_err(|e| e.to_string())?;
         let request = node.request_context();
         node.runtime()
-            .block_on(node.read_forge_events_in(
-                &request,
-                options
-                    .after
-                    .map(|cursor| (cursor.repository_sequence, cursor.event_index)),
-                options.limit,
-                options.expected_head,
-            ))
+            .block_on(
+                node.read_forge_events_in(
+                    &request,
+                    options
+                        .after
+                        .map(|cursor| (cursor.repository_sequence, cursor.event_index)),
+                    options.limit,
+                    options.expected_head,
+                ),
+            )
             .map_err(|e| e.to_string())
     })();
     let cleanup = node.shutdown().err().map(|e| e.to_string());

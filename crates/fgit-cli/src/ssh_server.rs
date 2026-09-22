@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 use fgit_cli::CliOutcome;
 use fgit_crypto::sha256_digest;
 use fgit_identity::deploy_key::{DeployKeyBinding, DeployKeyScope};
-use fgit_ssh::SigningKey;
 use fgit_node::{
     NodeConfig, OneNode, RepositoryResolutionInput, SshServerLimits, SshServerReceipt,
 };
+use fgit_ssh::SigningKey;
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
 const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-id> <listen-address>
@@ -50,7 +50,10 @@ fn integer(value: &str, flag: &str, zero: bool) -> Result<u64, String> {
 fn parse_hex_key_32(hex_str: &str, desc: &str) -> Result<[u8; 32], String> {
     let clean = hex_str.trim();
     if clean.len() != 64 {
-        return Err(format!("invalid {desc}: expected 64 hex characters (32 bytes), got {}", clean.len()));
+        return Err(format!(
+            "invalid {desc}: expected 64 hex characters (32 bytes), got {}",
+            clean.len()
+        ));
     }
     let mut bytes = [0u8; 32];
     for (i, byte) in bytes.iter_mut().enumerate() {
@@ -68,7 +71,8 @@ fn read_host_key(path: &Path) -> Result<SigningKey, String> {
         arr.copy_from_slice(&content);
         arr
     } else {
-        let text = std::str::from_utf8(&content).map_err(|_| "host key file contains invalid UTF-8 hex")?;
+        let text = std::str::from_utf8(&content)
+            .map_err(|_| "host key file contains invalid UTF-8 hex")?;
         parse_hex_key_32(text, "host signing key")?
     };
     Ok(SigningKey::from_bytes(&key_bytes))
@@ -80,7 +84,11 @@ fn parse_scopes(text: &str) -> Result<Vec<DeployKeyScope>, String> {
         match part.trim() {
             "read" => scopes.push(DeployKeyScope::Read),
             "write" => scopes.push(DeployKeyScope::Write),
-            other => return Err(format!("invalid deploy key scope `{other}`; expected `read` or `write`")),
+            other => {
+                return Err(format!(
+                    "invalid deploy key scope `{other}`; expected `read` or `write`"
+                ));
+            }
         }
     }
     if scopes.is_empty() {
@@ -94,7 +102,8 @@ fn read_deploy_keys_file(
     repo_id: RepositoryId,
     route_repo_id: RepositoryId,
 ) -> Result<Vec<DeployKeyBinding>, String> {
-    let content = fs::read_to_string(path).map_err(|e| format!("cannot read deploy keys file: {e}"))?;
+    let content =
+        fs::read_to_string(path).map_err(|e| format!("cannot read deploy keys file: {e}"))?;
     let mut bindings = Vec::new();
     for (line_no, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -103,10 +112,14 @@ fn read_deploy_keys_file(
         }
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
         if parts.len() < 3 {
-            return Err(format!("invalid deploy keys file line {}: expected `<pubkey-hex> <principal-hex> <scopes>`", line_no + 1));
+            return Err(format!(
+                "invalid deploy keys file line {}: expected `<pubkey-hex> <principal-hex> <scopes>`",
+                line_no + 1
+            ));
         }
         let pub_bytes = parse_hex_key_32(parts[0], "deploy public key")?;
-        let principal = PrincipalId::from_hex(parts[1]).map_err(|e| format!("line {}: invalid principal: {e}", line_no + 1))?;
+        let principal = PrincipalId::from_hex(parts[1])
+            .map_err(|e| format!("line {}: invalid principal: {e}", line_no + 1))?;
         let scopes = parse_scopes(parts[2])?;
 
         let fgit_key = fgit_crypto::VerifyingKey::from_bytes(pub_bytes);
@@ -231,9 +244,10 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
 
     let mut configuration = NodeConfig::new(PathBuf::from(*root), tenant, repository);
     if let Some(value) = flags.get("--expected-incarnation") {
-        configuration = configuration.with_resolution_input(RepositoryResolutionInput::TransportTarget(
-            RepositoryIncarnationId::from_hex(value).map_err(|e| e.to_string())?,
-        ));
+        configuration =
+            configuration.with_resolution_input(RepositoryResolutionInput::TransportTarget(
+                RepositoryIncarnationId::from_hex(value).map_err(|e| e.to_string())?,
+            ));
     }
 
     Ok(Prepared {
@@ -264,7 +278,9 @@ pub(crate) fn run(arguments: &[String]) -> Result<CliOutcome, String> {
         let _ = writeln!(
             out,
             "{{\"type\":\"ssh_listening\",\"schema_version\":1,\"address\":\"{}\",\"allow_receive\":{},\"repository_incarnation\":\"{}\"}}",
-            listen_address, prepared.allow_receive, node.repository_incarnation_id()
+            listen_address,
+            prepared.allow_receive,
+            node.repository_incarnation_id()
         );
         let _ = out.flush();
         drop(out);

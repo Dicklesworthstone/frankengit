@@ -9,7 +9,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fgit_forge::preparation::{MergeConflict, MergeEntry, MergeMetadata, MergePreparation, PreparationLimits};
+use fgit_forge::preparation::{
+    MergeConflict, MergeEntry, MergeMetadata, MergePreparation, PreparationLimits,
+};
 use fgit_node::{NodeConfig, OneNode};
 use fgit_types::{HeadGeneration, RefName, RepositoryId, TenantId};
 
@@ -29,49 +31,89 @@ struct Options {
 }
 
 pub(super) fn run(arguments: &[String]) -> Result<(), String> {
-    if arguments.first().is_some_and(|arg| arg == "resolve") { return resolution::run(arguments); }
+    if arguments.first().is_some_and(|arg| arg == "resolve") {
+        return resolution::run(arguments);
+    }
     if arguments == ["prepare", "--help"] {
-        println!("{USAGE}\n\npath-v1 is an explicit bounded path-based merge, not a claim of Git ort equivalence. No rename heuristics, virtual bases, external merge drivers or hooks are run. Conflicts produce JSON and no bundle. Repository state is never changed.");
+        println!(
+            "{USAGE}\n\npath-v1 is an explicit bounded path-based merge, not a claim of Git ort equivalence. No rename heuristics, virtual bases, external merge drivers or hooks are run. Conflicts produce JSON and no bundle. Repository state is never changed."
+        );
         return Ok(());
     }
     let options = parse(arguments)?;
     require_absent(&options.output)?;
     let mut node = OneNode::open_existing(NodeConfig::new(
-        options.storage.clone(), options.tenant, options.repository,
-    )).map_err(|error| error.to_string())?;
+        options.storage.clone(),
+        options.tenant,
+        options.repository,
+    ))
+    .map_err(|error| error.to_string())?;
     let result = (|| {
-        node.bring_into_service(HeadGeneration::FIRST).map_err(|error| error.to_string())?;
+        node.bring_into_service(HeadGeneration::FIRST)
+            .map_err(|error| error.to_string())?;
         let request = node.request_context();
-        node.runtime().block_on(node.prepare_merge_bundle_in(
-            &request, &options.target, &options.incoming, &Default::default(),
-            &options.metadata, PreparationLimits::default(),
-        )).map_err(|error| error.to_string())
+        node.runtime()
+            .block_on(node.prepare_merge_bundle_in(
+                &request,
+                &options.target,
+                &options.incoming,
+                &Default::default(),
+                &options.metadata,
+                PreparationLimits::default(),
+            ))
+            .map_err(|error| error.to_string())
     })();
     let cleanup = node.shutdown().err().map(|error| error.to_string());
     let artifact = match (result, cleanup) {
         (Ok(artifact), None) => artifact,
         (Err(error), None) => return Err(error),
-        (Ok(_), Some(error)) => return Err(format!("node shutdown failed: {error}; no candidate bundle was published")),
-        (Err(error), Some(cleanup)) => return Err(format!("{error}; node shutdown also failed: {cleanup}; no candidate bundle was published")),
+        (Ok(_), Some(error)) => {
+            return Err(format!(
+                "node shutdown failed: {error}; no candidate bundle was published"
+            ));
+        }
+        (Err(error), Some(cleanup)) => {
+            return Err(format!(
+                "{error}; node shutdown also failed: {cleanup}; no candidate bundle was published"
+            ));
+        }
     };
     let mut fields = vec![
         "\"type\":\"merge_preparation\"".to_owned(),
         "\"profile\":\"path-v1\"".to_owned(),
         "\"published_to_repository\":false".to_owned(),
         "\"node_closed\":true".to_owned(),
-        format!("\"source_head\":{}", quote(&artifact.source_head.to_string())),
-        format!("\"repository_id\":{}", quote(&options.repository.to_string())),
-        format!("\"source_reference_hex\":\"{}\"", hex(options.incoming.as_bytes())),
-        format!("\"target_reference_hex\":\"{}\"", hex(options.target.as_bytes())),
+        format!(
+            "\"source_head\":{}",
+            quote(&artifact.source_head.to_string())
+        ),
+        format!(
+            "\"repository_id\":{}",
+            quote(&options.repository.to_string())
+        ),
+        format!(
+            "\"source_reference_hex\":\"{}\"",
+            hex(options.incoming.as_bytes())
+        ),
+        format!(
+            "\"target_reference_hex\":\"{}\"",
+            hex(options.target.as_bytes())
+        ),
     ];
     let conflicted = match &artifact.outcome {
         MergePreparation::Clean(plan) => {
-            let bundle = artifact.bundle.as_deref().ok_or("clean preparation omitted its bundle")?;
+            let bundle = artifact
+                .bundle
+                .as_deref()
+                .ok_or("clean preparation omitted its bundle")?;
             publish_new_bundle(&options.output, bundle)?;
             fields.extend([
                 "\"outcome\":\"prepared\"".to_owned(),
                 "\"bundle_created\":true".to_owned(),
-                format!("\"bundle_path\":{}", quote(&options.output.to_string_lossy())),
+                format!(
+                    "\"bundle_path\":{}",
+                    quote(&options.output.to_string_lossy())
+                ),
                 format!("\"expected_source\":\"{}\"", plan.source),
                 format!("\"expected_target\":\"{}\"", plan.target),
                 format!("\"merge_base\":\"{}\"", plan.base),
@@ -83,17 +125,28 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
             false
         }
         MergePreparation::Conflicted { base, conflicts } => {
-            if artifact.bundle.is_some() { return Err("conflicted preparation unexpectedly carried a bundle".to_owned()); }
+            if artifact.bundle.is_some() {
+                return Err("conflicted preparation unexpectedly carried a bundle".to_owned());
+            }
             fields.extend([
                 "\"outcome\":\"conflicted\"".to_owned(),
                 "\"bundle_created\":false".to_owned(),
                 format!("\"merge_base\":\"{base}\""),
-                format!("\"conflicts\":[{}]", conflicts.iter().map(render_conflict).collect::<Vec<_>>().join(",")),
+                format!(
+                    "\"conflicts\":[{}]",
+                    conflicts
+                        .iter()
+                        .map(render_conflict)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
             ]);
             true
         }
         MergePreparation::AlreadyUpToDate { target } => {
-            if artifact.bundle.is_some() { return Err("no-op preparation unexpectedly carried a bundle".to_owned()); }
+            if artifact.bundle.is_some() {
+                return Err("no-op preparation unexpectedly carried a bundle".to_owned());
+            }
             fields.extend([
                 "\"outcome\":\"already_up_to_date\"".to_owned(),
                 "\"bundle_created\":false".to_owned(),
@@ -111,23 +164,40 @@ pub(super) fn run(arguments: &[String]) -> Result<(), String> {
             format!("preparation receipt output failed: {error}; no bundle or repository mutation was published")
         }
     })?;
-    if conflicted { Err("merge conflicts require explicit resolution; no candidate bundle was created".to_owned()) }
-    else { Ok(()) }
+    if conflicted {
+        Err(
+            "merge conflicts require explicit resolution; no candidate bundle was created"
+                .to_owned(),
+        )
+    } else {
+        Ok(())
+    }
 }
 
-fn hex(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 fn render_entry(entry: Option<&MergeEntry>) -> String {
-    entry.map_or_else(|| "null".to_owned(), |entry|
-        format!("{{\"mode\":{},\"oid\":\"{}\"}}", entry.mode, entry.oid))
+    entry.map_or_else(
+        || "null".to_owned(),
+        |entry| format!("{{\"mode\":{},\"oid\":\"{}\"}}", entry.mode, entry.oid),
+    )
 }
 pub(crate) fn render_conflict(conflict: &MergeConflict) -> String {
-    format!("{{\"path_hex\":\"{}\",\"kind\":{},\"base\":{},\"ours\":{},\"theirs\":{}}}",
-        hex(&conflict.path), quote(&format!("{:?}", conflict.kind)),
-        render_entry(conflict.base.as_ref()), render_entry(conflict.ours.as_ref()), render_entry(conflict.theirs.as_ref()))
+    format!(
+        "{{\"path_hex\":\"{}\",\"kind\":{},\"base\":{},\"ours\":{},\"theirs\":{}}}",
+        hex(&conflict.path),
+        quote(&format!("{:?}", conflict.kind)),
+        render_entry(conflict.base.as_ref()),
+        render_entry(conflict.ours.as_ref()),
+        render_entry(conflict.theirs.as_ref())
+    )
 }
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
-    if arguments.len() < 6 || arguments[0] != "prepare" { return Err(USAGE.to_owned()); }
+    if arguments.len() < 6 || arguments[0] != "prepare" {
+        return Err(USAGE.to_owned());
+    }
     if arguments.len() > 24 || arguments.iter().any(|arg| arg.len() > 64 * 1024) {
         return Err("merge prepare arguments exceed the bounded profile".to_owned());
     }
@@ -142,52 +212,104 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let mut trusted = false;
     let mut cursor = 6;
     while cursor < arguments.len() {
-        let flag = arguments[cursor].as_str(); cursor += 1;
+        let flag = arguments[cursor].as_str();
+        cursor += 1;
         if flag == "--trusted-local" {
-            if trusted { return Err("duplicate --trusted-local".to_owned()); }
-            trusted = true; continue;
+            if trusted {
+                return Err("duplicate --trusted-local".to_owned());
+            }
+            trusted = true;
+            continue;
         }
-        let value = arguments.get(cursor).ok_or_else(|| format!("missing value for {flag}"))?;
+        let value = arguments
+            .get(cursor)
+            .ok_or_else(|| format!("missing value for {flag}"))?;
         cursor += 1;
         match flag {
-            "--source-ref" => set_once(&mut incoming, RefName::try_new(value.as_bytes()).map_err(|error| error.to_string())?, flag)?,
+            "--source-ref" => set_once(
+                &mut incoming,
+                RefName::try_new(value.as_bytes()).map_err(|error| error.to_string())?,
+                flag,
+            )?,
             "--profile" => {
-                if value != "path-v1" { return Err("only the explicitly selected path-v1 merge profile is supported".to_owned()); }
+                if value != "path-v1" {
+                    return Err(
+                        "only the explicitly selected path-v1 merge profile is supported"
+                            .to_owned(),
+                    );
+                }
                 set_once(&mut profile, (), flag)?;
             }
             "--author" => set_once(&mut author, value.clone(), flag)?,
             "--committer" => set_once(&mut committer, value.clone(), flag)?,
             "--message" => set_once(&mut message, value.as_bytes().to_vec(), flag)?,
             "--timestamp" => {
-                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) || value.starts_with('0') {
-                    return Err("timestamp must be canonical positive decimal Unix seconds".to_owned());
+                if value.is_empty()
+                    || !value.bytes().all(|byte| byte.is_ascii_digit())
+                    || value.starts_with('0')
+                {
+                    return Err(
+                        "timestamp must be canonical positive decimal Unix seconds".to_owned()
+                    );
                 }
-                set_once(&mut timestamp, value.parse::<u64>().map_err(|_| "timestamp overflow")?, flag)?;
+                set_once(
+                    &mut timestamp,
+                    value.parse::<u64>().map_err(|_| "timestamp overflow")?,
+                    flag,
+                )?;
             }
-            _ => return Err(format!("unknown merge prepare option {flag}; no implicit approval or publication is supported")),
+            _ => {
+                return Err(format!(
+                    "unknown merge prepare option {flag}; no implicit approval or publication is supported"
+                ));
+            }
         }
     }
-    if !trusted { return Err("--trusted-local is required for repository disclosure and artifact creation".to_owned()); }
-    profile.ok_or("--profile path-v1 is required; rename/driver/virtual-base semantics are not implied")?;
+    if !trusted {
+        return Err(
+            "--trusted-local is required for repository disclosure and artifact creation"
+                .to_owned(),
+        );
+    }
+    profile.ok_or(
+        "--profile path-v1 is required; rename/driver/virtual-base semantics are not implied",
+    )?;
     let incoming = incoming.ok_or("--source-ref is required")?;
-    if target == incoming || !target.as_bytes().starts_with(b"refs/heads/") || !incoming.as_bytes().starts_with(b"refs/heads/") {
+    if target == incoming
+        || !target.as_bytes().starts_with(b"refs/heads/")
+        || !incoming.as_bytes().starts_with(b"refs/heads/")
+    {
         return Err("source and target must be distinct fully qualified branch names".to_owned());
     }
     let author = author.ok_or("--author is required")?;
     let metadata = MergeMetadata {
-        committer: committer.unwrap_or_else(|| author.clone()), author,
+        committer: committer.unwrap_or_else(|| author.clone()),
+        author,
         timestamp: timestamp.ok_or("--timestamp is required")?,
         message: message.ok_or("--message is required")?,
     };
     metadata.validate().map_err(|error| error.to_string())?;
     let output = PathBuf::from(&arguments[5]);
-    if output.file_name().is_none() { return Err("output must name a new regular file".to_owned()); }
-    Ok(Options { storage: arguments[1].clone().into(), tenant, repository, target, incoming, output, metadata })
+    if output.file_name().is_none() {
+        return Err("output must name a new regular file".to_owned());
+    }
+    Ok(Options {
+        storage: arguments[1].clone().into(),
+        tenant,
+        repository,
+        target,
+        incoming,
+        output,
+        metadata,
+    })
 }
 
 pub(crate) fn require_absent(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
-        Ok(_) => Err("output path already exists; refusing to replace a file, symlink or directory".to_owned()),
+        Ok(_) => Err(
+            "output path already exists; refusing to replace a file, symlink or directory"
+                .to_owned(),
+        ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),
     }
@@ -199,15 +321,29 @@ pub(crate) fn require_absent(path: &Path) -> Result<(), String> {
 /// This is a trusted local-operator filesystem, not an adversarial host boundary.
 pub(crate) fn publish_new_bundle(path: &Path, bytes: &[u8]) -> Result<(), String> {
     require_absent(path)?;
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let mut selected = None;
     for _ in 0..32 {
-        let temp = parent.join(format!(".fg-merge-prepare-{}-{}.tmp", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
-        let mut options = OpenOptions::new(); options.write(true).create_new(true);
+        let temp = parent.join(format!(
+            ".fg-merge-prepare-{}-{}.tmp",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
-        { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
         match options.open(&temp) {
-            Ok(file) => { selected = Some((temp, file)); break; }
+            Ok(file) => {
+                selected = Some((temp, file));
+                break;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(format!("cannot create candidate temporary file: {error}")),
         }
@@ -229,11 +365,25 @@ pub(crate) fn publish_new_bundle(path: &Path, bytes: &[u8]) -> Result<(), String
         (Ok(()), None) => Ok(()),
         (result, cleanup) => {
             let state = if visible {
-                format!("complete bundle is visible at {}; artifact finalization was not fully acknowledged", path.display())
-            } else { "no candidate bundle was published".to_owned() };
-            let error = result.err().map_or_else(String::new, |error| format!("; {error}"));
-            let cleanup = cleanup.map_or_else(String::new, |error| format!("; temporary file {} could not be removed: {error}", temp.display()));
-            Err(format!("{state}{error}{cleanup}; repository state was not changed"))
+                format!(
+                    "complete bundle is visible at {}; artifact finalization was not fully acknowledged",
+                    path.display()
+                )
+            } else {
+                "no candidate bundle was published".to_owned()
+            };
+            let error = result
+                .err()
+                .map_or_else(String::new, |error| format!("; {error}"));
+            let cleanup = cleanup.map_or_else(String::new, |error| {
+                format!(
+                    "; temporary file {} could not be removed: {error}",
+                    temp.display()
+                )
+            });
+            Err(format!(
+                "{state}{error}{cleanup}; repository state was not changed"
+            ))
         }
     }
 }
@@ -242,34 +392,70 @@ pub(crate) fn publish_new_bundle(path: &Path, bytes: &[u8]) -> Result<(), String
 mod tests {
     use super::*;
     fn args() -> Vec<String> {
-        ["prepare", "node", &"11".repeat(16), &"22".repeat(16), "refs/heads/main", "candidate.bundle",
-            "--trusted-local", "--profile", "path-v1", "--source-ref", "refs/heads/topic",
-            "--author", "Test <test@example.invalid>", "--timestamp", "1", "--message", "merge\n"]
-            .into_iter().map(str::to_owned).collect()
+        [
+            "prepare",
+            "node",
+            &"11".repeat(16),
+            &"22".repeat(16),
+            "refs/heads/main",
+            "candidate.bundle",
+            "--trusted-local",
+            "--profile",
+            "path-v1",
+            "--source-ref",
+            "refs/heads/topic",
+            "--author",
+            "Test <test@example.invalid>",
+            "--timestamp",
+            "1",
+            "--message",
+            "merge\n",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     }
     #[test]
     fn parsing_requires_explicit_profile_time_identity_and_trust() {
         let parsed = parse(&args()).unwrap();
         assert_eq!(parsed.metadata.author, parsed.metadata.committer);
-        for flag in ["--profile", "--source-ref", "--author", "--timestamp", "--message"] {
-            let mut invalid = args(); let at = invalid.iter().position(|arg| arg == flag).unwrap();
-            invalid.drain(at..at + 2); assert!(parse(&invalid).is_err(), "missing {flag}");
-            let mut duplicate = args(); let at = duplicate.iter().position(|arg| arg == flag).unwrap();
-            duplicate.extend([flag.to_owned(), duplicate[at + 1].clone()]); assert!(parse(&duplicate).is_err());
+        for flag in [
+            "--profile",
+            "--source-ref",
+            "--author",
+            "--timestamp",
+            "--message",
+        ] {
+            let mut invalid = args();
+            let at = invalid.iter().position(|arg| arg == flag).unwrap();
+            invalid.drain(at..at + 2);
+            assert!(parse(&invalid).is_err(), "missing {flag}");
+            let mut duplicate = args();
+            let at = duplicate.iter().position(|arg| arg == flag).unwrap();
+            duplicate.extend([flag.to_owned(), duplicate[at + 1].clone()]);
+            assert!(parse(&duplicate).is_err());
         }
-        let mut untrusted = args(); untrusted.retain(|arg| arg != "--trusted-local");
+        let mut untrusted = args();
+        untrusted.retain(|arg| arg != "--trusted-local");
         assert!(parse(&untrusted).is_err());
         for value in ["0", "01", "+1", "-1", "18446744073709551616"] {
-            let mut invalid = args(); let at = invalid.iter().position(|arg| arg == "--timestamp").unwrap();
-            invalid[at + 1] = value.into(); assert!(parse(&invalid).is_err());
+            let mut invalid = args();
+            let at = invalid.iter().position(|arg| arg == "--timestamp").unwrap();
+            invalid[at + 1] = value.into();
+            assert!(parse(&invalid).is_err());
         }
-        let mut injection = args(); let at = injection.iter().position(|arg| arg == "--author").unwrap();
+        let mut injection = args();
+        let at = injection.iter().position(|arg| arg == "--author").unwrap();
         injection[at + 1] = "Test <test@example.invalid>\nparent bad".into();
         assert!(parse(&injection).is_err());
     }
     #[test]
     fn artifact_publication_is_create_only_and_cleans_its_temporary_name() {
-        let root = std::env::temp_dir().join(format!("fg-merge-bundle-test-{}-{}", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        let root = std::env::temp_dir().join(format!(
+            "fg-merge-bundle-test-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir(&root).unwrap();
         let output = root.join("candidate.bundle");
         publish_new_bundle(&output, b"complete original").unwrap();
@@ -280,14 +466,20 @@ mod tests {
     }
     #[test]
     fn simultaneous_artifact_writers_cannot_replace_the_winner() {
-        let root = std::env::temp_dir().join(format!("fg-merge-bundle-race-{}-{}", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        let root = std::env::temp_dir().join(format!(
+            "fg-merge-bundle-race-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir(&root).unwrap();
         let path = root.join("candidate.bundle");
-        let first = path.clone(); let second = path.clone();
+        let first = path.clone();
+        let second = path.clone();
         let a = std::thread::spawn(move || publish_new_bundle(&first, b"first"));
         let b = std::thread::spawn(move || publish_new_bundle(&second, b"second"));
         assert_ne!(a.join().unwrap().is_ok(), b.join().unwrap().is_ok());
-        let bytes = fs::read(path).unwrap(); assert!(bytes == b"first" || bytes == b"second");
+        let bytes = fs::read(path).unwrap();
+        assert!(bytes == b"first" || bytes == b"second");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         fs::remove_dir_all(root).unwrap();
     }

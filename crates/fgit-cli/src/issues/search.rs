@@ -1,12 +1,15 @@
 //! Snapshot-pinned issue search using canonical issue pages, not a local index.
-use std::collections::BTreeMap;
-use fgit_forge::event::issue::{CompiledIssueQuery, IssueQuery, IssueState, MAX_BODY_BYTES, MAX_LABELS};
+use super::options::{self, Operation};
+use fgit_forge::event::issue::{
+    CompiledIssueQuery, IssueQuery, IssueState, MAX_BODY_BYTES, MAX_LABELS,
+};
 use fgit_forge::issue_search::{self, MAX_SCAN, SearchRequest, SourcePage};
 use fgit_node::{NodeConfig, OneNode};
 use fgit_types::{HeadGeneration, PrincipalId};
-use super::options::{self, Operation};
+use std::collections::BTreeMap;
 
-const USAGE: &str = "usage: fg issue search <storage-root> <tenant-id> <repository-id> --trusted-local
+const USAGE: &str =
+    "usage: fg issue search <storage-root> <tenant-id> <repository-id> --trusted-local
   [--query <literal>] [--case-sensitive] [--state open|closed|all]
   [--opened-by <principal-id>] [--label <exact-label>]...
   [--limit <1..100>] [--max-scan <1..1000>]
@@ -31,10 +34,18 @@ struct Options {
 }
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
-    if arguments.len() < 3 { return Err(USAGE.to_owned()); }
-    if arguments.len() > 96 || arguments.iter().any(|arg| arg.len() > MAX_BODY_BYTES)
-        || arguments.iter().try_fold(0usize, |n, arg| n.checked_add(arg.len())).is_none_or(|n| n > 128 * 1024)
-    { return Err("issue search arguments exceed the bounded local profile".into()); }
+    if arguments.len() < 3 {
+        return Err(USAGE.to_owned());
+    }
+    if arguments.len() > 96
+        || arguments.iter().any(|arg| arg.len() > MAX_BODY_BYTES)
+        || arguments
+            .iter()
+            .try_fold(0usize, |n, arg| n.checked_add(arg.len()))
+            .is_none_or(|n| n > 128 * 1024)
+    {
+        return Err("issue search arguments exceed the bounded local profile".into());
+    }
     // Reuse the owning parser for repository identity, trust, object format,
     // canonical decimals, page size and algorithm-qualified snapshot tokens.
     let mut base = vec!["list".to_owned()];
@@ -47,7 +58,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         let flag = arguments[at].as_str();
         at += 1;
         if flag == "--case-sensitive" {
-            if case_sensitive { return Err("duplicate --case-sensitive".into()); }
+            if case_sensitive {
+                return Err("duplicate --case-sensitive".into());
+            }
             case_sensitive = true;
             continue;
         }
@@ -55,17 +68,33 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             base.push(flag.to_owned());
             continue;
         }
-        let filter = matches!(flag, "--query" | "--state" | "--opened-by" | "--label" | "--max-scan");
-        if !filter && !matches!(flag, "--limit" | "--after" | "--expected-head" | "--object-format") {
-            return Err(format!("unknown or inapplicable issue search option {flag:?}"));
+        let filter = matches!(
+            flag,
+            "--query" | "--state" | "--opened-by" | "--label" | "--max-scan"
+        );
+        if !filter
+            && !matches!(
+                flag,
+                "--limit" | "--after" | "--expected-head" | "--object-format"
+            )
+        {
+            return Err(format!(
+                "unknown or inapplicable issue search option {flag:?}"
+            ));
         }
-        let value = arguments.get(at).ok_or_else(|| format!("missing value for {flag}"))?;
+        let value = arguments
+            .get(at)
+            .ok_or_else(|| format!("missing value for {flag}"))?;
         at += 1;
         if flag == "--label" {
-            if labels.len() == MAX_LABELS { return Err("at most 32 issue search labels may be supplied".into()); }
+            if labels.len() == MAX_LABELS {
+                return Err("at most 32 issue search labels may be supplied".into());
+            }
             labels.push(value.clone());
         } else if filter {
-            if flags.insert(flag, value.as_str()).is_some() { return Err(format!("duplicate {flag}")); }
+            if flags.insert(flag, value.as_str()).is_some() {
+                return Err(format!("duplicate {flag}"));
+            }
         } else {
             base.push(flag.to_owned());
             base.push(value.clone());
@@ -78,16 +107,30 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         "closed" => Some(IssueState::Closed),
         _ => return Err("--state must be open, closed or all".into()),
     };
-    let opened_by = flags.get("--opened-by").map(|value|
-        PrincipalId::from_hex(value).map_err(|_| "invalid opener principal ID")).transpose()?;
+    let opened_by = flags
+        .get("--opened-by")
+        .map(|value| PrincipalId::from_hex(value).map_err(|_| "invalid opener principal ID"))
+        .transpose()?;
     let text = flags.get("--query").map(|value| (*value).to_owned());
-    if case_sensitive && text.is_none() { return Err("--case-sensitive requires --query".into()); }
+    if case_sensitive && text.is_none() {
+        return Err("--case-sensitive requires --query".into());
+    }
     labels.sort();
     let query = IssueQuery { state, opened_by, labels, text, case_sensitive }.compile()
         .map_err(|_| "invalid issue search query or labels (labels must be unique; text is 1..256 UTF-8 bytes without NUL)")?;
-    let max_scan = flags.get("--max-scan").map(|value| options::decimal(value)).transpose()?.unwrap_or(u64::from(MAX_SCAN));
-    if !(1..=u64::from(MAX_SCAN)).contains(&max_scan) { return Err("--max-scan must be 1..1000".into()); }
-    Ok(Options { base, query, max_scan: u16::try_from(max_scan).map_err(|_| "scan limit overflow")? })
+    let max_scan = flags
+        .get("--max-scan")
+        .map(|value| options::decimal(value))
+        .transpose()?
+        .unwrap_or(u64::from(MAX_SCAN));
+    if !(1..=u64::from(MAX_SCAN)).contains(&max_scan) {
+        return Err("--max-scan must be 1..1000".into());
+    }
+    Ok(Options {
+        base,
+        query,
+        max_scan: u16::try_from(max_scan).map_err(|_| "scan limit overflow")?,
+    })
 }
 
 pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
@@ -95,28 +138,61 @@ pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
         return super::write_read(&mut std::io::stdout().lock(), USAGE).map(|()| 0);
     }
     let options = parse(arguments)?;
-    let Operation::Read(read) = &options.base.operation else { return Err("search requires a read operation".into()); };
-    let mut node = OneNode::open_existing(NodeConfig::new(options.base.storage.clone(),
-        options.base.tenant, options.base.repository).with_object_format(options.base.format))
-        .map_err(|error| format!("cannot open issue search node: {error}"))?;
+    let Operation::Read(read) = &options.base.operation else {
+        return Err("search requires a read operation".into());
+    };
+    let mut node = OneNode::open_existing(
+        NodeConfig::new(
+            options.base.storage.clone(),
+            options.base.tenant,
+            options.base.repository,
+        )
+        .with_object_format(options.base.format),
+    )
+    .map_err(|error| format!("cannot open issue search node: {error}"))?;
     let result = (|| {
-        node.bring_into_service(HeadGeneration::FIRST).map_err(|error| error.to_string())?;
+        node.bring_into_service(HeadGeneration::FIRST)
+            .map_err(|error| error.to_string())?;
         let context = node.request_context();
-        let page = issue_search::search(&options.query, SearchRequest {
-            after: read.after, limit: read.limit, max_scan: options.max_scan, expected_head: read.expected_head,
-        }, |after, limit, expected_head| {
-            let page = node.runtime().block_on(node.read_issues_in(&context, after, limit, expected_head))
-                .map_err(|error| error.to_string())?;
-            Ok::<_, String>(SourcePage { source_head: page.source_head, issues: page.issues, next_after: page.next_after })
-        }).map_err(|error| error.to_string())?;
+        let page = issue_search::search(
+            &options.query,
+            SearchRequest {
+                after: read.after,
+                limit: read.limit,
+                max_scan: options.max_scan,
+                expected_head: read.expected_head,
+            },
+            |after, limit, expected_head| {
+                let page = node
+                    .runtime()
+                    .block_on(node.read_issues_in(&context, after, limit, expected_head))
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>(SourcePage {
+                    source_head: page.source_head,
+                    issues: page.issues,
+                    next_after: page.next_after,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())?;
         super::output::search(&options.base, read, &options.query, options.max_scan, &page)
     })();
     let cleanup = node.shutdown().err().map(|error| error.to_string());
     let report = match (result, cleanup) {
         (Ok(report), None) => report,
-        (Ok(_), Some(error)) => return Err(format!("issue search shutdown failed: {error}; no result returned")),
-        (Err(error), None) => return Err(format!("issue search failed: {error}; no result returned")),
-        (Err(error), Some(cleanup)) => return Err(format!("issue search failed: {error}; shutdown also failed: {cleanup}; no result returned")),
+        (Ok(_), Some(error)) => {
+            return Err(format!(
+                "issue search shutdown failed: {error}; no result returned"
+            ));
+        }
+        (Err(error), None) => {
+            return Err(format!("issue search failed: {error}; no result returned"));
+        }
+        (Err(error), Some(cleanup)) => {
+            return Err(format!(
+                "issue search failed: {error}; shutdown also failed: {cleanup}; no result returned"
+            ));
+        }
     };
     super::write_read(&mut std::io::stdout().lock(), &report)?;
     Ok(0)

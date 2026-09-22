@@ -5,6 +5,9 @@ mod mcp;
 fn main() -> std::process::ExitCode {
     match mcp::run(&std::env::args().skip(1).collect::<Vec<_>>()) {
         Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) => { eprintln!("fg-mcp: {error}"); std::process::ExitCode::from(2) }
+        Err(error) => {
+            eprintln!("fg-mcp: {error}");
+            std::process::ExitCode::from(2)
+        }
     }
 }

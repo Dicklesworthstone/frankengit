@@ -7,6 +7,7 @@ mod events;
 mod fsck;
 mod guarded_git_server;
 mod issues;
+mod mcp;
 mod merge_apply;
 mod patch_command;
 mod protection;
@@ -16,11 +17,11 @@ mod rebase;
 mod rebase_apply;
 mod review_commands;
 mod smart_http_server;
-mod ssh_server;
 mod source_browse;
 mod source_history;
 mod source_review;
 mod source_search;
+mod ssh_server;
 mod tags;
 mod transaction_outcome;
 mod webhook_commands;
@@ -46,7 +47,10 @@ fn main() -> ExitCode {
             }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "webhook") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "webhook")
+    {
         return match webhook_commands::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
@@ -58,7 +62,10 @@ fn main() -> ExitCode {
             }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "workflow") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "workflow")
+    {
         return match workflow_command::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
@@ -70,7 +77,10 @@ fn main() -> ExitCode {
             }
         };
     }
-    if arguments.first().is_some_and(|argument| argument == "serve-http") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "serve-http")
+    {
         return match smart_http_server::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
@@ -132,6 +142,15 @@ fn main() -> ExitCode {
                     "{{\"type\":\"bundle_error\",\"schema_version\":1,\"error\":{}}}",
                     publication_support::quote(&error)
                 );
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments.first().is_some_and(|argument| argument == "mcp") {
+        return match mcp::run(&arguments[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("fg: {error}");
                 ExitCode::from(2)
             }
         };
@@ -362,9 +381,15 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    let outcome = if arguments.first().is_some_and(|argument| argument == "serve") {
+    let outcome = if arguments
+        .first()
+        .is_some_and(|argument| argument == "serve")
+    {
         guarded_git_server::run(&arguments)
-    } else if arguments.first().is_some_and(|argument| argument == "serve-ssh") {
+    } else if arguments
+        .first()
+        .is_some_and(|argument| argument == "serve-ssh")
+    {
         ssh_server::run(&arguments)
     } else {
         fgit_cli::run(&arguments).map_err(|error| error.to_string())
