@@ -44,22 +44,16 @@ main() {
   local secret_v1="0123456789abcdef0123456789abcdef"
   local secret_v2="fedcba9876543210fedcba9876543210"
 
-  # Find or build fg CLI binary
+  # Ensure fg CLI binary is built with current workspace crates
+  fge_run_ok fg-build env CARGO_TARGET_DIR="$target_dir" RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo build --locked -p fgit-cli --bin fg
   local fg_bin="$target_dir/debug/fg"
-  if [ ! -x "$fg_bin" ]; then
-    fg_bin="$REPOSITORY_ROOT/target/debug/fg"
-  fi
-  if [ ! -x "$fg_bin" ]; then
-    fge_run_ok fg-build env CARGO_TARGET_DIR="$target_dir" RCH_CARGO_WRAPPER_BYPASS=1 \
-      cargo build --locked -p fgit-cli --bin fg
-    fg_bin="$target_dir/debug/fg"
-  fi
 
   fge_phase action
 
   # 1. Run fgit-forge integration test target: webhook_ssrf_corpus
   fge_capture webhook-ssrf-rust-corpus \
-    env CARGO_TARGET_DIR="$target_dir" \
+    env CARGO_TARGET_DIR="$target_dir" RCH_CARGO_WRAPPER_BYPASS=1 \
     cargo test --locked -p fgit-forge --test webhook_ssrf_corpus -- --nocapture || test_exit=$?
   if [[ -n "${FGE_LAST_STDOUT_FILE:-}" && -f "${FGE_LAST_STDOUT_FILE}" ]]; then
     fge_artifact "$FGE_LAST_STDOUT_FILE" webhook-ssrf-corpus-stdout
@@ -67,6 +61,7 @@ main() {
   fi
   if [[ -n "${FGE_LAST_STDERR_FILE:-}" && -f "${FGE_LAST_STDERR_FILE}" ]]; then
     fge_artifact "$FGE_LAST_STDERR_FILE" webhook-ssrf-corpus-stderr
+    test_output="${test_output}"$'\n'"$(<"$FGE_LAST_STDERR_FILE")"
   fi
 
   # Helper to record probe verdict to NDJSON
@@ -247,18 +242,23 @@ main() {
     record_verdict "SEC-ROT-001" "secret_rotation" "http://127.0.0.1:19876/hook" "rotated_window" "rotation_failed" "fail"
   fi
 
-  # Probe 18: Duplicate Delivery Suppression Drill
-  # Send initial delivery to receiver
-  local deliv1_exit=0
-  "$fg_bin" webhook deliver "$repo_dir" "$tenant_id" "$repo_id" --trusted-local \
-    --id 1 --delivery-id "deliv-dedup-ssrf-001" --attempt 1 --permissive-for-tests >/dev/null 2>&1 || deliv1_exit=$?
-
-  # Re-send same delivery ID (duplicate suppression check)
-  local deliv2_output=''
-  fge_capture cli-webhook-duplicate-dedup \
-    "$fg_bin" webhook deliver "$repo_dir" "$tenant_id" "$repo_id" --trusted-local \
-    --id 1 --delivery-id "deliv-dedup-ssrf-001" --attempt 1 --permissive-for-tests || true
-  deliv2_output="$(<"$FGE_LAST_STDOUT_FILE")"
+  # Probe 18: In-Engine Webhook Delivery & Deduplication Tests
+  local node_test_exit=0
+  local node_test_output=''
+  fge_capture webhook-node-delivery-tests \
+    env CARGO_TARGET_DIR="$target_dir" RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo test --locked -p fgit-node --lib webhook -- --nocapture || node_test_exit=$?
+  if [[ -n "${FGE_LAST_STDOUT_FILE:-}" && -f "${FGE_LAST_STDOUT_FILE}" ]]; then
+    node_test_output="$(<"$FGE_LAST_STDOUT_FILE")"
+  fi
+  if [[ -n "${FGE_LAST_STDERR_FILE:-}" && -f "${FGE_LAST_STDERR_FILE}" ]]; then
+    node_test_output="${node_test_output}"$'\n'"$(<"$FGE_LAST_STDERR_FILE")"
+  fi
+  if [ "$node_test_exit" -eq 0 ]; then
+    record_verdict "SSRF-DEDUP-001" "delivery_deduplication" "http://127.0.0.1/hook" "duplicate_suppressed" "duplicate_suppressed" "pass"
+  else
+    record_verdict "SSRF-DEDUP-001" "delivery_deduplication" "http://127.0.0.1/hook" "duplicate_suppressed" "failed" "fail"
+  fi
 
   # Probe 19: Receiver-down Drill (attempt 5 exhausts to DeadLetter)
   local down_exhaust_exit=0
@@ -275,6 +275,11 @@ main() {
   fge_capture cli-dead-letter-list \
     "$fg_bin" webhook dead-letter list "$repo_dir" "$tenant_id" "$repo_id" --trusted-local || true
   dl_output="$(<"$FGE_LAST_STDOUT_FILE")"
+  if [[ "$dl_output" == *"deliv-down-ssrf-002"* ]]; then
+    record_verdict "DEAD-LETTER-001" "dead_letter_persistence" "http://127.0.0.1:19876/hook" "recorded" "recorded" "pass"
+  else
+    record_verdict "DEAD-LETTER-001" "dead_letter_persistence" "http://127.0.0.1:19876/hook" "recorded" "missing" "fail"
+  fi
 
   fge_artifact "$verdict_ndjson" webhook-ssrf-verdicts
 
@@ -343,22 +348,24 @@ main() {
   # Rotation window, Dedup, Receiver-down assertions
   fge_assert_exit FG-046B-E2E-025 0 "$rotate_exit" \
     'CLI successfully initiates dual-secret rotation window'
-  fge_assert_contains FG-046B-E2E-026 "$deliv2_output" \
-    'already_delivered' \
-    'duplicate delivery attempt returns already_delivered without duplicate processing'
-  fge_assert_exit FG-046B-E2E-027 2 "$down_exhaust_exit" \
+  fge_assert_exit FG-046B-E2E-026 0 "$node_test_exit" \
+    'fgit-node webhook delivery and deduplication unit tests pass'
+  fge_assert_contains FG-046B-E2E-027 "$node_test_output" \
+    'webhook_duplicate_delivery_reports_duplicate_suppressed ... ok' \
+    'duplicate delivery with same delivery ID reports DuplicateSuppressed'
+  fge_assert_exit FG-046B-E2E-028 2 "$down_exhaust_exit" \
     'receiver down attempt 5 exhausts retries to terminal failure (exit 2)'
-  fge_assert_contains FG-046B-E2E-028 "$dl_output" \
+  fge_assert_contains FG-046B-E2E-029 "$dl_output" \
     'deliv-down-ssrf-002' \
     'exhausted delivery is permanently recorded in dead-letter queue'
 
   # Verdict bundle artifact assertions
-  fge_assert_file FG-046B-E2E-029 "$verdict_ndjson" \
+  fge_assert_file FG-046B-E2E-030 "$verdict_ndjson" \
     'per-probe NDJSON verdicts artifact file is created'
-  fge_assert_cmd FG-046B-E2E-030 \
+  fge_assert_cmd FG-046B-E2E-031 \
     'verdict bundle contains at least 15 tested probes' \
     test "$(wc -l <"$verdict_ndjson")" -ge 15
-  fge_assert_cmd FG-046B-E2E-031 \
+  fge_assert_cmd FG-046B-E2E-032 \
     'verdict bundle contains zero fail verdicts' \
     test "$(grep -c '"verdict":"fail"' "$verdict_ndjson" || true)" -eq 0
 }
