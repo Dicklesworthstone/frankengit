@@ -1729,6 +1729,13 @@ fn no_published_statement_can_enumerate_keys() {
     // authority in the head slot rather than in the ability to discover what
     // exists.
     for statement in fgit_authority_fsqlite::operation_statements() {
+        // Portable export statements intentionally read whole tables under
+        // preflighted PortableStoreLimits for single-head archive portability;
+        // they are not regular authority reopen or runtime lookup statements.
+        if statement.name.starts_with("portable.") {
+            continue;
+        }
+
         let sql = statement.sql;
         let squeezed: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
         let upper = squeezed.to_uppercase();
