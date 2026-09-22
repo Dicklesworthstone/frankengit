@@ -43,9 +43,18 @@ pub mod review;
 pub mod snapshot;
 pub mod source_search;
 pub mod source_symbols;
+pub mod federation;
 pub mod webhook;
 
 use core::fmt;
+
+pub use federation::{
+    AdmittedProposal, BasisCapsule, CanonicalRef, CurrentAuthorityState, EquivocationDetector,
+    EquivocationEvidence, EquivocationEvidenceId, FederatedEventClass, FederationRefusal,
+    ImportReceipt, MirrorRef, ObservationOutcome, OfflineEffect, OfflineEvidence, OfflineIntent,
+    OfflineSigner, OfflineWorkBundle, PeerId, PeerKeyHistory, PeerStatus, ProposedRefTxn,
+    ProposedTxnId, ReviewRouting, SignedClaim, create_offline_bundle, import_offline_bundle,
+};
 
 pub use aggregate::{
     AggregateHead, AggregateId, AggregateVersion, ExpectedVersion, OrganisationNumber,

@@ -814,6 +814,7 @@ name = "fgit-forge"
 version = "0.0.1"
 dependencies = [
  "fgit-authority",
+ "fgit-calm",
  "fgit-chronicle",
  "fgit-codec",
  "fgit-crypto",
