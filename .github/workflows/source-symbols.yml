@@ -1,11 +1,5 @@
 name: Native declaration scanner
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/fgit-forge/src/source_symbols/**'
-      - 'scripts/verify_source_symbols.sh'
-      - '.github/workflows/source-symbols.yml'
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,8 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # actions/checkout v4.2.2
       - name: Install repository-pinned toolchain
         run: rustup toolchain install nightly-2026-08-31 --profile minimal
-      - name: Execute repository-owned scanner tests
-        run: ./scripts/verify_source_symbols.sh
+      - name: Execute repository-owned scanner lane
+        run: ./scripts/verify.sh source-symbols

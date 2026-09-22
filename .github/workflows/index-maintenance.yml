@@ -1,11 +1,5 @@
 name: Index maintenance progress
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/fgit-node/src/bin/index_maintenance/**'
-      - 'scripts/verify_index_maintenance.sh'
-      - '.github/workflows/index-maintenance.yml'
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,8 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # actions/checkout v4.2.2
       - name: Install repository-pinned toolchain
         run: rustup toolchain install nightly-2026-08-31 --profile minimal
-      - name: Execute repository-owned progress tests
-        run: ./scripts/verify_index_maintenance.sh
+      - name: Execute repository-owned progress lane
+        run: ./scripts/verify.sh index-maintenance

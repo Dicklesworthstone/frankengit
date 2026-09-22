@@ -1,12 +1,6 @@
 name: Exact patch regression tests
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/fgit-diff/src/patch.rs'
-      - 'crates/fgit-diff/src/patch/**'
-      - 'scripts/verify_exact_patch.sh'
-      - '.github/workflows/exact-patch.yml'
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -16,5 +10,6 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@v4
-      - run: bash scripts/verify_exact_patch.sh --nocapture
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # actions/checkout v4.2.2
+      - name: Execute repository-owned patch regression lane
+        run: ./scripts/verify.sh exact-patch
