@@ -1,0 +1,20 @@
+# franken-registry-v1
+id	threat_model_ref	attack_description	owning_suite	status
+ATK-001	7.1	Git pack/delta expansion bomb, integer overflow, or malformed wire frame to force memory exhaustion or crash	crates/fgit-wire/tests/receivepack_adversarial.rs	active
+ATK-002	7.1	Malformed Git object headers, path traversal in tree entries, and hash collision tricks	crates/fgit-git-object/tests/adversarial_refusal.rs	active
+ATK-003	7.2	Forged or stale authority version token rollback, ABA equivocation, and lost-response double-terminal race	crates/fgit-authority/tests/fault_campaign.rs	active
+ATK-004	7.3	Wrong-tenant or wrong-key domain substitution, payload tampering, or locator confusion against storage fabric	crates/fgit-object-fabric/tests/microsegment_adversarial.rs	active
+ATK-005	7.4	Workspace path traversal, symlink/hardlink escape, and candidate materialization poisoning	crates/fgit-treefs/tests/path_security_adversarial.rs	active
+ATK-006	7.5	Token substitution across repositories, capability widening, and expired credential replay	crates/fgit-identity/tests/auth_adversarial_sessions.rs	active
+ATK-007	7.5a	Phishing/MFA recovery downgrade, credential stuffing, OAuth code replay, and session hijacking	scripts/e2e/suites/security/account_security_corpus.sh	active
+ATK-008	7.6	Prompt injection in repository text or tool outputs instructing secret disclosure or untyped side effects	crates/fgit-agent/tests/agent_adversarial.rs	active
+ATK-009	7.7	Runner sandbox escape, cross-trust cache poisoning, or unquiesced cancellation orphan processes	scripts/e2e/build_reuse_campaign.sh	active
+ATK-010	7.8	Have-summary poisoning, malicious delta base injection, and RaptorQ decoder resource amplification	crates/fgit-atp-git/tests/summary_poisoning.rs	active
+ATK-011	7.9	Webhook SSRF to loopback/private/metadata network ranges and DNS rebinding	scripts/e2e/suites/security/submodule_nondelegation.sh	active
+ATK-012	7.10	Raw script/active content XSS in markdown/documents, parser resource exhaustion, and review anchor misattachment	crates/fgit-doc/tests/suite/adversarial.rs	active
+ATK-013	7.11	Unauthorized private-code snippet leakage, query fanout DoS, and mixed-generation cache confusion	crates/fgit-admission/tests/pinned_snapshot_toctou.rs	active
+ATK-014	7.12	Malicious/stale repair symbols, GC root omission, and tombstone/grace-period deletion races	crates/fgit-raptorq/tests/raptorq_adversarial.rs	active
+ATK-015	7.13	Peer equivocation, CRDT last-writer-wins on protected refs, and schema skew rollback	crates/fgit-admission/tests/receive_admission_adversarial.rs	active
+ATK-016	7.14	Operator break-glass override abuse, signing key compromise, and release asset tampering	crates/fgit-policy/tests/break_glass_evidence.rs	active
+ATK-017	7.5	SSH transport host key forgery, unauthorized deploy key injection, and unauthenticated channel command execution	scripts/e2e/ssh_transport_security.sh	active
+ATK-018	7.1	Resource ceiling violations on untrusted pack/frame input triggering unbounded memory or recursion	scripts/e2e/suites/security/resource_ceilings.sh	active

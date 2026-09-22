@@ -356,6 +356,7 @@ fn check_required_files(root: &Path, report: &mut Report) {
         "docs/RAPTORQ_PERMEATION_MAP.md",
         "docs/RESEARCH_PROVENANCE.md",
         "registries/README.md",
+        "registries/attack_matrix.tsv",
         "registries/calm_operations.tsv",
         "registries/claim_classes.tsv",
         "registries/claims.tsv",
@@ -387,6 +388,16 @@ const CALM_CLASS_COUNT: usize = 7;
 
 fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
     BTreeMap::from([
+        (
+            "attack_matrix.tsv",
+            &[
+                "id",
+                "threat_model_ref",
+                "attack_description",
+                "owning_suite",
+                "status",
+            ][..],
+        ),
         (
             "calm_operations.tsv",
             &[
@@ -747,6 +758,7 @@ fn check_registries(root: &Path, report: &mut Report) {
         }
     }
     check_evidence_packs(root, report);
+    check_attack_matrix(root, report);
     claims::check(root, report);
 }
 
@@ -929,6 +941,95 @@ fn canonical_body_families(source: &str, display: &str, report: &mut Report) -> 
         families.insert(literal[..end].to_owned());
     }
     families
+}
+
+/// How many threat controls `SECURITY_THREAT_MODEL.md` section 7 declares.
+const THREAT_MODEL_SECTION_7_COUNT: usize = 15;
+
+/// The closed set of threat controls, parsed from SECURITY_THREAT_MODEL.md section 7.
+fn security_threat_model_controls(root: &Path, report: &mut Report) -> BTreeSet<String> {
+    let path = root.join("SECURITY_THREAT_MODEL.md");
+    let display = relative(root, &path);
+    let mut controls = BTreeSet::new();
+    let text = match fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(format!("cannot read {display}: {error}"));
+            return controls;
+        }
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("### 7.") {
+            let section_num = match rest.split_once(' ') {
+                Some((num, _)) => format!("7.{num}"),
+                None => format!("7.{rest}"),
+            };
+            controls.insert(section_num);
+        }
+    }
+    if controls.len() != THREAT_MODEL_SECTION_7_COUNT {
+        report.error(format!(
+            "expected {THREAT_MODEL_SECTION_7_COUNT} threat controls in {display} section 7, parsed {}; \
+             the attack_matrix completeness check would be vacuous",
+            controls.len()
+        ));
+    }
+    controls
+}
+
+/// Validates that every attack row in `registries/attack_matrix.tsv` binds to a
+/// declared threat control in `SECURITY_THREAT_MODEL.md`, names a real existing
+/// suite file, and that every threat control has >= 1 attack row (completeness).
+fn check_attack_matrix(root: &Path, report: &mut Report) {
+    let expected_controls = security_threat_model_controls(root, report);
+    let path = root.join("registries/attack_matrix.tsv");
+    let display = relative(root, &path);
+    let text = match fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(_) => return, // The generic registry gate reports the missing file.
+    };
+    let mut covered_controls = BTreeSet::new();
+    let mut in_header = true;
+    for (line_index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if in_header {
+            in_header = false;
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 5 {
+            continue;
+        }
+        let threat_ref = fields[1].trim();
+        let suite_path = fields[3].trim();
+        if !expected_controls.contains(threat_ref) {
+            report.error(format!(
+                "attack row at {display}:{} references unknown threat control `{threat_ref}`; \
+                 SECURITY_THREAT_MODEL.md section 7 declares only {:?}",
+                line_index + 1,
+                expected_controls
+            ));
+        } else {
+            covered_controls.insert(threat_ref.to_owned());
+        }
+        let target_file = root.join(suite_path);
+        if !target_file.is_file() {
+            report.error(format!(
+                "attack row at {display}:{} references non-existent suite file `{suite_path}`",
+                line_index + 1
+            ));
+        }
+    }
+    for control in &expected_controls {
+        if !covered_controls.contains(control) {
+            report.error(format!(
+                "threat control `{control}` from SECURITY_THREAT_MODEL.md has no mapped attack rows in {display}; \
+                 completeness check requires every control to be covered by >= 1 attack row"
+            ));
+        }
+    }
 }
 
 /// The one in-code source of the registry status vocabulary.

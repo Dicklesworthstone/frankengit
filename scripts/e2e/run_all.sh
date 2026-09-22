@@ -138,6 +138,7 @@ fge__detect_digest_tool || {
 RA_REPO_ROOT=$(fge__repo_root "$RA_DIR")
 RA_SUITE_DIR="$RA_DIR/suites"
 RA_BUILD_REUSE_CAMPAIGN="$RA_DIR/build_reuse_campaign.sh"
+RA_SECURITY_PROGRAM="$RA_DIR/security_program.sh"
 RA_OUT=''
 RA_TIMEOUT=900
 RA_ATTEMPTS=1
@@ -377,6 +378,12 @@ else
       exit 2
     fi
     RA_SCRIPTS+=("$RA_BUILD_REUSE_CAMPAIGN")
+    if [ ! -f "$RA_SECURITY_PROGRAM" ] || [ ! -x "$RA_SECURITY_PROGRAM" ]; then
+      printf 'run_all: required security program is missing or not executable: %s\n' \
+        "$RA_SECURITY_PROGRAM" >&2
+      exit 2
+    fi
+    RA_SCRIPTS+=("$RA_SECURITY_PROGRAM")
   fi
 fi
 
