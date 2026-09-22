@@ -9,7 +9,11 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use fgit_node::{NodeConfig, OneNode};
-use fgit_types::{GitHashAlgorithm, GitOid, HeadGeneration, RepositoryId, TenantId};
+use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
+use fgit_types::{
+    CANONICAL_CODEC_VERSION, GitHashAlgorithm, GitOid, HeadGeneration,
+    RepositoryAuthorityHeadId, RepositoryId, TenantId,
+};
 
 use super::publication_support::{quote, set_once};
 
@@ -18,6 +22,7 @@ const MAX_OBJECTS: usize = 1_000_000;
 const MAX_BYTES: u64 = 16 * 1024 * MIB;
 const USAGE: &str = "usage: fg fsck <storage-root> <tenant-id> <repository-id> --trusted-local
   [--object-format sha1|sha256] [--expected-generation <non-zero>]
+  [--expected-head <algorithm-qualified-snapshot-token>]
   [--max-objects <1..1000000>] [--max-bytes <1..17179869184>]
   [--max-object-bytes <1..268435456>] [--timeout-secs <1..3600>]
 
@@ -27,6 +32,8 @@ the independent payload commitment are checked by the existing object fabric.
 Every current reference must belong to that closure. The exact authority basis
 is revalidated after the scan; movement refuses the attempt rather than mixing
 snapshots. --expected-generation optionally fences the initial observation.
+For exact identity, pass a previous receipt's snapshot_token as --expected-head;
+a generation alone is not an identity. Both supplied fences must match.
 
 This local operator command can inspect hidden refs and requires explicit
 whole-repository authorization via --trusted-local. It does not discover orphan
@@ -34,7 +41,9 @@ files, repair storage, change refs, run external Git, or verify graph structure.
 Defaults: 100000 objects, 512 MiB total payload, 32 MiB per object, 300 seconds.
 The per-object ceiling is enforced before allocation; the total counts verified
 payload bytes, not physical I/O. A failing scan may read one additional bounded
-object before refusing. Authority materialization has its own runtime bounds.
+object before refusing. The scan timeout is checked between operations; it does
+not interrupt a blocking filesystem call. Authority materialization has its own
+runtime bounds. Revalidation is an observation, not a lock against later writes.
 No success receipt is emitted before all checks and node shutdown complete.
 Exit 0: complete scoped audit; 2: invalid input, incomplete audit, or output error.";
 
@@ -45,6 +54,7 @@ struct Options {
     repository: RepositoryId,
     format: GitHashAlgorithm,
     expected_generation: Option<u64>,
+    expected_head: Option<RepositoryAuthorityHeadId>,
     limits: Limits,
 }
 
@@ -71,6 +81,7 @@ enum Refusal {
     ReferenceOutsideClosure(GitOid),
     ObjectFormat(GitOid),
     Generation { expected: u64, observed: u64 },
+    ExpectedHead,
     SnapshotChanged,
 }
 
@@ -85,6 +96,7 @@ impl Display for Refusal {
             Self::ObjectFormat(oid) => write!(out, "object_format_mismatch: {oid}"),
             Self::Generation { expected, observed } => write!(out,
                 "authority_generation_mismatch: expected {expected}, observed {observed}"),
+            Self::ExpectedHead => out.write_str("authority_head_mismatch: expected snapshot is not current"),
             Self::SnapshotChanged => out.write_str("authority_snapshot_changed: restart the audit"),
         }
     }
@@ -94,7 +106,9 @@ impl std::error::Error for Refusal {}
 
 #[derive(Debug, PartialEq, Eq)]
 struct Report {
+    head: RepositoryAuthorityHeadId,
     generation: u64,
+    closure_root: String,
     references: usize,
     objects: usize,
     payload_bytes: u64,
@@ -108,6 +122,36 @@ fn positive(text: &str, maximum: u64, field: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{field} must be in 1..={maximum}"))
 }
 
+fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
+    let (algorithm, digest) = text.strip_prefix("alg:")
+        .and_then(|value| value.split_once(':'))
+        .ok_or("expected an algorithm-qualified snapshot_token")?;
+    if algorithm.starts_with('0') {
+        return Err("snapshot algorithm must be canonical positive decimal".into());
+    }
+    let code = positive(algorithm, u64::from(u16::MAX), "snapshot algorithm")?;
+    let algorithm = DigestAlgorithmId::try_new(u16::try_from(code)
+        .map_err(|_| "snapshot algorithm overflow")?)
+        .map_err(|_| "invalid snapshot algorithm")?;
+    if digest.is_empty() || digest.len() > 128 || digest.len() % 2 != 0
+        || !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("snapshot digest must be bounded lowercase hex".into());
+    }
+    let nibble = |byte: u8| if byte <= b'9' { byte - b'0' } else { byte - b'a' + 10 };
+    let bytes = digest.as_bytes().chunks_exact(2)
+        .map(|pair| 16 * nibble(pair[0]) + nibble(pair[1])).collect::<Vec<_>>();
+    let digest = DigestBytes::try_new(&bytes).map_err(|_| "invalid snapshot digest width")?;
+    Ok(RepositoryAuthorityHeadId::from_digest(algorithm, CANONICAL_CODEC_VERSION, digest))
+}
+
+fn head_token(head: RepositoryAuthorityHeadId) -> String {
+    let id = head.as_internal_object_id();
+    let digest = id.digest().as_bytes().iter()
+        .map(|byte| format!("{byte:02x}")).collect::<String>();
+    format!("alg:{}:{digest}", id.algorithm().code_point())
+}
+
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 4 || args.len() > 18 || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
@@ -118,6 +162,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut trusted = None;
     let mut format = None;
     let mut generation = None;
+    let mut head = None;
     let mut objects = None;
     let mut bytes = None;
     let mut object_bytes = None;
@@ -141,6 +186,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 set_once(&mut format, value, flag)?;
             }
             "--expected-generation" => set_once(&mut generation, positive(value, u64::MAX, flag)?, flag)?,
+            "--expected-head" => set_once(&mut head, parse_head(value)?, flag)?,
             "--max-objects" => set_once(&mut objects, positive(value, MAX_OBJECTS as u64, flag)? as usize, flag)?,
             "--max-bytes" => set_once(&mut bytes, positive(value, MAX_BYTES, flag)?, flag)?,
             "--max-object-bytes" => set_once(&mut object_bytes, positive(value, 256 * MIB, flag)?, flag)?,
@@ -158,6 +204,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         repository: RepositoryId::from_hex(&args[2]).map_err(|error| error.to_string())?,
         format: format.unwrap_or(GitHashAlgorithm::Sha1),
         expected_generation: generation,
+        expected_head: head,
         limits: Limits {
             objects: objects.unwrap_or(defaults.objects),
             bytes: bytes.unwrap_or(defaults.bytes),
@@ -173,6 +220,18 @@ fn live(started: Instant, seconds: u64) -> Result<(), Refusal> {
     } else {
         Ok(())
     }
+}
+
+fn check_fences(options: &Options, head: RepositoryAuthorityHeadId, generation: u64) -> Result<(), Refusal> {
+    if let Some(expected) = options.expected_generation {
+        if expected != generation {
+            return Err(Refusal::Generation { expected, observed: generation });
+        }
+    }
+    if options.expected_head.is_some_and(|expected| expected != head) {
+        return Err(Refusal::ExpectedHead);
+    }
+    Ok(())
 }
 
 /// The reader is a verified-whole-read boundary, not a source of unchecked
@@ -211,11 +270,8 @@ fn inspect(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
     let selected = node.runtime().block_on(node.materialize_admission_in(&request))
         .map_err(|error| Refusal::Source(error.to_string()))?;
     let generation = selected.authenticated().receipt().generation().get();
-    if let Some(expected) = options.expected_generation {
-        if expected != generation {
-            return Err(Refusal::Generation { expected, observed: generation });
-        }
-    }
+    let head = selected.basis().id();
+    check_fences(options, head, generation)?;
     let objects = selected.selected_closure().closure().objects();
     for oid in selected.snapshot().refs.values() {
         live(started, options.limits.seconds)?;
@@ -233,7 +289,14 @@ fn inspect(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
     if current.basis() != selected.basis() || current.selected_closure() != selected.selected_closure() {
         return Err(Refusal::SnapshotChanged);
     }
-    Ok(Report { generation, references: selected.snapshot().refs.len(), objects: objects.len(), payload_bytes })
+    Ok(Report {
+        head,
+        generation,
+        closure_root: selected.selected_closure().root().to_string(),
+        references: selected.snapshot().refs.len(),
+        objects: objects.len(),
+        payload_bytes,
+    })
 }
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
@@ -245,7 +308,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     let mut node = OneNode::open_existing(NodeConfig::new(
         options.storage.clone(), options.tenant, options.repository)
         .with_object_format(options.format)
-        .with_max_object_bytes(options.limits.object_bytes.min(options.limits.bytes)))
+        .with_max_object_bytes(options.limits.object_bytes))
         .map_err(|error| format!("cannot open fsck node: {error}"))?;
     let result = node.bring_into_service(HeadGeneration::FIRST)
         .map_err(|error| Refusal::Source(error.to_string()))
@@ -266,12 +329,14 @@ fn finish(output: &mut impl Write, options: &Options, result: Result<Report, Ref
             emit(output, &format!(concat!("{{\"type\":\"repository_fsck\",\"schema_version\":1,",
                 "\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},",
                 "\"authority_generation\":{},\"references_checked\":{},\"objects_verified\":{},",
-                "\"payload_bytes_verified\":{},\"scope\":\"authority_selected_objects\",",
+                "\"payload_bytes_verified\":{},\"authority_head\":{},\"snapshot_token\":{},",
+                "\"selected_closure_root\":{},\"scope\":\"authority_selected_objects\",",
                 "\"complete\":true,\"object_graph_verified\":false,\"head_revalidated\":true,",
                 "\"physical_orphans_scanned\":false,\"repository_changed\":false,\"node_closed\":true}}"),
                 quote(&options.tenant.to_string()), quote(&options.repository.to_string()),
                 quote(options.format.as_str()), report.generation, report.references,
-                report.objects, report.payload_bytes))?;
+                report.objects, report.payload_bytes, quote(&report.head.to_string()),
+                quote(&head_token(report.head)), quote(&report.closure_root)))?;
             Ok(0)
         }
         (result, cleanup) => {
@@ -283,69 +348,4 @@ fn finish(output: &mut impl Write, options: &Options, result: Result<Report, Ref
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn oid(byte: u8, format: GitHashAlgorithm) -> GitOid {
-        let width = match format { GitHashAlgorithm::Sha1 => 20, GitHashAlgorithm::Sha256 => 32 };
-        GitOid::from_hex(format, &format!("{byte:02x}").repeat(width)).unwrap()
-    }
-
-    #[test]
-    fn complete_scan_reads_every_selected_object_once_in_both_domains() {
-        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-            let ids = BTreeSet::from([oid(1, format), oid(2, format)]);
-            let mut read = Vec::new();
-            let bytes = check_objects(&ids, format, Limits::default(), |id| {
-                read.push(id); Ok(if id == oid(1, format) { 0 } else { 7 })
-            }, || Ok(())).unwrap();
-            assert_eq!(read, ids.iter().copied().collect::<Vec<_>>());
-            assert_eq!(bytes, 7);
-        }
-    }
-
-    #[test]
-    fn count_and_identity_refusals_precede_object_reads() {
-        let ids = BTreeSet::from([oid(1, GitHashAlgorithm::Sha1)]);
-        let read = |_| -> Result<u64, String> { panic!("must refuse before object I/O") };
-        assert_eq!(check_objects(&ids, GitHashAlgorithm::Sha1,
-            Limits { objects: 0, ..Default::default() }, read, || Ok(())), Err(Refusal::Limit("max-objects")));
-        assert!(matches!(check_objects(&ids, GitHashAlgorithm::Sha256,
-            Limits::default(), read, || Ok(())), Err(Refusal::ObjectFormat(_))));
-    }
-
-    #[test]
-    fn budget_and_read_failures_never_return_partial_success() {
-        let format = GitHashAlgorithm::Sha1;
-        let ids = BTreeSet::from([oid(1, format), oid(2, format)]);
-        assert_eq!(check_objects(&ids, format, Limits { bytes: 5, ..Default::default() },
-            |_| Ok(3), || Ok(())), Err(Refusal::Limit("max-bytes")));
-        assert_eq!(check_objects(&ids, format, Limits { object_bytes: 2, ..Default::default() },
-            |_| Ok(3), || Ok(())), Err(Refusal::Limit("max-object-bytes")));
-        assert!(matches!(check_objects(&ids, format, Limits::default(),
-            |_| Err("payload commitment mismatch".into()), || Ok(())), Err(Refusal::Object { .. })));
-        assert_eq!(check_objects(&ids, format, Limits::default(),
-            |_| panic!("deadline must fence reads"), || Err(Refusal::Deadline)), Err(Refusal::Deadline));
-    }
-
-    #[test]
-    fn empty_selection_still_observes_deadline() {
-        assert_eq!(check_objects(&BTreeSet::new(), GitHashAlgorithm::Sha1,
-            Limits::default(), |_| panic!("no objects"), || Err(Refusal::Deadline)), Err(Refusal::Deadline));
-    }
-
-    #[test]
-    fn decimal_limits_reject_signs_whitespace_zero_and_overflow() {
-        for text in ["", "0", "-1", "+1", " 1", "1 ", "1.0", "18446744073709551616"] {
-            assert!(positive(text, u64::MAX, "limit").is_err(), "{text}");
-        }
-        assert_eq!(positive("9", 9, "limit").unwrap(), 9);
-        assert!(positive("10", 9, "limit").is_err());
-    }
-
-    #[test]
-    fn help_explains_scope_and_does_not_claim_graph_verification() {
-        assert!(USAGE.contains("including\nadmitted history"));
-        assert!(USAGE.contains("or verify graph structure"));
-    }
-}
+mod tests;
