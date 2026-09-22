@@ -171,11 +171,11 @@ pub use current_effect_dispatch::{
     CurrentAuthoritySettledOutboxEffect,
 };
 pub use delegation::{
-    Caveat, DelegatedCapability, DelegationLimits, DisclosurePolicy, Selector, SubIntent,
-    SubIntentFanOutTracker, SubIntentId, SubIntentParams, SubIntentRefusal,
-    MAX_CONTEXT_DUPLICATION_BYTES, MAX_DELEGATION_DEPTH, MAX_DELEGATION_FAN_OUT,
-    MAX_SUBINTENT_CAPABILITIES, MAX_SUBINTENT_CAVEATS, MAX_SUBINTENT_IDENTITIES,
-    MAX_SUBINTENT_INPUT_COMMITMENTS, verify_sub_intent_ancestry,
+    Caveat, DelegatedCapability, DelegationLimits, DisclosurePolicy, MAX_CONTEXT_DUPLICATION_BYTES,
+    MAX_DELEGATION_DEPTH, MAX_DELEGATION_FAN_OUT, MAX_SUBINTENT_CAPABILITIES,
+    MAX_SUBINTENT_CAVEATS, MAX_SUBINTENT_IDENTITIES, MAX_SUBINTENT_INPUT_COMMITMENTS, Selector,
+    SubIntent, SubIntentFanOutTracker, SubIntentId, SubIntentParams, SubIntentRefusal,
+    verify_sub_intent_ancestry,
 };
 pub use descendant_revocation::{
     CurrentAuthorityCapabilityEffectAuthorization, CurrentAuthorityCapabilityEffectAuthorizationId,

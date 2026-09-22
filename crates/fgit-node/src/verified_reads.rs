@@ -942,7 +942,8 @@ mod tests {
             authority_head_id(&body).expect("the genesis head re-identifies"),
             body,
         );
-        let record = crate::tests::stage_fixture_ref_record(node, &request, &basis, &refs, &closure);
+        let record =
+            crate::tests::stage_fixture_ref_record(node, &request, &basis, &refs, &closure);
         assert_eq!(record.resulting_ref_root, ref_root);
         assert_eq!(record.object_closure_root, closure_root);
         let mut roots = ResultingRoots::carried_forward(&basis);

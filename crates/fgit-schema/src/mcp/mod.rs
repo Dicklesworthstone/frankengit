@@ -18,11 +18,11 @@ pub mod validate;
 
 pub use dispatch::{admit_call, discover_tools};
 pub use refusal::McpRefusal;
-pub use registry::{find_tool, find_tool_version, REGISTRY};
+pub use registry::{REGISTRY, find_tool, find_tool_version};
 pub use types::{
     BudgetDimensions, CancellationBehavior, CapabilityRequirement, DisclosureClass,
     EvidenceReceiptClass, FieldClassification, IdempotencyRequirement,
     InputAuthorityRootRequirement, McpEntityKind, McpField, McpToolEntry, PaginationRules,
     PrincipalRequirement, ReadMutationClass, SupportProfile,
 };
-pub use validate::{validate_registry, validate_tool_entry, McpValidationError};
+pub use validate::{McpValidationError, validate_registry, validate_tool_entry};

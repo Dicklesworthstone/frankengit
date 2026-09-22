@@ -1,7 +1,9 @@
 //! Immutable source-browsing requests and receipts. No storage or authority effects.
 use fgit_treefs::{BaseError, TreePath};
-use fgit_types::{GitHashAlgorithm as Format, GitOid as Oid, RepositoryAuthorityHeadId,
-    RepositoryCommitId, RepositoryId};
+use fgit_types::{
+    GitHashAlgorithm as Format, GitOid as Oid, RepositoryAuthorityHeadId, RepositoryCommitId,
+    RepositoryId,
+};
 pub const MAX_SOURCE_PAGE_BYTES: u32 = 1024 * 1024;
 
 /// One level of a tree, or one exact byte range of a file/link payload.
@@ -22,33 +24,52 @@ pub struct SourceBrowseQuery {
 }
 impl SourceBrowseQuery {
     pub fn validate(&self, format: Format) -> Result<Option<TreePath>, SourceBrowseError> {
-        if self.expected_commit.is_some_and(|id| id.algorithm() != format || id.is_zero()) {
-            return Err(SourceBrowseError::InvalidRequest("invalid expected commit domain"));
+        if self
+            .expected_commit
+            .is_some_and(|id| id.algorithm() != format || id.is_zero())
+        {
+            return Err(SourceBrowseError::InvalidRequest(
+                "invalid expected commit domain",
+            ));
         }
-        let path = self.path.as_deref().map(TreePath::parse_default).transpose()
+        let path = self
+            .path
+            .as_deref()
+            .map(TreePath::parse_default)
+            .transpose()
             .map_err(|_| SourceBrowseError::InvalidRequest("invalid repository path"))?;
         match &self.action {
             SourceBrowseAction::List { after, limit } => {
                 if !(1..=1000).contains(limit) {
-                    return Err(SourceBrowseError::InvalidRequest("directory page limit must be 1..1000"));
+                    return Err(SourceBrowseError::InvalidRequest(
+                        "directory page limit must be 1..1000",
+                    ));
                 }
                 if let Some(name) = after {
                     let cursor = TreePath::parse_default(name)
                         .map_err(|_| SourceBrowseError::InvalidRequest("invalid child cursor"))?;
                     if cursor.components().count() != 1 {
-                        return Err(SourceBrowseError::InvalidRequest("cursor must name one immediate child"));
+                        return Err(SourceBrowseError::InvalidRequest(
+                            "cursor must name one immediate child",
+                        ));
                     }
                     if self.expected_head.is_none() {
-                        return Err(SourceBrowseError::InvalidRequest("continuation requires source head"));
+                        return Err(SourceBrowseError::InvalidRequest(
+                            "continuation requires source head",
+                        ));
                     }
                 }
             }
             SourceBrowseAction::Read { offset, limit } => {
                 if path.is_none() || *limit == 0 || *limit > MAX_SOURCE_PAGE_BYTES {
-                    return Err(SourceBrowseError::InvalidRequest("file path and byte limit 1..1048576 required"));
+                    return Err(SourceBrowseError::InvalidRequest(
+                        "file path and byte limit 1..1048576 required",
+                    ));
                 }
                 if *offset != 0 && self.expected_head.is_none() {
-                    return Err(SourceBrowseError::InvalidRequest("range continuation requires source head"));
+                    return Err(SourceBrowseError::InvalidRequest(
+                        "range continuation requires source head",
+                    ));
                 }
             }
         }
@@ -74,12 +95,23 @@ impl std::fmt::Display for SourceBrowseError {
 }
 impl std::error::Error for SourceBrowseError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SourceEntryKind { File, Executable, Directory, Symlink, Gitlink }
+pub enum SourceEntryKind {
+    File,
+    Executable,
+    Directory,
+    Symlink,
+    Gitlink,
+}
 impl SourceEntryKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self { Self::File => "file", Self::Executable => "executable",
-            Self::Directory => "directory", Self::Symlink => "symlink", Self::Gitlink => "gitlink" }
+        match self {
+            Self::File => "file",
+            Self::Executable => "executable",
+            Self::Directory => "directory",
+            Self::Symlink => "symlink",
+            Self::Gitlink => "gitlink",
+        }
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -90,10 +122,18 @@ pub struct SourceDirectoryEntry {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SourceBrowseContent {
-    Directory { entries: Vec<SourceDirectoryEntry>, next_after: Option<Vec<u8>> },
+    Directory {
+        entries: Vec<SourceDirectoryEntry>,
+        next_after: Option<Vec<u8>>,
+    },
     /// Symlink bytes are data, never followed. Gitlinks cannot be read as files.
-    Blob { kind: SourceEntryKind, bytes: Vec<u8>, total_bytes: u64,
-        offset: u64, next_offset: Option<u64> },
+    Blob {
+        kind: SourceEntryKind,
+        bytes: Vec<u8>,
+        total_bytes: u64,
+        offset: u64,
+        next_offset: Option<u64>,
+    },
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceBrowseReport {

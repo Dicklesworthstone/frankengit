@@ -81,7 +81,8 @@ fn webhook_delivery_successful_acknowledgement_and_signature_verification() {
         assert_eq!(delivery_header, "delivery-123");
 
         // Respond with HTTP 200 OK
-        let response = "HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
         stream.write_all(response.as_bytes()).unwrap();
         stream.flush().unwrap();
     });
@@ -208,7 +209,9 @@ fn webhook_ssrf_blocked_target_immediately_rejects_and_dead_letters() {
         "169.254.169.254",
         80,
         "/latest/meta-data",
-        Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(169, 254, 169, 254))),
+        Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            169, 254, 169, 254,
+        ))),
     );
     let reg = WebhookRegistration {
         id: WebhookId(99),

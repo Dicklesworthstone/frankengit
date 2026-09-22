@@ -64,9 +64,7 @@ fn sample_input_root(
     let (prev, next) = match kind {
         RefUpdateKind::Create => (None, Some(oid(1))),
         RefUpdateKind::Delete => (Some(oid(1)), None),
-        RefUpdateKind::FastForward | RefUpdateKind::NonFastForward => {
-            (Some(oid(1)), Some(oid(2)))
-        }
+        RefUpdateKind::FastForward | RefUpdateKind::NonFastForward => (Some(oid(1)), Some(oid(2))),
     };
     let update = RefUpdateFact::try_new(name, prev, next, kind, force).expect("valid update fact");
     let principal = PrincipalFacts::try_new(
@@ -122,7 +120,10 @@ fn in_memory_retroactivity_replay_drill() {
     )
     .expect("policy P2 compiles");
     let p2_id = policy_p2.id();
-    assert_ne!(p1_id, p2_id, "policy P1 and P2 must have distinct identities");
+    assert_ne!(
+        p1_id, p2_id,
+        "policy P1 and P2 must have distinct identities"
+    );
 
     let pinned_p2 = source.pin(policy_p2);
     assert_eq!(pinned_p2, p2_id);
@@ -165,12 +166,8 @@ fn persisted_authority_storage_retroactivity_replay() {
     let limits = PolicyStoreLimits::default();
 
     // 1. Stage policy P1 (allow all).
-    let frame_p1 = PolicyFrame::compile(
-        "policy p1_open {\n    default allow\n}",
-        limits,
-        &live,
-    )
-    .expect("P1 compiles into frame");
+    let frame_p1 = PolicyFrame::compile("policy p1_open {\n    default allow\n}", limits, &live)
+        .expect("P1 compiles into frame");
     let p1_id = frame_p1.id();
     let receipt_p1 = stage_policy(&store, &frame_p1, &live).expect("stage P1 succeeds");
     assert_eq!(receipt_p1.id, p1_id);
@@ -237,7 +234,8 @@ fn toctou_and_substitution_fail_closed() {
     let limits = PolicyStoreLimits::default();
 
     let frame_p1 = PolicyFrame::compile("policy p1 { default allow }", limits, &live).unwrap();
-    let frame_p2 = PolicyFrame::compile("policy p2 { default deny \"deny\" }", limits, &live).unwrap();
+    let frame_p2 =
+        PolicyFrame::compile("policy p2 { default deny \"deny\" }", limits, &live).unwrap();
 
     let p1_id = frame_p1.id();
     let p2_id = frame_p2.id();
@@ -284,8 +282,8 @@ fn toctou_and_substitution_fail_closed() {
 #[test]
 fn receive_pack_and_effects_protection_bridge() {
     let mut source = InMemoryPolicySnapshots::new();
-    let policy = compile_branch_protection_policy("refs/heads/main")
-        .expect("branch protection compiles");
+    let policy =
+        compile_branch_protection_policy("refs/heads/main").expect("branch protection compiles");
     let id = source.pin(policy);
 
     let main_ref = RefName::try_new(b"refs/heads/main").unwrap();

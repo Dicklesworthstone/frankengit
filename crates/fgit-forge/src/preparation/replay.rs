@@ -8,13 +8,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_types::{GitHashAlgorithm, GitOid};
 
-use super::{CommitInput, MergeConflict, MergeEntry, MergeMetadata, MergeObjectSource,
-    MergeSourceError, PlannedMergeObject, Planner, PreparationError, PreparationLimits};
-use super::resolution::{ConflictResolution, ResolvedPath, ResolutionError,
-    resolve_discovered_conflicts, validate_resolutions};
+use super::resolution::{
+    ConflictResolution, ResolutionError, ResolvedPath, resolve_discovered_conflicts,
+    validate_resolutions,
+};
+use super::{
+    CommitInput, MergeConflict, MergeEntry, MergeMetadata, MergeObjectSource, MergeSourceError,
+    PlannedMergeObject, Planner, PreparationError, PreparationLimits,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReplayDirection { CherryPick, Revert }
+pub enum ReplayDirection {
+    CherryPick,
+    Revert,
+}
 
 /// Exact immutable inputs. `source_tip` authorizes historical selection, not
 /// the change being applied: later source commits are deliberately excluded.
@@ -50,10 +57,15 @@ pub struct PreparedReplay {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReplayPreparation {
     Clean(PreparedReplay),
-    Conflicted { coordinates: ReplayCoordinates, conflicts: Vec<MergeConflict> },
+    Conflicted {
+        coordinates: ReplayCoordinates,
+        conflicts: Vec<MergeConflict>,
+    },
     /// The resulting tree equals the current target tree. This is a content
     /// observation, not proof that this patch previously appeared in history.
-    NoChange { coordinates: ReplayCoordinates },
+    NoChange {
+        coordinates: ReplayCoordinates,
+    },
 }
 
 /// The result of replay with explicit conflict choices. Successful resolution
@@ -80,13 +92,19 @@ impl std::fmt::Display for ReplayError {
 }
 impl std::error::Error for ReplayError {}
 impl From<ResolutionError> for ReplayError {
-    fn from(error: ResolutionError) -> Self { Self::Resolution(Box::new(error)) }
+    fn from(error: ResolutionError) -> Self {
+        Self::Resolution(Box::new(error))
+    }
 }
 impl From<PreparationError> for ReplayError {
-    fn from(error: PreparationError) -> Self { Self::Preparation(error) }
+    fn from(error: PreparationError) -> Self {
+        Self::Preparation(error)
+    }
 }
 impl From<MergeSourceError> for ReplayError {
-    fn from(error: MergeSourceError) -> Self { Self::Preparation(error.into()) }
+    fn from(error: MergeSourceError) -> Self {
+        Self::Preparation(error.into())
+    }
 }
 
 /// Construct one single-parent commit without staging objects or moving refs.
@@ -100,8 +118,11 @@ impl From<MergeSourceError> for ReplayError {
 /// empty commit. Attributes, binary conflicts and type conflicts retain the
 /// existing path-v1 planner's refusal/conflict semantics.
 pub fn prepare_replay<S: MergeObjectSource>(
-    source: &S, format: GitHashAlgorithm, request: ReplayRequest,
-    metadata: &MergeMetadata, limits: PreparationLimits,
+    source: &S,
+    format: GitHashAlgorithm,
+    request: ReplayRequest,
+    metadata: &MergeMetadata,
+    limits: PreparationLimits,
 ) -> Result<ReplayPreparation, ReplayError> {
     prepare_replay_inner(source, format, request, metadata, limits, None)
         .map(|result| result.outcome)
@@ -113,41 +134,76 @@ pub fn prepare_replay<S: MergeObjectSource>(
 /// Explicit deletion is required when the chosen side is absent. No source
 /// commit is grafted into the resulting history; the target is its only parent.
 pub fn prepare_resolved_replay<S: MergeObjectSource>(
-    source: &S, format: GitHashAlgorithm, request: ReplayRequest,
-    resolutions: &[ConflictResolution], metadata: &MergeMetadata, limits: PreparationLimits,
+    source: &S,
+    format: GitHashAlgorithm,
+    request: ReplayRequest,
+    resolutions: &[ConflictResolution],
+    metadata: &MergeMetadata,
+    limits: PreparationLimits,
 ) -> Result<ResolvedReplay, ReplayError> {
     prepare_replay_inner(source, format, request, metadata, limits, Some(resolutions))
 }
 
 fn prepare_replay_inner<S: MergeObjectSource>(
-    source: &S, format: GitHashAlgorithm, request: ReplayRequest,
-    metadata: &MergeMetadata, limits: PreparationLimits,
+    source: &S,
+    format: GitHashAlgorithm,
+    request: ReplayRequest,
+    metadata: &MergeMetadata,
+    limits: PreparationLimits,
     resolutions: Option<&[ConflictResolution]>,
 ) -> Result<ResolvedReplay, ReplayError> {
     limits.validate()?;
     metadata.validate()?;
-    if let Some(choices) = resolutions { validate_resolutions(choices, limits)?; }
-    if [request.target, request.source_tip, request.selected_commit].iter()
+    if let Some(choices) = resolutions {
+        validate_resolutions(choices, limits)?;
+    }
+    if [request.target, request.source_tip, request.selected_commit]
+        .iter()
         .any(|id| id.is_zero() || id.algorithm() != format)
-    { return Err(PreparationError::ObjectFormat.into()); }
+    {
+        return Err(PreparationError::ObjectFormat.into());
+    }
     if request.mainline == Some(0) {
-        return Err(ReplayError::InvalidMainline { requested: 0, parents: 0 });
+        return Err(ReplayError::InvalidMainline {
+            requested: 0,
+            parents: 0,
+        });
     }
     source.checkpoint()?;
-    let mut history = History { source, format, limits, commits: BTreeMap::new(), edges: 0 };
+    let mut history = History {
+        source,
+        format,
+        limits,
+        commits: BTreeMap::new(),
+        edges: 0,
+    };
     // Never read an arbitrary supplied commit before finding its identity in
     // the selected visible history. The target is not an alternative authority
     // for discovering a commit outside that history.
     let selected = history.find(request.source_tip, request.selected_commit)?;
     let (parent, mainline) = select_parent(&selected, request.mainline)?;
-    let parent_tree = parent.map(|id| history.read(id).map(|commit| commit.tree)).transpose()?;
+    let parent_tree = parent
+        .map(|id| history.read(id).map(|commit| commit.tree))
+        .transpose()?;
     let target_tree = history.read(request.target)?.tree;
-    let coordinates = ReplayCoordinates { request, selected_parent: parent, selected_mainline: mainline };
+    let coordinates = ReplayCoordinates {
+        request,
+        selected_parent: parent,
+        selected_mainline: mainline,
+    };
     let empty = git_object_id(format, GitObjectKind::Tree, &[]);
     let source = EmptyTreeSource { source, empty };
     let mut planner = Planner {
-        source: &source, format, limits, entries: 0, content_merges: 0, output_bytes: 0,
-        objects: BTreeMap::new(), trees: BTreeMap::new(), conflicts: Vec::new(), resolutions: BTreeMap::new(),
+        source: &source,
+        format,
+        limits,
+        entries: 0,
+        content_merges: 0,
+        output_bytes: 0,
+        objects: BTreeMap::new(),
+        trees: BTreeMap::new(),
+        conflicts: Vec::new(),
+        resolutions: BTreeMap::new(),
     };
     let (base, applied) = match request.direction {
         ReplayDirection::CherryPick => (parent_tree, selected.tree),
@@ -161,7 +217,10 @@ fn prepare_replay_inner<S: MergeObjectSource>(
         if !planner.conflicts.is_empty() {
             planner.conflicts.sort_by(|a, b| a.path.cmp(&b.path));
             return Ok(ResolvedReplay {
-                outcome: ReplayPreparation::Conflicted { coordinates, conflicts: planner.conflicts },
+                outcome: ReplayPreparation::Conflicted {
+                    coordinates,
+                    conflicts: planner.conflicts,
+                },
                 resolutions: Vec::new(),
             });
         }
@@ -169,12 +228,24 @@ fn prepare_replay_inner<S: MergeObjectSource>(
     };
     source.checkpoint()?;
     if tree == target_tree {
-        return Ok(ResolvedReplay { outcome: ReplayPreparation::NoChange { coordinates }, resolutions: receipts });
+        return Ok(ResolvedReplay {
+            outcome: ReplayPreparation::NoChange { coordinates },
+            resolutions: receipts,
+        });
     }
-    if tree == empty { planner.emit(GitObjectKind::Tree, Vec::new())?; }
-    let mut body = format!("tree {tree}\nparent {}\nauthor {} {} +0000\ncommitter {} {} +0000\n\n",
-        request.target, metadata.author, metadata.timestamp, metadata.committer, metadata.timestamp).into_bytes();
-    if body.len().checked_add(metadata.message.len()).is_none_or(|size| size > limits.max_output_bytes) {
+    if tree == empty {
+        planner.emit(GitObjectKind::Tree, Vec::new())?;
+    }
+    let mut body = format!(
+        "tree {tree}\nparent {}\nauthor {} {} +0000\ncommitter {} {} +0000\n\n",
+        request.target, metadata.author, metadata.timestamp, metadata.committer, metadata.timestamp
+    )
+    .into_bytes();
+    if body
+        .len()
+        .checked_add(metadata.message.len())
+        .is_none_or(|size| size > limits.max_output_bytes)
+    {
         return Err(PreparationError::Budget("commit bytes").into());
     }
     body.extend_from_slice(&metadata.message);
@@ -182,53 +253,94 @@ fn prepare_replay_inner<S: MergeObjectSource>(
     source.checkpoint()?;
     Ok(ResolvedReplay {
         outcome: ReplayPreparation::Clean(PreparedReplay {
-            coordinates, tree, commit, objects: planner.objects.into_values().collect(),
+            coordinates,
+            tree,
+            commit,
+            objects: planner.objects.into_values().collect(),
         }),
         resolutions: receipts,
     })
 }
 
-fn select_parent(commit: &CommitInput, mainline: Option<u16>) -> Result<(Option<GitOid>, Option<u16>), ReplayError> {
+fn select_parent(
+    commit: &CommitInput,
+    mainline: Option<u16>,
+) -> Result<(Option<GitOid>, Option<u16>), ReplayError> {
     let count = commit.parents.len();
     match (count, mainline) {
         (0, None) => Ok((None, None)),
         (1, None) => Ok((Some(commit.parents[0]), Some(1))),
-        (_, Some(position)) if position > 0 && usize::from(position) <= count =>
-            Ok((Some(commit.parents[usize::from(position) - 1]), Some(position))),
-        (_, Some(requested)) => Err(ReplayError::InvalidMainline { requested, parents: count }),
+        (_, Some(position)) if position > 0 && usize::from(position) <= count => Ok((
+            Some(commit.parents[usize::from(position) - 1]),
+            Some(position),
+        )),
+        (_, Some(requested)) => Err(ReplayError::InvalidMainline {
+            requested,
+            parents: count,
+        }),
         (_, None) => Err(ReplayError::MainlineRequired { parents: count }),
     }
 }
 
 /// The empty tree is constructed data with its actual Git identity, not a
 /// fabricated source commit or a lookup that grants access to other objects.
-struct EmptyTreeSource<'a, S> { source: &'a S, empty: GitOid }
+struct EmptyTreeSource<'a, S> {
+    source: &'a S,
+    empty: GitOid,
+}
 impl<S: MergeObjectSource> MergeObjectSource for EmptyTreeSource<'_, S> {
-    fn checkpoint(&self) -> Result<(), MergeSourceError> { self.source.checkpoint() }
-    fn commit(&self, id: GitOid) -> Result<CommitInput, MergeSourceError> { self.source.commit(id) }
+    fn checkpoint(&self) -> Result<(), MergeSourceError> {
+        self.source.checkpoint()
+    }
+    fn commit(&self, id: GitOid) -> Result<CommitInput, MergeSourceError> {
+        self.source.commit(id)
+    }
     fn tree(&self, id: GitOid) -> Result<Vec<MergeEntry>, MergeSourceError> {
         self.checkpoint()?;
-        if id == self.empty { Ok(Vec::new()) } else { self.source.tree(id) }
+        if id == self.empty {
+            Ok(Vec::new())
+        } else {
+            self.source.tree(id)
+        }
     }
-    fn blob(&self, id: GitOid) -> Result<Vec<u8>, MergeSourceError> { self.source.blob(id) }
+    fn blob(&self, id: GitOid) -> Result<Vec<u8>, MergeSourceError> {
+        self.source.blob(id)
+    }
 }
 
 struct History<'a, S> {
-    source: &'a S, format: GitHashAlgorithm, limits: PreparationLimits,
-    commits: BTreeMap<GitOid, CommitInput>, edges: usize,
+    source: &'a S,
+    format: GitHashAlgorithm,
+    limits: PreparationLimits,
+    commits: BTreeMap<GitOid, CommitInput>,
+    edges: usize,
 }
 impl<S: MergeObjectSource> History<'_, S> {
     fn read(&mut self, id: GitOid) -> Result<CommitInput, ReplayError> {
         self.source.checkpoint()?;
-        if let Some(commit) = self.commits.get(&id) { return Ok(commit.clone()); }
-        if id.is_zero() || id.algorithm() != self.format { return Err(PreparationError::ObjectFormat.into()); }
-        if self.commits.len() >= self.limits.max_commits { return Err(PreparationError::Budget("history commits").into()); }
+        if let Some(commit) = self.commits.get(&id) {
+            return Ok(commit.clone());
+        }
+        if id.is_zero() || id.algorithm() != self.format {
+            return Err(PreparationError::ObjectFormat.into());
+        }
+        if self.commits.len() >= self.limits.max_commits {
+            return Err(PreparationError::Budget("history commits").into());
+        }
         let commit = self.source.commit(id)?;
         self.source.checkpoint()?;
-        if commit.tree.is_zero() || commit.tree.algorithm() != self.format
-            || commit.parents.iter().any(|parent| parent.is_zero() || parent.algorithm() != self.format || *parent == id)
-        { return Err(MergeSourceError::InvalidObject(id).into()); }
-        self.edges = self.edges.checked_add(commit.parents.len()).filter(|n| *n <= self.limits.max_edges)
+        if commit.tree.is_zero()
+            || commit.tree.algorithm() != self.format
+            || commit.parents.iter().any(|parent| {
+                parent.is_zero() || parent.algorithm() != self.format || *parent == id
+            })
+        {
+            return Err(MergeSourceError::InvalidObject(id).into());
+        }
+        self.edges = self
+            .edges
+            .checked_add(commit.parents.len())
+            .filter(|n| *n <= self.limits.max_edges)
             .ok_or(PreparationError::Budget("history edges"))?;
         self.commits.insert(id, commit.clone());
         Ok(commit)
@@ -238,7 +350,9 @@ impl<S: MergeObjectSource> History<'_, S> {
         let mut pending = vec![tip];
         while let Some(id) = pending.pop() {
             let commit = self.read(id)?;
-            if id == selected { return Ok(commit); }
+            if id == selected {
+                return Ok(commit);
+            }
             // Reverse push means the first stored parent is visited first.
             for parent in commit.parents.iter().rev() {
                 self.source.checkpoint()?;

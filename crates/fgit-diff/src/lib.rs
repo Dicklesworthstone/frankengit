@@ -245,9 +245,17 @@ impl DiffResult {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DiffError {
-    InputBytesExceeded { limit: usize, actual: usize },
-    UnitsExceeded { limit: usize, actual: usize },
-    WorkExceeded { limit: usize },
+    InputBytesExceeded {
+        limit: usize,
+        actual: usize,
+    },
+    UnitsExceeded {
+        limit: usize,
+        actual: usize,
+    },
+    WorkExceeded {
+        limit: usize,
+    },
     /// Cooperative cancellation observed before a complete result was returned.
     Cancelled,
     ArithmeticOverflow,

@@ -2,18 +2,18 @@
 //! Exhaustive unit and integration tests for the workflow coordinator (FG-095b).
 
 use fgit_resource::kinds::{ContainmentClass, ExitClass, RunnerReaped};
-use fgit_schema::workflow::compile;
 use fgit_schema::workflow::Limits as SchemaLimits;
+use fgit_schema::workflow::compile;
 use fgit_types::{GitOid, GitOidSha1, RepositoryId, TenantId};
 
 use fgit_runner::coordinator::{
-    CancellationReason, CheckRunConclusion, CheckRunStatus, ConcurrencyGroup,
-    CoordinatorLimits, CoordinatorRefusal, IdempotencyKey, JobStatus, RunOutcome, RunStatus,
-    TriggerContext, WorkflowCoordinator,
+    CancellationReason, CheckRunConclusion, CheckRunStatus, ConcurrencyGroup, CoordinatorLimits,
+    CoordinatorRefusal, IdempotencyKey, JobStatus, RunOutcome, RunStatus, TriggerContext,
+    WorkflowCoordinator,
 };
 use fgit_runner::{
-    CheckOutcome, Commitment, ContainmentSubstrate, LogRedactor, ResourceCeilings,
-    ResourceUsage, SandboxPlan, SourceObject, SubstrateObservation, SubstrateRefusal,
+    CheckOutcome, Commitment, ContainmentSubstrate, LogRedactor, ResourceCeilings, ResourceUsage,
+    SandboxPlan, SourceObject, SubstrateObservation, SubstrateRefusal,
 };
 
 fn hash(val: &[u8]) -> Commitment {
@@ -27,7 +27,15 @@ fn sample_oid(val: u8) -> GitOid {
 }
 
 fn ceilings() -> ResourceCeilings {
-    ResourceCeilings::new(100_000, 512 * 1024 * 1024, 1024 * 1024 * 1024, 0, 16, 60_000).unwrap()
+    ResourceCeilings::new(
+        100_000,
+        512 * 1024 * 1024,
+        1024 * 1024 * 1024,
+        0,
+        16,
+        60_000,
+    )
+    .unwrap()
 }
 
 struct MockSubstrate {
@@ -68,7 +76,11 @@ impl ContainmentSubstrate for MockSubstrate {
                     processes_reaped: 1,
                     containment: ContainmentClass::Cooperative,
                 },
-                log_redaction: LogRedactor::new(vec![]).unwrap().redact(&self.output).unwrap().receipt(),
+                log_redaction: LogRedactor::new(vec![])
+                    .unwrap()
+                    .redact(&self.output)
+                    .unwrap()
+                    .receipt(),
                 artifacts: Vec::new(),
             })
         } else {
@@ -86,7 +98,11 @@ impl ContainmentSubstrate for MockSubstrate {
                     processes_reaped: 1,
                     containment: ContainmentClass::Cooperative,
                 },
-                log_redaction: LogRedactor::new(vec![]).unwrap().redact(&self.output).unwrap().receipt(),
+                log_redaction: LogRedactor::new(vec![])
+                    .unwrap()
+                    .redact(&self.output)
+                    .unwrap()
+                    .receipt(),
                 artifacts: vec![hash(b"test-artifact-1")],
             })
         }
@@ -111,26 +127,31 @@ jobs:
 #[test]
 fn state_machine_four_state_lifecycle_and_dag_progression() {
     let graph = compile(TWO_STAGE_DAG, &SchemaLimits::default()).unwrap();
-    let mut coordinator = WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 8).unwrap();
+    let mut coordinator =
+        WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 8).unwrap();
 
     let tenant = TenantId::from_bytes([1; 16]);
     let repo = RepositoryId::from_bytes([2; 16]);
     let head = hash(b"head-001");
     let commit = sample_oid(1);
 
-    let run_id = coordinator.enqueue_run(
-        tenant,
-        repo,
-        head,
-        commit,
-        graph,
-        TriggerContext::trusted_push("alice"),
-        1,
-        1000,
-    ).unwrap();
+    let run_id = coordinator
+        .enqueue_run(
+            tenant,
+            repo,
+            head,
+            commit,
+            graph,
+            TriggerContext::trusted_push("alice"),
+            1,
+            1000,
+        )
+        .unwrap();
 
     // Initial state: Queued
-    let run = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1)).unwrap();
+    let run = coordinator
+        .lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1))
+        .unwrap();
     assert_eq!(run.status, RunStatus::Queued);
     assert_eq!(run.job_statuses.get("build"), Some(&JobStatus::Queued));
     assert_eq!(run.job_statuses.get("test"), Some(&JobStatus::Queued));
@@ -141,15 +162,17 @@ fn state_machine_four_state_lifecycle_and_dag_progression() {
 
     // Execute 'build' job
     let mut substrate = MockSubstrate::success();
-    let receipt = coordinator.execute_job(
-        run_id,
-        "build",
-        &mut substrate,
-        1050,
-        vec![SourceObject::new(hash(b"src1"), 100)],
-        hash(b"lock-file"),
-        "rust-stable",
-    ).unwrap();
+    let receipt = coordinator
+        .execute_job(
+            run_id,
+            "build",
+            &mut substrate,
+            1050,
+            vec![SourceObject::new(hash(b"src1"), 100)],
+            hash(b"lock-file"),
+            "rust-stable",
+        )
+        .unwrap();
 
     assert_eq!(receipt.outcome(), CheckOutcome::Succeeded);
     assert_eq!(receipt.artifacts(), &[hash(b"test-artifact-1")]);
@@ -159,20 +182,24 @@ fn state_machine_four_state_lifecycle_and_dag_progression() {
     assert_eq!(eligible_next, vec!["test".to_string()]);
 
     // Execute 'test' job
-    let receipt_test = coordinator.execute_job(
-        run_id,
-        "test",
-        &mut substrate,
-        1100,
-        vec![SourceObject::new(hash(b"src1"), 100)],
-        hash(b"lock-file"),
-        "rust-stable",
-    ).unwrap();
+    let receipt_test = coordinator
+        .execute_job(
+            run_id,
+            "test",
+            &mut substrate,
+            1100,
+            vec![SourceObject::new(hash(b"src1"), 100)],
+            hash(b"lock-file"),
+            "rust-stable",
+        )
+        .unwrap();
 
     assert_eq!(receipt_test.outcome(), CheckOutcome::Succeeded);
 
     // Entire run is now terminal Succeeded!
-    let run_final = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1)).unwrap();
+    let run_final = coordinator
+        .lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1))
+        .unwrap();
     assert_eq!(run_final.status, RunStatus::Terminal(RunOutcome::Succeeded));
 
     // Publish / drain outbox check facts
@@ -186,84 +213,106 @@ fn state_machine_four_state_lifecycle_and_dag_progression() {
 #[test]
 fn idempotency_derivation_prevents_duplicate_executions() {
     let graph = compile(TWO_STAGE_DAG, &SchemaLimits::default()).unwrap();
-    let mut coordinator = WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
+    let mut coordinator =
+        WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
 
     let tenant = TenantId::from_bytes([1; 16]);
     let repo = RepositoryId::from_bytes([2; 16]);
     let head = hash(b"head-001");
     let commit = sample_oid(2);
 
-    let run_id = coordinator.enqueue_run(
-        tenant,
-        repo,
-        head,
-        commit,
-        graph.clone(),
-        TriggerContext::trusted_push("alice"),
-        42,
-        1000,
-    ).unwrap();
+    let run_id = coordinator
+        .enqueue_run(
+            tenant,
+            repo,
+            head,
+            commit,
+            graph.clone(),
+            TriggerContext::trusted_push("alice"),
+            42,
+            1000,
+        )
+        .unwrap();
 
     // Re-enqueuing with the exact same parameters must return DuplicateIdempotencyKey
-    let dup_err = coordinator.enqueue_run(
-        tenant,
-        repo,
-        head,
-        commit,
-        graph,
-        TriggerContext::trusted_push("alice"),
-        42,
-        1001,
-    ).unwrap_err();
+    let dup_err = coordinator
+        .enqueue_run(
+            tenant,
+            repo,
+            head,
+            commit,
+            graph,
+            TriggerContext::trusted_push("alice"),
+            42,
+            1001,
+        )
+        .unwrap_err();
 
     let expected_key = IdempotencyKey::of("push", &commit, "test-ci", 42);
-    assert_eq!(dup_err, CoordinatorRefusal::DuplicateIdempotencyKey(expected_key));
+    assert_eq!(
+        dup_err,
+        CoordinatorRefusal::DuplicateIdempotencyKey(expected_key)
+    );
 
-    let looked_up = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 42)).unwrap();
+    let looked_up = coordinator
+        .lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 42))
+        .unwrap();
     assert_eq!(looked_up.id, run_id);
 }
 
 #[test]
 fn request_drain_finalize_cancellation_lifecycle() {
     let graph = compile(TWO_STAGE_DAG, &SchemaLimits::default()).unwrap();
-    let mut coordinator = WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
+    let mut coordinator =
+        WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
 
     let tenant = TenantId::from_bytes([1; 16]);
     let repo = RepositoryId::from_bytes([2; 16]);
     let head = hash(b"head-001");
     let commit = sample_oid(3);
 
-    let run_id = coordinator.enqueue_run(
-        tenant,
-        repo,
-        head,
-        commit,
-        graph,
-        TriggerContext::trusted_push("alice"),
-        1,
-        1000,
-    ).unwrap();
+    let run_id = coordinator
+        .enqueue_run(
+            tenant,
+            repo,
+            head,
+            commit,
+            graph,
+            TriggerContext::trusted_push("alice"),
+            1,
+            1000,
+        )
+        .unwrap();
 
     // Cancel while queued -> directly terminates
-    coordinator.cancel_run(run_id, CancellationReason::UserRequested).unwrap();
-    let run = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1)).unwrap();
+    coordinator
+        .cancel_run(run_id, CancellationReason::UserRequested)
+        .unwrap();
+    let run = coordinator
+        .lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1))
+        .unwrap();
     assert_eq!(
         run.status,
-        RunStatus::Terminal(RunOutcome::Cancelled { reason: CancellationReason::UserRequested })
+        RunStatus::Terminal(RunOutcome::Cancelled {
+            reason: CancellationReason::UserRequested
+        })
     );
 
     // Draining and finalizing already terminal run returns its outcome
     let final_outcome = coordinator.drain_and_finalize(run_id).unwrap();
     assert_eq!(
         final_outcome,
-        RunOutcome::Cancelled { reason: CancellationReason::UserRequested }
+        RunOutcome::Cancelled {
+            reason: CancellationReason::UserRequested
+        }
     );
 }
 
 #[test]
 fn concurrency_group_cancel_in_progress_preempts_older_run() {
     let graph = compile(TWO_STAGE_DAG, &SchemaLimits::default()).unwrap();
-    let mut coordinator = WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 8).unwrap();
+    let mut coordinator =
+        WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 8).unwrap();
 
     let tenant = TenantId::from_bytes([1; 16]);
     let repo = RepositoryId::from_bytes([2; 16]);
@@ -276,48 +325,52 @@ fn concurrency_group_cancel_in_progress_preempts_older_run() {
     let mut trigger1 = TriggerContext::trusted_push("alice");
     trigger1.concurrency_group = Some(group.clone());
 
-    let run1 = coordinator.enqueue_run(
-        tenant,
-        repo,
-        head,
-        commit1,
-        graph.clone(),
-        trigger1,
-        1,
-        1000,
-    ).unwrap();
+    let run1 = coordinator
+        .enqueue_run(
+            tenant,
+            repo,
+            head,
+            commit1,
+            graph.clone(),
+            trigger1,
+            1,
+            1000,
+        )
+        .unwrap();
 
     // Start executing run1's build job so it's in Running state
     let mut substrate = MockSubstrate::success();
-    let _ = coordinator.execute_job(
-        run1,
-        "build",
-        &mut substrate,
-        1050,
-        vec![SourceObject::new(hash(b"src1"), 100)],
-        hash(b"lock-file"),
-        "rust-stable",
-    ).unwrap();
+    let _ = coordinator
+        .execute_job(
+            run1,
+            "build",
+            &mut substrate,
+            1050,
+            vec![SourceObject::new(hash(b"src1"), 100)],
+            hash(b"lock-file"),
+            "rust-stable",
+        )
+        .unwrap();
 
     // Enqueue run2 in the same concurrency group with cancel_in_progress = true
     let mut trigger2 = TriggerContext::trusted_push("alice");
     trigger2.concurrency_group = Some(group);
 
-    let run2 = coordinator.enqueue_run(
-        tenant,
-        repo,
-        head,
-        commit2,
-        graph,
-        trigger2,
-        2,
-        1100,
-    ).unwrap();
+    let run2 = coordinator
+        .enqueue_run(tenant, repo, head, commit2, graph, trigger2, 2, 1100)
+        .unwrap();
 
     // Run1 should now be in Draining phase with ConcurrencyPreempted reason!
-    let run1_state = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit1, "test-ci", 1)).unwrap();
+    let run1_state = coordinator
+        .lookup_by_idempotency(&IdempotencyKey::of("push", &commit1, "test-ci", 1))
+        .unwrap();
     match &run1_state.status {
-        RunStatus::Draining { reason: fgit_runner::coordinator::DrainReason::Cancelled(CancellationReason::ConcurrencyPreempted { group, newer_run }) } => {
+        RunStatus::Draining {
+            reason:
+                fgit_runner::coordinator::DrainReason::Cancelled(
+                    CancellationReason::ConcurrencyPreempted { group, newer_run },
+                ),
+        } => {
             assert_eq!(group, "pr-concurrency-branch-feat");
             assert_eq!(*newer_run, run2);
         }
@@ -326,13 +379,19 @@ fn concurrency_group_cancel_in_progress_preempts_older_run() {
 
     // Drain and finalize run1
     let outcome = coordinator.drain_and_finalize(run1).unwrap();
-    assert!(matches!(outcome, RunOutcome::Cancelled { reason: CancellationReason::ConcurrencyPreempted { .. } }));
+    assert!(matches!(
+        outcome,
+        RunOutcome::Cancelled {
+            reason: CancellationReason::ConcurrencyPreempted { .. }
+        }
+    ));
 }
 
 #[test]
 fn fork_pull_request_attenuation_enforces_isolated_domain_and_denied_network() {
     let graph = compile(TWO_STAGE_DAG, &SchemaLimits::default()).unwrap();
-    let mut coordinator = WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
+    let mut coordinator =
+        WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
 
     let tenant = TenantId::from_bytes([1; 16]);
     let repo = RepositoryId::from_bytes([2; 16]);
@@ -342,27 +401,22 @@ fn fork_pull_request_attenuation_enforces_isolated_domain_and_denied_network() {
     let trigger = TriggerContext::fork_pull_request(123, "external-contributor");
     assert!(trigger.is_fork);
 
-    let run_id = coordinator.enqueue_run(
-        tenant,
-        repo,
-        head,
-        commit,
-        graph,
-        trigger,
-        1,
-        2000,
-    ).unwrap();
+    let run_id = coordinator
+        .enqueue_run(tenant, repo, head, commit, graph, trigger, 1, 2000)
+        .unwrap();
 
     let mut substrate = MockSubstrate::success();
-    let receipt = coordinator.execute_job(
-        run_id,
-        "build",
-        &mut substrate,
-        2050,
-        vec![SourceObject::new(hash(b"src1"), 100)],
-        hash(b"lock-file"),
-        "rust-stable",
-    ).unwrap();
+    let receipt = coordinator
+        .execute_job(
+            run_id,
+            "build",
+            &mut substrate,
+            2050,
+            vec![SourceObject::new(hash(b"src1"), 100)],
+            hash(b"lock-file"),
+            "rust-stable",
+        )
+        .unwrap();
 
     // For a fork PR: zero secret leases should have been bound/revoked
     assert_eq!(receipt.revoked_secrets(), 0);
@@ -376,23 +430,26 @@ fn fork_pull_request_attenuation_enforces_isolated_domain_and_denied_network() {
 #[test]
 fn check_publication_facts_emitted_to_outbox() {
     let graph = compile(TWO_STAGE_DAG, &SchemaLimits::default()).unwrap();
-    let mut coordinator = WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
+    let mut coordinator =
+        WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
 
     let tenant = TenantId::from_bytes([1; 16]);
     let repo = RepositoryId::from_bytes([2; 16]);
     let head = hash(b"head-001");
     let commit = sample_oid(70);
 
-    let run_id = coordinator.enqueue_run(
-        tenant,
-        repo,
-        head,
-        commit,
-        graph,
-        TriggerContext::trusted_push("alice"),
-        1,
-        3000,
-    ).unwrap();
+    let run_id = coordinator
+        .enqueue_run(
+            tenant,
+            repo,
+            head,
+            commit,
+            graph,
+            TriggerContext::trusted_push("alice"),
+            1,
+            3000,
+        )
+        .unwrap();
 
     let facts = coordinator.drain_check_facts();
     // 2 jobs in graph -> 2 Queued check facts
@@ -405,15 +462,17 @@ fn check_publication_facts_emitted_to_outbox() {
 
     // Execute build job
     let mut substrate = MockSubstrate::success();
-    let _ = coordinator.execute_job(
-        run_id,
-        "build",
-        &mut substrate,
-        3050,
-        vec![SourceObject::new(hash(b"src1"), 100)],
-        hash(b"lock-file"),
-        "rust-stable",
-    ).unwrap();
+    let _ = coordinator
+        .execute_job(
+            run_id,
+            "build",
+            &mut substrate,
+            3050,
+            vec![SourceObject::new(hash(b"src1"), 100)],
+            hash(b"lock-file"),
+            "rust-stable",
+        )
+        .unwrap();
 
     let next_facts = coordinator.drain_check_facts();
     // InProgress + Completed facts
@@ -430,7 +489,8 @@ fn check_publication_facts_emitted_to_outbox() {
 #[test]
 fn crash_recovery_marks_inflight_runs_as_reaped_and_invalidates_stale_heads() {
     let graph = compile(TWO_STAGE_DAG, &SchemaLimits::default()).unwrap();
-    let mut coordinator = WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
+    let mut coordinator =
+        WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
 
     let tenant = TenantId::from_bytes([1; 16]);
     let repo = RepositoryId::from_bytes([2; 16]);
@@ -439,39 +499,45 @@ fn crash_recovery_marks_inflight_runs_as_reaped_and_invalidates_stale_heads() {
     let commit2 = sample_oid(81);
 
     // Run 1: left in running state
-    let run1 = coordinator.enqueue_run(
-        tenant,
-        repo,
-        head,
-        commit1,
-        graph.clone(),
-        TriggerContext::trusted_push("alice"),
-        1,
-        4000,
-    ).unwrap();
+    let run1 = coordinator
+        .enqueue_run(
+            tenant,
+            repo,
+            head,
+            commit1,
+            graph.clone(),
+            TriggerContext::trusted_push("alice"),
+            1,
+            4000,
+        )
+        .unwrap();
 
     let mut substrate = MockSubstrate::success();
-    let _ = coordinator.execute_job(
-        run1,
-        "build",
-        &mut substrate,
-        4050,
-        vec![SourceObject::new(hash(b"src1"), 100)],
-        hash(b"lock-file"),
-        "rust-stable",
-    ).unwrap();
+    let _ = coordinator
+        .execute_job(
+            run1,
+            "build",
+            &mut substrate,
+            4050,
+            vec![SourceObject::new(hash(b"src1"), 100)],
+            hash(b"lock-file"),
+            "rust-stable",
+        )
+        .unwrap();
 
     // Run 2: queued with the old head
-    let run2 = coordinator.enqueue_run(
-        tenant,
-        repo,
-        head,
-        commit2,
-        graph,
-        TriggerContext::trusted_push("alice"),
-        2,
-        4100,
-    ).unwrap();
+    let run2 = coordinator
+        .enqueue_run(
+            tenant,
+            repo,
+            head,
+            commit2,
+            graph,
+            TriggerContext::trusted_push("alice"),
+            2,
+            4100,
+        )
+        .unwrap();
 
     // Authority head moves forward while coordinator was down
     let head_new = hash(b"head-new");
@@ -482,44 +548,59 @@ fn crash_recovery_marks_inflight_runs_as_reaped_and_invalidates_stale_heads() {
     assert!(recovered.contains(&run1));
     assert!(recovered.contains(&run2));
 
-    let run1_state = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit1, "test-ci", 1)).unwrap();
-    assert!(matches!(run1_state.status, RunStatus::Terminal(RunOutcome::Invalidated { .. })));
+    let run1_state = coordinator
+        .lookup_by_idempotency(&IdempotencyKey::of("push", &commit1, "test-ci", 1))
+        .unwrap();
+    assert!(matches!(
+        run1_state.status,
+        RunStatus::Terminal(RunOutcome::Invalidated { .. })
+    ));
 
-    let run2_state = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit2, "test-ci", 2)).unwrap();
-    assert!(matches!(run2_state.status, RunStatus::Terminal(RunOutcome::Invalidated { .. })));
+    let run2_state = coordinator
+        .lookup_by_idempotency(&IdempotencyKey::of("push", &commit2, "test-ci", 2))
+        .unwrap();
+    assert!(matches!(
+        run2_state.status,
+        RunStatus::Terminal(RunOutcome::Invalidated { .. })
+    ));
 }
 
 #[test]
 fn job_failure_skips_dependents_and_marks_run_failed() {
     let graph = compile(TWO_STAGE_DAG, &SchemaLimits::default()).unwrap();
-    let mut coordinator = WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
+    let mut coordinator =
+        WorkflowCoordinator::new(CoordinatorLimits::default(), ceilings(), 4).unwrap();
 
     let tenant = TenantId::from_bytes([1; 16]);
     let repo = RepositoryId::from_bytes([2; 16]);
     let head = hash(b"head-001");
     let commit = sample_oid(90);
 
-    let run_id = coordinator.enqueue_run(
-        tenant,
-        repo,
-        head,
-        commit,
-        graph,
-        TriggerContext::trusted_push("alice"),
-        1,
-        5000,
-    ).unwrap();
+    let run_id = coordinator
+        .enqueue_run(
+            tenant,
+            repo,
+            head,
+            commit,
+            graph,
+            TriggerContext::trusted_push("alice"),
+            1,
+            5000,
+        )
+        .unwrap();
 
     let mut fail_substrate = MockSubstrate::failure();
-    let receipt = coordinator.execute_job(
-        run_id,
-        "build",
-        &mut fail_substrate,
-        5050,
-        vec![SourceObject::new(hash(b"src1"), 100)],
-        hash(b"lock-file"),
-        "rust-stable",
-    ).unwrap();
+    let receipt = coordinator
+        .execute_job(
+            run_id,
+            "build",
+            &mut fail_substrate,
+            5050,
+            vec![SourceObject::new(hash(b"src1"), 100)],
+            hash(b"lock-file"),
+            "rust-stable",
+        )
+        .unwrap();
 
     assert_eq!(receipt.outcome(), CheckOutcome::Failed);
 
@@ -528,19 +609,30 @@ fn job_failure_skips_dependents_and_marks_run_failed() {
     assert!(eligible.is_empty());
 
     // Run outcome should be marked failed
-    let run = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1)).unwrap();
+    let run = coordinator
+        .lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1))
+        .unwrap();
     match &run.status {
         RunStatus::Running => {
             // Cancel/terminate the run through request -> drain -> finalize
-            coordinator.cancel_run(run_id, CancellationReason::UserRequested).unwrap();
-            let draining = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1)).unwrap();
+            coordinator
+                .cancel_run(run_id, CancellationReason::UserRequested)
+                .unwrap();
+            let draining = coordinator
+                .lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1))
+                .unwrap();
             assert!(matches!(draining.status, RunStatus::Draining { .. }));
 
             let outcome = coordinator.drain_and_finalize(run_id).unwrap();
             assert!(matches!(outcome, RunOutcome::Cancelled { .. }));
 
-            let term = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1)).unwrap();
-            assert!(matches!(term.status, RunStatus::Terminal(RunOutcome::Cancelled { .. })));
+            let term = coordinator
+                .lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1))
+                .unwrap();
+            assert!(matches!(
+                term.status,
+                RunStatus::Terminal(RunOutcome::Cancelled { .. })
+            ));
         }
         RunStatus::Terminal(RunOutcome::Failed { failed_jobs }) => {
             assert_eq!(failed_jobs, &["build".to_string()]);

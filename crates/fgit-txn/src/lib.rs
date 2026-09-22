@@ -565,7 +565,10 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_raw_byte(3);
             out.write_text("ForgeEntityId", pull_request.label().as_str())?;
         }
-        ForgeEventKind::PullRequestUpdated { pull_request, target } => {
+        ForgeEventKind::PullRequestUpdated {
+            pull_request,
+            target,
+        } => {
             // A new required tag, never a reinterpretation of an opening.
             // Established event tags and their field encodings remain intact.
             out.write_raw_byte(4);
@@ -578,7 +581,8 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             out.write_ref_name(target)?;
         }
         ForgeEventKind::ReviewProtectionChanged { policy } => {
-            out.write_raw_byte(7); out.write_text("ForgeEntityId", policy.label().as_str())?;
+            out.write_raw_byte(7);
+            out.write_text("ForgeEntityId", policy.label().as_str())?;
         }
         ForgeEventKind::IssueChanged { issue } => {
             out.write_raw_byte(6);
@@ -1245,10 +1249,21 @@ mod tests {
         let entity = ForgeEntityId::new(label("native-pr"));
         let target = name("refs/heads/main");
         let events = [
-            ForgeEventKind::PullRequestOpened { pull_request: entity, target: target.clone() },
-            ForgeEventKind::PullRequestMerged { pull_request: entity, target: target.clone() },
-            ForgeEventKind::PullRequestClosed { pull_request: entity },
-            ForgeEventKind::PullRequestUpdated { pull_request: entity, target },
+            ForgeEventKind::PullRequestOpened {
+                pull_request: entity,
+                target: target.clone(),
+            },
+            ForgeEventKind::PullRequestMerged {
+                pull_request: entity,
+                target: target.clone(),
+            },
+            ForgeEventKind::PullRequestClosed {
+                pull_request: entity,
+            },
+            ForgeEventKind::PullRequestUpdated {
+                pull_request: entity,
+                target,
+            },
         ];
         let mut encodings = BTreeSet::new();
         for (index, event) in events.iter().enumerate() {
@@ -1264,12 +1279,15 @@ mod tests {
         let request = request(vec![Statement {
             mismatch_policy: MismatchPolicy::TxnAbort,
             intents: vec![Intent::Forge(ForgeIntent {
-                stream, expected_position: ForgeStreamPosition::new(1), event: events[3].clone(),
+                stream,
+                expected_position: ForgeStreamPosition::new(1),
+                event: events[3].clone(),
             })],
         }]);
         let (refs, mut positions, retention, outbox) = empty_basis();
         positions.insert(stream, ForgeStreamPosition::new(1));
-        let report = IntentEvaluator.evaluate(basis_of(&refs, &positions, &retention, &outbox), &request);
+        let report =
+            IntentEvaluator.evaluate(basis_of(&refs, &positions, &retention, &outbox), &request);
         IntentEvaluator.validate_report(&request, &report).unwrap();
         let effects = report.effects().unwrap();
         assert!(effects.refs.is_empty());

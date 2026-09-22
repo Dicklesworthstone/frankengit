@@ -111,21 +111,15 @@ pub enum CommandParseRefusal {
     /// The command string was empty or purely whitespace.
     EmptyCommand,
     /// The command does not invoke git-upload-pack or git-receive-pack.
-    UnsupportedService {
-        observed: String,
-    },
+    UnsupportedService { observed: String },
     /// The path quotation was unclosed or malformed.
     InvalidQuoting,
     /// The extracted repository path was empty.
     EmptyPath,
     /// Path starts with `-`, attempting option injection (e.g. `--exec`).
-    OptionInjection {
-        observed: String,
-    },
+    OptionInjection { observed: String },
     /// A forbidden shell metacharacter was observed.
-    ShellMetacharacterForbidden {
-        character: char,
-    },
+    ShellMetacharacterForbidden { character: char },
     /// Directory traversal (`..`) was detected in the repository path.
     PathTraversalForbidden,
     /// A null byte (`\0`) was detected.
@@ -139,20 +133,32 @@ impl Display for CommandParseRefusal {
         match self {
             Self::EmptyCommand => formatter.write_str("empty SSH exec command is refused"),
             Self::UnsupportedService { observed } => {
-                write!(formatter, "unsupported SSH service `{observed}`: only git-upload-pack and git-receive-pack are admitted")
+                write!(
+                    formatter,
+                    "unsupported SSH service `{observed}`: only git-upload-pack and git-receive-pack are admitted"
+                )
             }
             Self::InvalidQuoting => formatter.write_str("malformed path quotation in SSH command"),
-            Self::EmptyPath => formatter.write_str("empty repository path in SSH command is refused"),
+            Self::EmptyPath => {
+                formatter.write_str("empty repository path in SSH command is refused")
+            }
             Self::OptionInjection { observed } => {
-                write!(formatter, "leading option flag `{observed}` in repository path is refused")
+                write!(
+                    formatter,
+                    "leading option flag `{observed}` in repository path is refused"
+                )
             }
             Self::ShellMetacharacterForbidden { character } => {
-                write!(formatter, "forbidden shell metacharacter `{character}` in SSH command")
+                write!(
+                    formatter,
+                    "forbidden shell metacharacter `{character}` in SSH command"
+                )
             }
-            Self::PathTraversalForbidden => {
-                formatter.write_str("directory traversal component `..` in repository path is refused")
+            Self::PathTraversalForbidden => formatter
+                .write_str("directory traversal component `..` in repository path is refused"),
+            Self::NullByteForbidden => {
+                formatter.write_str("null byte in repository path is refused")
             }
-            Self::NullByteForbidden => formatter.write_str("null byte in repository path is refused"),
             Self::TrailingArgumentsForbidden => {
                 formatter.write_str("unexpected trailing arguments after repository path")
             }

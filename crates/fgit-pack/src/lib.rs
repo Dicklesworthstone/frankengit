@@ -8,10 +8,10 @@
 pub mod binary_patch;
 mod bitmap;
 mod bundle;
-pub mod full_bundle;
 mod bundle_uri;
 mod commit_graph;
 mod delta;
+pub mod full_bundle;
 mod idx;
 mod midx;
 mod pack;

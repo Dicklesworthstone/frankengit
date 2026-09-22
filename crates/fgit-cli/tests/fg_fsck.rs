@@ -20,28 +20,46 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
         let sequence = NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("frankengit-fsck-{}-{sequence}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("frankengit-fsck-{}-{sequence}", std::process::id()));
         // Refuse a stale directory rather than reusing another run's contents.
         fs::create_dir(&root).expect("create isolated scratch directory");
         Self(root)
     }
 }
 impl Drop for Scratch {
-    fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
-fn text(path: &Path) -> &str { path.to_str().expect("fixture path is UTF-8") }
+fn text(path: &Path) -> &str {
+    path.to_str().expect("fixture path is UTF-8")
+}
 fn fg(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_fg")).args(args).output().expect("run fg binary")
+    Command::new(env!("CARGO_BIN_EXE_fg"))
+        .args(args)
+        .output()
+        .expect("run fg binary")
 }
 fn success(output: Output) -> String {
-    assert_eq!(output.status.code(), Some(0), "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8(output.stdout).expect("CLI output is UTF-8")
 }
 fn refused(output: Output) -> String {
-    assert_eq!(output.status.code(), Some(2), "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(output.stdout.is_empty(), "incomplete audit emitted stdout");
     let error = String::from_utf8(output.stderr).expect("CLI error is UTF-8");
     assert!(error.contains("\"type\":\"fsck_error\""), "{error}");
@@ -49,18 +67,37 @@ fn refused(output: Output) -> String {
     error
 }
 fn audit(root: &Path, format: &str, extra: &[&str]) -> Output {
-    let mut args = vec!["fsck", text(root), TENANT, REPOSITORY, "--trusted-local", "--object-format", format];
+    let mut args = vec![
+        "fsck",
+        text(root),
+        TENANT,
+        REPOSITORY,
+        "--trusted-local",
+        "--object-format",
+        format,
+    ];
     args.extend_from_slice(extra);
     fg(&args)
 }
 fn token(receipt: &str) -> &str {
-    receipt.split_once("\"snapshot_token\":\"").expect("snapshot token in receipt")
-        .1.split('"').next().expect("snapshot token terminator")
+    receipt
+        .split_once("\"snapshot_token\":\"")
+        .expect("snapshot token in receipt")
+        .1
+        .split('"')
+        .next()
+        .expect("snapshot token terminator")
 }
 fn assert_counts(receipt: &str, refs: usize, objects: usize) {
     assert_eq!(receipt.lines().count(), 1, "one NDJSON receipt");
-    assert!(receipt.contains(&format!("\"references_checked\":{refs},")), "{receipt}");
-    assert!(receipt.contains(&format!("\"objects_verified\":{objects},")), "{receipt}");
+    assert!(
+        receipt.contains(&format!("\"references_checked\":{refs},")),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains(&format!("\"objects_verified\":{objects},")),
+        "{receipt}"
+    );
     assert!(receipt.contains("\"complete\":true"));
     assert!(receipt.contains("\"node_closed\":true"));
     assert!(receipt.contains("\"object_graph_verified\":true"));
@@ -72,10 +109,15 @@ fn help_and_invalid_requests_do_not_initialize_storage() {
     let absent = scratch.0.join("absent");
     assert!(success(fg(&["fsck", "--help"])).starts_with("usage: fg fsck"));
     refused(fg(&["fsck", text(&absent), TENANT, REPOSITORY]));
-    for extra in [vec!["--max-objects", "0"], vec!["--max-bytes", "0"],
-        vec!["--max-object-bytes", "0"], vec!["--expected-head", "unqualified"],
-        vec!["--timeout-secs", "3601"], vec!["--trusted-local"], vec!["--repair", "yes"]]
-    {
+    for extra in [
+        vec!["--max-objects", "0"],
+        vec!["--max-bytes", "0"],
+        vec!["--max-object-bytes", "0"],
+        vec!["--expected-head", "unqualified"],
+        vec!["--timeout-secs", "3601"],
+        vec!["--trusted-local"],
+        vec!["--repair", "yes"],
+    ] {
         refused(audit(&absent, "sha1", &extra));
         assert!(!absent.exists(), "invalid input created repository state");
     }
@@ -91,21 +133,45 @@ fn both_native_formats_audit_empty_repositories_and_enforce_snapshot_fences() {
         assert_counts(&receipt, 0, 0);
         assert!(receipt.contains("\"payload_bytes_verified\":0,"));
         assert!(receipt.contains("\"authority_generation\":1,"));
-        assert_eq!(success(audit(&root, format, &["--expected-head", token(&receipt),
-            "--expected-generation", "1"])), receipt);
+        assert_eq!(
+            success(audit(
+                &root,
+                format,
+                &[
+                    "--expected-head",
+                    token(&receipt),
+                    "--expected-generation",
+                    "1"
+                ]
+            )),
+            receipt
+        );
 
         let mut wrong = token(&receipt).to_owned();
         let last = wrong.pop().expect("nonempty digest");
         wrong.push(if last == '0' { '1' } else { '0' });
-        assert!(refused(audit(&root, format, &["--expected-head", &wrong]))
-            .contains("authority_head_mismatch"));
-        assert!(refused(audit(&root, format, &["--expected-generation", "2"]))
-            .contains("authority_generation_mismatch"));
-        assert_eq!(success(audit(&root, format, &[])), receipt, "refused audits did not advance authority");
+        assert!(
+            refused(audit(&root, format, &["--expected-head", &wrong]))
+                .contains("authority_head_mismatch")
+        );
+        assert!(
+            refused(audit(&root, format, &["--expected-generation", "2"]))
+                .contains("authority_generation_mismatch")
+        );
+        assert_eq!(
+            success(audit(&root, format, &[])),
+            receipt,
+            "refused audits did not advance authority"
+        );
     }
 }
 
-struct Fixture { main: GitOid, obsolete: GitOid, obsolete_blob: GitOid, payload_bytes: usize }
+struct Fixture {
+    main: GitOid,
+    obsolete: GitOid,
+    obsolete_blob: GitOid,
+    payload_bytes: usize,
+}
 fn fixture(source: &Path) -> Fixture {
     let (main, _, main_bytes) = history(source, b"fsck current main object\n");
     let (obsolete, obsolete_blob, old_bytes) = history(source, HISTORICAL_PAYLOAD);
@@ -113,21 +179,31 @@ fn fixture(source: &Path) -> Fixture {
     fs::write(source.join("refs/heads/main"), format!("{main}\n")).unwrap();
     fs::write(source.join("refs/heads/obsolete"), format!("{obsolete}\n")).unwrap();
     fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-    Fixture { main, obsolete, obsolete_blob, payload_bytes: main_bytes + old_bytes }
+    Fixture {
+        main,
+        obsolete,
+        obsolete_blob,
+        payload_bytes: main_bytes + old_bytes,
+    }
 }
 fn history(source: &Path, body: &[u8]) -> (GitOid, GitOid, usize) {
     let blob = loose(source, GitObjectKind::Blob, body);
     let mut tree = b"100644 README\0".to_vec();
     tree.extend_from_slice(blob.require_sha1().unwrap().as_bytes());
     let tree_oid = loose(source, GitObjectKind::Tree, &tree);
-    let commit = format!("tree {tree_oid}\nauthor Fsck <fsck@example.invalid> 1 +0000\ncommitter Fsck <fsck@example.invalid> 1 +0000\n\nfsck fixture\n");
+    let commit = format!(
+        "tree {tree_oid}\nauthor Fsck <fsck@example.invalid> 1 +0000\ncommitter Fsck <fsck@example.invalid> 1 +0000\n\nfsck fixture\n"
+    );
     let commit_oid = loose(source, GitObjectKind::Commit, commit.as_bytes());
     (commit_oid, blob, body.len() + tree.len() + commit.len())
 }
 fn loose(root: &Path, kind: GitObjectKind, body: &[u8]) -> GitOid {
     let oid = git_object_id(GitHashAlgorithm::Sha1, kind, body);
     let oid_text = oid.to_string();
-    let path = root.join("objects").join(&oid_text[..2]).join(&oid_text[2..]);
+    let path = root
+        .join("objects")
+        .join(&oid_text[..2])
+        .join(&oid_text[2..]);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut framed = format!("{} {}\0", kind.label(), body.len()).into_bytes();
     framed.extend_from_slice(body);
@@ -137,7 +213,10 @@ fn loose(root: &Path, kind: GitObjectKind, body: &[u8]) -> GitOid {
     zlib.extend_from_slice(&(!length).to_le_bytes());
     zlib.extend_from_slice(&framed);
     let (mut a, mut b) = (1_u32, 0_u32);
-    for byte in framed { a = (a + u32::from(byte)) % 65_521; b = (b + a) % 65_521; }
+    for byte in framed {
+        a = (a + u32::from(byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
     zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
     fs::write(path, zlib).unwrap();
     oid
@@ -148,7 +227,15 @@ fn imported(scratch: &Scratch) -> (PathBuf, Fixture) {
     let source = scratch.0.join("source.git");
     let fixture = fixture(&source);
     success(fg(&["init", text(&root), TENANT, REPOSITORY]));
-    success(fg(&["import", text(&root), TENANT, REPOSITORY, ACTOR, "fsck-fixture", text(&source)]));
+    success(fg(&[
+        "import",
+        text(&root),
+        TENANT,
+        REPOSITORY,
+        ACTOR,
+        "fsck-fixture",
+        text(&source),
+    ]));
     (root, fixture)
 }
 
@@ -158,12 +245,32 @@ fn full_import_audit_counts_exact_payloads_and_never_truncates_to_a_budget() {
     let (root, fixture) = imported(&scratch);
     let receipt = success(audit(&root, "sha1", &[]));
     assert_counts(&receipt, 2, 6);
-    assert!(receipt.contains(&format!("\"payload_bytes_verified\":{},", fixture.payload_bytes)));
-    assert_eq!(success(audit(&root, "sha1", &["--max-objects", "6", "--max-bytes",
-        &fixture.payload_bytes.to_string()])), receipt);
+    assert!(receipt.contains(&format!(
+        "\"payload_bytes_verified\":{},",
+        fixture.payload_bytes
+    )));
+    assert_eq!(
+        success(audit(
+            &root,
+            "sha1",
+            &[
+                "--max-objects",
+                "6",
+                "--max-bytes",
+                &fixture.payload_bytes.to_string()
+            ]
+        )),
+        receipt
+    );
     assert!(refused(audit(&root, "sha1", &["--max-objects", "5"])).contains("max-objects"));
-    assert!(refused(audit(&root, "sha1", &["--max-bytes", &(fixture.payload_bytes - 1).to_string()]))
-        .contains("max-bytes"));
+    assert!(
+        refused(audit(
+            &root,
+            "sha1",
+            &["--max-bytes", &(fixture.payload_bytes - 1).to_string()]
+        ))
+        .contains("max-bytes")
+    );
     refused(audit(&root, "sha1", &["--max-object-bytes", "1"]));
     assert_eq!(success(audit(&root, "sha1", &[])), receipt);
 }
@@ -179,7 +286,9 @@ fn find_payload(root: &Path, payload: &[u8], depth: usize, matches: &mut Vec<(Pa
             find_payload(&entry.path(), payload, depth + 1, matches);
         } else if kind.is_file() {
             let bytes = fs::read(entry.path()).unwrap();
-            if bytes.ends_with(payload) { matches.push((entry.path(), bytes)); }
+            if bytes.ends_with(payload) {
+                matches.push((entry.path(), bytes));
+            }
         }
     }
 }
@@ -189,14 +298,29 @@ fn deleted_branch_history_is_still_audited_and_corruption_is_not_repaired() {
     let scratch = Scratch::new();
     let (root, fixture) = imported(&scratch);
     let before = success(audit(&root, "sha1", &[]));
-    success(fg(&["branch", "delete", text(&root), TENANT, REPOSITORY,
-        "--trusted-local", "--principal", ACTOR, "--idempotency-key", "fsck-delete-old",
-        "--ref", "refs/heads/obsolete", "--expected-tip", &fixture.obsolete.to_string()]));
+    success(fg(&[
+        "branch",
+        "delete",
+        text(&root),
+        TENANT,
+        REPOSITORY,
+        "--trusted-local",
+        "--principal",
+        ACTOR,
+        "--idempotency-key",
+        "fsck-delete-old",
+        "--ref",
+        "refs/heads/obsolete",
+        "--expected-tip",
+        &fixture.obsolete.to_string(),
+    ]));
     let after = success(audit(&root, "sha1", &[]));
     assert_counts(&after, 1, 6);
     assert_ne!(token(&before), token(&after));
-    assert!(refused(audit(&root, "sha1", &["--expected-head", token(&before)]))
-        .contains("authority_head_mismatch"));
+    assert!(
+        refused(audit(&root, "sha1", &["--expected-head", token(&before)]))
+            .contains("authority_head_mismatch")
+    );
 
     let mut matches = Vec::new();
     find_payload(&root.join("objects"), HISTORICAL_PAYLOAD, 0, &mut matches);
@@ -206,10 +330,23 @@ fn deleted_branch_history_is_still_audited_and_corruption_is_not_repaired() {
     *corrupt.last_mut().unwrap() ^= 1;
     fs::write(&path, &corrupt).unwrap();
     // A current-commit doctor sample cannot stand in for the whole-set audit.
-    success(fg(&["doctor", text(&root), TENANT, REPOSITORY, &fixture.main.to_string()]));
+    success(fg(&[
+        "doctor",
+        text(&root),
+        TENANT,
+        REPOSITORY,
+        &fixture.main.to_string(),
+    ]));
     let error = refused(audit(&root, "sha1", &[]));
-    assert!(error.contains(&fixture.obsolete_blob.to_string()), "{error}");
-    assert_eq!(fs::read(&path).unwrap(), corrupt, "fsck must not silently repair bytes");
+    assert!(
+        error.contains(&fixture.obsolete_blob.to_string()),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        corrupt,
+        "fsck must not silently repair bytes"
+    );
     fs::write(&path, &original).unwrap();
     assert_eq!(success(audit(&root, "sha1", &[])), after);
 

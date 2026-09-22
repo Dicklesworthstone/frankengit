@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
-use fgit_schema::workflow::{compile, Condition, Limits, WorkflowRefusal};
+use fgit_schema::workflow::{Condition, Limits, WorkflowRefusal, compile};
 
 fn source(job_if: &str, step_if: &str) -> String {
-    format!("name: conditions\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: false\n  diagnose:\n    runs-on: fgit-trusted-local\n    needs: build\n    if: {job_if}\n    steps:\n      - name: collect\n        if: {step_if}\n        run: printf diagnostic\n")
+    format!(
+        "name: conditions\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: false\n  diagnose:\n    runs-on: fgit-trusted-local\n    needs: build\n    if: {job_if}\n    steps:\n      - name: collect\n        if: {step_if}\n        run: printf diagnostic\n"
+    )
 }
 
 #[test]
@@ -29,12 +31,21 @@ fn closed_conditions_lower_and_bind_canonical_identity() {
 #[test]
 fn unsupported_expressions_refuse_at_the_condition_span() {
     for bad in [
-        "cancelled()", "true", "needs.build.result == 'failure'",
-        "${{ always() }}", "always() || success()",
+        "cancelled()",
+        "true",
+        "needs.build.result == 'failure'",
+        "${{ always() }}",
+        "always() || success()",
     ] {
         let input = source(bad, "success()");
         let error = compile(&input, &Limits::default()).unwrap_err();
-        assert!(matches!(error, WorkflowRefusal::Malformed { expected: "one of success(), failure(), or always() (job.if)", .. }));
+        assert!(matches!(
+            error,
+            WorkflowRefusal::Malformed {
+                expected: "one of success(), failure(), or always() (job.if)",
+                ..
+            }
+        ));
         assert!(error.span().line >= 9);
     }
 }
@@ -44,7 +55,11 @@ fn default_condition_preserves_existing_graph_bytes() {
     let implicit = "name: x\non: push\njobs:\n  a:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf x\n";
     let explicit = "name: x\non: push\njobs:\n  a:\n    runs-on: fgit-trusted-local\n    if: success()\n    steps:\n      - if: success()\n        run: printf x\n";
     assert_eq!(
-        compile(implicit, &Limits::default()).unwrap().canonical_bytes(),
-        compile(explicit, &Limits::default()).unwrap().canonical_bytes()
+        compile(implicit, &Limits::default())
+            .unwrap()
+            .canonical_bytes(),
+        compile(explicit, &Limits::default())
+            .unwrap()
+            .canonical_bytes()
     );
 }

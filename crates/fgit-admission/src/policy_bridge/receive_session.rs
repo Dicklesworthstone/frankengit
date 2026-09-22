@@ -18,8 +18,7 @@ use std::fmt::{self, Display, Formatter};
 
 use fgit_authority::{
     AsyncAuthorityStore, IdempotencyKey, SealAttempt, SemanticRequest, TerminalOutcome,
-    bind_idempotency_key_async, read_authority_head_body_async,
-    read_decision_batch_body_async,
+    bind_idempotency_key_async, read_authority_head_body_async, read_decision_batch_body_async,
 };
 use fgit_chronicle::{PublicationBasis, verify_pair};
 use fgit_codec::{CryptoBodyIdentity, RepositoryDecisionBatchBody};
@@ -215,10 +214,15 @@ where
     S: AsyncAuthorityStore + ?Sized,
 {
     let whole = if !plan.atomic {
-        let commands = input.updates.iter()
+        let commands = input
+            .updates
+            .iter()
             .map(|update| lower_ref_update(update.old, update.new, update.ref_name))
             .collect::<Result<Vec<_>, _>>()?;
-        let options = input.push_options.iter().cloned()
+        let options = input
+            .push_options
+            .iter()
+            .cloned()
             .map(fgit_authority::PushOption::new)
             .collect::<Result<Vec<_>, _>>()?;
         let whole = SealAttempt {
@@ -272,7 +276,9 @@ where
 {
     let (observed, _, _) = read_basis_async(store, cx, &context.head_key).await?;
     if observed.body().repository_id != context.repository_id {
-        return Err(AdmissionError::MaterializationMismatch("receive continuation repository"));
+        return Err(AdmissionError::MaterializationMismatch(
+            "receive continuation repository",
+        ));
     }
     if observed.id() == permitted {
         // Common retry case: earlier commands were already terminal before this
@@ -286,7 +292,9 @@ where
     }
     let predecessor = read_authority_head_body_async(store, cx, permitted).await?;
     let Some(tail) = observed.body().decision_tail_id else {
-        return Err(AdmissionError::MaterializationMismatch("receive continuation decision tail"));
+        return Err(AdmissionError::MaterializationMismatch(
+            "receive continuation decision tail",
+        ));
     };
     let batch = read_decision_batch_body_async(store, cx, tail).await?;
     let basis = PublicationBasis::new(permitted, predecessor);

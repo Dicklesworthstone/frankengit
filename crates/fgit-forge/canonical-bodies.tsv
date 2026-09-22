@@ -3,3 +3,4 @@
 forge-event	One tagged forge aggregate event encoded with its aggregate identity, version, actor and event-specific payload in stream order.
 forge-event-batch	An ordered sequence of forge-event payloads admitted together; sequence order is replay semantics.
 forge-ref-intent	Ref name bytes, expected native Git tip, and replacement native Git tip for one conditional forge-side ref movement.
+frankengit.federation-bundle	Exported offline work bundle containing basis capsule, proposed intents, embedded effect descriptors, carried evidence, and detached signature.

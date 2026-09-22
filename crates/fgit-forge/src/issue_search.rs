@@ -3,10 +3,10 @@
 //! call must return a complete ascending page at the supplied head (or refuse),
 //! and checkpoint its caller's runtime context before doing storage work.
 
-use std::fmt::{self, Display, Formatter};
+use crate::event::issue::{CompiledIssueQuery, IssueSnapshot};
 use fgit_codec::CodecRefusal;
 use fgit_types::RepositoryAuthorityHeadId;
-use crate::event::issue::{CompiledIssueQuery, IssueSnapshot};
+use std::fmt::{self, Display, Formatter};
 
 pub const MAX_SCAN: u16 = 1000;
 pub const MAX_RESULTS: u16 = 100;
@@ -32,7 +32,11 @@ pub struct SourcePage {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SearchStop { Exhausted, ResultLimit, ScanLimit }
+pub enum SearchStop {
+    Exhausted,
+    ResultLimit,
+    ScanLimit,
+}
 impl SearchStop {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -68,10 +72,16 @@ pub enum SearchError<E> {
 impl<E: Display> Display for SearchError<E> {
     fn fmt(&self, out: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidLimits => out.write_str("issue search requires limit 1..100 and max_scan 1..1000"),
-            Self::SnapshotRequired => out.write_str("issue search continuation requires its original snapshot token"),
+            Self::InvalidLimits => {
+                out.write_str("issue search requires limit 1..100 and max_scan 1..1000")
+            }
+            Self::SnapshotRequired => {
+                out.write_str("issue search continuation requires its original snapshot token")
+            }
             Self::SnapshotMoved => out.write_str("issue search reader changed the pinned snapshot"),
-            Self::InvalidSourcePage => out.write_str("issue search reader violated its pagination contract"),
+            Self::InvalidSourcePage => {
+                out.write_str("issue search reader violated its pagination contract")
+            }
             Self::InvalidSnapshot(error) => write!(out, "issue search invalid snapshot: {error}"),
             Self::Allocation => out.write_str("issue search allocation refused"),
             Self::Source(error) => write!(out, "issue search source: {error}"),
@@ -112,7 +122,9 @@ pub fn search<E>(
         return Err(SearchError::SnapshotRequired);
     }
     let mut issues = Vec::new();
-    issues.try_reserve(usize::from(request.limit)).map_err(|_| SearchError::Allocation)?;
+    issues
+        .try_reserve(usize::from(request.limit))
+        .map_err(|_| SearchError::Allocation)?;
     let mut after = request.after;
     let mut selected = request.expected_head;
     let mut scanned = 0;
@@ -125,10 +137,15 @@ pub fn search<E>(
         selected = Some(page.source_head);
         if page.issues.len() > usize::from(batch)
             || page.issues.iter().any(|issue| issue.number.get() <= after)
-            || page.issues.windows(2).any(|pair| pair[0].number >= pair[1].number)
-            || page.next_after.is_some_and(|next| next == u64::MAX
-                || page.issues.len() != usize::from(batch)
-                || page.issues.last().map(|issue| issue.number.get()) != Some(next))
+            || page
+                .issues
+                .windows(2)
+                .any(|pair| pair[0].number >= pair[1].number)
+            || page.next_after.is_some_and(|next| {
+                next == u64::MAX
+                    || page.issues.len() != usize::from(batch)
+                    || page.issues.last().map(|issue| issue.number.get()) != Some(next)
+            })
         {
             return Err(SearchError::InvalidSourcePage);
         }
@@ -136,22 +153,40 @@ pub fn search<E>(
         for (index, issue) in page.issues.into_iter().enumerate() {
             scanned += 1;
             after = issue.number.get();
-            if query.matches(&issue).map_err(SearchError::InvalidSnapshot)? {
+            if query
+                .matches(&issue)
+                .map_err(SearchError::InvalidSnapshot)?
+            {
                 issues.push(issue);
             }
             let more = index + 1 < count || page.next_after.is_some();
-            let stop = if !more { Some(SearchStop::Exhausted) }
-                else if issues.len() == usize::from(request.limit) { Some(SearchStop::ResultLimit) }
-                else if scanned == request.max_scan { Some(SearchStop::ScanLimit) }
-                else { None };
+            let stop = if !more {
+                Some(SearchStop::Exhausted)
+            } else if issues.len() == usize::from(request.limit) {
+                Some(SearchStop::ResultLimit)
+            } else if scanned == request.max_scan {
+                Some(SearchStop::ScanLimit)
+            } else {
+                None
+            };
             if let Some(stop) = stop {
-                return Ok(SearchPage { source_head: page.source_head, issues, scanned,
-                    next_after: more.then_some(after), stop });
+                return Ok(SearchPage {
+                    source_head: page.source_head,
+                    issues,
+                    scanned,
+                    next_after: more.then_some(after),
+                    stop,
+                });
             }
         }
         if page.next_after.is_none() {
-            return Ok(SearchPage { source_head: page.source_head, issues, scanned,
-                next_after: None, stop: SearchStop::Exhausted });
+            return Ok(SearchPage {
+                source_head: page.source_head,
+                issues,
+                scanned,
+                next_after: None,
+                stop: SearchStop::Exhausted,
+            });
         }
     }
 }

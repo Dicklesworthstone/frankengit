@@ -38,7 +38,9 @@ pub fn compare_source_series<S: MergeObjectSource>(
     }
     source.checkpoint()?;
     let mut output = Vec::new();
-    output.try_reserve_exact(pairs.len()).map_err(|_| ReviewError::Budget("series allocation"))?;
+    output
+        .try_reserve_exact(pairs.len())
+        .map_err(|_| ReviewError::Budget("series allocation"))?;
     let (mut trees, mut changes, mut text_files, mut output_bytes, mut hunks) = (0, 0, 0, 0, 0);
     for &(before, after) in pairs {
         source.checkpoint()?;
@@ -55,15 +57,26 @@ pub fn compare_source_series<S: MergeObjectSource>(
         // succeeds, while Walker::entry refuses the first additional change.
         // Only this internal allowance may be zero; public options were checked.
         let mut walker = Walker {
-            source, format, options: &remaining, entries: Vec::new(),
-            trees, text_files, output_bytes, hunks,
+            source,
+            format,
+            options: &remaining,
+            entries: Vec::new(),
+            trees,
+            text_files,
+            output_bytes,
+            hunks,
         };
         walker.directory(Some(before_tree), Some(after_tree), &[], 0)?;
         walker.entries.sort_by(|a, b| a.path.cmp(&b.path));
-        if walker.entries.windows(2).any(|pair| pair[0].path == pair[1].path) {
+        if walker
+            .entries
+            .windows(2)
+            .any(|pair| pair[0].path == pair[1].path)
+        {
             return Err(ReviewError::InvalidTree);
         }
-        changes = changes.checked_add(walker.entries.len())
+        changes = changes
+            .checked_add(walker.entries.len())
             .filter(|n| *n <= options.limits.max_changes)
             .ok_or(ReviewError::Budget("changed entries"))?;
         trees = walker.trees;
@@ -72,8 +85,13 @@ pub fn compare_source_series<S: MergeObjectSource>(
         hunks = walker.hunks;
         source.checkpoint()?;
         output.push(SourceComparison {
-            mode: ComparisonMode::Direct, requested_before: before, requested_after: after,
-            compared_before: before, before_tree, after_tree, entries: walker.entries,
+            mode: ComparisonMode::Direct,
+            requested_before: before,
+            requested_after: after,
+            compared_before: before,
+            before_tree,
+            after_tree,
+            entries: walker.entries,
         });
     }
     source.checkpoint()?;

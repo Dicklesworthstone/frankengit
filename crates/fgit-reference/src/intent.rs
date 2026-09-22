@@ -184,8 +184,12 @@ pub enum ForgeEventKind {
         target: RefName,
     },
     /// Issue lifecycle or discussion changed; detailed action/text are sealed in its event batch.
-    IssueChanged { issue: ForgeEntityId },
-    ReviewProtectionChanged { policy: ForgeEntityId },
+    IssueChanged {
+        issue: ForgeEntityId,
+    },
+    ReviewProtectionChanged {
+        policy: ForgeEntityId,
+    },
 }
 
 impl ForgeEventKind {
@@ -194,8 +198,12 @@ impl ForgeEventKind {
     pub const fn required_ref_effect(&self) -> Option<&RefName> {
         match self {
             Self::PullRequestMerged { target, .. } => Some(target),
-            Self::PullRequestOpened { .. } | Self::PullRequestClosed { .. }
-            | Self::PullRequestUpdated { .. } | Self::PullRequestReviewed { .. } | Self::IssueChanged { .. } | Self::ReviewProtectionChanged { .. } => None,
+            Self::PullRequestOpened { .. }
+            | Self::PullRequestClosed { .. }
+            | Self::PullRequestUpdated { .. }
+            | Self::PullRequestReviewed { .. }
+            | Self::IssueChanged { .. }
+            | Self::ReviewProtectionChanged { .. } => None,
         }
     }
 

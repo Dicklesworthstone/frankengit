@@ -48,7 +48,10 @@ pub enum PolicySourceRefusal {
     /// The stored body failed to decode.
     Undecodable { id: String },
     /// A valid snapshot was returned under the wrong requested identity.
-    IdentityMismatch { requested: Box<PolicySnapshotId>, observed: Box<PolicySnapshotId> },
+    IdentityMismatch {
+        requested: Box<PolicySnapshotId>,
+        observed: Box<PolicySnapshotId>,
+    },
 }
 
 impl std::fmt::Display for PolicySourceRefusal {
@@ -60,8 +63,12 @@ impl std::fmt::Display for PolicySourceRefusal {
             Self::Undecodable { id } => {
                 write!(formatter, "policy snapshot {id} does not decode")
             }
-            Self::IdentityMismatch { requested, observed } => write!(
-                formatter, "policy snapshot mismatch: requested {requested}, received {observed}",
+            Self::IdentityMismatch {
+                requested,
+                observed,
+            } => write!(
+                formatter,
+                "policy snapshot mismatch: requested {requested}, received {observed}",
             ),
         }
     }
@@ -146,13 +153,15 @@ pub fn evaluate_protection(
     evaluate_snapshot(&snapshot, codes, input_root)
 }
 
-fn checked_snapshot(source: &dyn PolicySnapshotSource, id: &PolicySnapshotId)
-    -> Result<fgit_policy::PolicySnapshot, PolicySourceRefusal>
-{
+fn checked_snapshot(
+    source: &dyn PolicySnapshotSource,
+    id: &PolicySnapshotId,
+) -> Result<fgit_policy::PolicySnapshot, PolicySourceRefusal> {
     let snapshot = source.snapshot_by_id(id)?;
     if snapshot.id() != *id {
         return Err(PolicySourceRefusal::IdentityMismatch {
-            requested: Box::new(*id), observed: Box::new(snapshot.id()),
+            requested: Box::new(*id),
+            observed: Box::new(snapshot.id()),
         });
     }
     Ok(snapshot)
@@ -232,9 +241,13 @@ impl<'a, S: fgit_authority::AuthorityStore + ?Sized> PolicySnapshotSource
             persisted::PolicyStoreError::Missing { .. } => {
                 PolicySourceRefusal::UnknownSnapshot { id: id.to_string() }
             }
-            persisted::PolicyStoreError::IdentityMismatch { requested, observed } => {
-                PolicySourceRefusal::IdentityMismatch { requested, observed }
-            }
+            persisted::PolicyStoreError::IdentityMismatch {
+                requested,
+                observed,
+            } => PolicySourceRefusal::IdentityMismatch {
+                requested,
+                observed,
+            },
             _ => PolicySourceRefusal::Undecodable { id: id.to_string() },
         })
     }
@@ -245,14 +258,12 @@ impl<'a, S: fgit_authority::AuthorityStore + ?Sized> PolicySnapshotSource
 pub fn default_principal_snapshot_id() -> fgit_types::PrincipalSnapshotId {
     let digest_bytes = fgit_types::DigestBytes::try_new(&[0u8; 32]).expect("valid digest bytes");
     let algorithm = fgit_types::DigestAlgorithmId::try_new(2).expect("valid algorithm id");
-    fgit_types::PrincipalSnapshotId::from_internal_object_id(
-        fgit_types::InternalObjectId::new(
-            algorithm,
-            fgit_types::PrincipalSnapshotId::DOMAIN_TAG,
-            fgit_types::CANONICAL_CODEC_VERSION,
-            digest_bytes,
-        ),
-    )
+    fgit_types::PrincipalSnapshotId::from_internal_object_id(fgit_types::InternalObjectId::new(
+        algorithm,
+        fgit_types::PrincipalSnapshotId::DOMAIN_TAG,
+        fgit_types::CANONICAL_CODEC_VERSION,
+        digest_bytes,
+    ))
     .expect("valid default principal snapshot id")
 }
 
@@ -310,12 +321,14 @@ pub fn ref_updates_from_commands(
 ) -> Result<Vec<fgit_policy::RefUpdateFact>, fgit_policy::error::PolicyInputRefusal> {
     let mut facts = Vec::with_capacity(commands.len());
     for command in commands {
-        let previous = refs_before.get(&command.name).copied().or_else(|| {
-            match command.expected_old {
-                fgit_authority::ExpectedOld::Exactly(oid) => Some(oid),
-                _ => None,
-            }
-        });
+        let previous =
+            refs_before
+                .get(&command.name)
+                .copied()
+                .or_else(|| match command.expected_old {
+                    fgit_authority::ExpectedOld::Exactly(oid) => Some(oid),
+                    _ => None,
+                });
         let (next, kind) = match command.proposed_new {
             fgit_authority::ProposedNew::Delete => (None, fgit_policy::RefUpdateKind::Delete),
             fgit_authority::ProposedNew::Update(oid) => {
@@ -371,9 +384,7 @@ where
             "    rule protect_branch_{idx} {{\n        when ref.name matches \"{pattern}\"\n        then deny \"direct update to protected branch {branch} prohibited\"\n    }}\n"
         ));
     }
-    let source = format!(
-        "policy forge_branch_protection {{\n{rules}    default allow\n}}"
-    );
+    let source = format!("policy forge_branch_protection {{\n{rules}    default allow\n}}");
     fgit_policy::compile_and_seal(&source)
 }
 
@@ -423,9 +434,10 @@ mod tests {
         reads: Cell<usize>,
     }
     impl PolicySnapshotSource for SubstitutingSource {
-        fn snapshot_by_id(&self, _: &PolicySnapshotId)
-            -> Result<fgit_policy::PolicySnapshot, PolicySourceRefusal>
-        {
+        fn snapshot_by_id(
+            &self,
+            _: &PolicySnapshotId,
+        ) -> Result<fgit_policy::PolicySnapshot, PolicySourceRefusal> {
             self.reads.set(self.reads.get() + 1);
             Ok(self.replacement.clone())
         }
@@ -433,22 +445,40 @@ mod tests {
 
     #[test]
     fn a_valid_allow_policy_cannot_be_substituted_for_the_requested_deny_policy() {
-        let deny = fgit_policy::compile_and_seal("policy pinned { default deny \"review required\" }").unwrap();
+        let deny =
+            fgit_policy::compile_and_seal("policy pinned { default deny \"review required\" }")
+                .unwrap();
         let allow = fgit_policy::compile_and_seal("policy pinned { default allow }").unwrap();
         assert_ne!(deny.id(), allow.id());
-        let source = SubstitutingSource { replacement: allow.clone(), reads: Cell::new(0) };
-        assert_eq!(checked_snapshot(&source, &deny.id()).unwrap_err(),
-            PolicySourceRefusal::IdentityMismatch { requested: Box::new(deny.id()), observed: Box::new(allow.id()) });
-        assert_eq!(source.reads.get(), 1, "no fallback lookup after substitution");
+        let source = SubstitutingSource {
+            replacement: allow.clone(),
+            reads: Cell::new(0),
+        };
+        assert_eq!(
+            checked_snapshot(&source, &deny.id()).unwrap_err(),
+            PolicySourceRefusal::IdentityMismatch {
+                requested: Box::new(deny.id()),
+                observed: Box::new(allow.id())
+            }
+        );
+        assert_eq!(
+            source.reads.get(),
+            1,
+            "no fallback lookup after substitution"
+        );
         assert_eq!(checked_snapshot(&source, &allow.id()).unwrap(), allow);
         assert_eq!(source.reads.get(), 2);
     }
 
     #[test]
     fn absent_and_exact_policy_snapshots_remain_distinct() {
-        let policy = fgit_policy::compile_and_seal("policy exact { default deny \"not allowed\" }").unwrap();
+        let policy =
+            fgit_policy::compile_and_seal("policy exact { default deny \"not allowed\" }").unwrap();
         let mut source = InMemoryPolicySnapshots::new();
-        assert!(matches!(checked_snapshot(&source, &policy.id()), Err(PolicySourceRefusal::UnknownSnapshot { .. })));
+        assert!(matches!(
+            checked_snapshot(&source, &policy.id()),
+            Err(PolicySourceRefusal::UnknownSnapshot { .. })
+        ));
         let id = source.pin(policy.clone());
         assert_eq!(checked_snapshot(&source, &id).unwrap(), policy);
         assert_eq!(source.pin(policy.clone()), id);

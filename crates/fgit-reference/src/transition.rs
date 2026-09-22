@@ -537,7 +537,9 @@ const fn named_ref(intent: &Intent) -> Option<&RefName> {
             | ForgeEventKind::PullRequestMerged { target, .. }
             | ForgeEventKind::PullRequestUpdated { target, .. }
             | ForgeEventKind::PullRequestReviewed { target, .. } => Some(target),
-            ForgeEventKind::PullRequestClosed { .. } | ForgeEventKind::IssueChanged { .. } | ForgeEventKind::ReviewProtectionChanged { .. } => None,
+            ForgeEventKind::PullRequestClosed { .. }
+            | ForgeEventKind::IssueChanged { .. }
+            | ForgeEventKind::ReviewProtectionChanged { .. } => None,
         },
         Intent::Retention(_) | Intent::Outbox(_) => None,
     }

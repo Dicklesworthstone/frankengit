@@ -9,17 +9,17 @@ use fgit_types::{Digest, DomainTag, ForgeEventId, GitOid, RefName, SchemaFamily}
 
 use crate::ForgeRefusal;
 use crate::aggregate::{
-    AGGREGATE_KIND_ORGANISATION, AGGREGATE_KIND_TEAM, AGGREGATE_KIND_PULL_REQUEST_REVIEW,
-    AggregateId, AggregateVersion, OrganisationNumber, PullRequestNumber, TeamNumber, IssueNumber, AGGREGATE_KIND_ISSUE,
-    AGGREGATE_KIND_MERGE_QUEUE, QueueNumber,
+    AGGREGATE_KIND_ISSUE, AGGREGATE_KIND_MERGE_QUEUE, AGGREGATE_KIND_ORGANISATION,
+    AGGREGATE_KIND_PULL_REQUEST_REVIEW, AGGREGATE_KIND_TEAM, AggregateId, AggregateVersion,
+    IssueNumber, OrganisationNumber, PullRequestNumber, QueueNumber, TeamNumber,
 };
 
-pub mod pull_request;
-pub mod review;
 pub mod issue;
 pub mod protection;
+pub mod pull_request;
 pub mod queue;
-use issue::{NativeIssueEvent, IssueAction};
+pub mod review;
+use issue::{IssueAction, NativeIssueEvent};
 use pull_request::{NativePullRequestEvent, PullRequestAction};
 use queue::NativeQueueEvent;
 use review::NativeReviewEvent;
@@ -34,7 +34,6 @@ const KIND_NATIVE_PULL_REQUEST_REVIEWED: u32 = 7;
 const KIND_NATIVE_ISSUE_CHANGED: u32 = 8;
 const KIND_REVIEW_PROTECTION_CHANGED: u32 = 9;
 const KIND_NATIVE_MERGE_QUEUE_CHANGED: u32 = 10;
-
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -61,8 +60,14 @@ impl NativeMerge {
             return Err(invalid_native("native_merge.branches"));
         }
         let format = self.merge_commit.algorithm();
-        if [self.source_tip, self.base_tip, self.target_tip_before, self.merge_commit]
-            .iter().any(|oid| oid.is_zero() || oid.algorithm() != format)
+        if [
+            self.source_tip,
+            self.base_tip,
+            self.target_tip_before,
+            self.merge_commit,
+        ]
+        .iter()
+        .any(|oid| oid.is_zero() || oid.algorithm() != format)
         {
             return Err(invalid_native("native_merge.object_format"));
         }
@@ -85,10 +90,12 @@ impl NativeMerge {
 
     fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         let value = Self {
-            source_ref: RefName::try_new(input.read_bytes("source_ref")?).map_err(CodecRefusal::from)?,
+            source_ref: RefName::try_new(input.read_bytes("source_ref")?)
+                .map_err(CodecRefusal::from)?,
             source_tip: input.read_git_oid()?,
             base_tip: input.read_git_oid()?,
-            target_ref: RefName::try_new(input.read_bytes("target_ref")?).map_err(CodecRefusal::from)?,
+            target_ref: RefName::try_new(input.read_bytes("target_ref")?)
+                .map_err(CodecRefusal::from)?,
             target_tip_before: input.read_git_oid()?,
             merge_commit: input.read_git_oid()?,
         };
@@ -98,7 +105,11 @@ impl NativeMerge {
 }
 
 fn invalid_native(field: &'static str) -> CodecRefusal {
-    CodecRefusal::ValueUnrepresentable { field, observed: 0, limit: 1 }
+    CodecRefusal::ValueUnrepresentable {
+        field,
+        observed: 0,
+        limit: 1,
+    }
 }
 
 /// Legacy kinds retain their original fields and bytes. Native lifecycle data
@@ -113,14 +124,18 @@ pub enum ForgeEventPayload {
         source_tip: Digest,
         target_tip: Digest,
     },
-    PullRequestHeadAdvanced { source_tip: Digest },
+    PullRequestHeadAdvanced {
+        source_tip: Digest,
+    },
     MergeCommitted {
         merge_commit: Digest,
         target_ref: Vec<u8>,
         target_tip_before: Digest,
         target_tip_after: Digest,
     },
-    PullRequestClosed { withdrawn: bool },
+    PullRequestClosed {
+        withdrawn: bool,
+    },
     MergeCommittedNative(NativeMerge),
     /// Full-state open/update/close event, wire kind 6. Its expected aggregate
     /// predecessor is exactly `event.version - 1`, not a mutable latest value.
@@ -161,8 +176,15 @@ pub struct ForgeEvent {
 
 fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
     match aggregate {
-        AggregateId::ReviewProtection => { out.write_scalar(0_u64); out.write_scalar(crate::aggregate::AGGREGATE_KIND_REVIEW_PROTECTION); }
-        AggregateId::Issue(number) => { out.write_scalar(0_u64); out.write_scalar(AGGREGATE_KIND_ISSUE); out.write_scalar(number.get()); }
+        AggregateId::ReviewProtection => {
+            out.write_scalar(0_u64);
+            out.write_scalar(crate::aggregate::AGGREGATE_KIND_REVIEW_PROTECTION);
+        }
+        AggregateId::Issue(number) => {
+            out.write_scalar(0_u64);
+            out.write_scalar(AGGREGATE_KIND_ISSUE);
+            out.write_scalar(number.get());
+        }
         AggregateId::PullRequest(number) => out.write_scalar(number.get()),
         AggregateId::Organisation(number) => {
             out.write_scalar(0_u64);
@@ -174,7 +196,10 @@ fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
             out.write_scalar(AGGREGATE_KIND_TEAM);
             out.write_scalar(number.get());
         }
-        AggregateId::PullRequestReview { pull_request, reviewer } => {
+        AggregateId::PullRequestReview {
+            pull_request,
+            reviewer,
+        } => {
             out.write_scalar(0_u64);
             out.write_scalar(AGGREGATE_KIND_PULL_REQUEST_REVIEW);
             out.write_scalar(pull_request.get());
@@ -197,54 +222,90 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
     let kind = input.read_scalar::<u32>("aggregate.kind")?;
     match kind {
         crate::aggregate::AGGREGATE_KIND_REVIEW_PROTECTION => Ok(AggregateId::ReviewProtection),
-        AGGREGATE_KIND_ISSUE => Ok(AggregateId::Issue(counter("aggregate.issue", input.read_scalar::<u64>("aggregate.issue")?)?)),
+        AGGREGATE_KIND_ISSUE => Ok(AggregateId::Issue(counter(
+            "aggregate.issue",
+            input.read_scalar::<u64>("aggregate.issue")?,
+        )?)),
         AGGREGATE_KIND_ORGANISATION => Ok(AggregateId::Organisation(counter(
-            "aggregate.organisation", input.read_scalar::<u64>("aggregate.organisation")?,
+            "aggregate.organisation",
+            input.read_scalar::<u64>("aggregate.organisation")?,
         )?)),
         AGGREGATE_KIND_TEAM => Ok(AggregateId::Team(counter(
-            "aggregate.team", input.read_scalar::<u64>("aggregate.team")?,
+            "aggregate.team",
+            input.read_scalar::<u64>("aggregate.team")?,
         )?)),
         AGGREGATE_KIND_PULL_REQUEST_REVIEW => Ok(AggregateId::PullRequestReview {
-            pull_request: counter("aggregate.review.pull_request", input.read_scalar::<u64>("aggregate.review.pull_request")?)?,
-            reviewer: fgit_types::PrincipalId::from_bytes(input.read_opaque_id("aggregate.review.reviewer")?),
+            pull_request: counter(
+                "aggregate.review.pull_request",
+                input.read_scalar::<u64>("aggregate.review.pull_request")?,
+            )?,
+            reviewer: fgit_types::PrincipalId::from_bytes(
+                input.read_opaque_id("aggregate.review.reviewer")?,
+            ),
         }),
         AGGREGATE_KIND_MERGE_QUEUE => Ok(AggregateId::MergeQueue(counter(
-            "aggregate.queue", input.read_scalar::<u64>("aggregate.queue")?,
+            "aggregate.queue",
+            input.read_scalar::<u64>("aggregate.queue")?,
         )?)),
         unknown => Err(CodecRefusal::VariantUnknown {
-            field: "aggregate.kind", observed: unknown, offset: kind_offset,
+            field: "aggregate.kind",
+            observed: unknown,
+            offset: kind_offset,
         }),
     }
 }
 
-
-fn validate_lifecycle(event: &ForgeEvent, change: &NativePullRequestEvent) -> Result<(), CodecRefusal> {
+fn validate_lifecycle(
+    event: &ForgeEvent,
+    change: &NativePullRequestEvent,
+) -> Result<(), CodecRefusal> {
     if !matches!(event.aggregate, AggregateId::PullRequest(_))
         || (change.action == PullRequestAction::Open) != (event.version == AggregateVersion::FIRST)
-    { return Err(invalid_native("pull_request.aggregate_version")); }
+    {
+        return Err(invalid_native("pull_request.aggregate_version"));
+    }
     change.data.validate()
 }
 
 fn validate_review(event: &ForgeEvent, review: &NativeReviewEvent) -> Result<(), CodecRefusal> {
     if event.aggregate != review.aggregate()
-        || (review.decision == review::ReviewDecision::Withdraw && event.version == AggregateVersion::FIRST)
-    { return Err(invalid_native("review.aggregate_version")); }
+        || (review.decision == review::ReviewDecision::Withdraw
+            && event.version == AggregateVersion::FIRST)
+    {
+        return Err(invalid_native("review.aggregate_version"));
+    }
     review.validate()
 }
 
 fn validate_issue(event: &ForgeEvent) -> Result<(), CodecRefusal> {
-    if matches!(event.aggregate, AggregateId::ReviewProtection) != matches!(event.payload, ForgeEventPayload::ReviewProtectionChanged(_)) { return Err(invalid_native("review_protection.aggregate")); }
-    if let ForgeEventPayload::ReviewProtectionChanged(change) = &event.payload { change.validate()?; }
-    if matches!(event.aggregate, AggregateId::Issue(_)) != matches!(event.payload, ForgeEventPayload::IssueChangedNative(_)) { return Err(invalid_native("issue.aggregate_kind")); }
+    if matches!(event.aggregate, AggregateId::ReviewProtection)
+        != matches!(event.payload, ForgeEventPayload::ReviewProtectionChanged(_))
+    {
+        return Err(invalid_native("review_protection.aggregate"));
+    }
+    if let ForgeEventPayload::ReviewProtectionChanged(change) = &event.payload {
+        change.validate()?;
+    }
+    if matches!(event.aggregate, AggregateId::Issue(_))
+        != matches!(event.payload, ForgeEventPayload::IssueChangedNative(_))
+    {
+        return Err(invalid_native("issue.aggregate_kind"));
+    }
     if let ForgeEventPayload::IssueChangedNative(change) = &event.payload {
         change.action.validate()?;
-        if matches!(change.action, IssueAction::Open { .. }) != (event.version == AggregateVersion::FIRST) { return Err(invalid_native("issue.aggregate_version")); }
+        if matches!(change.action, IssueAction::Open { .. })
+            != (event.version == AggregateVersion::FIRST)
+        {
+            return Err(invalid_native("issue.aggregate_version"));
+        }
     }
     Ok(())
 }
 
 fn validate_queue(event: &ForgeEvent) -> Result<(), CodecRefusal> {
-    if matches!(event.aggregate, AggregateId::MergeQueue(_)) != matches!(event.payload, ForgeEventPayload::MergeQueueChangedNative(_)) {
+    if matches!(event.aggregate, AggregateId::MergeQueue(_))
+        != matches!(event.payload, ForgeEventPayload::MergeQueueChangedNative(_))
+    {
         return Err(invalid_native("queue.aggregate_kind"));
     }
     if let ForgeEventPayload::MergeQueueChangedNative(change) = &event.payload {
@@ -260,20 +321,37 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
     validate_issue(event)?;
     validate_queue(event)?;
     if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
-        != matches!(event.payload, ForgeEventPayload::PullRequestReviewedNative(_))
-    { return Err(invalid_native("review.aggregate_kind")); }
+        != matches!(
+            event.payload,
+            ForgeEventPayload::PullRequestReviewedNative(_)
+        )
+    {
+        return Err(invalid_native("review.aggregate_kind"));
+    }
     write_aggregate(out, event.aggregate);
     out.write_scalar(event.version.get());
     out.write_scalar(event.payload.kind());
     match &event.payload {
-        ForgeEventPayload::PullRequestOpened { source_ref, target_ref, source_tip, target_tip } => {
+        ForgeEventPayload::PullRequestOpened {
+            source_ref,
+            target_ref,
+            source_tip,
+            target_tip,
+        } => {
             out.write_bytes("source_ref", source_ref)?;
             out.write_bytes("target_ref", target_ref)?;
             out.write_digest(source_tip)?;
             out.write_digest(target_tip)?;
         }
-        ForgeEventPayload::PullRequestHeadAdvanced { source_tip } => out.write_digest(source_tip)?,
-        ForgeEventPayload::MergeCommitted { merge_commit, target_ref, target_tip_before, target_tip_after } => {
+        ForgeEventPayload::PullRequestHeadAdvanced { source_tip } => {
+            out.write_digest(source_tip)?
+        }
+        ForgeEventPayload::MergeCommitted {
+            merge_commit,
+            target_ref,
+            target_tip_before,
+            target_tip_after,
+        } => {
             out.write_digest(merge_commit)?;
             out.write_bytes("target_ref", target_ref)?;
             out.write_digest(target_tip_before)?;
@@ -313,35 +391,62 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
             source_tip: input.read_digest()?,
             target_tip: input.read_digest()?,
         },
-        KIND_HEAD_ADVANCED => ForgeEventPayload::PullRequestHeadAdvanced { source_tip: input.read_digest()? },
+        KIND_HEAD_ADVANCED => ForgeEventPayload::PullRequestHeadAdvanced {
+            source_tip: input.read_digest()?,
+        },
         KIND_MERGE_COMMITTED => ForgeEventPayload::MergeCommitted {
             merge_commit: input.read_digest()?,
             target_ref: input.read_bytes("target_ref")?.to_vec(),
             target_tip_before: input.read_digest()?,
             target_tip_after: input.read_digest()?,
         },
-        KIND_CLOSED => ForgeEventPayload::PullRequestClosed { withdrawn: input.read_bool("withdrawn")? },
+        KIND_CLOSED => ForgeEventPayload::PullRequestClosed {
+            withdrawn: input.read_bool("withdrawn")?,
+        },
         KIND_NATIVE_MERGE_COMMITTED => {
             if !matches!(aggregate, AggregateId::PullRequest(_)) {
                 return Err(invalid_native("native_merge.aggregate"));
             }
             ForgeEventPayload::MergeCommittedNative(NativeMerge::read(input)?)
         }
-        KIND_NATIVE_PULL_REQUEST_CHANGED => ForgeEventPayload::PullRequestChangedNative(NativePullRequestEvent::read(input)?),
-        KIND_NATIVE_PULL_REQUEST_REVIEWED => ForgeEventPayload::PullRequestReviewedNative(NativeReviewEvent::read(input)?),
-        KIND_NATIVE_ISSUE_CHANGED => ForgeEventPayload::IssueChangedNative(NativeIssueEvent::read(input)?),
-        KIND_REVIEW_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(protection::NativeProtectionEvent::read(input)?),
-        KIND_NATIVE_MERGE_QUEUE_CHANGED => ForgeEventPayload::MergeQueueChangedNative(NativeQueueEvent::read(input)?),
-        unknown => return Err(CodecRefusal::VariantUnknown {
-            field: "kind", observed: unknown, offset: kind_offset,
-        }),
+        KIND_NATIVE_PULL_REQUEST_CHANGED => {
+            ForgeEventPayload::PullRequestChangedNative(NativePullRequestEvent::read(input)?)
+        }
+        KIND_NATIVE_PULL_REQUEST_REVIEWED => {
+            ForgeEventPayload::PullRequestReviewedNative(NativeReviewEvent::read(input)?)
+        }
+        KIND_NATIVE_ISSUE_CHANGED => {
+            ForgeEventPayload::IssueChangedNative(NativeIssueEvent::read(input)?)
+        }
+        KIND_REVIEW_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
+            protection::NativeProtectionEvent::read(input)?,
+        ),
+        KIND_NATIVE_MERGE_QUEUE_CHANGED => {
+            ForgeEventPayload::MergeQueueChangedNative(NativeQueueEvent::read(input)?)
+        }
+        unknown => {
+            return Err(CodecRefusal::VariantUnknown {
+                field: "kind",
+                observed: unknown,
+                offset: kind_offset,
+            });
+        }
     };
-    let event = ForgeEvent { aggregate, version, payload };
+    let event = ForgeEvent {
+        aggregate,
+        version,
+        payload,
+    };
     validate_issue(&event)?;
     validate_queue(&event)?;
     if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
-        != matches!(event.payload, ForgeEventPayload::PullRequestReviewedNative(_))
-    { return Err(invalid_native("review.aggregate_kind")); }
+        != matches!(
+            event.payload,
+            ForgeEventPayload::PullRequestReviewedNative(_)
+        )
+    {
+        return Err(invalid_native("review.aggregate_kind"));
+    }
     if let ForgeEventPayload::PullRequestChangedNative(change) = &event.payload {
         validate_lifecycle(&event, change)?;
     }
@@ -352,32 +457,71 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
 }
 
 fn counter<T: Counter>(field: &'static str, value: u64) -> Result<T, CodecRefusal> {
-    T::build(value).ok_or(CodecRefusal::ValueUnrepresentable { field, observed: value, limit: 1 })
+    T::build(value).ok_or(CodecRefusal::ValueUnrepresentable {
+        field,
+        observed: value,
+        limit: 1,
+    })
 }
-trait Counter: Sized { fn build(value: u64) -> Option<Self>; }
-impl Counter for IssueNumber { fn build(value: u64) -> Option<Self> { Self::try_new(value) } }
-impl Counter for PullRequestNumber { fn build(value: u64) -> Option<Self> { Self::try_new(value) } }
-impl Counter for AggregateVersion { fn build(value: u64) -> Option<Self> { Self::try_new(value) } }
-impl Counter for OrganisationNumber { fn build(value: u64) -> Option<Self> { Self::try_new(value) } }
-impl Counter for TeamNumber { fn build(value: u64) -> Option<Self> { Self::try_new(value) } }
-impl Counter for QueueNumber { fn build(value: u64) -> Option<Self> { Self::try_new(value) } }
-
+trait Counter: Sized {
+    fn build(value: u64) -> Option<Self>;
+}
+impl Counter for IssueNumber {
+    fn build(value: u64) -> Option<Self> {
+        Self::try_new(value)
+    }
+}
+impl Counter for PullRequestNumber {
+    fn build(value: u64) -> Option<Self> {
+        Self::try_new(value)
+    }
+}
+impl Counter for AggregateVersion {
+    fn build(value: u64) -> Option<Self> {
+        Self::try_new(value)
+    }
+}
+impl Counter for OrganisationNumber {
+    fn build(value: u64) -> Option<Self> {
+        Self::try_new(value)
+    }
+}
+impl Counter for TeamNumber {
+    fn build(value: u64) -> Option<Self> {
+        Self::try_new(value)
+    }
+}
+impl Counter for QueueNumber {
+    fn build(value: u64) -> Option<Self> {
+        Self::try_new(value)
+    }
+}
 
 impl CanonicalBody for ForgeEvent {
     const DOMAIN: DomainTag = ForgeEventId::DOMAIN_TAG;
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("forge-event");
     const SCHEMA_MAJOR: u16 = 1;
     const SCHEMA_MINOR: u16 = 0;
-    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> { write_event(out, self) }
-    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> { read_event(input) }
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        write_event(out, self)
+    }
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        read_event(input)
+    }
 }
 
 /// Ordered events admitted by one repository decision; never sorted as a set.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ForgeEventBatch { pub events: Vec<ForgeEvent> }
+pub struct ForgeEventBatch {
+    pub events: Vec<ForgeEvent>,
+}
 impl ForgeEventBatch {
     #[must_use]
-    pub fn of_one(event: ForgeEvent) -> Self { Self { events: vec![event] } }
+    pub fn of_one(event: ForgeEvent) -> Self {
+        Self {
+            events: vec![event],
+        }
+    }
 }
 impl CanonicalBody for ForgeEventBatch {
     const DOMAIN: DomainTag = DomainTag::from_static("frankengit/forge-event-batch/v1");
@@ -388,16 +532,23 @@ impl CanonicalBody for ForgeEventBatch {
         out.write_sequence("events", &self.events, write_event)
     }
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
-        Ok(Self { events: input.read_sequence("events", read_event)? })
+        Ok(Self {
+            events: input.read_sequence("events", read_event)?,
+        })
     }
 }
 
 pub fn event_id<I>(identity: &I, event: &ForgeEvent) -> Result<ForgeEventId, ForgeRefusal>
-where I: BodyIdentity + ?Sized,
+where
+    I: BodyIdentity + ?Sized,
 {
     let object = body_id(identity, event).map_err(|cause| match cause {
-        CodecRefusal::IdentityDomainUnregistered { .. } => ForgeRefusal::IdentityUnavailable { body: "ForgeEvent" },
-        cause => ForgeRefusal::BodyUnrepresentable { cause: Box::new(cause) },
+        CodecRefusal::IdentityDomainUnregistered { .. } => {
+            ForgeRefusal::IdentityUnavailable { body: "ForgeEvent" }
+        }
+        cause => ForgeRefusal::BodyUnrepresentable {
+            cause: Box::new(cause),
+        },
     })?;
     ForgeEventId::from_internal_object_id(object)
         .map_err(|_| ForgeRefusal::IdentityUnavailable { body: "ForgeEvent" })

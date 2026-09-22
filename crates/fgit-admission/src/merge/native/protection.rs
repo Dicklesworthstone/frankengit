@@ -234,11 +234,17 @@ where
             let branch_strings: Vec<String> = policy
                 .branches
                 .iter()
-                .filter_map(|b| std::str::from_utf8(b.name.as_bytes()).ok().map(ToOwned::to_owned))
+                .filter_map(|b| {
+                    std::str::from_utf8(b.name.as_bytes())
+                        .ok()
+                        .map(ToOwned::to_owned)
+                })
                 .collect();
             let branch_refs: Vec<&str> = branch_strings.iter().map(String::as_str).collect();
             let compiled = crate::policy_bridge::compile_protected_branch_rules(branch_refs)
-                .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))?;
+                .map_err(|_| {
+                    ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied)
+                })?;
             let id = source.pin(compiled);
             let verdict = crate::policy_bridge::evaluate_effects_protection(
                 &source,

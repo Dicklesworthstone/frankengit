@@ -7805,7 +7805,7 @@ impl CanonicalBody for EvidenceRecordBody {
                 "# franken-registry-v2\n",
                 "id\tcrate_pattern\tscope\tdecision\towner\trationale\tfeature_policy\tunsafe_policy\tffi_policy\tstatus\tbuild_script\tproc_macro\n",
                 "DEP-013\tfgit-*\tproduction\tallow_first_party\tarchitecture\tfirst-party\tworkspace_pinned\tsafe\tno_ffi\tactive\tabsent\tabsent\n",
-                "DEP-014\taead\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.9_transitive_direct_parent_aes-gcm\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n",
+                "DEP-014\taead\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.5.0_transitive_direct_parent_aes-gcm\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n",
                 "DEP-175\tbubblewrap\ttooling\texternal_tool\trelease\toracle sandbox\tnot_linked\tnot_in_binary\texternal_process\tactive\tnot_applicable\tnot_applicable\n"
             ),
         )
@@ -7830,7 +7830,7 @@ impl CanonicalBody for EvidenceRecordBody {
             concat!(
                 "# franken-registry-v2\n",
                 "id\tcrate_pattern\tscope\tdecision\towner\trationale\tfeature_policy\tunsafe_policy\tffi_policy\tstatus\tbuild_script\tproc_macro\n",
-                "DEP-014\taead\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.9_transitive_direct_parent_aes-gcm\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n",
+                "DEP-014\taead\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.5.0_transitive_direct_parent_aes-gcm\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n",
                 "DEP-015\tunrelated\tproduction\tallow_transitive_admitted_other\tother\tunrelated\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n"
             ),
         )

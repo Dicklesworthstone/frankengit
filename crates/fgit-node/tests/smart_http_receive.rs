@@ -105,7 +105,11 @@ fn post<W: Write>(
 ) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
     let header = head_bytes(node, if use_chunks { None } else { Some(body.len()) });
     let head = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
-    let wire = if use_chunks { chunked(body) } else { body.to_vec() };
+    let wire = if use_chunks {
+        chunked(body)
+    } else {
+        body.to_vec()
+    };
     node.smart_http_receive_rpc_in(
         &head,
         session,
@@ -180,11 +184,19 @@ fn assert_report(output: &[u8], record: &[u8]) {
     let boundary = output.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
     let header = std::str::from_utf8(&output[..boundary]).unwrap();
     assert!(header.contains("application/x-git-receive-pack-result"));
-    let length = header.lines().find_map(|line| {
-        line.strip_prefix("Content-Length: ").map(|value| value.trim().parse::<usize>().unwrap())
-    }).expect("fixed response length");
+    let length = header
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Content-Length: ")
+                .map(|value| value.trim().parse::<usize>().unwrap())
+        })
+        .expect("fixed response length");
     assert_eq!(length, output.len() - boundary);
-    assert!(output[boundary..].windows(record.len()).any(|w| w == record));
+    assert!(
+        output[boundary..]
+            .windows(record.len())
+            .any(|w| w == record)
+    );
     assert!(output.ends_with(b"0000"));
 }
 
@@ -199,10 +211,16 @@ fn sha1_and_sha256_pushes_survive_both_http_framings_and_reopen() {
             let outcome = post(&node, &session(b"create"), &body, use_chunks, &mut output).unwrap();
             assert_committed(&outcome);
             assert_report(&output, b"ok refs/tags/http-blob\n");
-            assert_eq!(refs(&node).get(&RefName::try_new(TAG.as_bytes()).unwrap()), Some(&oid));
+            assert_eq!(
+                refs(&node).get(&RefName::try_new(TAG.as_bytes()).unwrap()),
+                Some(&oid)
+            );
             node.shutdown().unwrap();
             let reopened = OneNode::open_existing(config(&scratch, format)).unwrap();
-            assert_eq!(refs(&reopened).get(&RefName::try_new(TAG.as_bytes()).unwrap()), Some(&oid));
+            assert_eq!(
+                refs(&reopened).get(&RefName::try_new(TAG.as_bytes()).unwrap()),
+                Some(&oid)
+            );
             reopened.shutdown().unwrap();
         }
     }
@@ -248,18 +266,29 @@ fn incomplete_or_pipelined_bodies_never_stage_or_publish() {
             }
             let mut output = Vec::new();
             let result = node.smart_http_receive_rpc_in(
-                &head, &session(b"incomplete"), &wire, HttpLimits::default(),
-                AdmissionLimits::default(), &mut || true, &mut output,
+                &head,
+                &session(b"incomplete"),
+                &wire,
+                HttpLimits::default(),
+                AdmissionLimits::default(),
+                &mut || true,
+                &mut output,
             );
             if trailing {
-                assert!(matches!(result, Err(NodeSmartHttpRefusal::TrailingRequestBytes { count: 4 })));
+                assert!(matches!(
+                    result,
+                    Err(NodeSmartHttpRefusal::TrailingRequestBytes { count: 4 })
+                ));
             } else {
                 assert!(matches!(result, Err(NodeSmartHttpRefusal::Rpc(error))
                     if matches!(error.as_ref(), RpcError::IncompleteRequest)));
             }
             assert!(output.is_empty());
             assert!(refs(&node).is_empty());
-            assert!(node.read_git_object(oid).is_err(), "no quarantine handoff before HTTP EOF");
+            assert!(
+                node.read_git_object(oid).is_err(),
+                "no quarantine handoff before HTTP EOF"
+            );
             node.shutdown().unwrap();
         }
     }
@@ -271,7 +300,13 @@ fn authentication_and_cell_state_precede_untrusted_git_parsing() {
     let (node, _) = OneNode::init(config(&scratch, GitHashAlgorithm::Sha1)).unwrap();
     let mut output = Vec::new();
     assert!(matches!(
-        post(&node, &LoopbackReceiveSession::Anonymous, b"not git", false, &mut output),
+        post(
+            &node,
+            &LoopbackReceiveSession::Anonymous,
+            b"not git",
+            false,
+            &mut output
+        ),
         Err(NodeSmartHttpRefusal::UnauthenticatedReceive)
     ));
     assert!(matches!(
@@ -325,14 +360,20 @@ struct FailingWriter {
 impl Write for FailingWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if self.remaining == 0 {
-            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "simulated lost response"));
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "simulated lost response",
+            ));
         }
         let count = bytes.len().min(self.remaining);
         self.remaining -= count;
         Ok(count)
     }
     fn flush(&mut self) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::BrokenPipe, "simulated flush failure"))
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "simulated flush failure",
+        ))
     }
 }
 
@@ -344,7 +385,13 @@ fn lost_response_retains_the_canonical_outcome_and_same_key_recovers_it() {
         let node = serving_node(&scratch, GitHashAlgorithm::Sha1);
         let (_, body) = create(GitHashAlgorithm::Sha1);
         let authenticated = session(b"ambiguous-response");
-        let result = post(&node, &authenticated, &body, false, &mut FailingWriter { remaining });
+        let result = post(
+            &node,
+            &authenticated,
+            &body,
+            false,
+            &mut FailingWriter { remaining },
+        );
         let first = match result {
             Err(NodeSmartHttpRefusal::ReceiveResponse { outcome, .. }) => outcome,
             other => panic!("expected a preserved canonical result, got {other:?}"),
@@ -356,7 +403,10 @@ fn lost_response_retains_the_canonical_outcome_and_same_key_recovers_it() {
         // Changing transport framing must not change client retry identity.
         let retried = post(&node, &authenticated, &body, true, &mut output).unwrap();
         assert_committed(&retried);
-        assert_eq!(retried.commands[0].terminal.outcome, first.commands[0].terminal.outcome);
+        assert_eq!(
+            retried.commands[0].terminal.outcome,
+            first.commands[0].terminal.outcome
+        );
         assert_eq!(refs(&node), before_retry);
         assert_report(&output, b"ok refs/tags/http-blob\n");
         node.shutdown().unwrap();
@@ -371,9 +421,19 @@ fn a_new_key_does_not_turn_stale_expected_old_into_a_second_success() {
     assert_committed(&post(&node, &session(b"first"), &body, false, &mut Vec::new()).unwrap());
     let before = refs(&node);
     let mut output = Vec::new();
-    let refused = post(&node, &session(b"different-request"), &body, false, &mut output).unwrap();
+    let refused = post(
+        &node,
+        &session(b"different-request"),
+        &body,
+        false,
+        &mut output,
+    )
+    .unwrap();
     assert_eq!(refused.commands.len(), 1);
-    assert!(!matches!(refused.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
+    assert!(!matches!(
+        refused.commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
     assert_report(&output, b"ng refs/tags/http-blob ");
     assert_eq!(refs(&node), before);
     node.shutdown().unwrap();

@@ -107,11 +107,7 @@ async fn read_window<C: Connection>(
     let end = end_inclusive.get().min(MAX_SQL_POSITION);
     // Even an empty window checks an existing watermark's binding. These
     // parameters make its LEFT JOIN produce only the metadata sentinel.
-    let (sql_start, sql_end) = if start > end {
-        (1, 0)
-    } else {
-        (start, end)
-    };
+    let (sql_start, sql_end) = if start > end { (1, 0) } else { (start, end) };
     let rows = flatten(
         session
             .connection_ref()

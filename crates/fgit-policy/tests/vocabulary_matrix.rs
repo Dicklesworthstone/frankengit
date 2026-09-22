@@ -463,12 +463,23 @@ fn test_vocabulary_matrix_machine_readable_completeness() {
         let has_refuse = VOCABULARY_MATRIX
             .iter()
             .any(|e| e.check_name == *name && e.direction == MatrixDirection::Refuse);
-        assert!(has_admit, "rule check '{}' missing Admit direction in matrix", name);
-        assert!(has_refuse, "rule check '{}' missing Refuse direction in matrix", name);
+        assert!(
+            has_admit,
+            "rule check '{}' missing Admit direction in matrix",
+            name
+        );
+        assert!(
+            has_refuse,
+            "rule check '{}' missing Refuse direction in matrix",
+            name
+        );
     }
 
     for entry in VOCABULARY_MATRIX {
-        assert!(!entry.description.is_empty(), "description must not be empty");
+        assert!(
+            !entry.description.is_empty(),
+            "description must not be empty"
+        );
         match entry.direction {
             MatrixDirection::Admit => assert_eq!(entry.expected_decision, Decision::Allow),
             MatrixDirection::Refuse => assert_eq!(entry.expected_decision, Decision::Deny),
@@ -482,13 +493,19 @@ fn test_vocabulary_matrix_machine_readable_completeness() {
         .iter()
         .filter(|e| e.is_expiry_revocation)
         .collect();
-    assert!(expiry_entries.len() >= 3, "must have at least 3 expiry/revocation fixtures");
+    assert!(
+        expiry_entries.len() >= 3,
+        "must have at least 3 expiry/revocation fixtures"
+    );
 
     let composition_entries: Vec<_> = VOCABULARY_MATRIX
         .iter()
         .filter(|e| e.is_composition)
         .collect();
-    assert!(composition_entries.len() >= 2, "must have composition fixtures");
+    assert!(
+        composition_entries.len() >= 2,
+        "must have composition fixtures"
+    );
 }
 
 #[test]
@@ -512,17 +529,50 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             durability: None,
             flags: ProtectionBits::empty(), // ALLOW_DELETIONS not set
         };
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::Delete, false, p, vec![], vec![], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::Delete,
+            false,
+            p,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("deletion of protected ref is prohibited"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("deletion of protected ref is prohibited")
+        );
 
         // 1b. Admit deletion
         let mut rule_allowed = rule;
         rule_allowed.flags = ProtectionBits::ALLOW_DELETIONS;
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::Delete, false, p, vec![], vec![], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::Delete,
+            false,
+            p,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule_allowed], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Allow);
     }
@@ -543,17 +593,50 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             durability: None,
             flags: ProtectionBits::empty(), // ALLOW_CREATION not set
         };
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::Create, false, p, vec![], vec![], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::Create,
+            false,
+            p,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("creation under protected ref pattern is prohibited"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("creation under protected ref pattern is prohibited")
+        );
 
         // 2b. Admit creation
         let mut rule_allowed = rule;
         rule_allowed.flags = ProtectionBits::ALLOW_CREATION;
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::Create, false, p, vec![], vec![], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::Create,
+            false,
+            p,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule_allowed], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Allow);
     }
@@ -574,17 +657,50 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             durability: None,
             flags: ProtectionBits::empty(), // ALLOW_FORCE_PUSH not set
         };
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::NonFastForward, true, p, vec![], vec![], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::NonFastForward,
+            true,
+            p,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("force push to protected ref is prohibited"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("force push to protected ref is prohibited")
+        );
 
         // 3b. Admit force push
         let mut rule_allowed = rule;
         rule_allowed.flags = ProtectionBits::ALLOW_FORCE_PUSH;
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::NonFastForward, true, p, vec![], vec![], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::NonFastForward,
+            true,
+            p,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule_allowed], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Allow);
     }
@@ -605,15 +721,48 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             durability: None,
             flags: ProtectionBits::REQUIRE_FAST_FORWARD,
         };
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::NonFastForward, false, p, vec![], vec![], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::NonFastForward,
+            false,
+            p,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("non-fast-forward update refused by protected ref policy"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("non-fast-forward update refused by protected ref policy")
+        );
 
         // 4b. Admit fast-forward
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p, vec![], vec![], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Allow);
     }
@@ -637,15 +786,48 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         };
 
         // 5a. Refuse non-allowed actor
-        let p_denied = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_denied, vec![], vec![], 100);
+        let p_denied = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_denied,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("is not in allowed actors list"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("is not in allowed actors list")
+        );
 
         // 5b. Admit allowed actor
-        let p_admitted = dummy_principal(5, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_admitted, vec![], vec![], 100);
+        let p_admitted = dummy_principal(
+            5,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_admitted,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Allow);
     }
@@ -669,15 +851,48 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         };
 
         // 6a. Refuse human when only service allowed
-        let p_human = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_human, vec![], vec![], 100);
+        let p_human = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_human,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("principal kind 'human' is not admitted"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("principal kind 'human' is not admitted")
+        );
 
         // 6b. Admit service
-        let p_service = dummy_principal(1, PrincipalKind::Service, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_service, vec![], vec![], 100);
+        let p_service = dummy_principal(
+            1,
+            PrincipalKind::Service,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_service,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Allow);
     }
@@ -701,15 +916,48 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         };
 
         // 7a. Refuse without team
-        let p_no_team = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &["interns"], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_no_team, vec![], vec![], 100);
+        let p_no_team = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &["interns"],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_no_team,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("does not belong to any required team"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("does not belong to any required team")
+        );
 
         // 7b. Admit with team
-        let p_with_team = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &["core-maintainers"], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_with_team, vec![], vec![], 100);
+        let p_with_team = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &["core-maintainers"],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_with_team,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Allow);
     }
@@ -733,15 +981,48 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         };
 
         // 8a. Refuse without capability
-        let p_no_cap = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &["view-repo"]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_no_cap, vec![], vec![], 100);
+        let p_no_cap = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &["view-repo"],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_no_cap,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("principal lacks required capability"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("principal lacks required capability")
+        );
 
         // 8b. Admit with capability
-        let p_with_cap = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &["deploy-prod"]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_with_cap, vec![], vec![], 100);
+        let p_with_cap = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &["deploy-prod"],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_with_cap,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Allow);
     }
@@ -763,15 +1044,48 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         };
 
         // 9a. Refuse weak auth
-        let p_single = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_single, vec![], vec![], 100);
+        let p_single = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_single,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("does not meet minimum"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("does not meet minimum")
+        );
 
         // 9b. Admit strong auth
-        let p_hard = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::HardwareBacked, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_hard, vec![], vec![], 100);
+        let p_hard = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::HardwareBacked,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_hard,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Allow);
     }
@@ -793,15 +1107,48 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         };
 
         // 10a. Refuse unsigned (auth < HardwareBacked)
-        let p_unsigned = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::MultiFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_unsigned, vec![], vec![], 100);
+        let p_unsigned = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::MultiFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_unsigned,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("cryptographically signed commits required"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("cryptographically signed commits required")
+        );
 
         // 10b. Admit signed
-        let p_signed = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::HardwareBacked, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p_signed, vec![], vec![], 100);
+        let p_signed = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::HardwareBacked,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p_signed,
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Allow);
     }
@@ -823,22 +1170,60 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         };
 
         // 11a. Refuse missing review
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p.clone(), vec![], vec![], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p.clone(),
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("missing required code review approvals"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("missing required code review approvals")
+        );
 
         // 11b. Refuse expired review (receipt expires at 90, evaluation instant is 100)
         let expired_receipt = dummy_receipt("code_review", &r_name_main, 10, 90);
-        let (input_exp, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p.clone(), vec![expired_receipt], vec![], 100);
+        let (input_exp, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p.clone(),
+            vec![expired_receipt],
+            vec![],
+            100,
+        );
         let eval_exp = evaluate_protected_ref(&[rule.clone()], &input_exp, &ref_name);
         assert_eq!(eval_exp.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("code review") || eval_exp.denial_reason.as_ref().unwrap().contains("expired"));
+        assert!(
+            eval.denial_reason.as_ref().unwrap().contains("code review")
+                || eval_exp.denial_reason.as_ref().unwrap().contains("expired")
+        );
 
         // 11c. Admit valid review (receipt expires at 200, evaluation instant is 100)
         let valid_receipt = dummy_receipt("code_review", &r_name_main, 10, 200);
-        let (input_valid, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p, vec![valid_receipt], vec![], 100);
+        let (input_valid, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p,
+            vec![valid_receipt],
+            vec![],
+            100,
+        );
         let eval_valid = evaluate_protected_ref(&[rule], &input_valid, &ref_name);
         assert_eq!(eval_valid.decision, Decision::Allow);
     }
@@ -865,22 +1250,63 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         };
 
         // 12a. Refuse missing check
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p.clone(), vec![], vec![], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p.clone(),
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("missing required CI status check"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("missing required CI status check")
+        );
 
         // 12b. Refuse expired check (expires at 80, evaluated at 100)
         let expired_ci = dummy_receipt("ci_check", &r_name_main, 10, 80);
-        let (input_exp, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p.clone(), vec![expired_ci], vec![], 100);
+        let (input_exp, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p.clone(),
+            vec![expired_ci],
+            vec![],
+            100,
+        );
         let eval_exp = evaluate_protected_ref(&[rule.clone()], &input_exp, &ref_name);
         assert_eq!(eval_exp.decision, Decision::Deny);
-        assert!(eval_exp.denial_reason.as_ref().unwrap().contains("status check evidence receipt is expired"));
+        assert!(
+            eval_exp
+                .denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("status check evidence receipt is expired")
+        );
 
         // 12c. Admit valid check
         let valid_ci = dummy_receipt("ci_check", &r_name_main, 10, 200);
-        let (input_valid, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p, vec![valid_ci], vec![], 100);
+        let (input_valid, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p,
+            vec![valid_ci],
+            vec![],
+            100,
+        );
         let eval_valid = evaluate_protected_ref(&[rule], &input_valid, &ref_name);
         assert_eq!(eval_valid.decision, Decision::Allow);
     }
@@ -902,22 +1328,63 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         };
 
         // 13a. Refuse missing merge queue receipt
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p.clone(), vec![], vec![], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p.clone(),
+            vec![],
+            vec![],
+            100,
+        );
         let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
-        assert!(eval.denial_reason.as_ref().unwrap().contains("direct push prohibited; update must land via merge queue"));
+        assert!(
+            eval.denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("direct push prohibited; update must land via merge queue")
+        );
 
         // 13b. Refuse expired merge queue receipt
         let expired_mq = dummy_receipt("merge_queue", &r_name_main, 10, 95);
-        let (input_exp, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p.clone(), vec![expired_mq], vec![], 100);
+        let (input_exp, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p.clone(),
+            vec![expired_mq],
+            vec![],
+            100,
+        );
         let eval_exp = evaluate_protected_ref(&[rule.clone()], &input_exp, &ref_name);
         assert_eq!(eval_exp.decision, Decision::Deny);
-        assert!(eval_exp.denial_reason.as_ref().unwrap().contains("merge queue integration receipt is expired"));
+        assert!(
+            eval_exp
+                .denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("merge queue integration receipt is expired")
+        );
 
         // 13c. Admit valid merge queue receipt
         let valid_mq = dummy_receipt("merge_queue", &r_name_main, 10, 200);
-        let (input_valid, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p, vec![valid_mq], vec![], 100);
+        let (input_valid, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p,
+            vec![valid_mq],
+            vec![],
+            100,
+        );
         let eval_valid = evaluate_protected_ref(&[rule], &input_valid, &ref_name);
         assert_eq!(eval_valid.decision, Decision::Allow);
     }
@@ -939,14 +1406,42 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         };
 
         // 14a. Refuse non-zero unresolved findings
-        let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::SingleFactor, &[], &[]);
-        let (input_findings, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p.clone(), vec![], vec![("unresolved_findings", 3)], 100);
+        let p = dummy_principal(
+            1,
+            PrincipalKind::Human,
+            AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        );
+        let (input_findings, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p.clone(),
+            vec![],
+            vec![("unresolved_findings", 3)],
+            100,
+        );
         let eval_findings = evaluate_protected_ref(&[rule.clone()], &input_findings, &ref_name);
         assert_eq!(eval_findings.decision, Decision::Deny);
-        assert!(eval_findings.denial_reason.as_ref().unwrap().contains("blocked by 3 unresolved security findings"));
+        assert!(
+            eval_findings
+                .denial_reason
+                .as_ref()
+                .unwrap()
+                .contains("blocked by 3 unresolved security findings")
+        );
 
         // 14b. Admit zero unresolved findings
-        let (input_clean, ref_name) = build_input("refs/heads/main", RefUpdateKind::FastForward, false, p, vec![], vec![("unresolved_findings", 0)], 100);
+        let (input_clean, ref_name) = build_input(
+            "refs/heads/main",
+            RefUpdateKind::FastForward,
+            false,
+            p,
+            vec![],
+            vec![("unresolved_findings", 0)],
+            100,
+        );
         let eval_clean = evaluate_protected_ref(&[rule], &input_clean, &ref_name);
         assert_eq!(eval_clean.decision, Decision::Allow);
     }
@@ -986,7 +1481,13 @@ fn composition_fixtures_composite_governance_rule() {
             .with(ProtectionBits::BLOCK_UNRESOLVED_FINDINGS),
     };
 
-    let p_valid = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::HardwareBacked, &[], &[]);
+    let p_valid = dummy_principal(
+        1,
+        PrincipalKind::Human,
+        AuthenticationStrength::HardwareBacked,
+        &[],
+        &[],
+    );
     let rev_rec = dummy_receipt("code_review", &r_name_main, 10, 500);
     let ci_rec = dummy_receipt("ci_check", &r_name_main, 10, 500);
 
@@ -1018,13 +1519,44 @@ fn composition_fixtures_composite_governance_rule() {
     );
     let eval_no_rev = evaluate_protected_ref(&[composite_rule.clone()], &input_no_rev, &ref_name);
     assert_eq!(eval_no_rev.decision, Decision::Deny);
-    assert!(eval_no_rev.denial_reason.as_ref().unwrap().contains("missing required code review approvals"));
+    assert!(
+        eval_no_rev
+            .denial_reason
+            .as_ref()
+            .unwrap()
+            .contains("missing required code review approvals")
+    );
     // Verify that verdicts record individual check results
-    assert!(eval_no_rev.verdicts.iter().any(|v| v.name() == "fast_forward_only" && v.is_passed()));
-    assert!(eval_no_rev.verdicts.iter().any(|v| v.name() == "min_authentication" && v.is_passed()));
-    assert!(eval_no_rev.verdicts.iter().any(|v| v.name() == "signed_commits" && v.is_passed()));
-    assert!(eval_no_rev.verdicts.iter().any(|v| v.name() == "status_checks" && v.is_passed()));
-    assert!(eval_no_rev.verdicts.iter().any(|v| v.name() == "code_reviews" && !v.is_passed()));
+    assert!(
+        eval_no_rev
+            .verdicts
+            .iter()
+            .any(|v| v.name() == "fast_forward_only" && v.is_passed())
+    );
+    assert!(
+        eval_no_rev
+            .verdicts
+            .iter()
+            .any(|v| v.name() == "min_authentication" && v.is_passed())
+    );
+    assert!(
+        eval_no_rev
+            .verdicts
+            .iter()
+            .any(|v| v.name() == "signed_commits" && v.is_passed())
+    );
+    assert!(
+        eval_no_rev
+            .verdicts
+            .iter()
+            .any(|v| v.name() == "status_checks" && v.is_passed())
+    );
+    assert!(
+        eval_no_rev
+            .verdicts
+            .iter()
+            .any(|v| v.name() == "code_reviews" && !v.is_passed())
+    );
 
     // Scenario C: Compositional failure — non-fast-forward AND unresolved findings
     let (input_multi_fault, ref_name) = build_input(
@@ -1069,7 +1601,13 @@ fn revocation_and_temporal_expiry_fixtures() {
         flags: ProtectionBits::empty(),
     };
 
-    let p = dummy_principal(1, PrincipalKind::Human, AuthenticationStrength::HardwareBacked, &[], &[]);
+    let p = dummy_principal(
+        1,
+        PrincipalKind::Human,
+        AuthenticationStrength::HardwareBacked,
+        &[],
+        &[],
+    );
     // Receipt valid exclusively between t=100 and t=200
     let time_bounded_receipt = dummy_receipt("code_review", &r_name_main, 100, 200);
 
@@ -1124,5 +1662,11 @@ fn revocation_and_temporal_expiry_fixtures() {
     );
     let eval_after = evaluate_protected_ref(&[rule], &input_after, &ref_name);
     assert_eq!(eval_after.decision, Decision::Deny);
-    assert!(eval_after.denial_reason.as_ref().unwrap().contains("expired"));
+    assert!(
+        eval_after
+            .denial_reason
+            .as_ref()
+            .unwrap()
+            .contains("expired")
+    );
 }

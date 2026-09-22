@@ -4,8 +4,7 @@ use std::{path::Path, process::Command};
 
 #[test]
 fn fresh_process_rebase_preserves_native_history_and_exports_complete_bundles() {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/e2e/rebase_smoke.py");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/e2e/rebase_smoke.py");
     let output = Command::new("python3")
         .arg(script)
         .arg("--fg")

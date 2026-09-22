@@ -969,14 +969,17 @@ impl SecretBroker {
     fn revoke_all(&mut self, leases: &[SecretLease]) -> Result<u16, RunnerRefusal> {
         // An invalid handle must not leave a partially revoked set whose retry
         // then fails on the already-settled first lease.
-        let revoked = u16::try_from(leases.len())
-            .map_err(|_| RunnerRefusal::SecretLeaseExhausted)?;
+        let revoked =
+            u16::try_from(leases.len()).map_err(|_| RunnerRefusal::SecretLeaseExhausted)?;
         let mut seen = BTreeSet::new();
         for lease in leases {
             if !seen.insert(*lease) {
                 return Err(RunnerRefusal::DuplicateSecretLease);
             }
-            let record = self.records.get(lease).ok_or(RunnerRefusal::UnknownSecretLease)?;
+            let record = self
+                .records
+                .get(lease)
+                .ok_or(RunnerRefusal::UnknownSecretLease)?;
             if record.state != SecretState::Bound {
                 return Err(RunnerRefusal::SecretLeaseUnavailable);
             }

@@ -212,14 +212,18 @@ impl fmt::Debug for RequestHead<'_> {
 /// needed. Native endpoints share envelope framing, never Git service policy.
 pub fn parse_head(input: &[u8], limits: HttpLimits) -> Result<Option<RequestHead<'_>>, HttpError> {
     let Some((envelope, (operation, repository_route))) =
-        head::parse_with(input, limits, |method, target| route(method, target, limits.max_target_bytes))?
+        head::parse_with(input, limits, |method, target| {
+            route(method, target, limits.max_target_bytes)
+        })?
     else {
         return Ok(None);
     };
     match operation {
         Operation::Discover(_) => {
-            if !matches!(envelope.body, BodyFraming::Empty | BodyFraming::ContentLength(0))
-                || envelope.expect_continue
+            if !matches!(
+                envelope.body,
+                BodyFraming::Empty | BodyFraming::ContentLength(0)
+            ) || envelope.expect_continue
             {
                 return Err(HttpError::BodyNotAllowed);
             }
@@ -228,7 +232,10 @@ pub fn parse_head(input: &[u8], limits: HttpLimits) -> Result<Option<RequestHead
             if envelope.body == BodyFraming::Empty {
                 return Err(HttpError::LengthRequired);
             }
-            if !envelope.content_type.is_some_and(|value| value.eq_ignore_ascii_case(service.request_media_type())) {
+            if !envelope
+                .content_type
+                .is_some_and(|value| value.eq_ignore_ascii_case(service.request_media_type()))
+            {
                 return Err(HttpError::UnsupportedMediaType);
             }
         }

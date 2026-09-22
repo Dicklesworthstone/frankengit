@@ -147,7 +147,10 @@ fn key_bytes(key: &Key, input: &mut impl Read) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
-    if args.first().is_some_and(|arg| matches!(arg.as_str(), "sync-export" | "sync-import")) {
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "sync-export" | "sync-import"))
+    {
         return incremental::run(args);
     }
     if args.first().is_some_and(|arg| arg == "fetch") {
@@ -158,7 +161,13 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
             && args[1] == "--help"
             && matches!(args[0].as_str(), "export" | "import"))
     {
-        writeln!(std::io::stdout().lock(), "{USAGE}\n\n{}\n\n{}", fetch::USAGE, incremental::USAGE).map_err(|e| e.to_string())?;
+        writeln!(
+            std::io::stdout().lock(),
+            "{USAGE}\n\n{}\n\n{}",
+            fetch::USAGE,
+            incremental::USAGE
+        )
+        .map_err(|e| e.to_string())?;
         return Ok(0);
     }
     let options = parse(args)?;

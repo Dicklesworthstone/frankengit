@@ -48,10 +48,10 @@ pub use fgit_pack::full_bundle::fetch::BundleRefMapping;
 pub mod source_retrieval;
 mod treefs_workspace;
 pub use treefs_workspace::IssueReadRefusal;
-pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
 pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
+pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, HeadInit, HeadKey,
@@ -129,9 +129,9 @@ mod merge_delivery;
 mod smart_http;
 pub use smart_http::{NodeSmartHttpDiscovery, NodeSmartHttpRefusal, NodeSmartHttpUploadReceipt};
 mod quarantine_validator;
-mod verified_reads;
-mod upload_visibility;
 mod ssh;
+mod upload_visibility;
+mod verified_reads;
 pub mod webhook;
 
 pub use ssh::{NodeSshRefusal, SshServerLimits, SshServerReceipt};
@@ -191,7 +191,10 @@ const GIT_DAEMON_CAPABILITIES: &[u8] = b"allow-reachable-sha1-in-want shallow de
 /// Anyone extending this node to protocol v2 must NOT carry the order across.
 /// The same oracle run shows v2 emitting `agent=` first and `object-format=`
 /// last, so the v0/v1 order is not a global Git convention.
-pub(crate) fn git_daemon_capabilities(object_format: GitHashAlgorithm, head_target: Option<&[u8]>) -> Vec<u8> {
+pub(crate) fn git_daemon_capabilities(
+    object_format: GitHashAlgorithm,
+    head_target: Option<&[u8]>,
+) -> Vec<u8> {
     let mut tokens = b"object-format=".to_vec();
     tokens.extend_from_slice(object_format.as_str().as_bytes());
     // `ofs-delta` opens delta-compressed serving: without this token a v0/v1
@@ -251,7 +254,11 @@ impl AdmissionUploadPackRepository {
             .collect();
 
         // A hidden target must not survive as a protocol-v2 unborn symref.
-        let head_target = snapshot.head_target.as_ref().filter(|target| !hides(target)).cloned();
+        let head_target = snapshot
+            .head_target
+            .as_ref()
+            .filter(|target| !hides(target))
+            .cloned();
         let head_oid = match head_target.as_ref() {
             // A HEAD whose target this principal cannot see must make the
             // repository look UNBORN to them: no HEAD advertised, and no
@@ -378,8 +385,14 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
         self.shallow_proof.is_some()
     }
 
-    fn shallow_update(&self, request: &PackRequest) -> Result<fgit_wire::closure::ShallowUpdate, WireError> {
-        self.shallow_proof.as_ref().ok_or(WireError::PackSourceRefused)?.update(request)
+    fn shallow_update(
+        &self,
+        request: &PackRequest,
+    ) -> Result<fgit_wire::closure::ShallowUpdate, WireError> {
+        self.shallow_proof
+            .as_ref()
+            .ok_or(WireError::PackSourceRefused)?
+            .update(request)
     }
 
     fn peeled(&self, oid: AnyGitOid) -> Option<AnyGitOid> {
@@ -1007,9 +1020,12 @@ pub enum NodePackMaterializationRefusal {
 impl Display for NodePackMaterializationRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedFetch(feature) => write!(formatter, "unsupported fetch feature: {feature}"),
+            Self::UnsupportedFetch(feature) => {
+                write!(formatter, "unsupported fetch feature: {feature}")
+            }
             Self::DisclosureGraph(code) => write!(
-                formatter, "visible upload-pack graph proof refused: {code:?}"
+                formatter,
+                "visible upload-pack graph proof refused: {code:?}"
             ),
             Self::Admission(error) => Display::fmt(error, formatter),
             Self::RequestedWantOutsideClosure(id) => write!(
@@ -2360,8 +2376,13 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
                 ));
             }
             fgit_admission::merge::native::protection::enforce_direct_at(
-                authority, cx, basis, fold, &|| cx.checkpoint().is_err(),
-            ).await?;
+                authority,
+                cx,
+                basis,
+                fold,
+                &|| cx.checkpoint().is_err(),
+            )
+            .await?;
             let stage_context = cx.create_child();
             let is_cancelled = || stage_context.checkpoint().is_err();
             let provider = self
@@ -2504,42 +2525,84 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
         next_state: &'a CanonicalRefState,
     ) -> Result<CommitMaterialization, AsyncProjectionFailure> {
         if *context != self.context {
-            return Err(AsyncProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
+            return Err(AsyncProjectionFailure::Unavailable(
+                RefusalCode::EvidenceInvalid,
+            ));
         }
-        let prepared_basis = self.prepared.lock()
+        let prepared_basis = self
+            .prepared
+            .lock()
             .map_err(|_| AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach))?
-            .take().ok_or(AsyncProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+            .take()
+            .ok_or(AsyncProjectionFailure::Unavailable(
+                RefusalCode::EvidenceMissing,
+            ))?;
         if prepared_basis.basis != *basis {
-            return Err(AsyncProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
+            return Err(AsyncProjectionFailure::Unavailable(
+                RefusalCode::AuthorityReceiptStale,
+            ));
         }
         let is_cancelled = || cx.checkpoint().is_err();
-        let delivery = fgit_admission::merge::native::delivery::read_in(
-            authority,
-            cx,
+        let delivery =
+            fgit_admission::merge::native::delivery::read_in(authority, cx, basis, &is_cancelled)
+                .await
+                .map_err(|error| {
+                    async_projection_unavailable(AdmissionMaterializationRefusal::Delivery(
+                        Box::new(error),
+                    ))
+                })?;
+        let prepared = fgit_admission::merge::prepare_native_merge(
+            context,
+            sealed,
+            tx_id,
+            attempt,
             basis,
-            &is_cancelled,
-        )
-        .await
-        .map_err(|error| async_projection_unavailable(AdmissionMaterializationRefusal::Delivery(Box::new(error))))?;
-        let prepared = fgit_admission::merge::prepare_native_merge(context, sealed, tx_id, attempt, basis,
             &fgit_admission::merge::NativeMergeBasis {
-                refs: prepared_basis.ref_state, root_layout: prepared_basis.root_layout,
-                forge: delivery.forge, outbox: delivery.outbox,
-            }).map_err(AsyncProjectionFailure::Refuse)?;
+                refs: prepared_basis.ref_state,
+                root_layout: prepared_basis.root_layout,
+                forge: delivery.forge,
+                outbox: delivery.outbox,
+            },
+        )
+        .map_err(AsyncProjectionFailure::Refuse)?;
         if prepared.refs != *next_state {
-            return Err(AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach));
+            return Err(AsyncProjectionFailure::Unavailable(
+                RefusalCode::InternalInvariantBreach,
+            ));
         }
         // Legacy digest packages carry no authenticated exact-candidate votes.
         // They cannot bypass a protected target through a different materializer.
         fgit_admission::merge::native::protection::enforce_direct_at(
-            authority, cx, basis, &prepared.fold, &is_cancelled,
-        ).await?;
-        self.materializer.stage_evidence_bodies_in(authority, cx, &prepared.evidence, &is_cancelled)
-            .await.map_err(async_projection_unavailable)?;
-        self.materializer.stage_ref_state_for_layout_in(authority, cx, context.repository_id,
-            prepared.root_layout, prepared.refs).await.map_err(async_projection_unavailable)?;
-        self.materializer.stage_permitted_object_closure_in(authority, cx, context.repository_id,
-            prepared.closure).await.map_err(async_projection_unavailable)?;
+            authority,
+            cx,
+            basis,
+            &prepared.fold,
+            &is_cancelled,
+        )
+        .await?;
+        self.materializer
+            .stage_evidence_bodies_in(authority, cx, &prepared.evidence, &is_cancelled)
+            .await
+            .map_err(async_projection_unavailable)?;
+        self.materializer
+            .stage_ref_state_for_layout_in(
+                authority,
+                cx,
+                context.repository_id,
+                prepared.root_layout,
+                prepared.refs,
+            )
+            .await
+            .map_err(async_projection_unavailable)?;
+        self.materializer
+            .stage_permitted_object_closure_in(
+                authority,
+                cx,
+                context.repository_id,
+                prepared.closure,
+            )
+            .await
+            .map_err(async_projection_unavailable)?;
         fgit_admission::merge::native::delivery::stage_in(
             authority,
             cx,
@@ -2552,7 +2615,9 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
             &is_cancelled,
         )
         .await
-        .map_err(|error| async_projection_unavailable(AdmissionMaterializationRefusal::Delivery(Box::new(error))))?;
+        .map_err(|error| {
+            async_projection_unavailable(AdmissionMaterializationRefusal::Delivery(Box::new(error)))
+        })?;
         Ok(prepared.materialization)
     }
 }
@@ -2819,8 +2884,15 @@ where
             }
             if record.policy_epoch != successor.policy_epoch {
                 fgit_admission::merge::native::protection::verify_epoch_advance_at(
-                    authority, cx, &basis, &successor, &batch, is_cancelled,
-                ).await.map_err(|error| AdmissionMaterializationRefusal::Delivery(Box::new(error)))?;
+                    authority,
+                    cx,
+                    &basis,
+                    &successor,
+                    &batch,
+                    is_cancelled,
+                )
+                .await
+                .map_err(|error| AdmissionMaterializationRefusal::Delivery(Box::new(error)))?;
             }
             latest_record = Some(record_id);
         }
@@ -2920,9 +2992,15 @@ impl VerifiedFabricPackSource<'_> {
         self.references_from_body(object_type, &body)
     }
 
-    fn references_from_body(&self, object_type: ObjectType, body: &[u8]) -> Result<Vec<GitOid>, PackWriteError> {
+    fn references_from_body(
+        &self,
+        object_type: ObjectType,
+        body: &[u8],
+    ) -> Result<Vec<GitOid>, PackWriteError> {
         self.session_checkpoint()?;
-        if object_type == ObjectType::Blob { return Ok(Vec::new()); }
+        if object_type == ObjectType::Blob {
+            return Ok(Vec::new());
+        }
         let parsed = parse_object_body(
             object_type,
             body,
@@ -5160,8 +5238,9 @@ where
             })
         })?;
         if read == 0 {
-            machine.finish().map_err(|error| GitDaemonServeError::Transport(
-                GitDaemonTransportRefusal::Wire(error)))?;
+            machine.finish().map_err(|error| {
+                GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
+            })?;
             if ls_refs_completed && machine.is_awaiting_command() {
                 // The client obtained everything it needed from ls-refs (the
                 // empty-repository shape) and closed the session cleanly.
@@ -7263,14 +7342,9 @@ impl OneNode {
         // detach admission with a fresh budget after expensive preparation.
         loose_import::checkpoint_request(request)
             .map_err(|error| NodeSourceImportRefusal::Staging(Box::new(error)))?;
-        self.admit_validated_source_import_durable_in(
-            request,
-            &context,
-            &validated,
-            limits,
-        )
-        .await
-        .map_err(|error| NodeSourceImportRefusal::Admission(Box::new(error)))
+        self.admit_validated_source_import_durable_in(request, &context, &validated, limits)
+            .await
+            .map_err(|error| NodeSourceImportRefusal::Admission(Box::new(error)))
     }
 
     /// Materializes a bounded Git pack from exactly one authority-selected closure.
@@ -7356,9 +7430,16 @@ impl OneNode {
         // Explicit local authority materialization retains the canonical
         // historical scope. Network callers must supply their disclosure proof.
         self.materialize_selected_pack_in_scope(
-            materialized, materialized.selected_closure().closure(), None, client_wants,
-            client_haves, write_profile, database_context, database_exhaustion,
-            session_is_live, is_live,
+            materialized,
+            materialized.selected_closure().closure(),
+            None,
+            client_wants,
+            client_haves,
+            write_profile,
+            database_context,
+            database_exhaustion,
+            session_is_live,
+            is_live,
         )
     }
 
@@ -7386,13 +7467,20 @@ impl OneNode {
             database_exhaustion,
             session_is_live,
         };
-        let mut ids = if fetch.is_some_and(|(_, request)| upload_visibility::shallow::requested(request)) {
-            // A shallow have proves only history above the client's boundary.
-            // The visible scope below computes both clipped closures together.
-            Vec::new()
-        } else {
-            selected_pack_ids(&source, disclosure_closure, client_wants, client_haves, &limits)?
-        };
+        let mut ids =
+            if fetch.is_some_and(|(_, request)| upload_visibility::shallow::requested(request)) {
+                // A shallow have proves only history above the client's boundary.
+                // The visible scope below computes both clipped closures together.
+                Vec::new()
+            } else {
+                selected_pack_ids(
+                    &source,
+                    disclosure_closure,
+                    client_wants,
+                    client_haves,
+                    &limits,
+                )?
+            };
         if let Some((scope, request)) = fetch {
             scope.closure_for(materialized)?;
             scope.select_partial(&mut ids, request, &limits, is_live)?;
@@ -7577,9 +7665,8 @@ impl OneNode {
             }
             return Ok(served);
         }
-        let disclosure = self.prepare_visible_upload_pack(
-            &request, &materialized, &limits, &deadline,
-        )?;
+        let disclosure =
+            self.prepare_visible_upload_pack(&request, &materialized, &limits, &deadline)?;
         let repository = disclosure.repository();
         let advertised_capabilities =
             git_daemon_capabilities(self.object_format, repository.symref_target(b"HEAD"));
@@ -7629,7 +7716,9 @@ impl OneNode {
                     };
                     self.materialize_selected_pack_in_scope(
                         &materialized,
-                        disclosure.closure_for(&materialized).map_err(GitDaemonServeError::Pack)?,
+                        disclosure
+                            .closure_for(&materialized)
+                            .map_err(GitDaemonServeError::Pack)?,
                         Some((&disclosure, pack_request)),
                         Some(&pack_request.wants),
                         &pack_request.haves,

@@ -20,31 +20,51 @@ pub(super) struct SourceIdentity<'a, A: GitHashAlgorithm> {
     payload: usize,
 }
 impl<'a, A: GitHashAlgorithm> SourceIdentity<'a, A> {
-    pub(super) fn repository_id(&self) -> RepositoryId { self.repository }
-    pub(super) fn source_rcr_id(&self) -> RepositoryCommitId { self.rcr }
-    pub(super) fn source_commit_oid(&self) -> &'a GitOid<A> { self.commit }
-    pub(super) fn source_tree_oid(&self) -> &'a GitOid<A> { self.tree }
-    pub(super) fn payload_bytes(&self) -> usize { self.payload }
+    pub(super) fn repository_id(&self) -> RepositoryId {
+        self.repository
+    }
+    pub(super) fn source_rcr_id(&self) -> RepositoryCommitId {
+        self.rcr
+    }
+    pub(super) fn source_commit_oid(&self) -> &'a GitOid<A> {
+        self.commit
+    }
+    pub(super) fn source_tree_oid(&self) -> &'a GitOid<A> {
+        self.tree
+    }
+    pub(super) fn payload_bytes(&self) -> usize {
+        self.payload
+    }
 }
 impl<A: GitHashAlgorithm> WorkspaceManifest<A> {
     pub(super) fn entries(&self) -> &[SparseEntry<A>] {
-        match self { Self::Canonical(m) => m.entries(), Self::Candidate(m) => m.entries() }
+        match self {
+            Self::Canonical(m) => m.entries(),
+            Self::Candidate(m) => m.entries(),
+        }
     }
     /// For a candidate these are BASE coordinates, not an admission assertion.
     pub(super) fn receipt(&self) -> SourceIdentity<'_, A> {
         match self {
             Self::Canonical(m) => SourceIdentity {
-                repository: m.receipt().repository_id(), rcr: m.receipt().source_rcr_id(),
-                commit: m.receipt().source_commit_oid(), tree: m.receipt().source_tree_oid(),
+                repository: m.receipt().repository_id(),
+                rcr: m.receipt().source_rcr_id(),
+                commit: m.receipt().source_commit_oid(),
+                tree: m.receipt().source_tree_oid(),
                 payload: m.receipt().payload_bytes(),
             },
             Self::Candidate(m) => SourceIdentity {
-                repository: m.repository_id(), rcr: m.base_rcr_id(), commit: m.base_commit_oid(),
-                tree: m.base_tree_oid(), payload: m.payload_bytes(),
+                repository: m.repository_id(),
+                rcr: m.base_rcr_id(),
+                commit: m.base_commit_oid(),
+                tree: m.base_tree_oid(),
+                payload: m.payload_bytes(),
             },
         }
     }
-    pub(super) fn is_candidate(&self) -> bool { matches!(self, Self::Candidate(_)) }
+    pub(super) fn is_candidate(&self) -> bool {
+        matches!(self, Self::Candidate(_))
+    }
     pub(super) fn bind_candidate(&self, bytes: &mut Encoder) -> Result<(), HostRefusal> {
         if let Self::Candidate(m) = self {
             // Canonical plan bytes remain byte-for-byte unchanged. Candidate
@@ -64,9 +84,17 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
     /// profile. No output declaration, candidate admission, or canonical source
     /// receipt is inferred, and SparseWorkspace::import refuses these plans.
     pub fn for_candidate(
-        manifest: Arc<SparseCandidateManifest<A>>, capability: &TreeCapability,
-        now: u64, limits: SparseLimits,
+        manifest: Arc<SparseCandidateManifest<A>>,
+        capability: &TreeCapability,
+        now: u64,
+        limits: SparseLimits,
     ) -> Result<Self, HostRefusal> {
-        Self::from_manifest(WorkspaceManifest::Candidate(manifest), Vec::new(), capability, now, limits)
+        Self::from_manifest(
+            WorkspaceManifest::Candidate(manifest),
+            Vec::new(),
+            capability,
+            now,
+            limits,
+        )
     }
 }

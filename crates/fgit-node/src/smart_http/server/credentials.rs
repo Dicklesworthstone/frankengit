@@ -33,8 +33,14 @@ pub(super) struct Binding {
 // No Debug implementation: credentials must not be printed in diagnostics.
 #[derive(Clone)]
 pub(super) enum CredentialSource {
-    Static { digest: [u8; 32], principal: PrincipalId },
-    File { path: PathBuf, binding: Binding },
+    Static {
+        digest: [u8; 32],
+        principal: PrincipalId,
+    },
+    File {
+        path: PathBuf,
+        binding: Binding,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -59,19 +65,33 @@ impl Grant {
         }
     }
     pub fn permits_issues(self, mutation: bool) -> bool {
-        if mutation { self.issues_write } else { self.issues_read }
+        if mutation {
+            self.issues_write
+        } else {
+            self.issues_read
+        }
     }
     /// PR metadata authority is separate from code publication and reviews.
     pub fn permits_pulls(self, mutation: bool) -> bool {
-        if mutation { self.pulls_write } else { self.pulls_read }
+        if mutation {
+            self.pulls_write
+        } else {
+            self.pulls_read
+        }
     }
     /// A vote always uses this credential's principal, not a form field.
     pub fn permits_reviews(self, mutation: bool) -> bool {
-        if mutation { self.reviews_write } else { self.reviews_read }
+        if mutation {
+            self.reviews_write
+        } else {
+            self.reviews_read
+        }
     }
     /// Allows reviewed code publication and selection of additional named
     /// reviewers. Mandatory repository protection remains enforced at CAS.
-    pub fn permits_reviewed_merge(self) -> bool { self.merges_write }
+    pub fn permits_reviewed_merge(self) -> bool {
+        self.merges_write
+    }
     /// Recovery is separately grantable after write access has been withdrawn.
     /// It never permits inspecting another principal's transaction namespace.
     pub fn permits_outcomes(self) -> bool {
@@ -98,7 +118,9 @@ impl Display for CredentialFailure {
             Self::UnknownCredential => "HTTP credential is not accepted",
             Self::Unavailable => "HTTP credential file is unavailable",
             Self::InvalidFile => "HTTP credential file is invalid or exceeds its bounds",
-            Self::WrongRepository => "HTTP credential file selects a different repository incarnation",
+            Self::WrongRepository => {
+                "HTTP credential file selects a different repository incarnation"
+            }
             Self::UnsafeFile => "HTTP credential file must be a stable private regular file",
         })
     }
@@ -122,10 +144,19 @@ impl CredentialSource {
                 }
                 // Preserve the static Git profile without silently granting any
                 // newly added metadata authority to an existing credential.
-                Ok(Grant { principal: *principal, read: true, receive: true,
-                    issues_read: false, issues_write: false, outcomes_read: false,
-                    pulls_read: false, pulls_write: false,
-                    reviews_read: false, reviews_write: false, merges_write: false })
+                Ok(Grant {
+                    principal: *principal,
+                    read: true,
+                    receive: true,
+                    issues_read: false,
+                    issues_write: false,
+                    outcomes_read: false,
+                    pulls_read: false,
+                    pulls_write: false,
+                    reviews_read: false,
+                    reviews_write: false,
+                    merges_write: false,
+                })
             }
             Self::File { path, binding } => {
                 let entries = load(path, *binding)?;
@@ -152,7 +183,8 @@ const MAX_BASIC_USERNAME_BYTES: usize = 256;
 const MAX_BASIC_BYTES: usize = MAX_BASIC_USERNAME_BYTES + 1 + 64;
 
 fn credential_digest(authorization: Option<&str>) -> Result<[u8; 32], CredentialFailure> {
-    let (scheme, value) = authorization.and_then(|value| value.split_once(' '))
+    let (scheme, value) = authorization
+        .and_then(|value| value.split_once(' '))
         .ok_or(CredentialFailure::UnknownCredential)?;
     if scheme.eq_ignore_ascii_case("bearer") {
         return token_digest(value.as_bytes());
@@ -161,12 +193,15 @@ fn credential_digest(authorization: Option<&str>) -> Result<[u8; 32], Credential
         return Err(CredentialFailure::UnknownCredential);
     }
     let mut decoded = [0_u8; MAX_BASIC_BYTES];
-    let length = decode_basic(value.as_bytes(), &mut decoded)
-        .ok_or(CredentialFailure::UnknownCredential)?;
+    let length =
+        decode_basic(value.as_bytes(), &mut decoded).ok_or(CredentialFailure::UnknownCredential)?;
     let user_pass = &decoded[..length];
-    let separator = user_pass.iter().position(|byte| *byte == b':')
+    let separator = user_pass
+        .iter()
+        .position(|byte| *byte == b':')
         .ok_or(CredentialFailure::UnknownCredential)?;
-    if separator == 0 || separator > MAX_BASIC_USERNAME_BYTES
+    if separator == 0
+        || separator > MAX_BASIC_USERNAME_BYTES
         || user_pass[..separator].iter().any(u8::is_ascii_control)
         || std::str::from_utf8(&user_pass[..separator]).is_err()
     {
@@ -177,7 +212,9 @@ fn credential_digest(authorization: Option<&str>) -> Result<[u8; 32], Credential
 
 fn token_digest(token: &[u8]) -> Result<[u8; 32], CredentialFailure> {
     if token.len() != 64
-        || !token.iter().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        || !token
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
     {
         return Err(CredentialFailure::UnknownCredential);
     }
@@ -188,7 +225,8 @@ fn token_digest(token: &[u8]) -> Result<[u8; 32], CredentialFailure> {
 // Reject truncated input, whitespace, URL-safe alphabets, internal/extra
 // padding and nonzero unused bits. No allocation depends on hostile input.
 fn decode_basic(input: &[u8], output: &mut [u8; MAX_BASIC_BYTES]) -> Option<usize> {
-    if input.is_empty() || input.len() > MAX_BASIC_BYTES.div_ceil(3) * 4
+    if input.is_empty()
+        || input.len() > MAX_BASIC_BYTES.div_ceil(3) * 4
         || !input.len().is_multiple_of(4)
     {
         return None;
@@ -212,15 +250,23 @@ fn decode_basic(input: &[u8], output: &mut [u8; MAX_BASIC_BYTES]) -> Option<usiz
             (b'=', b'=') if last && b & 15 == 0 => (0, 0, 1),
             (c, b'=') if last => {
                 let c = sextet(c)?;
-                if c & 3 != 0 { return None; }
+                if c & 3 != 0 {
+                    return None;
+                }
                 (c, 0, 2)
             }
             (c, d) => (sextet(c)?, sextet(d)?, 3),
         };
-        if written + count > output.len() { return None; }
+        if written + count > output.len() {
+            return None;
+        }
         output[written] = (a << 2) | (b >> 4);
-        if count > 1 { output[written + 1] = (b << 4) | (c >> 2); }
-        if count > 2 { output[written + 2] = (c << 6) | d; }
+        if count > 1 {
+            output[written + 1] = (b << 4) | (c >> 2);
+        }
+        if count > 2 {
+            output[written + 2] = (c << 6) | d;
+        }
         written += count;
     }
     Some(written)
@@ -247,7 +293,9 @@ fn load(path: &Path, binding: Binding) -> Result<Vec<Entry>, CredentialFailure> 
     let before = fs::symlink_metadata(path).map_err(|_| CredentialFailure::Unavailable)?;
     safe_metadata(&before)?;
     let mut file = File::open(path).map_err(|_| CredentialFailure::Unavailable)?;
-    let opened = file.metadata().map_err(|_| CredentialFailure::Unavailable)?;
+    let opened = file
+        .metadata()
+        .map_err(|_| CredentialFailure::Unavailable)?;
     safe_metadata(&opened)?;
     #[cfg(unix)]
     {
@@ -257,12 +305,19 @@ fn load(path: &Path, binding: Binding) -> Result<Vec<Entry>, CredentialFailure> 
         }
     }
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(MAX_FILE_BYTES + 1).map_err(|_| CredentialFailure::Unavailable)?;
-    (&mut file).take((MAX_FILE_BYTES + 1) as u64).read_to_end(&mut bytes)
+    bytes
+        .try_reserve_exact(MAX_FILE_BYTES + 1)
         .map_err(|_| CredentialFailure::Unavailable)?;
-    let after = file.metadata().map_err(|_| CredentialFailure::Unavailable)?;
+    (&mut file)
+        .take((MAX_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| CredentialFailure::Unavailable)?;
+    let after = file
+        .metadata()
+        .map_err(|_| CredentialFailure::Unavailable)?;
     safe_metadata(&after)?;
-    if opened.len() != after.len() || after.len() != bytes.len() as u64
+    if opened.len() != after.len()
+        || after.len() != bytes.len() as u64
         || opened.modified().ok() != after.modified().ok()
     {
         return Err(CredentialFailure::UnsafeFile);
@@ -271,7 +326,11 @@ fn load(path: &Path, binding: Binding) -> Result<Vec<Entry>, CredentialFailure> 
 }
 
 fn lower_hex<const N: usize>(text: &str) -> Result<[u8; N], CredentialFailure> {
-    if text.len() != N * 2 || !text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if text.len() != N * 2
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err(CredentialFailure::InvalidFile);
     }
     let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
@@ -283,10 +342,19 @@ fn lower_hex<const N: usize>(text: &str) -> Result<[u8; N], CredentialFailure> {
 }
 
 fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailure> {
-    let mut grant = Grant { principal, read: false, receive: false,
-        issues_read: false, issues_write: false, outcomes_read: false,
-        pulls_read: false, pulls_write: false,
-        reviews_read: false, reviews_write: false, merges_write: false };
+    let mut grant = Grant {
+        principal,
+        read: false,
+        receive: false,
+        issues_read: false,
+        issues_write: false,
+        outcomes_read: false,
+        pulls_read: false,
+        pulls_write: false,
+        reviews_read: false,
+        reviews_write: false,
+        merges_write: false,
+    };
     let mut previous = 0;
     for scope in scopes.split(',') {
         // Canonical order extends the existing grammar. An old deployment
@@ -304,7 +372,9 @@ fn grant(principal: PrincipalId, scopes: &str) -> Result<Grant, CredentialFailur
             "merges-write" => (10, &mut grant.merges_write),
             _ => return Err(CredentialFailure::InvalidFile),
         };
-        if rank <= previous { return Err(CredentialFailure::InvalidFile); }
+        if rank <= previous {
+            return Err(CredentialFailure::InvalidFile);
+        }
         *flag = true;
         previous = rank;
     }
@@ -317,14 +387,23 @@ fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure
     }
     let text = std::str::from_utf8(bytes).map_err(|_| CredentialFailure::InvalidFile)?;
     let mut lines = text.lines();
-    let mut header = lines.next().ok_or(CredentialFailure::InvalidFile)?.split(' ');
+    let mut header = lines
+        .next()
+        .ok_or(CredentialFailure::InvalidFile)?
+        .split(' ');
     if header.next() != Some(HEADER) {
         return Err(CredentialFailure::InvalidFile);
     }
     let selected = Binding {
-        tenant: TenantId::from_bytes(lower_hex(header.next().ok_or(CredentialFailure::InvalidFile)?)?),
-        repository: RepositoryId::from_bytes(lower_hex(header.next().ok_or(CredentialFailure::InvalidFile)?)?),
-        incarnation: RepositoryIncarnationId::from_bytes(lower_hex(header.next().ok_or(CredentialFailure::InvalidFile)?)?),
+        tenant: TenantId::from_bytes(lower_hex(
+            header.next().ok_or(CredentialFailure::InvalidFile)?,
+        )?),
+        repository: RepositoryId::from_bytes(lower_hex(
+            header.next().ok_or(CredentialFailure::InvalidFile)?,
+        )?),
+        incarnation: RepositoryIncarnationId::from_bytes(lower_hex(
+            header.next().ok_or(CredentialFailure::InvalidFile)?,
+        )?),
     };
     if header.next().is_some() {
         return Err(CredentialFailure::InvalidFile);
@@ -340,12 +419,19 @@ fn parse(bytes: &[u8], binding: Binding) -> Result<Vec<Entry>, CredentialFailure
         }
         let mut fields = line.split(' ');
         let digest = lower_hex(fields.next().ok_or(CredentialFailure::InvalidFile)?)?;
-        let principal = PrincipalId::from_bytes(lower_hex(fields.next().ok_or(CredentialFailure::InvalidFile)?)?);
-        let grant = grant(principal, fields.next().ok_or(CredentialFailure::InvalidFile)?)?;
+        let principal = PrincipalId::from_bytes(lower_hex(
+            fields.next().ok_or(CredentialFailure::InvalidFile)?,
+        )?);
+        let grant = grant(
+            principal,
+            fields.next().ok_or(CredentialFailure::InvalidFile)?,
+        )?;
         if fields.next().is_some() || !digests.insert(digest) {
             return Err(CredentialFailure::InvalidFile);
         }
-        entries.try_reserve(1).map_err(|_| CredentialFailure::Unavailable)?;
+        entries
+            .try_reserve(1)
+            .map_err(|_| CredentialFailure::Unavailable)?;
         entries.push(Entry { digest, grant });
     }
     // A header with zero entries is a valid revoke-all configuration.
@@ -358,39 +444,56 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     fn binding() -> Binding {
-        Binding { tenant: TenantId::from_bytes([1; 16]), repository: RepositoryId::from_bytes([2; 16]),
-            incarnation: RepositoryIncarnationId::from_bytes([3; 16]) }
+        Binding {
+            tenant: TenantId::from_bytes([1; 16]),
+            repository: RepositoryId::from_bytes([2; 16]),
+            incarnation: RepositoryIncarnationId::from_bytes([3; 16]),
+        }
     }
     fn header() -> String {
         let b = binding();
         format!("{HEADER} {} {} {}\n", b.tenant, b.repository, b.incarnation)
     }
     fn row(token: &str, principal: u8, scope: &str) -> String {
-        let digest: String = sha256_digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
-        format!("{digest} {} {scope}\n", PrincipalId::from_bytes([principal; 16]))
+        let digest: String = sha256_digest(token.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!(
+            "{digest} {} {scope}\n",
+            PrincipalId::from_bytes([principal; 16])
+        )
     }
     fn private_write(path: &Path, bytes: &[u8]) {
         fs::write(path, bytes).unwrap();
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         }
     }
     fn basic(user_pass: &[u8]) -> String {
-        const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut encoded = String::from("Basic ");
         for chunk in user_pass.chunks(3) {
             let first = chunk[0];
             let second = chunk.get(1).copied().unwrap_or(0);
             let third = chunk.get(2).copied().unwrap_or(0);
             encoded.push(char::from(ALPHABET[usize::from(first >> 2)]));
-            encoded.push(char::from(ALPHABET[usize::from(((first & 3) << 4) | (second >> 4))]));
+            encoded.push(char::from(
+                ALPHABET[usize::from(((first & 3) << 4) | (second >> 4))],
+            ));
             encoded.push(if chunk.len() > 1 {
                 char::from(ALPHABET[usize::from(((second & 15) << 2) | (third >> 6))])
-            } else { '=' });
+            } else {
+                '='
+            });
             encoded.push(if chunk.len() > 2 {
                 char::from(ALPHABET[usize::from(third & 63)])
-            } else { '=' });
+            } else {
+                '='
+            });
         }
         encoded
     }
@@ -399,16 +502,33 @@ mod tests {
     fn basic_decoder_matches_rfc_vectors_and_checks_all_padding_forms() {
         let mut output = [0; MAX_BASIC_BYTES];
         for (encoded, decoded) in [
-            ("Zg==", "f"), ("Zm8=", "fo"), ("Zm9v", "foo"),
-            ("Zm9vYg==", "foob"), ("Zm9vYmE=", "fooba"), ("Zm9vYmFy", "foobar"),
+            ("Zg==", "f"),
+            ("Zm8=", "fo"),
+            ("Zm9v", "foo"),
+            ("Zm9vYg==", "foob"),
+            ("Zm9vYmE=", "fooba"),
+            ("Zm9vYmFy", "foobar"),
             ("QWxhZGRpbjpvcGVuIHNlc2FtZQ==", "Aladdin:open sesame"),
         ] {
             let length = decode_basic(encoded.as_bytes(), &mut output).unwrap();
             assert_eq!(&output[..length], decoded.as_bytes());
         }
-        for invalid in ["", "Zg", "Zg=", "Zg===", "Zh==", "Zm9=", "Zg==AAAA",
-            "Zm=8", "=m9v", "Zm9v\n", "Zm9v YmFy", "____", "----", "===="]
-        {
+        for invalid in [
+            "",
+            "Zg",
+            "Zg=",
+            "Zg===",
+            "Zh==",
+            "Zm9=",
+            "Zg==AAAA",
+            "Zm=8",
+            "=m9v",
+            "Zm9v\n",
+            "Zm9v YmFy",
+            "____",
+            "----",
+            "====",
+        ] {
             assert!(decode_basic(invalid.as_bytes(), &mut output).is_none());
         }
         // Exercise every byte value and every possible final-quantum length.
@@ -418,73 +538,152 @@ mod tests {
             let size = decode_basic(encoded[6..].as_bytes(), &mut output).unwrap();
             assert_eq!(&output[..size], original);
         }
-        assert!(decode_basic(basic(&vec![b'x'; MAX_BASIC_BYTES + 1])[6..].as_bytes(), &mut output).is_none());
+        assert!(
+            decode_basic(
+                basic(&vec![b'x'; MAX_BASIC_BYTES + 1])[6..].as_bytes(),
+                &mut output
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn basic_and_bearer_select_the_same_token_not_the_supplied_username() {
         let token = "a".repeat(64);
         let principal = PrincipalId::from_bytes([7; 16]);
-        let source = CredentialSource::Static { digest: sha256_digest(token.as_bytes()), principal };
-        for username in ["git".to_owned(), "admin".to_owned(), PrincipalId::from_bytes([9; 16]).to_string(),
-            "u".repeat(MAX_BASIC_USERNAME_BYTES), "utilisateur-é".to_owned()]
-        {
+        let source = CredentialSource::Static {
+            digest: sha256_digest(token.as_bytes()),
+            principal,
+        };
+        for username in [
+            "git".to_owned(),
+            "admin".to_owned(),
+            PrincipalId::from_bytes([9; 16]).to_string(),
+            "u".repeat(MAX_BASIC_USERNAME_BYTES),
+            "utilisateur-é".to_owned(),
+        ] {
             let authorization = basic(format!("{username}:{token}").as_bytes());
             let selected = source.authenticate(Some(&authorization)).unwrap();
             assert_eq!(selected.principal, principal);
-            assert!(selected.permits(Service::UploadPack) && selected.permits(Service::ReceivePack));
+            assert!(
+                selected.permits(Service::UploadPack) && selected.permits(Service::ReceivePack)
+            );
             assert!(!selected.permits_issues(false) && !selected.permits_issues(true));
             assert!(!selected.permits_pulls(false) && !selected.permits_pulls(true));
             assert!(!selected.permits_reviews(false) && !selected.permits_reviews(true));
             assert!(!selected.permits_outcomes() && !selected.permits_reviewed_merge());
-            assert_eq!(credential_digest(Some(&authorization)), credential_digest(Some(&format!("bEaReR {token}"))));
-            assert!(source.authenticate(Some(&authorization.replacen("Basic", "bAsIc", 1))).is_ok());
+            assert_eq!(
+                credential_digest(Some(&authorization)),
+                credential_digest(Some(&format!("bEaReR {token}")))
+            );
+            assert!(
+                source
+                    .authenticate(Some(&authorization.replacen("Basic", "bAsIc", 1)))
+                    .is_ok()
+            );
         }
-        for user_pass in [format!(":{token}"), format!("{}:{token}", "u".repeat(MAX_BASIC_USERNAME_BYTES + 1)),
-            format!("user\n:{token}"), format!("user\0:{token}"), format!("user\u{7f}:{token}"),
-            format!("user:{token}:extra"), format!("user:{}", "a".repeat(63)),
-            format!("user:{}", "A".repeat(64)), token.clone(), format!("user:{}", "b".repeat(64))]
-        {
-            assert!(matches!(source.authenticate(Some(&basic(user_pass.as_bytes()))), Err(CredentialFailure::UnknownCredential)));
+        for user_pass in [
+            format!(":{token}"),
+            format!("{}:{token}", "u".repeat(MAX_BASIC_USERNAME_BYTES + 1)),
+            format!("user\n:{token}"),
+            format!("user\0:{token}"),
+            format!("user\u{7f}:{token}"),
+            format!("user:{token}:extra"),
+            format!("user:{}", "a".repeat(63)),
+            format!("user:{}", "A".repeat(64)),
+            token.clone(),
+            format!("user:{}", "b".repeat(64)),
+        ] {
+            assert!(matches!(
+                source.authenticate(Some(&basic(user_pass.as_bytes()))),
+                Err(CredentialFailure::UnknownCredential)
+            ));
         }
-        assert!(matches!(source.authenticate(Some(&basic(&[0xff, b':', b'a']))), Err(CredentialFailure::UnknownCredential)));
-        for authorization in [None, Some(""), Some("Basic"), Some("Digest token"), Some("Basic  Zg=="), Some("Bearer invalid")] {
-            assert!(matches!(source.authenticate(authorization), Err(CredentialFailure::UnknownCredential)));
+        assert!(matches!(
+            source.authenticate(Some(&basic(&[0xff, b':', b'a']))),
+            Err(CredentialFailure::UnknownCredential)
+        ));
+        for authorization in [
+            None,
+            Some(""),
+            Some("Basic"),
+            Some("Digest token"),
+            Some("Basic  Zg=="),
+            Some("Bearer invalid"),
+        ] {
+            assert!(matches!(
+                source.authenticate(authorization),
+                Err(CredentialFailure::UnknownCredential)
+            ));
         }
     }
 
     #[test]
     fn basic_file_grants_preserve_scopes_rotation_revocation_and_incarnation_binding() {
-        let path = std::env::temp_dir().join(format!("fg-http-basic-grants-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        let source = CredentialSource::File { path: path.clone(), binding: binding() };
+        let path = std::env::temp_dir().join(format!(
+            "fg-http-basic-grants-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let source = CredentialSource::File {
+            path: path.clone(),
+            binding: binding(),
+        };
         let first = basic(format!("admin:{}", "a".repeat(64)).as_bytes());
         let rotated = basic(format!("other:{}", "b".repeat(64)).as_bytes());
-        private_write(&path, (header() + &row(&"a".repeat(64), 4, "read")).as_bytes());
+        private_write(
+            &path,
+            (header() + &row(&"a".repeat(64), 4, "read")).as_bytes(),
+        );
         let selected = source.authenticate(Some(&first)).unwrap();
         assert_eq!(selected.principal, PrincipalId::from_bytes([4; 16]));
         assert!(selected.permits(Service::UploadPack));
         assert!(!selected.permits(Service::ReceivePack) && !selected.permits_reviewed_merge());
         let mut foreign = binding();
         foreign.incarnation = RepositoryIncarnationId::from_bytes([9; 16]);
-        assert!(matches!(CredentialSource::File { path: path.clone(), binding: foreign }.authenticate(Some(&first)), Err(CredentialFailure::WrongRepository)));
-        private_write(&path, (header() + &row(&"b".repeat(64), 4, "outcomes-read")).as_bytes());
-        assert!(matches!(source.authenticate(Some(&first)), Err(CredentialFailure::UnknownCredential)));
+        assert!(matches!(
+            CredentialSource::File {
+                path: path.clone(),
+                binding: foreign
+            }
+            .authenticate(Some(&first)),
+            Err(CredentialFailure::WrongRepository)
+        ));
+        private_write(
+            &path,
+            (header() + &row(&"b".repeat(64), 4, "outcomes-read")).as_bytes(),
+        );
+        assert!(matches!(
+            source.authenticate(Some(&first)),
+            Err(CredentialFailure::UnknownCredential)
+        ));
         let recovery = source.authenticate(Some(&rotated)).unwrap();
         assert_eq!(recovery.principal, selected.principal);
         assert!(recovery.permits_outcomes());
         assert!(!recovery.permits(Service::UploadPack) && !recovery.permits(Service::ReceivePack));
         private_write(&path, b"malformed");
-        assert!(matches!(source.authenticate(Some(&rotated)), Err(CredentialFailure::InvalidFile)));
+        assert!(matches!(
+            source.authenticate(Some(&rotated)),
+            Err(CredentialFailure::InvalidFile)
+        ));
         private_write(&path, header().as_bytes());
-        assert!(matches!(source.authenticate(Some(&rotated)), Err(CredentialFailure::UnknownCredential)));
+        assert!(matches!(
+            source.authenticate(Some(&rotated)),
+            Err(CredentialFailure::UnknownCredential)
+        ));
         fs::remove_file(path).unwrap();
-        assert!(matches!(source.authenticate(Some(&rotated)), Err(CredentialFailure::Unavailable)));
+        assert!(matches!(
+            source.authenticate(Some(&rotated)),
+            Err(CredentialFailure::Unavailable)
+        ));
     }
 
     #[test]
     fn scopes_are_explicit_and_receive_does_not_imply_fetch() {
-        let text = header() + &row(&"a".repeat(64), 4, "read")
-            + &row(&"b".repeat(64), 5, "receive") + &row(&"c".repeat(64), 6, "read,receive");
+        let text = header()
+            + &row(&"a".repeat(64), 4, "read")
+            + &row(&"b".repeat(64), 5, "receive")
+            + &row(&"c".repeat(64), 6, "read,receive");
         let entries = parse(text.as_bytes(), binding()).unwrap();
         assert_eq!(entries.len(), 3);
         assert!(entries[0].grant.permits(Service::UploadPack));
@@ -514,12 +713,21 @@ mod tests {
             assert!(!grant.permits(Service::ReceivePack));
             assert!(!grant.permits_outcomes());
         }
-        assert!(grant(principal, "issues-read,issues-write").unwrap().permits_issues(true));
+        assert!(
+            grant(principal, "issues-read,issues-write")
+                .unwrap()
+                .permits_issues(true)
+        );
         assert!(grant(principal, "issues-write,read").is_err());
         assert!(grant(principal, "issues-read,issues-read").is_err());
         let token = "a".repeat(64);
-        let source = CredentialSource::Static { digest: sha256_digest(token.as_bytes()), principal };
-        let legacy = source.authenticate(Some(&format!("Bearer {token}"))).unwrap();
+        let source = CredentialSource::Static {
+            digest: sha256_digest(token.as_bytes()),
+            principal,
+        };
+        let legacy = source
+            .authenticate(Some(&format!("Bearer {token}")))
+            .unwrap();
         assert!(!legacy.permits_issues(false) && !legacy.permits_issues(true));
         assert!(!legacy.permits_outcomes());
     }
@@ -532,7 +740,11 @@ mod tests {
         assert!(!recovery.permits(Service::ReceivePack));
         assert!(!recovery.permits_issues(false));
         assert!(!recovery.permits_issues(true));
-        let full = grant(principal, "read,receive,issues-read,issues-write,outcomes-read").unwrap();
+        let full = grant(
+            principal,
+            "read,receive,issues-read,issues-write,outcomes-read",
+        )
+        .unwrap();
         assert!(full.permits_outcomes() && full.permits_issues(true));
         assert!(grant(principal, "outcomes-read,read").is_err());
         assert!(grant(principal, "outcomes-read,outcomes-read").is_err());
@@ -540,7 +752,13 @@ mod tests {
     #[test]
     fn pull_request_scopes_do_not_imply_each_other_or_any_existing_service() {
         let principal = PrincipalId::from_bytes([7; 16]);
-        for scope in ["read", "receive", "issues-read", "issues-write", "outcomes-read"] {
+        for scope in [
+            "read",
+            "receive",
+            "issues-read",
+            "issues-write",
+            "outcomes-read",
+        ] {
             let old = grant(principal, scope).unwrap();
             assert!(!old.permits_pulls(false) && !old.permits_pulls(true));
         }
@@ -548,85 +766,164 @@ mod tests {
             let selected = grant(principal, scope).unwrap();
             assert!(selected.permits_pulls(write));
             assert!(!selected.permits_pulls(!write));
-            assert!(!selected.permits(Service::UploadPack) && !selected.permits(Service::ReceivePack));
+            assert!(
+                !selected.permits(Service::UploadPack) && !selected.permits(Service::ReceivePack)
+            );
             assert!(!selected.permits_issues(false) && !selected.permits_issues(true));
             assert!(!selected.permits_outcomes());
         }
         assert!(grant(principal, "outcomes-read,pulls-read,pulls-write").is_ok());
-        for scopes in ["pulls-write,pulls-read", "pulls-read,pulls-read", "pulls-read,read", "pulls-merge"] {
+        for scopes in [
+            "pulls-write,pulls-read",
+            "pulls-read,pulls-read",
+            "pulls-read,read",
+            "pulls-merge",
+        ] {
             assert!(grant(principal, scopes).is_err());
         }
         let token = "a".repeat(64);
-        let source = CredentialSource::Static { digest: sha256_digest(token.as_bytes()), principal };
-        let legacy = source.authenticate(Some(&format!("Bearer {token}"))).unwrap();
+        let source = CredentialSource::Static {
+            digest: sha256_digest(token.as_bytes()),
+            principal,
+        };
+        let legacy = source
+            .authenticate(Some(&format!("Bearer {token}")))
+            .unwrap();
         assert!(!legacy.permits_pulls(false) && !legacy.permits_pulls(true));
     }
     #[test]
     fn review_and_merge_grants_are_independent_of_each_other_and_all_old_scopes() {
         let principal = PrincipalId::from_bytes([7; 16]);
-        let old = grant(principal, "read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write").unwrap();
-        assert!(!old.permits_reviews(false) && !old.permits_reviews(true) && !old.permits_reviewed_merge());
+        let old = grant(
+            principal,
+            "read,receive,issues-read,issues-write,outcomes-read,pulls-read,pulls-write",
+        )
+        .unwrap();
+        assert!(
+            !old.permits_reviews(false)
+                && !old.permits_reviews(true)
+                && !old.permits_reviewed_merge()
+        );
         for scope in ["reviews-read", "reviews-write", "merges-write"] {
             let selected = grant(principal, scope).unwrap();
             assert_eq!(selected.permits_reviews(false), scope == "reviews-read");
             assert_eq!(selected.permits_reviews(true), scope == "reviews-write");
             assert_eq!(selected.permits_reviewed_merge(), scope == "merges-write");
             assert!(!selected.permits_pulls(false) && !selected.permits_pulls(true));
-            assert!(!selected.permits(Service::UploadPack) && !selected.permits(Service::ReceivePack));
-            assert!(!selected.permits_issues(false) && !selected.permits_issues(true) && !selected.permits_outcomes());
+            assert!(
+                !selected.permits(Service::UploadPack) && !selected.permits(Service::ReceivePack)
+            );
+            assert!(
+                !selected.permits_issues(false)
+                    && !selected.permits_issues(true)
+                    && !selected.permits_outcomes()
+            );
         }
         assert!(grant(principal, "reviews-read,reviews-write,merges-write").is_ok());
         assert!(grant(principal, "merges-write,reviews-write").is_err());
         assert!(grant(principal, "reviews-read,reviews-read").is_err());
         let token = "a".repeat(64);
-        let legacy = CredentialSource::Static { digest: sha256_digest(token.as_bytes()), principal }
-            .authenticate(Some(&format!("Bearer {token}"))).unwrap();
-        assert!(!legacy.permits_reviews(false) && !legacy.permits_reviews(true) && !legacy.permits_reviewed_merge());
+        let legacy = CredentialSource::Static {
+            digest: sha256_digest(token.as_bytes()),
+            principal,
+        }
+        .authenticate(Some(&format!("Bearer {token}")))
+        .unwrap();
+        assert!(
+            !legacy.permits_reviews(false)
+                && !legacy.permits_reviews(true)
+                && !legacy.permits_reviewed_merge()
+        );
     }
     #[test]
     fn duplicate_tokens_bad_scopes_and_foreign_bindings_fail_closed() {
         let row = row(&"a".repeat(64), 4, "read");
-        for text in [header() + &row + &row, header() + &row.replace(" read", " write"),
-            header() + &row.replace(" read", " read,read"), header() + "\n", String::new()]
-        {
+        for text in [
+            header() + &row + &row,
+            header() + &row.replace(" read", " write"),
+            header() + &row.replace(" read", " read,read"),
+            header() + "\n",
+            String::new(),
+        ] {
             assert!(parse(text.as_bytes(), binding()).is_err());
         }
         let mut foreign = binding();
         foreign.incarnation = RepositoryIncarnationId::from_bytes([9; 16]);
-        assert!(matches!(parse((header() + &row).as_bytes(), foreign), Err(CredentialFailure::WrongRepository)));
+        assert!(matches!(
+            parse((header() + &row).as_bytes(), foreign),
+            Err(CredentialFailure::WrongRepository)
+        ));
         assert!(parse(header().as_bytes(), binding()).unwrap().is_empty());
         assert!(parse(&vec![b'x'; MAX_FILE_BYTES + 1], binding()).is_err());
     }
     #[test]
     fn grants_reload_for_rotation_revocation_and_invalid_configuration() {
-        let path = std::env::temp_dir().join(format!("fg-http-grants-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        let source = CredentialSource::File { path: path.clone(), binding: binding() };
+        let path = std::env::temp_dir().join(format!(
+            "fg-http-grants-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let source = CredentialSource::File {
+            path: path.clone(),
+            binding: binding(),
+        };
         let first = format!("Bearer {}", "a".repeat(64));
         let rotated = format!("Bearer {}", "b".repeat(64));
-        private_write(&path, (header() + &row(&"a".repeat(64), 4, "receive")).as_bytes());
+        private_write(
+            &path,
+            (header() + &row(&"a".repeat(64), 4, "receive")).as_bytes(),
+        );
         let principal = source.authenticate(Some(&first)).unwrap().principal;
-        private_write(&path, (header() + &row(&"b".repeat(64), 4, "receive")).as_bytes());
-        assert!(matches!(source.authenticate(Some(&first)), Err(CredentialFailure::UnknownCredential)));
-        assert_eq!(source.authenticate(Some(&rotated)).unwrap().principal, principal);
+        private_write(
+            &path,
+            (header() + &row(&"b".repeat(64), 4, "receive")).as_bytes(),
+        );
+        assert!(matches!(
+            source.authenticate(Some(&first)),
+            Err(CredentialFailure::UnknownCredential)
+        ));
+        assert_eq!(
+            source.authenticate(Some(&rotated)).unwrap().principal,
+            principal
+        );
         private_write(&path, b"malformed");
-        assert!(matches!(source.authenticate(Some(&rotated)), Err(CredentialFailure::InvalidFile)));
+        assert!(matches!(
+            source.authenticate(Some(&rotated)),
+            Err(CredentialFailure::InvalidFile)
+        ));
         private_write(&path, header().as_bytes());
-        assert!(matches!(source.authenticate(Some(&rotated)), Err(CredentialFailure::UnknownCredential)));
+        assert!(matches!(
+            source.authenticate(Some(&rotated)),
+            Err(CredentialFailure::UnknownCredential)
+        ));
         fs::remove_file(&path).unwrap();
-        assert!(matches!(source.authenticate(Some(&rotated)), Err(CredentialFailure::Unavailable)));
+        assert!(matches!(
+            source.authenticate(Some(&rotated)),
+            Err(CredentialFailure::Unavailable)
+        ));
     }
     #[cfg(unix)]
     #[test]
     fn public_files_and_symlinks_are_refused() {
         use std::os::unix::fs::{PermissionsExt, symlink};
-        let path = std::env::temp_dir().join(format!("fg-http-grant-perms-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let path = std::env::temp_dir().join(format!(
+            "fg-http-grant-perms-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         private_write(&path, header().as_bytes());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(matches!(load(&path, binding()), Err(CredentialFailure::UnsafeFile)));
+        assert!(matches!(
+            load(&path, binding()),
+            Err(CredentialFailure::UnsafeFile)
+        ));
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let link = path.with_extension("link");
         symlink(&path, &link).unwrap();
-        assert!(matches!(load(&link, binding()), Err(CredentialFailure::UnsafeFile)));
+        assert!(matches!(
+            load(&link, binding()),
+            Err(CredentialFailure::UnsafeFile)
+        ));
         fs::remove_file(link).unwrap();
         fs::remove_file(path).unwrap();
     }

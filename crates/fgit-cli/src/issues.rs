@@ -38,7 +38,10 @@ Exit 0: committed/read; 3: canonical refusal; 4: missing issue; 2: input/infrast
 This is a trusted local repository interface, not remote authentication or an issue ACL.";
 
 pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
-    if arguments.first().is_some_and(|argument| argument == "search") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "search")
+    {
         return search::run(&arguments[1..]);
     }
     if arguments == ["--help"]

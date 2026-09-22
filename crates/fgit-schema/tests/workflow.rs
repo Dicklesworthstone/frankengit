@@ -572,7 +572,11 @@ fn the_construct_registry_is_sorted_complete_and_reasoned() {
     );
     // The registry need not keep a row in every historical status. What matters
     // is that the active accepted/normalized/refusing classes are real.
-    for status in [ConstructStatus::Accepted, ConstructStatus::Normalized, ConstructStatus::Unsupported] {
+    for status in [
+        ConstructStatus::Accepted,
+        ConstructStatus::Normalized,
+        ConstructStatus::Unsupported,
+    ] {
         let count = tally.iter().find(|(kind, _)| *kind == status).unwrap().1;
         assert!(count > 0, "{} has no rows", status.as_str());
     }

@@ -35,7 +35,10 @@ impl Display for AuthRefusal {
                 formatter.write_str("command execution attempted before SSH key authentication")
             }
             Self::ScopeNotGranted { requested } => {
-                write!(formatter, "deploy key does not grant required scope `{requested}`")
+                write!(
+                    formatter,
+                    "deploy key does not grant required scope `{requested}`"
+                )
             }
         }
     }
@@ -94,7 +97,8 @@ pub fn verify_client_signature(
     sig_blob: &[u8],
 ) -> Result<[u8; 32], AuthRefusal> {
     let pub_key_bytes = parse_ed25519_public_key(public_key_blob)?;
-    let preimage = build_userauth_signature_preimage(session_id, user_name, service_name, public_key_blob);
+    let preimage =
+        build_userauth_signature_preimage(session_id, user_name, service_name, public_key_blob);
     verify_ed25519(&pub_key_bytes, &preimage, sig_blob)?;
     Ok(pub_key_bytes)
 }

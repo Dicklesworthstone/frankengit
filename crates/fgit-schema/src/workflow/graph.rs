@@ -55,8 +55,14 @@ impl Condition {
         }
     }
 }
-fn condition(node: Option<&Node>, construct: &'static str, span: Span) -> Result<Condition, WorkflowRefusal> {
-    let Some(node) = node else { return Ok(Condition::Success); };
+fn condition(
+    node: Option<&Node>,
+    construct: &'static str,
+    span: Span,
+) -> Result<Condition, WorkflowRefusal> {
+    let Some(node) = node else {
+        return Ok(Condition::Success);
+    };
     match expect_scalar(node, "if")?.trim() {
         "success()" => Ok(Condition::Success),
         "failure()" => Ok(Condition::Failure),
@@ -69,7 +75,11 @@ fn condition(node: Option<&Node>, construct: &'static str, span: Span) -> Result
             };
             Err(WorkflowRefusal::Malformed {
                 expected,
-                span: if node.span().is_empty() { span } else { node.span() },
+                span: if node.span().is_empty() {
+                    span
+                } else {
+                    node.span()
+                },
             })
         }
     }
@@ -152,7 +162,11 @@ impl WorkflowGraph {
                 escape(&job.runs_on)
             ));
             if job.condition != Condition::Success {
-                lines.push(format!("job-if\t{}\t{}", escape(&job.id), job.condition.token()));
+                lines.push(format!(
+                    "job-if\t{}\t{}",
+                    escape(&job.id),
+                    job.condition.token()
+                ));
             }
             for need in &job.needs {
                 lines.push(format!("need\t{}\t{}", escape(&job.id), escape(need)));
@@ -165,7 +179,11 @@ impl WorkflowGraph {
                     escape(&step.run)
                 ));
                 if step.condition != Condition::Success {
-                    lines.push(format!("step-if\t{}\t{index}\t{}", escape(&job.id), step.condition.token()));
+                    lines.push(format!(
+                        "step-if\t{}\t{index}\t{}",
+                        escape(&job.id),
+                        step.condition.token()
+                    ));
                 }
             }
         }
@@ -262,10 +280,7 @@ fn lower_step(node: &Node) -> Result<Step, WorkflowRefusal> {
         node,
         "a step",
         &["name", "run", "if"],
-        &[
-            ("uses", "step.uses"),
-            ("with", "step.with"),
-        ],
+        &[("uses", "step.uses"), ("with", "step.with")],
     )?;
     let Node::Mapping { .. } = node else {
         return Err(WorkflowRefusal::FieldShape {

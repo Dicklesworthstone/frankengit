@@ -16,11 +16,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use fgit_crypto::git_object_id;
-use fgit_git_object::{
-    AcceptanceProfile, ObjectError, ParseLimits, TagTargetType, parse_annotated_tag,
-    parse_commit, parse_tree, validate_reference_target_kind,
-};
 pub use fgit_git_object::ObjectType as ObjectKind;
+use fgit_git_object::{
+    AcceptanceProfile, ObjectError, ParseLimits, TagTargetType, parse_annotated_tag, parse_commit,
+    parse_tree, validate_reference_target_kind,
+};
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefName};
 
 /// Independent graph, input and parser bounds. Allocator overhead and the
@@ -37,8 +37,13 @@ pub struct GraphLimits {
 
 impl Default for GraphLimits {
     fn default() -> Self {
-        Self { max_objects: 100_000, max_references: 100_000, max_edges: 1_000_000,
-            max_object_bytes: 32 * 1024 * 1024, max_payload_bytes: 512 * 1024 * 1024 }
+        Self {
+            max_objects: 100_000,
+            max_references: 100_000,
+            max_edges: 1_000_000,
+            max_object_bytes: 32 * 1024 * 1024,
+            max_payload_bytes: 512 * 1024 * 1024,
+        }
     }
 }
 
@@ -52,10 +57,20 @@ pub enum GraphRefusal {
     ObjectOrder,
     ObjectFormat(GitOid),
     IdentityMismatch(GitOid),
-    Malformed { object: GitOid, cause: Box<ObjectError> },
+    Malformed {
+        object: GitOid,
+        cause: Box<ObjectError>,
+    },
     InvalidTreeMode(GitOid),
-    MissingTarget { source: Option<GitOid>, target: GitOid },
-    TargetKind { target: GitOid, expected: ObjectKind, actual: ObjectKind },
+    MissingTarget {
+        source: Option<GitOid>,
+        target: GitOid,
+    },
+    TargetKind {
+        target: GitOid,
+        expected: ObjectKind,
+        actual: ObjectKind,
+    },
     Cycle(GitOid),
 }
 
@@ -70,12 +85,24 @@ impl fmt::Display for GraphRefusal {
             Self::ObjectOrder => out.write_str("graph_object_order_or_selection_mismatch"),
             Self::ObjectFormat(id) => write!(out, "graph_native_identity_invalid: {id}"),
             Self::IdentityMismatch(id) => write!(out, "graph_object_identity_mismatch: {id}"),
-            Self::Malformed { object, cause } => write!(out, "graph_object_malformed: {object}: {cause}"),
+            Self::Malformed { object, cause } => {
+                write!(out, "graph_object_malformed: {object}: {cause}")
+            }
             Self::InvalidTreeMode(id) => write!(out, "graph_tree_mode_unsupported: {id}"),
-            Self::MissingTarget { source, target } => write!(out,
-                "graph_target_outside_selection: {target}; source: {source:?}"),
-            Self::TargetKind { target, expected, actual } => write!(out,
-                "graph_target_kind_mismatch: {target}; expected {}, found {}", expected.label(), actual.label()),
+            Self::MissingTarget { source, target } => write!(
+                out,
+                "graph_target_outside_selection: {target}; source: {source:?}"
+            ),
+            Self::TargetKind {
+                target,
+                expected,
+                actual,
+            } => write!(
+                out,
+                "graph_target_kind_mismatch: {target}; expected {}, found {}",
+                expected.label(),
+                actual.label()
+            ),
             Self::Cycle(id) => write!(out, "graph_cycle: {id}"),
         }
     }
@@ -100,7 +127,10 @@ struct Node {
     end: usize,
 }
 #[derive(Debug)]
-struct Edge { target: usize, expected: ObjectKind }
+struct Edge {
+    target: usize,
+    expected: ObjectKind,
+}
 
 /// Streaming audit with dense object ordinals and contiguous adjacency ranges.
 /// An observation failure poisons the builder: ignoring an error cannot yield
@@ -118,7 +148,11 @@ pub struct ObjectGraphAudit {
 }
 
 fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), GraphRefusal> {
-    if live() { Ok(()) } else { Err(GraphRefusal::Cancelled) }
+    if live() {
+        Ok(())
+    } else {
+        Err(GraphRefusal::Cancelled)
+    }
 }
 fn malformed(object: GitOid, cause: ObjectError) -> GraphRefusal {
     match cause {
@@ -126,59 +160,104 @@ fn malformed(object: GitOid, cause: ObjectError) -> GraphRefusal {
         ObjectError::ObjectTooLarge { .. } => GraphRefusal::Limit("object bytes"),
         ObjectError::TooManyTreeEntries { .. } => GraphRefusal::Limit("tree entries"),
         ObjectError::HeaderLimitExceeded { .. } => GraphRefusal::Limit("header structure"),
-        cause => GraphRefusal::Malformed { object, cause: Box::new(cause) },
+        cause => GraphRefusal::Malformed {
+            object,
+            cause: Box::new(cause),
+        },
     }
 }
 
 impl ObjectGraphAudit {
     /// Reserve only the selected object table, after its count is bounded.
     /// Empty sets and zero edge budgets are legitimate, independently bounded inputs.
-    pub fn new(objects: &BTreeSet<GitOid>, format: GitHashAlgorithm,
-        limits: GraphLimits, live: &mut impl FnMut() -> bool,
+    pub fn new(
+        objects: &BTreeSet<GitOid>,
+        format: GitHashAlgorithm,
+        limits: GraphLimits,
+        live: &mut impl FnMut() -> bool,
     ) -> Result<Self, GraphRefusal> {
         checkpoint(live)?;
-        if objects.len() > limits.max_objects { return Err(GraphRefusal::Limit("objects")); }
+        if objects.len() > limits.max_objects {
+            return Err(GraphRefusal::Limit("objects"));
+        }
         let mut nodes = Vec::new();
-        nodes.try_reserve_exact(objects.len()).map_err(|_| GraphRefusal::Allocation)?;
+        nodes
+            .try_reserve_exact(objects.len())
+            .map_err(|_| GraphRefusal::Allocation)?;
         for &id in objects {
             checkpoint(live)?;
-            if id.algorithm() != format || id.is_zero() { return Err(GraphRefusal::ObjectFormat(id)); }
-            nodes.push(Node { id, kind: None, start: 0, end: 0 });
+            if id.algorithm() != format || id.is_zero() {
+                return Err(GraphRefusal::ObjectFormat(id));
+            }
+            nodes.push(Node {
+                id,
+                kind: None,
+                start: 0,
+                end: 0,
+            });
         }
-        Ok(Self { format, limits, nodes, edges: Vec::new(), next: 0, gitlinks: 0,
-            payload_bytes: 0, failed: false })
+        Ok(Self {
+            format,
+            limits,
+            nodes,
+            edges: Vec::new(),
+            next: 0,
+            gitlinks: 0,
+            payload_bytes: 0,
+            failed: false,
+        })
     }
 
-    pub fn observe(&mut self, id: GitOid, kind: ObjectKind, body: &[u8],
+    pub fn observe(
+        &mut self,
+        id: GitOid,
+        kind: ObjectKind,
+        body: &[u8],
         live: &mut impl FnMut() -> bool,
     ) -> Result<(), GraphRefusal> {
-        if self.failed { return Err(GraphRefusal::Failed); }
+        if self.failed {
+            return Err(GraphRefusal::Failed);
+        }
         let result = self.observe_inner(id, kind, body, live);
-        if result.is_err() { self.failed = true; }
+        if result.is_err() {
+            self.failed = true;
+        }
         result
     }
 
-    fn observe_inner(&mut self, id: GitOid, kind: ObjectKind, body: &[u8],
+    fn observe_inner(
+        &mut self,
+        id: GitOid,
+        kind: ObjectKind,
+        body: &[u8],
         live: &mut impl FnMut() -> bool,
     ) -> Result<(), GraphRefusal> {
         checkpoint(live)?;
         if self.nodes.get(self.next).map(|node| node.id) != Some(id) {
             return Err(GraphRefusal::ObjectOrder);
         }
-        if body.len() > self.limits.max_object_bytes { return Err(GraphRefusal::Limit("object bytes")); }
-        let payload_bytes = self.payload_bytes.checked_add(body.len() as u64)
+        if body.len() > self.limits.max_object_bytes {
+            return Err(GraphRefusal::Limit("object bytes"));
+        }
+        let payload_bytes = self
+            .payload_bytes
+            .checked_add(body.len() as u64)
             .filter(|total| *total <= self.limits.max_payload_bytes)
             .ok_or(GraphRefusal::Limit("payload bytes"))?;
         let identity = git_object_id(self.format, kind, body);
         checkpoint(live)?;
-        if identity != id { return Err(GraphRefusal::IdentityMismatch(id)); }
+        if identity != id {
+            return Err(GraphRefusal::IdentityMismatch(id));
+        }
         let start = self.edges.len();
         let limits = ParseLimits {
             max_object_bytes: self.limits.max_object_bytes,
             tree_reference_bytes: self.format.digest_len(),
             // Parser work is bounded before copying entries, even when a tree
             // contains only external links or repeated edges.
-            max_tree_entries: self.remaining_edges().min(ParseLimits::default().max_tree_entries),
+            max_tree_entries: self
+                .remaining_edges()
+                .min(ParseLimits::default().max_tree_entries),
             ..ParseLimits::default()
         };
         match kind {
@@ -191,25 +270,35 @@ impl ObjectGraphAudit {
                 for header in commit.headers() {
                     checkpoint(live)?;
                     let expected = match header.name.as_slice() {
-                        b"tree" => { trees += 1; ObjectKind::Tree }
+                        b"tree" => {
+                            trees += 1;
+                            ObjectKind::Tree
+                        }
                         b"parent" => ObjectKind::Commit,
                         _ => continue,
                     };
                     if !header.continuations.is_empty() {
                         return Err(malformed(id, ObjectError::MalformedObjectReference));
                     }
-                    if trees > 1 { return Err(malformed(id, ObjectError::MissingOrDuplicateCommitTree)); }
+                    if trees > 1 {
+                        return Err(malformed(id, ObjectError::MissingOrDuplicateCommitTree));
+                    }
                     let target = native_hex(self.format, &header.value)
                         .map_err(|cause| malformed(id, cause))?;
                     self.add_edge(id, target, expected)?;
                 }
-                if trees != 1 { return Err(malformed(id, ObjectError::MissingOrDuplicateCommitTree)); }
+                if trees != 1 {
+                    return Err(malformed(id, ObjectError::MissingOrDuplicateCommitTree));
+                }
             }
             ObjectKind::Tree => {
                 let entries = parse_tree(body, AcceptanceProfile::GitCompatibleImport, &limits)
                     .map_err(|cause| match cause {
                         ObjectError::TooManyTreeEntries { .. }
-                            if limits.max_tree_entries == self.remaining_edges() => GraphRefusal::Limit("edges"),
+                            if limits.max_tree_entries == self.remaining_edges() =>
+                        {
+                            GraphRefusal::Limit("edges")
+                        }
                         cause => malformed(id, cause),
                     })?;
                 checkpoint(live)?;
@@ -217,8 +306,11 @@ impl ObjectGraphAudit {
                     checkpoint(live)?;
                     let target = native_bytes(self.format, &entry.object_id)
                         .map_err(|cause| malformed(id, cause))?;
-                    if target.is_zero() { return Err(GraphRefusal::ObjectFormat(target)); }
-                    let expected = tree_target_kind(&entry.mode).ok_or(GraphRefusal::InvalidTreeMode(id))?;
+                    if target.is_zero() {
+                        return Err(GraphRefusal::ObjectFormat(target));
+                    }
+                    let expected =
+                        tree_target_kind(&entry.mode).ok_or(GraphRefusal::InvalidTreeMode(id))?;
                     if let Some(expected) = expected {
                         self.add_edge(id, target, expected)?;
                     } else {
@@ -230,8 +322,13 @@ impl ObjectGraphAudit {
                 }
             }
             ObjectKind::Tag => {
-                let tag = parse_annotated_tag(body, self.format, AcceptanceProfile::GitCompatibleImport, &limits)
-                    .map_err(|cause| malformed(id, cause))?;
+                let tag = parse_annotated_tag(
+                    body,
+                    self.format,
+                    AcceptanceProfile::GitCompatibleImport,
+                    &limits,
+                )
+                .map_err(|cause| malformed(id, cause))?;
                 checkpoint(live)?;
                 let target = tag.target();
                 let expected = match target.object_type {
@@ -254,54 +351,98 @@ impl ObjectGraphAudit {
     }
 
     fn remaining_edges(&self) -> usize {
-        self.limits.max_edges.saturating_sub(self.edges.len()).saturating_sub(self.gitlinks)
+        self.limits
+            .max_edges
+            .saturating_sub(self.edges.len())
+            .saturating_sub(self.gitlinks)
     }
     fn charge_edge(&self) -> Result<(), GraphRefusal> {
-        if self.remaining_edges() == 0 { Err(GraphRefusal::Limit("edges")) } else { Ok(()) }
+        if self.remaining_edges() == 0 {
+            Err(GraphRefusal::Limit("edges"))
+        } else {
+            Ok(())
+        }
     }
     fn index(&self, source: Option<GitOid>, target: GitOid) -> Result<usize, GraphRefusal> {
-        if target.algorithm() != self.format || target.is_zero() { return Err(GraphRefusal::ObjectFormat(target)); }
-        self.nodes.binary_search_by_key(&target, |node| node.id)
+        if target.algorithm() != self.format || target.is_zero() {
+            return Err(GraphRefusal::ObjectFormat(target));
+        }
+        self.nodes
+            .binary_search_by_key(&target, |node| node.id)
             .map_err(|_| GraphRefusal::MissingTarget { source, target })
     }
-    fn add_edge(&mut self, source: GitOid, target: GitOid, expected: ObjectKind) -> Result<(), GraphRefusal> {
+    fn add_edge(
+        &mut self,
+        source: GitOid,
+        target: GitOid,
+        expected: ObjectKind,
+    ) -> Result<(), GraphRefusal> {
         self.charge_edge()?;
         let target = self.index(Some(source), target)?;
         // Geometric growth bounded by max_edges, not one realloc per edge.
         if self.edges.len() == self.edges.capacity() {
-            let capacity = self.edges.capacity().saturating_mul(2).max(16).min(self.limits.max_edges);
-            self.edges.try_reserve_exact(capacity - self.edges.len()).map_err(|_| GraphRefusal::Allocation)?;
+            let capacity = self
+                .edges
+                .capacity()
+                .saturating_mul(2)
+                .max(16)
+                .min(self.limits.max_edges);
+            self.edges
+                .try_reserve_exact(capacity - self.edges.len())
+                .map_err(|_| GraphRefusal::Allocation)?;
         }
         self.edges.push(Edge { target, expected });
         Ok(())
     }
 
-    pub fn finish(self, references: &BTreeMap<RefName, GitOid>, live: &mut impl FnMut() -> bool)
-        -> Result<GraphReport, GraphRefusal>
-    {
+    pub fn finish(
+        self,
+        references: &BTreeMap<RefName, GitOid>,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<GraphReport, GraphRefusal> {
         checkpoint(live)?;
-        if self.failed { return Err(GraphRefusal::Failed); }
-        if self.next != self.nodes.len() { return Err(GraphRefusal::Incomplete); }
-        if references.len() > self.limits.max_references { return Err(GraphRefusal::Limit("references")); }
+        if self.failed {
+            return Err(GraphRefusal::Failed);
+        }
+        if self.next != self.nodes.len() {
+            return Err(GraphRefusal::Incomplete);
+        }
+        if references.len() > self.limits.max_references {
+            return Err(GraphRefusal::Limit("references"));
+        }
         for (name, &target) in references {
             checkpoint(live)?;
             let index = self.index(None, target)?;
             let actual = self.nodes[index].kind.ok_or(GraphRefusal::Incomplete)?;
-            validate_reference_target_kind(name.as_bytes(), actual).map_err(|error|
-                GraphRefusal::TargetKind { target, expected: error.expected, actual: error.actual })?;
+            validate_reference_target_kind(name.as_bytes(), actual).map_err(|error| {
+                GraphRefusal::TargetKind {
+                    target,
+                    expected: error.expected,
+                    actual: error.actual,
+                }
+            })?;
         }
         for edge in &self.edges {
             checkpoint(live)?;
             let node = &self.nodes[edge.target];
             let actual = node.kind.ok_or(GraphRefusal::Incomplete)?;
             if actual != edge.expected {
-                return Err(GraphRefusal::TargetKind { target: node.id, expected: edge.expected, actual });
+                return Err(GraphRefusal::TargetKind {
+                    target: node.id,
+                    expected: edge.expected,
+                    actual,
+                });
             }
         }
         verify_acyclic(&self.nodes, &self.edges, live)?;
         checkpoint(live)?;
-        Ok(GraphReport { objects: self.nodes.len(), references: references.len(),
-            local_edges: self.edges.len(), external_gitlinks: self.gitlinks, payload_bytes: self.payload_bytes })
+        Ok(GraphReport {
+            objects: self.nodes.len(),
+            references: references.len(),
+            local_edges: self.edges.len(),
+            external_gitlinks: self.gitlinks,
+            payload_bytes: self.payload_bytes,
+        })
     }
 }
 
@@ -311,9 +452,16 @@ fn native_hex(format: GitHashAlgorithm, bytes: &[u8]) -> Result<GitOid, ObjectEr
 }
 fn native_bytes(format: GitHashAlgorithm, bytes: &[u8]) -> Result<GitOid, ObjectError> {
     match format {
-        GitHashAlgorithm::Sha1 => bytes.try_into().map(GitOidSha1::from_bytes).map(GitOid::from),
-        GitHashAlgorithm::Sha256 => bytes.try_into().map(GitOidSha256::from_bytes).map(GitOid::from),
-    }.map_err(|_| ObjectError::MalformedObjectReference)
+        GitHashAlgorithm::Sha1 => bytes
+            .try_into()
+            .map(GitOidSha1::from_bytes)
+            .map(GitOid::from),
+        GitHashAlgorithm::Sha256 => bytes
+            .try_into()
+            .map(GitOidSha256::from_bytes)
+            .map(GitOid::from),
+    }
+    .map_err(|_| ObjectError::MalformedObjectReference)
 }
 
 /// Octal value, not spelling: imported 0160000 remains a gitlink. Import's
@@ -321,12 +469,18 @@ fn native_bytes(format: GitHashAlgorithm, bytes: &[u8]) -> Result<GitOid, Object
 /// No unknown file type is silently treated as a blob or discarded edge.
 fn tree_target_kind(mode: &[u8]) -> Option<Option<ObjectKind>> {
     let mut value = 0_u32;
-    if mode.is_empty() { return None; }
+    if mode.is_empty() {
+        return None;
+    }
     for &digit in mode {
-        if !(b'0'..=b'7').contains(&digit) { return None; }
+        if !(b'0'..=b'7').contains(&digit) {
+            return None;
+        }
         value = value.checked_mul(8)?.checked_add(u32::from(digit - b'0'))?;
     }
-    if value > 0o177777 { return None; }
+    if value > 0o177777 {
+        return None;
+    }
     match value & 0o170000 {
         0o040000 => Some(Some(ObjectKind::Tree)),
         0o100000 | 0o120000 => Some(Some(ObjectKind::Blob)),
@@ -337,15 +491,25 @@ fn tree_target_kind(mode: &[u8]) -> Option<Option<ObjectKind>> {
 
 /// Iterative DFS is O(V+E), counts duplicate edges, and uses O(V) scratch.
 /// Colors are local: a cancelled/failed traversal never leaves a reusable proof.
-fn verify_acyclic(nodes: &[Node], edges: &[Edge], live: &mut impl FnMut() -> bool) -> Result<(), GraphRefusal> {
+fn verify_acyclic(
+    nodes: &[Node],
+    edges: &[Edge],
+    live: &mut impl FnMut() -> bool,
+) -> Result<(), GraphRefusal> {
     let mut colors = Vec::new();
-    colors.try_reserve_exact(nodes.len()).map_err(|_| GraphRefusal::Allocation)?;
+    colors
+        .try_reserve_exact(nodes.len())
+        .map_err(|_| GraphRefusal::Allocation)?;
     colors.resize(nodes.len(), 0_u8);
     let mut stack: Vec<(usize, usize)> = Vec::new();
-    stack.try_reserve_exact(nodes.len()).map_err(|_| GraphRefusal::Allocation)?;
+    stack
+        .try_reserve_exact(nodes.len())
+        .map_err(|_| GraphRefusal::Allocation)?;
     for root in 0..nodes.len() {
         checkpoint(live)?;
-        if colors[root] != 0 { continue; }
+        if colors[root] != 0 {
+            continue;
+        }
         colors[root] = 1;
         stack.push((root, nodes[root].start));
         while let Some((node, cursor)) = stack.last_mut() {
@@ -359,7 +523,10 @@ fn verify_acyclic(nodes: &[Node], edges: &[Edge], live: &mut impl FnMut() -> boo
             *cursor += 1;
             match colors[target] {
                 1 => return Err(GraphRefusal::Cycle(nodes[target].id)),
-                0 => { colors[target] = 1; stack.push((target, nodes[target].start)); }
+                0 => {
+                    colors[target] = 1;
+                    stack.push((target, nodes[target].start));
+                }
                 _ => {}
             }
         }

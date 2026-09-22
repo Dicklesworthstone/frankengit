@@ -133,10 +133,17 @@ mod tests {
     fn fixed_and_chunked_bodies_survive_every_small_fragment_width_and_interrupts() {
         for (framing, bytes) in [
             (BodyFraming::ContentLength(5), b"hello".as_slice()),
-            (BodyFraming::Chunked, b"2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n".as_slice()),
+            (
+                BodyFraming::Chunked,
+                b"2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n".as_slice(),
+            ),
         ] {
             for width in 1..=bytes.len() {
-                let mut reader = Fragments { bytes, width, interrupt: true };
+                let mut reader = Fragments {
+                    bytes,
+                    width,
+                    interrupt: true,
+                };
                 let mut decoder = BodyDecoder::new(framing, HttpLimits::default()).unwrap();
                 let decoded = BodyInput::Reader(&mut reader)
                     .consume(&mut || true, |bytes, live| push(&mut decoder, bytes, live))
@@ -152,11 +159,15 @@ mod tests {
     fn truncation_and_read_ahead_suffix_never_complete_ingress() {
         for (bytes, trailing) in [(b"hell".as_slice(), false), (b"helloNEXT".as_slice(), true)] {
             let mut reader = io::Cursor::new(bytes);
-            let mut decoder = BodyDecoder::new(BodyFraming::ContentLength(5), HttpLimits::default()).unwrap();
+            let mut decoder =
+                BodyDecoder::new(BodyFraming::ContentLength(5), HttpLimits::default()).unwrap();
             let result = BodyInput::Reader(&mut reader)
                 .consume(&mut || true, |bytes, live| push(&mut decoder, bytes, live));
             if trailing {
-                assert!(matches!(result, Err(NodeSmartHttpRefusal::TrailingRequestBytes { count: 4 })));
+                assert!(matches!(
+                    result,
+                    Err(NodeSmartHttpRefusal::TrailingRequestBytes { count: 4 })
+                ));
             } else {
                 assert!(matches!(result, Err(NodeSmartHttpRefusal::Rpc(error))
                     if matches!(*error, RpcError::IncompleteRequest)));
@@ -173,9 +184,14 @@ mod tests {
 
     #[test]
     fn completion_does_not_require_socket_eof_and_cancellation_precedes_reads() {
-        let mut decoder = BodyDecoder::new(BodyFraming::ContentLength(0), HttpLimits::default()).unwrap();
-        assert_eq!(BodyInput::Reader(&mut NoRead)
-            .consume(&mut || true, |bytes, live| push(&mut decoder, bytes, live)).unwrap(), 0);
+        let mut decoder =
+            BodyDecoder::new(BodyFraming::ContentLength(0), HttpLimits::default()).unwrap();
+        assert_eq!(
+            BodyInput::Reader(&mut NoRead)
+                .consume(&mut || true, |bytes, live| push(&mut decoder, bytes, live))
+                .unwrap(),
+            0
+        );
         let result = BodyInput::Reader(&mut NoRead)
             .consume(&mut || false, |_, _| panic!("cancelled before parser work"));
         assert!(matches!(result, Err(NodeSmartHttpRefusal::Rpc(error))
@@ -183,22 +199,30 @@ mod tests {
         // The same guarantee after a non-empty complete body: another read
         // would block on a real Git client's still-open request connection.
         let mut reader = io::Cursor::new(b"hello").chain(NoRead);
-        let mut decoder = BodyDecoder::new(BodyFraming::ContentLength(5), HttpLimits::default()).unwrap();
-        assert_eq!(BodyInput::Reader(&mut reader)
-            .consume(&mut || true, |bytes, live| push(&mut decoder, bytes, live)).unwrap(), 5);
+        let mut decoder =
+            BodyDecoder::new(BodyFraming::ContentLength(5), HttpLimits::default()).unwrap();
+        assert_eq!(
+            BodyInput::Reader(&mut reader)
+                .consume(&mut || true, |bytes, live| push(&mut decoder, bytes, live))
+                .unwrap(),
+            5
+        );
     }
 
     #[test]
     fn large_ingress_never_requests_a_body_sized_read() {
         let length = 1024 * 1024;
         let mut reader = io::repeat(b'x').take(length);
-        let mut decoder = BodyDecoder::new(BodyFraming::ContentLength(length), HttpLimits::default()).unwrap();
+        let mut decoder =
+            BodyDecoder::new(BodyFraming::ContentLength(length), HttpLimits::default()).unwrap();
         let mut pushes = 0;
-        let decoded = BodyInput::Reader(&mut reader).consume(&mut || true, |bytes, live| {
-            assert!(bytes.len() <= READ_BYTES);
-            pushes += usize::from(!bytes.is_empty());
-            push(&mut decoder, bytes, live)
-        }).unwrap();
+        let decoded = BodyInput::Reader(&mut reader)
+            .consume(&mut || true, |bytes, live| {
+                assert!(bytes.len() <= READ_BYTES);
+                pushes += usize::from(!bytes.is_empty());
+                push(&mut decoder, bytes, live)
+            })
+            .unwrap();
         assert_eq!(decoded, length);
         assert_eq!(pushes, 64);
     }

@@ -3,14 +3,12 @@
 mod activation;
 mod recovery;
 
-pub use recovery::{GenerationReadLimits, GenerationRecovery, PinnedGeneration, SelectedGeneration};
+pub use recovery::{
+    GenerationReadLimits, GenerationRecovery, PinnedGeneration, SelectedGeneration,
+};
 
-use fgit_authority::{
-    AuthorityFailure, HeadKey, ImmutableKey, KeyError,
-};
-use fgit_codec::{
-    CanonicalBody, CodecRefusal, CryptoBodyIdentity, Decoder, Encoder, body_id,
-};
+use fgit_authority::{AuthorityFailure, HeadKey, ImmutableKey, KeyError};
+use fgit_codec::{CanonicalBody, CodecRefusal, CryptoBodyIdentity, Decoder, Encoder, body_id};
 use fgit_types::{
     AsciiSlug, Digest, GenerationId, HeadGeneration, RepositoryCommitId, SchemaFamily, SchemaId,
     TypeRefusal,
@@ -349,7 +347,9 @@ pub enum GenerationAuthorityError {
     /// A complete ancestry observation did not fit the caller's budget.
     ReadBudgetExceeded(&'static str),
     /// A body referenced by the selected head or predecessor is unavailable.
-    MissingGeneration { generation_id: Box<GraphGenerationId> },
+    MissingGeneration {
+        generation_id: Box<GraphGenerationId>,
+    },
     /// Bytes at an immutable predecessor key do not have the committed identity.
     GenerationIdentityMismatch {
         expected: Box<GraphGenerationId>,
@@ -406,7 +406,6 @@ pub struct GenerationAuthority<'a, S> {
     store: &'a S,
     head_key: HeadKey,
 }
-
 
 fn immutable_generation_key(
     generation_id: GraphGenerationId,

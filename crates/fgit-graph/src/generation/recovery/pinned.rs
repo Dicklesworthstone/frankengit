@@ -20,50 +20,74 @@ pub struct PinnedGeneration {
 impl PinnedGeneration {
     /// The requested generation, never an implicit replacement by a newer one.
     #[must_use]
-    pub const fn activation(&self) -> &GenerationActivation { self.generation.activation() }
+    pub const fn activation(&self) -> &GenerationActivation {
+        self.generation.activation()
+    }
     /// Exact immutable manifest used by every continuation of this query.
     #[must_use]
-    pub const fn body(&self) -> &GraphGenerationBody { self.generation.body() }
+    pub const fn body(&self) -> &GraphGenerationBody {
+        self.generation.body()
+    }
     /// Current head observed once when this membership check started. It is
     /// evidence of lineage, not the generation to use for the query's payloads.
     #[must_use]
-    pub const fn selected_head(&self) -> &GenerationActivation { &self.selected_head }
+    pub const fn selected_head(&self) -> &GenerationActivation {
+        &self.selected_head
+    }
     #[must_use]
-    pub const fn generations_read(&self) -> usize { self.generation.generations_read() }
+    pub const fn generations_read(&self) -> usize {
+        self.generation.generations_read()
+    }
     #[must_use]
-    pub const fn bytes_read(&self) -> usize { self.generation.bytes_read() }
+    pub const fn bytes_read(&self) -> usize {
+        self.generation.bytes_read()
+    }
 }
 
 impl GraphGenerationBody {
     /// Committed vertex payload root. Reading it still requires the owning
     /// store's authorization and exact payload verification.
     #[must_use]
-    pub const fn vertices_root(&self) -> &Digest { &self.vertices_root }
+    pub const fn vertices_root(&self) -> &Digest {
+        &self.vertices_root
+    }
     /// Committed edge payload root, not a caller-selected substitute.
     #[must_use]
-    pub const fn edges_root(&self) -> &Digest { &self.edges_root }
+    pub const fn edges_root(&self) -> &Digest {
+        &self.edges_root
+    }
     /// Committed index manifest, shared by all reads of this exact generation.
     #[must_use]
-    pub const fn index_manifest_root(&self) -> &Digest { &self.index_manifest_root }
+    pub const fn index_manifest_root(&self) -> &Digest {
+        &self.index_manifest_root
+    }
     /// Evidence committed with this generation, not evidence from a newer head.
     #[must_use]
-    pub const fn evidence_root(&self) -> &Digest { &self.evidence_root }
+    pub const fn evidence_root(&self) -> &Digest {
+        &self.evidence_root
+    }
 }
 
 fn pinned(
-    walk: Option<Walk>, expected: &GenerationActivation,
+    walk: Option<Walk>,
+    expected: &GenerationActivation,
 ) -> Result<PinnedGeneration, GenerationAuthorityError> {
     let walk = walk.ok_or(GenerationAuthorityError::CheckpointUnresolved)?;
-    let activation = walk.found.ok_or(GenerationAuthorityError::CheckpointUnresolved)?;
+    let activation = walk
+        .found
+        .ok_or(GenerationAuthorityError::CheckpointUnresolved)?;
     if &activation != expected || !walk.minimum_seen {
         return Err(GenerationAuthorityError::CheckpointUnresolved);
     }
-    let body = walk.found_body.ok_or(GenerationAuthorityError::HistoryInconsistent)?;
+    let body = walk
+        .found_body
+        .ok_or(GenerationAuthorityError::HistoryInconsistent)?;
     // These are measured work counters for the complete membership/checkpoint
     // observation, not a claim that only the target body was read.
     Ok(PinnedGeneration {
         generation: SelectedGeneration {
-            activation, body,
+            activation,
+            body,
             generations_read: walk.selected.generations_read(),
             bytes_read: walk.selected.bytes_read(),
         },
@@ -81,14 +105,22 @@ impl<S: AuthorityStore> GenerationAuthority<'_, S> {
     /// Missing history, a fork or the wrong original position refuses; no
     /// staged-object fallback, head refresh, retry or write is performed.
     pub fn read_at(
-        &self, view: GraphViewId, expected: &GenerationActivation,
-        minimum: Option<&GenerationActivation>, limits: GenerationReadLimits,
+        &self,
+        view: GraphViewId,
+        expected: &GenerationActivation,
+        minimum: Option<&GenerationActivation>,
+        limits: GenerationReadLimits,
         live: &mut impl FnMut() -> bool,
     ) -> Result<PinnedGeneration, GenerationAuthorityError> {
         // With no independent floor, requiring the query checkpoint avoids
         // confusing a staged identity with a published generation at this slot.
-        let walk = self.inspect(view, Some(expected.generation_id),
-            minimum.or(Some(expected)), limits, live)?;
+        let walk = self.inspect(
+            view,
+            Some(expected.generation_id),
+            minimum.or(Some(expected)),
+            limits,
+            live,
+        )?;
         pinned(walk, expected)
     }
 }
@@ -102,12 +134,24 @@ impl<S: AsyncAuthorityStore> GenerationAuthority<'_, S> {
     /// using the returned manifest. Keeping this value alive does not pin data
     /// against retention or replace the runtime's cancellation ownership.
     pub async fn read_at_async(
-        &self, cx: &S::Context, view: GraphViewId, expected: &GenerationActivation,
-        minimum: Option<&GenerationActivation>, limits: GenerationReadLimits,
+        &self,
+        cx: &S::Context,
+        view: GraphViewId,
+        expected: &GenerationActivation,
+        minimum: Option<&GenerationActivation>,
+        limits: GenerationReadLimits,
         live: &mut (impl FnMut() -> bool + Send),
     ) -> Result<PinnedGeneration, GenerationAuthorityError> {
-        let walk = self.inspect_async(cx, view, Some(expected.generation_id),
-            minimum.or(Some(expected)), limits, live).await?;
+        let walk = self
+            .inspect_async(
+                cx,
+                view,
+                Some(expected.generation_id),
+                minimum.or(Some(expected)),
+                limits,
+                live,
+            )
+            .await?;
         pinned(walk, expected)
     }
 }

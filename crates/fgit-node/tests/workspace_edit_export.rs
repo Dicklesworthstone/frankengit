@@ -38,25 +38,43 @@ impl Fixture {
         let edit = loose(&source, GitObjectKind::Blob, "blob", b"before\n");
         let untouched = loose(&source, GitObjectKind::Blob, "blob", b"must survive\n");
         let tree_body = [
-            b"100644 edit.txt\0".as_slice(), edit.as_bytes(),
-            b"100644 keep.txt\0".as_slice(), untouched.as_bytes(),
-        ].concat();
+            b"100644 edit.txt\0".as_slice(),
+            edit.as_bytes(),
+            b"100644 keep.txt\0".as_slice(),
+            untouched.as_bytes(),
+        ]
+        .concat();
         let tree = loose(&source, GitObjectKind::Tree, "tree", &tree_body);
         let commit = loose(&source, GitObjectKind::Commit, "commit", format!(
             "tree {tree}\nauthor Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\nsource\n"
         ).as_bytes());
         fs::write(source.join("refs/heads/main"), format!("{commit}\n")).unwrap();
         let (mut node, _) = OneNode::init(NodeConfig::new(
-            root.join("node"), TenantId::from_bytes([0x81; 16]), REPOSITORY,
-        )).unwrap();
+            root.join("node"),
+            TenantId::from_bytes([0x81; 16]),
+            REPOSITORY,
+        ))
+        .unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
         let request = node.request_context();
-        node.runtime().block_on(node.import_loose_git_directory_durable_in(
-            &request, &source, PrincipalId::from_bytes([0x83; 16]), b"edit-export-source",
-        )).unwrap();
-        Self { root, node: Some(node), commit, untouched }
+        node.runtime()
+            .block_on(node.import_loose_git_directory_durable_in(
+                &request,
+                &source,
+                PrincipalId::from_bytes([0x83; 16]),
+                b"edit-export-source",
+            ))
+            .unwrap();
+        Self {
+            root,
+            node: Some(node),
+            commit,
+            untouched,
+        }
     }
-    fn node(&self) -> &OneNode { self.node.as_ref().unwrap() }
+    fn node(&self) -> &OneNode {
+        self.node.as_ref().unwrap()
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -83,40 +101,81 @@ fn loose(root: &Path, kind: GitObjectKind, label: &str, body: &[u8]) -> GitOid {
     fs::write(directory.join(&hex[2..]), encoded).unwrap();
     oid
 }
-fn path(name: &str) -> TreePath { TreePath::parse_default(name.as_bytes()).unwrap() }
+fn path(name: &str) -> TreePath {
+    TreePath::parse_default(name.as_bytes()).unwrap()
+}
 fn capability(complete: bool) -> TreeCapability {
     let mut reads = vec![path("edit.txt")];
-    if complete { reads.push(path("keep.txt")); }
-    TreeCapability::new(WorkspaceId::from_bytes([0x84; 16]), REPOSITORY, reads, vec![path("edit.txt")])
+    if complete {
+        reads.push(path("keep.txt"));
+    }
+    TreeCapability::new(
+        WorkspaceId::from_bytes([0x84; 16]),
+        REPOSITORY,
+        reads,
+        vec![path("edit.txt")],
+    )
 }
 fn edit() -> IntentLog {
     let mut log = IntentLog::new();
     log.push(TreeEditIntent::Write {
-        path: path("edit.txt"), content: b"after\n".to_vec(),
-        mode: FileMode::Executable, entry_class: EntryClass::Content,
+        path: path("edit.txt"),
+        content: b"after\n".to_vec(),
+        mode: FileMode::Executable,
+        entry_class: EntryClass::Content,
     });
     log
 }
-fn reference() -> RefName { RefName::try_new(b"refs/heads/main").unwrap() }
+fn reference() -> RefName {
+    RefName::try_new(b"refs/heads/main").unwrap()
+}
 
 #[test]
 fn exported_edit_preserves_unmodified_files_and_publishes_no_ref() {
     let fixture = Fixture::new();
     let node = fixture.node();
     let request = node.request_context();
-    let export = node.runtime().block_on(node.export_workspace_edits_in::<Sha1>(
-        &request, &reference(), fixture.commit, &RefVisibility::new(),
-        &mut capability(true), &edit(), 0, ExportLimits::default(),
-    )).unwrap();
+    let export = node
+        .runtime()
+        .block_on(node.export_workspace_edits_in::<Sha1>(
+            &request,
+            &reference(),
+            fixture.commit,
+            &RefVisibility::new(),
+            &mut capability(true),
+            &edit(),
+            0,
+            ExportLimits::default(),
+        ))
+        .unwrap();
     assert!(export.plan.verify_all());
-    assert_eq!(export.source_commit.digest_bytes(), fixture.commit.as_bytes());
+    assert_eq!(
+        export.source_commit.digest_bytes(),
+        fixture.commit.as_bytes()
+    );
     assert_eq!(export.changed_paths, vec![path("edit.txt")]);
-    assert_eq!(export.plan.object_count(), 2, "only the new blob and root tree");
+    assert_eq!(
+        export.plan.object_count(),
+        2,
+        "only the new blob and root tree"
+    );
     let root = export.plan.get(export.plan.root_tree()).unwrap().body();
-    assert!(root.windows(b"100755 edit.txt\0".len()).any(|w| w == b"100755 edit.txt\0"));
-    assert!(root.windows(b"100644 keep.txt\0".len()).any(|w| w == b"100644 keep.txt\0"));
-    assert!(root.ends_with(fixture.untouched.as_bytes()), "untouched identity must survive");
-    let current = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
+    assert!(
+        root.windows(b"100755 edit.txt\0".len())
+            .any(|w| w == b"100755 edit.txt\0")
+    );
+    assert!(
+        root.windows(b"100644 keep.txt\0".len())
+            .any(|w| w == b"100644 keep.txt\0")
+    );
+    assert!(
+        root.ends_with(fixture.untouched.as_bytes()),
+        "untouched identity must survive"
+    );
+    let current = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&request))
+        .unwrap();
     assert_eq!(current.snapshot().refs[&reference()], fixture.commit);
 }
 
@@ -125,15 +184,34 @@ fn incomplete_export_scope_refuses_instead_of_deleting_hidden_siblings() {
     let fixture = Fixture::new();
     let node = fixture.node();
     let request = node.request_context();
-    let result = node.runtime().block_on(node.export_workspace_edits_in::<Sha1>(
-        &request, &reference(), fixture.commit, &RefVisibility::new(),
-        &mut capability(false), &edit(), 0, ExportLimits::default(),
+    let result = node
+        .runtime()
+        .block_on(node.export_workspace_edits_in::<Sha1>(
+            &request,
+            &reference(),
+            fixture.commit,
+            &RefVisibility::new(),
+            &mut capability(false),
+            &edit(),
+            0,
+            ExportLimits::default(),
+        ));
+    assert!(matches!(
+        result,
+        Err(NodeWorkspaceRefusal::IncompleteWorkspaceExportScope)
     ));
-    assert!(matches!(result, Err(NodeWorkspaceRefusal::IncompleteWorkspaceExportScope)));
-    let permitted = node.runtime().block_on(node.export_workspace_edits_in::<Sha1>(
-        &request, &reference(), fixture.commit, &RefVisibility::new(),
-        &mut capability(true), &edit(), 0, ExportLimits::default(),
-    ));
+    let permitted = node
+        .runtime()
+        .block_on(node.export_workspace_edits_in::<Sha1>(
+            &request,
+            &reference(),
+            fixture.commit,
+            &RefVisibility::new(),
+            &mut capability(true),
+            &edit(),
+            0,
+            ExportLimits::default(),
+        ));
     assert!(permitted.is_ok());
 }
 
@@ -142,23 +220,58 @@ fn stale_hidden_and_over_budget_exports_never_produce_candidates() {
     let fixture = Fixture::new();
     let node = fixture.node();
     let request = node.request_context();
-    let stale = node.runtime().block_on(node.export_workspace_edits_in::<Sha1>(
-        &request, &reference(), fixture.untouched, &RefVisibility::new(),
-        &mut capability(true), &edit(), 0, ExportLimits::default(),
+    let stale = node
+        .runtime()
+        .block_on(node.export_workspace_edits_in::<Sha1>(
+            &request,
+            &reference(),
+            fixture.untouched,
+            &RefVisibility::new(),
+            &mut capability(true),
+            &edit(),
+            0,
+            ExportLimits::default(),
+        ));
+    assert!(matches!(
+        stale,
+        Err(NodeWorkspaceRefusal::StaleWorkspaceBase)
     ));
-    assert!(matches!(stale, Err(NodeWorkspaceRefusal::StaleWorkspaceBase)));
     let mut visibility = RefVisibility::new();
-    visibility.push_rule(b"refs/heads/main", &WireLimits::default()).unwrap();
-    let hidden = node.runtime().block_on(node.export_workspace_edits_in::<Sha1>(
-        &request, &reference(), fixture.commit, &visibility,
-        &mut capability(true), &edit(), 0, ExportLimits::default(),
-    ));
+    visibility
+        .push_rule(b"refs/heads/main", &WireLimits::default())
+        .unwrap();
+    let hidden = node
+        .runtime()
+        .block_on(node.export_workspace_edits_in::<Sha1>(
+            &request,
+            &reference(),
+            fixture.commit,
+            &visibility,
+            &mut capability(true),
+            &edit(),
+            0,
+            ExportLimits::default(),
+        ));
     assert!(matches!(hidden, Err(NodeWorkspaceRefusal::RefUnavailable)));
-    let limited = node.runtime().block_on(node.export_workspace_edits_in::<Sha1>(
-        &request, &reference(), fixture.commit, &RefVisibility::new(),
-        &mut capability(true), &edit(), 0, ExportLimits { max_total_bytes: 1, ..ExportLimits::default() },
+    let limited = node
+        .runtime()
+        .block_on(node.export_workspace_edits_in::<Sha1>(
+            &request,
+            &reference(),
+            fixture.commit,
+            &RefVisibility::new(),
+            &mut capability(true),
+            &edit(),
+            0,
+            ExportLimits {
+                max_total_bytes: 1,
+                ..ExportLimits::default()
+            },
+        ));
+    assert!(matches!(
+        limited,
+        Err(NodeWorkspaceRefusal::WorkspaceEditLimit)
     ));
-    assert!(matches!(limited, Err(NodeWorkspaceRefusal::WorkspaceEditLimit)));
 }
 
 #[cfg(target_os = "linux")]
@@ -183,17 +296,35 @@ fn trusted_tool_reads_sparse_inputs_and_exports_an_exact_native_commit() {
     let writes = reads.clone();
     let mut command = Command::new("/bin/sh");
     command.args(["-c", "test ! -e keep.txt && printf 'after\n' > edit.txt && printf 'new\n' > new.txt && chmod 755 new.txt"]);
-    let result = node.runtime().block_on(node.run_trusted_workspace_tool_in(
-        &request, &reference(), [0x85; 16], &parent, &reads, &writes,
-        &mut command, Duration::from_secs(10), ("Test <test@example.invalid>", 1, b"tool candidate\n"),
-    )).unwrap();
+    let result = node
+        .runtime()
+        .block_on(node.run_trusted_workspace_tool_in(
+            &request,
+            &reference(),
+            [0x85; 16],
+            &parent,
+            &reads,
+            &writes,
+            &mut command,
+            Duration::from_secs(10),
+            ("Test <test@example.invalid>", 1, b"tool candidate\n"),
+        ))
+        .unwrap();
     let edit = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"after\n");
     let new = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"new\n");
-    let expected_tree = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Tree, &[
-        b"100644 edit.txt\0".as_slice(), edit.as_bytes(),
-        b"100644 keep.txt\0".as_slice(), fixture.untouched.as_bytes(),
-        b"100755 new.txt\0".as_slice(), new.as_bytes(),
-    ].concat());
+    let expected_tree = git_object_id(
+        GitHashAlgorithm::Sha1,
+        GitObjectKind::Tree,
+        &[
+            b"100644 edit.txt\0".as_slice(),
+            edit.as_bytes(),
+            b"100644 keep.txt\0".as_slice(),
+            fixture.untouched.as_bytes(),
+            b"100755 new.txt\0".as_slice(),
+            new.as_bytes(),
+        ]
+        .concat(),
+    );
     assert_eq!(result.root_tree, expected_tree);
     let expected_commit = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Commit,
         format!("tree {expected_tree}\nparent {}\nauthor Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\ntool candidate\n", fixture.commit).as_bytes());
@@ -202,10 +333,24 @@ fn trusted_tool_reads_sparse_inputs_and_exports_an_exact_native_commit() {
     assert_eq!(result.changed_paths, writes);
     assert_eq!(result.object_count, 4);
     assert_eq!(&result.pack_bytes()[..4], b"PACK");
-    assert_eq!(u32::from_be_bytes(result.pack_bytes()[8..12].try_into().unwrap()), 4);
-    assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "workspace lease reaped");
-    let current = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
-    assert_eq!(current.snapshot().refs[&reference()], fixture.commit, "candidate did not publish");
+    assert_eq!(
+        u32::from_be_bytes(result.pack_bytes()[8..12].try_into().unwrap()),
+        4
+    );
+    assert_eq!(
+        fs::read_dir(&parent).unwrap().count(),
+        0,
+        "workspace lease reaped"
+    );
+    let current = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&request))
+        .unwrap();
+    assert_eq!(
+        current.snapshot().refs[&reference()],
+        fixture.commit,
+        "candidate did not publish"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -218,11 +363,18 @@ fn tool_failure_and_undeclared_input_changes_clean_up_without_candidates() {
     let node = fixture.node();
     let request = node.request_context();
     for script in ["exit 7", "printf forbidden > keep.txt"] {
-        let mut command = Command::new("/bin/sh"); command.args(["-c", script]);
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]);
         let result = node.runtime().block_on(node.run_trusted_workspace_tool_in(
-            &request, &reference(), [0x86; 16], &parent,
-            &[b"edit.txt".to_vec(), b"keep.txt".to_vec()], &[b"edit.txt".to_vec()],
-            &mut command, Duration::from_secs(10), ("Test <test@example.invalid>", 1, b"refused\n"),
+            &request,
+            &reference(),
+            [0x86; 16],
+            &parent,
+            &[b"edit.txt".to_vec(), b"keep.txt".to_vec()],
+            &[b"edit.txt".to_vec()],
+            &mut command,
+            Duration::from_secs(10),
+            ("Test <test@example.invalid>", 1, b"refused\n"),
         ));
         assert!(result.is_err());
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
@@ -238,11 +390,26 @@ fn timed_out_tool_reports_retained_workspace_instead_of_claiming_descendant_clea
     let parent = private_parent(&fixture);
     let node = fixture.node();
     let request = node.request_context();
-    let mut command = Command::new("/bin/sleep"); command.arg("10");
-    let error = node.runtime().block_on(node.run_trusted_workspace_tool_in(
-        &request, &reference(), [0x87; 16], &parent,
-        &[b"edit.txt".to_vec()], &[b"edit.txt".to_vec()], &mut command,
-        Duration::from_secs(2), ("Test <test@example.invalid>", 1, b"timeout\n"),
-    )).unwrap_err();
-    assert!(error.retained_workspace().expect("containment path survives final checks").is_dir());
+    let mut command = Command::new("/bin/sleep");
+    command.arg("10");
+    let error = node
+        .runtime()
+        .block_on(node.run_trusted_workspace_tool_in(
+            &request,
+            &reference(),
+            [0x87; 16],
+            &parent,
+            &[b"edit.txt".to_vec()],
+            &[b"edit.txt".to_vec()],
+            &mut command,
+            Duration::from_secs(2),
+            ("Test <test@example.invalid>", 1, b"timeout\n"),
+        ))
+        .unwrap_err();
+    assert!(
+        error
+            .retained_workspace()
+            .expect("containment path survives final checks")
+            .is_dir()
+    );
 }

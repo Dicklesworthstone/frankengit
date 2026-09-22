@@ -400,8 +400,14 @@ fn assert_native_transfer(source: &OneNode, destination: &OneNode, id: GitOid) {
     assert_eq!(received.identity(), id);
     assert_eq!(original.envelope().namespace(), source.namespace);
     assert_eq!(received.envelope().namespace(), destination.namespace);
-    assert_ne!(source.repository_incarnation_id, destination.repository_incarnation_id);
-    assert_ne!(original.envelope().namespace(), received.envelope().namespace());
+    assert_ne!(
+        source.repository_incarnation_id,
+        destination.repository_incarnation_id
+    );
+    assert_ne!(
+        original.envelope().namespace(),
+        received.envelope().namespace()
+    );
     let envelope = original.envelope();
     let local = fgit_object_fabric::ObjectEnvelope::new(
         destination.namespace.clone(),
@@ -413,9 +419,13 @@ fn assert_native_transfer(source: &OneNode, destination: &OneNode, id: GitOid) {
         envelope.logical_content_identity(),
         envelope.manifest_reference(),
         &destination.segment_limits,
-    ).unwrap();
-    let expected = fgit_object_fabric::fabric::VerifiedObject::new(
-        local, original.payload().to_vec(),
-    ).unwrap();
-    assert_eq!(received, expected, "native identity, bytes and all non-placement fields must survive transfer");
+    )
+    .unwrap();
+    let expected =
+        fgit_object_fabric::fabric::VerifiedObject::new(local, original.payload().to_vec())
+            .unwrap();
+    assert_eq!(
+        received, expected,
+        "native identity, bytes and all non-placement fields must survive transfer"
+    );
 }

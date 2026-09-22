@@ -5,7 +5,7 @@
 //! at invocation. It never disappears or falls through to another operation.
 
 use super::refusal::McpRefusal;
-use super::registry::{find_tool_version, REGISTRY};
+use super::registry::{REGISTRY, find_tool_version};
 use super::types::{McpToolEntry, PrincipalRequirement, SupportProfile};
 
 /// Result of a successful capability admission and input parameter check.

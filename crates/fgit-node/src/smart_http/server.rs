@@ -24,19 +24,19 @@ use std::time::{Duration, Instant};
 use fgit_authority::IdempotencyKey;
 use fgit_types::PrincipalId;
 use fgit_types::cell::CellState;
+use fgit_wire::WireLimits;
+use fgit_wire::smart_http::rpc::RpcError;
 use fgit_wire::smart_http::{
     HttpError, HttpLimits, HttpVersion, Operation, RequestHead, Service, head, parse_head,
 };
-use fgit_wire::smart_http::rpc::RpcError;
-use fgit_wire::WireLimits;
 
-use credentials::{Binding, CredentialFailure, CredentialSource};
 use super::NodeSmartHttpRefusal;
 use crate::{
     DeadlineTcpStream, GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionDeadline,
     GitDaemonSessionTimeout, GitDaemonSessionWorkScaling, LoopbackReceiveSession, NodeConfig,
     NodeRefusal, OneNode, PushQuota,
 };
+use credentials::{Binding, CredentialFailure, CredentialSource};
 
 // Offer Basic first so ordinary Git credential helpers can negotiate a token
 // password. Both schemes authenticate through the SAME digest/grant lookup.
@@ -131,9 +131,18 @@ impl OneNode {
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
-            listener, server_limits,
-            CredentialSource::Static { digest: credential_digest, principal },
-            allow_receive, false, false, false, false, idle_timeout,
+            listener,
+            server_limits,
+            CredentialSource::Static {
+                digest: credential_digest,
+                principal,
+            },
+            allow_receive,
+            false,
+            false,
+            false,
+            false,
+            idle_timeout,
         )
     }
 
@@ -143,7 +152,9 @@ impl OneNode {
         &self,
         path: &Path,
     ) -> Result<(), NodeSmartHttpRefusal> {
-        self.smart_http_credentials_source(path).validate().map_err(credential_error)
+        self.smart_http_credentials_source(path)
+            .validate()
+            .map_err(credential_error)
     }
 
     /// Serve multiple explicitly granted principals on the same bounded node.
@@ -172,8 +183,15 @@ impl OneNode {
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
-            listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, false, false, false, false, idle_timeout,
+            listener,
+            server_limits,
+            self.smart_http_credentials_source(credentials_file),
+            allow_receive,
+            false,
+            false,
+            false,
+            false,
+            idle_timeout,
         )
     }
 
@@ -200,8 +218,15 @@ impl OneNode {
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
-            listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, true, false, false, false, idle_timeout,
+            listener,
+            server_limits,
+            self.smart_http_credentials_source(credentials_file),
+            allow_receive,
+            true,
+            false,
+            false,
+            false,
+            idle_timeout,
         )
     }
 
@@ -229,8 +254,15 @@ impl OneNode {
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
-            listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, allow_issues, allow_outcomes, false, false, idle_timeout,
+            listener,
+            server_limits,
+            self.smart_http_credentials_source(credentials_file),
+            allow_receive,
+            allow_issues,
+            allow_outcomes,
+            false,
+            false,
+            idle_timeout,
         )
     }
 
@@ -254,8 +286,15 @@ impl OneNode {
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
-            listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, allow_issues, allow_outcomes, true, false, idle_timeout,
+            listener,
+            server_limits,
+            self.smart_http_credentials_source(credentials_file),
+            allow_receive,
+            allow_issues,
+            allow_outcomes,
+            true,
+            false,
+            idle_timeout,
         )
     }
 
@@ -267,13 +306,26 @@ impl OneNode {
     /// arbitrary admitted objects. Reads have their own principal quota; source
     /// publication shares mutation quota. Older entrypoints keep source disabled.
     pub fn serve_repository_http_with_source_bounded(
-        &self, listener: &TcpListener, server_limits: GitDaemonServerLimits,
-        credentials_file: &Path, allow_receive: bool, allow_issues: bool,
-        allow_outcomes: bool, allow_pulls: bool, idle_timeout: Duration,
+        &self,
+        listener: &TcpListener,
+        server_limits: GitDaemonServerLimits,
+        credentials_file: &Path,
+        allow_receive: bool,
+        allow_issues: bool,
+        allow_outcomes: bool,
+        allow_pulls: bool,
+        idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         self.serve_smart_http_with_source_bounded(
-            listener, server_limits, self.smart_http_credentials_source(credentials_file),
-            allow_receive, allow_issues, allow_outcomes, allow_pulls, true, idle_timeout,
+            listener,
+            server_limits,
+            self.smart_http_credentials_source(credentials_file),
+            allow_receive,
+            allow_issues,
+            allow_outcomes,
+            allow_pulls,
+            true,
+            idle_timeout,
         )
     }
 
@@ -300,28 +352,39 @@ impl OneNode {
         allow_source: bool,
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
-        let address = listener.local_addr().map_err(|source| io_error("inspect HTTP listener", source))?;
+        let address = listener
+            .local_addr()
+            .map_err(|source| io_error("inspect HTTP listener", source))?;
         if !address.ip().is_loopback() {
-            return Err(invalid_configuration("Smart HTTP requires a loopback listener"));
+            return Err(invalid_configuration(
+                "Smart HTTP requires a loopback listener",
+            ));
         }
         if self.cell_state() != CellState::Serving {
-            return Err(invalid_configuration("bring the HTTP node into service before listening"));
+            return Err(invalid_configuration(
+                "bring the HTTP node into service before listening",
+            ));
         }
         if !(1..=MAX_SESSIONS).contains(&server_limits.max_sessions())
             || !(1..=MAX_IN_FLIGHT).contains(&server_limits.max_in_flight())
             || idle_timeout.is_zero()
         {
-            return Err(invalid_configuration("invalid bounded Smart HTTP service limits"));
+            return Err(invalid_configuration(
+                "invalid bounded Smart HTTP service limits",
+            ));
         }
         credentials.validate().map_err(credential_error)?;
         let maximum_body = u64::try_from(self.git_daemon_receive_limits.pack.max_input_bytes)
             .map_err(|_| invalid_configuration("HTTP input envelope is not representable"))?;
-        let maximum_wire = maximum_body.checked_add(FRAMING_ALLOWANCE)
+        let maximum_wire = maximum_body
+            .checked_add(FRAMING_ALLOWANCE)
             .ok_or_else(|| invalid_configuration("HTTP wire envelope overflow"))?;
-        let maximum_response_bytes = u64::try_from(self.selected_pack_limits.max_total_expanded_bytes)
-            .ok().and_then(|n| n.checked_mul(2))
-            .and_then(|n| n.checked_add(FRAMING_ALLOWANCE))
-            .ok_or_else(|| invalid_configuration("HTTP response envelope overflow"))?;
+        let maximum_response_bytes =
+            u64::try_from(self.selected_pack_limits.max_total_expanded_bytes)
+                .ok()
+                .and_then(|n| n.checked_mul(2))
+                .and_then(|n| n.checked_add(FRAMING_ALLOWANCE))
+                .ok_or_else(|| invalid_configuration("HTTP response envelope overflow"))?;
         let http = HttpLimits {
             max_body_bytes: maximum_body,
             max_body_wire_bytes: maximum_wire,
@@ -329,7 +392,9 @@ impl OneNode {
         };
         http.validate()?;
         let profile = Arc::new(Profile {
-            config: self.service_config.clone()
+            config: self
+                .service_config
+                .clone()
                 .with_expected_repository_incarnation(self.repository_incarnation_id()),
             route: self.git_daemon_repository_path().as_bytes().to_vec(),
             credentials,
@@ -345,7 +410,9 @@ impl OneNode {
             outcome_quota: Arc::new(PushQuota::default()),
             source_quota: Arc::new(PushQuota::default()),
         });
-        listener.set_nonblocking(true).map_err(|source| io_error("configure HTTP listener", source))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|source| io_error("configure HTTP listener", source))?;
         let completed = Arc::new(AtomicUsize::new(0));
         let refused = Arc::new(AtomicUsize::new(0));
         let mut pending: Vec<PendingSession> = Vec::new();
@@ -388,7 +455,8 @@ impl OneNode {
             last_activity = Instant::now();
             // Queue time counts against ingress: a queued peer does not acquire
             // a new wall-clock allowance when a blocking worker becomes free.
-            let deadline = GitDaemonSessionDeadline::new(profile.timeout, GitDaemonSessionWorkScaling::FLAT);
+            let deadline =
+                GitDaemonSessionDeadline::new(profile.timeout, GitDaemonSessionWorkScaling::FLAT);
             let finished = Arc::new(AtomicBool::new(false));
             let completion = Completion {
                 finished: Arc::clone(&finished),
@@ -403,10 +471,15 @@ impl OneNode {
             }) {
                 Ok(task) => pending.push(PendingSession {
                     finished,
-                    join: Box::new(move || { task.wait(); }),
+                    join: Box::new(move || {
+                        task.wait();
+                    }),
                 }),
                 Err(error) => {
-                    failure = Some(io_error("schedule Smart HTTP connection", io::Error::other(error.to_string())));
+                    failure = Some(io_error(
+                        "schedule Smart HTTP connection",
+                        io::Error::other(error.to_string()),
+                    ));
                     break;
                 }
             }
@@ -414,11 +487,15 @@ impl OneNode {
         for child in pending {
             (child.join)();
         }
-        let restored = listener.set_nonblocking(false)
+        let restored = listener
+            .set_nonblocking(false)
             .map_err(|source| io_error("restore HTTP listener", source));
         if let Some(error) = failure {
             if let Err(cleanup) = restored {
-                return Err(io_error("HTTP listener cleanup after service failure", io::Error::other(format!("{error}; {cleanup}"))));
+                return Err(io_error(
+                    "HTTP listener cleanup after service failure",
+                    io::Error::other(format!("{error}; {cleanup}")),
+                ));
             }
             return Err(error);
         }
@@ -426,7 +503,9 @@ impl OneNode {
         let completed_sessions = completed.load(Ordering::Acquire);
         let refused_sessions = refused.load(Ordering::Acquire);
         if completed_sessions.checked_add(refused_sessions) != Some(accepted) {
-            return Err(invalid_configuration("HTTP service did not settle every accepted child"));
+            return Err(invalid_configuration(
+                "HTTP service did not settle every accepted child",
+            ));
         }
         Ok(GitDaemonServerReceipt {
             accepted_sessions: accepted,
@@ -440,7 +519,10 @@ fn credential_error(error: CredentialFailure) -> NodeSmartHttpRefusal {
     io_error("load Smart HTTP credentials", io::Error::other(error))
 }
 fn invalid_configuration(message: &'static str) -> NodeSmartHttpRefusal {
-    io_error("configure Smart HTTP service", io::Error::new(io::ErrorKind::InvalidInput, message))
+    io_error(
+        "configure Smart HTTP service",
+        io::Error::new(io::ErrorKind::InvalidInput, message),
+    )
 }
 fn io_error(operation: &'static str, source: io::Error) -> NodeSmartHttpRefusal {
     NodeSmartHttpRefusal::Io { operation, source }
@@ -448,8 +530,20 @@ fn io_error(operation: &'static str, source: io::Error) -> NodeSmartHttpRefusal 
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Status {
-    Success, BadRequest, Unauthorized, Forbidden, NotFound, Conflict, TooLarge, HeaderTooLarge,
-    MediaType, Method, Expectation, Timeout, RateLimited, Unavailable,
+    Success,
+    BadRequest,
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Conflict,
+    TooLarge,
+    HeaderTooLarge,
+    MediaType,
+    Method,
+    Expectation,
+    Timeout,
+    RateLimited,
+    Unavailable,
 }
 impl Status {
     fn line(self) -> &'static str {
@@ -473,15 +567,22 @@ impl Status {
 }
 impl From<CredentialFailure> for Status {
     fn from(error: CredentialFailure) -> Self {
-        match error { CredentialFailure::UnknownCredential => Self::Unauthorized, _ => Self::Unavailable }
+        match error {
+            CredentialFailure::UnknownCredential => Self::Unauthorized,
+            _ => Self::Unavailable,
+        }
     }
 }
 impl From<HttpError> for Status {
     fn from(error: HttpError) -> Self {
         match error {
-            HttpError::BodyTooLarge | HttpError::WireBudgetExceeded | HttpError::TooManyChunks => Self::TooLarge,
+            HttpError::BodyTooLarge | HttpError::WireBudgetExceeded | HttpError::TooManyChunks => {
+                Self::TooLarge
+            }
             HttpError::HeadTooLarge | HttpError::TooManyHeaders => Self::HeaderTooLarge,
-            HttpError::UnsupportedMediaType | HttpError::UnsupportedContentEncoding => Self::MediaType,
+            HttpError::UnsupportedMediaType | HttpError::UnsupportedContentEncoding => {
+                Self::MediaType
+            }
             HttpError::UnsupportedExpectation => Self::Expectation,
             HttpError::MethodNotAllowed => Self::Method,
             HttpError::InvalidRoute => Self::NotFound,
@@ -491,7 +592,10 @@ impl From<HttpError> for Status {
 }
 impl From<io::Error> for Status {
     fn from(error: io::Error) -> Self {
-        if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) {
+        if matches!(
+            error.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        ) {
             Self::Timeout
         } else {
             Self::BadRequest
@@ -508,12 +612,18 @@ impl From<NodeSmartHttpRefusal> for Status {
             NodeSmartHttpRefusal::Rpc(error) => match *error {
                 RpcError::Http(error) => Self::from(error),
                 RpcError::Cancelled => Self::Timeout,
-                RpcError::Wire(_) | RpcError::Receive(_) | RpcError::WrongOperation
-                | RpcError::IncompleteRequest | RpcError::MultipleCommands
+                RpcError::Wire(_)
+                | RpcError::Receive(_)
+                | RpcError::WrongOperation
+                | RpcError::IncompleteRequest
+                | RpcError::MultipleCommands
                 | RpcError::FailedRequest => Self::BadRequest,
                 _ => Self::Unavailable,
             },
-            NodeSmartHttpRefusal::Io { operation: "read smart HTTP body", source } => Self::from(source),
+            NodeSmartHttpRefusal::Io {
+                operation: "read smart HTTP body",
+                source,
+            } => Self::from(source),
             // Admission errors can follow transmission or partial non-atomic
             // publication. Never classify those as proof of a rejected push.
             _ => Self::Unavailable,
@@ -526,7 +636,10 @@ fn authenticated_session(
     raw_head: &[u8],
     profile: &Profile,
 ) -> Result<LoopbackReceiveSession, Status> {
-    let grant = profile.credentials.authenticate(request.authorization()).map_err(Status::from)?;
+    let grant = profile
+        .credentials
+        .authenticate(request.authorization())
+        .map_err(Status::from)?;
     if request.repository_route.as_bytes() != profile.route {
         return Err(Status::NotFound);
     }
@@ -548,11 +661,17 @@ fn authenticated_session(
 fn retry_key(raw_head: &[u8]) -> Result<Option<&[u8]>, Status> {
     let text = std::str::from_utf8(raw_head).map_err(|_| Status::BadRequest)?;
     let mut key = None;
-    for line in text.split("\r\n").skip(1).take_while(|line| !line.is_empty()) {
+    for line in text
+        .split("\r\n")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+    {
         let (name, value) = line.split_once(':').ok_or(Status::BadRequest)?;
         if name.eq_ignore_ascii_case("Idempotency-Key") {
             let value = value.trim_matches([' ', '\t']).as_bytes();
-            if key.is_some() || value.is_empty() || value.len() > 128
+            if key.is_some()
+                || value.is_empty()
+                || value.len() > 128
                 || !value.iter().all(u8::is_ascii_graphic)
             {
                 return Err(Status::BadRequest);
@@ -560,7 +679,9 @@ fn retry_key(raw_head: &[u8]) -> Result<Option<&[u8]>, Status> {
             key = Some(value);
         }
         if name.eq_ignore_ascii_case("Connection")
-            && value.split(',').any(|part| part.trim().eq_ignore_ascii_case("Idempotency-Key"))
+            && value
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case("Idempotency-Key"))
         {
             return Err(Status::BadRequest);
         }
@@ -569,12 +690,19 @@ fn retry_key(raw_head: &[u8]) -> Result<Option<&[u8]>, Status> {
 }
 
 fn append_bounded(target: &mut Vec<u8>, bytes: &[u8], maximum: u64) -> Result<(), Status> {
-    let next = target.len().checked_add(bytes.len()).ok_or(Status::TooLarge)?;
+    let next = target
+        .len()
+        .checked_add(bytes.len())
+        .ok_or(Status::TooLarge)?;
     let maximum = usize::try_from(maximum).unwrap_or(usize::MAX);
-    if next > maximum { return Err(Status::TooLarge); }
+    if next > maximum {
+        return Err(Status::TooLarge);
+    }
     if next > target.capacity() {
         let capacity = next.max(target.capacity().saturating_mul(2)).min(maximum);
-        target.try_reserve_exact(capacity - target.len()).map_err(|_| Status::Unavailable)?;
+        target
+            .try_reserve_exact(capacity - target.len())
+            .map_err(|_| Status::Unavailable)?;
     }
     target.extend_from_slice(bytes);
     Ok(())
@@ -584,14 +712,22 @@ fn read_head(reader: &mut impl Read, limits: HttpLimits) -> Result<Vec<u8>, Stat
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; IO_CHUNK];
     loop {
-        if head::parse(&bytes, limits)?.is_some() { return Ok(bytes); }
-        let count = buffer.len().min(limits.max_head_bytes.saturating_sub(bytes.len()));
-        if count == 0 { return Err(Status::HeaderTooLarge); }
+        if head::parse(&bytes, limits)?.is_some() {
+            return Ok(bytes);
+        }
+        let count = buffer
+            .len()
+            .min(limits.max_head_bytes.saturating_sub(bytes.len()));
+        if count == 0 {
+            return Err(Status::HeaderTooLarge);
+        }
         let read = match reader.read(&mut buffer[..count]) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => result?,
         };
-        if read == 0 { return Err(Status::BadRequest); }
+        if read == 0 {
+            return Err(Status::BadRequest);
+        }
         append_bounded(&mut bytes, &buffer[..read], limits.max_head_bytes as u64)?;
     }
 }
@@ -604,16 +740,24 @@ struct ResponseWriter<'a> {
 impl Write for ResponseWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if !self.started {
-            self.inner.restart_deadline(GitDaemonSessionDeadline::new(self.timeout, GitDaemonSessionWorkScaling::FLAT));
+            self.inner.restart_deadline(GitDaemonSessionDeadline::new(
+                self.timeout,
+                GitDaemonSessionWorkScaling::FLAT,
+            ));
             self.started = true;
         }
         self.inner.write(bytes)
     }
-    fn flush(&mut self) -> io::Result<()> { self.inner.flush() }
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 fn write_error(writer: &mut impl Write, version: HttpVersion, status: Status) -> io::Result<()> {
-    let version = match version { HttpVersion::Http10 => "HTTP/1.0", HttpVersion::Http11 => "HTTP/1.1" };
+    let version = match version {
+        HttpVersion::Http10 => "HTTP/1.0",
+        HttpVersion::Http11 => "HTTP/1.1",
+    };
     let body = if status == Status::Unavailable {
         "repository operation unavailable; a push may already be committed; retry with the same Idempotency-Key\n"
     } else {
@@ -625,13 +769,26 @@ fn write_error(writer: &mut impl Write, version: HttpVersion, status: Status) ->
         Status::Method => "Allow: GET, POST\r\n",
         _ => "",
     };
-    write!(writer, "{version} {}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n{extra}\r\n{body}", status.line(), body.len())?;
+    write!(
+        writer,
+        "{version} {}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n{extra}\r\n{body}",
+        status.line(),
+        body.len()
+    )?;
     writer.flush()
 }
 
-fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, profile: &Profile) -> bool {
-    if stream.set_nonblocking(false).is_err() { return false; }
-    let Ok(mut output) = stream.try_clone() else { return false; };
+fn serve_connection(
+    mut stream: TcpStream,
+    deadline: GitDaemonSessionDeadline,
+    profile: &Profile,
+) -> bool {
+    if stream.set_nonblocking(false).is_err() {
+        return false;
+    }
+    let Ok(mut output) = stream.try_clone() else {
+        return false;
+    };
     let mut reader = DeadlineTcpStream::new(&mut stream, deadline.clone());
     let mut writer = ResponseWriter {
         inner: DeadlineTcpStream::new(&mut output, deadline),
@@ -653,27 +810,63 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
         if browser::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer)? {
             return Ok(());
         }
-        recovery = envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/outcomes"));
+        recovery = envelope
+            .target
+            .split('?')
+            .next()
+            .is_some_and(|path| path.contains("/api/v1/outcomes"));
         if recovery {
             // This read-only child has no mutation intake/Serving transition.
             // It uses its own scoped quota and always closes before returning.
-            return outcomes::serve(profile, &envelope, &bytes[..envelope.consumed],
-                &bytes[envelope.consumed..], &mut writer)
-                .map_err(|error| { recovery_error = Some(error); error.status });
+            return outcomes::serve(
+                profile,
+                &envelope,
+                &bytes[..envelope.consumed],
+                &bytes[envelope.consumed..],
+                &mut writer,
+            )
+            .map_err(|error| {
+                recovery_error = Some(error);
+                error.status
+            });
         }
-        source_api = envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/source"));
-        pull_api = envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/pulls"));
-        native = source_api || pull_api || envelope.target.split('?').next().is_some_and(|path| path.contains("/api/v1/issues"));
+        source_api = envelope
+            .target
+            .split('?')
+            .next()
+            .is_some_and(|path| path.contains("/api/v1/source"));
+        pull_api = envelope
+            .target
+            .split('?')
+            .next()
+            .is_some_and(|path| path.contains("/api/v1/pulls"));
+        native = source_api
+            || pull_api
+            || envelope
+                .target
+                .split('?')
+                .next()
+                .is_some_and(|path| path.contains("/api/v1/issues"));
         native_mutation = native && envelope.method == "POST" && !source_api;
         let source_request = if source_api {
-            Some(source::Request::parse(&envelope).map_err(|error| { api_error = Some(error); error.status })?)
-        } else { None };
+            Some(source::Request::parse(&envelope).map_err(|error| {
+                api_error = Some(error);
+                error.status
+            })?)
+        } else {
+            None
+        };
         if let Some(request) = &source_request {
             native_mutation = request.is_mutation();
         }
         let pull_request = if source_request.is_none() {
-            pulls::Request::parse(&envelope).map_err(|error| { api_error = Some(error); error.status })?
-        } else { None };
+            pulls::Request::parse(&envelope).map_err(|error| {
+                api_error = Some(error);
+                error.status
+            })?
+        } else {
+            None
+        };
         if let Some(request) = &pull_request {
             native_mutation = request.is_mutation();
         }
@@ -682,44 +875,94 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
                 api_error = Some(error);
                 error.status
             })?
-        } else { None };
-        let git_request = if source_request.is_none() && issue_request.is_none() && pull_request.is_none() {
-            Some(parse_head(&bytes, profile.http)?.ok_or(Status::BadRequest)?)
-        } else { None };
-        let session = if let Some(request) = &source_request {
-            source::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                .map_err(|error| { api_error = Some(error); error.status })?
-        } else if let Some(request) = &pull_request {
-            pulls::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                .map_err(|error| { api_error = Some(error); error.status })?
-        } else if let Some(request) = &issue_request {
-            issues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
-                .map_err(|error| { api_error = Some(error); error.status })?
         } else {
-            authenticated_session(git_request.as_ref().ok_or(Status::BadRequest)?, &bytes[..envelope.consumed], profile)?
+            None
         };
-        let mutation = native_mutation || git_request.as_ref().is_some_and(|request| request.operation == Operation::Rpc(Service::ReceivePack));
+        let git_request =
+            if source_request.is_none() && issue_request.is_none() && pull_request.is_none() {
+                Some(parse_head(&bytes, profile.http)?.ok_or(Status::BadRequest)?)
+            } else {
+                None
+            };
+        let session =
+            if let Some(request) = &source_request {
+                source::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                    .map_err(|error| {
+                        api_error = Some(error);
+                        error.status
+                    })?
+            } else if let Some(request) = &pull_request {
+                pulls::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                    .map_err(|error| {
+                        api_error = Some(error);
+                        error.status
+                    })?
+            } else if let Some(request) = &issue_request {
+                issues::authenticate(request, &envelope, &bytes[..envelope.consumed], profile)
+                    .map_err(|error| {
+                        api_error = Some(error);
+                        error.status
+                    })?
+            } else {
+                authenticated_session(
+                    git_request.as_ref().ok_or(Status::BadRequest)?,
+                    &bytes[..envelope.consumed],
+                    profile,
+                )?
+            };
+        let mutation = native_mutation
+            || git_request
+                .as_ref()
+                .is_some_and(|request| request.operation == Operation::Rpc(Service::ReceivePack));
         if source_request.is_some() && !mutation {
-            let principal = session.authenticated_session().ok_or(Status::Unauthorized)?.principal_id();
-            profile.source_quota.evaluate(&principal).map_err(|_| Status::RateLimited)?;
-        } else if mutation || pull_request.as_ref().is_some_and(|request| request.accepts_body()) {
+            let principal = session
+                .authenticated_session()
+                .ok_or(Status::Unauthorized)?
+                .principal_id();
+            profile
+                .source_quota
+                .evaluate(&principal)
+                .map_err(|_| Status::RateLimited)?;
+        } else if mutation
+            || pull_request
+                .as_ref()
+                .is_some_and(|request| request.accepts_body())
+        {
             // Source browsing/search must not consume mutation or recovery quotas.
-            let principal = session.authenticated_session().ok_or(Status::Unauthorized)?.principal_id();
-            profile.quota.evaluate(&principal).map_err(|_| Status::RateLimited)?;
+            let principal = session
+                .authenticated_session()
+                .ok_or(Status::Unauthorized)?
+                .principal_id();
+            profile
+                .quota
+                .evaluate(&principal)
+                .map_err(|_| Status::RateLimited)?;
         }
         if envelope.expect_continue && envelope.version == HttpVersion::Http10 {
             return Err(Status::Expectation);
         }
         let initial = &bytes[envelope.consumed..];
-        let body_not_allowed = pull_request.as_ref().is_some_and(|request| !request.accepts_body())
-            || issue_request.as_ref().is_some_and(|request| !request.is_mutation())
-            || git_request.as_ref().is_some_and(|request| matches!(request.operation, Operation::Discover(_)));
-        if body_not_allowed && !initial.is_empty() { return Err(Status::BadRequest); }
-        let mut node = OneNode::open_existing(profile.config.clone()).map_err(|_| Status::Unavailable)?;
+        let body_not_allowed = pull_request
+            .as_ref()
+            .is_some_and(|request| !request.accepts_body())
+            || issue_request
+                .as_ref()
+                .is_some_and(|request| !request.is_mutation())
+            || git_request
+                .as_ref()
+                .is_some_and(|request| matches!(request.operation, Operation::Discover(_)));
+        if body_not_allowed && !initial.is_empty() {
+            return Err(Status::BadRequest);
+        }
+        let mut node =
+            OneNode::open_existing(profile.config.clone()).map_err(|_| Status::Unavailable)?;
         let result = (|| -> Result<(), Status> {
-            let authenticated = node.runtime().block_on(node.authenticate_authority_head())
+            let authenticated = node
+                .runtime()
+                .block_on(node.authenticate_authority_head())
                 .map_err(|_| Status::Unavailable)?;
-            node.bring_into_service(authenticated.receipt().generation()).map_err(|_| Status::Unavailable)?;
+            node.bring_into_service(authenticated.receipt().generation())
+                .map_err(|_| Status::Unavailable)?;
             if envelope.expect_continue {
                 // No interim success before credentials, scopes, incarnation,
                 // endpoint envelope policy and node intake have all passed.
@@ -728,20 +971,56 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
             }
             let mut body = io::Cursor::new(initial).chain(&mut reader);
             if let Some(request) = &source_request {
-                let reply = source::execute(&node, request, &session, envelope.body, &mut body,
-                    profile.http, profile.maximum_response_bytes)
-                    .map_err(|error| { api_error = Some(error); error.status })?;
-                reply.send(&mut writer, version).map_err(|_| Status::Unavailable)?;
+                let reply = source::execute(
+                    &node,
+                    request,
+                    &session,
+                    envelope.body,
+                    &mut body,
+                    profile.http,
+                    profile.maximum_response_bytes,
+                )
+                .map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?;
+                reply
+                    .send(&mut writer, version)
+                    .map_err(|_| Status::Unavailable)?;
             } else if let Some(request) = &pull_request {
-                let reply = pulls::execute(&node, request, &session, envelope.body, &mut body,
-                    profile.http, profile.maximum_response_bytes)
-                    .map_err(|error| { api_error = Some(error); error.status })?;
-                reply.send(&mut writer, version).map_err(|_| Status::Unavailable)?;
+                let reply = pulls::execute(
+                    &node,
+                    request,
+                    &session,
+                    envelope.body,
+                    &mut body,
+                    profile.http,
+                    profile.maximum_response_bytes,
+                )
+                .map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?;
+                reply
+                    .send(&mut writer, version)
+                    .map_err(|_| Status::Unavailable)?;
             } else if let Some(request) = &issue_request {
-                let reply = issues::execute(&node, request, &session, envelope.body, &mut body,
-                    profile.http, profile.maximum_response_bytes)
-                    .map_err(|error| { api_error = Some(error); error.status })?;
-                reply.send(&mut writer, version).map_err(|_| Status::Unavailable)?;
+                let reply = issues::execute(
+                    &node,
+                    request,
+                    &session,
+                    envelope.body,
+                    &mut body,
+                    profile.http,
+                    profile.maximum_response_bytes,
+                )
+                .map_err(|error| {
+                    api_error = Some(error);
+                    error.status
+                })?;
+                reply
+                    .send(&mut writer, version)
+                    .map_err(|_| Status::Unavailable)?;
             } else {
                 let request = git_request.as_ref().ok_or(Status::BadRequest)?;
                 let mut live = || true;
@@ -749,26 +1028,54 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
                     match request.operation {
                         Operation::Discover(service) => {
                             let discovery = match service {
-                                Service::UploadPack => node.smart_http_upload_discovery_in(request, WireLimits::default())?,
-                                Service::ReceivePack => node.smart_http_receive_discovery_in(request, &session, WireLimits::default())?,
+                                Service::UploadPack => node.smart_http_upload_discovery_in(
+                                    request,
+                                    WireLimits::default(),
+                                )?,
+                                Service::ReceivePack => node.smart_http_receive_discovery_in(
+                                    request,
+                                    &session,
+                                    WireLimits::default(),
+                                )?,
                             };
-                            writer.write_all(discovery.head().as_bytes()).map_err(|source| io_error("write HTTP discovery head", source))?;
-                            writer.write_all(discovery.body()).map_err(|source| io_error("write HTTP discovery body", source))?;
+                            writer
+                                .write_all(discovery.head().as_bytes())
+                                .map_err(|source| io_error("write HTTP discovery head", source))?;
+                            writer
+                                .write_all(discovery.body())
+                                .map_err(|source| io_error("write HTTP discovery body", source))?;
                         }
                         Operation::Rpc(Service::UploadPack) => {
-                            node.smart_http_upload_stream_in(request, &mut body, WireLimits::default(), profile.http,
-                                profile.maximum_response_bytes, &mut live, &mut writer)?;
+                            node.smart_http_upload_stream_in(
+                                request,
+                                &mut body,
+                                WireLimits::default(),
+                                profile.http,
+                                profile.maximum_response_bytes,
+                                &mut live,
+                                &mut writer,
+                            )?;
                         }
                         Operation::Rpc(Service::ReceivePack) => {
-                            let _outcome = node.smart_http_receive_stream_in(request, &session, &mut body,
-                                profile.http, fgit_admission::AdmissionLimits::default(), &mut live, &mut writer)?;
+                            let _outcome = node.smart_http_receive_stream_in(
+                                request,
+                                &session,
+                                &mut body,
+                                profile.http,
+                                fgit_admission::AdmissionLimits::default(),
+                                &mut live,
+                                &mut writer,
+                            )?;
                         }
                     }
                     Ok(())
                 })();
                 if let Err(NodeSmartHttpRefusal::ReceiveResponse { outcome, .. }) = &git_result {
                     for command in &outcome.commands {
-                        eprintln!("Smart HTTP reply lost after canonical outcome for transaction {}; retry with the original Idempotency-Key", command.tx_id);
+                        eprintln!(
+                            "Smart HTTP reply lost after canonical outcome for transaction {}; retry with the original Idempotency-Key",
+                            command.tx_id
+                        );
                     }
                 }
                 git_result.map_err(Status::from)?;
@@ -787,10 +1094,12 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
         // In particular, disconnect/cleanup never proves a mutation rolled back.
         if !writer.started {
             if recovery {
-                let error = recovery_error.unwrap_or_else(|| outcomes::ApiError::from_status(status));
+                let error =
+                    recovery_error.unwrap_or_else(|| outcomes::ApiError::from_status(status));
                 let _ = error.send(&mut writer, version);
             } else if native {
-                let error = api_error.unwrap_or_else(|| issues::ApiError::from_status(status, native_mutation));
+                let error = api_error
+                    .unwrap_or_else(|| issues::ApiError::from_status(status, native_mutation));
                 if source_api {
                     let _ = error.send_named(&mut writer, version, "source_error");
                 } else if pull_api {
@@ -811,7 +1120,9 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
     let mut buffer = [0_u8; 1024];
     while remaining > 0 {
         let budget = Duration::from_secs(1).saturating_sub(started.elapsed());
-        if budget.is_zero() || stream.set_read_timeout(Some(budget)).is_err() { break; }
+        if budget.is_zero() || stream.set_read_timeout(Some(budget)).is_err() {
+            break;
+        }
         match stream.read(&mut buffer[..remaining.min(1024)]) {
             Ok(0) | Err(_) => break,
             Ok(count) => remaining -= count,
@@ -826,17 +1137,21 @@ fn log_cleanup(error: &NodeRefusal) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ingress::BodyInput;
     use super::*;
-    use std::io::Cursor;
     use fgit_crypto::sha256_digest;
     use fgit_types::{RepositoryId, TenantId};
     use fgit_wire::smart_http::BodyDecoder;
     use fgit_wire::smart_http::rpc::RpcProgress;
-    use super::super::ingress::BodyInput;
+    use std::io::Cursor;
 
     fn profile() -> Profile {
         Profile {
-            config: NodeConfig::new("unused".into(), TenantId::from_bytes([1; 16]), RepositoryId::from_bytes([2; 16])),
+            config: NodeConfig::new(
+                "unused".into(),
+                TenantId::from_bytes([1; 16]),
+                RepositoryId::from_bytes([2; 16]),
+            ),
             route: b"/repo.git".to_vec(),
             credentials: CredentialSource::Static {
                 digest: sha256_digest(&[b'a'; 64]),
@@ -861,21 +1176,39 @@ mod tests {
     #[test]
     fn bearer_and_explicit_retry_identity_are_both_required() {
         let profile = profile();
-        for extra in ["".to_owned(), "X-Forwarded-User: trusted\r\nIdempotency-Key: k\r\n".to_owned(),
-            format!("Authorization: Bearer {}\r\nIdempotency-Key: k\r\n", "b".repeat(64))] {
+        for extra in [
+            "".to_owned(),
+            "X-Forwarded-User: trusted\r\nIdempotency-Key: k\r\n".to_owned(),
+            format!(
+                "Authorization: Bearer {}\r\nIdempotency-Key: k\r\n",
+                "b".repeat(64)
+            ),
+        ] {
             let bytes = head(&extra);
             let request = parse_head(&bytes, profile.http).unwrap().unwrap();
-            assert_eq!(authenticated_session(&request, &bytes, &profile), Err(Status::Unauthorized));
+            assert_eq!(
+                authenticated_session(&request, &bytes, &profile),
+                Err(Status::Unauthorized)
+            );
         }
         let bytes = head(&format!("Authorization: Bearer {}\r\n", "a".repeat(64)));
         let request = parse_head(&bytes, profile.http).unwrap().unwrap();
-        assert_eq!(authenticated_session(&request, &bytes, &profile), Err(Status::BadRequest));
-        let bytes = head(&format!("Authorization: Bearer {}\r\nIdempotency-Key: stable-1\r\n", "a".repeat(64)));
+        assert_eq!(
+            authenticated_session(&request, &bytes, &profile),
+            Err(Status::BadRequest)
+        );
+        let bytes = head(&format!(
+            "Authorization: Bearer {}\r\nIdempotency-Key: stable-1\r\n",
+            "a".repeat(64)
+        ));
         let request = parse_head(&bytes, profile.http).unwrap().unwrap();
         assert!(authenticated_session(&request, &bytes, &profile).is_ok());
         let mut readonly = profile.clone();
         readonly.allow_receive = false;
-        assert_eq!(authenticated_session(&request, &bytes, &readonly), Err(Status::Forbidden));
+        assert_eq!(
+            authenticated_session(&request, &bytes, &readonly),
+            Err(Status::Forbidden)
+        );
     }
     // RFC 4648 encoding of the fixture user-pass `git:` + 64 lowercase a's.
     const BASIC: &str = "Basic Z2l0OmFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=";
@@ -883,22 +1216,42 @@ mod tests {
     #[test]
     fn basic_and_bearer_bind_the_same_principal_and_explicit_retry_key() {
         let profile = profile();
-        let basic = head(&format!("Authorization: {BASIC}\r\nIdempotency-Key: stable-1\r\n"));
-        let bearer = head(&format!("Authorization: Bearer {}\r\nIdempotency-Key: stable-1\r\n", "a".repeat(64)));
+        let basic = head(&format!(
+            "Authorization: {BASIC}\r\nIdempotency-Key: stable-1\r\n"
+        ));
+        let bearer = head(&format!(
+            "Authorization: Bearer {}\r\nIdempotency-Key: stable-1\r\n",
+            "a".repeat(64)
+        ));
         let basic_request = parse_head(&basic, profile.http).unwrap().unwrap();
         let bearer_request = parse_head(&bearer, profile.http).unwrap().unwrap();
         let selected = authenticated_session(&basic_request, &basic, &profile).unwrap();
-        assert_eq!(selected, authenticated_session(&bearer_request, &bearer, &profile).unwrap());
-        assert_eq!(selected.authenticated_session().unwrap().principal_id(), PrincipalId::from_bytes([3; 16]));
+        assert_eq!(
+            selected,
+            authenticated_session(&bearer_request, &bearer, &profile).unwrap()
+        );
+        assert_eq!(
+            selected.authenticated_session().unwrap().principal_id(),
+            PrincipalId::from_bytes([3; 16])
+        );
         let no_key = head(&format!("Authorization: {BASIC}\r\n"));
         let request = parse_head(&no_key, profile.http).unwrap().unwrap();
-        assert_eq!(authenticated_session(&request, &no_key, &profile), Err(Status::BadRequest));
+        assert_eq!(
+            authenticated_session(&request, &no_key, &profile),
+            Err(Status::BadRequest)
+        );
         let mut readonly = profile.clone();
         readonly.allow_receive = false;
-        assert_eq!(authenticated_session(&basic_request, &basic, &readonly), Err(Status::Forbidden));
+        assert_eq!(
+            authenticated_session(&basic_request, &basic, &readonly),
+            Err(Status::Forbidden)
+        );
         let mut foreign = profile.clone();
         foreign.route = b"/different.git".to_vec();
-        assert_eq!(authenticated_session(&basic_request, &basic, &foreign), Err(Status::NotFound));
+        assert_eq!(
+            authenticated_session(&basic_request, &basic, &foreign),
+            Err(Status::NotFound)
+        );
     }
 
     #[test]
@@ -908,13 +1261,19 @@ mod tests {
         let bytes = format!("GET /repo.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: local\r\nAuthorization: {BASIC}\r\n\r\n").into_bytes();
         let request = parse_head(&bytes, profile.http).unwrap().unwrap();
         let selected = authenticated_session(&request, &bytes, &profile).unwrap();
-        assert_eq!(selected.authenticated_session().unwrap().principal_id(), PrincipalId::from_bytes([3; 16]));
+        assert_eq!(
+            selected.authenticated_session().unwrap().principal_id(),
+            PrincipalId::from_bytes([3; 16])
+        );
         assert_eq!(retry_key(&bytes).unwrap(), None);
     }
 
     #[test]
     fn only_unauthorized_responses_offer_both_credential_challenges() {
-        for (version, prefix) in [(HttpVersion::Http10, "HTTP/1.0"), (HttpVersion::Http11, "HTTP/1.1")] {
+        for (version, prefix) in [
+            (HttpVersion::Http10, "HTTP/1.0"),
+            (HttpVersion::Http11, "HTTP/1.1"),
+        ] {
             for status in [Status::Unauthorized, Status::Forbidden, Status::Unavailable] {
                 let mut response = Vec::new();
                 write_error(&mut response, version, status).unwrap();
@@ -925,10 +1284,15 @@ mod tests {
                 assert!(headers.contains("Cache-Control: no-store"));
                 assert!(!response.contains(BASIC));
                 if status == Status::Unauthorized {
-                    assert!(headers.contains("WWW-Authenticate: Basic realm=\"frankengit\", charset=\"UTF-8\""));
+                    assert!(headers.contains(
+                        "WWW-Authenticate: Basic realm=\"frankengit\", charset=\"UTF-8\""
+                    ));
                     assert!(headers.contains("WWW-Authenticate: Bearer realm=\"frankengit\""));
                     assert_eq!(headers.matches("WWW-Authenticate:").count(), 2);
-                    assert!(headers.find("WWW-Authenticate: Basic") < headers.find("WWW-Authenticate: Bearer"));
+                    assert!(
+                        headers.find("WWW-Authenticate: Basic")
+                            < headers.find("WWW-Authenticate: Bearer")
+                    );
                 } else {
                     assert!(!headers.contains("WWW-Authenticate:"));
                 }
@@ -941,43 +1305,103 @@ mod tests {
 
     #[test]
     fn duplicate_or_hop_by_hop_retry_identity_is_refused() {
-        for extra in ["Idempotency-Key: a\r\nidempotency-key: b\r\n", "Idempotency-Key: a\r\nConnection: Idempotency-Key\r\n", "Idempotency-Key: \r\n"] {
+        for extra in [
+            "Idempotency-Key: a\r\nidempotency-key: b\r\n",
+            "Idempotency-Key: a\r\nConnection: Idempotency-Key\r\n",
+            "Idempotency-Key: \r\n",
+        ] {
             assert_eq!(retry_key(&head(extra)), Err(Status::BadRequest));
         }
-        assert_eq!(retry_key(&head("Idempotency-Key: a\r\n")).unwrap(), Some(b"a".as_slice()));
+        assert_eq!(
+            retry_key(&head("Idempotency-Key: a\r\n")).unwrap(),
+            Some(b"a".as_slice())
+        );
     }
-    fn decoded_body(reader: &mut impl Read, initial: &[u8], request: &RequestHead<'_>, limits: HttpLimits) -> Result<u64, Status> {
+    fn decoded_body(
+        reader: &mut impl Read,
+        initial: &[u8],
+        request: &RequestHead<'_>,
+        limits: HttpLimits,
+    ) -> Result<u64, Status> {
         let mut decoder = BodyDecoder::new(request.body, limits)?;
         let mut reader = Cursor::new(initial).chain(reader);
-        BodyInput::Reader(&mut reader).consume(&mut || true, |bytes, _| {
-            let mut consumed = 0;
-            while consumed < bytes.len() && !decoder.is_complete() {
-                consumed += decoder.push(&bytes[consumed..])?.consumed;
-            }
-            Ok(RpcProgress { consumed, body_complete: decoder.is_complete(), decoded_body_bytes: decoder.decoded_bytes() })
-        }).map_err(Status::from)
+        BodyInput::Reader(&mut reader)
+            .consume(&mut || true, |bytes, _| {
+                let mut consumed = 0;
+                while consumed < bytes.len() && !decoder.is_complete() {
+                    consumed += decoder.push(&bytes[consumed..])?.consumed;
+                }
+                Ok(RpcProgress {
+                    consumed,
+                    body_complete: decoder.is_complete(),
+                    decoded_body_bytes: decoder.decoded_bytes(),
+                })
+            })
+            .map_err(Status::from)
     }
     #[test]
     fn bodies_finish_at_framing_without_waiting_for_socket_eof() {
         struct NoMoreReads;
         impl Read for NoMoreReads {
-            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> { panic!("complete body must not wait for EOF") }
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("complete body must not wait for EOF")
+            }
         }
         let bytes = head("");
         let request = parse_head(&bytes, HttpLimits::default()).unwrap().unwrap();
-        assert_eq!(decoded_body(&mut NoMoreReads, b"0000", &request, HttpLimits::default()).unwrap(), 4);
-        assert_eq!(decoded_body(&mut NoMoreReads, b"0000NEXT", &request, HttpLimits::default()), Err(Status::BadRequest));
-        assert_eq!(decoded_body(&mut Cursor::new(b""), b"000", &request, HttpLimits::default()), Err(Status::BadRequest));
+        assert_eq!(
+            decoded_body(&mut NoMoreReads, b"0000", &request, HttpLimits::default()).unwrap(),
+            4
+        );
+        assert_eq!(
+            decoded_body(
+                &mut NoMoreReads,
+                b"0000NEXT",
+                &request,
+                HttpLimits::default()
+            ),
+            Err(Status::BadRequest)
+        );
+        assert_eq!(
+            decoded_body(
+                &mut Cursor::new(b""),
+                b"000",
+                &request,
+                HttpLimits::default()
+            ),
+            Err(Status::BadRequest)
+        );
     }
     #[test]
     fn chunked_intake_rejects_trailers_and_overflow() {
-        let bytes = String::from_utf8(head("")).unwrap().replace("Content-Length: 4", "Transfer-Encoding: chunked");
-        let request = parse_head(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+        let bytes = String::from_utf8(head(""))
+            .unwrap()
+            .replace("Content-Length: 4", "Transfer-Encoding: chunked");
+        let request = parse_head(bytes.as_bytes(), HttpLimits::default())
+            .unwrap()
+            .unwrap();
         let body = b"2\r\n00\r\n2\r\n00\r\n0\r\n\r\n";
-        assert_eq!(decoded_body(&mut Cursor::new(body), b"", &request, HttpLimits::default()).unwrap(), 4);
-        assert_eq!(decoded_body(&mut Cursor::new(b"0\r\nX: y\r\n\r\n"), b"", &request, HttpLimits::default()), Err(Status::BadRequest));
-        let limits = HttpLimits { max_body_bytes: 3, ..HttpLimits::default() };
-        assert_eq!(decoded_body(&mut Cursor::new(body), b"", &request, limits), Err(Status::TooLarge));
+        assert_eq!(
+            decoded_body(&mut Cursor::new(body), b"", &request, HttpLimits::default()).unwrap(),
+            4
+        );
+        assert_eq!(
+            decoded_body(
+                &mut Cursor::new(b"0\r\nX: y\r\n\r\n"),
+                b"",
+                &request,
+                HttpLimits::default()
+            ),
+            Err(Status::BadRequest)
+        );
+        let limits = HttpLimits {
+            max_body_bytes: 3,
+            ..HttpLimits::default()
+        };
+        assert_eq!(
+            decoded_body(&mut Cursor::new(body), b"", &request, limits),
+            Err(Status::TooLarge)
+        );
     }
     #[test]
     fn final_refusal_is_self_delimiting_and_contains_no_request_text() {

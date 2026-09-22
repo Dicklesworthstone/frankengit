@@ -93,7 +93,10 @@ impl fmt::Display for McpValidationError {
                 )
             }
             Self::MissingBudgetDimension { tool, dimension } => {
-                write!(formatter, "tool '{tool}' refuses: budget dimension '{dimension}' must be greater than zero")
+                write!(
+                    formatter,
+                    "tool '{tool}' refuses: budget dimension '{dimension}' must be greater than zero"
+                )
             }
             Self::BudgetCeilingExceeded {
                 tool,
@@ -101,7 +104,10 @@ impl fmt::Display for McpValidationError {
                 actual,
                 ceiling,
             } => {
-                write!(formatter, "tool '{tool}' refuses: budget dimension '{dimension}' value {actual} exceeds ceiling {ceiling}")
+                write!(
+                    formatter,
+                    "tool '{tool}' refuses: budget dimension '{dimension}' value {actual} exceeds ceiling {ceiling}"
+                )
             }
             Self::MissingAuthorityPosition { tool, requirement } => {
                 write!(
@@ -110,7 +116,10 @@ impl fmt::Display for McpValidationError {
                 )
             }
             Self::ProseOnlyError { tool, code } => {
-                write!(formatter, "tool '{tool}' refuses: refusal code '{code}' is prose-like, must be snake_case identifier")
+                write!(
+                    formatter,
+                    "tool '{tool}' refuses: refusal code '{code}' is prose-like, must be snake_case identifier"
+                )
             }
             Self::EmptyRefusalCodes { tool } => {
                 write!(

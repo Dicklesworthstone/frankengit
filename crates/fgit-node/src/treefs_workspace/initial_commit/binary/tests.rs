@@ -9,16 +9,25 @@ const LITERAL: &str = "literal 7\nOcmZQzWa8!e?+5?_r~z95\n\n";
 const DELTA: &str = "delta 10\nRc${NkXJ=q!;^q492mk{j0cijL\n\n";
 const EMPTY: &str = "literal 0\nHcmV?d00001\n\n";
 fn metadata() -> MergeMetadata {
-    MergeMetadata { author: "A <a@example.invalid>".into(), committer: "C <c@example.invalid>".into(),
-        timestamp: 1, message: b"initial\n".to_vec() }
+    MergeMetadata {
+        author: "A <a@example.invalid>".into(),
+        committer: "C <c@example.invalid>".into(),
+        timestamp: 1,
+        message: b"initial\n".to_vec(),
+    }
 }
 fn patch(format: GitHashAlgorithm, path: &str, forward: &str, reverse: &str) -> Vec<u8> {
     let target = git_object_id(format, GitObjectKind::Blob, BODY);
     format!("diff --git a/{path} b/{path}\nnew file mode 100755\nindex {}..{target}\nGIT binary patch\n{forward}{reverse}",
         "0".repeat(format.digest_len() * 2)).into_bytes()
 }
-fn prepare(format: GitHashAlgorithm, input: &[u8]) -> Result<InitialCommitPlan, InitialCommitError> {
-    prepare_initial_commit(format, input, &metadata(), PatchLimits::default(), &|| false)
+fn prepare(
+    format: GitHashAlgorithm,
+    input: &[u8],
+) -> Result<InitialCommitPlan, InitialCommitError> {
+    prepare_initial_commit(format, input, &metadata(), PatchLimits::default(), &|| {
+        false
+    })
 }
 
 #[test]
@@ -26,14 +35,28 @@ fn real_literal_and_empty_base_delta_create_identical_complete_root_objects() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let literal = prepare(format, &patch(format, "asset.bin", LITERAL, EMPTY)).unwrap();
         let delta = prepare(format, &patch(format, "asset.bin", DELTA, EMPTY)).unwrap();
-        assert_eq!(literal.commit, delta.commit); assert_eq!(literal.objects, delta.objects);
+        assert_eq!(literal.commit, delta.commit);
+        assert_eq!(literal.objects, delta.objects);
         let blob = git_object_id(format, GitObjectKind::Blob, BODY);
-        assert_eq!(literal.files[0].blob, blob); assert_eq!(literal.files[0].mode, 0o100755);
-        assert_eq!(literal.objects.iter().find(|o| o.id == blob).unwrap().body, BODY);
+        assert_eq!(literal.files[0].blob, blob);
+        assert_eq!(literal.files[0].mode, 0o100755);
+        assert_eq!(
+            literal.objects.iter().find(|o| o.id == blob).unwrap().body,
+            BODY
+        );
         let tree = [b"100755 asset.bin\0".as_slice(), blob.as_bytes()].concat();
-        assert_eq!(literal.tree, git_object_id(format, GitObjectKind::Tree, &tree));
-        let commit = format!("tree {}\nauthor A <a@example.invalid> 1 +0000\ncommitter C <c@example.invalid> 1 +0000\n\ninitial\n", literal.tree);
-        assert_eq!(literal.commit, git_object_id(format, GitObjectKind::Commit, commit.as_bytes()));
+        assert_eq!(
+            literal.tree,
+            git_object_id(format, GitObjectKind::Tree, &tree)
+        );
+        let commit = format!(
+            "tree {}\nauthor A <a@example.invalid> 1 +0000\ncommitter C <c@example.invalid> 1 +0000\n\ninitial\n",
+            literal.tree
+        );
+        assert_eq!(
+            literal.commit,
+            git_object_id(format, GitObjectKind::Commit, commit.as_bytes())
+        );
         assert_eq!(literal.objects.len(), 3);
     }
 }
@@ -43,12 +66,22 @@ fn an_empty_compressed_creation_is_a_present_empty_blob() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let original = git_object_id(format, GitObjectKind::Blob, BODY).to_string();
         let empty = git_object_id(format, GitObjectKind::Blob, b"");
-        let input = String::from_utf8(patch(format, "empty.bin", EMPTY, EMPTY)).unwrap()
+        let input = String::from_utf8(patch(format, "empty.bin", EMPTY, EMPTY))
+            .unwrap()
             .replace(&original, &empty.to_string());
         let plan = prepare(format, input.as_bytes()).unwrap();
-        assert_eq!(plan.files.len(), 1); assert_eq!(plan.files[0].bytes, 0);
-        assert_eq!(plan.files[0].blob, empty); assert_eq!(plan.objects.len(), 3);
-        assert!(plan.objects.iter().find(|o| o.id == empty).unwrap().body.is_empty());
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].bytes, 0);
+        assert_eq!(plan.files[0].blob, empty);
+        assert_eq!(plan.objects.len(), 3);
+        assert!(
+            plan.objects
+                .iter()
+                .find(|o| o.id == empty)
+                .unwrap()
+                .body
+                .is_empty()
+        );
     }
 }
 
@@ -57,9 +90,16 @@ fn mixed_binary_text_nested_and_empty_creations_preserve_native_identities() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut input = patch(format, "dir/asset.bin", LITERAL, EMPTY);
         input.extend_from_slice(b"diff --git a/empty b/empty\nnew file mode 100644\ndiff --git a/readme b/readme\nnew file mode 100644\n--- /dev/null\n+++ b/readme\n@@ -0,0 +1 @@\n+hello\n");
-        let plan = prepare(format, &input).unwrap(); assert_eq!(plan.files.len(), 3);
-        assert_eq!(plan.files[1].blob, git_object_id(format, GitObjectKind::Blob, b""));
-        assert_eq!(plan.files[2].blob, git_object_id(format, GitObjectKind::Blob, b"hello\n"));
+        let plan = prepare(format, &input).unwrap();
+        assert_eq!(plan.files.len(), 3);
+        assert_eq!(
+            plan.files[1].blob,
+            git_object_id(format, GitObjectKind::Blob, b"")
+        );
+        assert_eq!(
+            plan.files[2].blob,
+            git_object_id(format, GitObjectKind::Blob, b"hello\n")
+        );
         assert_eq!(plan, prepare(format, &input).unwrap());
     }
 }
@@ -68,8 +108,13 @@ fn mixed_binary_text_nested_and_empty_creations_preserve_native_identities() {
 fn a_supplied_reverse_image_must_reconstruct_absence_not_the_created_file() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         assert!(prepare(format, &patch(format, "asset.bin", LITERAL, EMPTY)).is_ok());
-        assert!(matches!(prepare(format, &patch(format, "asset.bin", LITERAL, LITERAL)),
-            Err(InitialCommitError::Patch(PatchError::Syntax { reason: "initial binary reverse image mismatch", .. }))));
+        assert!(matches!(
+            prepare(format, &patch(format, "asset.bin", LITERAL, LITERAL)),
+            Err(InitialCommitError::Patch(PatchError::Syntax {
+                reason: "initial binary reverse image mismatch",
+                ..
+            }))
+        ));
         // A reverse member is optional, not silently synthesized.
         assert!(prepare(format, &patch(format, "asset.bin", LITERAL, "")).is_ok());
     }
@@ -81,9 +126,12 @@ fn corruption_truncation_target_mismatch_and_foreign_width_refuse() {
     let good = patch(format, "asset.bin", LITERAL, EMPTY);
     let text = String::from_utf8(good.clone()).unwrap();
     let id = git_object_id(format, GitObjectKind::Blob, BODY).to_string();
-    for bad in [text.replace("OcmZQz", "OcmZQy").into_bytes(),
-        good[..good.len() - 3].to_vec(), text.replace(&id, &"a".repeat(40)).into_bytes(),
-        patch(GitHashAlgorithm::Sha256, "asset.bin", LITERAL, EMPTY)] {
+    for bad in [
+        text.replace("OcmZQz", "OcmZQy").into_bytes(),
+        good[..good.len() - 3].to_vec(),
+        text.replace(&id, &"a".repeat(40)).into_bytes(),
+        patch(GitHashAlgorithm::Sha256, "asset.bin", LITERAL, EMPTY),
+    ] {
         assert!(prepare(format, &bad).is_err());
     }
     assert!(prepare(format, &good).is_ok());
@@ -95,28 +143,49 @@ fn shared_expansion_file_and_record_budgets_refuse_the_whole_plan() {
     let mut input = patch(format, "a", LITERAL, EMPTY);
     input.extend(patch(format, "b", LITERAL, EMPTY));
     assert!(prepare(format, &input).is_ok());
-    for limits in [PatchLimits { max_output_bytes: BODY.len() * 2 - 1, ..PatchLimits::default() },
-        PatchLimits { max_file_bytes: BODY.len() - 1, ..PatchLimits::default() },
-        PatchLimits { max_files: 1, ..PatchLimits::default() },
-        PatchLimits { max_lines: 1, ..PatchLimits::default() }] {
+    for limits in [
+        PatchLimits {
+            max_output_bytes: BODY.len() * 2 - 1,
+            ..PatchLimits::default()
+        },
+        PatchLimits {
+            max_file_bytes: BODY.len() - 1,
+            ..PatchLimits::default()
+        },
+        PatchLimits {
+            max_files: 1,
+            ..PatchLimits::default()
+        },
+        PatchLimits {
+            max_lines: 1,
+            ..PatchLimits::default()
+        },
+    ] {
         assert!(prepare_initial_commit(format, &input, &metadata(), limits, &|| false).is_err());
     }
 }
 
 #[test]
 fn late_noncreation_and_cancelled_work_never_produce_partial_roots() {
-    let format = GitHashAlgorithm::Sha1; let good = patch(format, "a", LITERAL, EMPTY);
+    let format = GitHashAlgorithm::Sha1;
+    let good = patch(format, "a", LITERAL, EMPTY);
     let mut input = good.clone();
     input.extend_from_slice(b"diff --git a/z b/z\nold mode 100644\nnew mode 100755\n");
-    assert!(matches!(prepare(format, &input), Err(InitialCommitError::CreationRequired)));
-    assert!(matches!(prepare_initial_commit(format, &good, &metadata(), PatchLimits::default(), &|| true),
-        Err(InitialCommitError::Patch(PatchError::Cancelled))));
+    assert!(matches!(
+        prepare(format, &input),
+        Err(InitialCommitError::CreationRequired)
+    ));
+    assert!(matches!(
+        prepare_initial_commit(format, &good, &metadata(), PatchLimits::default(), &|| true),
+        Err(InitialCommitError::Patch(PatchError::Cancelled))
+    ));
     assert!(prepare(format, &good).is_ok());
 }
 
 #[test]
 fn late_corrupt_reverse_cannot_leave_an_earlier_creation_accepted() {
-    let format = GitHashAlgorithm::Sha1; let mut input = patch(format, "a", LITERAL, EMPTY);
+    let format = GitHashAlgorithm::Sha1;
+    let mut input = patch(format, "a", LITERAL, EMPTY);
     input.extend(patch(format, "z", DELTA, LITERAL));
     assert!(prepare(format, &input).is_err());
     let mut valid = patch(format, "a", LITERAL, EMPTY);
@@ -129,44 +198,118 @@ fn binary_absent_branch_preparation_publication_and_reopen_keep_original_identit
     use crate::{LoopbackReceiveSession, NodeConfig, OneNode};
     use fgit_admission::AdmissionLimits;
     use fgit_authority::IdempotencyKey;
-    use fgit_types::{DecisionOutcome, HeadGeneration, PrincipalId, RefName, RepositoryId, TenantId};
+    use fgit_types::{
+        DecisionOutcome, HeadGeneration, PrincipalId, RefName, RepositoryId, TenantId,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        let root = std::env::temp_dir().join(format!("fg-initial-compressed-{}-{}",
-            std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let root = std::env::temp_dir().join(format!(
+            "fg-initial-compressed-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir(&root).unwrap();
-        let config = || NodeConfig::new(root.join("node"), TenantId::from_bytes([0xd7;16]),
-            RepositoryId::from_bytes([0xd8;16])).with_object_format(format).with_worker_threads(2);
+        let config = || {
+            NodeConfig::new(
+                root.join("node"),
+                TenantId::from_bytes([0xd7; 16]),
+                RepositoryId::from_bytes([0xd8; 16]),
+            )
+            .with_object_format(format)
+            .with_worker_threads(2)
+        };
         let (mut node, _) = OneNode::init(config()).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
         let reference = RefName::try_new(b"refs/heads/main").unwrap();
-        let input = patch(format, "asset.bin", DELTA, EMPTY); let meta = metadata();
+        let input = patch(format, "asset.bin", DELTA, EMPTY);
+        let meta = metadata();
         let request = node.request_context();
-        let before = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
-        let (head, plan, bundle) = node.runtime().block_on(node.prepare_trusted_initial_patch_in(
-            &request, &reference, &input, &meta, PatchLimits::default(), Some(before.basis().id()))).unwrap();
+        let before = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        let (head, plan, bundle) = node
+            .runtime()
+            .block_on(node.prepare_trusted_initial_patch_in(
+                &request,
+                &reference,
+                &input,
+                &meta,
+                PatchLimits::default(),
+                Some(before.basis().id()),
+            ))
+            .unwrap();
         assert_eq!(head, before.basis().id());
-        let untouched = node.runtime().block_on(node.materialize_admission_in(&request)).unwrap();
-        assert_eq!(untouched.basis(), before.basis()); assert!(untouched.snapshot().refs.is_empty());
+        let untouched = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .unwrap();
+        assert_eq!(untouched.basis(), before.basis());
+        assert!(untouched.snapshot().refs.is_empty());
         assert!(node.read_git_object(plan.commit).is_err());
-        let session = LoopbackReceiveSession::authenticated(PrincipalId::from_bytes([0xd9;16]),
-            IdempotencyKey::new(b"initial-compressed".to_vec()).unwrap());
-        let outcome = node.runtime().block_on(node.apply_initial_patch_bundle_durable_in(
-            &request, &session, &reference, plan.commit, bundle.bytes(), AdmissionLimits::default())).unwrap();
-        assert!(matches!(outcome.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
-        for object in &plan.objects { assert_eq!(node.read_git_object(object.id).unwrap().payload(), object.body); }
-        assert!(node.runtime().block_on(node.prepare_trusted_initial_patch_in(
-            &request, &reference, &input, &meta, PatchLimits::default(), None)).is_err());
+        let session = LoopbackReceiveSession::authenticated(
+            PrincipalId::from_bytes([0xd9; 16]),
+            IdempotencyKey::new(b"initial-compressed".to_vec()).unwrap(),
+        );
+        let outcome = node
+            .runtime()
+            .block_on(node.apply_initial_patch_bundle_durable_in(
+                &request,
+                &session,
+                &reference,
+                plan.commit,
+                bundle.bytes(),
+                AdmissionLimits::default(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            outcome.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        for object in &plan.objects {
+            assert_eq!(
+                node.read_git_object(object.id).unwrap().payload(),
+                object.body
+            );
+        }
+        assert!(
+            node.runtime()
+                .block_on(node.prepare_trusted_initial_patch_in(
+                    &request,
+                    &reference,
+                    &input,
+                    &meta,
+                    PatchLimits::default(),
+                    None
+                ))
+                .is_err()
+        );
         node.shutdown().unwrap();
         let mut node = OneNode::open_existing(config()).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
         let request = node.request_context();
-        let again = node.runtime().block_on(node.apply_initial_patch_bundle_durable_in(
-            &request, &session, &reference, plan.commit, bundle.bytes(), AdmissionLimits::default())).unwrap();
+        let again = node
+            .runtime()
+            .block_on(node.apply_initial_patch_bundle_durable_in(
+                &request,
+                &session,
+                &reference,
+                plan.commit,
+                bundle.bytes(),
+                AdmissionLimits::default(),
+            ))
+            .unwrap();
         assert_eq!(again, outcome);
-        assert_eq!(node.runtime().block_on(node.materialize_admission_in(&request)).unwrap()
-            .snapshot().refs[&reference], plan.commit);
-        node.shutdown().unwrap(); std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            node.runtime()
+                .block_on(node.materialize_admission_in(&request))
+                .unwrap()
+                .snapshot()
+                .refs[&reference],
+            plan.commit
+        );
+        node.shutdown().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

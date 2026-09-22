@@ -89,7 +89,8 @@ where
             field: "schema_generation",
             expected: session.identity().schema_generation().to_string(),
             observed: requested_schema_generation.to_string(),
-        }.into());
+        }
+        .into());
     }
     ensure_schema_generation_on(session.connection_ref(), cx, session.identity()).await
 }
@@ -114,12 +115,13 @@ pub async fn ensure_schema_generation_on<'a, C: Connection>(
 where
     C::Tx<'a>: TransactionOps,
 {
-    let head_generation = i64::try_from(identity.authority_head_generation())
-        .map_err(|_| ProjectionError::OutOfRange {
+    let head_generation = i64::try_from(identity.authority_head_generation()).map_err(|_| {
+        ProjectionError::OutOfRange {
             field: "authority head generation",
             value: identity.authority_head_generation(),
             maximum: 9_223_372_036_854_775_807,
-        })?;
+        }
+    })?;
     let expected_receipt = identity.render_receipt();
     let tx = flatten(connection.begin(cx).await, "begin_schema_reconciliation")?;
     macro_rules! checked {
@@ -139,22 +141,37 @@ where
     }
 
     for (sql, parameters) in install_schema_statements() {
-        checked!(flatten(tx.execute(cx, sql, &parameters).await, "install_schema"));
+        checked!(flatten(
+            tx.execute(cx, sql, &parameters).await,
+            "install_schema"
+        ));
     }
-    let stored = checked!(flatten(tx.query_one(
-        cx,
-        "SELECT source_incarnation, authority_head, authority_head_generation, \
+    let stored = checked!(flatten(
+        tx.query_one(
+            cx,
+            "SELECT source_incarnation, authority_head, authority_head_generation, \
          last_position, state_text, schema_generation \
          FROM fgit_projection_watermark WHERE singleton = 1",
-        &[],
-    ).await, "read_schema_watermark"));
-    let receipt_row = checked!(flatten(tx.query_one(
-        cx, "SELECT receipt FROM fgit_projection_identity WHERE singleton = 1", &[],
-    ).await, "read_schema_identity"));
+            &[],
+        )
+        .await,
+        "read_schema_watermark"
+    ));
+    let receipt_row = checked!(flatten(
+        tx.query_one(
+            cx,
+            "SELECT receipt FROM fgit_projection_identity WHERE singleton = 1",
+            &[],
+        )
+        .await,
+        "read_schema_identity"
+    ));
     let receipt = match receipt_row.as_ref() {
-        Some(row) => Some(checked!(row.get_by_name("receipt")
-            .and_then(Value::as_str)
-            .ok_or(StoreReadError::MissingColumn("receipt")))),
+        Some(row) => Some(checked!(
+            row.get_by_name("receipt")
+                .and_then(Value::as_str)
+                .ok_or(StoreReadError::MissingColumn("receipt"))
+        )),
         None => None,
     };
 
@@ -171,11 +188,19 @@ where
                     observed: receipt.to_owned(),
                 });
             }
-            let orphan = checked!(flatten(tx.query_one(
-                cx, "SELECT seq FROM fgit_projection_applied_decision ORDER BY seq ASC LIMIT 1", &[],
-            ).await, "check_empty_projection"));
+            let orphan = checked!(flatten(
+                tx.query_one(
+                    cx,
+                    "SELECT seq FROM fgit_projection_applied_decision ORDER BY seq ASC LIMIT 1",
+                    &[],
+                )
+                .await,
+                "check_empty_projection"
+            ));
             if orphan.is_some() {
-                abort!(StoreReadError::MissingColumn("watermark for existing decisions"));
+                abort!(StoreReadError::MissingColumn(
+                    "watermark for existing decisions"
+                ));
             }
             SchemaReconciliation::ReadyForFold
         }
@@ -206,14 +231,22 @@ where
                             observed: receipt.to_owned(),
                         });
                     }
-                    SchemaReconciliation::Current { position: row.last_position }
+                    SchemaReconciliation::Current {
+                        position: row.last_position,
+                    }
                 }
                 StoredClass::Stale => {
                     for (sql, parameters) in teardown_statements() {
-                        checked!(flatten(tx.execute(cx, sql, &parameters).await, "drop_old_projection"));
+                        checked!(flatten(
+                            tx.execute(cx, sql, &parameters).await,
+                            "drop_old_projection"
+                        ));
                     }
                     for (sql, parameters) in install_schema_statements() {
-                        checked!(flatten(tx.execute(cx, sql, &parameters).await, "install_replacement_projection"));
+                        checked!(flatten(
+                            tx.execute(cx, sql, &parameters).await,
+                            "install_replacement_projection"
+                        ));
                     }
                     SchemaReconciliation::ReadyForFold
                 }
@@ -222,28 +255,38 @@ where
     };
 
     if reconciliation == SchemaReconciliation::ReadyForFold {
-        checked!(flatten(tx.execute(
-            cx,
-            "INSERT INTO fgit_projection_watermark (singleton, source_incarnation, \
+        checked!(flatten(
+            tx.execute(
+                cx,
+                "INSERT INTO fgit_projection_watermark (singleton, source_incarnation, \
              authority_head, authority_head_generation, last_position, state_text, \
              schema_generation) VALUES (1, ?1, ?2, ?3, 0, 'fresh', ?4)",
-            &[
-                Value::Text(identity.source_incarnation().to_owned()),
-                Value::Text(identity.authority_head().to_owned()),
-                Value::BigInt(head_generation),
-                Value::BigInt(i64::from(identity.schema_generation())),
-            ],
-        ).await, "install_empty_watermark"));
-        checked!(flatten(tx.execute(
-            cx,
-            "INSERT INTO fgit_projection_identity (singleton, receipt) VALUES (1, ?1) \
+                &[
+                    Value::Text(identity.source_incarnation().to_owned()),
+                    Value::Text(identity.authority_head().to_owned()),
+                    Value::BigInt(head_generation),
+                    Value::BigInt(i64::from(identity.schema_generation())),
+                ],
+            )
+            .await,
+            "install_empty_watermark"
+        ));
+        checked!(flatten(
+            tx.execute(
+                cx,
+                "INSERT INTO fgit_projection_identity (singleton, receipt) VALUES (1, ?1) \
              ON CONFLICT(singleton) DO UPDATE SET receipt = excluded.receipt",
-            &[Value::Text(expected_receipt)],
-        ).await, "install_identity_receipt"));
+                &[Value::Text(expected_receipt)],
+            )
+            .await,
+            "install_identity_receipt"
+        ));
     }
     match flatten(tx.commit(cx).await, "commit_schema_reconciliation") {
         Ok(()) => Ok(reconciliation),
-        Err(failure) => Err(ProjectionError::CommitUncertain { failure: Box::new(failure) }),
+        Err(failure) => Err(ProjectionError::CommitUncertain {
+            failure: Box::new(failure),
+        }),
     }
 }
 
@@ -287,28 +330,41 @@ mod tests {
 
     #[test]
     fn foreign_incarnation_is_refused_not_wiped() {
-        assert!(matches!(classify_stored("other-inc", HEAD, 1, 1, INC, HEAD),
-            Err(WatermarkRefusal::HeadBindingMismatch { .. })));
+        assert!(matches!(
+            classify_stored("other-inc", HEAD, 1, 1, INC, HEAD),
+            Err(WatermarkRefusal::HeadBindingMismatch { .. })
+        ));
     }
 
     #[test]
     fn foreign_head_is_refused_not_wiped() {
-        assert!(matches!(classify_stored(INC, "other-head", 1, 1, INC, HEAD),
-            Err(WatermarkRefusal::HeadBindingMismatch { .. })));
+        assert!(matches!(
+            classify_stored(INC, "other-head", 1, 1, INC, HEAD),
+            Err(WatermarkRefusal::HeadBindingMismatch { .. })
+        ));
     }
 
     #[test]
     fn same_binding_splits_current_from_stale() {
-        assert!(matches!(classify_stored(INC, HEAD, 3, 3, INC, HEAD),
-            Ok(StoredClass::Current { .. })));
-        assert!(matches!(classify_stored(INC, HEAD, 3, 4, INC, HEAD), Ok(StoredClass::Stale)));
+        assert!(matches!(
+            classify_stored(INC, HEAD, 3, 3, INC, HEAD),
+            Ok(StoredClass::Current { .. })
+        ));
+        assert!(matches!(
+            classify_stored(INC, HEAD, 3, 4, INC, HEAD),
+            Ok(StoredClass::Stale)
+        ));
     }
 
     #[test]
     fn reconciliation_and_refold_round_trip_on_real_driver() {
-        let node = fgit_runtime::boot::RuntimeProfile::deterministic().build().expect("node");
+        let node = fgit_runtime::boot::RuntimeProfile::deterministic()
+            .build()
+            .expect("node");
         let runtime = asupersync::runtime::RuntimeBuilder::new()
-            .blocking_threads(1, 2).build().expect("runtime");
+            .blocking_threads(1, 2)
+            .build()
+            .expect("runtime");
         let outcome: Result<(), ProjectionError> = {
             let cx = node.request_cx(fgit_runtime::meter::BudgetClass::Request);
             runtime.block_on(async {
@@ -372,32 +428,66 @@ mod tests {
 
     #[test]
     fn even_empty_generations_refuse_foreign_rebuilds_and_preserve_their_receipt() {
-        let node = fgit_runtime::boot::RuntimeProfile::deterministic().build().expect("node");
-        let rt = asupersync::runtime::RuntimeBuilder::current_thread().build().expect("runtime");
+        let node = fgit_runtime::boot::RuntimeProfile::deterministic()
+            .build()
+            .expect("node");
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime");
         let result: Result<(), ProjectionError> = {
             let cx = node.request_cx(fgit_runtime::meter::BudgetClass::Request);
             rt.block_on(async {
                 let session = ProjectionSession::open_memory(identity(1))?;
                 ensure_schema_generation(&session, &cx, 1).await?;
                 for foreign in [
-                    ProjectionIdentity::new("foreign-incarnation", HEAD, 7, 1, 2, BuildIdentity::current()),
+                    ProjectionIdentity::new(
+                        "foreign-incarnation",
+                        HEAD,
+                        7,
+                        1,
+                        2,
+                        BuildIdentity::current(),
+                    ),
                     ProjectionIdentity::new(INC, "foreign-head", 7, 1, 2, BuildIdentity::current()),
                     ProjectionIdentity::new(INC, HEAD, 8, 1, 2, BuildIdentity::current()),
                 ] {
-                    assert!(ensure_schema_generation_on(session.connection_ref(), &cx, &foreign).await.is_err());
-                    let stored = session.load_watermark_row(&cx).await?.expect("original empty binding survives");
+                    assert!(
+                        ensure_schema_generation_on(session.connection_ref(), &cx, &foreign)
+                            .await
+                            .is_err()
+                    );
+                    let stored = session
+                        .load_watermark_row(&cx)
+                        .await?
+                        .expect("original empty binding survives");
                     assert_eq!(stored.source_incarnation, INC);
                     assert_eq!(stored.authority_head, HEAD);
                     assert_eq!(stored.authority_head_generation, 7);
                     assert_eq!(stored.schema_generation, 1);
                     assert_eq!(stored.last_position, None);
-                    let receipt = flatten(session.connection_ref().query_one(
-                        &cx, "SELECT receipt FROM fgit_projection_identity WHERE singleton = 1", &[],
-                    ).await, "verify_preserved_receipt")?.expect("receipt survives");
-                    assert_eq!(receipt.get_by_name("receipt").and_then(Value::as_str),
-                        Some(session.identity().render_receipt().as_str()));
+                    let receipt = flatten(
+                        session
+                            .connection_ref()
+                            .query_one(
+                                &cx,
+                                "SELECT receipt FROM fgit_projection_identity WHERE singleton = 1",
+                                &[],
+                            )
+                            .await,
+                        "verify_preserved_receipt",
+                    )?
+                    .expect("receipt survives");
+                    assert_eq!(
+                        receipt.get_by_name("receipt").and_then(Value::as_str),
+                        Some(session.identity().render_receipt().as_str())
+                    );
                 }
-                assert_eq!(apply_batch(&session, &cx, &[record(1, "d1")]).await?.applied, 1);
+                assert_eq!(
+                    apply_batch(&session, &cx, &[record(1, "d1")])
+                        .await?
+                        .applied,
+                    1
+                );
                 session.close(&cx).await?;
                 Ok(())
             })

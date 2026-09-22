@@ -8,8 +8,8 @@
 use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_types::{Digest, GitOid, PrincipalId, RefName};
 
-use crate::aggregate::{PullRequestNumber, QueueNumber};
 use super::{counter, invalid_native};
+use crate::aggregate::{PullRequestNumber, QueueNumber};
 
 pub const MAX_QUEUE_ENTRIES: usize = 1024;
 
@@ -90,7 +90,11 @@ pub enum QueueAction {
 impl QueueAction {
     pub fn validate(&self) -> Result<(), CodecRefusal> {
         match self {
-            Self::Enqueue { source_ref, head_tip, .. } => {
+            Self::Enqueue {
+                source_ref,
+                head_tip,
+                ..
+            } => {
                 if !source_ref.as_bytes().starts_with(b"refs/") {
                     return Err(invalid_native("queue.enqueue.source_ref"));
                 }
@@ -127,7 +131,11 @@ impl QueueAction {
                 }
                 Ok(())
             }
-            Self::BatchLanded { entries, target_tip, .. } => {
+            Self::BatchLanded {
+                entries,
+                target_tip,
+                ..
+            } => {
                 if entries.is_empty() || entries.len() > MAX_QUEUE_ENTRIES {
                     return Err(invalid_native("queue.batch_landed.entries"));
                 }
@@ -197,7 +205,10 @@ impl NativeQueueEvent {
                 out.write_opaque_id(dequeued_by.as_bytes());
                 out.write_scalar(reason.wire_value());
             }
-            QueueAction::Reorder { order, reordered_by } => {
+            QueueAction::Reorder {
+                order,
+                reordered_by,
+            } => {
                 out.write_opaque_id(reordered_by.as_bytes());
                 out.write_sequence("queue.reorder.order", order, |out, pr| {
                     out.write_scalar(pr.get());
@@ -246,7 +257,8 @@ impl NativeQueueEvent {
                 let source_ref_bytes = input.read_bytes("queue.enqueue.source_ref")?;
                 let source_ref = RefName::try_new(source_ref_bytes).map_err(CodecRefusal::from)?;
                 let head_tip = input.read_git_oid()?;
-                let enqueued_by = PrincipalId::from_bytes(input.read_opaque_id("queue.enqueue.enqueued_by")?);
+                let enqueued_by =
+                    PrincipalId::from_bytes(input.read_opaque_id("queue.enqueue.enqueued_by")?);
                 let priority = input.read_scalar::<u32>("queue.enqueue.priority")?;
                 QueueAction::Enqueue {
                     pull_request,
@@ -259,7 +271,8 @@ impl NativeQueueEvent {
             2 => {
                 let pr_raw = input.read_scalar::<u64>("queue.dequeue.pull_request")?;
                 let pull_request = counter("queue.dequeue.pull_request", pr_raw)?;
-                let dequeued_by = PrincipalId::from_bytes(input.read_opaque_id("queue.dequeue.dequeued_by")?);
+                let dequeued_by =
+                    PrincipalId::from_bytes(input.read_opaque_id("queue.dequeue.dequeued_by")?);
                 let reason_raw = input.read_scalar::<u32>("queue.dequeue.reason")?;
                 let reason = DequeueReason::from_wire_value(reason_raw)?;
                 QueueAction::Dequeue {
@@ -269,23 +282,31 @@ impl NativeQueueEvent {
                 }
             }
             3 => {
-                let reordered_by = PrincipalId::from_bytes(input.read_opaque_id("queue.reorder.reordered_by")?);
+                let reordered_by =
+                    PrincipalId::from_bytes(input.read_opaque_id("queue.reorder.reordered_by")?);
                 let mut count = 0usize;
                 let order = input.read_sequence("queue.reorder.order", |input| {
-                    count = count.checked_add(1).ok_or_else(|| invalid_native("queue.reorder.order"))?;
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| invalid_native("queue.reorder.order"))?;
                     if count > MAX_QUEUE_ENTRIES {
                         return Err(invalid_native("queue.reorder.order"));
                     }
                     let pr_raw = input.read_scalar::<u64>("queue.reorder.pr")?;
                     counter("queue.reorder.pr", pr_raw)
                 })?;
-                QueueAction::Reorder { order, reordered_by }
+                QueueAction::Reorder {
+                    order,
+                    reordered_by,
+                }
             }
             4 => {
                 let batch_id = input.read_digest()?;
                 let mut count = 0usize;
                 let entries = input.read_sequence("queue.batch_formed.entries", |input| {
-                    count = count.checked_add(1).ok_or_else(|| invalid_native("queue.batch_formed.entries"))?;
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| invalid_native("queue.batch_formed.entries"))?;
                     if count > MAX_QUEUE_ENTRIES {
                         return Err(invalid_native("queue.batch_formed.entries"));
                     }
@@ -298,7 +319,9 @@ impl NativeQueueEvent {
                 let batch_id = input.read_digest()?;
                 let mut count = 0usize;
                 let entries = input.read_sequence("queue.batch_landed.entries", |input| {
-                    count = count.checked_add(1).ok_or_else(|| invalid_native("queue.batch_landed.entries"))?;
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(|| invalid_native("queue.batch_landed.entries"))?;
                     if count > MAX_QUEUE_ENTRIES {
                         return Err(invalid_native("queue.batch_landed.entries"));
                     }

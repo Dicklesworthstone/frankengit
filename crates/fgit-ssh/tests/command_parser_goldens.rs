@@ -5,31 +5,89 @@ use fgit_ssh::command::{CommandParseRefusal, SshGitCommand, SshGitService};
 #[test]
 fn test_valid_commands() {
     let cases = [
-        ("git-upload-pack 'repo.git'", SshGitService::UploadPack, "repo.git"),
-        ("git-upload-pack '/repo.git'", SshGitService::UploadPack, "repo.git"),
-        ("git-upload-pack '/owner/repo.git'", SshGitService::UploadPack, "owner/repo.git"),
-        ("git-receive-pack 'repo.git'", SshGitService::ReceivePack, "repo.git"),
-        ("git-receive-pack '/path/to/my-repo.git'", SshGitService::ReceivePack, "path/to/my-repo.git"),
-        ("git upload-pack 'repo.git'", SshGitService::UploadPack, "repo.git"),
-        ("git receive-pack 'repo.git'", SshGitService::ReceivePack, "repo.git"),
-        ("git-upload-pack \"repo.git\"", SshGitService::UploadPack, "repo.git"),
-        ("git-upload-pack repo.git", SshGitService::UploadPack, "repo.git"),
-        ("git-upload-pack 'path with spaces/repo.git'", SshGitService::UploadPack, "path with spaces/repo.git"),
-        ("git-upload-pack 'foo'\\''bar.git'", SshGitService::UploadPack, "foo'bar.git"),
+        (
+            "git-upload-pack 'repo.git'",
+            SshGitService::UploadPack,
+            "repo.git",
+        ),
+        (
+            "git-upload-pack '/repo.git'",
+            SshGitService::UploadPack,
+            "repo.git",
+        ),
+        (
+            "git-upload-pack '/owner/repo.git'",
+            SshGitService::UploadPack,
+            "owner/repo.git",
+        ),
+        (
+            "git-receive-pack 'repo.git'",
+            SshGitService::ReceivePack,
+            "repo.git",
+        ),
+        (
+            "git-receive-pack '/path/to/my-repo.git'",
+            SshGitService::ReceivePack,
+            "path/to/my-repo.git",
+        ),
+        (
+            "git upload-pack 'repo.git'",
+            SshGitService::UploadPack,
+            "repo.git",
+        ),
+        (
+            "git receive-pack 'repo.git'",
+            SshGitService::ReceivePack,
+            "repo.git",
+        ),
+        (
+            "git-upload-pack \"repo.git\"",
+            SshGitService::UploadPack,
+            "repo.git",
+        ),
+        (
+            "git-upload-pack repo.git",
+            SshGitService::UploadPack,
+            "repo.git",
+        ),
+        (
+            "git-upload-pack 'path with spaces/repo.git'",
+            SshGitService::UploadPack,
+            "path with spaces/repo.git",
+        ),
+        (
+            "git-upload-pack 'foo'\\''bar.git'",
+            SshGitService::UploadPack,
+            "foo'bar.git",
+        ),
     ];
 
     for (input, expected_service, expected_path) in cases {
         let cmd = SshGitCommand::parse(input)
             .unwrap_or_else(|e| panic!("failed to parse `{input}`: {e:?}"));
-        assert_eq!(cmd.service(), expected_service, "service mismatch for `{input}`");
-        assert_eq!(cmd.repository_path(), expected_path, "path mismatch for `{input}`");
+        assert_eq!(
+            cmd.service(),
+            expected_service,
+            "service mismatch for `{input}`"
+        );
+        assert_eq!(
+            cmd.repository_path(),
+            expected_path,
+            "path mismatch for `{input}`"
+        );
     }
 }
 
 #[test]
 fn test_empty_and_unsupported_services() {
-    assert_eq!(SshGitCommand::parse(""), Err(CommandParseRefusal::EmptyCommand));
-    assert_eq!(SshGitCommand::parse("   "), Err(CommandParseRefusal::EmptyCommand));
+    assert_eq!(
+        SshGitCommand::parse(""),
+        Err(CommandParseRefusal::EmptyCommand)
+    );
+    assert_eq!(
+        SshGitCommand::parse("   "),
+        Err(CommandParseRefusal::EmptyCommand)
+    );
 
     let hostile = [
         "rm -rf /",

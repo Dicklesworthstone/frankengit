@@ -1,8 +1,6 @@
 //! Comprehensive adversarial SSRF corpus, secret rotation, and retry schedule test suite (FG-046b).
 
-use fgit_forge::webhook::{
-    SsrfPolicy, WebhookRetrySchedule, WebhookSecret, WebhookSecretRotation,
-};
+use fgit_forge::webhook::{SsrfPolicy, WebhookRetrySchedule, WebhookSecret, WebhookSecretRotation};
 use std::time::Duration;
 
 #[test]
@@ -15,7 +13,7 @@ fn ssrf_corpus_blocks_all_metadata_targets() {
         "http://[::ffff:169.254.169.254]/latest/meta-data/",
         "http://[::ffff:a9fe:a9fe]/latest/meta-data/",
         "http://2852039166/latest/meta-data/", // decimal 169.254.169.254
-        "http://0xa9fea9fe/latest/meta-data/",  // hex 169.254.169.254
+        "http://0xa9fea9fe/latest/meta-data/", // hex 169.254.169.254
         "http://0251.0376.0251.0376/latest/meta-data/", // octal 169.254.169.254
     ];
 
@@ -37,12 +35,12 @@ fn ssrf_corpus_blocks_all_private_and_loopback_ipv4() {
         "http://127.0.0.2:8080/",
         "http://127.255.255.255/",
         "http://2130706433/", // decimal 127.0.0.1
-        "http://0x7f000001/",  // hex 127.0.0.1
-        "http://0177.0.0.1/",  // octal
+        "http://0x7f000001/", // hex 127.0.0.1
+        "http://0177.0.0.1/", // octal
         // 10.0.0.0/8 private
         "http://10.0.0.1/",
         "http://10.255.255.254:3000/",
-        "http://167772161/", // decimal 10.0.0.1
+        "http://167772161/",  // decimal 10.0.0.1
         "http://0x0a000001/", // hex 10.0.0.1
         // 172.16.0.0/12 private
         "http://172.16.0.1/",
@@ -80,22 +78,22 @@ fn ssrf_corpus_blocks_all_private_and_loopback_ipv4() {
 fn ssrf_corpus_blocks_all_forbidden_ipv6_addresses() {
     let policy = SsrfPolicy::STRICT;
     let ipv6_probes = [
-        "http://[::1]/",                         // Loopback
-        "http://[::]/",                          // Unspecified
-        "http://[fc00::1]/",                     // Unique local address (ULA)
-        "http://[fd12:3456:789a:1::1]/",        // ULA
-        "http://[fe80::1]/",                     // Link-local
-        "http://[ff02::1]/",                     // Multicast
-        "http://[2001:db8::1]/",                 // Documentation
-        "http://[::ffff:127.0.0.1]/",            // IPv4-mapped loopback
-        "http://[::ffff:10.0.0.1]/",             // IPv4-mapped private
-        "http://[::ffff:172.16.0.1]/",           // IPv4-mapped private
-        "http://[::ffff:192.168.1.1]/",          // IPv4-mapped private
-        "http://[::ffff:169.254.169.254]/",      // IPv4-mapped metadata
-        "http://[64:ff9b::127.0.0.1]/",          // NAT64 prefix
-        "http://[2002:7f00:1::1]/",              // 6to4 prefix embedding 127.0.0.1
-        "http://[2002:0a00:0001::]/",            // 6to4 prefix embedding 10.0.0.1
-        "http://[100::1]/",                      // Discard-only prefix (RFC 6666)
+        "http://[::1]/",                    // Loopback
+        "http://[::]/",                     // Unspecified
+        "http://[fc00::1]/",                // Unique local address (ULA)
+        "http://[fd12:3456:789a:1::1]/",    // ULA
+        "http://[fe80::1]/",                // Link-local
+        "http://[ff02::1]/",                // Multicast
+        "http://[2001:db8::1]/",            // Documentation
+        "http://[::ffff:127.0.0.1]/",       // IPv4-mapped loopback
+        "http://[::ffff:10.0.0.1]/",        // IPv4-mapped private
+        "http://[::ffff:172.16.0.1]/",      // IPv4-mapped private
+        "http://[::ffff:192.168.1.1]/",     // IPv4-mapped private
+        "http://[::ffff:169.254.169.254]/", // IPv4-mapped metadata
+        "http://[64:ff9b::127.0.0.1]/",     // NAT64 prefix
+        "http://[2002:7f00:1::1]/",         // 6to4 prefix embedding 127.0.0.1
+        "http://[2002:0a00:0001::]/",       // 6to4 prefix embedding 10.0.0.1
+        "http://[100::1]/",                 // Discard-only prefix (RFC 6666)
     ];
 
     for probe in ipv6_probes {
@@ -112,9 +110,17 @@ fn ssrf_corpus_blocks_embedded_credentials_and_unsupported_schemes() {
     let policy = SsrfPolicy::STRICT;
 
     // Embedded credentials
-    assert!(policy.validate_url("http://user:pass@example.com/webhook").is_err());
+    assert!(
+        policy
+            .validate_url("http://user:pass@example.com/webhook")
+            .is_err()
+    );
     assert!(policy.validate_url("https://token@example.com/").is_err());
-    assert!(policy.validate_url("http://admin:secret@127.0.0.1/").is_err());
+    assert!(
+        policy
+            .validate_url("http://admin:secret@127.0.0.1/")
+            .is_err()
+    );
 
     // Unsupported schemes
     assert!(policy.validate_url("file:///etc/passwd").is_err());

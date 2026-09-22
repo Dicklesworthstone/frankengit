@@ -42,13 +42,15 @@ fn test_end_to_end_ssh_session_flow() {
 
     // 2. Feed client identification
     let client_ident = b"SSH-2.0-OpenSSH_9.5\r\n";
-    session.handle_incoming_bytes(client_ident).expect("handle ident failed");
+    session
+        .handle_incoming_bytes(client_ident)
+        .expect("handle ident failed");
 
     // Server should have emitted its KEXINIT
     let server_kexinit_wire = session.take_outgoing_bytes();
     assert!(!server_kexinit_wire.is_empty());
-    let server_kexinit_payload = decode_cleartext_packet(&server_kexinit_wire)
-        .expect("decode server kexinit failed");
+    let server_kexinit_payload =
+        decode_cleartext_packet(&server_kexinit_wire).expect("decode server kexinit failed");
     assert_eq!(server_kexinit_payload[0], msg::KEXINIT);
 
     // 3. Client sends its KEXINIT
@@ -69,7 +71,9 @@ fn test_end_to_end_ssh_session_flow() {
     client_kexinit.write_u32(0);
     let client_kexinit_payload = client_kexinit.into_bytes();
     let client_kexinit_wire = encode_cleartext_packet(&client_kexinit_payload, &[0; 16]);
-    session.handle_incoming_bytes(&client_kexinit_wire).expect("handle client kexinit failed");
+    session
+        .handle_incoming_bytes(&client_kexinit_wire)
+        .expect("handle client kexinit failed");
 
     // 4. Client generates ephemeral Curve25519 key and sends KEX_ECDH_INIT
     let client_ephemeral = Curve25519Kex::from_private_bytes([0x33; 32]);
@@ -77,7 +81,9 @@ fn test_end_to_end_ssh_session_flow() {
     ecdh_init.write_u8(msg::KEX_ECDH_INIT);
     ecdh_init.write_string(client_ephemeral.public_key());
     let ecdh_init_wire = encode_cleartext_packet(&ecdh_init.into_bytes(), &[0; 16]);
-    session.handle_incoming_bytes(&ecdh_init_wire).expect("handle ecdh init failed");
+    session
+        .handle_incoming_bytes(&ecdh_init_wire)
+        .expect("handle ecdh init failed");
 
     // Server sends KEX_ECDH_REPLY and NEWKEYS
     let reply_wire = session.take_outgoing_bytes();
@@ -86,17 +92,25 @@ fn test_end_to_end_ssh_session_flow() {
     // Parse KEX_ECDH_REPLY
     let (ecdh_reply_payload, consumed) = {
         let p = decode_cleartext_packet(&reply_wire).expect("decode ecdh reply failed");
-        (p.to_vec(), 4 + u32::from_be_bytes([reply_wire[0], reply_wire[1], reply_wire[2], reply_wire[3]]) as usize)
+        (
+            p.to_vec(),
+            4 + u32::from_be_bytes([reply_wire[0], reply_wire[1], reply_wire[2], reply_wire[3]])
+                as usize,
+        )
     };
     assert_eq!(ecdh_reply_payload[0], msg::KEX_ECDH_REPLY);
     let mut reader = WireReader::new(&ecdh_reply_payload[1..]);
     let host_pub_blob = reader.read_string().expect("read host key blob failed");
-    let server_ephemeral_pub = reader.read_string().expect("read server ephemeral pub failed");
+    let server_ephemeral_pub = reader
+        .read_string()
+        .expect("read server ephemeral pub failed");
     let sig_blob = reader.read_string().expect("read sig blob failed");
 
     let mut server_pub_arr = [0u8; 32];
     server_pub_arr.copy_from_slice(server_ephemeral_pub);
-    let shared_secret = client_ephemeral.compute_shared_secret(&server_pub_arr).expect("compute shared secret failed");
+    let shared_secret = client_ephemeral
+        .compute_shared_secret(&server_pub_arr)
+        .expect("compute shared secret failed");
 
     // Client verifies exchange hash and signature
     let mut mpint_writer = WireWriter::new();
@@ -114,8 +128,12 @@ fn test_end_to_end_ssh_session_flow() {
     hash_writer.write_raw(&k_mpint);
     let hash_h = sha256_digest(&hash_writer.into_bytes());
 
-    fgit_ssh::crypto::verify_ed25519(&host_signing_key.verifying_key().to_bytes(), &hash_h, sig_blob)
-        .expect("verify server signature failed");
+    fgit_ssh::crypto::verify_ed25519(
+        &host_signing_key.verifying_key().to_bytes(),
+        &hash_h,
+        sig_blob,
+    )
+    .expect("verify server signature failed");
 
     // Check second packet: NEWKEYS
     let newkeys_wire = &reply_wire[consumed..];
@@ -138,28 +156,30 @@ fn test_end_to_end_ssh_session_flow() {
     let mut client_newkeys = WireWriter::new();
     client_newkeys.write_u8(msg::NEWKEYS);
     let client_newkeys_wire = encode_cleartext_packet(&client_newkeys.into_bytes(), &[0; 16]);
-    session.handle_incoming_bytes(&client_newkeys_wire).expect("handle client newkeys failed");
+    session
+        .handle_incoming_bytes(&client_newkeys_wire)
+        .expect("handle client newkeys failed");
 
     // 6. Client requests service "ssh-userauth" (encrypted)
     let mut svc_req = WireWriter::new();
     svc_req.write_u8(msg::SERVICE_REQUEST);
     svc_req.write_utf8("ssh-userauth");
     let svc_wire = client_out_cipher.encrypt_packet(&svc_req.into_bytes(), &[0; 16]);
-    session.handle_incoming_bytes(&svc_wire).expect("handle service request failed");
+    session
+        .handle_incoming_bytes(&svc_wire)
+        .expect("handle service request failed");
 
     // Server answers with SERVICE_ACCEPT (encrypted)
     let server_svc_wire = session.take_outgoing_bytes();
-    let server_svc_payload = client_in_cipher.decrypt_packet(&server_svc_wire).expect("decrypt svc accept failed");
+    let server_svc_payload = client_in_cipher
+        .decrypt_packet(&server_svc_wire)
+        .expect("decrypt svc accept failed");
     assert_eq!(server_svc_payload[0], msg::SERVICE_ACCEPT);
 
     // 7. Client authenticates via publickey
     let client_pub_blob = encode_ed25519_public_key(&client_pub_bytes);
-    let userauth_preimage = build_userauth_signature_preimage(
-        &hash_h,
-        "git",
-        "ssh-connection",
-        &client_pub_blob,
-    );
+    let userauth_preimage =
+        build_userauth_signature_preimage(&hash_h, "git", "ssh-connection", &client_pub_blob);
     let client_sig_blob = sign_ed25519(&client_signing_key, &userauth_preimage);
 
     let mut auth_req = WireWriter::new();
@@ -173,11 +193,15 @@ fn test_end_to_end_ssh_session_flow() {
     auth_req.write_string(&client_sig_blob);
 
     let auth_wire = client_out_cipher.encrypt_packet(&auth_req.into_bytes(), &[0; 16]);
-    session.handle_incoming_bytes(&auth_wire).expect("handle auth request failed");
+    session
+        .handle_incoming_bytes(&auth_wire)
+        .expect("handle auth request failed");
 
     // Server sends USERAUTH_SUCCESS
     let server_auth_wire = session.take_outgoing_bytes();
-    let server_auth_payload = client_in_cipher.decrypt_packet(&server_auth_wire).expect("decrypt auth success failed");
+    let server_auth_payload = client_in_cipher
+        .decrypt_packet(&server_auth_wire)
+        .expect("decrypt auth success failed");
     assert_eq!(server_auth_payload[0], msg::USERAUTH_SUCCESS);
     assert_eq!(*session.phase(), SessionPhase::ChannelReady);
 
@@ -189,11 +213,15 @@ fn test_end_to_end_ssh_session_flow() {
     chan_open.write_u32(2 * 1024 * 1024);
     chan_open.write_u32(32 * 1024);
     let chan_open_wire = client_out_cipher.encrypt_packet(&chan_open.into_bytes(), &[0; 16]);
-    session.handle_incoming_bytes(&chan_open_wire).expect("handle channel open failed");
+    session
+        .handle_incoming_bytes(&chan_open_wire)
+        .expect("handle channel open failed");
 
     // Server sends CHANNEL_OPEN_CONFIRMATION
     let server_chan_wire = session.take_outgoing_bytes();
-    let server_chan_payload = client_in_cipher.decrypt_packet(&server_chan_wire).expect("decrypt chan open confirm failed");
+    let server_chan_payload = client_in_cipher
+        .decrypt_packet(&server_chan_wire)
+        .expect("decrypt chan open confirm failed");
     assert_eq!(server_chan_payload[0], msg::CHANNEL_OPEN_CONFIRMATION);
 
     // 9. Client sends exec request: git-upload-pack 'my-repo.git'
@@ -204,16 +232,26 @@ fn test_end_to_end_ssh_session_flow() {
     exec_req.write_bool(true);
     exec_req.write_utf8("git-upload-pack 'my-repo.git'");
     let exec_wire = client_out_cipher.encrypt_packet(&exec_req.into_bytes(), &[0; 16]);
-    session.handle_incoming_bytes(&exec_wire).expect("handle exec request failed");
+    session
+        .handle_incoming_bytes(&exec_wire)
+        .expect("handle exec request failed");
 
     // Server sends CHANNEL_SUCCESS
     let server_exec_wire = session.take_outgoing_bytes();
-    let server_exec_payload = client_in_cipher.decrypt_packet(&server_exec_wire).expect("decrypt chan success failed");
+    let server_exec_payload = client_in_cipher
+        .decrypt_packet(&server_exec_wire)
+        .expect("decrypt chan success failed");
     assert_eq!(server_exec_payload[0], msg::CHANNEL_SUCCESS);
     assert_eq!(*session.phase(), SessionPhase::ActiveChannel);
     assert_eq!(session.authenticated_principal(), Some(principal));
-    assert_eq!(session.active_command().unwrap().service(), SshGitService::UploadPack);
-    assert_eq!(session.active_command().unwrap().repository_path(), "my-repo.git");
+    assert_eq!(
+        session.active_command().unwrap().service(),
+        SshGitService::UploadPack
+    );
+    assert_eq!(
+        session.active_command().unwrap().repository_path(),
+        "my-repo.git"
+    );
 
     // 10. Data exchange over channel
     let git_client_data = b"0014command=ls-refs\n0000";
@@ -222,7 +260,9 @@ fn test_end_to_end_ssh_session_flow() {
     data_msg.write_u32(0);
     data_msg.write_string(git_client_data);
     let data_wire = client_out_cipher.encrypt_packet(&data_msg.into_bytes(), &[0; 16]);
-    session.handle_incoming_bytes(&data_wire).expect("handle channel data failed");
+    session
+        .handle_incoming_bytes(&data_wire)
+        .expect("handle channel data failed");
 
     let input = session.take_channel_input();
     assert_eq!(&input, git_client_data);
@@ -231,7 +271,9 @@ fn test_end_to_end_ssh_session_flow() {
     let git_server_response = b"0008NAK\n";
     session.send_channel_data(git_server_response);
     let server_data_wire = session.take_outgoing_bytes();
-    let server_data_payload = client_in_cipher.decrypt_packet(&server_data_wire).expect("decrypt server data failed");
+    let server_data_payload = client_in_cipher
+        .decrypt_packet(&server_data_wire)
+        .expect("decrypt server data failed");
     assert_eq!(server_data_payload[0], msg::CHANNEL_DATA);
     let mut reader = WireReader::new(&server_data_payload[1..]);
     let _chan = reader.read_u32().unwrap();
@@ -243,14 +285,18 @@ fn test_end_to_end_ssh_session_flow() {
     eof_msg.write_u8(msg::CHANNEL_EOF);
     eof_msg.write_u32(0);
     let eof_wire = client_out_cipher.encrypt_packet(&eof_msg.into_bytes(), &[0; 16]);
-    session.handle_incoming_bytes(&eof_wire).expect("handle eof failed");
+    session
+        .handle_incoming_bytes(&eof_wire)
+        .expect("handle eof failed");
     assert!(session.is_channel_eof_received());
 
     let mut close_msg = WireWriter::new();
     close_msg.write_u8(msg::CHANNEL_CLOSE);
     close_msg.write_u32(0);
     let close_wire = client_out_cipher.encrypt_packet(&close_msg.into_bytes(), &[0; 16]);
-    session.handle_incoming_bytes(&close_wire).expect("handle close failed");
+    session
+        .handle_incoming_bytes(&close_wire)
+        .expect("handle close failed");
     assert!(session.is_channel_closed());
     assert_eq!(*session.phase(), SessionPhase::Closed);
 }

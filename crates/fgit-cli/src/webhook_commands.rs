@@ -10,7 +10,8 @@ use fgit_types::{AsciiSlug, RepositoryId, TenantId};
 
 use crate::publication_support::quote;
 
-const USAGE: &str = "usage: fg webhook register <storage-root> <tenant-id> <repository-id> --trusted-local
+const USAGE: &str =
+    "usage: fg webhook register <storage-root> <tenant-id> <repository-id> --trusted-local
          --id <id> --url <url> --secret <hex-secret>
          [--filter <all|event1,event2>] [--permissive-for-tests]
 usage: fg webhook list <storage-root> <tenant-id> <repository-id> --trusted-local
@@ -87,7 +88,11 @@ fn run_register(args: &[String]) -> Result<u8, String> {
             }
             "--secret" => {
                 idx += 1;
-                secret_hex = Some(args.get(idx).ok_or("missing argument for --secret")?.clone());
+                secret_hex = Some(
+                    args.get(idx)
+                        .ok_or("missing argument for --secret")?
+                        .clone(),
+                );
             }
             "--filter" => {
                 idx += 1;
@@ -120,7 +125,9 @@ fn run_register(args: &[String]) -> Result<u8, String> {
         SsrfPolicy::STRICT
     };
 
-    let validated_url = ssrf_policy.validate_url(&url_str).map_err(|e| e.to_string())?;
+    let validated_url = ssrf_policy
+        .validate_url(&url_str)
+        .map_err(|e| e.to_string())?;
 
     let reg = WebhookRegistration {
         id: WebhookId(webhook_id),
@@ -183,7 +190,11 @@ fn run_rotate(args: &[String]) -> Result<u8, String> {
             }
             "--new-secret" => {
                 idx += 1;
-                new_secret_hex = Some(args.get(idx).ok_or("missing argument for --new-secret")?.clone());
+                new_secret_hex = Some(
+                    args.get(idx)
+                        .ok_or("missing argument for --new-secret")?
+                        .clone(),
+                );
             }
             "--window-secs" => {
                 idx += 1;
@@ -210,8 +221,7 @@ fn run_rotate(args: &[String]) -> Result<u8, String> {
 
     println!(
         "{{\"type\":\"webhook_secret_rotated\",\"schema_version\":1,\"id\":{},\"window_secs\":{}}}",
-        webhook_id,
-        window_secs
+        webhook_id, window_secs
     );
     Ok(0)
 }
@@ -251,12 +261,17 @@ fn run_dead_letter(args: &[String]) -> Result<u8, String> {
             while idx < args.len() - 1 {
                 if args[idx] == "--delivery-id" {
                     idx += 1;
-                    delivery_id = Some(args.get(idx).ok_or("missing argument for --delivery-id")?.clone());
+                    delivery_id = Some(
+                        args.get(idx)
+                            .ok_or("missing argument for --delivery-id")?
+                            .clone(),
+                    );
                 }
                 idx += 1;
             }
             let id_str = delivery_id.ok_or("missing mandatory --delivery-id")?;
-            let slug = AsciiSlug::try_new("delivery_id", id_str.as_bytes()).map_err(|e| e.to_string())?;
+            let slug =
+                AsciiSlug::try_new("delivery_id", id_str.as_bytes()).map_err(|e| e.to_string())?;
 
             let store = WebhookStore::open(storage.join("webhooks"))?;
             let replayed = store.replay_dead_letter(slug);
@@ -268,7 +283,9 @@ fn run_dead_letter(args: &[String]) -> Result<u8, String> {
                 );
                 Ok(0)
             } else {
-                Err(format!("delivery id {id_str} not found in dead-letter queue"))
+                Err(format!(
+                    "delivery id {id_str} not found in dead-letter queue"
+                ))
             }
         }
         unknown => Err(format!("unknown dead-letter action: {unknown}")),
@@ -292,7 +309,11 @@ fn run_deliver(args: &[String]) -> Result<u8, String> {
             }
             "--delivery-id" => {
                 idx += 1;
-                delivery_id_str = Some(args.get(idx).ok_or("missing argument for --delivery-id")?.clone());
+                delivery_id_str = Some(
+                    args.get(idx)
+                        .ok_or("missing argument for --delivery-id")?
+                        .clone(),
+                );
             }
             "--attempt" => {
                 idx += 1;
@@ -309,7 +330,8 @@ fn run_deliver(args: &[String]) -> Result<u8, String> {
 
     let webhook_id = id.ok_or("missing mandatory --id")?;
     let del_str = delivery_id_str.ok_or("missing mandatory --delivery-id")?;
-    let delivery_slug = AsciiSlug::try_new("delivery_id", del_str.as_bytes()).map_err(|e| e.to_string())?;
+    let delivery_slug =
+        AsciiSlug::try_new("delivery_id", del_str.as_bytes()).map_err(|e| e.to_string())?;
 
     let store = WebhookStore::open(storage.join("webhooks"))?;
     let reg = store
@@ -322,12 +344,8 @@ fn run_deliver(args: &[String]) -> Result<u8, String> {
         SsrfPolicy::STRICT
     };
 
-    let dest = WebhookDeliveryDestination::new(
-        delivery_slug,
-        reg,
-        ssrf_policy,
-        store.dead_letters(),
-    );
+    let dest =
+        WebhookDeliveryDestination::new(delivery_slug, reg, ssrf_policy, store.dead_letters());
 
     // Execute HTTP dispatch
     let (verdict_str, response_body) = dest.deliver_simple(delivery_slug, attempt)?;

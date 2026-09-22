@@ -4,10 +4,10 @@
 //! closure validation are real; only immutable storage and scheduling use the
 //! explicitly non-durable MemoryAuthorityStore lane.
 
-#[path = "native_merge_delivery_faults/workspace.rs"]
-mod workspace;
 #[path = "native_merge_delivery_faults/pull_request.rs"]
 mod pull_request;
+#[path = "native_merge_delivery_faults/workspace.rs"]
+mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;

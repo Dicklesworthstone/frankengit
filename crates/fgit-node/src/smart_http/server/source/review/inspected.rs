@@ -5,16 +5,25 @@ use super::*;
 use fgit_forge::review::SourceReview;
 
 pub(in crate::smart_http::server::source) fn render(
-    node: &OneNode, report: &SourceReview, options: &ReviewOptions,
-    maximum: usize, live: &mut impl FnMut() -> bool,
+    node: &OneNode,
+    report: &SourceReview,
+    options: &ReviewOptions,
+    maximum: usize,
+    live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
-    options.validate().map_err(|_| ApiError::bad("invalid_diff_options"))?;
-    if options.mode != ComparisonMode::Direct || !options.paths.is_empty()
+    options
+        .validate()
+        .map_err(|_| ApiError::bad("invalid_diff_options"))?;
+    if options.mode != ComparisonMode::Direct
+        || !options.paths.is_empty()
         || report.pull_request.is_some()
-    { return Err(ApiError::bad("full_candidate_comparison_required")); }
+    {
+        return Err(ApiError::bad("full_candidate_comparison_required"));
+    }
     let command = Command {
         selection: ReviewSelection::References {
-            before: report.before_reference.clone(), after: report.after_reference.clone(),
+            before: report.before_reference.clone(),
+            after: report.after_reference.clone(),
         },
         expected_head: Some(report.source_head),
         expected_before: Some(report.comparison.requested_before),

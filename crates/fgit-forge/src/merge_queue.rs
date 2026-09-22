@@ -36,7 +36,6 @@ use crate::{ForgeRefusal, MergeSide, StaleTips};
 /// Synthetic queue reference namespace root.
 pub const QUEUE_REF_PREFIX: &[u8] = b"refs/queue/";
 
-
 /// The kind and coordinates of a synthetic queue reference.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QueueRefKind {
@@ -185,7 +184,8 @@ impl QueueBatchEntry {
                 limit: 1,
             }
         })?;
-        let source_ref = RefName::try_new(input.read_bytes("source_ref")?).map_err(CodecRefusal::from)?;
+        let source_ref =
+            RefName::try_new(input.read_bytes("source_ref")?).map_err(CodecRefusal::from)?;
         let head_tip = input.read_git_oid()?;
         Ok(Self {
             pull_request,
@@ -196,10 +196,8 @@ impl QueueBatchEntry {
 }
 
 fn sha256_digest_from_bytes(raw: [u8; 32]) -> Result<Digest, ForgeRefusal> {
-    let bytes = DigestBytes::try_new(&raw).map_err(|cause| {
-        ForgeRefusal::BodyUnrepresentable {
-            cause: Box::new(CodecRefusal::from(cause)),
-        }
+    let bytes = DigestBytes::try_new(&raw).map_err(|cause| ForgeRefusal::BodyUnrepresentable {
+        cause: Box::new(CodecRefusal::from(cause)),
     })?;
     Ok(Digest::new(
         fgit_crypto::InternalDigestAlgorithm::Sha256.id(),
@@ -277,7 +275,6 @@ impl QueueBatchId {
     }
 }
 
-
 impl fmt::Display for QueueBatchId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.to_hex())
@@ -340,7 +337,6 @@ impl QueueBatchReceipt {
         let digest_bytes = fgit_crypto::sha256_digest(&bytes);
         sha256_digest_from_bytes(digest_bytes)
     }
-
 
     /// Verifies if this receipt is valid for the current observed target ref and base tip.
     pub fn check_validity(
@@ -446,7 +442,10 @@ impl SpeculativeBatchPlan {
             });
         }
         for step in &self.steps {
-            let observed_candidate = candidate_tips.get(&step.pull_request).copied().unwrap_or(step.candidate_tip);
+            let observed_candidate = candidate_tips
+                .get(&step.pull_request)
+                .copied()
+                .unwrap_or(step.candidate_tip);
             if observed_candidate != step.candidate_tip {
                 return Err(ForgeRefusal::MergeStale {
                     reference: MergeSide::Source,
@@ -584,7 +583,8 @@ pub fn assemble_batch_landing_package(
     }
 
     // 2. Canonical event for the merge queue aggregate
-    let landed_entries: Vec<PullRequestNumber> = plan.steps.iter().map(|s| s.pull_request).collect();
+    let landed_entries: Vec<PullRequestNumber> =
+        plan.steps.iter().map(|s| s.pull_request).collect();
     let queue_event = NativeQueueEvent {
         queue_number,
         target_ref: plan.target_ref.clone(),
@@ -717,7 +717,11 @@ impl MergeQueueSnapshot {
                 priority,
             } => {
                 // If entry already exists, update head_tip and priority
-                if let Some(pos) = self.entries.iter().position(|e| e.pull_request == *pull_request) {
+                if let Some(pos) = self
+                    .entries
+                    .iter()
+                    .position(|e| e.pull_request == *pull_request)
+                {
                     self.entries[pos].head_tip = *head_tip;
                     self.entries[pos].priority = *priority;
                 } else {

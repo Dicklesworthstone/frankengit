@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use fgit_admission::CanonicalRefState;
 use fgit_admission::policy_bridge::{
     InMemoryPolicySnapshots, SubjectCodeMap, compile_branch_protection_policy,
-    compile_protected_branch_rules, default_principal_snapshot_id,
-    evaluate_effects_protection, evaluate_receive_pack_protection,
+    compile_protected_branch_rules, default_principal_snapshot_id, evaluate_effects_protection,
+    evaluate_receive_pack_protection,
 };
 use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
 use fgit_reference::effect::RefEffect;
@@ -349,4 +349,3 @@ fn planted_bypass_merge_protection_direct_push_violation_is_caught() {
     );
     assert_eq!(verdict.snapshot_id, id);
 }
-

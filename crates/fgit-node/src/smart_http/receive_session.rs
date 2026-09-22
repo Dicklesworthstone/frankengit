@@ -16,17 +16,17 @@ use fgit_admission::{
     AdmissionContext, AdmissionLimits, AdmissionResult, BasisBoundValidatedReceive,
 };
 use fgit_git_object::ParseLimits;
-use fgit_types::{GitHashAlgorithm, RefusalCode};
 use fgit_types::cell::admits_staging_intake;
+use fgit_types::{GitHashAlgorithm, RefusalCode};
 use fgit_wire::GitObjectFormat;
 use fgit_wire::receive::{ReceiveCancellation, ReceiveContext, ReceiveError, ReceivePack};
 
 use super::NodeSmartHttpRefusal;
-use crate::{
-    LoopbackReceiveSession, MaterializedAdmission, NodeReceiveTransportRefusal,
-    NodeRequestContext, OneNode, PackContextCheckpoint, checkpoint_pack_context,
-};
 use crate::quarantine_validator::ProductionReceiveQuarantineHandoff;
+use crate::{
+    LoopbackReceiveSession, MaterializedAdmission, NodeReceiveTransportRefusal, NodeRequestContext,
+    OneNode, PackContextCheckpoint, checkpoint_pack_context,
+};
 
 impl OneNode {
     /// Derive the key needed to recover one non-atomic receive command.
@@ -130,8 +130,7 @@ impl OneNode {
             .authenticated_session()
             .ok_or(NodeSmartHttpRefusal::UnauthenticatedReceive)?;
         self.push_quota.evaluate(&authenticated.principal_id())?;
-        admits_staging_intake(self.cell_state())
-            .map_err(NodeReceiveTransportRefusal::CellState)?;
+        admits_staging_intake(self.cell_state()).map_err(NodeReceiveTransportRefusal::CellState)?;
         let expected_format = match self.object_format {
             GitHashAlgorithm::Sha1 => GitObjectFormat::Sha1,
             GitHashAlgorithm::Sha256 => GitObjectFormat::Sha256,
@@ -139,40 +138,57 @@ impl OneNode {
         if receive_context.object_format != expected_format {
             return Err(ReceiveError::AuthoritativeRefusal(
                 RefusalCode::HashAlgorithmDomainMismatch,
-            ).into());
+            )
+            .into());
         }
         let mut live = || {
             let active = cancellation.checkpoint()
-                && matches!(checkpoint_pack_context(request.authority()), PackContextCheckpoint::Live);
-            if !active { request.authority().cancel(); }
+                && matches!(
+                    checkpoint_pack_context(request.authority()),
+                    PackContextCheckpoint::Live
+                );
+            if !active {
+                request.authority().cancel();
+            }
             active
         };
         if !live() {
-            return Err(ReceiveError::AuthoritativeRefusal(RefusalCode::CancellationInProgress).into());
+            return Err(
+                ReceiveError::AuthoritativeRefusal(RefusalCode::CancellationInProgress).into(),
+            );
         }
-        let validator = self.production_quarantine_validator(
-            materialized, receive_context.limits.pack.clone(), parse_limits,
-        ).map_err(ReceiveError::AuthoritativeRefusal)?;
+        let validator = self
+            .production_quarantine_validator(
+                materialized,
+                receive_context.limits.pack.clone(),
+                parse_limits,
+            )
+            .map_err(ReceiveError::AuthoritativeRefusal)?;
         let mut receive = ReceivePack::new(receive_context)?;
         bounded_intake::push(&mut receive, input, &mut live)?;
-        let mut handoff = ProductionReceiveQuarantineHandoff::new(
-            validator, materialized.basis().clone(),
-        );
+        let mut handoff =
+            ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
         receive.finish_with_handoff(&mut handoff, &mut live)?;
         let validated = handoff.into_validated_receive()?;
         drop(receive);
         if !live() {
-            return Err(ReceiveError::AuthoritativeRefusal(RefusalCode::CancellationInProgress).into());
+            return Err(
+                ReceiveError::AuthoritativeRefusal(RefusalCode::CancellationInProgress).into(),
+            );
         }
         let mut admission = pin!(self.admit_receive_session_durable_in(
-            request, session, &validated, admission_limits,
+            request,
+            session,
+            &validated,
+            admission_limits,
         ));
         poll_fn(|cx| {
             // Never return early here: the underlying future may already own
             // an in-flight head CAS, and only it can settle that responsibility.
             let _ = live();
             admission.as_mut().poll(cx)
-        }).await
+        })
+        .await
     }
 
     /// Compatibility shim: HTTP has no independent session admission rules.
@@ -183,7 +199,8 @@ impl OneNode {
         validated: &BasisBoundValidatedReceive,
         limits: AdmissionLimits,
     ) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
-        self.admit_receive_session_durable_in(request, session, validated, limits).await
+        self.admit_receive_session_durable_in(request, session, validated, limits)
+            .await
     }
 }
 

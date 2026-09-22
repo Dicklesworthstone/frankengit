@@ -4,12 +4,12 @@
 //! of returning a candidate for a silently refreshed subject.
 
 use fgit_admission::{AdmissionError, ProjectionFailure};
+use fgit_forge::ForgeEventPayload;
 use fgit_forge::event::pull_request::PullRequestAction;
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::{MergeMetadata, MergePreparation, PreparationLimits};
-use fgit_forge::ForgeEventPayload;
-use fgit_types::{RefusalCode, RepositoryAuthorityHeadId};
 use fgit_types::cell::{ReadMode, admits_read};
+use fgit_types::{RefusalCode, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
 
 use crate::{NodeRequestContext, NodeWorkspaceRefusal, OneNode};
@@ -41,11 +41,25 @@ impl OneNode {
         metadata: &MergeMetadata,
         limits: PreparationLimits,
     ) -> Result<PreparedPullRequestBundle, NodeWorkspaceRefusal> {
-        metadata.validate().map_err(NodeWorkspaceRefusal::MergePreparation)?;
-        limits.validate().map_err(NodeWorkspaceRefusal::MergePreparation)?;
-        let head = self.validate_pull_request_preparation_in(request, subject, visibility).await?;
-        let prepared = self.prepare_merge_bundle_in(request, &subject.target_ref,
-            &subject.source_ref, visibility, metadata, limits).await?;
+        metadata
+            .validate()
+            .map_err(NodeWorkspaceRefusal::MergePreparation)?;
+        limits
+            .validate()
+            .map_err(NodeWorkspaceRefusal::MergePreparation)?;
+        let head = self
+            .validate_pull_request_preparation_in(request, subject, visibility)
+            .await?;
+        let prepared = self
+            .prepare_merge_bundle_in(
+                request,
+                &subject.target_ref,
+                &subject.source_ref,
+                visibility,
+                metadata,
+                limits,
+            )
+            .await?;
         if prepared.source_head != head {
             return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);
         }
@@ -53,8 +67,10 @@ impl OneNode {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
         Ok(PreparedPullRequestBundle {
-            source_head: prepared.source_head, subject: subject.clone(),
-            outcome: prepared.outcome, bundle: prepared.bundle,
+            source_head: prepared.source_head,
+            subject: subject.clone(),
+            outcome: prepared.outcome,
+            bundle: prepared.bundle,
         })
     }
 
@@ -62,37 +78,56 @@ impl OneNode {
     /// This is not a publication capability. Every caller must still pin its
     /// subsequent native construction to the returned authenticated head.
     pub(in crate::treefs_workspace) async fn validate_pull_request_preparation_in(
-        &self, request: &NodeRequestContext, subject: &ReviewSubject,
+        &self,
+        request: &NodeRequestContext,
+        subject: &ReviewSubject,
         visibility: &RefVisibility,
     ) -> Result<RepositoryAuthorityHeadId, NodeWorkspaceRefusal> {
-        subject.validate().map_err(|_| NodeWorkspaceRefusal::InvalidWorkspaceCandidate("invalid preparation subject"))?;
+        subject.validate().map_err(|_| {
+            NodeWorkspaceRefusal::InvalidWorkspaceCandidate("invalid preparation subject")
+        })?;
         if subject.source_tip.algorithm() != self.object_format {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
         }
         admits_read(self.cell_state(), ReadMode::Current).map_err(NodeWorkspaceRefusal::Cell)?;
-        if visibility.hides(subject.source_ref.as_bytes()) || visibility.hides(subject.target_ref.as_bytes()) {
+        if visibility.hides(subject.source_ref.as_bytes())
+            || visibility.hides(subject.target_ref.as_bytes())
+        {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
-        let current = self.materialize_admission_in(request).await
+        let current = self
+            .materialize_admission_in(request)
+            .await
             .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
         let visible = |source: &fgit_types::RefName, target: &fgit_types::RefName| {
-            [source, target].iter().all(|name| !visibility.hides(name.as_bytes())
-                && !current.snapshot().hidden_refs.hides(name.as_bytes()))
+            [source, target].iter().all(|name| {
+                !visibility.hides(name.as_bytes())
+                    && !current.snapshot().hidden_refs.hides(name.as_bytes())
+            })
         };
         if !visible(&subject.source_ref, &subject.target_ref) {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
         let mut page = fgit_admission::merge::native::pull_request::read_page_at(
-            &self.authority, request.authority(), current.basis(),
-            subject.pull_request.get() - 1, 1, &visible,
+            &self.authority,
+            request.authority(),
+            current.basis(),
+            subject.pull_request.get() - 1,
+            1,
+            &visible,
             &|| !super::super::workspace_request_live(request),
-        ).await.map_err(|error| NodeWorkspaceRefusal::MergeValidation(ProjectionFailure::Unavailable(
-            match error {
+        )
+        .await
+        .map_err(|error| {
+            NodeWorkspaceRefusal::MergeValidation(ProjectionFailure::Unavailable(match error {
                 AdmissionError::AsyncProjectionUnavailable(code) => code,
                 _ => RefusalCode::EvidenceInvalid,
-            },
-        )))?;
-        let pr = page.pull_requests.pop().filter(|pr| pr.number == subject.pull_request)
+            }))
+        })?;
+        let pr = page
+            .pull_requests
+            .pop()
+            .filter(|pr| pr.number == subject.pull_request)
             .ok_or(NodeWorkspaceRefusal::RefUnavailable)?;
         let ForgeEventPayload::PullRequestChangedNative(change) = &pr.event.payload else {
             return Err(NodeWorkspaceRefusal::StaleWorkspaceBase);

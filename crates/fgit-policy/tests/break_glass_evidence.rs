@@ -329,7 +329,8 @@ fn break_glass_scope_and_temporal_bounds() {
     // 4. Overlong window duration (> 14400s)
     let mut overlong_intent = intent;
     overlong_intent.issued_at = PolicyInstant::from_seconds(100);
-    overlong_intent.expires_at = PolicyInstant::from_seconds(100 + MAX_BREAK_GLASS_DURATION_SECS + 1);
+    overlong_intent.expires_at =
+        PolicyInstant::from_seconds(100 + MAX_BREAK_GLASS_DURATION_SECS + 1);
     overlong_intent.audit_token = overlong_intent.compute_audit_token();
     let input_valid_time = build_input(
         "refs/heads/main",
@@ -444,7 +445,10 @@ fn break_glass_successful_execution_retains_displaced_state_and_post_review() {
     assert_eq!(receipt.intent.proposed_oid, dummy_oid(20));
 
     // 2. Post-review obligation: non-removable record
-    assert_eq!(receipt.post_review_obligation_id.as_str(), "post-incident-review");
+    assert_eq!(
+        receipt.post_review_obligation_id.as_str(),
+        "post-incident-review"
+    );
 
     // 3. Evaluation instant and audit token preserved
     assert_eq!(receipt.evaluated_at, PolicyInstant::from_seconds(1500));

@@ -7,8 +7,8 @@
 //! the exact closure witness for admission; staging itself never publishes a
 //! ref.
 
-mod typed_closure;
 mod reused_targets;
+mod typed_closure;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,9 +22,9 @@ use fgit_pack::{
     CachedResolver, Deadline, ExternalBaseLookup, ObjectId, PackError, PackLimits, PackObject,
     ParsedDeltaBase, QuarantinedPack, ResolutionBudget, verify_native_object,
 };
-use fgit_types::{GitOid, RefusalCode};
 #[cfg(test)]
 use fgit_types::GitHashAlgorithm;
+use fgit_types::{GitOid, RefusalCode};
 use fgit_wire::receive::{
     QuarantineReceipt, ReceiveError, ReceiveQuarantineHandoff, ReceiveRequest,
 };
@@ -280,25 +280,36 @@ impl<'node> ProductionQuarantineValidator<'node> {
         self.external_bases_with_initial_bytes(pack, 0, None, deadline)
     }
 
-    fn external_bases_with_initial_bytes(&self, pack: &QuarantinedPack,
-        initial_bytes: usize, permitted: Option<&BTreeSet<GitOid>>, deadline: &mut impl Deadline) -> Result<ExternalBases, RefusalCode> {
+    fn external_bases_with_initial_bytes(
+        &self,
+        pack: &QuarantinedPack,
+        initial_bytes: usize,
+        permitted: Option<&BTreeSet<GitOid>>,
+        deadline: &mut impl Deadline,
+    ) -> Result<ExternalBases, RefusalCode> {
         let mut bases = BTreeMap::new();
         let mut read_bytes = initial_bytes;
         let limit = self.external_read_limit();
-        if read_bytes > limit { return Err(RefusalCode::ResourceBudgetExceeded); }
+        if read_bytes > limit {
+            return Err(RefusalCode::ResourceBudgetExceeded);
+        }
         for entry in pack.entries() {
             checkpoint(deadline)?;
             let Some(ParsedDeltaBase::Ref { base, .. }) = &entry.delta_base else {
                 continue;
             };
-            if permitted.is_some_and(|scope| !scope.contains(base)) { continue; }
+            if permitted.is_some_and(|scope| !scope.contains(base)) {
+                continue;
+            }
             if bases.contains_key(base) {
                 continue;
             }
-            let remaining = limit.checked_sub(read_bytes)
+            let remaining = limit
+                .checked_sub(read_bytes)
                 .ok_or(RefusalCode::ResourceBudgetExceeded)?;
             if let Some(loaded) = self.load_selected_external_base(*base, remaining, deadline)? {
-                read_bytes = read_bytes.checked_add(loaded.body.len())
+                read_bytes = read_bytes
+                    .checked_add(loaded.body.len())
                     .filter(|bytes| *bytes <= limit)
                     .ok_or(RefusalCode::ResourceBudgetExceeded)?;
                 bases.insert(*base, loaded);
@@ -311,7 +322,9 @@ impl<'node> ProductionQuarantineValidator<'node> {
     /// A tiny thin pack cannot allocate an unbounded set of selected bases
     /// before the delta resolver gets a chance to enforce its own budgets.
     fn external_read_limit(&self) -> usize {
-        self.pack_limits.max_cached_bytes.min(self.pack_limits.max_total_expanded_bytes)
+        self.pack_limits
+            .max_cached_bytes
+            .min(self.pack_limits.max_total_expanded_bytes)
     }
 
     fn verify_resolved_object(
@@ -501,7 +514,6 @@ impl<'node> ProductionQuarantineValidator<'node> {
         }
         Ok(dependencies)
     }
-
 }
 
 impl OneNode {
@@ -540,12 +552,19 @@ impl OneNode {
         // This production path never substitutes cumulative membership for
         // visibility, including the all-hidden/no-visible-ref case. The fixture
         // constructor is not compiled into the production library.
-        let visible_roots = materialized.snapshot().refs.iter()
+        let visible_roots = materialized
+            .snapshot()
+            .refs
+            .iter()
             .filter(|(name, _)| !materialized.snapshot().hidden_refs.hides(name.as_bytes()))
             .map(|(_, id)| *id)
             .collect();
         Ok(ProductionQuarantineValidator {
-            node: self, selected_closure, visible_roots, pack_limits, parse_limits,
+            node: self,
+            selected_closure,
+            visible_roots,
+            pack_limits,
+            parse_limits,
         })
     }
 }
@@ -604,7 +623,12 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
         let in_pack_delta_bases = Self::in_pack_delta_bases(pack, &ids_at_offset, deadline)?;
         let independent = reused_targets::independent_uploads(pack, &ids_at_offset, deadline)?;
         let closure = self.reachable_uploaded_closure(
-            request, &verified, &in_pack_delta_bases, &bases, &independent, deadline,
+            request,
+            &verified,
+            &in_pack_delta_bases,
+            &bases,
+            &independent,
+            deadline,
         )?;
         // This second phase keeps a later malformed delta from leaving earlier
         // reachable objects in fabric.  Immutable placement remains

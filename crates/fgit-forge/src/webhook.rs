@@ -2,10 +2,10 @@
 //! and retry schedule.
 
 use core::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::time::Duration;
 use fgit_crypto::{hmac_sha256, verify_mac};
 use fgit_types::{AsciiSlug, Digest};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::time::Duration;
 
 /// Unique identifier for a registered webhook.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -48,7 +48,9 @@ impl fmt::Display for WebhookRefusal {
             Self::InvalidSignature => write!(f, "invalid webhook signature"),
             Self::RotationExpired => write!(f, "webhook secret rotation window expired"),
             Self::NotFound(id) => write!(f, "webhook {id} not found"),
-            Self::DeliveryExhausted { attempts } => write!(f, "webhook delivery exhausted after {attempts} attempts"),
+            Self::DeliveryExhausted { attempts } => {
+                write!(f, "webhook delivery exhausted after {attempts} attempts")
+            }
         }
     }
 }
@@ -123,10 +125,14 @@ pub struct SsrfPolicy {
 
 impl SsrfPolicy {
     /// Strict policy for production: loopback, private, and internal addresses are forbidden.
-    pub const STRICT: Self = Self { allow_loopback: false };
+    pub const STRICT: Self = Self {
+        allow_loopback: false,
+    };
 
     /// Permissive loopback policy for test environments and local development.
-    pub const PERMISSIVE_FOR_TESTS: Self = Self { allow_loopback: true };
+    pub const PERMISSIVE_FOR_TESTS: Self = Self {
+        allow_loopback: true,
+    };
 
     #[must_use]
     pub const fn allows_loopback(self) -> bool {
@@ -202,7 +208,13 @@ impl SsrfPolicy {
         }
         // IPv4-mapped IPv6: ::ffff:a.b.c.d
         let segments = ip.segments();
-        if segments[0] == 0 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0 && segments[4] == 0 && segments[5] == 0xffff {
+        if segments[0] == 0
+            && segments[1] == 0
+            && segments[2] == 0
+            && segments[3] == 0
+            && segments[4] == 0
+            && segments[5] == 0xffff
+        {
             let v4 = Ipv4Addr::new(
                 (segments[6] >> 8) as u8,
                 (segments[6] & 0xff) as u8,
@@ -212,7 +224,13 @@ impl SsrfPolicy {
             return self.is_safe_ipv4(v4);
         }
         // NAT64 well-known prefix: 64:ff9b::/96 (RFC 6052)
-        if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0 && segments[3] == 0 && segments[4] == 0 && segments[5] == 0 {
+        if segments[0] == 0x0064
+            && segments[1] == 0xff9b
+            && segments[2] == 0
+            && segments[3] == 0
+            && segments[4] == 0
+            && segments[5] == 0
+        {
             let v4 = Ipv4Addr::new(
                 (segments[6] >> 8) as u8,
                 (segments[6] & 0xff) as u8,
@@ -261,7 +279,9 @@ impl SsrfPolicy {
             return Err(WebhookRefusal::InvalidUrl("empty URL".into()));
         }
         if trimmed.len() > 4096 {
-            return Err(WebhookRefusal::InvalidUrl("URL exceeds maximum length of 4096 bytes".into()));
+            return Err(WebhookRefusal::InvalidUrl(
+                "URL exceeds maximum length of 4096 bytes".into(),
+            ));
         }
 
         // Scheme extraction
@@ -278,7 +298,9 @@ impl SsrfPolicy {
         if let Some(at_idx) = rest.find('@') {
             let slash_idx = rest.find('/').unwrap_or(rest.len());
             if at_idx < slash_idx {
-                return Err(WebhookRefusal::InvalidUrl("embedded credentials (@) not permitted in webhook URLs".into()));
+                return Err(WebhookRefusal::InvalidUrl(
+                    "embedded credentials (@) not permitted in webhook URLs".into(),
+                ));
             }
         }
 
@@ -301,21 +323,23 @@ impl SsrfPolicy {
             let ipv6_text = &authority[1..close_bracket];
             let remainder = &authority[close_bracket + 1..];
             let port = if let Some(port_str) = remainder.strip_prefix(':') {
-                port_str.parse::<u16>().map_err(|_| {
-                    WebhookRefusal::InvalidUrl("invalid port number".into())
-                })?
+                port_str
+                    .parse::<u16>()
+                    .map_err(|_| WebhookRefusal::InvalidUrl("invalid port number".into()))?
             } else if remainder.is_empty() {
                 if scheme == "https" { 443 } else { 80 }
             } else {
-                return Err(WebhookRefusal::InvalidUrl("unexpected characters after IPv6 literal".into()));
+                return Err(WebhookRefusal::InvalidUrl(
+                    "unexpected characters after IPv6 literal".into(),
+                ));
             };
             (ipv6_text, port)
         } else if let Some(colon_idx) = authority.rfind(':') {
             let host_part = &authority[..colon_idx];
             let port_part = &authority[colon_idx + 1..];
-            let port = port_part.parse::<u16>().map_err(|_| {
-                WebhookRefusal::InvalidUrl("invalid port number".into())
-            })?;
+            let port = port_part
+                .parse::<u16>()
+                .map_err(|_| WebhookRefusal::InvalidUrl("invalid port number".into()))?;
             (host_part, port)
         } else {
             let default_port = if scheme == "https" { 443 } else { 80 };
@@ -341,7 +365,9 @@ impl SsrfPolicy {
             });
         }
         // Check for octal dotted components (e.g. 0177.0.0.1)
-        if host_str.split('.').any(|part| part.len() > 1 && part.starts_with('0') && part.chars().all(|c| c.is_ascii_digit())) {
+        if host_str.split('.').any(|part| {
+            part.len() > 1 && part.starts_with('0') && part.chars().all(|c| c.is_ascii_digit())
+        }) {
             return Err(WebhookRefusal::SsrfBlocked {
                 url: raw.to_string(),
                 reason: "octal IP address notation is forbidden",
@@ -377,13 +403,19 @@ impl SsrfPolicy {
             }
             for label in host_str.split('.') {
                 if label.is_empty() || label.len() > 63 {
-                    return Err(WebhookRefusal::InvalidUrl("invalid DNS label length".into()));
+                    return Err(WebhookRefusal::InvalidUrl(
+                        "invalid DNS label length".into(),
+                    ));
                 }
                 if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-                    return Err(WebhookRefusal::InvalidUrl("invalid characters in hostname".into()));
+                    return Err(WebhookRefusal::InvalidUrl(
+                        "invalid characters in hostname".into(),
+                    ));
                 }
                 if label.starts_with('-') || label.ends_with('-') {
-                    return Err(WebhookRefusal::InvalidUrl("hostname label cannot start or end with hyphen".into()));
+                    return Err(WebhookRefusal::InvalidUrl(
+                        "hostname label cannot start or end with hyphen".into(),
+                    ));
                 }
             }
             None
@@ -400,14 +432,23 @@ impl SsrfPolicy {
     }
 
     /// Re-validates a redirect URL against this policy, preventing redirect-based SSRF bypass.
-    pub fn validate_redirect(&self, current: &ValidatedWebhookUrl, location: &str) -> Result<ValidatedWebhookUrl, WebhookRefusal> {
+    pub fn validate_redirect(
+        &self,
+        current: &ValidatedWebhookUrl,
+        location: &str,
+    ) -> Result<ValidatedWebhookUrl, WebhookRefusal> {
         let target = location.trim();
         if target.starts_with("http://") || target.starts_with("https://") {
             self.validate_url(target)
         } else if target.starts_with('/') {
             // Relative redirect on the same host
-            let new_raw = format!("{}://{}{}{}", current.scheme, current.host,
-                if (current.scheme == "https" && current.port == 443) || (current.scheme == "http" && current.port == 80) {
+            let new_raw = format!(
+                "{}://{}{}{}",
+                current.scheme,
+                current.host,
+                if (current.scheme == "https" && current.port == 443)
+                    || (current.scheme == "http" && current.port == 80)
+                {
                     "".to_string()
                 } else {
                     format!(":{}", current.port)
@@ -416,7 +457,9 @@ impl SsrfPolicy {
             );
             self.validate_url(&new_raw)
         } else {
-            Err(WebhookRefusal::InvalidUrl(format!("unrecognized redirect target: {location}")))
+            Err(WebhookRefusal::InvalidUrl(format!(
+                "unrecognized redirect target: {location}"
+            )))
         }
     }
 }
@@ -434,10 +477,14 @@ impl WebhookSecret {
     pub fn new(secret: impl Into<Vec<u8>>) -> Result<Self, WebhookRefusal> {
         let bytes = secret.into();
         if bytes.len() < Self::MIN_SECRET_BYTES {
-            return Err(WebhookRefusal::InvalidSecret("secret must be at least 16 bytes"));
+            return Err(WebhookRefusal::InvalidSecret(
+                "secret must be at least 16 bytes",
+            ));
         }
         if bytes.len() > Self::MAX_SECRET_BYTES {
-            return Err(WebhookRefusal::InvalidSecret("secret must be at most 256 bytes"));
+            return Err(WebhookRefusal::InvalidSecret(
+                "secret must be at most 256 bytes",
+            ));
         }
         Ok(Self { bytes })
     }
@@ -503,7 +550,12 @@ impl WebhookSecretRotation {
     }
 
     /// Rotate to a new secret with a specified rotation window duration in seconds.
-    pub fn rotate(&mut self, new_secret: WebhookSecret, window_duration_secs: u64, now_unix_secs: u64) {
+    pub fn rotate(
+        &mut self,
+        new_secret: WebhookSecret,
+        window_duration_secs: u64,
+        now_unix_secs: u64,
+    ) {
         let old = std::mem::replace(&mut self.active, new_secret);
         self.expiring = Some((old, now_unix_secs.saturating_add(window_duration_secs)));
     }
@@ -516,12 +568,18 @@ impl WebhookSecretRotation {
 
     /// Verify signature against active secret, or against expiring secret if within window.
     #[must_use]
-    pub fn verify(&self, payload: &[u8], candidate_signature: &[u8; 32], now_unix_secs: u64) -> bool {
+    pub fn verify(
+        &self,
+        payload: &[u8],
+        candidate_signature: &[u8; 32],
+        now_unix_secs: u64,
+    ) -> bool {
         if self.active.verify(payload, candidate_signature) {
             return true;
         }
         if let Some((expiring_secret, expires_at)) = &self.expiring {
-            if now_unix_secs <= *expires_at && expiring_secret.verify(payload, candidate_signature) {
+            if now_unix_secs <= *expires_at && expiring_secret.verify(payload, candidate_signature)
+            {
                 return true;
             }
         }
@@ -569,9 +627,15 @@ impl WebhookRetrySchedule {
     pub const MIN_ATTEMPTS: u32 = 2;
     pub const MAX_ATTEMPTS: u32 = 16;
 
-    pub fn new(max_attempts: u32, initial_delay: Duration, max_delay: Duration) -> Result<Self, WebhookRefusal> {
+    pub fn new(
+        max_attempts: u32,
+        initial_delay: Duration,
+        max_delay: Duration,
+    ) -> Result<Self, WebhookRefusal> {
         if !(Self::MIN_ATTEMPTS..=Self::MAX_ATTEMPTS).contains(&max_attempts) {
-            return Err(WebhookRefusal::InvalidSecret("max_attempts must be in 2..=16"));
+            return Err(WebhookRefusal::InvalidSecret(
+                "max_attempts must be in 2..=16",
+            ));
         }
         Ok(Self {
             max_attempts,
@@ -589,7 +653,9 @@ impl WebhookRetrySchedule {
         let exp = (attempt - 1).min(10);
         let factor = 1u64.checked_shl(exp - 1).unwrap_or(u64::MAX);
         let base_millis = self.initial_delay.as_millis() as u64;
-        let exp_millis = base_millis.saturating_mul(factor).min(self.max_delay.as_millis() as u64);
+        let exp_millis = base_millis
+            .saturating_mul(factor)
+            .min(self.max_delay.as_millis() as u64);
 
         // Deterministic pseudorandom jitter in range [-20%, +20%]
         // Hash combination of seed and attempt:
@@ -618,7 +684,9 @@ impl WebhookEventFilter {
     pub fn matches(&self, event_name: &str) -> bool {
         match self {
             Self::Wildcard => true,
-            Self::Selected(list) => list.iter().any(|item| item.eq_ignore_ascii_case(event_name)),
+            Self::Selected(list) => list
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(event_name)),
         }
     }
 }

@@ -21,9 +21,15 @@ pub(crate) struct Page {
 #[derive(Debug)]
 pub(crate) enum Operation<'a> {
     List(Page),
-    Show { number: IssueNumber, page: Page },
+    Show {
+        number: IssueNumber,
+        page: Page,
+    },
     Search,
-    Mutate { number: IssueNumber, action: &'a str },
+    Mutate {
+        number: IssueNumber,
+        action: &'a str,
+    },
 }
 
 #[derive(Debug)]
@@ -34,25 +40,41 @@ pub(crate) struct Request<'a> {
 
 impl<'a> Request<'a> {
     pub(crate) fn parse(head: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
-        let (path, query) = head.target.split_once('?').map_or((head.target, None), |(p, q)| (p, Some(q)));
+        let (path, query) = head
+            .target
+            .split_once('?')
+            .map_or((head.target, None), |(p, q)| (p, Some(q)));
         let Some((repository_route, suffix)) = path.split_once("/api/v1/issues") else {
             return Ok(None);
         };
-        if repository_route.len() < 2 || !repository_route.starts_with('/')
-            || repository_route[1..].split('/').any(|part| part.is_empty() || matches!(part, "." | "..")
-                || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)))
+        if repository_route.len() < 2
+            || !repository_route.starts_with('/')
+            || repository_route[1..].split('/').any(|part| {
+                part.is_empty()
+                    || matches!(part, "." | "..")
+                    || !part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+            })
         {
             return Err(ApiError::not_found());
         }
         let operation = if head.method == "GET" {
-            if !matches!(head.body, BodyFraming::Empty | BodyFraming::ContentLength(0)) || head.expect_continue {
+            if !matches!(
+                head.body,
+                BodyFraming::Empty | BodyFraming::ContentLength(0)
+            ) || head.expect_continue
+            {
                 return Err(ApiError::bad("body_not_allowed"));
             }
             if suffix.is_empty() {
                 Operation::List(page(query, "after")?)
             } else {
                 let number = suffix.strip_prefix('/').ok_or_else(ApiError::not_found)?;
-                Operation::Show { number: issue_number(number)?, page: page(query, "after_version")? }
+                Operation::Show {
+                    number: issue_number(number)?,
+                    page: page(query, "after_version")?,
+                }
             }
         } else if head.method == "POST" {
             if query.is_some() || head.body == BodyFraming::Empty {
@@ -60,7 +82,8 @@ impl<'a> Request<'a> {
             }
             if !head.content_type.is_some_and(|value| {
                 value.eq_ignore_ascii_case("application/x-www-form-urlencoded")
-                    || value.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8")
+                    || value
+                        .eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8")
             }) {
                 return Err(ApiError::media());
             }
@@ -70,17 +93,25 @@ impl<'a> Request<'a> {
             if suffix == "/search" {
                 Operation::Search
             } else {
-                let (number, action) = suffix.strip_prefix('/').and_then(|s| s.split_once('/'))
+                let (number, action) = suffix
+                    .strip_prefix('/')
+                    .and_then(|s| s.split_once('/'))
                     .ok_or_else(ApiError::not_found)?;
                 if !matches!(action, "open" | "edit" | "close" | "reopen" | "comment") {
                     return Err(ApiError::not_found());
                 }
-                Operation::Mutate { number: issue_number(number)?, action }
+                Operation::Mutate {
+                    number: issue_number(number)?,
+                    action,
+                }
             }
         } else {
             return Err(ApiError::method());
         };
-        Ok(Some(Self { repository_route, operation }))
+        Ok(Some(Self {
+            repository_route,
+            operation,
+        }))
     }
 
     pub(crate) fn is_mutation(&self) -> bool {
@@ -98,12 +129,18 @@ impl<'a> Request<'a> {
             match key.as_str() {
                 "expected_version" => set_once(&mut version, decimal(&value)?)?,
                 "title" if matches!(action, "open" | "edit") => set_once(&mut title, value)?,
-                "body" if matches!(action, "open" | "edit" | "comment") => set_once(&mut text, value)?,
+                "body" if matches!(action, "open" | "edit" | "comment") => {
+                    set_once(&mut text, value)?
+                }
                 "label" if matches!(action, "open" | "edit") => {
-                    if labels.len() == MAX_LABELS { return Err(ApiError::too_large()); }
+                    if labels.len() == MAX_LABELS {
+                        return Err(ApiError::too_large());
+                    }
                     labels.push(value);
                 }
-                "clear_labels" if action == "edit" && value == "true" => set_once(&mut clear_labels, true)?,
+                "clear_labels" if action == "edit" && value == "true" => {
+                    set_once(&mut clear_labels, true)?
+                }
                 _ => return Err(ApiError::bad("unknown_or_inapplicable_field")),
             }
         }
@@ -114,8 +151,11 @@ impl<'a> Request<'a> {
         let expected_version = if version == 0 {
             ExpectedVersion::NewStream
         } else {
-            let version = AggregateVersion::try_new(version).ok_or_else(|| ApiError::bad("invalid_expected_version"))?;
-            version.next().map_err(|_| ApiError::bad("version_exhausted"))?;
+            let version = AggregateVersion::try_new(version)
+                .ok_or_else(|| ApiError::bad("invalid_expected_version"))?;
+            version
+                .next()
+                .map_err(|_| ApiError::bad("version_exhausted"))?;
             ExpectedVersion::Exactly(version)
         };
         if clear_labels.is_some() && !labels.is_empty() {
@@ -134,15 +174,27 @@ impl<'a> Request<'a> {
             "edit" => IssueAction::Edit(IssueEdit {
                 title,
                 body: text,
-                labels: if clear_labels.is_some() || !labels.is_empty() { Some(labels) } else { None },
+                labels: if clear_labels.is_some() || !labels.is_empty() {
+                    Some(labels)
+                } else {
+                    None
+                },
             }),
-            "comment" => IssueAction::Comment { body: text.ok_or_else(|| ApiError::bad("body_required"))? },
+            "comment" => IssueAction::Comment {
+                body: text.ok_or_else(|| ApiError::bad("body_required"))?,
+            },
             "close" => IssueAction::Close,
             "reopen" => IssueAction::Reopen,
             _ => return Err(ApiError::not_found()),
         };
-        action.validate().map_err(|_| ApiError::bad("invalid_issue_content"))?;
-        Ok(IssueCommand { number, expected_version, action })
+        action
+            .validate()
+            .map_err(|_| ApiError::bad("invalid_issue_content"))?;
+        Ok(IssueCommand {
+            number,
+            expected_version,
+            action,
+        })
     }
 }
 
@@ -150,11 +202,16 @@ fn issue_number(text: &str) -> Result<IssueNumber, ApiError> {
     IssueNumber::try_new(decimal(text)?).ok_or_else(|| ApiError::bad("invalid_issue_number"))
 }
 fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<(), ApiError> {
-    if slot.replace(value).is_some() { return Err(ApiError::bad("duplicate_field")); }
+    if slot.replace(value).is_some() {
+        return Err(ApiError::bad("duplicate_field"));
+    }
     Ok(())
 }
 pub(super) fn decimal(text: &str) -> Result<u64, ApiError> {
-    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) || (text.len() > 1 && text.starts_with('0')) {
+    if text.is_empty()
+        || !text.bytes().all(|b| b.is_ascii_digit())
+        || (text.len() > 1 && text.starts_with('0'))
+    {
         return Err(ApiError::bad("invalid_integer"));
     }
     text.parse().map_err(|_| ApiError::bad("integer_overflow"))
@@ -173,18 +230,35 @@ pub(super) fn page(query: Option<&str>, cursor: &str) -> Result<Page, ApiError> 
         }
     }
     let (after, limit) = (after.unwrap_or(0), limit.unwrap_or(50));
-    if !(1..=100).contains(&limit) { return Err(ApiError::bad("invalid_page_limit")); }
-    if after != 0 && expected.is_none() { return Err(ApiError::bad("snapshot_required")); }
-    Ok(Page { after, limit: limit as u16, expected_head: expected })
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad("invalid_page_limit"));
+    }
+    if after != 0 && expected.is_none() {
+        return Err(ApiError::bad("snapshot_required"));
+    }
+    Ok(Page {
+        after,
+        limit: limit as u16,
+        expected_head: expected,
+    })
 }
 
 pub(super) fn form(bytes: &[u8], maximum_fields: usize) -> Result<Vec<(String, String)>, ApiError> {
-    if bytes.len() > MAX_FORM_BYTES { return Err(ApiError::too_large()); }
-    if bytes.is_empty() { return Ok(Vec::new()); }
+    if bytes.len() > MAX_FORM_BYTES {
+        return Err(ApiError::too_large());
+    }
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut result = Vec::new();
     for field in bytes.split(|&b| b == b'&') {
-        if result.len() == maximum_fields { return Err(ApiError::too_large()); }
-        let equals = field.iter().position(|&b| b == b'=').ok_or_else(|| ApiError::bad("invalid_form"))?;
+        if result.len() == maximum_fields {
+            return Err(ApiError::too_large());
+        }
+        let equals = field
+            .iter()
+            .position(|&b| b == b'=')
+            .ok_or_else(|| ApiError::bad("invalid_form"))?;
         let key = decode(&field[..equals], 32)?;
         if key.is_empty() || !key.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
             return Err(ApiError::bad("invalid_field_name"));
@@ -197,21 +271,30 @@ pub(super) fn form(bytes: &[u8], maximum_fields: usize) -> Result<Vec<(String, S
 }
 fn decode(bytes: &[u8], maximum: usize) -> Result<String, ApiError> {
     let mut out = Vec::new();
-    out.try_reserve_exact(bytes.len().min(maximum)).map_err(|_| ApiError::unavailable())?;
+    out.try_reserve_exact(bytes.len().min(maximum))
+        .map_err(|_| ApiError::unavailable())?;
     let mut cursor = 0;
     while cursor < bytes.len() {
-        if out.len() == maximum { return Err(ApiError::too_large()); }
+        if out.len() == maximum {
+            return Err(ApiError::too_large());
+        }
         let byte = match bytes[cursor] {
             b'+' => b' ',
             b'%' => {
-                let first = *bytes.get(cursor + 1).ok_or_else(|| ApiError::bad("invalid_percent_escape"))?;
-                let second = *bytes.get(cursor + 2).ok_or_else(|| ApiError::bad("invalid_percent_escape"))?;
+                let first = *bytes
+                    .get(cursor + 1)
+                    .ok_or_else(|| ApiError::bad("invalid_percent_escape"))?;
+                let second = *bytes
+                    .get(cursor + 2)
+                    .ok_or_else(|| ApiError::bad("invalid_percent_escape"))?;
                 cursor += 2;
                 (digit(first)? << 4) | digit(second)?
             }
             byte => byte,
         };
-        if byte == 0 { return Err(ApiError::bad("nul_not_allowed")); }
+        if byte == 0 {
+            return Err(ApiError::bad("nul_not_allowed"));
+        }
         out.push(byte);
         cursor += 1;
     }
@@ -226,18 +309,35 @@ fn digit(byte: u8) -> Result<u8, ApiError> {
     }
 }
 pub(super) fn parse_head_token(text: &str) -> Result<RepositoryAuthorityHeadId, ApiError> {
-    let (algorithm, digest) = text.strip_prefix("alg:").and_then(|text| text.split_once(':'))
+    let (algorithm, digest) = text
+        .strip_prefix("alg:")
+        .and_then(|text| text.split_once(':'))
         .ok_or_else(|| ApiError::bad("invalid_snapshot_token"))?;
-    let algorithm = DigestAlgorithmId::try_new(u16::try_from(decimal(algorithm)?)
-        .map_err(|_| ApiError::bad("invalid_snapshot_token"))?)
-        .map_err(|_| ApiError::bad("invalid_snapshot_token"))?;
-    if digest.is_empty() || digest.len() > 128 || digest.len() % 2 != 0
-        || !digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    { return Err(ApiError::bad("invalid_snapshot_token")); }
-    let bytes = digest.as_bytes().chunks_exact(2).map(|pair| Ok((digit(pair[0])? << 4) | digit(pair[1])?))
+    let algorithm = DigestAlgorithmId::try_new(
+        u16::try_from(decimal(algorithm)?).map_err(|_| ApiError::bad("invalid_snapshot_token"))?,
+    )
+    .map_err(|_| ApiError::bad("invalid_snapshot_token"))?;
+    if digest.is_empty()
+        || digest.len() > 128
+        || digest.len() % 2 != 0
+        || !digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(ApiError::bad("invalid_snapshot_token"));
+    }
+    let bytes = digest
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| Ok((digit(pair[0])? << 4) | digit(pair[1])?))
         .collect::<Result<Vec<_>, ApiError>>()?;
-    let digest = DigestBytes::try_new(&bytes).map_err(|_| ApiError::bad("invalid_snapshot_token"))?;
-    Ok(RepositoryAuthorityHeadId::from_digest(algorithm, CANONICAL_CODEC_VERSION, digest))
+    let digest =
+        DigestBytes::try_new(&bytes).map_err(|_| ApiError::bad("invalid_snapshot_token"))?;
+    Ok(RepositoryAuthorityHeadId::from_digest(
+        algorithm,
+        CANONICAL_CODEC_VERSION,
+        digest,
+    ))
 }
 
 #[cfg(test)]
@@ -246,20 +346,38 @@ mod tests {
     use fgit_wire::smart_http::{HttpLimits, head};
 
     fn command(action: &str, form: &[u8]) -> Result<IssueCommand, ApiError> {
-        let bytes = format!("POST /repo.git/api/v1/issues/1/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n", form.len());
-        let head = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+        let bytes = format!(
+            "POST /repo.git/api/v1/issues/1/{action} HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n",
+            form.len()
+        );
+        let head = head::parse(bytes.as_bytes(), HttpLimits::default())
+            .unwrap()
+            .unwrap();
         Request::parse(&head)?.unwrap().command(form)
     }
 
     #[test]
     fn versioned_forms_preserve_utf8_empty_replacements_and_literal_escapes() {
-        let open = command("open", b"expected_version=0&title=Hello+%F0%9F%A6%80&body=%252f%0A%22&label=z&label=a").unwrap();
-        let IssueAction::Open { title, body, labels } = open.action else { panic!("open") };
+        let open = command(
+            "open",
+            b"expected_version=0&title=Hello+%F0%9F%A6%80&body=%252f%0A%22&label=z&label=a",
+        )
+        .unwrap();
+        let IssueAction::Open {
+            title,
+            body,
+            labels,
+        } = open.action
+        else {
+            panic!("open")
+        };
         assert_eq!(title, "Hello 🦀");
         assert_eq!(body, "%2f\n\"");
         assert_eq!(labels, ["a", "z"]);
         let edit = command("edit", b"expected_version=1&body=&clear_labels=true").unwrap();
-        let IssueAction::Edit(edit) = edit.action else { panic!("edit") };
+        let IssueAction::Edit(edit) = edit.action else {
+            panic!("edit")
+        };
         assert_eq!(edit.title, None);
         assert_eq!(edit.body, Some(String::new()));
         assert_eq!(edit.labels, Some(Vec::new()));
@@ -276,7 +394,9 @@ mod tests {
             b"expected_version=0&title=t&body=%00",
             b"expected_version=0&title=t&body=%",
             b"expected_version=0&title=t&body=b&label=a&label=a",
-        ] { assert!(command("open", body).is_err()); }
+        ] {
+            assert!(command("open", body).is_err());
+        }
         assert!(command("close", b"expected_version=1&body=ignored").is_err());
         assert!(command("edit", b"expected_version=1").is_err());
         assert!(command("edit", b"expected_version=1&clear_labels=true&label=a").is_err());
@@ -285,7 +405,14 @@ mod tests {
 
     #[test]
     fn paging_requires_an_explicit_basis_and_rejects_unknown_or_duplicate_parameters() {
-        for query in ["after=1", "limit=0", "limit=101", "limit=1&limit=2", "principal=admin", "after_version=1"] {
+        for query in [
+            "after=1",
+            "limit=0",
+            "limit=101",
+            "limit=1&limit=2",
+            "principal=admin",
+            "after_version=1",
+        ] {
             assert!(page(Some(query), "after").is_err());
         }
         assert_eq!(page(Some("limit=2"), "after").unwrap().limit, 2);

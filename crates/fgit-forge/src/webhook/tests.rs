@@ -24,16 +24,19 @@ fn ssrf_strict_blocks_loopback_private_and_metadata_addresses() {
         "http://100.127.255.254/hook",
         "http://0.0.0.0/hook",
         "http://255.255.255.255/hook",
-        "http://224.0.0.1/hook", // Multicast
-        "http://240.0.0.1/hook", // Reserved
-        "http://192.0.2.1/hook", // TEST-NET-1
+        "http://224.0.0.1/hook",    // Multicast
+        "http://240.0.0.1/hook",    // Reserved
+        "http://192.0.2.1/hook",    // TEST-NET-1
         "http://198.51.100.1/hook", // TEST-NET-2
-        "http://203.0.113.1/hook", // TEST-NET-3
+        "http://203.0.113.1/hook",  // TEST-NET-3
     ];
 
     for url in forbidden_urls {
         let res = policy.validate_url(url);
-        assert!(matches!(res, Err(WebhookRefusal::SsrfBlocked { .. })), "expected {url} to be blocked by SSRF policy, got {res:?}");
+        assert!(
+            matches!(res, Err(WebhookRefusal::SsrfBlocked { .. })),
+            "expected {url} to be blocked by SSRF policy, got {res:?}"
+        );
     }
 }
 
@@ -46,18 +49,21 @@ fn ssrf_strict_blocks_ipv6_private_loopback_and_mapped_addresses() {
         "http://[::]/hook",
         "http://[fc00::1]/hook",
         "http://[fd00::1234]/hook",
-        "http://[fe80::1]/hook", // link-local
-        "http://[ff02::1]/hook", // multicast
-        "http://[2001:db8::1]/hook", // documentation
-        "http://[::ffff:127.0.0.1]/hook", // IPv4-mapped loopback
+        "http://[fe80::1]/hook",                // link-local
+        "http://[ff02::1]/hook",                // multicast
+        "http://[2001:db8::1]/hook",            // documentation
+        "http://[::ffff:127.0.0.1]/hook",       // IPv4-mapped loopback
         "http://[::ffff:169.254.169.254]/hook", // IPv4-mapped metadata
-        "http://[::ffff:10.0.0.1]/hook", // IPv4-mapped private
-        "http://[::ffff:192.168.1.1]/hook", // IPv4-mapped private
+        "http://[::ffff:10.0.0.1]/hook",        // IPv4-mapped private
+        "http://[::ffff:192.168.1.1]/hook",     // IPv4-mapped private
     ];
 
     for url in forbidden_ipv6 {
         let res = policy.validate_url(url);
-        assert!(matches!(res, Err(WebhookRefusal::SsrfBlocked { .. })), "expected IPv6 {url} to be blocked, got {res:?}");
+        assert!(
+            matches!(res, Err(WebhookRefusal::SsrfBlocked { .. })),
+            "expected IPv6 {url} to be blocked, got {res:?}"
+        );
     }
 }
 
@@ -66,13 +72,13 @@ fn ssrf_blocks_obfuscated_ip_notations_and_embedded_credentials() {
     let policy = SsrfPolicy::STRICT;
 
     let obfuscated = [
-        "http://2130706433/hook", // Decimal integer for 127.0.0.1
-        "http://0x7f000001/hook", // Hex integer
-        "http://0177.0.0.1/hook", // Octal notation
+        "http://2130706433/hook",            // Decimal integer for 127.0.0.1
+        "http://0x7f000001/hook",            // Hex integer
+        "http://0177.0.0.1/hook",            // Octal notation
         "http://user:pass@example.com/hook", // Embedded credentials
-        "ftp://example.com/hook", // Unsupported scheme
-        "file:///etc/passwd", // Unsupported scheme
-        "gopher://example.com/hook", // Unsupported scheme
+        "ftp://example.com/hook",            // Unsupported scheme
+        "file:///etc/passwd",                // Unsupported scheme
+        "gopher://example.com/hook",         // Unsupported scheme
     ];
 
     for url in obfuscated {
@@ -89,7 +95,7 @@ fn ssrf_accepts_valid_public_hosts_and_ips() {
         "https://api.github.com/webhook",
         "http://example.com:8080/events",
         "https://subdomain.example.org/path?param=1",
-        "https://93.184.216.34/hook", // example.com public IP
+        "https://93.184.216.34/hook",    // example.com public IP
         "https://8.8.8.8:443/dns-query", // public DNS IP
     ];
 
@@ -107,25 +113,53 @@ fn ssrf_permissive_for_tests_allows_loopback_but_still_blocks_metadata_and_priva
     let test_policy = SsrfPolicy::PERMISSIVE_FOR_TESTS;
 
     // Loopback allowed in test policy:
-    assert!(test_policy.validate_url("http://127.0.0.1:8080/hook").is_ok());
-    assert!(test_policy.validate_url("http://localhost:3000/webhook").is_ok());
+    assert!(
+        test_policy
+            .validate_url("http://127.0.0.1:8080/hook")
+            .is_ok()
+    );
+    assert!(
+        test_policy
+            .validate_url("http://localhost:3000/webhook")
+            .is_ok()
+    );
     assert!(test_policy.validate_url("http://[::1]:9999/hook").is_ok());
 
     // BUT metadata and private are STILL strictly blocked!
-    assert!(matches!(test_policy.validate_url("http://169.254.169.254/metadata"), Err(WebhookRefusal::SsrfBlocked { .. })));
-    assert!(matches!(test_policy.validate_url("http://10.1.2.3/hook"), Err(WebhookRefusal::SsrfBlocked { .. })));
-    assert!(matches!(test_policy.validate_url("http://192.168.1.1/hook"), Err(WebhookRefusal::SsrfBlocked { .. })));
+    assert!(matches!(
+        test_policy.validate_url("http://169.254.169.254/metadata"),
+        Err(WebhookRefusal::SsrfBlocked { .. })
+    ));
+    assert!(matches!(
+        test_policy.validate_url("http://10.1.2.3/hook"),
+        Err(WebhookRefusal::SsrfBlocked { .. })
+    ));
+    assert!(matches!(
+        test_policy.validate_url("http://192.168.1.1/hook"),
+        Err(WebhookRefusal::SsrfBlocked { .. })
+    ));
 }
 
 #[test]
 fn ssrf_redirect_validation_blocks_redirect_to_internal_ip() {
     let policy = SsrfPolicy::STRICT;
-    let initial = policy.validate_url("https://example.com/api/v1/hook").unwrap();
+    let initial = policy
+        .validate_url("https://example.com/api/v1/hook")
+        .unwrap();
 
     // Redirect to internal IP must be blocked:
-    assert!(matches!(policy.validate_redirect(&initial, "http://127.0.0.1/admin"), Err(WebhookRefusal::SsrfBlocked { .. })));
-    assert!(matches!(policy.validate_redirect(&initial, "http://169.254.169.254/latest"), Err(WebhookRefusal::SsrfBlocked { .. })));
-    assert!(matches!(policy.validate_redirect(&initial, "http://10.0.0.1/internal"), Err(WebhookRefusal::SsrfBlocked { .. })));
+    assert!(matches!(
+        policy.validate_redirect(&initial, "http://127.0.0.1/admin"),
+        Err(WebhookRefusal::SsrfBlocked { .. })
+    ));
+    assert!(matches!(
+        policy.validate_redirect(&initial, "http://169.254.169.254/latest"),
+        Err(WebhookRefusal::SsrfBlocked { .. })
+    ));
+    assert!(matches!(
+        policy.validate_redirect(&initial, "http://10.0.0.1/internal"),
+        Err(WebhookRefusal::SsrfBlocked { .. })
+    ));
 
     // Relative redirect on same host is safe:
     let rel = policy.validate_redirect(&initial, "/api/v2/hook").unwrap();
@@ -133,7 +167,9 @@ fn ssrf_redirect_validation_blocks_redirect_to_internal_ip() {
     assert_eq!(rel.path_and_query(), "/api/v2/hook");
 
     // Public external redirect is safe:
-    let ext = policy.validate_redirect(&initial, "https://hooks.slack.com/services/123").unwrap();
+    let ext = policy
+        .validate_redirect(&initial, "https://hooks.slack.com/services/123")
+        .unwrap();
     assert_eq!(ext.host(), "hooks.slack.com");
 }
 
@@ -192,29 +228,45 @@ fn webhook_secret_rotation_window() {
 
 #[test]
 fn webhook_retry_schedule_exponential_backoff_and_jitter() {
-    let schedule = WebhookRetrySchedule::new(5, Duration::from_secs(1), Duration::from_secs(30)).unwrap();
+    let schedule =
+        WebhookRetrySchedule::new(5, Duration::from_secs(1), Duration::from_secs(30)).unwrap();
 
     // Attempt 1 delay is 0:
     assert_eq!(schedule.delay_for_attempt(1, 42), Duration::ZERO);
 
     // Attempt 2 base is 1s, with jitter [-20%, +20%] -> [800ms, 1200ms]
     let d2 = schedule.delay_for_attempt(2, 42);
-    assert!(d2 >= Duration::from_millis(800) && d2 <= Duration::from_millis(1200), "d2 was {d2:?}");
+    assert!(
+        d2 >= Duration::from_millis(800) && d2 <= Duration::from_millis(1200),
+        "d2 was {d2:?}"
+    );
 
     // Attempt 3 base is 2s -> [1600ms, 2400ms]
     let d3 = schedule.delay_for_attempt(3, 42);
-    assert!(d3 >= Duration::from_millis(1600) && d3 <= Duration::from_millis(2400), "d3 was {d3:?}");
+    assert!(
+        d3 >= Duration::from_millis(1600) && d3 <= Duration::from_millis(2400),
+        "d3 was {d3:?}"
+    );
 
     // Attempt 4 base is 4s -> [3200ms, 4800ms]
     let d4 = schedule.delay_for_attempt(4, 42);
-    assert!(d4 >= Duration::from_millis(3200) && d4 <= Duration::from_millis(4800), "d4 was {d4:?}");
+    assert!(
+        d4 >= Duration::from_millis(3200) && d4 <= Duration::from_millis(4800),
+        "d4 was {d4:?}"
+    );
 
     // Attempt 5 base is 8s -> [6400ms, 9600ms]
     let d5 = schedule.delay_for_attempt(5, 42);
-    assert!(d5 >= Duration::from_millis(6400) && d5 <= Duration::from_millis(9600), "d5 was {d5:?}");
+    assert!(
+        d5 >= Duration::from_millis(6400) && d5 <= Duration::from_millis(9600),
+        "d5 was {d5:?}"
+    );
 
     // Deterministic with same seed and attempt:
-    assert_eq!(schedule.delay_for_attempt(3, 42), schedule.delay_for_attempt(3, 42));
+    assert_eq!(
+        schedule.delay_for_attempt(3, 42),
+        schedule.delay_for_attempt(3, 42)
+    );
 }
 
 #[test]

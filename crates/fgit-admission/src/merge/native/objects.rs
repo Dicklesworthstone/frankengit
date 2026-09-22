@@ -9,7 +9,9 @@ use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
 use fgit_pack::{CanonicalObjectSource, Deadline, PackError, PackWriteError, verify_native_object};
 use fgit_types::{GitHashAlgorithm, GitOid, RefusalCode};
 
-use crate::{PermittedObjectClosure, ProjectionFailure, ValidatedClosure, permitted_object_closure_root};
+use crate::{
+    PermittedObjectClosure, ProjectionFailure, ValidatedClosure, permitted_object_closure_root,
+};
 
 /// Independent object/work ceilings. A caller also supplies its live deadline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,8 +48,14 @@ pub fn validate_merge_objects(
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
     merge.validate().map_err(|_| invalid())?;
-    validate_candidate_objects(source, merge.merge_commit,
-        Some(&[merge.target_tip_before, merge.source_tip]), Some(merge.base_tip), limits, deadline)
+    validate_candidate_objects(
+        source,
+        merge.merge_commit,
+        Some(&[merge.target_tip_before, merge.source_tip]),
+        Some(merge.base_tip),
+        limits,
+        deadline,
+    )
 }
 
 /// Verify a single-parent workspace commit with the SAME identity, required
@@ -62,7 +70,14 @@ pub fn validate_workspace_objects(
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
-    validate_candidate_objects(source, candidate, Some(&[expected_parent]), None, limits, deadline)
+    validate_candidate_objects(
+        source,
+        candidate,
+        Some(&[expected_parent]),
+        None,
+        limits,
+        deadline,
+    )
 }
 
 /// Verify all native dependencies of an already-authorized source commit.
@@ -87,19 +102,35 @@ fn validate_candidate_objects(
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
     let format = candidate.algorithm();
-    if candidate.is_zero() || expected_parents.is_some_and(|parents|
-        parents.is_empty() || parents.len() > 2
-        || parents.iter().any(|id| id.is_zero() || id.algorithm() != format || *id == candidate)
-        || (parents.len() == 2 && parents[0] == parents[1]))
-        || merge_base.is_some_and(|id| id.is_zero() || id.algorithm() != format
-            || expected_parents.is_none_or(|parents| parents.len() != 2))
-    { return Err(invalid()); }
+    if candidate.is_zero()
+        || expected_parents.is_some_and(|parents| {
+            parents.is_empty()
+                || parents.len() > 2
+                || parents
+                    .iter()
+                    .any(|id| id.is_zero() || id.algorithm() != format || *id == candidate)
+                || (parents.len() == 2 && parents[0] == parents[1])
+        })
+        || merge_base.is_some_and(|id| {
+            id.is_zero()
+                || id.algorithm() != format
+                || expected_parents.is_none_or(|parents| parents.len() != 2)
+        })
+    {
+        return Err(invalid());
+    }
     let maximum = MergeObjectLimits::default();
-    if limits.max_objects == 0 || limits.max_objects > maximum.max_objects
-        || limits.max_edges == 0 || limits.max_edges > maximum.max_edges
-        || limits.max_object_bytes == 0 || limits.max_object_bytes > maximum.max_object_bytes
-        || limits.max_total_bytes == 0 || limits.max_total_bytes > maximum.max_total_bytes
-    { return Err(budget()); }
+    if limits.max_objects == 0
+        || limits.max_objects > maximum.max_objects
+        || limits.max_edges == 0
+        || limits.max_edges > maximum.max_edges
+        || limits.max_object_bytes == 0
+        || limits.max_object_bytes > maximum.max_object_bytes
+        || limits.max_total_bytes == 0
+        || limits.max_total_bytes > maximum.max_total_bytes
+    {
+        return Err(budget());
+    }
     let parse_limits = ParseLimits {
         max_object_bytes: limits.max_object_bytes,
         max_tree_entries: limits.max_edges,
@@ -110,7 +141,13 @@ fn validate_candidate_objects(
     let mut pending = BTreeSet::new();
     let mut visited = BTreeSet::new();
     let mut parents = BTreeMap::<GitOid, Vec<GitOid>>::new();
-    require_object(candidate, ObjectType::Commit, &mut required, &mut pending, limits)?;
+    require_object(
+        candidate,
+        ObjectType::Commit,
+        &mut required,
+        &mut pending,
+        limits,
+    )?;
     let mut total_bytes = 0_usize;
     let mut edges = 0_usize;
 
@@ -121,35 +158,69 @@ fn validate_candidate_objects(
         if object.id() != id || required.get(&id) != Some(&object.object_type()) {
             return Err(invalid());
         }
-        if object.body().len() > limits.max_object_bytes { return Err(budget()); }
-        total_bytes = total_bytes.checked_add(object.body().len())
-            .filter(|bytes| *bytes <= limits.max_total_bytes).ok_or_else(budget)?;
+        if object.body().len() > limits.max_object_bytes {
+            return Err(budget());
+        }
+        total_bytes = total_bytes
+            .checked_add(object.body().len())
+            .filter(|bytes| *bytes <= limits.max_total_bytes)
+            .ok_or_else(budget)?;
         let profile = if id == candidate && expected_parents.is_some() {
             AcceptanceProfile::StrictCreate
         } else {
             AcceptanceProfile::GitCompatibleImport
         };
-        let parsed = verify_native_object(format, object.object_type(), object.body(), &id, profile, &parse_limits)
-            .map_err(|_| invalid())?;
+        let parsed = verify_native_object(
+            format,
+            object.object_type(),
+            object.body(),
+            &id,
+            profile,
+            &parse_limits,
+        )
+        .map_err(|_| invalid())?;
         checkpoint(deadline)?;
         visited.insert(id);
         let mut outgoing = Vec::new();
         match parsed {
             ParsedObject::Commit(commit) => {
-                if commit.headers().iter().filter(|header| header.name == b"tree").count() != 1
-                    || commit.headers().iter().any(|header| (header.name == b"tree" || header.name == b"parent")
-                        && !header.continuations.is_empty())
-                { return Err(invalid()); }
+                if commit
+                    .headers()
+                    .iter()
+                    .filter(|header| header.name == b"tree")
+                    .count()
+                    != 1
+                    || commit.headers().iter().any(|header| {
+                        (header.name == b"tree" || header.name == b"parent")
+                            && !header.continuations.is_empty()
+                    })
+                {
+                    return Err(invalid());
+                }
                 let tree = parse_oid(format, commit.tree_reference().ok_or_else(invalid)?)?;
-                push_edge(&mut outgoing, &mut edges, limits.max_edges, tree, ObjectType::Tree)?;
+                push_edge(
+                    &mut outgoing,
+                    &mut edges,
+                    limits.max_edges,
+                    tree,
+                    ObjectType::Tree,
+                )?;
                 let mut parent_ids = Vec::new();
                 for parent in commit.parent_references() {
                     checkpoint(deadline)?;
                     let parent = parse_oid(format, parent)?;
-                    push_edge(&mut outgoing, &mut edges, limits.max_edges, parent, ObjectType::Commit)?;
+                    push_edge(
+                        &mut outgoing,
+                        &mut edges,
+                        limits.max_edges,
+                        parent,
+                        ObjectType::Commit,
+                    )?;
                     parent_ids.push(parent);
                 }
-                if id == candidate && expected_parents.is_some_and(|expected| parent_ids.as_slice() != expected) {
+                if id == candidate
+                    && expected_parents.is_some_and(|expected| parent_ids.as_slice() != expected)
+                {
                     return Err(invalid());
                 }
                 parents.insert(id, parent_ids);
@@ -160,15 +231,21 @@ fn validate_candidate_objects(
                     // Even a gitlink consumes traversal work, though its target
                     // belongs to another repository and is not fetched here.
                     charge_edge(&mut edges, limits.max_edges)?;
-                    let mode = std::str::from_utf8(&entry.mode).ok()
-                        .and_then(|mode| u32::from_str_radix(mode, 8).ok()).ok_or_else(invalid)?;
+                    let mode = std::str::from_utf8(&entry.mode)
+                        .ok()
+                        .and_then(|mode| u32::from_str_radix(mode, 8).ok())
+                        .ok_or_else(invalid)?;
                     let kind = match mode & 0o170_000 {
                         0o040_000 => ObjectType::Tree,
                         0o100_000 | 0o120_000 => ObjectType::Blob,
                         0o160_000 => continue,
                         _ => return Err(invalid()),
                     };
-                    let hex: String = entry.object_id.iter().map(|byte| format!("{byte:02x}")).collect();
+                    let hex: String = entry
+                        .object_id
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
                     outgoing.try_reserve(1).map_err(|_| budget())?;
                     outgoing.push((parse_oid(format, hex.as_bytes())?, kind));
                 }
@@ -186,24 +263,35 @@ fn validate_candidate_objects(
         if !parents.contains_key(&base)
             || !is_ancestor(base, expected_parents[1], &parents, deadline)?
             || !is_ancestor(base, expected_parents[0], &parents, deadline)?
-        { return Err(invalid()); }
+        {
+            return Err(invalid());
+        }
     }
     checkpoint(deadline)?;
     let closure = PermittedObjectClosure::new(visited);
-    let object_closure_root = permitted_object_closure_root(&closure)
-        .map_err(ProjectionFailure::Unavailable)?;
+    let object_closure_root =
+        permitted_object_closure_root(&closure).map_err(ProjectionFailure::Unavailable)?;
     checkpoint(deadline)?;
-    Ok(ValidatedClosure { object_closure_root, objects: closure.objects().clone() })
+    Ok(ValidatedClosure {
+        object_closure_root,
+        objects: closure.objects().clone(),
+    })
 }
 
 fn charge_edge(edges: &mut usize, limit: usize) -> Result<(), ProjectionFailure> {
-    *edges = edges.checked_add(1).filter(|count| *count <= limit).ok_or_else(budget)?;
+    *edges = edges
+        .checked_add(1)
+        .filter(|count| *count <= limit)
+        .ok_or_else(budget)?;
     Ok(())
 }
 
 fn push_edge(
-    outgoing: &mut Vec<(GitOid, ObjectType)>, edges: &mut usize, limit: usize,
-    target: GitOid, kind: ObjectType,
+    outgoing: &mut Vec<(GitOid, ObjectType)>,
+    edges: &mut usize,
+    limit: usize,
+    target: GitOid,
+    kind: ObjectType,
 ) -> Result<(), ProjectionFailure> {
     charge_edge(edges, limit)?;
     outgoing.try_reserve(1).map_err(|_| budget())?;
@@ -212,34 +300,49 @@ fn push_edge(
 }
 
 fn require_object(
-    id: GitOid, kind: ObjectType, required: &mut BTreeMap<GitOid, ObjectType>,
-    pending: &mut BTreeSet<GitOid>, limits: MergeObjectLimits,
+    id: GitOid,
+    kind: ObjectType,
+    required: &mut BTreeMap<GitOid, ObjectType>,
+    pending: &mut BTreeSet<GitOid>,
+    limits: MergeObjectLimits,
 ) -> Result<(), ProjectionFailure> {
-    if id.is_zero() { return Err(invalid()); }
+    if id.is_zero() {
+        return Err(invalid());
+    }
     if let Some(expected) = required.get(&id) {
-        if *expected != kind { return Err(invalid()); }
+        if *expected != kind {
+            return Err(invalid());
+        }
         return Ok(());
     }
     // Charge unique membership at enqueue, not after reading: shared edges
     // cannot inflate the worklist and cycles cannot loop indefinitely.
-    if required.len() >= limits.max_objects { return Err(budget()); }
+    if required.len() >= limits.max_objects {
+        return Err(budget());
+    }
     required.insert(id, kind);
     pending.insert(id);
     Ok(())
 }
 
 fn is_ancestor(
-    ancestor: GitOid, tip: GitOid, parents: &BTreeMap<GitOid, Vec<GitOid>>,
+    ancestor: GitOid,
+    tip: GitOid,
+    parents: &BTreeMap<GitOid, Vec<GitOid>>,
     deadline: &mut impl Deadline,
 ) -> Result<bool, ProjectionFailure> {
     let mut pending = BTreeSet::from([tip]);
     let mut visited = BTreeSet::from([tip]);
     while let Some(id) = pending.pop_first() {
         checkpoint(deadline)?;
-        if id == ancestor { return Ok(true); }
+        if id == ancestor {
+            return Ok(true);
+        }
         for parent in parents.get(&id).ok_or_else(invalid)? {
             checkpoint(deadline)?;
-            if visited.insert(*parent) { pending.insert(*parent); }
+            if visited.insert(*parent) {
+                pending.insert(*parent);
+            }
         }
     }
     Ok(false)
@@ -251,15 +354,26 @@ fn parse_oid(format: GitHashAlgorithm, bytes: &[u8]) -> Result<GitOid, Projectio
     // object bytes stay unchanged and are what the native hash verifies.
     GitOid::from_hex(format, &hex.to_ascii_lowercase()).map_err(|_| invalid())
 }
-fn invalid() -> ProjectionFailure { ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid) }
-fn budget() -> ProjectionFailure { ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded) }
+fn invalid() -> ProjectionFailure {
+    ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid)
+}
+fn budget() -> ProjectionFailure {
+    ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded)
+}
 fn checkpoint(deadline: &mut impl Deadline) -> Result<(), ProjectionFailure> {
-    if deadline.checkpoint() { Ok(()) }
-    else { Err(ProjectionFailure::Unavailable(RefusalCode::CancellationInProgress)) }
+    if deadline.checkpoint() {
+        Ok(())
+    } else {
+        Err(ProjectionFailure::Unavailable(
+            RefusalCode::CancellationInProgress,
+        ))
+    }
 }
 fn source_failure(error: PackWriteError) -> ProjectionFailure {
     match error {
-        PackWriteError::Pack(PackError::DeadlineExceeded) => ProjectionFailure::Unavailable(RefusalCode::CancellationInProgress),
+        PackWriteError::Pack(PackError::DeadlineExceeded) => {
+            ProjectionFailure::Unavailable(RefusalCode::CancellationInProgress)
+        }
         _ => ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing),
     }
 }

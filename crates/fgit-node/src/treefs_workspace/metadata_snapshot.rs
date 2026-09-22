@@ -45,7 +45,10 @@ fn invalid() -> SnapshotReadRefusal {
 /// Only ordinary publications in one policy/configuration/retention epoch are
 /// traversable. In particular, a revoked visibility policy cannot be bypassed
 /// using an older page token, even if its old immutable objects still exist.
-fn same_read_epoch(current: &RepositoryAuthorityHeadBody, older: &RepositoryAuthorityHeadBody) -> bool {
+fn same_read_epoch(
+    current: &RepositoryAuthorityHeadBody,
+    older: &RepositoryAuthorityHeadBody,
+) -> bool {
     current.repository_id == older.repository_id
         && current.configuration_root == older.configuration_root
         && current.policy_epoch == older.policy_epoch
@@ -64,7 +67,15 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
-    select_bounded(store, cx, current, requested, MAX_SNAPSHOT_TRANSITIONS, cancelled).await
+    select_bounded(
+        store,
+        cx,
+        current,
+        requested,
+        MAX_SNAPSHOT_TRANSITIONS,
+        cancelled,
+    )
+    .await
 }
 
 async fn select_bounded<S, C>(
@@ -93,18 +104,19 @@ where
             return Err(SnapshotReadRefusal::Unavailable);
         };
         let predecessor = fgit_authority::read_authority_head_body_async(store, cx, predecessor_id)
-            .await.map_err(AdmissionError::from)?;
+            .await
+            .map_err(AdmissionError::from)?;
         stopped(cancelled)?;
         if !same_read_epoch(current.body(), &predecessor) {
             return Err(SnapshotReadRefusal::Unavailable);
         }
         let batch_id = selected.body().decision_tail_id.ok_or_else(invalid)?;
         let batch = fgit_authority::read_decision_batch_body_async(store, cx, batch_id)
-            .await.map_err(AdmissionError::from)?;
+            .await
+            .map_err(AdmissionError::from)?;
         stopped(cancelled)?;
         let older = PublicationBasis::new(predecessor_id, predecessor);
-        verify_pair(&CryptoBodyIdentity, &older, &batch, selected.body())
-            .map_err(|_| invalid())?;
+        verify_pair(&CryptoBodyIdentity, &older, &batch, selected.body()).map_err(|_| invalid())?;
         // The current bounded profile has no historical retention lease.
         // Do not walk through compaction/generation activation on the strength
         // of an old token. Such continuations require a future retained-view
@@ -112,7 +124,8 @@ where
         if batch.compaction_generation_link.is_some() {
             return Err(SnapshotReadRefusal::Unavailable);
         }
-        decisions = decisions.checked_add(batch.decisions.len())
+        decisions = decisions
+            .checked_add(batch.decisions.len())
             .filter(|count| *count <= MAX_SNAPSHOT_DECISIONS)
             .ok_or(SnapshotReadRefusal::Unavailable)?;
         transitions += 1;

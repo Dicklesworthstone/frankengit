@@ -6,8 +6,8 @@ use std::cell::Cell;
 
 use fgit_wire::visibility::{RefVisibility, VisibleUploadPackRepository};
 use fgit_wire::{
-    AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, UploadPackRepository,
-    V1Advertisement, WireLimits,
+    AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, UploadPackRepository, V1Advertisement,
+    WireLimits,
 };
 
 struct Repository {
@@ -24,8 +24,7 @@ fn oid(format: GitObjectFormat, digit: char) -> AnyGitOid {
 }
 
 fn reference(format: GitObjectFormat, digit: char, name: &[u8]) -> AdvertisedRef {
-    AdvertisedRef::new(oid(format, digit), name, &WireLimits::default())
-        .expect("fixture reference")
+    AdvertisedRef::new(oid(format, digit), name, &WireLimits::default()).expect("fixture reference")
 }
 
 fn repository(format: GitObjectFormat, shared: bool) -> Repository {
@@ -131,7 +130,10 @@ fn unhiding_the_target_restores_the_alias_and_its_peeled_record() {
         let repository = repository(format, false);
         let view = VisibleUploadPackRepository::new(&repository, &visibility);
         assert_eq!(view.advertised_refs(), repository.refs.as_slice());
-        assert_eq!(view.symref_target(b"refs/tags/alias"), Some(&b"refs/private/tag"[..]));
+        assert_eq!(
+            view.symref_target(b"refs/tags/alias"),
+            Some(&b"refs/private/tag"[..])
+        );
         assert!(view.contains_want(oid(format, '3')));
     }
 }
@@ -152,9 +154,15 @@ fn a_public_identity_shared_with_a_hidden_alias_remains_usable() {
 fn hiding_propagates_through_multiple_aliases_to_every_peeled_record() {
     for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
         let mut repository = repository(format, false);
-        repository.refs.push(reference(format, '2', b"refs/tags/second"));
-        repository.refs.push(reference(format, '3', b"refs/tags/second^{}"));
-        repository.aliases.push((b"refs/tags/second", b"refs/tags/alias"));
+        repository
+            .refs
+            .push(reference(format, '2', b"refs/tags/second"));
+        repository
+            .refs
+            .push(reference(format, '3', b"refs/tags/second^{}"));
+        repository
+            .aliases
+            .push((b"refs/tags/second", b"refs/tags/alias"));
         let view = VisibleUploadPackRepository::new(&repository, &policy());
         assert_eq!(view.advertised_refs(), &repository.refs[..1]);
         assert_eq!(view.resolve_ref(b"refs/tags/second^{}"), None);
@@ -167,9 +175,15 @@ fn analysis_and_emission_use_the_same_single_advertised_snapshot() {
     let format = GitObjectFormat::Sha1;
     let mut repository = repository(format, false);
     repository.later_refs = Some(vec![reference(format, '4', b"refs/tags/injected")]);
-    repository.aliases.push((b"refs/tags/injected", b"refs/private/tag"));
+    repository
+        .aliases
+        .push((b"refs/tags/injected", b"refs/private/tag"));
     let view = VisibleUploadPackRepository::new(&repository, &policy());
-    assert_eq!(repository.reads.get(), 1, "do not reread between projection passes");
+    assert_eq!(
+        repository.reads.get(),
+        1,
+        "do not reread between projection passes"
+    );
     assert_eq!(view.advertised_refs(), &repository.refs[..1]);
     assert_eq!(view.resolve_ref(b"refs/tags/injected"), None);
 }

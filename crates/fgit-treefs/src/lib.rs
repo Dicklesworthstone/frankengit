@@ -60,8 +60,8 @@
 
 pub mod archive;
 pub mod base;
-pub mod capability;
 pub mod candidate_sparse;
+pub mod capability;
 pub mod export;
 pub mod integrity;
 pub mod intent;
@@ -74,12 +74,12 @@ pub mod proposal;
 pub mod snapshot;
 pub mod sparse;
 
-pub use candidate_sparse::{CandidateManifestRefusal, SparseCandidateManifest};
 pub use archive::{
     ArchiveCompleteness, ArchiveProfile, ArchiveReceipt, ArchiveRefusal, ArchiveVerification,
     TarLimits, UstarArchive, ZipArchive, ZipLimits,
 };
 pub use base::{BaseEntry, BaseError, BaseView, DirectoryListing, ObjectSource, ObjectSourceError};
+pub use candidate_sparse::{CandidateManifestRefusal, SparseCandidateManifest};
 pub use capability::{
     CapabilityRefusal, GrantScope, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId,
     WriteGrant,

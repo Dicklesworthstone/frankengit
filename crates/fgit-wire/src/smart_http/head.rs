@@ -79,7 +79,9 @@ pub(super) fn parse_with<'a, T>(
     }
     if target.len() > limits.max_target_bytes
         || !target.starts_with('/')
-        || !target.bytes().all(|byte| byte.is_ascii_graphic() && !b"#\\".contains(&byte))
+        || !target
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !b"#\\".contains(&byte))
     {
         return Err(HttpError::InvalidRoute);
     }
@@ -94,7 +96,9 @@ pub(super) fn parse_with<'a, T>(
         let (name, value) = line.split_once(':').ok_or(HttpError::InvalidHeader)?;
         if name.is_empty()
             || !name.bytes().all(token_byte)
-            || !value.bytes().all(|byte| byte == b'\t' || (32..=126).contains(&byte))
+            || !value
+                .bytes()
+                .all(|byte| byte == b'\t' || (32..=126).contains(&byte))
         {
             return Err(HttpError::InvalidHeader);
         }
@@ -124,7 +128,9 @@ pub(super) fn parse_with<'a, T>(
     if (version == "HTTP/1.1" && host.is_none())
         || host.is_some_and(|value| {
             value.is_empty()
-                || value.bytes().any(|b| b.is_ascii_whitespace() || b"/?#@\\,".contains(&b))
+                || value
+                    .bytes()
+                    .any(|b| b.is_ascii_whitespace() || b"/?#@\\,".contains(&b))
         })
     {
         return Err(HttpError::InvalidHost);
@@ -162,17 +168,24 @@ pub(super) fn parse_with<'a, T>(
         Some(value) if value.eq_ignore_ascii_case("100-continue") => true,
         Some(_) => return Err(HttpError::UnsupportedExpectation),
     };
-    Ok(Some((Envelope {
-        method,
-        target,
-        version: if version == "HTTP/1.0" { HttpVersion::Http10 } else { HttpVersion::Http11 },
-        body,
-        expect_continue,
-        consumed: end + 4,
-        content_type: media,
-        git_protocol: protocol,
-        authorization,
-    }, selected)))
+    Ok(Some((
+        Envelope {
+            method,
+            target,
+            version: if version == "HTTP/1.0" {
+                HttpVersion::Http10
+            } else {
+                HttpVersion::Http11
+            },
+            body,
+            expect_continue,
+            consumed: end + 4,
+            content_type: media,
+            git_protocol: protocol,
+            authorization,
+        },
+        selected,
+    )))
 }
 
 #[cfg(test)]
@@ -195,11 +208,21 @@ mod tests {
     fn every_header_fragment_waits_and_binary_body_is_not_header_text() {
         let header = b"GET /repo.git/api/v1/issues HTTP/1.1\r\nHost: local\r\n\r\n";
         for end in 0..header.len() {
-            assert!(parse(&header[..end], HttpLimits::default()).unwrap().is_none());
+            assert!(
+                parse(&header[..end], HttpLimits::default())
+                    .unwrap()
+                    .is_none()
+            );
         }
         let mut input = header.to_vec();
         input.extend_from_slice(&[0xff, 0, 0xfe]);
-        assert_eq!(parse(&input, HttpLimits::default()).unwrap().unwrap().consumed, header.len());
+        assert_eq!(
+            parse(&input, HttpLimits::default())
+                .unwrap()
+                .unwrap()
+                .consumed,
+            header.len()
+        );
     }
 
     #[test]
@@ -213,8 +236,13 @@ mod tests {
             "Content-Encoding: gzip\r\n",
             " Host: hidden\r\n",
         ] {
-            let input = format!("POST /repo.git/api/v1/issues/1/open HTTP/1.1\r\nHost: local\r\n{headers}\r\n");
-            assert!(parse(input.as_bytes(), HttpLimits::default()).is_err(), "{headers}");
+            let input = format!(
+                "POST /repo.git/api/v1/issues/1/open HTTP/1.1\r\nHost: local\r\n{headers}\r\n"
+            );
+            assert!(
+                parse(input.as_bytes(), HttpLimits::default()).is_err(),
+                "{headers}"
+            );
         }
     }
 }

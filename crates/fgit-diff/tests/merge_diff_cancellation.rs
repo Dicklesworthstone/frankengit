@@ -3,9 +3,9 @@
 use std::cell::Cell;
 
 use fgit_diff::{
-    ContentMergeError, ContentMergeOptions, DiffError, DiffLimits, DiffOptions,
-    MergeCancellation, VirtualBaseProfile, diff_with_cancellation, merge_content,
-    merge_content_many, merge_content_many_with_cancellation, merge_content_with_cancellation,
+    ContentMergeError, ContentMergeOptions, DiffError, DiffLimits, DiffOptions, MergeCancellation,
+    VirtualBaseProfile, diff_with_cancellation, merge_content, merge_content_many,
+    merge_content_many_with_cancellation, merge_content_with_cancellation,
 };
 
 struct CancelOn {
@@ -87,7 +87,10 @@ fn first_side_diff_is_interruptible_for_every_profile_and_retry_has_no_residue()
             Err(ContentMergeError::Cancelled),
         );
         assert_eq!(cancel.calls.get(), 32);
-        assert_eq!(merge_content(&base, &ours, &theirs, options).unwrap(), expected);
+        assert_eq!(
+            merge_content(&base, &ours, &theirs, options).unwrap(),
+            expected
+        );
     }
 }
 
@@ -136,7 +139,9 @@ fn recursive_virtual_base_construction_forwards_cancellation_into_diff() {
         assert_eq!(cancel.calls.get(), 4);
         assert_eq!(
             merge_content_many(&bases, &ours, theirs, exhausted),
-            Err(ContentMergeError::Diff(DiffError::WorkExceeded { limit: 0 })),
+            Err(ContentMergeError::Diff(DiffError::WorkExceeded {
+                limit: 0
+            })),
         );
         assert!(merge_content_many(&bases, &ours, theirs, options).is_ok());
     }

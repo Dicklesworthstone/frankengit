@@ -14,9 +14,11 @@ use fgit_authority::{IdempotencyKey, OutcomeLookup};
 use fgit_types::{DecisionOutcome, PrincipalId};
 use fgit_wire::smart_http::{BodyFraming, HttpVersion, head::Envelope};
 
-use crate::{GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession, OneNode};
-use super::{Profile, Status, retry_key};
 use super::super::drive_request_while;
+use super::{Profile, Status, retry_key};
+use crate::{
+    GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, LoopbackReceiveSession, OneNode,
+};
 
 const MAX_REPLY_BYTES: usize = 16 * 1024;
 const ROUTE: &str = "/api/v1/outcomes";
@@ -29,7 +31,10 @@ enum Selector {
 }
 impl Selector {
     fn command_index(self) -> Option<usize> {
-        match self { Self::Command(index) => Some(index), _ => None }
+        match self {
+            Self::Command(index) => Some(index),
+            _ => None,
+        }
     }
 }
 
@@ -52,29 +57,38 @@ impl<'a> Request<'a> {
         } else if suffix == "/receive" {
             Selector::Session
         } else {
-            let number = suffix.strip_prefix("/receive/")
+            let number = suffix
+                .strip_prefix("/receive/")
                 .ok_or_else(|| ApiError::new(Status::NotFound, "not_found"))?;
-            if number.is_empty() || number.len() > 2
+            if number.is_empty()
+                || number.len() > 2
                 || !number.bytes().all(|byte| byte.is_ascii_digit())
                 || (number.len() > 1 && number.starts_with('0'))
             {
                 return Err(ApiError::bad("invalid_command_index"));
             }
-            let index: usize = number.parse().map_err(|_| ApiError::bad("invalid_command_index"))?;
+            let index: usize = number
+                .parse()
+                .map_err(|_| ApiError::bad("invalid_command_index"))?;
             if index >= fgit_admission::AdmissionLimits::default().max_commands {
                 return Err(ApiError::bad("invalid_command_index"));
             }
             Selector::Command(index)
         };
-        if !matches!(envelope.body, BodyFraming::Empty | BodyFraming::ContentLength(0))
-            || envelope.expect_continue
+        if !matches!(
+            envelope.body,
+            BodyFraming::Empty | BodyFraming::ContentLength(0)
+        ) || envelope.expect_continue
         {
             return Err(ApiError::bad("body_not_allowed"));
         }
         if envelope.git_protocol.is_some() {
             return Err(ApiError::bad("git_protocol_not_applicable"));
         }
-        Ok(Some(Self { repository_route, selector }))
+        Ok(Some(Self {
+            repository_route,
+            selector,
+        }))
     }
 }
 
@@ -84,8 +98,12 @@ pub(super) struct ApiError {
     code: &'static str,
 }
 impl ApiError {
-    fn new(status: Status, code: &'static str) -> Self { Self { status, code } }
-    fn bad(code: &'static str) -> Self { Self::new(Status::BadRequest, code) }
+    fn new(status: Status, code: &'static str) -> Self {
+        Self { status, code }
+    }
+    fn bad(code: &'static str) -> Self {
+        Self::new(Status::BadRequest, code)
+    }
     pub(super) fn from_status(status: Status) -> Self {
         let code = match status {
             Status::Unauthorized => "unauthorized",
@@ -100,26 +118,39 @@ impl ApiError {
         Self::new(status, code)
     }
     pub(super) fn send(self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
-        let retryable = matches!(self.status, Status::Unavailable | Status::Timeout | Status::RateLimited);
+        let retryable = matches!(
+            self.status,
+            Status::Unavailable | Status::Timeout | Status::RateLimited
+        );
         let remediation = match self.status {
             Status::Unauthorized => "authenticate_as_original_principal",
             Status::Forbidden => "request_outcomes_read_grant",
             _ if retryable => "retry_same_lookup",
             _ => "correct_lookup_parameters",
         };
-        let body = format!(concat!(
-            "{{\"type\":\"outcome_error\",\"schema_version\":1,\"code\":{},",
-            "\"retryable\":{},\"remediation\":{},\"outcome_unknown\":true,",
-            "\"read_only\":true,\"request_reexecuted\":false,\"absence_proves_non_commit\":false}}"
-        ), quote(self.code), retryable, quote(remediation));
+        let body = format!(
+            concat!(
+                "{{\"type\":\"outcome_error\",\"schema_version\":1,\"code\":{},",
+                "\"retryable\":{},\"remediation\":{},\"outcome_unknown\":true,",
+                "\"read_only\":true,\"request_reexecuted\":false,\"absence_proves_non_commit\":false}}"
+            ),
+            quote(self.code),
+            retryable,
+            quote(remediation)
+        );
         send_json(writer, version, self.status, &body)
     }
 }
 
 fn authenticate(
-    request: &Request<'_>, envelope: &Envelope<'_>, raw_head: &[u8], profile: &Profile,
+    request: &Request<'_>,
+    envelope: &Envelope<'_>,
+    raw_head: &[u8],
+    profile: &Profile,
 ) -> Result<LoopbackReceiveSession, ApiError> {
-    let grant = profile.credentials.authenticate(envelope.authorization())
+    let grant = profile
+        .credentials
+        .authenticate(envelope.authorization())
         .map_err(|error| ApiError::from_status(Status::from(error)))?;
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::new(Status::NotFound, "not_found"));
@@ -127,9 +158,11 @@ fn authenticate(
     if !profile.allow_outcomes || !grant.permits_outcomes() {
         return Err(ApiError::new(Status::Forbidden, "forbidden"));
     }
-    let original = retry_key(raw_head).map_err(|_| ApiError::bad("invalid_original_key"))?
+    let original = retry_key(raw_head)
+        .map_err(|_| ApiError::bad("invalid_original_key"))?
         .ok_or_else(|| ApiError::bad("original_key_required"))?;
-    let original = IdempotencyKey::new(original.to_vec()).map_err(|_| ApiError::bad("invalid_original_key"))?;
+    let original = IdempotencyKey::new(original.to_vec())
+        .map_err(|_| ApiError::bad("invalid_original_key"))?;
     let key = match request.selector {
         Selector::Transaction | Selector::Session => original,
         Selector::Command(index) => non_atomic_command_key(&original, index)
@@ -142,22 +175,34 @@ fn authenticate(
 /// This path never reads a transaction body or brings the child into Serving.
 /// Recovery has its own quota so an exhausted write quota cannot hide a result.
 pub(super) fn serve(
-    profile: &Profile, envelope: &Envelope<'_>, raw_head: &[u8],
-    read_ahead: &[u8], writer: &mut impl Write,
+    profile: &Profile,
+    envelope: &Envelope<'_>,
+    raw_head: &[u8],
+    read_ahead: &[u8],
+    writer: &mut impl Write,
 ) -> Result<(), ApiError> {
-    let request = Request::parse(envelope)?
-        .ok_or_else(|| ApiError::new(Status::NotFound, "not_found"))?;
+    let request =
+        Request::parse(envelope)?.ok_or_else(|| ApiError::new(Status::NotFound, "not_found"))?;
     let session = authenticate(&request, envelope, raw_head, profile)?;
-    if !read_ahead.is_empty() { return Err(ApiError::bad("body_not_allowed")); }
-    let principal = session.authenticated_session()
-        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?.principal_id();
-    profile.outcome_quota.evaluate(&principal)
+    if !read_ahead.is_empty() {
+        return Err(ApiError::bad("body_not_allowed"));
+    }
+    let principal = session
+        .authenticated_session()
+        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?
+        .principal_id();
+    profile
+        .outcome_quota
+        .evaluate(&principal)
         .map_err(|_| ApiError::from_status(Status::RateLimited))?;
     let node = OneNode::open_existing(profile.config.clone())
         .map_err(|_| ApiError::from_status(Status::Unavailable))?;
-    let result = execute(&node, &request, &session, profile.maximum_response_bytes)
-        .and_then(|reply| reply.send(writer, envelope.version)
-            .map_err(|_| ApiError::from_status(Status::Unavailable)));
+    let result =
+        execute(&node, &request, &session, profile.maximum_response_bytes).and_then(|reply| {
+            reply
+                .send(writer, envelope.version)
+                .map_err(|_| ApiError::from_status(Status::Unavailable))
+        });
     let cleanup = node.shutdown();
     if let Err(error) = cleanup {
         super::log_cleanup(&error);
@@ -175,7 +220,9 @@ impl Reply {
         let result = send_json(writer, version, Status::Success, &self.body);
         if result.is_err() {
             if let Some(tx) = self.terminal_tx {
-                eprintln!("Outcome HTTP reply lost after resolving canonical transaction {tx}; repeat the read-only lookup");
+                eprintln!(
+                    "Outcome HTTP reply lost after resolving canonical transaction {tx}; repeat the read-only lookup"
+                );
             }
         }
         result
@@ -183,52 +230,92 @@ impl Reply {
 }
 
 fn execute(
-    node: &OneNode, request: &Request<'_>, session: &LoopbackReceiveSession, maximum_response: u64,
+    node: &OneNode,
+    request: &Request<'_>,
+    session: &LoopbackReceiveSession,
+    maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     if request.selector == Selector::Session {
         return sessions::execute(node, session, maximum_response);
     }
-    let principal = session.authenticated_session()
-        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?.principal_id();
+    let principal = session
+        .authenticated_session()
+        .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?
+        .principal_id();
     let context = node.request_context();
-    let deadline = GitDaemonSessionDeadline::new(node.git_daemon_session_timeout, GitDaemonSessionWorkScaling::FLAT);
+    let deadline = GitDaemonSessionDeadline::new(
+        node.git_daemon_session_timeout,
+        GitDaemonSessionWorkScaling::FLAT,
+    );
     // The resolver preserves a terminal result even if cancellation arrives
     // after that decision was authenticated. No seal or binding is written.
-    let report = drive_request_while(node, &context,
-        node.recover_transaction_in(&context, session), &mut || !deadline.expired())
-        .map_err(|_| ApiError::from_status(Status::Unavailable))?;
+    let report = drive_request_while(
+        node,
+        &context,
+        node.recover_transaction_in(&context, session),
+        &mut || !deadline.expired(),
+    )
+    .map_err(|_| ApiError::from_status(Status::Unavailable))?;
     let body = render(node, principal, request.selector.command_index(), &report);
-    let maximum = usize::try_from(maximum_response).unwrap_or(usize::MAX).min(MAX_REPLY_BYTES);
+    let maximum = usize::try_from(maximum_response)
+        .unwrap_or(usize::MAX)
+        .min(MAX_REPLY_BYTES);
     if body.len() > maximum {
         return Err(ApiError::from_status(Status::TooLarge));
     }
     let terminal_tx = match &report {
-        RequestRecovery::Recovered(recovered) if report.terminal().is_some() => Some(recovered.tx_id()),
+        RequestRecovery::Recovered(recovered) if report.terminal().is_some() => {
+            Some(recovered.tx_id())
+        }
         _ => None,
     };
     Ok(Reply { body, terminal_tx })
 }
 
-fn render(node: &OneNode, principal: PrincipalId, command_index: Option<usize>, report: &RequestRecovery) -> String {
+fn render(
+    node: &OneNode,
+    principal: PrincipalId,
+    command_index: Option<usize>,
+    report: &RequestRecovery,
+) -> String {
     let (state, recovered, terminal) = match report {
         RequestRecovery::KeyNotObserved => ("key_not_observed", None, None),
         RequestRecovery::SealNotObserved => ("seal_not_observed", None, None),
         RequestRecovery::Recovered(recovered) => match recovered.outcome() {
             OutcomeLookup::Undecided => ("undecided", Some(recovered.as_ref()), None),
             OutcomeLookup::Decided(terminal) => (
-                match terminal.outcome { DecisionOutcome::Committed { .. } => "committed", DecisionOutcome::Refused { .. } => "refused" },
-                Some(recovered.as_ref()), Some(terminal),
+                match terminal.outcome {
+                    DecisionOutcome::Committed { .. } => "committed",
+                    DecisionOutcome::Refused { .. } => "refused",
+                },
+                Some(recovered.as_ref()),
+                Some(terminal),
             ),
         },
     };
-    let transaction = recovered.map_or_else(|| "null".to_owned(), |recovered| {
-        let digest = recovered.seal().canonical_request_digest;
-        let hex: String = digest.bytes().as_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
-        format!(concat!("{{\"tx_id\":{},\"seal_id\":{},\"request_schema\":{},",
-            "\"canonical_request_digest\":{{\"algorithm\":{},\"hex\":{}}}}}"),
-            quote(&recovered.tx_id().to_string()), quote(&recovered.seal_id().to_string()),
-            quote(&recovered.seal().request_schema.to_string()), digest.algorithm().code_point(), quote(&hex))
-    });
+    let transaction = recovered.map_or_else(
+        || "null".to_owned(),
+        |recovered| {
+            let digest = recovered.seal().canonical_request_digest;
+            let hex: String = digest
+                .bytes()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!(
+                concat!(
+                    "{{\"tx_id\":{},\"seal_id\":{},\"request_schema\":{},",
+                    "\"canonical_request_digest\":{{\"algorithm\":{},\"hex\":{}}}}}"
+                ),
+                quote(&recovered.tx_id().to_string()),
+                quote(&recovered.seal_id().to_string()),
+                quote(&recovered.seal().request_schema.to_string()),
+                digest.algorithm().code_point(),
+                quote(&hex)
+            )
+        },
+    );
     let decision = terminal.map_or_else(|| "null".to_owned(), |terminal| match terminal.outcome {
         DecisionOutcome::Committed { repository_commit_id } => format!(
             "{{\"kind\":\"committed\",\"decision_sequence\":{},\"repository_commit_id\":{}}}",
@@ -237,16 +324,29 @@ fn render(node: &OneNode, principal: PrincipalId, command_index: Option<usize>, 
             "{{\"kind\":\"refused\",\"decision_sequence\":{},\"code\":{},\"code_point\":{},\"refusal_record_id\":{}}}",
             terminal.decision_sequence.get(), quote(&format!("{code:?}")), code.code_point(), quote(&refusal_record_id.to_string())),
     });
-    format!(concat!("{{\"type\":\"transaction_outcome\",\"schema_version\":1,",
-        "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation\":{},\"principal_id\":{},",
-        "\"selector\":{},\"command_index\":{},\"state\":{},\"terminal\":{},",
-        "\"transaction\":{},\"decision\":{},\"read_only\":true,\"request_reexecuted\":false,",
-        "\"absence_proves_non_commit\":false,\"session_completeness_established\":false}}"),
-        quote(&node.tenant_id.to_string()), quote(&node.repository_id.to_string()),
-        quote(&node.repository_incarnation_id().to_string()), quote(&principal.to_string()),
-        quote(if command_index.is_some() { "receive_command" } else { "transaction" }),
+    format!(
+        concat!(
+            "{{\"type\":\"transaction_outcome\",\"schema_version\":1,",
+            "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation\":{},\"principal_id\":{},",
+            "\"selector\":{},\"command_index\":{},\"state\":{},\"terminal\":{},",
+            "\"transaction\":{},\"decision\":{},\"read_only\":true,\"request_reexecuted\":false,",
+            "\"absence_proves_non_commit\":false,\"session_completeness_established\":false}}"
+        ),
+        quote(&node.tenant_id.to_string()),
+        quote(&node.repository_id.to_string()),
+        quote(&node.repository_incarnation_id().to_string()),
+        quote(&principal.to_string()),
+        quote(if command_index.is_some() {
+            "receive_command"
+        } else {
+            "transaction"
+        }),
         command_index.map_or_else(|| "null".to_owned(), |index| index.to_string()),
-        quote(state), terminal.is_some(), transaction, decision)
+        quote(state),
+        terminal.is_some(),
+        transaction,
+        decision
+    )
 }
 
 fn quote(text: &str) -> String {
@@ -262,15 +362,28 @@ fn quote(text: &str) -> String {
     out.push('"');
     out
 }
-fn send_json(writer: &mut impl Write, version: HttpVersion, status: Status, body: &str) -> io::Result<()> {
-    let version = match version { HttpVersion::Http10 => "HTTP/1.0", HttpVersion::Http11 => "HTTP/1.1" };
+fn send_json(
+    writer: &mut impl Write,
+    version: HttpVersion,
+    status: Status,
+    body: &str,
+) -> io::Result<()> {
+    let version = match version {
+        HttpVersion::Http10 => "HTTP/1.0",
+        HttpVersion::Http11 => "HTTP/1.1",
+    };
     let extra = match status {
         Status::Unauthorized => "WWW-Authenticate: Bearer realm=\"frankengit\"\r\n",
         Status::RateLimited => "Retry-After: 60\r\n",
         Status::Method => "Allow: POST\r\n",
         _ => "",
     };
-    write!(writer, "{version} {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nVary: Authorization, Idempotency-Key\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n{extra}\r\n{body}", status.line(), body.len())?;
+    write!(
+        writer,
+        "{version} {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nVary: Authorization, Idempotency-Key\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n{extra}\r\n{body}",
+        status.line(),
+        body.len()
+    )?;
     writer.flush()
 }
 
@@ -285,10 +398,18 @@ mod tests {
 
     #[test]
     fn selectors_are_bodyless_queries_with_explicit_original_wire_indices() {
-        for (suffix, selector) in [("", Selector::Transaction), ("/receive", Selector::Session),
-            ("/receive/0", Selector::Command(0)), ("/receive/63", Selector::Command(63))] {
-            let bytes = format!("POST /repo.git/api/v1/outcomes{suffix} HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\n\r\n");
-            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+        for (suffix, selector) in [
+            ("", Selector::Transaction),
+            ("/receive", Selector::Session),
+            ("/receive/0", Selector::Command(0)),
+            ("/receive/63", Selector::Command(63)),
+        ] {
+            let bytes = format!(
+                "POST /repo.git/api/v1/outcomes{suffix} HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\n\r\n"
+            );
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
             let request = Request::parse(&envelope).unwrap().unwrap();
             assert_eq!(request.repository_route, "/repo.git");
             assert_eq!(request.selector, selector);
@@ -298,15 +419,27 @@ mod tests {
     #[test]
     fn recovery_never_accepts_mutation_bodies_query_keys_or_ambiguous_indices() {
         for (suffix, headers) in [
-            ("?key=secret", ""), ("/receive/64", ""), ("/receive/00", ""),
-            ("/receive/-1", ""), ("/receive/1/extra", ""), ("/receive/%30", ""),
-            ("/receive/", ""), ("/receive?key=secret", ""),
-            ("/receive", "Content-Length: 1\r\n"), ("/receive", "Expect: 100-continue\r\n"),
-            ("", "Content-Length: 1\r\n"), ("", "Transfer-Encoding: chunked\r\n"),
-            ("", "Expect: 100-continue\r\n"), ("", "Git-Protocol: version=2\r\n"),
+            ("?key=secret", ""),
+            ("/receive/64", ""),
+            ("/receive/00", ""),
+            ("/receive/-1", ""),
+            ("/receive/1/extra", ""),
+            ("/receive/%30", ""),
+            ("/receive/", ""),
+            ("/receive?key=secret", ""),
+            ("/receive", "Content-Length: 1\r\n"),
+            ("/receive", "Expect: 100-continue\r\n"),
+            ("", "Content-Length: 1\r\n"),
+            ("", "Transfer-Encoding: chunked\r\n"),
+            ("", "Expect: 100-continue\r\n"),
+            ("", "Git-Protocol: version=2\r\n"),
         ] {
-            let bytes = format!("POST /repo.git/api/v1/outcomes{suffix} HTTP/1.1\r\nHost: local\r\n{headers}\r\n");
-            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+            let bytes = format!(
+                "POST /repo.git/api/v1/outcomes{suffix} HTTP/1.1\r\nHost: local\r\n{headers}\r\n"
+            );
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
             assert!(Request::parse(&envelope).is_err(), "{suffix} {headers}");
         }
     }
@@ -314,7 +447,9 @@ mod tests {
     #[test]
     fn errors_are_self_delimited_and_never_infer_a_previous_mutations_outcome() {
         let mut output = Vec::new();
-        ApiError::from_status(Status::Unavailable).send(&mut output, HttpVersion::Http11).unwrap();
+        ApiError::from_status(Status::Unavailable)
+            .send(&mut output, HttpVersion::Http11)
+            .unwrap();
         let text = String::from_utf8(output).unwrap();
         let (head, body) = text.split_once("\r\n\r\n").unwrap();
         assert!(head.starts_with("HTTP/1.1 503"));

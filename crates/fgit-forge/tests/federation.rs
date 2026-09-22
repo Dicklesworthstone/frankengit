@@ -14,16 +14,13 @@
 
 use std::collections::BTreeMap;
 
-use fgit_codec::{decode_body, encode_body, DecodeLimits};
-use fgit_crypto::{
-    DetachedSignature, Identity, KeyEpoch, KeyScope, RootSecret, SecretKey,
-};
+use fgit_codec::{DecodeLimits, decode_body, encode_body};
+use fgit_crypto::{DetachedSignature, Identity, KeyEpoch, KeyScope, RootSecret, SecretKey};
 use fgit_forge::federation::{
-    create_offline_bundle, import_offline_bundle, BasisCapsule, CanonicalRef,
-    CurrentAuthorityState, EquivocationDetector, FederatedEventClass, FederationRefusal,
-    MirrorRef, ObservationOutcome, OfflineEffect, OfflineEvidence, OfflineIntent, OfflineSigner,
-    OfflineWorkBundle, PeerId, PeerKeyHistory, ProposedRefTxn, ProposedTxnId, ReviewRouting,
-    SignedClaim,
+    BasisCapsule, CanonicalRef, CurrentAuthorityState, EquivocationDetector, FederatedEventClass,
+    FederationRefusal, MirrorRef, ObservationOutcome, OfflineEffect, OfflineEvidence,
+    OfflineIntent, OfflineSigner, OfflineWorkBundle, PeerId, PeerKeyHistory, ProposedRefTxn,
+    ProposedTxnId, ReviewRouting, SignedClaim, create_offline_bundle, import_offline_bundle,
 };
 use fgit_types::GitOid;
 
@@ -142,15 +139,8 @@ fn offline_bundle_import_revalidation_staged_conflict_refused_vs_matching_permit
     }];
     let evidence = vec![];
 
-    let bundle = create_offline_bundle(
-        basis,
-        peer_id,
-        &signer,
-        intents,
-        effects,
-        evidence,
-    )
-    .expect("bundle creation");
+    let bundle = create_offline_bundle(basis, peer_id, &signer, intents, effects, evidence)
+        .expect("bundle creation");
 
     // Case 1 (Permitted twin): Current authority state matches expected basis
     let mut refs_ok = BTreeMap::new();
@@ -219,15 +209,8 @@ fn offline_bundle_tampered_signature_is_refused() {
         proposed_tip: sample_git_oid(0x20),
     }];
 
-    let mut bundle = create_offline_bundle(
-        basis,
-        peer_id,
-        &signer,
-        intents,
-        vec![],
-        vec![],
-    )
-    .expect("bundle creation");
+    let mut bundle = create_offline_bundle(basis, peer_id, &signer, intents, vec![], vec![])
+        .expect("bundle creation");
 
     // Tamper with signature
     let mut sig_bytes = *bundle.signature.signature();

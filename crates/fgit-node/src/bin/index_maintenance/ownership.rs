@@ -8,16 +8,23 @@ const RUN: &str = "run.lock";
 const MAX_MARKER: u64 = 128;
 
 fn identity(metadata: &fs::Metadata) -> io::Result<(u64, u64)> {
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::MetadataExt;
         if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
-            return Err(invalid("ownership files must be private regular files with one link"));
+            return Err(invalid(
+                "ownership files must be private regular files with one link",
+            ));
         }
         Ok((metadata.dev(), metadata.ino()))
     }
-    #[cfg(not(unix))] {
+    #[cfg(not(unix))]
+    {
         let _ = metadata;
-        Err(io::Error::new(io::ErrorKind::Unsupported, "process ownership requires Unix"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "process ownership requires Unix",
+        ))
     }
 }
 fn same_file(path: &Path, file: &File) -> io::Result<()> {
@@ -52,7 +59,9 @@ impl Owner {
         // grants ownership; an unsupported lock implementation fails closed.
         anchor.try_lock()?;
         same_file(&path, &anchor)?;
-        if anchor.metadata()?.len() != 0 { return Err(invalid("invalid ownership anchor")); }
+        if anchor.metadata()?.len() != 0 {
+            return Err(invalid("invalid ownership anchor"));
+        }
         let (device, inode) = identity(&anchor.metadata()?)?;
         let expected = format!("frankengit-index-owner-v1 {device} {inode}\n");
         let path = directory.join(RUN);
@@ -64,11 +73,15 @@ impl Owner {
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists && !initialize => {
                 let mut file = existing(&path)?;
-                if file.metadata()?.len() > MAX_MARKER { return Err(invalid("invalid run marker size")); }
+                if file.metadata()?.len() > MAX_MARKER {
+                    return Err(invalid("invalid run marker size"));
+                }
                 let mut bytes = Vec::new();
                 (&mut file).take(MAX_MARKER + 1).read_to_end(&mut bytes)?;
                 if bytes != expected.as_bytes() {
-                    return Err(invalid("legacy, corrupt or foreign run marker requires inspection"));
+                    return Err(invalid(
+                        "legacy, corrupt or foreign run marker requires inspection",
+                    ));
                 }
                 // Only a matching marker AND this exclusive anchor permit
                 // resumption. Never rewrite the checkpoint or pending identity.
@@ -78,12 +91,20 @@ impl Owner {
         };
         anchor.sync_all()?;
         File::open(directory)?.sync_all()?;
-        let owner = Self { directory: directory.to_path_buf(), anchor: Some(anchor), marker, created };
+        let owner = Self {
+            directory: directory.to_path_buf(),
+            anchor: Some(anchor),
+            marker,
+            created,
+        };
         owner.check()?;
         Ok(owner)
     }
     pub(super) fn check(&self) -> io::Result<()> {
-        let anchor = self.anchor.as_ref().ok_or_else(|| invalid("ownership already released"))?;
+        let anchor = self
+            .anchor
+            .as_ref()
+            .ok_or_else(|| invalid("ownership already released"))?;
         same_file(&self.directory.join(ANCHOR), anchor)?;
         same_file(&self.directory.join(RUN), &self.marker)
     }
@@ -113,6 +134,8 @@ impl Drop for Owner {
         // drained. Keep this one descriptor locked until PROCESS termination.
         // The OS then closes it, providing the missing exclusive-restart proof.
         // Normal release and pre-work failure explicitly close it above.
-        if let Some(anchor) = self.anchor.take() { std::mem::forget(anchor); }
+        if let Some(anchor) = self.anchor.take() {
+            std::mem::forget(anchor);
+        }
     }
 }
