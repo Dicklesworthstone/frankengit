@@ -78,6 +78,11 @@ forge_counter!(
     TeamNumber,
     "Organisation-scoped number identifying one team aggregate."
 );
+forge_counter!(
+    QueueNumber,
+    "Repository-scoped number identifying one merge queue aggregate."
+);
+
 
 impl AggregateVersion {
     /// The immediate successor, refusing exhaustion instead of wrapping.
@@ -146,6 +151,8 @@ pub enum AggregateId {
     PullRequestReview { pull_request: PullRequestNumber, reviewer: fgit_types::PrincipalId },
     /// A canonical repository issue. Existing aggregate encodings are unchanged.
     Issue(IssueNumber),
+    /// One repository-scoped merge queue stream.
+    MergeQueue(QueueNumber),
 }
 
 /// Wire tag for [`AggregateId::Organisation`], written only after a zero slot.
@@ -157,7 +164,15 @@ pub(crate) const AGGREGATE_KIND_PULL_REQUEST_REVIEW: u32 = 3;
 /// Required issue aggregate discriminator, appended without reusing a code point.
 pub(crate) const AGGREGATE_KIND_ISSUE: u32 = 4;
 pub(crate) const AGGREGATE_KIND_REVIEW_PROTECTION: u32 = 5;
+/// Wire tag for [`AggregateId::MergeQueue`], written only after a zero slot.
+pub(crate) const AGGREGATE_KIND_MERGE_QUEUE: u32 = 6;
 impl From<IssueNumber> for AggregateId { fn from(number: IssueNumber) -> Self { Self::Issue(number) } }
+
+impl From<QueueNumber> for AggregateId {
+    fn from(number: QueueNumber) -> Self {
+        Self::MergeQueue(number)
+    }
+}
 
 impl From<PullRequestNumber> for AggregateId {
     fn from(value: PullRequestNumber) -> Self {
@@ -186,6 +201,7 @@ impl fmt::Display for AggregateId {
             Self::Organisation(number) => write!(formatter, "organisation/{number}"),
             Self::Team(number) => write!(formatter, "team/{number}"),
             Self::PullRequestReview { pull_request, reviewer } => write!(formatter, "review/{pull_request}/{reviewer}"),
+            Self::MergeQueue(number) => write!(formatter, "queue/{number}"),
         }
     }
 }

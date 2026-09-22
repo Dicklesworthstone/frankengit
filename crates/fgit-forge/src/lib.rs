@@ -37,6 +37,7 @@ pub mod history;
 pub mod initial_commit;
 pub mod issue_search;
 pub mod merge;
+pub mod merge_queue;
 pub mod preparation;
 pub mod review;
 pub mod snapshot;
@@ -48,8 +49,14 @@ use core::fmt;
 
 pub use aggregate::{
     AggregateHead, AggregateId, AggregateVersion, ExpectedVersion, OrganisationNumber,
-    PullRequestNumber, TeamNumber, IssueNumber,
+    PullRequestNumber, TeamNumber, IssueNumber, QueueNumber,
 };
+pub use merge_queue::{
+    BatchLandingPackage, BatchStatus, MergeQueueSnapshot, QueueAction, QueueBatchEntry,
+    QueueBatchId, QueueBatchReceipt, QueueEntry, QueueRef, QueueRefKind, SpeculativeBatchPlan,
+    SpeculativeMergeStep, assemble_batch_landing_package,
+};
+
 pub use bisection::{
     BisectionContext, BisectionPredicate, BisectionRange, BisectionReceipt, BisectionRefusal,
     BisectionTermination, MonotonicityShape, PolicyEpochPredicate, PredicateOutcome, ProbeRecord,

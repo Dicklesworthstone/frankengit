@@ -276,10 +276,11 @@ pub struct RecordFrame {
     pub retention_delta_root: Digest,
 }
 
-fn root_of<B, I>(identity: &I, body: &B, name: &'static str) -> Result<Digest, ForgeRefusal>
+pub(crate) fn root_of<B, I>(identity: &I, body: &B, name: &'static str) -> Result<Digest, ForgeRefusal>
 where
     B: CanonicalBody,
     I: BodyIdentity + ?Sized,
+
 {
     let object = body_id(identity, body).map_err(|cause| match cause {
         CodecRefusal::IdentityDomainUnregistered { .. } => {
