@@ -2,6 +2,7 @@
 //! object selected by the exact same authenticated head. No directory inventory
 //! or mutable Git repository becomes authoritative. This is not a capsule.
 mod archive;
+mod restore;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -176,7 +177,9 @@ fn receipt(archive: &Archive<'_>, graph: GraphReport, digest: [u8; 32], size: us
         graph.objects, graph.references, graph.payload_bytes, graph.local_edges, graph.external_gitlinks)
 }
 pub(super) fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
-    if args == ["--help"] || args == ["export", "--help"] { return emit(output, USAGE); }
+    if args == ["--help"] { emit(output, USAGE)?; return emit(output, restore::USAGE); }
+    if args.first().is_some_and(|arg| arg == "restore") { return restore::run(args, output); }
+    if args == ["export", "--help"] { return emit(output, USAGE); }
     let options = parse(args)?;
     require_absent(&options.destination)?;
     let (bytes, receipt) = export(&options)?;
