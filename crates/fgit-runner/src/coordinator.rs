@@ -18,9 +18,9 @@ use fgit_types::{GitOid, RepositoryId, TenantId};
 use crate::workflow::{JobOutcome, StepObservation, WorkflowError, MAX_JOBS, MAX_STEPS};
 use crate::{
     BuildCommand, BuildInputCapsule, CheckOutcome, CheckReceipt, Commitment,
-    ContainmentSubstrate, EnvironmentBinding, ForkPolicy, JobRequest, ResourceCeilings,
+    ContainmentSubstrate, EnvironmentBinding, JobRequest, ResourceCeilings,
     RunnerControlPlane, RunnerPolicy, RunnerRefusal, RunnerText, SandboxProfile,
-    SecretBroker, SecretRequest, SourceObject, TrustDomain,
+    SecretBroker, SourceObject, TrustDomain,
 };
 
 const WORKFLOW_RUN_DOMAIN: &[u8] = b"frankengit/workflow-run/v1\0";
@@ -28,6 +28,9 @@ const ATTEMPT_DOMAIN: &[u8] = b"frankengit/workflow-attempt/v1\0";
 const JOB_ATTEMPT_DOMAIN: &[u8] = b"frankengit/workflow-job-attempt/v1\0";
 const STEP_ATTEMPT_DOMAIN: &[u8] = b"frankengit/workflow-step-attempt/v1\0";
 const CHECK_FACT_DOMAIN: &[u8] = b"frankengit/check-fact/v1\0";
+
+/// Explicit bounded execution profile of `WorkflowCoordinator::execute_job`.
+pub const COMMAND_ONLY_PROFILE: &str = "coordinator-command-only-v1";
 
 /// Canonical identity of a single workflow execution run.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -238,6 +241,7 @@ pub enum CoordinatorRefusal {
     StaleAuthorityHead { expected: Commitment, actual: Commitment },
     PolicyRevoked(String), ObligationLeak(String), WorkflowRefusal(WorkflowError),
     RunnerRefusal(RunnerRefusal), ContainmentFailure(String),
+    UnsupportedExecution { job_id: String, reason: &'static str },
 }
 impl fmt::Display for CoordinatorRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -253,6 +257,7 @@ impl fmt::Display for CoordinatorRefusal {
             Self::WorkflowRefusal(e) => write!(f, "workflow refusal: {e}"),
             Self::RunnerRefusal(e) => write!(f, "runner refusal: {e:?}"),
             Self::ContainmentFailure(detail) => write!(f, "containment failure: {detail}"),
+            Self::UnsupportedExecution { job_id, reason } => write!(f, "unsupported execution for job {job_id}: {reason}"),
         }
     }
 }
@@ -297,7 +302,8 @@ pub struct ActiveRun {
     pub concurrency_group: Option<String>,
 }
 pub struct WorkflowCoordinator {
-    limits: CoordinatorLimits, control_plane: RunnerControlPlane, secret_broker: SecretBroker,
+    limits: CoordinatorLimits, ceilings: ResourceCeilings,
+    control_plane: RunnerControlPlane, secret_broker: SecretBroker,
     active_runs: BTreeMap<WorkflowRunId, ActiveRun>,
     idempotency_map: BTreeMap<(TenantId, RepositoryId, IdempotencyKey), WorkflowRunId>,
     concurrency_groups: BTreeMap<(TenantId, RepositoryId, String), VecDeque<WorkflowRunId>>,
@@ -315,7 +321,7 @@ impl WorkflowCoordinator {
         }
         let control_plane = RunnerControlPlane::new(ceilings, runner_slots).map_err(CoordinatorRefusal::RunnerRefusal)?;
         Ok(Self {
-            limits, control_plane, secret_broker: SecretBroker::default(), active_runs: BTreeMap::new(),
+            limits, ceilings, control_plane, secret_broker: SecretBroker::default(), active_runs: BTreeMap::new(),
             idempotency_map: BTreeMap::new(), concurrency_groups: BTreeMap::new(),
             outbox_facts: Vec::new(), obligations: ObligationSummary::default(),
         })
@@ -420,90 +426,6 @@ impl WorkflowCoordinator {
         }
     }
 
-    pub fn execute_job<S: ContainmentSubstrate>(
-        &mut self, run_id: WorkflowRunId, job_id: &str, substrate: &mut S,
-        logical_now: u64, source_objects: Vec<SourceObject>, dependency_lock: Commitment,
-        toolchain_name: &str,
-    ) -> Result<CheckReceipt, CoordinatorRefusal> {
-        // Check before touching attempts, check facts, leases, or slots. A caller
-        // cannot replay a terminal job or bypass a failed/unsettled dependency.
-        self.require_ready_job(run_id, job_id)?;
-        let run = self.active_runs.get_mut(&run_id).ok_or(CoordinatorRefusal::RunNotFound(run_id))?;
-        let job_schema = run.graph.jobs.iter().find(|j| j.id == job_id).cloned()
-            .ok_or_else(|| CoordinatorRefusal::JobNotFound(job_id.to_owned()))?;
-        run.status = RunStatus::Running;
-        run.started_at.get_or_insert_with(Instant::now);
-        run.job_statuses.insert(job_id.to_owned(), JobStatus::Running);
-        let attempt = run.job_attempts.get_mut(job_id).expect("job attempts pre-initialized");
-        *attempt += 1;
-        self.outbox_facts.push(CheckRunFact {
-            run_id, job_id: job_id.to_owned(), status: CheckRunStatus::InProgress,
-            conclusion: None, receipt_commitment: None, timestamp_millis: logical_now,
-        });
-        self.obligations.check_publications_emitted += 1;
-        self.obligations.runner_slots_reserved += 1;
-        let trust_domain = run.trigger_ctx.trust_domain.clone();
-        let is_fork = run.trigger_ctx.is_fork;
-        let ceilings = ResourceCeilings::new(100_000, 512 * 1024 * 1024, 1024 * 1024 * 1024, 0, 16, 60_000)
-            .map_err(CoordinatorRefusal::RunnerRefusal)?;
-        let runner_policy = RunnerPolicy::new(trust_domain.clone(), SandboxProfile::ProcessIsolated, NetworkPolicy::Denied, ceilings)
-            .map_err(CoordinatorRefusal::RunnerRefusal)?;
-        let mut secret_leases = Vec::new();
-        if !is_fork {
-            let token_request = SecretRequest::new(
-                RunnerText::parse("secret-name", "AUTH_TOKEN").expect("valid text"),
-                trust_domain.clone(), ForkPolicy::TrustedOnly, logical_now + 3600,
-            );
-            if let Ok(handle) = self.secret_broker.issue(token_request, logical_now) {
-                secret_leases.push(handle);
-                self.obligations.secret_leases_issued += 1;
-            }
-        }
-        let toolchain = RunnerText::parse("toolchain", toolchain_name).expect("valid toolchain");
-        let script_commands = job_schema.steps.iter()
-            .map(|s| RunnerText::parse("step-cmd", &s.run).unwrap_or_else(|_| RunnerText::parse("cmd", "true").unwrap()))
-            .collect::<Vec<_>>();
-        let program = RunnerText::parse("program", "/bin/sh").expect("valid program");
-        let build_command = BuildCommand::new(program, script_commands).map_err(CoordinatorRefusal::RunnerRefusal)?;
-        let environment = vec![
-            EnvironmentBinding::new(RunnerText::parse("env", "CI").unwrap(), RunnerText::parse("val", "true").unwrap()).unwrap(),
-            EnvironmentBinding::new(RunnerText::parse("env", "FGIT_RUN_ID").unwrap(), RunnerText::parse("val", &run_id.0.to_string()).unwrap()).unwrap(),
-        ];
-        let capsule = BuildInputCapsule::new(run.authority_head, source_objects, dependency_lock, toolchain, build_command, environment)
-            .map_err(CoordinatorRefusal::RunnerRefusal)?;
-        let job_request = JobRequest::new(is_fork, secret_leases, Vec::new(), 1).map_err(CoordinatorRefusal::RunnerRefusal)?;
-        let admitted_run = match self.control_plane.admit(capsule, runner_policy, job_request, &mut self.secret_broker, logical_now) {
-            Ok(admitted) => admitted,
-            Err(e) => {
-                self.obligations.runner_slots_aborted += 1;
-                self.record_terminal_job(run_id, job_id, JobOutcome::Refused, None, logical_now);
-                return Err(CoordinatorRefusal::RunnerRefusal(e));
-            }
-        };
-        let receipt = match self.control_plane.execute(admitted_run, substrate, &mut self.secret_broker) {
-            Ok(receipt) => receipt,
-            Err(e) => {
-                self.obligations.runner_slots_aborted += 1;
-                self.record_terminal_job(run_id, job_id, JobOutcome::Refused, None, logical_now);
-                return Err(CoordinatorRefusal::RunnerRefusal(e));
-            }
-        };
-        self.obligations.runner_slots_committed += 1;
-        self.obligations.runner_slots_acknowledged += 1;
-        self.obligations.secret_leases_revoked += receipt.revoked_secrets() as usize;
-        let job_outcome = match receipt.outcome() {
-            CheckOutcome::Succeeded => JobOutcome::Succeeded,
-            CheckOutcome::Failed => JobOutcome::Failed,
-            CheckOutcome::Cancelled => JobOutcome::Cancelled,
-            CheckOutcome::ResourceCeiling { .. } => JobOutcome::OutputLimit,
-            // A lost containment boundary is NOT an ordinary command failure
-            // from which failure()/always() may launch additional user code.
-            CheckOutcome::ContainmentFailure { .. } | CheckOutcome::SubstrateRefused { .. } => JobOutcome::Refused,
-        };
-        self.record_terminal_job(run_id, job_id, job_outcome, Some(receipt.clone()), logical_now);
-        Ok(receipt)
-    }
-
     fn record_terminal_job(&mut self, run_id: WorkflowRunId, job_id: &str, outcome: JobOutcome, receipt: Option<CheckReceipt>, logical_now: u64) {
         let Some(run) = self.active_runs.get_mut(&run_id) else { return; };
         if matches!(run.job_statuses.get(job_id), Some(JobStatus::Terminal(_))) { return; }
@@ -514,7 +436,9 @@ impl WorkflowCoordinator {
             JobOutcome::TimedOut => CheckRunConclusion::TimedOut,
             JobOutcome::Skipped => CheckRunConclusion::Neutral,
         };
-        let receipt_commitment = receipt.as_ref().map(|r| r.capsule_id().commitment());
+        // Bind the terminal evidence (outcome, logs, artifacts, resources),
+        // not merely the input capsule, which is identical on success/failure.
+        let receipt_commitment = receipt.as_ref().map(|r| Commitment::of_bytes(r.evidence().frame()));
         run.job_statuses.insert(job_id.to_owned(), JobStatus::Terminal(outcome));
         if let Some(receipt) = receipt { run.job_receipts.insert(job_id.to_owned(), receipt); }
         self.outbox_facts.push(CheckRunFact {
@@ -651,6 +575,7 @@ fn validate_graph(graph: &WorkflowGraph) -> Result<(), CoordinatorRefusal> {
         if job.steps.is_empty() || steps > MAX_STEPS {
             return Err(CoordinatorRefusal::WorkflowRefusal(WorkflowError::ExecutionLimit));
         }
+        execution::lower_command(job)?;
         seen.insert(job.id.as_str());
     }
     Ok(())
@@ -675,3 +600,5 @@ fn job_condition(condition: Condition, needs: &[String], completed: &BTreeMap<&s
 mod scheduling_tests;
 
 mod scope;
+
+mod execution;
