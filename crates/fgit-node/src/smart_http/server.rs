@@ -766,9 +766,6 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
                     }
                     Ok(())
                 })();
-                if let Err(ref e) = git_result {
-                    eprintln!("DEBUG_SMART_HTTP_GIT_RESULT: {e:?}");
-                }
                 if let Err(NodeSmartHttpRefusal::ReceiveResponse { outcome, .. }) = &git_result {
                     for command in &outcome.commands {
                         eprintln!("Smart HTTP reply lost after canonical outcome for transaction {}; retry with the original Idempotency-Key", command.tx_id);
@@ -786,7 +783,6 @@ fn serve_connection(mut stream: TcpStream, deadline: GitDaemonSessionDeadline, p
         result
     })();
     if let Err(status) = served {
-        eprintln!("DEBUG_SMART_HTTP_SERVED: {status:?}");
         // Never append a second response after any final response has started.
         // In particular, disconnect/cleanup never proves a mutation rolled back.
         if !writer.started {

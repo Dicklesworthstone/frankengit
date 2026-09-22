@@ -774,7 +774,10 @@ impl OneNode {
             .production_quarantine_validator(
                 &materialized,
                 receive_limits.pack.clone(),
-                fgit_git_object::ParseLimits::default(),
+                fgit_git_object::ParseLimits {
+                    tree_reference_bytes: self.object_format.digest_len(),
+                    ..fgit_git_object::ParseLimits::default()
+                },
             )
             .map_err(ReceiveError::AuthoritativeRefusal)?;
         let mut handoff =
