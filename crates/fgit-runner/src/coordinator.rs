@@ -974,6 +974,9 @@ impl WorkflowCoordinator {
         }
         self.active_runs.get(id)
     }
+    /// Legacy in-memory ownership transfer. The caller becomes responsible for
+    /// every returned fact; this is NOT durable or canonical acknowledgement.
+    /// Services requiring restart-safe custody must use `deliver_check_facts`.
     pub fn drain_check_facts(&mut self) -> Vec<CheckRunFact> {
         let facts = std::mem::take(&mut self.outbox_facts);
         self.obligations.check_publications_settled += facts.len();
@@ -1067,3 +1070,6 @@ mod scoped_workflow;
 pub use scoped_workflow::{
     CoordinatorExecutionProfile, PreparedTrustedWorkflow, TrustedWorkflowReceipt,
 };
+
+/// Bounded, acknowledgement-driven custody of workflow check proposals.
+pub mod delivery;
