@@ -153,6 +153,7 @@ impl WorkflowPlan {
         let mut completed = BTreeMap::new();
         let mut remaining = limits.total_output_bytes;
         let mut containment_lost = false;
+        let mut cancelled = false;
         for (index, job) in self.graph.jobs.iter().enumerate() {
             let mut result = JobReport {
                 id: job.id.clone(),
@@ -160,8 +161,8 @@ impl WorkflowPlan {
                 steps: Vec::new(),
                 failure: None,
             };
-            if containment_lost || !run_live() {
-                result.outcome = if containment_lost {
+            if containment_lost || cancelled || !run_live() {
+                result.outcome = if containment_lost || cancelled {
                     JobOutcome::Cancelled
                 } else {
                     stopped()
@@ -209,34 +210,31 @@ impl WorkflowPlan {
                                     break;
                                 }
                                 Ok(mut observed) => {
-                                    // A worker may return hostile metadata; never let a
-                                    // misleading success escape the declared envelope.
-                                    if observed.stdout.len() > budget.stream_bytes
-                                        || observed.stderr.len() > budget.stream_bytes
-                                    {
+                                    // Normalize safety outcomes BEFORE clamping output.
+                                    // A second metadata defect must never conceal loss of
+                                    // containment or turn cancellation into an output error.
+                                    let containment_failed = observed.retain_workspace
+                                        || observed.outcome == StepOutcome::ContainmentFailure
+                                        || (observed.outcome == StepOutcome::Succeeded
+                                            && observed.exit_code != Some(0));
+                                    let output_exceeded = observed.stdout.len() > budget.stream_bytes
+                                        || observed.stderr.len() > budget.stream_bytes;
+                                    if output_exceeded {
                                         observed.stdout.truncate(budget.stream_bytes);
                                         observed.stderr.truncate(budget.stream_bytes);
-                                        observed.outcome = StepOutcome::OutputLimit;
                                         observed.output_complete = false;
                                     }
-                                    if observed.outcome == StepOutcome::Succeeded
-                                        && observed.exit_code != Some(0)
-                                    {
+                                    if containment_failed {
                                         observed.outcome = StepOutcome::ContainmentFailure;
                                         observed.retain_workspace = true;
-                                    }
-                                    if observed.retain_workspace {
                                         containment_lost = true;
-                                    }
-                                    if !observed.output_complete
-                                        && observed.outcome == StepOutcome::Succeeded
+                                    } else if observed.outcome == StepOutcome::Cancelled {
+                                        cancelled = true;
+                                    } else if output_exceeded
+                                        || (!observed.output_complete
+                                            && observed.outcome == StepOutcome::Succeeded)
                                     {
                                         observed.outcome = StepOutcome::OutputLimit;
-                                    }
-                                    if observed.retain_workspace
-                                        && observed.outcome == StepOutcome::Succeeded
-                                    {
-                                        observed.outcome = StepOutcome::ContainmentFailure;
                                     }
                                     remaining -= observed.stdout.len() + observed.stderr.len();
                                     let outcome = observed.outcome;
@@ -283,10 +281,17 @@ impl WorkflowPlan {
                                 result.failure = Some(WorkerFailure::new(failure.detail, true));
                             }
                         }
+                        // Cleanup can consume the remaining deadline or observe
+                        // cancellation too. Never publish success before it ends.
+                        if result.outcome == JobOutcome::Succeeded && !run_live() {
+                            result.outcome = stopped();
+                        }
                     }
                 }
             }
+            cancelled |= result.outcome == JobOutcome::Cancelled;
             completed.insert(job.id.as_str(), result.outcome);
+            executor.observe_job(&result);
             report.jobs.push(result);
         }
         Ok(report)
@@ -342,6 +347,13 @@ pub trait WorkflowExecutor {
         live: &dyn Fn() -> bool,
     ) -> Result<StepObservation, WorkerFailure>;
     fn finish_job(&mut self, retain: bool) -> Result<(), WorkerFailure>;
+
+    /// Receives one normalized terminal observation after cleanup, or after a
+    /// job is skipped/refused before starting. Called in graph order before
+    /// the next job. A coordinator may use it to advance its derived scheduler;
+    /// it is NOT acknowledgement of canonical check or outbox publication.
+    /// Implementations must not launch work from this notification.
+    fn observe_job(&mut self, _report: &JobReport) {}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -440,6 +452,18 @@ pub struct JobReport {
     pub steps: Vec<StepReport>,
     pub failure: Option<WorkerFailure>,
 }
+impl JobReport {
+    /// Whether the owning executor reported unresolved containment. An absent
+    /// retention flag cannot override an explicit containment-failure outcome.
+    pub fn requires_containment(&self) -> bool {
+        self.failure.as_ref().is_some_and(|failure| failure.retain_workspace)
+            || self.steps.iter().any(|step| {
+                step.observation.retain_workspace
+                    || step.observation.outcome == StepOutcome::ContainmentFailure
+            })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowReport {
     pub source: Commitment,
@@ -498,3 +522,6 @@ fn quote(value: &str) -> String {
     result.push('"');
     result
 }
+
+#[cfg(test)]
+mod settlement_tests;
