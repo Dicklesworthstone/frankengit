@@ -81,6 +81,7 @@ fn interruption_after_data_preparation_leaves_no_public_authority() {
         fs::read(target.join("authority.fsqlite-wal")).unwrap(),
         b"closed-WAL"
     );
+    assert!(!stage.join("authority.fsqlite-wal").exists(), "WAL has exactly one recovery location");
     assert!(!target.join("authority.fsqlite-shm").exists());
     drop(ready);
     assert!(
@@ -109,7 +110,7 @@ fn publication_is_no_replace_and_preserves_both_images_on_collision() {
     );
 }
 #[test]
-fn successful_file_publication_keeps_data_and_reaps_only_owned_quarantine() {
+fn file_publication_keeps_data_and_retains_quarantine_until_final_verification() {
     let scratch = Scratch::new();
     let (stage, target) = scratch.stage();
     fs::write(stage.join("authority.fsqlite-wal"), b"closed-WAL").unwrap();
@@ -117,7 +118,7 @@ fn successful_file_publication_keeps_data_and_reaps_only_owned_quarantine() {
         .unwrap()
         .publish()
         .unwrap();
-    assert!(!stage.exists());
+    assert!(stage.exists(), "publication alone cannot clean recovery evidence");
     assert_eq!(
         fs::read(target.join("authority.fsqlite")).unwrap(),
         b"already-closed-image"
@@ -150,6 +151,7 @@ fn checksum_failure_precedes_destination_creation() {
         expected: [1; 32],
         instance: StoreInstanceId::from_raw(99),
         profile: Profile::default(),
+        resume: false,
     })
     .unwrap_err();
     assert!(error.contains("checksum mismatch"));
@@ -176,4 +178,15 @@ fn restore_accepts_shared_profile_flags_and_rejects_duplicate_limits() {
         "2".into(),
     ]);
     assert!(parse(&input).is_err());
+}
+
+#[test]
+fn resume_is_explicit_unique_and_compatible_with_all_resource_flags() {
+    assert!(!parse(&args()).unwrap().resume);
+    let mut input = args(); input.push("--resume".into());
+    assert!(parse(&input).unwrap().resume);
+    input.extend(["--max-archive-bytes".into(), "2147483648".into(), "--timeout-secs".into(), "900".into()]);
+    assert_eq!(input.len(), 13); assert!(parse(&input).unwrap().resume);
+    let mut duplicate = args(); duplicate.extend(["--resume".into(), "--resume".into()]);
+    assert!(parse(&duplicate).unwrap_err().contains("duplicate --resume"));
 }
