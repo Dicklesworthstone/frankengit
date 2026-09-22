@@ -63,6 +63,7 @@ pub mod base;
 pub mod capability;
 pub mod candidate_sparse;
 pub mod export;
+pub mod integrity;
 pub mod intent;
 pub mod journal;
 pub mod materialize;
