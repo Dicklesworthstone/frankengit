@@ -1,0 +1,351 @@
+#![forbid(unsafe_code)]
+//! Trusted-local integrity audit of one authenticated, immutable object set.
+//! Physical residue is never used to discover canonical objects.
+
+use std::collections::BTreeSet;
+use std::fmt::{self, Display, Formatter};
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use fgit_node::{NodeConfig, OneNode};
+use fgit_types::{GitHashAlgorithm, GitOid, HeadGeneration, RepositoryId, TenantId};
+
+use super::publication_support::{quote, set_once};
+
+const MIB: u64 = 1024 * 1024;
+const MAX_OBJECTS: usize = 1_000_000;
+const MAX_BYTES: u64 = 16 * 1024 * MIB;
+const USAGE: &str = "usage: fg fsck <storage-root> <tenant-id> <repository-id> --trusted-local
+  [--object-format sha1|sha256] [--expected-generation <non-zero>]
+  [--max-objects <1..1000000>] [--max-bytes <1..17179869184>]
+  [--max-object-bytes <1..268435456>] [--timeout-secs <1..3600>]
+
+Verify EVERY object in the authenticated authority-selected closure, including
+admitted history no longer reachable from current refs. Native Git identity and
+the independent payload commitment are checked by the existing object fabric.
+Every current reference must belong to that closure. The exact authority basis
+is revalidated after the scan; movement refuses the attempt rather than mixing
+snapshots. --expected-generation optionally fences the initial observation.
+
+This local operator command can inspect hidden refs and requires explicit
+whole-repository authorization via --trusted-local. It does not discover orphan
+files, repair storage, change refs, run external Git, or verify graph structure.
+Defaults: 100000 objects, 512 MiB total payload, 32 MiB per object, 300 seconds.
+The per-object ceiling is enforced before allocation; the total counts verified
+payload bytes, not physical I/O. A failing scan may read one additional bounded
+object before refusing. Authority materialization has its own runtime bounds.
+No success receipt is emitted before all checks and node shutdown complete.
+Exit 0: complete scoped audit; 2: invalid input, incomplete audit, or output error.";
+
+#[derive(Debug)]
+struct Options {
+    storage: PathBuf,
+    tenant: TenantId,
+    repository: RepositoryId,
+    format: GitHashAlgorithm,
+    expected_generation: Option<u64>,
+    limits: Limits,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    objects: usize,
+    bytes: u64,
+    object_bytes: u64,
+    seconds: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self { objects: 100_000, bytes: 512 * MIB, object_bytes: 32 * MIB, seconds: 300 }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Refusal {
+    Limit(&'static str),
+    Deadline,
+    Source(String),
+    Object { oid: GitOid, detail: String },
+    ReferenceOutsideClosure(GitOid),
+    ObjectFormat(GitOid),
+    Generation { expected: u64, observed: u64 },
+    SnapshotChanged,
+}
+
+impl Display for Refusal {
+    fn fmt(&self, out: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Limit(field) => write!(out, "audit_limit_exceeded: {field}"),
+            Self::Deadline => out.write_str("audit_deadline_exceeded"),
+            Self::Source(detail) => write!(out, "authority_read_failed: {detail}"),
+            Self::Object { oid, detail } => write!(out, "object_read_failed: {oid}: {detail}"),
+            Self::ReferenceOutsideClosure(oid) => write!(out, "reference_outside_selected_closure: {oid}"),
+            Self::ObjectFormat(oid) => write!(out, "object_format_mismatch: {oid}"),
+            Self::Generation { expected, observed } => write!(out,
+                "authority_generation_mismatch: expected {expected}, observed {observed}"),
+            Self::SnapshotChanged => out.write_str("authority_snapshot_changed: restart the audit"),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Report {
+    generation: u64,
+    references: usize,
+    objects: usize,
+    payload_bytes: u64,
+}
+
+fn positive(text: &str, maximum: u64, field: &str) -> Result<u64, String> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("{field} requires a positive decimal integer"));
+    }
+    text.parse::<u64>().ok().filter(|value| *value > 0 && *value <= maximum)
+        .ok_or_else(|| format!("{field} must be in 1..={maximum}"))
+}
+
+fn parse(args: &[String]) -> Result<Options, String> {
+    if args.len() < 4 || args.len() > 18 || args.iter().any(|arg| arg.len() > 8192)
+        || args.iter().map(String::len).sum::<usize>() > 32768
+        || args[0].is_empty()
+    {
+        return Err(USAGE.into());
+    }
+    let mut trusted = None;
+    let mut format = None;
+    let mut generation = None;
+    let mut objects = None;
+    let mut bytes = None;
+    let mut object_bytes = None;
+    let mut seconds = None;
+    let mut cursor = 3;
+    while let Some(flag) = args.get(cursor) {
+        cursor += 1;
+        if flag == "--trusted-local" {
+            set_once(&mut trusted, true, flag)?;
+            continue;
+        }
+        let value = args.get(cursor).ok_or_else(|| format!("missing value for {flag}"))?;
+        cursor += 1;
+        match flag.as_str() {
+            "--object-format" => {
+                let value = match value.as_str() {
+                    "sha1" => GitHashAlgorithm::Sha1,
+                    "sha256" => GitHashAlgorithm::Sha256,
+                    _ => return Err("object format must be sha1 or sha256".into()),
+                };
+                set_once(&mut format, value, flag)?;
+            }
+            "--expected-generation" => set_once(&mut generation, positive(value, u64::MAX, flag)?, flag)?,
+            "--max-objects" => set_once(&mut objects, positive(value, MAX_OBJECTS as u64, flag)? as usize, flag)?,
+            "--max-bytes" => set_once(&mut bytes, positive(value, MAX_BYTES, flag)?, flag)?,
+            "--max-object-bytes" => set_once(&mut object_bytes, positive(value, 256 * MIB, flag)?, flag)?,
+            "--timeout-secs" => set_once(&mut seconds, positive(value, 3600, flag)?, flag)?,
+            _ => return Err(format!("unsupported fsck option: {flag}")),
+        }
+    }
+    if trusted != Some(true) {
+        return Err("fsck requires --trusted-local and authorization to inspect the entire repository".into());
+    }
+    let defaults = Limits::default();
+    Ok(Options {
+        storage: PathBuf::from(&args[0]),
+        tenant: TenantId::from_hex(&args[1]).map_err(|error| error.to_string())?,
+        repository: RepositoryId::from_hex(&args[2]).map_err(|error| error.to_string())?,
+        format: format.unwrap_or(GitHashAlgorithm::Sha1),
+        expected_generation: generation,
+        limits: Limits {
+            objects: objects.unwrap_or(defaults.objects),
+            bytes: bytes.unwrap_or(defaults.bytes),
+            object_bytes: object_bytes.unwrap_or(defaults.object_bytes),
+            seconds: seconds.unwrap_or(defaults.seconds),
+        },
+    })
+}
+
+fn live(started: Instant, seconds: u64) -> Result<(), Refusal> {
+    if started.elapsed() >= Duration::from_secs(seconds) {
+        Err(Refusal::Deadline)
+    } else {
+        Ok(())
+    }
+}
+
+/// The reader is a verified-whole-read boundary, not a source of unchecked
+/// payloads. Only the node fabric implements that boundary in the command.
+fn check_objects(
+    objects: &BTreeSet<GitOid>,
+    format: GitHashAlgorithm,
+    limits: Limits,
+    mut read: impl FnMut(GitOid) -> Result<u64, String>,
+    mut checkpoint: impl FnMut() -> Result<(), Refusal>,
+) -> Result<u64, Refusal> {
+    if objects.len() > limits.objects {
+        return Err(Refusal::Limit("max-objects"));
+    }
+    let mut bytes = 0_u64;
+    for &oid in objects {
+        checkpoint()?;
+        if oid.algorithm() != format || oid.is_zero() {
+            return Err(Refusal::ObjectFormat(oid));
+        }
+        let size = read(oid).map_err(|detail| Refusal::Object { oid, detail })?;
+        checkpoint()?;
+        if size > limits.object_bytes {
+            return Err(Refusal::Limit("max-object-bytes"));
+        }
+        bytes = bytes.checked_add(size).filter(|total| *total <= limits.bytes)
+            .ok_or(Refusal::Limit("max-bytes"))?;
+    }
+    checkpoint()?;
+    Ok(bytes)
+}
+
+fn inspect(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
+    let started = Instant::now();
+    let request = node.request_context();
+    let selected = node.runtime().block_on(node.materialize_admission_in(&request))
+        .map_err(|error| Refusal::Source(error.to_string()))?;
+    let generation = selected.authenticated().receipt().generation().get();
+    if let Some(expected) = options.expected_generation {
+        if expected != generation {
+            return Err(Refusal::Generation { expected, observed: generation });
+        }
+    }
+    let objects = selected.selected_closure().closure().objects();
+    for oid in selected.snapshot().refs.values() {
+        live(started, options.limits.seconds)?;
+        if !objects.contains(oid) {
+            return Err(Refusal::ReferenceOutsideClosure(*oid));
+        }
+    }
+    let payload_bytes = check_objects(objects, options.format, options.limits,
+        |oid| node.read_git_object(oid).map(|object| object.payload().len() as u64)
+            .map_err(|error| error.to_string()),
+        || live(started, options.limits.seconds))?;
+    let current = node.runtime().block_on(node.materialize_admission_in(&request))
+        .map_err(|error| Refusal::Source(error.to_string()))?;
+    live(started, options.limits.seconds)?;
+    if current.basis() != selected.basis() || current.selected_closure() != selected.selected_closure() {
+        return Err(Refusal::SnapshotChanged);
+    }
+    Ok(Report { generation, references: selected.snapshot().refs.len(), objects: objects.len(), payload_bytes })
+}
+
+pub(super) fn run(args: &[String]) -> Result<u8, String> {
+    if args == ["--help"] {
+        emit(&mut std::io::stdout().lock(), USAGE)?;
+        return Ok(0);
+    }
+    let options = parse(args)?;
+    let mut node = OneNode::open_existing(NodeConfig::new(
+        options.storage.clone(), options.tenant, options.repository)
+        .with_object_format(options.format)
+        .with_max_object_bytes(options.limits.object_bytes.min(options.limits.bytes)))
+        .map_err(|error| format!("cannot open fsck node: {error}"))?;
+    let result = node.bring_into_service(HeadGeneration::FIRST)
+        .map_err(|error| Refusal::Source(error.to_string()))
+        .and_then(|_| inspect(&node, &options));
+    let cleanup = node.shutdown().err().map(|error| error.to_string());
+    finish(&mut std::io::stdout().lock(), &options, result, cleanup)
+}
+
+fn emit(output: &mut impl Write, text: &str) -> Result<(), String> {
+    writeln!(output, "{text}").and_then(|()| output.flush())
+        .map_err(|error| format!("fsck receipt output incomplete: {error}"))
+}
+
+fn finish(output: &mut impl Write, options: &Options, result: Result<Report, Refusal>,
+    cleanup: Option<String>) -> Result<u8, String> {
+    match (result, cleanup) {
+        (Ok(report), None) => {
+            emit(output, &format!(concat!("{{\"type\":\"repository_fsck\",\"schema_version\":1,",
+                "\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},",
+                "\"authority_generation\":{},\"references_checked\":{},\"objects_verified\":{},",
+                "\"payload_bytes_verified\":{},\"scope\":\"authority_selected_objects\",",
+                "\"complete\":true,\"object_graph_verified\":false,\"head_revalidated\":true,",
+                "\"physical_orphans_scanned\":false,\"repository_changed\":false,\"node_closed\":true}}"),
+                quote(&options.tenant.to_string()), quote(&options.repository.to_string()),
+                quote(options.format.as_str()), report.generation, report.references,
+                report.objects, report.payload_bytes))?;
+            Ok(0)
+        }
+        (result, cleanup) => {
+            let check = result.err().map_or_else(String::new, |error| format!("; audit: {error}"));
+            let close = cleanup.map_or_else(String::new, |error| format!("; shutdown: {error}"));
+            Err(format!("no complete integrity report returned{check}{close}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn oid(byte: u8, format: GitHashAlgorithm) -> GitOid {
+        let width = match format { GitHashAlgorithm::Sha1 => 20, GitHashAlgorithm::Sha256 => 32 };
+        GitOid::from_hex(format, &format!("{byte:02x}").repeat(width)).unwrap()
+    }
+
+    #[test]
+    fn complete_scan_reads_every_selected_object_once_in_both_domains() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let ids = BTreeSet::from([oid(1, format), oid(2, format)]);
+            let mut read = Vec::new();
+            let bytes = check_objects(&ids, format, Limits::default(), |id| {
+                read.push(id); Ok(if id == oid(1, format) { 0 } else { 7 })
+            }, || Ok(())).unwrap();
+            assert_eq!(read, ids.iter().copied().collect::<Vec<_>>());
+            assert_eq!(bytes, 7);
+        }
+    }
+
+    #[test]
+    fn count_and_identity_refusals_precede_object_reads() {
+        let ids = BTreeSet::from([oid(1, GitHashAlgorithm::Sha1)]);
+        let read = |_| -> Result<u64, String> { panic!("must refuse before object I/O") };
+        assert_eq!(check_objects(&ids, GitHashAlgorithm::Sha1,
+            Limits { objects: 0, ..Default::default() }, read, || Ok(())), Err(Refusal::Limit("max-objects")));
+        assert!(matches!(check_objects(&ids, GitHashAlgorithm::Sha256,
+            Limits::default(), read, || Ok(())), Err(Refusal::ObjectFormat(_))));
+    }
+
+    #[test]
+    fn budget_and_read_failures_never_return_partial_success() {
+        let format = GitHashAlgorithm::Sha1;
+        let ids = BTreeSet::from([oid(1, format), oid(2, format)]);
+        assert_eq!(check_objects(&ids, format, Limits { bytes: 5, ..Default::default() },
+            |_| Ok(3), || Ok(())), Err(Refusal::Limit("max-bytes")));
+        assert_eq!(check_objects(&ids, format, Limits { object_bytes: 2, ..Default::default() },
+            |_| Ok(3), || Ok(())), Err(Refusal::Limit("max-object-bytes")));
+        assert!(matches!(check_objects(&ids, format, Limits::default(),
+            |_| Err("payload commitment mismatch".into()), || Ok(())), Err(Refusal::Object { .. })));
+        assert_eq!(check_objects(&ids, format, Limits::default(),
+            |_| panic!("deadline must fence reads"), || Err(Refusal::Deadline)), Err(Refusal::Deadline));
+    }
+
+    #[test]
+    fn empty_selection_still_observes_deadline() {
+        assert_eq!(check_objects(&BTreeSet::new(), GitHashAlgorithm::Sha1,
+            Limits::default(), |_| panic!("no objects"), || Err(Refusal::Deadline)), Err(Refusal::Deadline));
+    }
+
+    #[test]
+    fn decimal_limits_reject_signs_whitespace_zero_and_overflow() {
+        for text in ["", "0", "-1", "+1", " 1", "1 ", "1.0", "18446744073709551616"] {
+            assert!(positive(text, u64::MAX, "limit").is_err(), "{text}");
+        }
+        assert_eq!(positive("9", 9, "limit").unwrap(), 9);
+        assert!(positive("10", 9, "limit").is_err());
+    }
+
+    #[test]
+    fn help_explains_scope_and_does_not_claim_graph_verification() {
+        assert!(USAGE.contains("including\nadmitted history"));
+        assert!(USAGE.contains("or verify graph structure"));
+    }
+}

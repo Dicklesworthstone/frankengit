@@ -4,6 +4,7 @@ mod branches;
 mod bundle;
 mod commit_replay;
 mod events;
+mod fsck;
 mod guarded_git_server;
 mod issues;
 mod merge_apply;
@@ -32,6 +33,18 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "fsck") {
+        return match fsck::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!(
+                    "{{\"type\":\"fsck_error\",\"schema_version\":1,\"complete\":false,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "workflow") {
         return match workflow_command::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),
