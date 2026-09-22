@@ -2,7 +2,7 @@
 
 The bounded raw Git-daemon profile now applies partial-clone filters to the
 actual outgoing pack and supports authorized lazy object requests. This extends
-[the exact-head visibility and tag boundary](UPLOAD_PACK_VISIBILITY_AND_TAGS.md);
+[the exact-head visibility and tag boundary](../../docs/UPLOAD_PACK_VISIBILITY_AND_TAGS.md);
 it does not add smart HTTP, SSH authentication, shallow history or a new
 canonical storage format.
 
