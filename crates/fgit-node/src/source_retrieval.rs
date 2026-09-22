@@ -302,3 +302,6 @@ fn symbol_unavailable(error: SymbolError, policy: SymbolPolicy, has_floor: bool)
 
 #[cfg(test)]
 mod tests;
+
+/// Complete authority-selected native graph inspection under a node request.
+pub mod integrity;
