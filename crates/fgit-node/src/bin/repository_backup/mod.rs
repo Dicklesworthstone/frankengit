@@ -1,10 +1,10 @@
-//! Bounded source-recovery transport: authority rows plus EVERY admitted Git
-//! object selected by the exact same authenticated head. No directory inventory
-//! or mutable Git repository becomes authoritative. This is not a capsule.
+//! Bounded source recovery: authority rows plus EVERY Git object selected by
+//! the same head. Payload bytes stream through a private, unpublished file.
 mod archive;
 mod restore;
 
-use std::io::Write;
+use std::fs::File;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -16,8 +16,9 @@ use fgit_object_fabric::ObjectKind as FabricKind;
 use fgit_treefs::integrity::{GraphLimits, GraphReport, ObjectGraphAudit};
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
 
-use super::{emit, hex, publish_new, quote, regular, require_absent, sha256, with_store};
-use archive::{Archive, Encoder, Identity, MAX_ARCHIVE_BYTES, MAX_OBJECT_BYTES, MAX_OBJECTS};
+use super::{emit, hex, publish_streamed, quote, regular, require_absent, with_store};
+use archive::{Identity, MAX_ARCHIVE_BYTES, MAX_OBJECT_BYTES, MAX_OBJECTS};
+use archive::stream::{StreamDecoder, StreamEncoder, StreamHeader, Seal, TransferLimits};
 
 pub(super) const USAGE: &str = "usage: fg-repository-backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
          --trusted-local [--object-format sha1|sha256]
@@ -34,6 +35,7 @@ search indexes and routing are excluded. Stable trusted parent paths required.
 Limits: 64 MiB complete transport, 100000 objects, 32 MiB per object, 100000 refs,
 1000000 inspected edges and a 300 second node scan. Codec/runtime limits may
 refuse earlier. The scan timeout is cooperative, not a blocking-I/O interruption.
+Export streams payloads through one object buffer and verifies the staged file.
 Export never overwrites an existing file. Save its SHA-256 independently.";
 
 #[derive(Debug)]
@@ -107,7 +109,7 @@ fn with_node<T>(config: NodeConfig, action: impl FnOnce(&OneNode) -> Result<T, S
         (Err(error), Err(cleanup)) => Err(format!("{error}; node shutdown also failed: {cleanup}")),
     }
 }
-fn export(options: &Options) -> Result<(Vec<u8>, String), String> {
+fn export(options: &Options, file: &mut File) -> Result<String, String> {
     let metadata = std::fs::symlink_metadata(&options.root).map_err(|e| e.to_string())?;
     if !metadata.is_dir() { return Err("source root must be an existing directory, not a symlink".into()); }
     let database = options.root.join("authority.fsqlite");
@@ -125,44 +127,48 @@ fn export(options: &Options) -> Result<(Vec<u8>, String), String> {
             return Err("repository head moved after authority capture; no backup published".into());
         }
         let objects = selected.selected_closure().closure().objects();
-        let mut checkpoint = || live(started, &request).is_ok();
         let identity = Identity { tenant: options.tenant, repository: options.repository,
             incarnation: node.repository_incarnation_id(), format: options.format };
-        let mut output = Encoder::new(identity, &encoded, objects.len())?;
+        let mut io_live = || live(started, &request);
+        let mut output = StreamEncoder::new(&mut *file, identity, &encoded, objects.len(),
+            TransferLimits::default(), &mut io_live)?;
         for &oid in objects {
-            live(started, &request)?;
+            io_live()?;
             let object = node.read_git_object(oid).map_err(|error| format!("backup object {oid}: {error}"))?;
-            live(started, &request)?;
+            io_live()?;
             let kind = match object.envelope().object_kind() {
                 FabricKind::Commit => GitObjectKind::Commit, FabricKind::Tree => GitObjectKind::Tree,
                 FabricKind::Blob => GitObjectKind::Blob, FabricKind::Tag => GitObjectKind::Tag,
                 FabricKind::Internal => return Err("non-Git object in selected source closure".into()),
             };
-            output.object(oid, kind, object.payload(), &object.envelope().payload_commitment())?;
+            output.object(oid, kind, object.payload(), &object.envelope().payload_commitment(), &mut io_live)?;
         }
-        let bytes = output.finish()?;
-        // Exercise the same hostile-input envelope the destination uses. There
-        // must never be a successful export that our own decoder cannot read.
-        let decoded = archive::decode(&bytes, || live(started, &request))?;
-        if decoded.identity != identity || decoded.authority != authority || decoded.records.len() != objects.len() {
-            return Err("repository backup transport changed its source snapshot".into());
-        }
+        let written = output.finish(&mut io_live)?;
+        file.seek(SeekFrom::Start(0)).map_err(|e| format!("backup verification seek failed: {e}"))?;
+        // Read the actual staged bytes, not a second encoding or source buffer.
+        // Their checksum must equal the writer's digest and EOF must be exact.
+        let mut decoded = StreamDecoder::new(&mut *file, TransferLimits::default(), &mut io_live)?;
+        if decoded.header().identity != identity || decoded.header().authority != authority
+            || decoded.header().objects != objects.len()
+        { return Err("repository backup transport changed its source snapshot".into()); }
+        let mut checkpoint = || live(started, &request).is_ok();
         let mut graph = ObjectGraphAudit::new(objects, options.format, limits(), &mut checkpoint)
             .map_err(|error| error.to_string())?;
-        for record in &decoded.records {
+        while let Some(record) = decoded.record(&mut io_live)? {
             graph.observe(record.oid, record.kind, record.payload, &mut checkpoint).map_err(|error| error.to_string())?;
         }
+        let (header, verified) = decoded.finish(written.digest, &mut io_live)?;
+        if verified != written { return Err("repository backup staged length changed".into()); }
         let report = graph.finish(&selected.snapshot().refs, &mut checkpoint).map_err(|error| error.to_string())?;
         let current = node.runtime().block_on(node.authenticate_authority_head_in(&request)).map_err(|e| e.to_string())?;
-        live(started, &request)?;
+        io_live()?;
         if !matches_head(&authority, current.receipt()) {
             return Err("repository head moved during backup; no backup published".into());
         }
-        let receipt = receipt(&decoded, report, sha256(&bytes), bytes.len());
-        Ok((bytes, receipt))
+        Ok(receipt(&header, report, verified))
     })
 }
-fn receipt(archive: &Archive<'_>, graph: GraphReport, digest: [u8; 32], size: usize) -> String {
+fn receipt(archive: &StreamHeader, graph: GraphReport, seal: Seal) -> String {
     format!(concat!("{{\"type\":\"repository_source_backup_export\",\"schema_version\":1,",
         "\"sha256\":{},\"bytes\":{},\"tenant_id\":{},\"repository_id\":{},\"incarnation_id\":{},",
         "\"object_format\":{},\"head_generation\":{},\"objects\":{},\"references\":{},",
@@ -171,7 +177,7 @@ fn receipt(archive: &Archive<'_>, graph: GraphReport, digest: [u8; 32], size: us
         "\"object_graph_verified\":true,\"original_payload_commitments_verified\":true,",
         "\"source_head_revalidated\":true,\"node_closed\":true,\"signature_verified\":false,",
         "\"external_artifacts_included\":false,\"physical_orphans_included\":false}}"),
-        quote(&hex(&digest)), size, quote(&archive.identity.tenant.to_string()),
+        quote(&hex(&seal.digest)), seal.bytes, quote(&archive.identity.tenant.to_string()),
         quote(&archive.identity.repository.to_string()), quote(&archive.identity.incarnation.to_string()),
         quote(archive.identity.format.as_str()), super::generation(&archive.authority),
         graph.objects, graph.references, graph.payload_bytes, graph.local_edges, graph.external_gitlinks)
@@ -182,10 +188,12 @@ pub(super) fn run(args: &[String], output: &mut impl Write) -> Result<(), String
     if args == ["export", "--help"] { return emit(output, USAGE); }
     let options = parse(args)?;
     require_absent(&options.destination)?;
-    let (bytes, receipt) = export(&options)?;
-    publish_new(&options.destination, &bytes)?;
+    let receipt = publish_streamed(&options.destination, |file| export(&options, file))?;
     emit(output, &receipt).map_err(|error| format!("repository backup published; receipt output failed: {error}"))
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod publication_tests;
