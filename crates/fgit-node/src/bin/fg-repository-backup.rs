@@ -115,15 +115,17 @@ fn with_store<T>(path: &Path, instance: StoreInstanceId, existing: bool,
 fn generation(bundle: &ExportBundle) -> String {
     bundle.head.as_ref().map_or_else(|| "null".into(), |head| head.generation.to_string())
 }
-/// Complete-file/no-replace publication after all source verification and close.
-fn publish_new(destination: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Build and verify through one private read/write handle. The callback must
+/// finish its source verification and node close before any final path exists.
+/// The result is retained until file sync and no-replace publication succeed.
+fn publish_streamed<T>(destination: &Path, build: impl FnOnce(&mut File) -> Result<T, String>) -> Result<T, String> {
     require_absent(destination)?;
     let mut staged = None;
     for _ in 0..16 {
         let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
         let path = parent(destination).join(format!(".fg-source-backup-{}-{sequence}.tmp", std::process::id()));
         let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
+        options.read(true).write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -136,17 +138,21 @@ fn publish_new(destination: &Path, bytes: &[u8]) -> Result<(), String> {
         }
     }
     let (temporary, mut file) = staged.ok_or("no unused repository backup staging path")?;
-    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    let built = build(&mut file).and_then(|result| {
+        file.sync_all().map_err(|error| format!("repository backup staging sync failed: {error}"))?;
+        Ok(result)
+    });
     drop(file);
-    if let Err(error) = written {
-        return Err(remove_stage(&temporary, format!("repository backup staging failed: {error}")));
-    }
+    let result = match built {
+        Ok(result) => result,
+        Err(error) => return Err(remove_stage(&temporary, error)),
+    };
     if let Err(error) = fs::hard_link(&temporary, destination) {
         return Err(remove_stage(&temporary, format!("repository backup publication failed: {error}")));
     }
     fs::remove_file(&temporary).map_err(|e| format!("repository backup is visible; staging cleanup failed: {e}"))?;
     sync_directory(parent(destination)).map_err(|e| format!("repository backup is visible; parent sync failed: {e}"))?;
-    Ok(())
+    Ok(result)
 }
 fn remove_stage(path: &Path, original: String) -> String {
     fs::remove_file(path).err().map_or_else(|| original.clone(), |cleanup|

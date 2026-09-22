@@ -30,6 +30,7 @@ pub(super) struct Archive<'a> {
     pub authority: ExportBundle,
     pub records: Vec<Record<'a>>,
 }
+#[cfg(test)]
 #[derive(Debug)]
 pub(super) struct Encoder {
     bytes: Vec<u8>,
@@ -38,6 +39,7 @@ pub(super) struct Encoder {
     previous: Option<GitOid>,
     failed: bool,
 }
+#[cfg(test)]
 impl Encoder {
     pub fn new(identity: Identity, authority: &[u8], objects: usize) -> Result<Self, String> {
         if objects > MAX_OBJECTS { return Err("repository backup object-count limit".into()); }
@@ -173,3 +175,6 @@ pub(super) fn decode(bytes: &[u8], mut live: impl FnMut() -> Result<(), String>)
 #[cfg(test)]
 #[path = "archive_tests.rs"]
 mod tests;
+
+#[path = "stream.rs"]
+pub(super) mod stream;
