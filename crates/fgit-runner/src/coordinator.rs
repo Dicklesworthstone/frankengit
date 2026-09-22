@@ -307,6 +307,9 @@ pub struct ObligationSummary {
     pub secret_leases_revoked: usize,
     pub check_publications_emitted: usize,
     pub check_publications_settled: usize,
+    /// Job-scoped executor responsibilities, distinct from runner-slot receipts.
+    pub workflow_scopes_opened: usize,
+    pub workflow_scopes_closed: usize,
 }
 impl ObligationSummary {
     pub fn is_quiescent(&self) -> bool {
@@ -316,6 +319,7 @@ impl ObligationSummary {
             && self.runner_slots_committed == self.runner_slots_acknowledged
             && self.secret_leases_issued == self.secret_leases_revoked
             && self.check_publications_emitted == self.check_publications_settled
+            && self.workflow_scopes_opened == self.workflow_scopes_closed
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -447,6 +451,7 @@ pub struct ActiveRun {
     pub job_receipts: BTreeMap<String, CheckReceipt>,
     pub job_outputs: BTreeMap<String, Vec<StepObservation>>,
     pub concurrency_group: Option<String>,
+    pub execution_profile: CoordinatorExecutionProfile,
 }
 pub struct WorkflowCoordinator {
     limits: CoordinatorLimits,
@@ -509,6 +514,34 @@ impl WorkflowCoordinator {
         // WorkflowGraph has public fields. Validate before identity allocation,
         // preemption, or any check proposal; callers cannot bypass the compiler.
         validate_graph(&graph)?;
+        self.enqueue_preflighted_run(
+            tenant,
+            repository,
+            authority_head,
+            source_commit,
+            graph,
+            trigger_ctx,
+            sequence,
+            logical_now_millis,
+            CoordinatorExecutionProfile::CommandOnly,
+        )
+    }
+
+    // Called only after a complete command-only graph preflight or compilation
+    // of an immutable trusted WorkflowPlan. Profile selection is never inferred
+    // from repository text or silently widened by an execution adapter.
+    fn enqueue_preflighted_run(
+        &mut self,
+        tenant: TenantId,
+        repository: RepositoryId,
+        authority_head: Commitment,
+        source_commit: GitOid,
+        graph: WorkflowGraph,
+        trigger_ctx: TriggerContext,
+        sequence: u64,
+        logical_now_millis: u64,
+        execution_profile: CoordinatorExecutionProfile,
+    ) -> Result<WorkflowRunId, CoordinatorRefusal> {
         let idempotency_key = IdempotencyKey::of(
             &trigger_ctx.trigger_name,
             &source_commit,
@@ -579,12 +612,15 @@ impl WorkflowCoordinator {
                 job_receipts: BTreeMap::new(),
                 job_outputs: BTreeMap::new(),
                 concurrency_group,
+                execution_profile,
             },
         );
         self.idempotency_map
             .insert((tenant, repository, idempotency_key), run_id);
-        self.settle_skipped_jobs(run_id, logical_now_millis);
-        self.check_and_finalize_run(run_id);
+        if execution_profile == CoordinatorExecutionProfile::CommandOnly {
+            self.settle_skipped_jobs(run_id, logical_now_millis);
+            self.check_and_finalize_run(run_id);
+        }
         Ok(run_id)
     }
 
@@ -599,6 +635,11 @@ impl WorkflowCoordinator {
             return Ok(Vec::new());
         }
         if !self.has_concurrency_turn(run) {
+            return Ok(Vec::new());
+        }
+        // A retained/unwound trusted scope cannot silently release this
+        // coordinator for further work, even after a terminal error is recorded.
+        if self.obligations.workflow_scopes_opened != self.obligations.workflow_scopes_closed {
             return Ok(Vec::new());
         }
         let in_flight = self
@@ -625,6 +666,24 @@ impl WorkflowCoordinator {
     }
 
     fn require_ready_job(
+        &self,
+        run_id: WorkflowRunId,
+        job_id: &str,
+    ) -> Result<(), CoordinatorRefusal> {
+        let run = self
+            .active_runs
+            .get(&run_id)
+            .ok_or(CoordinatorRefusal::RunNotFound(run_id))?;
+        if run.execution_profile != CoordinatorExecutionProfile::CommandOnly {
+            return Err(CoordinatorRefusal::UnsupportedExecution {
+                job_id: job_id.to_owned(),
+                reason: "use execute_trusted_workflow for the admitted job-scoped profile",
+            });
+        }
+        self.require_eligible_job(run_id, job_id)
+    }
+
+    fn require_eligible_job(
         &self,
         run_id: WorkflowRunId,
         job_id: &str,
@@ -1003,3 +1062,8 @@ mod scheduling_tests;
 mod scope;
 
 mod execution;
+
+mod scoped_workflow;
+pub use scoped_workflow::{
+    CoordinatorExecutionProfile, PreparedTrustedWorkflow, TrustedWorkflowReceipt,
+};
