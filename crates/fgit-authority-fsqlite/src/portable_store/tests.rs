@@ -145,3 +145,127 @@ fn real_engine_export_import_remints_tokens_and_continues_cas() {
     drop(cx);
     assert!(runtime.join_root(std::time::Duration::from_secs(5)));
 }
+
+#[test]
+fn dropped_import_lease_cannot_leak_staged_bodies_head_or_tokens_into_an_export() {
+    let runtime = RuntimeProfile::deterministic().build().unwrap();
+    let cx = context(&runtime);
+    let mut target = runtime.block_on(FsqliteAuthorityStore::open(&cx, ":memory:",
+        StoreInstanceId::from_raw(52), AuthorityLimits::default())).unwrap();
+    let bundle = sample();
+    runtime.block_on(async {
+        // Exercise the production staging function and operation lease at the
+        // exact pre-COMMIT interruption boundary, not a synthetic in-memory map.
+        let mut lease = target.operation(&cx).await.unwrap();
+        target.begin(&cx, &mut lease).await.unwrap();
+        let staged = target.import_portable_snapshot(&cx, &bundle).await.unwrap().unwrap();
+        assert!(target.connection.in_transaction());
+        drop(lease);
+        let exported = target.export_portable(&cx, Default::default()).await.unwrap();
+        assert!(exported.bodies.is_empty());
+        assert!(exported.issuance.is_empty());
+        assert!(exported.head.is_none());
+        assert!(!target.connection.in_transaction());
+        assert!(target.authenticate_head_receipt(&cx, &staged).await.is_err(),
+            "a staged but uncommitted receipt is not authentic");
+        let committed = target.import_portable(&cx, &bundle, Default::default()).await.unwrap().unwrap();
+        target.authenticate_head_receipt(&cx, &committed).await.unwrap();
+        assert_eq!(target.export_portable(&cx, Default::default()).await.unwrap().bodies, bundle.bodies);
+    });
+    runtime.block_on(target.close(&cx)).unwrap();
+    drop(target); drop(cx);
+    assert!(runtime.join_root(std::time::Duration::from_secs(5)));
+}
+
+#[test]
+fn any_occupied_destination_table_refuses_the_whole_import_without_appending_rows() {
+    let runtime = RuntimeProfile::deterministic().build().unwrap();
+    for occupied in 0..3 {
+        let cx = context(&runtime);
+        let mut target = runtime.block_on(FsqliteAuthorityStore::open(&cx, ":memory:",
+            StoreInstanceId::from_raw(60 + occupied), AuthorityLimits::default())).unwrap();
+        runtime.block_on(async {
+            let key = HeadKey::new(b"preexisting/head".to_vec()).unwrap();
+            match occupied {
+                0 => { target.put_if_absent(&cx, &ImmutableKey::new(b"preexisting/body".to_vec()).unwrap(), b"keep").await.unwrap(); }
+                1 => { target.initialize_head(&cx, &key, HeadGeneration::FIRST, b"keep").await.unwrap(); }
+                _ => {
+                    // Deliberately damaged fixture: an issuance row with no
+                    // head is still occupied, never permission to restore over it.
+                    let sequence = IssuanceSequence::FIRST;
+                    target.record_issuance(&cx, mint_token(target.instance_id(), sequence),
+                        sequence, &key, HeadGeneration::FIRST, b"keep").await.unwrap();
+                }
+            }
+            let mut before = Vec::new();
+            for table in ["body.count", "head.count", "issuance.count"] {
+                before.push(target.occupancy(&cx, table).await.unwrap());
+            }
+            assert!(matches!(target.import_portable(&cx, &sample(), Default::default()).await,
+                Err(PortableStoreError::DestinationNotEmpty)));
+            for (table, count) in ["body.count", "head.count", "issuance.count"].into_iter().zip(before) {
+                assert_eq!(target.occupancy(&cx, table).await.unwrap(), count);
+            }
+            assert_eq!(target.read_immutable(&cx, &ImmutableKey::new(b"body".to_vec()).unwrap()).await.unwrap(), ImmutableRead::Absent);
+            assert!(!target.connection.in_transaction());
+        });
+        runtime.block_on(target.close(&cx)).unwrap();
+    }
+    assert!(runtime.join_root(std::time::Duration::from_secs(5)));
+}
+
+#[test]
+fn export_limits_and_multi_head_refusal_finalize_the_snapshot_without_changing_state() {
+    let runtime = RuntimeProfile::deterministic().build().unwrap();
+    let cx = context(&runtime);
+    let mut target = runtime.block_on(FsqliteAuthorityStore::open(&cx, ":memory:",
+        StoreInstanceId::from_raw(52), AuthorityLimits::default())).unwrap();
+    runtime.block_on(async {
+        target.import_portable(&cx, &sample(), Default::default()).await.unwrap();
+        let original = target.export_portable(&cx, Default::default()).await.unwrap();
+        for limits in [PortableStoreLimits { max_bodies: 0, ..Default::default() },
+            PortableStoreLimits { max_issuance: 1, ..Default::default() },
+            PortableStoreLimits { max_field_bytes: bytes(&original) - 1, ..Default::default() }]
+        {
+            assert!(matches!(target.export_portable(&cx, limits).await, Err(PortableStoreError::Limit(_))));
+            assert!(!target.connection.in_transaction());
+            assert_eq!(target.export_portable(&cx, Default::default()).await.unwrap(), original);
+        }
+        let key = HeadKey::new(b"second/head".to_vec()).unwrap();
+        let HeadInit::Created(second) = target.initialize_head(&cx, &key, HeadGeneration::FIRST, b"other").await.unwrap()
+            else { panic!("new second slot") };
+        assert!(matches!(target.export_portable(&cx, Default::default()).await, Err(PortableStoreError::MultipleHeads)));
+        assert!(!target.connection.in_transaction());
+        assert_eq!(target.read_head(&cx, &key).await.unwrap(), HeadRead::Present(second));
+    });
+    runtime.block_on(target.close(&cx)).unwrap();
+    drop(target); drop(cx);
+    assert!(runtime.join_root(std::time::Duration::from_secs(5)));
+}
+
+#[test]
+fn portable_source_open_does_not_initialize_an_unrelated_database() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let path = std::env::temp_dir().join(format!("fg-portable-unrelated-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir(&path).unwrap();
+    let database = path.join("unrelated.fsqlite");
+    let runtime = RuntimeProfile::deterministic().build().unwrap();
+    let cx = context(&runtime);
+    runtime.block_on(async {
+        let mut unrelated = fsqlite::AsyncConnection::open(&cx, database.to_string_lossy().to_string()).await.unwrap();
+        unrelated.execute(&cx, "CREATE TABLE unrelated (value INTEGER NOT NULL) STRICT").await.unwrap();
+        unrelated.execute(&cx, "INSERT INTO unrelated VALUES (42)").await.unwrap();
+        unrelated.close(&cx).await.unwrap();
+        assert!(FsqliteAuthorityStore::open_portable_source(&cx, database.to_string_lossy().to_string(), AuthorityLimits::default()).await.is_err());
+        let mut check = fsqlite::AsyncConnection::open(&cx, database.to_string_lossy().to_string()).await.unwrap();
+        let names = check.query_with_params(&cx, "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name", &[]).await.unwrap();
+        assert_eq!(names.len(), 1, "source opener must not add authority tables");
+        let values = check.query_with_params(&cx, "SELECT value FROM unrelated", &[]).await.unwrap();
+        assert_eq!(read_unsigned(&values[0], 0).unwrap(), 42);
+        check.close(&cx).await.unwrap();
+    });
+    drop(cx);
+    assert!(runtime.join_root(std::time::Duration::from_secs(5)));
+    std::fs::remove_dir_all(path).unwrap();
+}
