@@ -188,6 +188,43 @@ pub const fn operation_statements() -> &'static [SchemaStatement] {
             sql: "SELECT COUNT(*) FROM fgit_version_issuance",
             parameters: 0,
         },
+        // Portable snapshots preflight byte/count bounds in the same SQL
+        // transaction as their ordered reads. No schema or canonical encoding
+        // changes, table copying through a second database, or dynamic SQL.
+        SchemaStatement {
+            name: "portable.body_sizes",
+            sql: "SELECT COUNT(*), COALESCE(SUM(length(body_key) + length(body_bytes)), 0), \
+                  COALESCE(MAX(length(body_bytes)), 0) FROM fgit_immutable_body",
+            parameters: 0,
+        },
+        SchemaStatement {
+            name: "portable.issuance_sizes",
+            sql: "SELECT COUNT(*), COALESCE(SUM(length(token) + length(head_key) + length(body_bytes)), 0), \
+                  COALESCE(MAX(length(body_bytes)), 0) FROM fgit_version_issuance",
+            parameters: 0,
+        },
+        SchemaStatement {
+            name: "portable.head_sizes",
+            sql: "SELECT COUNT(*), COALESCE(SUM(length(head_key) + length(token) + length(body_bytes)), 0), \
+                  COALESCE(MAX(length(body_bytes)), 0) FROM fgit_head_slot",
+            parameters: 0,
+        },
+        SchemaStatement {
+            name: "portable.bodies",
+            sql: "SELECT body_key, body_bytes FROM fgit_immutable_body ORDER BY body_key",
+            parameters: 0,
+        },
+        SchemaStatement {
+            name: "portable.issuance",
+            sql: "SELECT token, issued_seq, head_key, generation, body_bytes \
+                  FROM fgit_version_issuance ORDER BY issued_seq",
+            parameters: 0,
+        },
+        SchemaStatement {
+            name: "portable.heads",
+            sql: "SELECT head_key, token, generation, body_bytes FROM fgit_head_slot ORDER BY head_key",
+            parameters: 0,
+        },
     ]
 }
 

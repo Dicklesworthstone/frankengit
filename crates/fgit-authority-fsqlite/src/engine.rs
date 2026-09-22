@@ -69,6 +69,9 @@ use crate::token::{TokenMintError, mint_token, next_issuance_after};
 mod operation;
 use operation::{OperationGate, OperationLease};
 
+#[path = "portable_store.rs"]
+pub mod portable_store;
+
 /// The number of bytes an opaque version token occupies in storage.
 const TOKEN_BYTES: usize = 16;
 

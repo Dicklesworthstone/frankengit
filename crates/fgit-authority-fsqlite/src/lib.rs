@@ -154,6 +154,7 @@ mod token;
 
 pub use crate::classify::{classify_franken_error, is_retryable_engine_error};
 pub use crate::engine::{EngineError, FsqliteAuthorityStore, run_with_retry};
+pub use crate::engine::portable_store::{PortableStoreError, PortableStoreLimits};
 pub use crate::envelope::{
     ConcurrencyEnvelope, EnvelopeRefusal, MAX_ADMITTED_AUTOCOMMIT_WRITERS, WriterTopology,
 };

@@ -54,6 +54,12 @@ fn the_operation_set_is_closed_and_complete() {
         "issuance.max_sequence",
         "issuance.record",
         "issuance.count",
+        "portable.body_sizes",
+        "portable.issuance_sizes",
+        "portable.head_sizes",
+        "portable.bodies",
+        "portable.issuance",
+        "portable.heads",
     ];
     let mut observed: Vec<&str> = operation_statements()
         .iter()
@@ -210,4 +216,27 @@ fn the_schema_generation_is_pinned() {
         "changing the schema generation is a deliberate act; the authority tables hold \
          canonical bytes and an in-place migration would rewrite history"
     );
+}
+
+#[test]
+fn portable_reads_are_ordered_and_preflight_counts_and_all_variable_fields() {
+    for (name, order) in [("portable.bodies", "body_key"),
+        ("portable.issuance", "issued_seq"), ("portable.heads", "head_key")]
+    {
+        let statement = operation_statement(name).unwrap();
+        assert!(statement.sql.starts_with("SELECT"));
+        assert!(statement.sql.ends_with(&format!("ORDER BY {order}")));
+        assert_eq!(statement.parameters, 0);
+    }
+    for (name, fields) in [
+        ("portable.body_sizes", &["body_key", "body_bytes"][..]),
+        ("portable.issuance_sizes", &["token", "head_key", "body_bytes"][..]),
+        ("portable.head_sizes", &["head_key", "token", "body_bytes"][..]),
+    ] {
+        let sql = operation_statement(name).unwrap().sql;
+        assert!(sql.contains("COUNT(*)"));
+        assert!(sql.contains("COALESCE(SUM("));
+        assert!(sql.contains("COALESCE(MAX(length(body_bytes)), 0)"));
+        for field in fields { assert!(sql.contains(&format!("length({field})"))); }
+    }
 }
