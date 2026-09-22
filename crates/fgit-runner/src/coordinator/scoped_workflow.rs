@@ -82,6 +82,16 @@ impl TrustedWorkflowReceipt {
         let attempt = *self.attempts.get(job_id)?;
         Some(job_commitment(&self.binding, &self.report, job, attempt, self.logical_now))
     }
+
+    /// Exact local per-job evidence bytes referenced by a check proposal.
+    /// Persist these bytes before relinquishing the prepared receipt; the full
+    /// workflow frame has a different commitment and cannot substitute for it.
+    pub fn job_frame(&self, job_id: &str) -> Option<Vec<u8>> {
+        let job = self.report.jobs.iter().find(|job| job.id == job_id)?;
+        let attempt = *self.attempts.get(job_id)?;
+        Some(job_frame(&self.binding, &self.report, job, attempt, self.logical_now))
+    }
+
 }
 
 fn observation_frame(
@@ -117,11 +127,17 @@ fn job_commitment(
     binding: &ObservationBinding, report: &WorkflowReport, job: &JobReport,
     attempt: u32, logical_now: u64,
 ) -> Commitment {
+    Commitment::of_bytes(&job_frame(binding, report, job, attempt, logical_now))
+}
+fn job_frame(
+    binding: &ObservationBinding, report: &WorkflowReport, job: &JobReport,
+    attempt: u32, logical_now: u64,
+) -> Vec<u8> {
     let fragment = WorkflowReport {
         source: report.source, graph: report.graph, limits: report.limits, jobs: vec![job.clone()],
     };
-    Commitment::of_bytes(&observation_frame(binding, &fragment,
-        &BTreeMap::from([(job.id.clone(), attempt)]), logical_now))
+    observation_frame(binding, &fragment,
+        &BTreeMap::from([(job.id.clone(), attempt)]), logical_now)
 }
 
 impl WorkflowCoordinator {

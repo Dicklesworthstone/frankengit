@@ -19,6 +19,7 @@ pub enum CheckDeliveryRefusal {
     StaleBatch,
     AcknowledgementMismatch,
     UnknownRun,
+    EvidenceMissing,
     Cancelled,
     StorageUnavailable,
     CorruptJournal,
@@ -313,3 +314,7 @@ impl WorkflowCoordinator {
 
 #[cfg(test)]
 mod tests;
+
+/// Private-file custody with bounded restart replay; not repository authority.
+#[cfg(unix)]
+pub mod journal;
