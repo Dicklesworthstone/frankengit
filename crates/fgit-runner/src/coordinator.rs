@@ -6,7 +6,7 @@
 //! remains responsible for actual process isolation. In-memory recovery is not
 //! a durable restart journal or evidence that a crashed process was reaped.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -247,7 +247,7 @@ impl fmt::Display for CoordinatorRefusal {
             Self::RunNotFound(id) => write!(f, "workflow run not found: {id}"),
             Self::JobNotFound(id) => write!(f, "job not found: {id}"),
             Self::InvalidStateTransition { from, to } => write!(f, "invalid state transition from {from} to {to}"),
-            Self::StaleAuthorityHead { expected, actual } => write!(f, "stale authority head: expected {expected}, actual {actual}"),
+            Self::StaleAuthorityHead { expected, actual } => write!(f, "stale authority head: expected {expected}, actual: {actual}"),
             Self::PolicyRevoked(detail) => write!(f, "policy revoked: {detail}"),
             Self::ObligationLeak(detail) => write!(f, "obligation leak: {detail}"),
             Self::WorkflowRefusal(e) => write!(f, "workflow refusal: {e}"),
@@ -298,8 +298,10 @@ pub struct ActiveRun {
 }
 pub struct WorkflowCoordinator {
     limits: CoordinatorLimits, control_plane: RunnerControlPlane, secret_broker: SecretBroker,
-    active_runs: BTreeMap<WorkflowRunId, ActiveRun>, idempotency_map: BTreeMap<IdempotencyKey, WorkflowRunId>,
-    concurrency_groups: BTreeMap<String, WorkflowRunId>, outbox_facts: Vec<CheckRunFact>,
+    active_runs: BTreeMap<WorkflowRunId, ActiveRun>,
+    idempotency_map: BTreeMap<(TenantId, RepositoryId, IdempotencyKey), WorkflowRunId>,
+    concurrency_groups: BTreeMap<(TenantId, RepositoryId, String), VecDeque<WorkflowRunId>>,
+    outbox_facts: Vec<CheckRunFact>,
     obligations: ObligationSummary,
 }
 
@@ -329,7 +331,7 @@ impl WorkflowCoordinator {
         // preemption, or any check proposal; callers cannot bypass the compiler.
         validate_graph(&graph)?;
         let idempotency_key = IdempotencyKey::of(&trigger_ctx.trigger_name, &source_commit, &graph.name, sequence);
-        if self.idempotency_map.contains_key(&idempotency_key) {
+        if self.idempotency_map.contains_key(&(tenant, repository, idempotency_key.clone())) {
             return Err(CoordinatorRefusal::DuplicateIdempotencyKey(idempotency_key));
         }
         if self.active_runs.len() >= self.limits.max_queued_runs {
@@ -338,22 +340,8 @@ impl WorkflowCoordinator {
         let graph_id = Commitment::of_bytes(graph.canonical_bytes().as_bytes());
         let run_id = WorkflowRunId::derive(&tenant, &repository, authority_head, &source_commit, graph_id, &trigger_ctx.trigger_name, sequence);
         let attempt_id = AttemptId::derive(run_id, 1);
-        if let Some(ref group) = trigger_ctx.concurrency_group {
-            if group.cancel_in_progress {
-                if let Some(existing_run_id) = self.concurrency_groups.get(&group.name).copied() {
-                    if let Some(existing_run) = self.active_runs.get_mut(&existing_run_id) {
-                        if matches!(existing_run.status, RunStatus::Queued | RunStatus::Running) {
-                            existing_run.status = RunStatus::Draining {
-                                reason: DrainReason::Cancelled(CancellationReason::ConcurrencyPreempted {
-                                    group: group.name.clone(), newer_run: run_id,
-                                }),
-                            };
-                        }
-                    }
-                }
-            }
-            self.concurrency_groups.insert(group.name.clone(), run_id);
-        }
+        self.enqueue_concurrency_group(tenant, repository, run_id, &trigger_ctx);
+        let concurrency_group = trigger_ctx.concurrency_group.as_ref().map(|group| group.name.clone());
         let mut job_statuses = BTreeMap::new();
         let mut job_attempts = BTreeMap::new();
         for job in &graph.jobs {
@@ -370,9 +358,9 @@ impl WorkflowCoordinator {
             tenant, repository, authority_head, source_commit, graph, graph_id, trigger_ctx,
             status: RunStatus::Queued, created_at: Instant::now(), started_at: None,
             job_statuses, job_attempts, job_receipts: BTreeMap::new(), job_outputs: BTreeMap::new(),
-            concurrency_group: None,
+            concurrency_group,
         });
-        self.idempotency_map.insert(idempotency_key, run_id);
+        self.idempotency_map.insert((tenant, repository, idempotency_key), run_id);
         self.settle_skipped_jobs(run_id, logical_now_millis);
         self.check_and_finalize_run(run_id);
         Ok(run_id)
@@ -383,6 +371,7 @@ impl WorkflowCoordinator {
     pub fn eligible_jobs(&self, run_id: WorkflowRunId) -> Result<Vec<String>, CoordinatorRefusal> {
         let run = self.active_runs.get(&run_id).ok_or(CoordinatorRefusal::RunNotFound(run_id))?;
         if !matches!(run.status, RunStatus::Queued | RunStatus::Running) { return Ok(Vec::new()); }
+        if !self.has_concurrency_turn(run) { return Ok(Vec::new()); }
         let in_flight = self.active_runs.values().flat_map(|r| r.job_statuses.values())
             .filter(|status| matches!(status, JobStatus::Running | JobStatus::Draining { .. })).count();
         let capacity = self.limits.max_concurrent_jobs.saturating_sub(in_flight);
@@ -610,28 +599,31 @@ impl WorkflowCoordinator {
         }
         Ok(())
     }
-    /// Reconciles this in-memory projection. This does not load a disk journal
-    /// or itself reap processes; a host still owns external crash containment.
+    /// Compatibility entry point for a single repository. A multi-repository
+    /// coordinator has no unique authority head: use the scoped method instead.
+    /// An ambiguous invocation makes no state change and reports no recoveries.
     pub fn recover_from_crash(&mut self, current_authority_head: Commitment) -> Vec<WorkflowRunId> {
-        let mut recovered = Vec::new();
-        for (id, run) in &mut self.active_runs {
-            if matches!(run.status, RunStatus::Terminal(_)) { continue; }
-            if run.authority_head != current_authority_head {
-                run.status = RunStatus::Terminal(RunOutcome::Invalidated {
-                    reason: format!("Stale source after restart: expected {}, current {}", run.authority_head, current_authority_head),
-                });
-            } else if matches!(run.status, RunStatus::Running | RunStatus::Draining { .. }) {
-                run.status = RunStatus::Terminal(RunOutcome::Cancelled { reason: CancellationReason::CrashRecovery });
-            } else { continue; }
-            for status in run.job_statuses.values_mut() {
-                if !matches!(status, JobStatus::Terminal(_)) { *status = JobStatus::Terminal(JobOutcome::Cancelled); }
-            }
-            recovered.push(*id);
-        }
-        recovered
+        let scopes = self.active_runs.values()
+            .filter(|run| !matches!(run.status, RunStatus::Terminal(_)))
+            .map(|run| (run.tenant, run.repository)).collect::<BTreeSet<_>>();
+        if scopes.len() != 1 { return Vec::new(); }
+        let (tenant, repository) = *scopes.iter().next().expect("one repository scope");
+        self.recover_repository_from_crash(tenant, repository, current_authority_head)
     }
+
+    /// Lookup within the exact tenant/repository namespace. No key from another
+    /// namespace can select a run or cause a duplicate-trigger refusal.
+    pub fn lookup_in_repository(&self, tenant: TenantId, repository: RepositoryId, key: &IdempotencyKey) -> Option<&ActiveRun> {
+        self.idempotency_map.get(&(tenant, repository, key.clone())).and_then(|id| self.active_runs.get(id))
+    }
+
+    /// Compatibility lookup for callers with one repository. Ambiguous keys
+    /// fail closed instead of selecting whichever tenant happens to sort first.
     pub fn lookup_by_idempotency(&self, key: &IdempotencyKey) -> Option<&ActiveRun> {
-        self.idempotency_map.get(key).and_then(|id| self.active_runs.get(id))
+        let mut matches = self.idempotency_map.iter().filter(|((_, _, candidate), _)| candidate == key);
+        let (_, id) = matches.next()?;
+        if matches.next().is_some() { return None; }
+        self.active_runs.get(id)
     }
     pub fn drain_check_facts(&mut self) -> Vec<CheckRunFact> {
         let facts = std::mem::take(&mut self.outbox_facts);
@@ -681,3 +673,5 @@ fn job_condition(condition: Condition, needs: &[String], completed: &BTreeMap<&s
 
 #[cfg(test)]
 mod scheduling_tests;
+
+mod scope;
