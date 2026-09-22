@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# e2e: the workflow lowering command, its refusals, and the published registry.
-#
-# The Rust tests cover the subset thoroughly in-process. This suite covers the
-# three things they cannot:
-#
+# =============================================================================
+# FG-095c / FG-095a: Workflow lowering, schema conformance, and refusal campaign
+# =============================================================================
+# The Rust tests cover the subset thoroughly in-process. This suite covers:
 #   1. the REPOSITORY-OWNED COMMAND produces the committed golden, so AGENTS.md
 #      12 ("YAML may not carry logic unavailable through a repository-owned
 #      command") is demonstrated rather than asserted;
@@ -11,29 +10,23 @@
 #      operator actually sees;
 #   3. the published construct registry parses and its counts agree with the
 #      rows it lists — a compatibility table that disagrees with itself is
-#      worse than none.
-#
-# NOTE on `|| true`, which is load-bearing rather than sloppy: lib.sh documents
-# that a bare `fge_run` whose command fails kills the script on that line under
-# `set -e`, BEFORE FGE_LAST_EXIT is read and before the assertion meant to
-# report it can run — yielding `status=fail failed=0`. Two checks here
-# deliberately expect exit 1, so every fge_run followed by an exit assertion is
-# guarded. Removing the guards makes the negative cases unreachable.
+#      worse than none;
+#   4. in-process schema, span, condition, and literal-script verification tests.
 set -euo pipefail
 
-WF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-WF_REPO=$(cd "$WF_DIR/../../../.." && pwd)
-# shellcheck source=/dev/null
+WF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+WF_REPO="$(cd "$WF_DIR/../../../.." && pwd -P)"
+# shellcheck source=../../lib.sh
 . "$WF_REPO/scripts/e2e/lib.sh"
 
-fge_init fg095a-workflow-lowering
-fge_context bead frankengit-fg095a-workflow-lowering-346z
+fge_init fg095c-workflow-lowering
+fge_context bead frankengit-fg095c-workflow-evidence-6opd
 fge_context crate fgit-schema
 fge_context command fgit-workflow
+fge_context suite workflow-lowering
 
-# Builds run locally (AGENTS.md 16.2); without this the rch wrapper offloads
-# and any file the worker writes lands on the remote host.
 export RCH_CARGO_WRAPPER_BYPASS=1
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/frankengit-targets/antigravity_rc}"
 
 readonly WF_GOLDENS="$WF_REPO/crates/fgit-schema/tests/workflow-goldens"
 readonly WF_SOURCE="$WF_GOLDENS/ci.workflow.yml"
@@ -57,8 +50,7 @@ fge_assert_exit FG-095A-E2E-010 0 "$FGE_LAST_EXIT" \
 
 fge_phase assert
 
-# Determinism through the command, not just through the library: two
-# invocations must agree byte for byte.
+# Determinism through the command: two invocations must agree byte for byte.
 WF_WORK=$(fge_tempdir workflow-lower)
 fge_run 'lower once' \
   cargo run -q -p fgit-schema --bin fgit-workflow -- lower "$WF_SOURCE" || true
@@ -84,9 +76,6 @@ fge_assert_eq FG-095A-E2E-023 1 \
 fge_phase failpoint
 
 # --------------------------------------------- the refusal path is reachable
-# A subset that has never been observed refusing is a subset nobody has tested
-# the edges of. Two constructs, one Unsupported and one Ambiguous, so the
-# distinction the registry draws is exercised rather than merely declared.
 printf 'name: ci\non: push\njobs:\n  a:\n    runs-on: linux\n    steps:\n      - uses: actions/checkout\n' \
   > "$WF_WORK/uses.yml"
 fge_run 'refuse step.uses' \
@@ -105,8 +94,7 @@ wf_ambiguous=$(cargo run -q -p fgit-schema --bin fgit-workflow -- lower "$WF_WOR
 fge_assert_contains FG-095A-E2E-033 "$wf_ambiguous" 'job.if' \
   'an ambiguous construct is refused by name too'
 
-# PERMITTED TWIN: the accepted fixture still lowers, so the refusals above are
-# about those constructs rather than about the command refusing everything.
+# PERMITTED TWIN: the accepted fixture still lowers
 fge_run 'permitted twin still lowers' \
   cargo run -q -p fgit-schema --bin fgit-workflow -- lower "$WF_SOURCE" || true
 fge_assert_exit FG-095A-E2E-034 0 "$FGE_LAST_EXIT" \
@@ -115,8 +103,6 @@ fge_assert_exit FG-095A-E2E-034 0 "$FGE_LAST_EXIT" \
 fge_phase action
 
 # ------------------------------------------------- the published registry
-# D12 wants a machine-readable table. A table that does not parse, or whose
-# summary counts disagree with its rows, is not one.
 if command -v python3 >/dev/null 2>&1; then
   export PYTHONDONTWRITEBYTECODE=1
   fge_run 'registry parses and self-agrees' python3 -c "
@@ -139,8 +125,15 @@ else
   fge_unsupported FG-095A-E2E-040 'python3 is unavailable, so the registry check did not run'
 fi
 
+# Run the schema and workflow lowering test suites
+local_test_exit=0
+fge_capture 'workflow-schema-tests' \
+  cargo test --locked -p fgit-schema --test workflow --test workflow_spans --test workflow_literal_scripts --test workflow_conditions || local_test_exit=$?
+fge_assert_exit FG-095A-E2E-050 0 "$local_test_exit" \
+  'in-process workflow schema and lowering unit test suites pass cleanly'
+
 fge_phase teardown
 
 fge_field accepted_constructs "$(grep -c '"status": "accepted"' "$WF_REGISTRY" || true)"
 fge_field refused_constructs "$(grep -c '"refuses": true' "$WF_REGISTRY" || true)"
-fge_note summary 'the subset refuses by name; every refusal carries a construct key and a source span'
+fge_note summary 'workflow lowering verified: deterministic graph production, source span tracking, and construct registry compliance'
