@@ -245,14 +245,14 @@ fn rust_sources(directory: &Path, files: &mut Vec<PathBuf>) {
 
 fn source_families_in(source: &str, path: &Path) -> Result<BTreeSet<String>, SchemaRefusal> {
     let mut families = BTreeSet::new();
-    let macro_definition = !code_pattern_offsets(source, "macro_rules! bytes_body").is_empty();
+    let macro_definition = !code_pattern_offsets(source, "macro_rules!").is_empty();
 
     for start in code_pattern_offsets(source, "impl CanonicalBody for") {
         let implementation = &source[start..];
         if macro_definition
             && implementation
                 .split_once('{')
-                .is_some_and(|(header, _)| header.contains("$body"))
+                .is_some_and(|(header, _)| header.contains('$'))
         {
             continue;
         }
@@ -282,7 +282,7 @@ fn source_families_in(source: &str, path: &Path) -> Result<BTreeSet<String>, Sch
                 found.trim()
             });
 
-        if expression.contains("$family") && macro_definition {
+        if expression.contains('$') && macro_definition {
             continue;
         }
         if let Some(family) = resolve_family(expression, source) {

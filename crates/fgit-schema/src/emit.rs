@@ -862,6 +862,155 @@ pub fn workflow_registry() -> String {
     lines.join("\n") + "\n"
 }
 
+/// The MCP surface schema as a JSON Schema document.
+#[must_use]
+pub fn mcp_schema() -> String {
+    use crate::mcp::REGISTRY;
+    let mut lines = vec![
+        "{".to_owned(),
+        "  \"$schema\": \"https://json-schema.org/draft/2020-12/schema\",".to_owned(),
+        "  \"$id\": \"https://frankengit.invalid/schemas/mcp-surface.schema.json\",".to_owned(),
+        "  \"title\": \"FrankenGit Model Context Protocol (MCP) surface schema\",".to_owned(),
+        format!(
+            "  \"description\": {},",
+            json_string("Authoritative schema definitions for all FrankenGit MCP tools, resources, and prompts.")
+        ),
+        "  \"type\": \"object\",".to_owned(),
+        "  \"properties\": {".to_owned(),
+    ];
+    for (i, tool) in REGISTRY.iter().enumerate() {
+        let comma = if i + 1 == REGISTRY.len() { "" } else { "," };
+        lines.push(format!("    {}: {{", json_string(tool.name)));
+        lines.push(format!("      \"title\": {},", json_string(tool.name)));
+        lines.push(format!("      \"description\": {},", json_string(tool.description)));
+        lines.push("      \"type\": \"object\",".to_owned());
+        lines.push("      \"properties\": {".to_owned());
+        lines.push("        \"parameters\": {".to_owned());
+        lines.push("          \"type\": \"object\",".to_owned());
+        lines.push("          \"properties\": {".to_owned());
+        for (fi, f) in tool.input_fields.iter().enumerate() {
+            let fcomma = if fi + 1 == tool.input_fields.len() { "" } else { "," };
+            let mut props = vec![
+                format!("              \"type\": {}", json_string(f.field_type)),
+                format!("              \"description\": {}", json_string(f.description)),
+                format!("              \"x-classification\": {}", json_string(f.classification.as_str())),
+            ];
+            if let Some(m) = f.max_bytes {
+                props.push(format!("              \"maxLength\": {m}"));
+            }
+            if let Some(p) = f.pattern {
+                props.push(format!("              \"pattern\": {}", json_string(p)));
+            }
+            lines.push(format!("            {}: {{", json_string(f.name)));
+            lines.push(props.join(",\n"));
+            lines.push(format!("            }}{fcomma}"));
+        }
+        lines.push("          },".to_owned());
+        let reqs: Vec<String> = tool.input_fields.iter().filter(|f| f.required).map(|f| json_string(f.name)).collect();
+        lines.push(format!("          \"required\": [{}],", reqs.join(", ")));
+        lines.push("          \"additionalProperties\": false".to_owned());
+        lines.push("        }".to_owned());
+        lines.push("      },".to_owned());
+        lines.push("      \"additionalProperties\": false".to_owned());
+        lines.push(format!("    }}{comma}"));
+    }
+    lines.push("  }".to_owned());
+    lines.push("}".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// The MCP tool registry as a JSON document.
+#[must_use]
+pub fn mcp_tools_registry() -> String {
+    use crate::mcp::REGISTRY;
+    let active_count = REGISTRY.iter().filter(|t| t.support_profile == crate::mcp::SupportProfile::Active).count();
+    let unsupported_count = REGISTRY.iter().filter(|t| t.support_profile == crate::mcp::SupportProfile::Unsupported).count();
+
+    let mut lines = vec![
+        "{".to_owned(),
+        "  \"$schema\": \"https://json-schema.org/draft/2020-12/schema\",".to_owned(),
+        "  \"$id\": \"https://frankengit.invalid/schemas/mcp_tools.json\",".to_owned(),
+        "  \"title\": \"FrankenGit MCP tool registry\",".to_owned(),
+        format!(
+            "  \"description\": {},",
+            json_string("Single-source registry of all FrankenGit MCP tools, resources, and prompts with capability requirements and budget boundaries.")
+        ),
+        format!("  \"total_count\": {},", REGISTRY.len()),
+        format!("  \"active_count\": {active_count},"),
+        format!("  \"unsupported_count\": {unsupported_count},"),
+        "  \"tools\": [".to_owned(),
+    ];
+    for (i, tool) in REGISTRY.iter().enumerate() {
+        let comma = if i + 1 == REGISTRY.len() { "" } else { "," };
+        let refusal_strs: Vec<String> = tool.refusal_codes.iter().map(|c| json_string(c)).collect();
+        lines.push("    {".to_owned());
+        lines.push(format!("      \"name\": {},", json_string(tool.name)));
+        lines.push(format!("      \"version\": {},", tool.version));
+        lines.push(format!("      \"kind\": {},", json_string(tool.entity_kind.as_str())));
+        lines.push(format!("      \"owner_subsystem\": {},", json_string(tool.owner_subsystem)));
+        lines.push(format!("      \"support_profile\": {},", json_string(tool.support_profile.as_str())));
+        lines.push(format!("      \"description\": {},", json_string(tool.description)));
+        lines.push(format!("      \"read_mutation\": {},", json_string(tool.read_mutation.as_str())));
+        lines.push(format!("      \"capability\": {},", json_string(tool.capability.as_str())));
+        lines.push(format!("      \"principal\": {},", json_string(tool.principal.as_str())));
+        lines.push(format!("      \"idempotency\": {},", json_string(tool.idempotency.as_str())));
+        lines.push(format!("      \"authority_root\": {},", json_string(tool.authority_root.as_str())));
+        lines.push("      \"budget\": {".to_owned());
+        lines.push(format!("        \"max_input_bytes\": {},", tool.budget.max_input_bytes));
+        lines.push(format!("        \"max_output_bytes\": {},", tool.budget.max_output_bytes));
+        lines.push(format!("        \"max_depth\": {},", tool.budget.max_depth));
+        lines.push(format!("        \"max_items\": {},", tool.budget.max_items));
+        lines.push(format!("        \"max_fan_out\": {},", tool.budget.max_fan_out));
+        lines.push(format!("        \"max_duration_ms\": {}", tool.budget.max_duration_ms));
+        lines.push("      },".to_owned());
+        lines.push(format!("      \"pagination\": {},", json_string(tool.pagination.as_str())));
+        lines.push(format!("      \"disclosure\": {},", json_string(tool.disclosure.as_str())));
+        lines.push(format!("      \"receipt\": {},", json_string(tool.receipt.as_str())));
+        lines.push(format!("      \"cancellation\": {},", json_string(tool.cancellation.as_str())));
+        lines.push(format!("      \"refusal_codes\": [{}],", refusal_strs.join(", ")));
+        lines.push(format!("      \"cli_command\": {},", json_string(tool.cli_command)));
+        lines.push(format!("      \"rest_api_path\": {}", json_string(tool.rest_api_path)));
+        lines.push(format!("    }}{comma}"));
+    }
+    lines.push("  ]".to_owned());
+    lines.push("}".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// The MCP to CLI and REST API parity manifest.
+#[must_use]
+pub fn mcp_parity_manifest() -> String {
+    use crate::mcp::REGISTRY;
+    let mut lines = vec![
+        "{".to_owned(),
+        "  \"$schema\": \"https://json-schema.org/draft/2020-12/schema\",".to_owned(),
+        "  \"$id\": \"https://frankengit.invalid/schemas/mcp_parity_manifest.json\",".to_owned(),
+        "  \"title\": \"FrankenGit MCP to CLI and REST API parity manifest\",".to_owned(),
+        format!(
+            "  \"description\": {},",
+            json_string("Mapping of MCP tools to equivalent fg CLI commands and native REST API paths, verifying zero isolated or ambient surfaces.")
+        ),
+        format!("  \"total_tools\": {},", REGISTRY.len()),
+        "  \"parity\": [".to_owned(),
+    ];
+    for (i, tool) in REGISTRY.iter().enumerate() {
+        let comma = if i + 1 == REGISTRY.len() { "" } else { "," };
+        lines.push("    {".to_owned());
+        lines.push(format!("      \"tool\": {},", json_string(tool.name)));
+        lines.push(format!("      \"version\": {},", tool.version));
+        lines.push(format!("      \"owner_subsystem\": {},", json_string(tool.owner_subsystem)));
+        lines.push(format!("      \"support_profile\": {},", json_string(tool.support_profile.as_str())));
+        lines.push(format!("      \"read_mutation\": {},", json_string(tool.read_mutation.as_str())));
+        lines.push(format!("      \"capability\": {},", json_string(tool.capability.as_str())));
+        lines.push(format!("      \"cli_command\": {},", json_string(tool.cli_command)));
+        lines.push(format!("      \"rest_api_path\": {}", json_string(tool.rest_api_path)));
+        lines.push(format!("    }}{comma}"));
+    }
+    lines.push("  ]".to_owned());
+    lines.push("}".to_owned());
+    lines.join("\n") + "\n"
+}
+
 /// One generated artifact: its file name and its bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Artifact {
@@ -890,6 +1039,18 @@ pub fn artifacts() -> Vec<Artifact> {
         Artifact {
             name: "workflow-constructs.json",
             contents: workflow_registry(),
+        },
+        Artifact {
+            name: "mcp-surface.schema.json",
+            contents: mcp_schema(),
+        },
+        Artifact {
+            name: "mcp_tools.json",
+            contents: mcp_tools_registry(),
+        },
+        Artifact {
+            name: "mcp_parity_manifest.json",
+            contents: mcp_parity_manifest(),
         },
     ]
 }

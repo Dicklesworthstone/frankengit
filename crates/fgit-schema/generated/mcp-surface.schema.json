@@ -1,0 +1,957 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frankengit.invalid/schemas/mcp-surface.schema.json",
+  "title": "FrankenGit Model Context Protocol (MCP) surface schema",
+  "description": "Authoritative schema definitions for all FrankenGit MCP tools, resources, and prompts.",
+  "type": "object",
+  "properties": {
+    "frankengit_admin_exec": {
+      "title": "frankengit_admin_exec",
+      "description": "Arbitrary command execution is constitutionally prohibited. Returns typed refusal.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "Attempted command string (prohibited).",
+              "x-classification": "untrusted_content",
+              "maxLength": 1024
+            }
+          },
+          "required": ["command"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_ambient_fs_read": {
+      "title": "frankengit_ambient_fs_read",
+      "description": "Ambient filesystem read outside admitted treefs workspaces is prohibited. Returns typed refusal.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Attempted host filesystem path (prohibited).",
+              "x-classification": "selector_position",
+              "maxLength": 4096
+            }
+          },
+          "required": ["path"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_code_review_prompt": {
+      "title": "frankengit_code_review_prompt",
+      "description": "Prompt template for guiding AI agents through capability-narrow pull request review.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pull_number": {
+              "type": "string",
+              "description": "Positive decimal pull request number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            }
+          },
+          "required": ["pull_number"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_hidden_repair": {
+      "title": "frankengit_hidden_repair",
+      "description": "Silent repair or bypass of current authority head is constitutionally prohibited. Returns typed refusal.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_issue_close": {
+      "title": "frankengit_issue_close",
+      "description": "Close an open issue with an exact predecessor version pin and durable idempotency key.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor version decimal string.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[0-9]+$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_issue_comment": {
+      "title": "frankengit_issue_comment",
+      "description": "Add a comment to an issue. Comment body is untrusted user text.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor version decimal string.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[0-9]+$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "body": {
+              "type": "string",
+              "description": "Comment body Markdown text (untrusted data).",
+              "x-classification": "untrusted_content",
+              "maxLength": 16384
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key", "body"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_issue_edit": {
+      "title": "frankengit_issue_edit",
+      "description": "Edit an issue's title, body, or labels with predecessor version pin. Content fields are untrusted data.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor version decimal string.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[0-9]+$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "title": {
+              "type": "string",
+              "description": "Updated title (untrusted data).",
+              "x-classification": "untrusted_content",
+              "maxLength": 256
+            },
+            "body": {
+              "type": "string",
+              "description": "Updated body Markdown text (untrusted data).",
+              "x-classification": "untrusted_content",
+              "maxLength": 16384
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_issue_list": {
+      "title": "frankengit_issue_list",
+      "description": "List issues from an authenticated repository snapshot. Issue texts are untrusted data.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "after": {
+              "type": "string",
+              "description": "Unsigned decimal issue cursor.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Page item limit (1..20, default 5).",
+              "x-classification": "selector_position"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Exact snapshot token from first page.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_issue_open": {
+      "title": "frankengit_issue_open",
+      "description": "Open a new issue with expected version 0. Title and body are untrusted user text.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor version (must be '0').",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^0$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "title": {
+              "type": "string",
+              "description": "Issue title (untrusted data).",
+              "x-classification": "untrusted_content",
+              "maxLength": 256
+            },
+            "body": {
+              "type": "string",
+              "description": "Issue body Markdown text (untrusted data).",
+              "x-classification": "untrusted_content",
+              "maxLength": 16384
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key", "title", "body"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_issue_reopen": {
+      "title": "frankengit_issue_reopen",
+      "description": "Reopen a closed issue with exact predecessor version pin and durable idempotency key.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor version decimal string.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[0-9]+$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_issue_show": {
+      "title": "frankengit_issue_show",
+      "description": "Read an issue and its complete action history from an authenticated repository snapshot.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal issue number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "after_version": {
+              "type": "string",
+              "description": "Optional cursor version to paginate action history.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Exact snapshot token from first page.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": ["number"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_pr_summary_prompt": {
+      "title": "frankengit_pr_summary_prompt",
+      "description": "Prompt template for synthesizing pull request summaries without executing untrusted text.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pull_number": {
+              "type": "string",
+              "description": "Positive decimal pull request number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            }
+          },
+          "required": ["pull_number"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_pull_close": {
+      "title": "frankengit_pull_close",
+      "description": "Close a pull request with exact predecessor version pin and durable idempotency key.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal pull request number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor version decimal string.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[0-9]+$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_pull_list": {
+      "title": "frankengit_pull_list",
+      "description": "List pull requests from an authenticated repository snapshot. PR text is untrusted data.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "after": {
+              "type": "string",
+              "description": "Unsigned decimal pull cursor.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Page item limit (1..20, default 5).",
+              "x-classification": "selector_position"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Exact snapshot token from first page.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_pull_open": {
+      "title": "frankengit_pull_open",
+      "description": "Open a pull request with head ref, base ref, and version 0. Content is untrusted data.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal pull request number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor version (must be '0').",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^0$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "title": {
+              "type": "string",
+              "description": "Pull request title (untrusted data).",
+              "x-classification": "untrusted_content",
+              "maxLength": 256
+            },
+            "body": {
+              "type": "string",
+              "description": "Pull request body text (untrusted data).",
+              "x-classification": "untrusted_content",
+              "maxLength": 16384
+            },
+            "head_ref": {
+              "type": "string",
+              "description": "Source branch reference.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "base_ref": {
+              "type": "string",
+              "description": "Target branch reference.",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key", "title", "body", "head_ref", "base_ref"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_pull_reopen": {
+      "title": "frankengit_pull_reopen",
+      "description": "Reopen a closed pull request with exact predecessor version pin and durable idempotency key.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal pull request number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor version decimal string.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[0-9]+$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["number", "expected_version", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_pull_show": {
+      "title": "frankengit_pull_show",
+      "description": "Read pull request metadata from an authenticated repository snapshot. No merge permission implied.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal pull request number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional snapshot token pin.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": ["number"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_raw_sql_query": {
+      "title": "frankengit_raw_sql_query",
+      "description": "Direct SQL execution is constitutionally prohibited. Returns typed refusal.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Attempted SQL query string (prohibited).",
+              "x-classification": "untrusted_content",
+              "maxLength": 1024
+            }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_repo_info": {
+      "title": "frankengit_repo_info",
+      "description": "Read authenticated repository identity, incarnation, and object format metadata via URI repo://info.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_repo_manifest": {
+      "title": "frankengit_repo_manifest",
+      "description": "Read repository capability manifest and supported profile bounds via URI repo://manifest.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_review_submit": {
+      "title": "frankengit_review_submit",
+      "description": "Submit a code review verdict binding exact candidate commit, tips, and policy epoch.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal pull request number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_version": {
+              "type": "string",
+              "description": "Exact predecessor pull request version.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[0-9]+$"
+            },
+            "candidate_commit": {
+              "type": "string",
+              "description": "Candidate commit ID being reviewed.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "verdict": {
+              "type": "string",
+              "description": "Review verdict: approve, request_changes, comment.",
+              "x-classification": "selector_position",
+              "maxLength": 32,
+              "pattern": "^(approve|request_changes|comment)$"
+            },
+            "explanation": {
+              "type": "string",
+              "description": "Explanation text for verdict (untrusted data).",
+              "x-classification": "untrusted_content",
+              "maxLength": 16384
+            }
+          },
+          "required": ["number", "expected_version", "candidate_commit", "idempotency_key", "verdict", "explanation"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_reviewed_merge": {
+      "title": "frankengit_reviewed_merge",
+      "description": "Atomically land an approved pull request. Opener and submitter votes cannot self-approve.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "string",
+              "description": "Positive decimal pull request number.",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "expected_target_commit": {
+              "type": "string",
+              "description": "Exact current target base commit ID.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
+            "candidate_commit": {
+              "type": "string",
+              "description": "Candidate tip commit ID to merge.",
+              "x-classification": "selector_position",
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{40,64}$"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["number", "expected_target_commit", "candidate_commit", "idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_source_blame": {
+      "title": "frankengit_source_blame",
+      "description": "Compute line provenance for a file in an authenticated repository snapshot.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full ref name (e.g. refs/heads/main).",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "path_hex": {
+              "type": "string",
+              "description": "Hex-encoded repository relative path.",
+              "x-classification": "selector_position",
+              "maxLength": 4096,
+              "pattern": "^[0-9a-f]+$"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional snapshot token pin.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": ["reference", "path_hex"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_source_blob": {
+      "title": "frankengit_source_blob",
+      "description": "Read file slice by hex path and byte offset from an authenticated repository snapshot.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full ref name (e.g. refs/heads/main).",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "path_hex": {
+              "type": "string",
+              "description": "Hex-encoded repository relative path.",
+              "x-classification": "selector_position",
+              "maxLength": 4096,
+              "pattern": "^[0-9a-f]+$"
+            },
+            "offset": {
+              "type": "string",
+              "description": "Byte offset decimal string (default 0).",
+              "x-classification": "selector_position",
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "max_bytes": {
+              "type": "integer",
+              "description": "Max bytes to return (1..65536, default 16384).",
+              "x-classification": "selector_position"
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional snapshot token pin.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": ["reference", "path_hex"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_source_commit": {
+      "title": "frankengit_source_commit",
+      "description": "Publish a commit and advance a ref atomically with predecessor tip condition.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Target ref name (e.g. refs/heads/feature).",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "expected_commit": {
+              "type": "string",
+              "description": "Exact predecessor tip commit ID, or 'absent'.",
+              "x-classification": "selector_position",
+              "maxLength": 64
+            },
+            "idempotency_key": {
+              "type": "string",
+              "description": "Durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            },
+            "bundle_hex": {
+              "type": "string",
+              "description": "Hex-encoded pack/object bundle (bounded 24 KiB).",
+              "x-classification": "untrusted_content",
+              "maxLength": 49152,
+              "pattern": "^[0-9a-f]+$"
+            }
+          },
+          "required": ["reference", "expected_commit", "idempotency_key", "bundle_hex"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_source_log": {
+      "title": "frankengit_source_log",
+      "description": "Read commit ancestry log from an authenticated repository snapshot.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full ref name (e.g. refs/heads/main).",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Max commits to return (1..100, default 50).",
+              "x-classification": "selector_position"
+            },
+            "after_commit": {
+              "type": "string",
+              "description": "Commit ID cursor.",
+              "x-classification": "selector_position",
+              "maxLength": 64
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional snapshot token pin.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": ["reference"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_source_tree": {
+      "title": "frankengit_source_tree",
+      "description": "List directory tree entries by hex path from an authenticated repository snapshot.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reference": {
+              "type": "string",
+              "description": "Full ref name (e.g. refs/heads/main).",
+              "x-classification": "selector_position",
+              "maxLength": 256
+            },
+            "path_hex": {
+              "type": "string",
+              "description": "Hex-encoded directory path (omitted for root).",
+              "x-classification": "selector_position",
+              "maxLength": 4096,
+              "pattern": "^[0-9a-f]*$"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Page item limit (1..100, default 50).",
+              "x-classification": "selector_position"
+            },
+            "after_hex": {
+              "type": "string",
+              "description": "Hex entry name cursor.",
+              "x-classification": "selector_position",
+              "maxLength": 512
+            },
+            "expected_head": {
+              "type": "string",
+              "description": "Optional snapshot token pin.",
+              "x-classification": "selector_position",
+              "maxLength": 140
+            }
+          },
+          "required": ["reference"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "frankengit_transaction_outcome": {
+      "title": "frankengit_transaction_outcome",
+      "description": "Query historical transaction outcome by idempotency key. Available even when intake is stopped.",
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "idempotency_key": {
+              "type": "string",
+              "description": "Original durable printable ASCII idempotency key.",
+              "x-classification": "selector_position",
+              "maxLength": 256,
+              "pattern": "^[!-~]+$"
+            }
+          },
+          "required": ["idempotency_key"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

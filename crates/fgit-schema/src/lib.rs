@@ -52,6 +52,7 @@ pub mod descriptor;
 pub mod emit;
 pub mod error;
 pub mod gate;
+pub mod mcp;
 pub mod registry;
 pub mod workflow;
 pub mod workspace_bodies;
