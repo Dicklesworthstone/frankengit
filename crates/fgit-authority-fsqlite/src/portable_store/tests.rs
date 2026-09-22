@@ -1,5 +1,8 @@
 use super::*;
-use fgit_authority::{CasOutcome, HeadInit, HeadRead, ImmutableRead};
+use crate::marshal::read_unsigned;
+use crate::schema::SCHEMA_VERSION;
+use crate::{ExportedBody, ExportedHead, ExportedIssuance};
+use fgit_authority::{AuthorityLimits, CasOutcome, HeadInit, HeadRead, ImmutableKey, ImmutableRead};
 use fgit_runtime::boot::{NodeRuntime, RuntimeProfile};
 use fgit_runtime::meter::BudgetClass;
 

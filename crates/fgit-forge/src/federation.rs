@@ -834,7 +834,7 @@ pub struct OfflineWorkBundle {
 
 impl CanonicalBody for OfflineWorkBundle {
     const DOMAIN: DomainTag = OFFLINE_BUNDLE_DOMAIN;
-    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static(OFFLINE_BUNDLE_SCHEMA_FAMILY);
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("frankengit.federation-bundle");
     const SCHEMA_MAJOR: u16 = 1;
     const SCHEMA_MINOR: u16 = 0;
 
