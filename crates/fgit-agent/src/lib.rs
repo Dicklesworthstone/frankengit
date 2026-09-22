@@ -80,6 +80,7 @@ pub mod claim_continuity;
 pub mod classes;
 pub mod cross_head_task_transfer;
 pub mod current_effect_dispatch;
+pub mod delegation;
 pub mod descendant_revocation;
 pub mod ecc;
 mod effect_authorization;
@@ -168,6 +169,13 @@ pub use current_effect_dispatch::{
     CurrentAuthorityRevocationAuthorizedOutboxEffect,
     CurrentAuthorityRevocationCheckedEffectBroker, CurrentAuthorityRevocationCheckedEffectRefusal,
     CurrentAuthoritySettledOutboxEffect,
+};
+pub use delegation::{
+    Caveat, DelegatedCapability, DelegationLimits, DisclosurePolicy, Selector, SubIntent,
+    SubIntentFanOutTracker, SubIntentId, SubIntentParams, SubIntentRefusal,
+    MAX_CONTEXT_DUPLICATION_BYTES, MAX_DELEGATION_DEPTH, MAX_DELEGATION_FAN_OUT,
+    MAX_SUBINTENT_CAPABILITIES, MAX_SUBINTENT_CAVEATS, MAX_SUBINTENT_IDENTITIES,
+    MAX_SUBINTENT_INPUT_COMMITMENTS, verify_sub_intent_ancestry,
 };
 pub use descendant_revocation::{
     CurrentAuthorityCapabilityEffectAuthorization, CurrentAuthorityCapabilityEffectAuthorizationId,
