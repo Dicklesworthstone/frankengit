@@ -64,6 +64,8 @@ pub enum PortableStoreError {
     MultipleHeads,
     SameStoreInstance,
     DestinationNotEmpty,
+    /// An occupied resume target is not the exact intended imported image.
+    DestinationSnapshotMismatch,
     Allocation,
     Engine(EngineError),
     Publication(EngineError),
@@ -95,6 +97,9 @@ impl std::fmt::Display for PortableStoreError {
             Self::DestinationNotEmpty => {
                 out.write_str("portable import requires an empty destination authority store")
             }
+            Self::DestinationSnapshotMismatch => out.write_str(
+                "portable resume destination does not match the complete imported snapshot",
+            ),
             Self::Allocation => out.write_str("bounded portable-store allocation failed"),
             Self::Engine(error) => write!(out, "portable-store engine operation failed: {error}"),
             Self::Publication(error) => write!(
@@ -566,6 +571,8 @@ impl FsqliteAuthorityStore {
         }
     }
 }
+
+mod resume;
 
 #[cfg(test)]
 // Explicit path: rustfmt resolves out-of-line children of `#[path]`-attributed

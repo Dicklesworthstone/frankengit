@@ -22,6 +22,7 @@ rustix.workspace = true
 
 [dev-dependencies]
 fgit-git-object.workspace = true
+fgit-types.workspace = true
 
 [lints]
 workspace = true
