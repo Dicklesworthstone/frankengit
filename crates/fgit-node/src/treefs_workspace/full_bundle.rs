@@ -454,3 +454,18 @@ impl ReceiveQuarantineHandoff for FullHandoff<'_> {
 
 #[cfg(test)]
 mod tests;
+
+// Bundle writers verify closure independently from the selected-ID traversal.
+// Keep native dependency metadata on the plan, deriving it from the exact body
+// that is already being loaded. Do not reread object fabric or widen selection.
+struct BundleObjectSource<'source, 'context>(&'source VerifiedFabricPackSource<'context>);
+impl fgit_pack::CanonicalObjectSource for BundleObjectSource<'_, '_> {
+    fn load(&self, id: &fgit_types::GitOid) -> Result<fgit_pack::CanonicalPackObject, fgit_pack::PackWriteError> {
+        let (kind, body) = self.0.read_object(id)?;
+        let references = self.0.object_references_from_body(kind, &body)?;
+        if !self.0.database_read_is_live() {
+            return Err(fgit_pack::PackError::DeadlineExceeded.into());
+        }
+        Ok(fgit_pack::CanonicalPackObject::new(*id, kind, body, references, 0, 0))
+    }
+}
