@@ -6,8 +6,8 @@ use fgit_forge::review::{ComparisonMode, ReviewOptions, SourceReview};
 use fgit_types::GitOid;
 use fgit_wire::visibility::RefVisibility;
 
-use crate::{NodeRequestContext, NodeWorkspaceRefusal, OneNode};
 pub(crate) use super::publication::BundleInspectionRefusal;
+use crate::{NodeRequestContext, NodeWorkspaceRefusal, OneNode};
 
 /// Transport measurements from the native inspector, not a closure proof or
 /// a claim that objects were admitted to this repository.
@@ -58,10 +58,14 @@ impl std::error::Error for PullRequestInspectionRefusal {
     }
 }
 impl From<NodeWorkspaceRefusal> for PullRequestInspectionRefusal {
-    fn from(error: NodeWorkspaceRefusal) -> Self { Self::Selection(Box::new(error)) }
+    fn from(error: NodeWorkspaceRefusal) -> Self {
+        Self::Selection(Box::new(error))
+    }
 }
 impl From<BundleInspectionRefusal> for PullRequestInspectionRefusal {
-    fn from(error: BundleInspectionRefusal) -> Self { Self::Candidate(Box::new(error)) }
+    fn from(error: BundleInspectionRefusal) -> Self {
+        Self::Candidate(Box::new(error))
+    }
 }
 
 impl OneNode {
@@ -86,14 +90,31 @@ impl OneNode {
         visibility: &RefVisibility,
         options: &ReviewOptions,
     ) -> Result<PullRequestInspection, PullRequestInspectionRefusal> {
-        options.validate().map_err(|error| BundleInspectionRefusal::Review(Box::new(error)))?;
+        options
+            .validate()
+            .map_err(|error| BundleInspectionRefusal::Review(Box::new(error)))?;
         if options.mode != ComparisonMode::Direct || !options.paths.is_empty() {
-            return Err(BundleInspectionRefusal::InvalidCandidate("full candidate inspection requires an unfiltered direct comparison").into());
+            return Err(BundleInspectionRefusal::InvalidCandidate(
+                "full candidate inspection requires an unfiltered direct comparison",
+            )
+            .into());
         }
-        candidate.validate(subject).map_err(|_| BundleInspectionRefusal::InvalidCandidate("invalid exact candidate coordinates"))?;
-        let head = self.validate_pull_request_preparation_in(request, subject, visibility).await?;
-        let mut inspected = self.inspect_merge_bundle_in(request, &candidate.merge(subject), input,
-            visibility, Some(head), options).await?;
+        candidate.validate(subject).map_err(|_| {
+            BundleInspectionRefusal::InvalidCandidate("invalid exact candidate coordinates")
+        })?;
+        let head = self
+            .validate_pull_request_preparation_in(request, subject, visibility)
+            .await?;
+        let mut inspected = self
+            .inspect_merge_bundle_in(
+                request,
+                &candidate.merge(subject),
+                input,
+                visibility,
+                Some(head),
+                options,
+            )
+            .await?;
         if inspected.review.source_head != head
             || inspected.review.comparison.requested_before != subject.target_tip
             || inspected.review.comparison.requested_after != candidate.commit
@@ -107,13 +128,19 @@ impl OneNode {
         }
         inspected.review.pull_request = Some((subject.pull_request, subject.pull_request_version));
         Ok(PullRequestInspection {
-            subject: subject.clone(), candidate, review: inspected.review,
+            subject: subject.clone(),
+            candidate,
+            review: inspected.review,
             candidate_commit_body: inspected.candidate_commit_body,
-            parents: inspected.parents, prerequisites: inspected.prerequisites,
+            parents: inspected.parents,
+            prerequisites: inspected.prerequisites,
             bundle: InspectedBundle {
-                sha256: inspected.bundle_sha256, bytes: inspected.bundle_bytes,
-                pack_bytes: inspected.pack_bytes, pack_objects: inspected.pack_objects,
-                expanded_bytes: inspected.expanded_bytes, closure_objects: inspected.closure_objects,
+                sha256: inspected.bundle_sha256,
+                bytes: inspected.bundle_bytes,
+                pack_bytes: inspected.pack_bytes,
+                pack_objects: inspected.pack_objects,
+                expanded_bytes: inspected.expanded_bytes,
+                closure_objects: inspected.closure_objects,
                 transport_only_objects: inspected.transport_only_objects,
             },
         })

@@ -58,8 +58,16 @@ impl OneNode {
             capability,
             now,
             |base, source, capability| {
-                export_from_base(base, source, capability, log, expected_commit, now, limits,
-                    &|| !super::workspace_request_live(request))
+                export_from_base(
+                    base,
+                    source,
+                    capability,
+                    log,
+                    expected_commit,
+                    now,
+                    limits,
+                    &|| !super::workspace_request_live(request),
+                )
             },
         )
         .await
@@ -69,19 +77,38 @@ impl OneNode {
 /// Shared by the direct edit API and the trusted host-tool composition. The
 /// caller already selected this exact immutable base through authority.
 pub(super) fn export_from_base<A: GitHashAlgorithm>(
-    base: &BaseView<A>, source: &NodeTreeSource<'_>, capability: &mut TreeCapability,
-    log: &IntentLog, expected_commit: AnyOid, now: u64, limits: ExportLimits,
+    base: &BaseView<A>,
+    source: &NodeTreeSource<'_>,
+    capability: &mut TreeCapability,
+    log: &IntentLog,
+    expected_commit: AnyOid,
+    now: u64,
+    limits: ExportLimits,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<WorkspaceEditExport<A>, NodeWorkspaceRefusal> {
-    export_owned_from_base(base, source, capability, log, expected_commit, now, limits, cancelled)
-        .map(|(export, _)| export)
+    export_owned_from_base(
+        base,
+        source,
+        capability,
+        log,
+        expected_commit,
+        now,
+        limits,
+        cancelled,
+    )
+    .map(|(export, _)| export)
 }
 
 /// Return the actual evaluated overlay to the node's workspace owner. The
 /// direct export API discards it; a session retains this same value and log.
 pub(super) fn export_owned_from_base<A: GitHashAlgorithm>(
-    base: &BaseView<A>, source: &NodeTreeSource<'_>, capability: &mut TreeCapability,
-    log: &IntentLog, expected_commit: AnyOid, now: u64, limits: ExportLimits,
+    base: &BaseView<A>,
+    source: &NodeTreeSource<'_>,
+    capability: &mut TreeCapability,
+    log: &IntentLog,
+    expected_commit: AnyOid,
+    now: u64,
+    limits: ExportLimits,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(WorkspaceEditExport<A>, fgit_treefs::Overlay), NodeWorkspaceRefusal> {
     validate_log(log, capability, now, limits)?;
@@ -114,12 +141,15 @@ pub(super) fn export_owned_from_base<A: GitHashAlgorithm>(
     let plan = ExportPlanner::new(limits, source.inner.parse_limits())
         .plan(base, source, capability, &overlay, now, cancelled)
         .map_err(NodeWorkspaceRefusal::WorkspaceExport)?;
-    Ok((WorkspaceEditExport {
-        source_rcr: base.base_rcr_id(),
-        source_commit: *base.base_commit_oid(),
-        plan,
-        changed_paths: paths.into_iter().collect(),
-    }, overlay))
+    Ok((
+        WorkspaceEditExport {
+            source_rcr: base.base_rcr_id(),
+            source_commit: *base.base_commit_oid(),
+            plan,
+            changed_paths: paths.into_iter().collect(),
+        },
+        overlay,
+    ))
 }
 
 pub(super) fn validate_log(
@@ -190,9 +220,11 @@ fn require_complete_directories<A: GitHashAlgorithm>(
         let body = base
             .read_object(source, &oid, GitObjectKind::Tree, &grant)
             .map_err(NodeWorkspaceRefusal::Object)?;
-        capability.charge_fetch(body.len() as u64).map_err(|error| {
-            NodeWorkspaceRefusal::Manifest(fgit_treefs::SparseRefusal::Capability(error))
-        })?;
+        capability
+            .charge_fetch(body.len() as u64)
+            .map_err(|error| {
+                NodeWorkspaceRefusal::Manifest(fgit_treefs::SparseRefusal::Capability(error))
+            })?;
         let entries = parse_tree(
             &body,
             AcceptanceProfile::GitCompatibleImport,

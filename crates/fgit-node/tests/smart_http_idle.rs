@@ -13,14 +13,23 @@ use fgit_wire::{Packet, WireLimits, encode_packets};
 
 struct Scratch(PathBuf);
 impl Drop for Scratch {
-    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 #[test]
 fn slow_authenticated_request_keeps_the_follow_up_accept_window_open() {
-    let scratch = Scratch(std::env::temp_dir().join(format!("fg-http-idle-{}", std::process::id())));
-    let configuration = NodeConfig::new(scratch.0.clone(), TenantId::from_bytes([0xd1; 16]), RepositoryId::from_bytes([0xd2; 16]))
-        .with_git_daemon_session_timeout(GitDaemonSessionTimeout::try_new(Duration::from_secs(10)).unwrap());
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("fg-http-idle-{}", std::process::id())));
+    let configuration = NodeConfig::new(
+        scratch.0.clone(),
+        TenantId::from_bytes([0xd1; 16]),
+        RepositoryId::from_bytes([0xd2; 16]),
+    )
+    .with_git_daemon_session_timeout(
+        GitDaemonSessionTimeout::try_new(Duration::from_secs(10)).unwrap(),
+    );
     let (mut node, _) = OneNode::init(configuration).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let route = String::from_utf8(node.git_daemon_repository_path().as_bytes().to_vec()).unwrap();
@@ -31,18 +40,37 @@ fn slow_authenticated_request_keeps_the_follow_up_accept_window_open() {
     // Connect before starting the listener loop so startup scheduling cannot
     // consume the idle interval before any test client exists.
     let mut first = TcpStream::connect(address).unwrap();
-    first.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-    first.set_write_timeout(Some(Duration::from_secs(15))).unwrap();
+    first
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    first
+        .set_write_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
     let worker = std::thread::spawn(move || {
-        let result = node.serve_smart_http_bounded(&listener, GitDaemonServerLimits::try_new(2, 1).unwrap(),
-            digest, PrincipalId::from_bytes([0xd3; 16]), false, Duration::from_millis(100));
+        let result = node.serve_smart_http_bounded(
+            &listener,
+            GitDaemonServerLimits::try_new(2, 1).unwrap(),
+            digest,
+            PrincipalId::from_bytes([0xd3; 16]),
+            false,
+            Duration::from_millis(100),
+        );
         let cleanup = node.shutdown();
         (result, cleanup)
     });
-    let body = encode_packets(&[
-        Packet::Data(b"command=ls-refs\n".to_vec()), Packet::Delimiter, Packet::Flush,
-    ], &WireLimits::default()).unwrap();
-    let request = format!("POST {route}/git-upload-pack HTTP/1.1\r\nHost: loopback\r\nAuthorization: Bearer {token}\r\nGit-Protocol: version=2\r\nContent-Type: application/x-git-upload-pack-request\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n", body.len());
+    let body = encode_packets(
+        &[
+            Packet::Data(b"command=ls-refs\n".to_vec()),
+            Packet::Delimiter,
+            Packet::Flush,
+        ],
+        &WireLimits::default(),
+    )
+    .unwrap();
+    let request = format!(
+        "POST {route}/git-upload-pack HTTP/1.1\r\nHost: loopback\r\nAuthorization: Bearer {token}\r\nGit-Protocol: version=2\r\nContent-Type: application/x-git-upload-pack-request\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
+        body.len()
+    );
     first.write_all(request.as_bytes()).unwrap();
     let mut interim = [0_u8; 25];
     first.read_exact(&mut interim).unwrap();
@@ -61,7 +89,10 @@ fn slow_authenticated_request_keeps_the_follow_up_accept_window_open() {
         second.set_write_timeout(Some(Duration::from_secs(15)))?;
         // A fresh anonymous connection must be accepted then independently
         // refused, rather than inheriting authentication or seeing a dead port.
-        write!(second, "GET {route}/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: loopback\r\n\r\n")?;
+        write!(
+            second,
+            "GET {route}/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: loopback\r\n\r\n"
+        )?;
         let mut response = Vec::new();
         second.read_to_end(&mut response)?;
         Ok(response)
@@ -70,7 +101,11 @@ fn slow_authenticated_request_keeps_the_follow_up_accept_window_open() {
     cleanup.expect("HTTP node and its children drain");
     let receipt = result.expect("bounded listener succeeds");
     assert!(first_response.starts_with(b"HTTP/1.1 200"));
-    assert!(follow_up.expect("follow-up connection remains available").starts_with(b"HTTP/1.1 401"));
+    assert!(
+        follow_up
+            .expect("follow-up connection remains available")
+            .starts_with(b"HTTP/1.1 401")
+    );
     assert_eq!(receipt.accepted_sessions(), 2);
     assert_eq!(receipt.completed_sessions(), 1);
     assert_eq!(receipt.refused_sessions(), 1);

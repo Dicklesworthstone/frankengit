@@ -942,7 +942,9 @@ fn a_stored_policy_filters_live_daemon_receive_and_refuses_hidden_publication() 
         })();
         let _ = client.shutdown(Shutdown::Both);
         drop(client);
-        let served = server.join().map_err(|_| io::Error::other("server thread panicked"));
+        let served = server
+            .join()
+            .map_err(|_| io::Error::other("server thread panicked"));
         // All assertions in the caller happen after socket cleanup, join, and
         // node shutdown, including when a read or write has timed out.
         served??;
@@ -950,16 +952,18 @@ fn a_stored_policy_filters_live_daemon_receive_and_refuses_hidden_publication() 
     }
 
     let (without_scratch, without_node) = open_repository(None);
-    without_node.shutdown().expect("the no-policy fixture quiesces");
+    without_node
+        .shutdown()
+        .expect("the no-policy fixture quiesces");
     let without = session(&without_scratch, REFUSED_REF)
         .expect("the no-policy daemon completes a valid push");
 
     let (scratch, node) = open_repository(Some(&[HIDE_RULE]));
     node.shutdown().expect("the stored-policy fixture quiesces");
-    let refused = session(&scratch, REFUSED_REF)
-        .expect("the daemon reports the hidden target refusal");
-    let admitted = session(&scratch, ADMITTED_REF)
-        .expect("the same daemon policy admits the permitted twin");
+    let refused =
+        session(&scratch, REFUSED_REF).expect("the daemon reports the hidden target refusal");
+    let admitted =
+        session(&scratch, ADMITTED_REF).expect("the same daemon policy admits the permitted twin");
 
     let mut node = OneNode::open_existing(config(scratch.0.clone()))
         .expect("the daemon's persisted head reopens");
@@ -993,12 +997,24 @@ fn a_stored_policy_filters_live_daemon_receive_and_refuses_hidden_publication() 
     let refused_name = std::str::from_utf8(REFUSED_REF).expect("ASCII fixture ref");
     let admitted_name = std::str::from_utf8(ADMITTED_REF).expect("ASCII fixture ref");
     assert!(contains(&without.1, &frame(b"unpack ok\n")));
-    assert!(contains(&without.1, &frame(format!("ok {refused_name}\n").as_bytes())));
+    assert!(contains(
+        &without.1,
+        &frame(format!("ok {refused_name}\n").as_bytes())
+    ));
     assert!(contains(&refused.1, &frame(b"unpack ok\n")));
-    assert!(contains(&refused.1, format!("ng {refused_name} ").as_bytes()));
-    assert!(!contains(&refused.1, &frame(format!("ok {refused_name}\n").as_bytes())));
+    assert!(contains(
+        &refused.1,
+        format!("ng {refused_name} ").as_bytes()
+    ));
+    assert!(!contains(
+        &refused.1,
+        &frame(format!("ok {refused_name}\n").as_bytes())
+    ));
     assert!(contains(&admitted.1, &frame(b"unpack ok\n")));
-    assert!(contains(&admitted.1, &frame(format!("ok {admitted_name}\n").as_bytes())));
+    assert!(contains(
+        &admitted.1,
+        &frame(format!("ok {admitted_name}\n").as_bytes())
+    ));
     for report in [&refused.1, &admitted.1] {
         // Echoing REFUSED_REF is not disclosure: the client supplied it. The
         // existing hidden name and its current object id were never supplied.

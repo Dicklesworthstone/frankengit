@@ -31,27 +31,39 @@ pub(crate) fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), Ad
     let repository = record.repository_id;
     let event_root = root(&prepared.event)?;
     let effect_root = prepared.effect.root().map_err(|_| invalid())?;
-    let entry = prepared.outbox.entry(prepared.effect.delivery_key()).ok_or_else(invalid)?;
+    let entry = prepared
+        .outbox
+        .entry(prepared.effect.delivery_key())
+        .ok_or_else(invalid)?;
     if prepared.event.events.len() != 1
         || prepared.request.tx_id != record.tx_id
         || prepared.request.repository != repository
         || prepared.request.canonical_request_digest != record.canonical_request_digest
         || prepared.forge.repository_id() != repository
         || prepared.outbox.repository_id() != repository
-        || prepared.effect != CanonicalOutboxEffectState::committed(repository,
-            prepared.effect.delivery_key(), record.tx_id, event_root)
+        || prepared.effect
+            != CanonicalOutboxEffectState::committed(
+                repository,
+                prepared.effect.delivery_key(),
+                record.tx_id,
+                event_root,
+            )
         || entry.effect_state_root() != effect_root
         || entry.predecessor_effect_state_root().is_some()
-        || entry.tx_id() != record.tx_id || entry.payload_root() != event_root
+        || entry.tx_id() != record.tx_id
+        || entry.payload_root() != event_root
         || record.resulting_ref_root != roots.ref_root
-        || crate::ref_state_root(prepared.root_layout, &prepared.refs).map_err(unavailable)? != roots.ref_root
-        || crate::permitted_object_closure_root(&prepared.closure).map_err(unavailable)? != record.object_closure_root
+        || crate::ref_state_root(prepared.root_layout, &prepared.refs).map_err(unavailable)?
+            != roots.ref_root
+        || crate::permitted_object_closure_root(&prepared.closure).map_err(unavailable)?
+            != record.object_closure_root
         || event_root != record.forge_event_batch_root
         || root(&prepared.forge)? != roots.forge_position_root
         || record.resulting_forge_position_root != roots.forge_position_root
         || root(&prepared.outbox)? != roots.outbox_root
         || roots.compaction_generation_link.is_some()
-        || principal_snapshot_id(prepared.evidence.principal_snapshot()).map_err(unavailable)? != record.principal_snapshot_id
+        || principal_snapshot_id(prepared.evidence.principal_snapshot()).map_err(unavailable)?
+            != record.principal_snapshot_id
         || root(prepared.evidence.policy_decision())? != record.policy_decision_root
         || root(prepared.evidence.invariant_evidence())? != record.invariant_evidence_root
         || root(prepared.evidence.outbox_effect_batch())? != record.outbox_effect_root
@@ -59,22 +71,32 @@ pub(crate) fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), Ad
     {
         return Err(invalid());
     }
-    fgit_txn::IntentEvaluator::new().validate_report(&prepared.request, &prepared.fold)
+    fgit_txn::IntentEvaluator::new()
+        .validate_report(&prepared.request, &prepared.fold)
         .map_err(unavailable)?;
     let event = &prepared.event.events[0];
-    let stream = fgit_types::AsciiSlug::try_new("forge_stream", event.aggregate.to_string().as_bytes())
-        .map_err(|_| invalid())?;
+    let stream =
+        fgit_types::AsciiSlug::try_new("forge_stream", event.aggregate.to_string().as_bytes())
+            .map_err(|_| invalid())?;
     let position = prepared.forge.entry(stream).ok_or_else(invalid)?;
-    if position.event_count() != 1 || position.event_batch_root() != event_root
+    if position.event_count() != 1
+        || position.event_batch_root() != event_root
         || position.successor_position() != event.version.get()
     {
         return Err(invalid());
     }
     let key = fgit_codec::derive_outbox_delivery_key(fgit_codec::OutboxDeliveryIdentityInput::new(
-        repository, entry.effect_class(), entry.destination(), entry.payload_root(),
-        entry.tx_id(), entry.predecessor_rcr_id(),
-    )).map_err(|_| invalid())?;
-    if key != entry.delivery_key() { return Err(invalid()); }
+        repository,
+        entry.effect_class(),
+        entry.destination(),
+        entry.payload_root(),
+        entry.tx_id(),
+        entry.predecessor_rcr_id(),
+    ))
+    .map_err(|_| invalid())?;
+    if key != entry.delivery_key() {
+        return Err(invalid());
+    }
     Ok(())
 }
 
@@ -82,7 +104,9 @@ pub(crate) fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), Ad
 /// store used for the head CAS. Errors preserve undecided status. Identical
 /// orphaned bodies from an interrupted or losing attempt are safe to reuse.
 pub(crate) async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
-    store: &S, cx: &S::Context, prepared: &PreparedNativeMerge,
+    store: &S,
+    cx: &S::Context,
+    prepared: &PreparedNativeMerge,
 ) -> Result<(), AdmissionError> {
     validate_prepared(prepared)?;
     let record = &prepared.materialization.record;
@@ -90,14 +114,64 @@ pub(crate) async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
     // Ref roots are configuration-selected (whole-body or Merkle). The stored
     // frame is still the full canonical state; do not key a Merkle repository
     // by the frame's unrelated whole-body digest.
-    stage_at(store, cx, repository, REF_STATE, record.resulting_ref_root, &prepared.refs).await?;
+    stage_at(
+        store,
+        cx,
+        repository,
+        REF_STATE,
+        record.resulting_ref_root,
+        &prepared.refs,
+    )
+    .await?;
     stage(store, cx, repository, CLOSURE, &prepared.closure).await?;
-    stage(store, cx, repository, PRINCIPAL, prepared.evidence.principal_snapshot()).await?;
-    stage(store, cx, repository, POLICY, prepared.evidence.policy_decision()).await?;
-    stage(store, cx, repository, INVARIANT, prepared.evidence.invariant_evidence()).await?;
-    stage(store, cx, repository, EVENT, prepared.evidence.forge_event_batch()).await?;
-    stage(store, cx, repository, OUTBOX_EVIDENCE, prepared.evidence.outbox_effect_batch()).await?;
-    stage(store, cx, repository, RETENTION, prepared.evidence.retention_delta()).await?;
+    stage(
+        store,
+        cx,
+        repository,
+        PRINCIPAL,
+        prepared.evidence.principal_snapshot(),
+    )
+    .await?;
+    stage(
+        store,
+        cx,
+        repository,
+        POLICY,
+        prepared.evidence.policy_decision(),
+    )
+    .await?;
+    stage(
+        store,
+        cx,
+        repository,
+        INVARIANT,
+        prepared.evidence.invariant_evidence(),
+    )
+    .await?;
+    stage(
+        store,
+        cx,
+        repository,
+        EVENT,
+        prepared.evidence.forge_event_batch(),
+    )
+    .await?;
+    stage(
+        store,
+        cx,
+        repository,
+        OUTBOX_EVIDENCE,
+        prepared.evidence.outbox_effect_batch(),
+    )
+    .await?;
+    stage(
+        store,
+        cx,
+        repository,
+        RETENTION,
+        prepared.evidence.retention_delta(),
+    )
+    .await?;
     stage(store, cx, repository, EVENT, &prepared.event).await?;
     stage(store, cx, repository, EFFECT, &prepared.effect).await?;
     stage(store, cx, repository, FORGE, &prepared.forge).await?;
@@ -105,14 +179,22 @@ pub(crate) async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
 }
 
 async fn stage<S: AsyncAuthorityStore + ?Sized, B: CanonicalBody + Sync>(
-    store: &S, cx: &S::Context, repository: RepositoryId, namespace: &[u8], body: &B,
+    store: &S,
+    cx: &S::Context,
+    repository: RepositoryId,
+    namespace: &[u8],
+    body: &B,
 ) -> Result<(), AdmissionError> {
     stage_at(store, cx, repository, namespace, root(body)?, body).await
 }
 
 async fn stage_at<S: AsyncAuthorityStore + ?Sized, B: CanonicalBody + Sync>(
-    store: &S, cx: &S::Context, repository: RepositoryId,
-    namespace: &[u8], digest: Digest, body: &B,
+    store: &S,
+    cx: &S::Context,
+    repository: RepositoryId,
+    namespace: &[u8],
+    digest: Digest,
+    body: &B,
 ) -> Result<(), AdmissionError> {
     let frame = encode_body(body).map_err(|_| unavailable(RefusalCode::CanonicalFramingInvalid))?;
     if frame.len() > MAX_FRAME_BYTES {
@@ -133,14 +215,20 @@ async fn stage_at<S: AsyncAuthorityStore + ?Sized, B: CanonicalBody + Sync>(
 fn root<B: CanonicalBody>(body: &B) -> Result<Digest, AdmissionError> {
     evidence_root(body).map_err(unavailable)
 }
-fn unavailable(code: RefusalCode) -> AdmissionError { AdmissionError::AsyncProjectionUnavailable(code) }
-fn invalid() -> AdmissionError { unavailable(RefusalCode::EvidenceInvalid) }
+fn unavailable(code: RefusalCode) -> AdmissionError {
+    AdmissionError::AsyncProjectionUnavailable(code)
+}
+fn invalid() -> AdmissionError {
+    unavailable(RefusalCode::EvidenceInvalid)
+}
 
 /// Policy changes are authorized by the predecessor epoch but publish its
 /// immediate successor. No other forge event may advance the policy epoch.
 fn validate_epoch_transition(prepared: &PreparedNativeMerge) -> Result<(), AdmissionError> {
     use fgit_forge::{AggregateId, ForgeEventPayload};
-    let [event] = prepared.event.events.as_slice() else { return Err(invalid()); };
+    let [event] = prepared.event.events.as_slice() else {
+        return Err(invalid());
+    };
     let record = &prepared.materialization.record;
     let resulting = prepared.materialization.roots.policy_epoch;
     match &event.payload {
@@ -151,9 +239,13 @@ fn validate_epoch_transition(prepared: &PreparedNativeMerge) -> Result<(), Admis
                 || change.expected_epoch != record.policy_epoch
                 || change.resulting_epoch().map_err(unavailable)? != resulting
                 || !prepared.closure.objects().is_empty()
-                || !prepared.fold.effects().is_some_and(|effects|
-                    effects.refs.is_empty() && effects.retention.is_empty())
-            { return Err(invalid()); }
+                || !prepared
+                    .fold
+                    .effects()
+                    .is_some_and(|effects| effects.refs.is_empty() && effects.retention.is_empty())
+            {
+                return Err(invalid());
+            }
         }
         _ if resulting != record.policy_epoch => return Err(invalid()),
         _ => {}

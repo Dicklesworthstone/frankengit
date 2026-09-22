@@ -81,7 +81,10 @@ fn exact_hide_removes_tag_and_peeled_record_without_hiding_nearby_names() {
     for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
         let repository = Repository::new(format, false);
         let expected = vec![repository.refs[0].clone()];
-        assert_eq!(filter_advertised_refs(&repository.refs, &visibility), expected);
+        assert_eq!(
+            filter_advertised_refs(&repository.refs, &visibility),
+            expected
+        );
         let view = VisibleUploadPackRepository::new(&repository, &visibility);
         assert_eq!(view.advertised_refs(), expected.as_slice());
         assert_eq!(view.resolve_ref(b"refs/tags/private^{}"), None);
@@ -125,7 +128,10 @@ fn last_matching_rule_unhides_or_rehides_the_entire_tag_pair() {
     let hidden = policy(&[b"refs/tags", b"!refs/tags/private", b"refs/tags/private"]);
     for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
         let repository = Repository::new(format, false);
-        assert_eq!(filter_advertised_refs(&repository.refs, &visible), repository.refs);
+        assert_eq!(
+            filter_advertised_refs(&repository.refs, &visible),
+            repository.refs
+        );
         assert_eq!(
             filter_advertised_refs(&repository.refs, &hidden),
             repository.refs[..1]

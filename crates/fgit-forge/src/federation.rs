@@ -55,8 +55,11 @@ pub const MAX_BUNDLE_EVIDENCE: usize = 64;
 pub const OFFLINE_BUNDLE_SCHEMA_FAMILY: &str = "frankengit.federation-bundle";
 
 /// Schema for federated offline work bundles.
-pub const OFFLINE_BUNDLE_SCHEMA: SchemaId =
-    SchemaId::new(SchemaFamily::from_static(OFFLINE_BUNDLE_SCHEMA_FAMILY), 1, 0);
+pub const OFFLINE_BUNDLE_SCHEMA: SchemaId = SchemaId::new(
+    SchemaFamily::from_static(OFFLINE_BUNDLE_SCHEMA_FAMILY),
+    1,
+    0,
+);
 
 /// Domain tag for signing federated offline work bundles.
 pub const OFFLINE_BUNDLE_DOMAIN: DomainTag =
@@ -105,11 +108,10 @@ impl PeerId {
         let mut bytes = [0_u8; 32];
         for (i, byte) in bytes.iter_mut().enumerate() {
             let chunk = &trimmed[i * 2..i * 2 + 2];
-            *byte = u8::from_str_radix(chunk, 16).map_err(|_| {
-                FederationRefusal::InvalidPeerId {
+            *byte =
+                u8::from_str_radix(chunk, 16).map_err(|_| FederationRefusal::InvalidPeerId {
                     reason: "invalid hex character in peer ID",
-                }
-            })?;
+                })?;
         }
         Ok(Self(bytes))
     }
@@ -418,7 +420,11 @@ impl MirrorRef {
     /// Format: `refs/federation/<peer_hex>/<branch_name>`
     #[must_use]
     pub fn full_ref_path(&self) -> String {
-        format!("refs/federation/{}/{}", self.peer_id.to_hex(), self.branch_name)
+        format!(
+            "refs/federation/{}/{}",
+            self.peer_id.to_hex(),
+            self.branch_name
+        )
     }
 }
 
@@ -979,12 +985,13 @@ impl CanonicalBody for OfflineWorkBundle {
             match tag {
                 1 => {
                     let target_ref_bytes = input.read_bytes("target_ref")?;
-                    let target_ref = String::from_utf8(target_ref_bytes.to_vec()).map_err(
-                        |_| CodecRefusal::TextNotUtf8 {
-                            field: "target_ref",
-                            offset: input.offset(),
-                        },
-                    )?;
+                    let target_ref =
+                        String::from_utf8(target_ref_bytes.to_vec()).map_err(|_| {
+                            CodecRefusal::TextNotUtf8 {
+                                field: "target_ref",
+                                offset: input.offset(),
+                            }
+                        })?;
                     let expected_basis = input.read_git_oid()?;
                     let proposed_tip = input.read_git_oid()?;
                     intents.push(OfflineIntent::ProposedRefChange {
@@ -1080,12 +1087,11 @@ impl CanonicalBody for OfflineWorkBundle {
             let mut evidence_id = [0_u8; 32];
             evidence_id.copy_from_slice(ev_bytes);
             let class_bytes = input.read_bytes("claim_class")?;
-            let claim_class = String::from_utf8(class_bytes.to_vec()).map_err(|_| {
-                CodecRefusal::TextNotUtf8 {
+            let claim_class =
+                String::from_utf8(class_bytes.to_vec()).map_err(|_| CodecRefusal::TextNotUtf8 {
                     field: "claim_class",
                     offset: input.offset(),
-                }
-            })?;
+                })?;
             let payload = input.read_bytes("payload")?.to_vec();
             evidence.push(OfflineEvidence {
                 evidence_id,
@@ -1097,13 +1103,12 @@ impl CanonicalBody for OfflineWorkBundle {
         // Signature
         let scheme = input.read_scalar::<u16>("signature.scheme")?;
         let purpose_code = input.read_scalar::<u16>("signature.purpose")?;
-        let purpose = KeyPurpose::from_code_point(purpose_code).ok_or(
-            CodecRefusal::VariantUnknown {
+        let purpose =
+            KeyPurpose::from_code_point(purpose_code).ok_or(CodecRefusal::VariantUnknown {
                 field: "signature.purpose",
                 observed: purpose_code as u32,
                 offset: input.offset(),
-            },
-        )?;
+            })?;
         let epoch_val = input.read_scalar::<u32>("signature.epoch")?;
         let epoch = KeyEpoch::new(epoch_val).ok_or(CodecRefusal::VariantUnknown {
             field: "signature.epoch",
@@ -1171,11 +1176,8 @@ impl<'a> OfflineSigner<'a> {
     /// Signs pre-image bytes under the `IdentityDomain::SignedEnvelope` domain.
     #[must_use]
     pub fn sign_bytes(&self, body: &[u8]) -> DetachedSignature {
-        self.secret_key.sign(
-            IdentityDomain::SignedEnvelope,
-            OFFLINE_BUNDLE_SCHEMA,
-            body,
-        )
+        self.secret_key
+            .sign(IdentityDomain::SignedEnvelope, OFFLINE_BUNDLE_SCHEMA, body)
     }
 }
 
@@ -1391,8 +1393,7 @@ pub fn import_offline_bundle(
                 prop_hasher.update(bundle.bundle_id.as_slice());
                 prop_hasher.update(target_ref.as_bytes());
                 prop_hasher.update(proposed_tip.as_bytes());
-                let proposal_id =
-                    ProposedTxnId::from_bytes(prop_hasher.finish());
+                let proposal_id = ProposedTxnId::from_bytes(prop_hasher.finish());
 
                 admitted_proposals.push(AdmittedProposal {
                     proposal_id,
@@ -1412,8 +1413,7 @@ pub fn import_offline_bundle(
                 )?;
                 admitted_mirror_refs.push(mirror_ref);
             }
-            OfflineIntent::AppendSocialComment { .. }
-            | OfflineIntent::ReviewAttestation { .. } => {
+            OfflineIntent::AppendSocialComment { .. } | OfflineIntent::ReviewAttestation { .. } => {
                 // Social events are coordination-free / CRDT bounded
                 admitted_social_events.push(intent.clone());
             }
@@ -1536,21 +1536,34 @@ impl fmt::Display for FederationRefusal {
                 formatter,
                 "stale basis generation: expected `{expected_generation}`, current is `{current_generation}`"
             ),
-            Self::InvalidSignature => formatter.write_str("cryptographic detached signature failed verification"),
+            Self::InvalidSignature => {
+                formatter.write_str("cryptographic detached signature failed verification")
+            }
             Self::PeerQuarantined {
                 peer_id,
                 evidence_id: _,
-            } => write!(formatter, "peer `{}` is quarantined due to equivocation", peer_id.to_hex()),
+            } => write!(
+                formatter,
+                "peer `{}` is quarantined due to equivocation",
+                peer_id.to_hex()
+            ),
             Self::PeerKeyRevoked { revoked_at_epoch } => {
-                write!(formatter, "peer key was revoked at epoch {revoked_at_epoch}")
+                write!(
+                    formatter,
+                    "peer key was revoked at epoch {revoked_at_epoch}"
+                )
             }
             Self::UnknownKeyEpoch { epoch } => write!(formatter, "unknown key epoch {epoch}"),
-            Self::UnknownPeer { peer_id } => write!(formatter, "peer `{}` is not recognized", peer_id.to_hex()),
+            Self::UnknownPeer { peer_id } => {
+                write!(formatter, "peer `{}` is not recognized", peer_id.to_hex())
+            }
             Self::InvalidPeerId { reason } => write!(formatter, "invalid peer ID: {reason}"),
             Self::InvalidRefName { name, reason } => {
                 write!(formatter, "invalid reference name `{name}`: {reason}")
             }
-            Self::EmptyBundle => formatter.write_str("offline bundle must contain at least one intent, effect, or evidence item"),
+            Self::EmptyBundle => formatter.write_str(
+                "offline bundle must contain at least one intent, effect, or evidence item",
+            ),
             Self::PayloadTooLarge { limit, observed } => write!(
                 formatter,
                 "bundle payload exceeds capacity limit: limit={limit}, observed={observed}"

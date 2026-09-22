@@ -70,10 +70,20 @@ mod tests {
     use crate::{LoopbackReceiveSession, NodeConfig};
     use fgit_admission::AdmissionLimits;
     use fgit_authority::{IdempotencyKey, TerminalOutcome};
+    use fgit_forge::event::{
+        ForgeEventPayload,
+        issue::{IssueAction, IssueCommand},
+    };
     use fgit_forge::{AggregateVersion, ExpectedVersion, IssueNumber};
-    use fgit_forge::event::{ForgeEventPayload, issue::{IssueAction, IssueCommand}};
-    use fgit_types::{DecisionOutcome, GitHashAlgorithm, HeadGeneration, PrincipalId, RepositoryId, TenantId, TxId};
-    use std::{fs, path::PathBuf, sync::atomic::{AtomicU64, Ordering}};
+    use fgit_types::{
+        DecisionOutcome, GitHashAlgorithm, HeadGeneration, PrincipalId, RepositoryId, TenantId,
+        TxId,
+    };
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
     struct Scratch(PathBuf);
@@ -132,13 +142,19 @@ mod tests {
     }
     fn publish(node: &OneNode, command: &IssueCommand, key: &str) -> (TxId, TerminalOutcome) {
         let request = node.request_context();
-        let result = node.runtime().block_on(node.admit_issue_durable_in(
-            &request,
-            &session(key),
-            command,
-            AdmissionLimits::default(),
-        )).unwrap();
-        assert!(matches!(result.1.outcome, DecisionOutcome::Committed { .. }), "{result:?}");
+        let result = node
+            .runtime()
+            .block_on(node.admit_issue_durable_in(
+                &request,
+                &session(key),
+                command,
+                AdmissionLimits::default(),
+            ))
+            .unwrap();
+        assert!(
+            matches!(result.1.outcome, DecisionOutcome::Committed { .. }),
+            "{result:?}"
+        );
         result
     }
     fn page(
@@ -148,12 +164,8 @@ mod tests {
         expected_head: Option<RepositoryAuthorityHeadId>,
     ) -> Result<ForgeEventPage, ForgeEventReadRefusal> {
         let request = node.request_context();
-        node.runtime().block_on(node.read_forge_events_in(
-            &request,
-            after,
-            limit,
-            expected_head,
-        ))
+        node.runtime()
+            .block_on(node.read_forge_events_in(&request, after, limit, expected_head))
     }
     fn coordinates(cursor: ForgeEventCursor) -> (u64, u32) {
         (cursor.repository_sequence, cursor.event_index)
@@ -186,7 +198,12 @@ mod tests {
             node.bring_into_service(HeadGeneration::FIRST).unwrap();
 
             let opened = publish(&node, &open(), "open");
-            let comment = change(1, IssueAction::Comment { body: "first comment".into() });
+            let comment = change(
+                1,
+                IssueAction::Comment {
+                    body: "first comment".into(),
+                },
+            );
             let commented = publish(&node, &comment, "comment");
 
             let first = page(&node, None, 1, None).unwrap();
@@ -200,7 +217,13 @@ mod tests {
             let first_cursor = first.events[0].cursor;
             assert_eq!(first.next_after, Some(first_cursor));
 
-            let second = page(&node, Some(coordinates(first_cursor)), 1, Some(first.source_head)).unwrap();
+            let second = page(
+                &node,
+                Some(coordinates(first_cursor)),
+                1,
+                Some(first.source_head),
+            )
+            .unwrap();
             assert_eq!(second.events.len(), 1);
             assert_eq!(second.events[0].tx_id, commented.0);
             assert!(matches!(
@@ -212,11 +235,21 @@ mod tests {
             let second_cursor = second.events[0].cursor;
 
             assert_eq!(publish(&node, &comment, "comment"), commented);
-            assert!(page(&node, Some(coordinates(second_cursor)), 10, None).unwrap().events.is_empty());
+            assert!(
+                page(&node, Some(coordinates(second_cursor)), 10, None)
+                    .unwrap()
+                    .events
+                    .is_empty()
+            );
 
             let closed = publish(&node, &change(2, IssueAction::Close), "close");
             assert!(matches!(
-                page(&node, Some(coordinates(second_cursor)), 10, Some(first.source_head)),
+                page(
+                    &node,
+                    Some(coordinates(second_cursor)),
+                    10,
+                    Some(first.source_head)
+                ),
                 Err(ForgeEventReadRefusal::SnapshotMoved)
             ));
             let advanced = page(&node, Some(coordinates(second_cursor)), 10, None).unwrap();
@@ -254,7 +287,12 @@ mod tests {
             assert_eq!(replay.events[1].cursor, last_cursor);
             assert_eq!(replay.events[0].tx_id, commented.0);
             assert_eq!(replay.events[1].tx_id, closed.0);
-            assert!(page(&reopened, Some(coordinates(last_cursor)), 10, None).unwrap().events.is_empty());
+            assert!(
+                page(&reopened, Some(coordinates(last_cursor)), 10, None)
+                    .unwrap()
+                    .events
+                    .is_empty()
+            );
             reopened.shutdown().unwrap();
         }
     }

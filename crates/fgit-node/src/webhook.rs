@@ -158,10 +158,10 @@ impl WebhookStore {
             .map_err(|e| format!("failed to open registrations file for write: {e}"))?;
         for reg in list.iter() {
             let line = serialize_registration(reg);
-            writeln!(file, "{line}")
-                .map_err(|e| format!("failed to write registration: {e}"))?;
+            writeln!(file, "{line}").map_err(|e| format!("failed to write registration: {e}"))?;
         }
-        file.flush().map_err(|e| format!("failed to flush registrations: {e}"))?;
+        file.flush()
+            .map_err(|e| format!("failed to flush registrations: {e}"))?;
         Ok(())
     }
 
@@ -181,7 +181,12 @@ impl WebhookStore {
 
     #[must_use]
     pub fn get(&self, id: WebhookId) -> Option<WebhookRegistration> {
-        self.registrations.lock().unwrap().iter().find(|r| r.id == id).cloned()
+        self.registrations
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.id == id)
+            .cloned()
     }
 
     pub fn rotate_secret(
@@ -197,7 +202,8 @@ impl WebhookStore {
                 .iter_mut()
                 .find(|r| r.id == id)
                 .ok_or_else(|| format!("webhook id {} not found", id.0))?;
-            reg.secrets.rotate(new_secret, window_duration_secs, now_unix_secs);
+            reg.secrets
+                .rotate(new_secret, window_duration_secs, now_unix_secs);
             reg.clone()
         };
         self.persist_registrations()?;
@@ -304,7 +310,10 @@ impl WebhookDeliveryDestination {
             Ok(v) => v,
             Err(WebhookRefusal::SsrfBlocked { reason, .. }) => {
                 self.record_terminal_failure(request, attempt, reason, now_secs);
-                return Ok((DeliveryVerdict::PermanentRejection, reason.as_bytes().to_vec()));
+                return Ok((
+                    DeliveryVerdict::PermanentRejection,
+                    reason.as_bytes().to_vec(),
+                ));
             }
             Err(e) => {
                 let err_msg = e.to_string();
@@ -363,7 +372,10 @@ impl WebhookDeliveryDestination {
             payload
         );
 
-        if let Err(e) = stream.write_all(http_req.as_bytes()).and_then(|()| stream.flush()) {
+        if let Err(e) = stream
+            .write_all(http_req.as_bytes())
+            .and_then(|()| stream.flush())
+        {
             let err_msg = format!("HTTP write error: {e}");
             return self.handle_network_failure(request, attempt, err_msg, now_secs);
         }
@@ -398,7 +410,10 @@ impl WebhookDeliveryDestination {
 
         match status_code {
             200..=299 => {
-                self.acknowledged.lock().unwrap().push((request.key, attempt));
+                self.acknowledged
+                    .lock()
+                    .unwrap()
+                    .push((request.key, attempt));
                 let verdict = if attempt == 1 {
                     DeliveryVerdict::Accepted
                 } else {
@@ -416,7 +431,10 @@ impl WebhookDeliveryDestination {
                         }
                         Err(WebhookRefusal::SsrfBlocked { reason, .. }) => {
                             self.record_terminal_failure(request, attempt, reason, now_secs);
-                            Ok((DeliveryVerdict::PermanentRejection, reason.as_bytes().to_vec()))
+                            Ok((
+                                DeliveryVerdict::PermanentRejection,
+                                reason.as_bytes().to_vec(),
+                            ))
                         }
                         Err(e) => {
                             let reason = e.to_string();
@@ -425,7 +443,10 @@ impl WebhookDeliveryDestination {
                         }
                     }
                 } else {
-                    Ok((DeliveryVerdict::PermanentRejection, b"missing location header on redirect".to_vec()))
+                    Ok((
+                        DeliveryVerdict::PermanentRejection,
+                        b"missing location header on redirect".to_vec(),
+                    ))
                 }
             }
             400..=499 if status_code != 429 => {
@@ -514,7 +535,8 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
         &'a mut self,
         _cx: &'a Cx,
         request: &'a DeliveryRequest<'_>,
-    ) -> impl std::future::Future<Output = Result<(ProbeVerdict, Vec<u8>), RefusalCode>> + Send + 'a {
+    ) -> impl std::future::Future<Output = Result<(ProbeVerdict, Vec<u8>), RefusalCode>> + Send + 'a
+    {
         async move {
             let acks = self.acknowledged.lock().unwrap();
             if acks.iter().any(|(k, _)| *k == request.key) {
@@ -530,10 +552,9 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
         _cx: &'a Cx,
         request: &'a DeliveryRequest<'_>,
         attempt: u32,
-    ) -> impl std::future::Future<Output = Result<(DeliveryVerdict, Vec<u8>), RefusalCode>> + Send + 'a {
-        async move {
-            self.dispatch_http(request, attempt)
-        }
+    ) -> impl std::future::Future<Output = Result<(DeliveryVerdict, Vec<u8>), RefusalCode>> + Send + 'a
+    {
+        async move { self.dispatch_http(request, attempt) }
     }
 }
 
@@ -727,7 +748,9 @@ fn parse_registration_line(line: &str) -> Option<WebhookRegistration> {
         max_delay: Duration::from_millis(max_delay_ms),
     };
 
-    let url = SsrfPolicy::PERMISSIVE_FOR_TESTS.validate_url(&url_raw).ok()?;
+    let url = SsrfPolicy::PERMISSIVE_FOR_TESTS
+        .validate_url(&url_raw)
+        .ok()?;
 
     Some(WebhookRegistration {
         id: WebhookId(id_val),

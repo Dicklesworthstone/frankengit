@@ -33,9 +33,9 @@ use super::{
     AdmissionUploadPackRepository, BudgetClass, GitDaemonSessionDeadline,
     GitDaemonTransportRefusal, LoopbackReceiveSession, NodeAdmissionViewRefusal,
     NodeGitDaemonServeRefusal, NodePackMaterializationRefusal, NodeReceiveTransportRefusal,
-    OneNode, PackContextCheckpoint, ProductionReceiveQuarantineHandoff,
-    SELECTED_PACK_BUDGET_CLASS, SELECTED_PACK_MATERIALIZATION_OPERATION, checkpoint_pack_context,
-    git_daemon_capabilities, selected_write_profile,
+    OneNode, PackContextCheckpoint, ProductionReceiveQuarantineHandoff, SELECTED_PACK_BUDGET_CLASS,
+    SELECTED_PACK_MATERIALIZATION_OPERATION, checkpoint_pack_context, git_daemon_capabilities,
+    selected_write_profile,
 };
 
 /// Complete successful Smart HTTP discovery response.
@@ -310,9 +310,8 @@ impl OneNode {
             .runtime
             .block_on(self.materialize_admission_while_in(&node_request, &is_live))
             .map_err(NodeAdmissionViewRefusal::from)?;
-        let disclosure = self.prepare_visible_upload_pack(
-            &node_request, &materialized, &limits, &deadline,
-        )?;
+        let disclosure =
+            self.prepare_visible_upload_pack(&node_request, &materialized, &limits, &deadline)?;
         let repository = disclosure.repository();
         let capabilities =
             upload_capabilities(self, repository, request.requested_version, &limits)?;
@@ -321,7 +320,8 @@ impl OneNode {
         } else {
             // A legacy annotated-tag advertisement needs its synthetic ^{}
             // records. The wrapper uses only already-verified visible peels.
-            let legacy = super::upload_visibility::tags::LegacyTagRepository::new(repository, &limits)?;
+            let legacy =
+                super::upload_visibility::tags::LegacyTagRepository::new(repository, &limits)?;
             upload_discovery(&legacy, capabilities, request.requested_version, &limits)?
         };
         let length = u64::try_from(body.len()).map_err(|_| WireError::AllocationFailure)?;
@@ -353,8 +353,13 @@ impl OneNode {
         C: ReceiveCancellation,
     {
         self.smart_http_upload_body_in(
-            request, ingress::BodyInput::Slice(body_wire), wire_limits, http_limits,
-            maximum_response_bytes, cancellation, writer,
+            request,
+            ingress::BodyInput::Slice(body_wire),
+            wire_limits,
+            http_limits,
+            maximum_response_bytes,
+            cancellation,
+            writer,
         )
     }
 
@@ -383,8 +388,13 @@ impl OneNode {
         C: ReceiveCancellation,
     {
         self.smart_http_upload_body_in(
-            request, ingress::BodyInput::Reader(reader), wire_limits, http_limits,
-            maximum_response_bytes, cancellation, writer,
+            request,
+            ingress::BodyInput::Reader(reader),
+            wire_limits,
+            http_limits,
+            maximum_response_bytes,
+            cancellation,
+            writer,
         )
     }
 
@@ -664,8 +674,13 @@ impl OneNode {
         C: ReceiveCancellation,
     {
         self.smart_http_receive_body_in(
-            request, session, ingress::BodyInput::Slice(body_wire), http_limits,
-            admission_limits, cancellation, writer,
+            request,
+            session,
+            ingress::BodyInput::Slice(body_wire),
+            http_limits,
+            admission_limits,
+            cancellation,
+            writer,
         )
     }
 
@@ -699,8 +714,13 @@ impl OneNode {
         C: ReceiveCancellation,
     {
         self.smart_http_receive_body_in(
-            request, session, ingress::BodyInput::Reader(reader), http_limits,
-            admission_limits, cancellation, writer,
+            request,
+            session,
+            ingress::BodyInput::Reader(reader),
+            http_limits,
+            admission_limits,
+            cancellation,
+            writer,
         )
     }
 
@@ -753,9 +773,7 @@ impl OneNode {
         let processing = super::GitDaemonReceiveProcessingDeadline::new(
             self.git_daemon_receive_processing_timeout,
         );
-        let mut live = || {
-            cancellation.checkpoint() && !deadline.expired() && !processing.expired()
-        };
+        let mut live = || cancellation.checkpoint() && !deadline.expired() && !processing.expired();
         let node_request = super::NodeRequestContext {
             authority: self.receive_admission_authority_context(decoded_body_bytes, &deadline),
         };

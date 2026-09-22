@@ -151,7 +151,13 @@ impl<A: GitHashAlgorithm> SparseWorkspacePlan<A> {
         now: u64,
         limits: SparseLimits,
     ) -> Result<Self, HostRefusal> {
-        Self::from_manifest(WorkspaceManifest::Canonical(manifest), outputs, capability, now, limits)
+        Self::from_manifest(
+            WorkspaceManifest::Canonical(manifest),
+            outputs,
+            capability,
+            now,
+            limits,
+        )
     }
 
     fn from_manifest(
@@ -596,7 +602,9 @@ impl<A: GitHashAlgorithm> SparseWorkspace<A> {
         now: u64,
         cancelled: &dyn Fn(HostEpoch) -> bool,
     ) -> Result<IntentLog, HostRefusal> {
-        if self.plan.manifest.is_candidate() { return Err(HostRefusal::IdentityMismatch); }
+        if self.plan.manifest.is_candidate() {
+            return Err(HostRefusal::IdentityMismatch);
+        }
         self.plan.authorize(capability, now)?;
         check_marker(&self.root, &self.plan.marker)?;
         let inputs: BTreeMap<_, _> = self

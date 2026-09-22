@@ -9,13 +9,13 @@
 //! import request, recorded its admission, and published an RCR through the
 //! authority head's conditional replacement.
 
-pub(crate) mod graph;
-mod control;
 #[cfg(test)]
 mod cancellation_tests;
+mod control;
+pub(crate) mod graph;
 
-use control::{ImportControl, ReadFailure};
 pub(crate) use control::checkpoint_request;
+use control::{ImportControl, ReadFailure};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -32,8 +32,9 @@ use fgit_git_object::{
     AcceptanceProfile, InflateLimits, LooseObjectDecodeError, ObjectError, ParseLimits,
 };
 use fgit_pack::{
-    CachedResolver, Deadline, IdxV2, NativeChecksumVerifier, PackError, PackLimits, ResolutionBudget,
-    read_verified_pack, validate_idx_entry_crc, validate_idx_pack_count, verify_native_object,
+    CachedResolver, Deadline, IdxV2, NativeChecksumVerifier, PackError, PackLimits,
+    ResolutionBudget, read_verified_pack, validate_idx_entry_crc, validate_idx_pack_count,
+    verify_native_object,
 };
 use fgit_types::{GitHashAlgorithm, GitOid, MAX_REF_NAME_LEN, RefName, TypeRefusal};
 
@@ -98,7 +99,10 @@ pub enum LooseGitImportRefusal {
     /// Preparation stopped under its caller-owned control. This is not proof
     /// of rollback or a canonical terminal decision. A runtime exhaustion keeps
     /// its exact dimension; no replacement budget is minted to continue.
-    Interrupted { code: fgit_types::RefusalCode, exhaustion: Option<fgit_runtime::Exhaustion> },
+    Interrupted {
+        code: fgit_types::RefusalCode,
+        exhaustion: Option<fgit_runtime::Exhaustion>,
+    },
     /// The source path or one required child could not be inspected or read.
     Io {
         /// Operation that refused.
@@ -206,7 +210,10 @@ pub enum LooseGitImportRefusal {
     },
     /// A native graph edge is ambiguous, has the wrong kind, or exceeds its
     /// bounded validation work. This is a pre-staging failure, not a decision.
-    ObjectGraph { identity: GitOid, code: fgit_types::RefusalCode },
+    ObjectGraph {
+        identity: GitOid,
+        code: fgit_types::RefusalCode,
+    },
     /// Bounded zlib/loose decoding refused the source object.
     LooseObject(Box<LooseObjectDecodeError>),
     /// A parsed object could not yield a complete closure edge set.
@@ -238,8 +245,10 @@ pub enum LooseGitImportRefusal {
 impl Display for LooseGitImportRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Interrupted { code, exhaustion } => write!(formatter,
-                "source import interrupted: {code:?}; exhaustion={exhaustion:?}"),
+            Self::Interrupted { code, exhaustion } => write!(
+                formatter,
+                "source import interrupted: {code:?}; exhaustion={exhaustion:?}"
+            ),
             Self::Io {
                 operation,
                 path,
@@ -365,7 +374,8 @@ impl Display for LooseGitImportRefusal {
                 "source object named {expected} re-identifies as {observed}"
             ),
             Self::ObjectGraph { identity, code } => write!(
-                formatter, "source object {identity} has an invalid native graph: {code:?}"
+                formatter,
+                "source object {identity} has an invalid native graph: {code:?}"
             ),
             Self::LooseObject(source) => Display::fmt(source, formatter),
             Self::ObjectStructure(source) => Display::fmt(source, formatter),
@@ -471,7 +481,9 @@ impl OneNode {
     /// Standalone compatibility entrypoint with hard resource bounds but no
     /// caller deadline. Request-handling code uses the `_in` variant below.
     pub(crate) fn stage_loose_git_import_with_ref_limit(
-        &self, source: &Path, max_refs: usize,
+        &self,
+        source: &Path,
+        max_refs: usize,
     ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
         self.stage_loose_git_import_with_control(source, max_refs, &mut || true)
     }
@@ -480,26 +492,40 @@ impl OneNode {
     /// interruption may leave verified unselected placement, never a ref update.
     /// No OS read already in progress can be preempted by this synchronous API.
     pub fn stage_loose_git_import_with_deadline(
-        &self, source: &Path, deadline: &mut impl Deadline,
+        &self,
+        source: &Path,
+        deadline: &mut impl Deadline,
     ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
         self.stage_loose_git_import_with_control(source, MAX_IMPORT_REFS, deadline)
     }
 
     pub(crate) fn stage_loose_git_import_with_ref_limit_in(
-        &self, request: &NodeRequestContext, source: &Path, max_refs: usize,
+        &self,
+        request: &NodeRequestContext,
+        source: &Path,
+        max_refs: usize,
     ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
         let mut stopped = None;
         let result = self.stage_loose_git_import_with_control(source, max_refs, &mut || {
             match checkpoint_request(request) {
                 Ok(()) => true,
-                Err(error) => { stopped = Some(error); false }
+                Err(error) => {
+                    stopped = Some(error);
+                    false
+                }
             }
         });
-        match stopped { Some(error) => Err(error), None => result }
+        match stopped {
+            Some(error) => Err(error),
+            None => result,
+        }
     }
 
     fn stage_loose_git_import_with_control(
-        &self, source: &Path, max_refs: usize, deadline: &mut impl Deadline,
+        &self,
+        source: &Path,
+        max_refs: usize,
+        deadline: &mut impl Deadline,
     ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
         let control = ImportControl::new(deadline);
         let result = self.stage_loose_git_import_controlled(source, max_refs, &control);
@@ -509,23 +535,48 @@ impl OneNode {
     }
 
     fn stage_loose_git_import_controlled(
-        &self, source: &Path, max_refs: usize, control: &ImportControl<'_>,
+        &self,
+        source: &Path,
+        max_refs: usize,
+        control: &ImportControl<'_>,
     ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
         control.checkpoint()?;
         if max_refs > MAX_IMPORT_REFS {
-            return Err(LooseGitImportRefusal::RefLimitExceeded { limit: MAX_IMPORT_REFS });
+            return Err(LooseGitImportRefusal::RefLimitExceeded {
+                limit: MAX_IMPORT_REFS,
+            });
         }
         let git_directory = resolve_git_directory(source, control)?;
         reject_object_alternates(&git_directory, control)?;
-        let mut packed =
-            PackedObjectSources::open(&git_directory, self.object_format, self.max_object_bytes, control)?;
+        let mut packed = PackedObjectSources::open(
+            &git_directory,
+            self.object_format,
+            self.max_object_bytes,
+            control,
+        )?;
         let refs = read_direct_refs(&git_directory, self.object_format, max_refs, control)?;
         let head_target = read_head_target(&git_directory, control)?;
         let validated = graph::validate_typed_controlled(
-            refs.iter().map(|(name, id)| (*id, fgit_git_object::required_ref_target_kind(name.as_bytes()))), self.object_format,
-            &parse_limits(self.object_format, self.max_object_bytes), graph::Limits::default(),
-            |identity| read_local_object(&git_directory, identity, self.object_format,
-                self.max_object_bytes, &mut packed, control), control,
+            refs.iter().map(|(name, id)| {
+                (
+                    *id,
+                    fgit_git_object::required_ref_target_kind(name.as_bytes()),
+                )
+            }),
+            self.object_format,
+            &parse_limits(self.object_format, self.max_object_bytes),
+            graph::Limits::default(),
+            |identity| {
+                read_local_object(
+                    &git_directory,
+                    identity,
+                    self.object_format,
+                    self.max_object_bytes,
+                    &mut packed,
+                    control,
+                )
+            },
+            control,
         )?;
         let refs = CanonicalRefState::new_with_head_target(refs, head_target)
             .map_err(|_| LooseGitImportRefusal::HeadTargetNotBranch(Box::new(git_directory)))?;
@@ -542,11 +593,13 @@ impl OneNode {
         // placement failures or cancellation can leave verified, noncanonical objects.
         for (identity, object) in validated.objects {
             control.checkpoint()?;
-            let stored = self.put_git_object(object.object_type, object.body)
+            let stored = self
+                .put_git_object(object.object_type, object.body)
                 .map_err(|error| LooseGitImportRefusal::Node(Box::new(error)))?;
             if stored.identity() != identity {
                 return Err(LooseGitImportRefusal::ObjectIdentityMismatch {
-                    expected: identity, observed: stored.identity(),
+                    expected: identity,
+                    observed: stored.identity(),
                 });
             }
         }
@@ -561,7 +614,10 @@ impl OneNode {
     }
 }
 
-fn resolve_git_directory(source: &Path, control: &ImportControl<'_>) -> Result<PathBuf, LooseGitImportRefusal> {
+fn resolve_git_directory(
+    source: &Path,
+    control: &ImportControl<'_>,
+) -> Result<PathBuf, LooseGitImportRefusal> {
     control.checkpoint()?;
     require_directory(source, "Git source directory", control)?;
     let dot_git = source.join(".git");
@@ -601,7 +657,10 @@ fn resolve_git_directory(source: &Path, control: &ImportControl<'_>) -> Result<P
     }
 }
 
-fn reject_object_alternates(git_directory: &Path, control: &ImportControl<'_>) -> Result<(), LooseGitImportRefusal> {
+fn reject_object_alternates(
+    git_directory: &Path,
+    control: &ImportControl<'_>,
+) -> Result<(), LooseGitImportRefusal> {
     control.checkpoint()?;
     let alternates = git_directory.join("objects/info/alternates");
     if path_exists(&alternates, control)? {
@@ -645,7 +704,8 @@ impl PackedObjectSources {
         let limits = import_pack_limits(max_object_bytes);
         let parse_limits = parse_limits(object_format, max_object_bytes);
         let pack_directory = git_directory.join("objects/pack");
-        let Some(metadata) = path_metadata(&pack_directory, "inspect packed-object directory", control)?
+        let Some(metadata) =
+            path_metadata(&pack_directory, "inspect packed-object directory", control)?
         else {
             return Ok(Self::empty(limits, parse_limits));
         };
@@ -665,7 +725,8 @@ impl PackedObjectSources {
         for entry in bounded_directory_entries(&pack_directory, control)? {
             control.checkpoint()?;
             let path = entry.path();
-            let metadata = control.run(|| fs::symlink_metadata(&path))?
+            let metadata = control
+                .run(|| fs::symlink_metadata(&path))?
                 .map_err(|error| io_refusal("inspect pack-directory entry", path.clone(), error))?;
             if metadata.file_type().is_symlink() {
                 return Err(LooseGitImportRefusal::SymbolicLink(Box::new(path)));
@@ -802,7 +863,11 @@ impl PackedObjectSources {
             .cloned())
     }
 
-    fn load(&mut self, source_index: usize, control: &ImportControl<'_>) -> Result<(), LooseGitImportRefusal> {
+    fn load(
+        &mut self,
+        source_index: usize,
+        control: &ImportControl<'_>,
+    ) -> Result<(), LooseGitImportRefusal> {
         control.checkpoint()?;
         if self.sources[source_index].verified_objects.is_some() {
             return Ok(());
@@ -897,8 +962,13 @@ impl PackedObjectSources {
                     },
                 )
             })?;
-            validate_idx_entry_crc(index_entry, raw_entry, &self.limits, &mut control.cpu_probe())
-                .map_err(|error| pack_refusal(source.index_path.clone(), error))?;
+            validate_idx_entry_crc(
+                index_entry,
+                raw_entry,
+                &self.limits,
+                &mut control.cpu_probe(),
+            )
+            .map_err(|error| pack_refusal(source.index_path.clone(), error))?;
         }
         let inflated_bytes = quarantined
             .entries()
@@ -919,13 +989,18 @@ impl PackedObjectSources {
             .into_scalar_objects(|offset| entries_by_offset.get(&offset).map(|entry| entry.oid))
             .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
         control.checkpoint()?;
-        let mut resolver = CachedResolver::new(&objects, &(), &self.limits, &mut control.cpu_probe())
-            .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
+        let mut resolver =
+            CachedResolver::new(&objects, &(), &self.limits, &mut control.cpu_probe())
+                .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
         let mut verified_objects = BTreeMap::new();
         for entry in source.index.entries() {
             control.checkpoint()?;
             let (object_type, body) = resolver
-                .resolve_id_typed_with_budget(&entry.oid, &mut self.resolution_budget, &mut control.cpu_probe())
+                .resolve_id_typed_with_budget(
+                    &entry.oid,
+                    &mut self.resolution_budget,
+                    &mut control.cpu_probe(),
+                )
                 .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
             verify_native_object(
                 source.index.format(),
@@ -1008,7 +1083,8 @@ fn read_regular_bounded(
     control: &ImportControl<'_>,
 ) -> Result<Vec<u8>, LooseGitImportRefusal> {
     control.checkpoint()?;
-    let metadata = control.run(|| fs::symlink_metadata(path))?
+    let metadata = control
+        .run(|| fs::symlink_metadata(path))?
         .map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
     if metadata.file_type().is_symlink() {
         return Err(LooseGitImportRefusal::SymbolicLink(Box::new(
@@ -1029,9 +1105,11 @@ fn read_regular_bounded(
     // from one opened handle and stop after the first byte beyond the selected
     // envelope, so growth beyond the envelope causes a typed refusal rather
     // than an unbounded `fs::read` allocation.
-    let file =
-        control.run(|| fs::File::open(path))?.map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
-    let opened_metadata = control.run(|| file.metadata())?
+    let file = control
+        .run(|| fs::File::open(path))?
+        .map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
+    let opened_metadata = control
+        .run(|| file.metadata())?
         .map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
     if !opened_metadata.is_file() {
         return Err(LooseGitImportRefusal::PathKind {
@@ -1115,7 +1193,8 @@ fn read_direct_refs(
     control.checkpoint()?;
     let mut refs = read_packed_refs(git_directory, object_format, max_refs, control)?;
     let loose_root = git_directory.join("refs");
-    let Some(metadata) = path_metadata(&loose_root, "inspect loose refs directory", control)? else {
+    let Some(metadata) = path_metadata(&loose_root, "inspect loose refs directory", control)?
+    else {
         return Ok(refs);
     };
     if metadata.file_type().is_symlink() {
@@ -1142,7 +1221,10 @@ fn read_direct_refs(
     Ok(refs)
 }
 
-fn read_head_target(git_directory: &Path, control: &ImportControl<'_>) -> Result<RefName, LooseGitImportRefusal> {
+fn read_head_target(
+    git_directory: &Path,
+    control: &ImportControl<'_>,
+) -> Result<RefName, LooseGitImportRefusal> {
     control.checkpoint()?;
     let head = git_directory.join("HEAD");
     let metadata = match control.run(|| fs::symlink_metadata(&head))? {
@@ -1279,13 +1361,22 @@ fn collect_loose_refs(
     for entry in bounded_directory_entries(directory, control)? {
         control.checkpoint()?;
         let path = entry.path();
-        let metadata = control.run(|| fs::symlink_metadata(&path))?
+        let metadata = control
+            .run(|| fs::symlink_metadata(&path))?
             .map_err(|error| io_refusal("inspect loose ref", path.clone(), error))?;
         if metadata.file_type().is_symlink() {
             return Err(LooseGitImportRefusal::SymbolicLink(Box::new(path)));
         }
         if metadata.is_dir() {
-            collect_loose_refs(root, &path, object_format, depth + 1, max_refs, refs, control)?;
+            collect_loose_refs(
+                root,
+                &path,
+                object_format,
+                depth + 1,
+                max_refs,
+                refs,
+                control,
+            )?;
             continue;
         }
         if !metadata.is_file() {
@@ -1371,9 +1462,13 @@ fn read_local_object(
     control: &ImportControl<'_>,
 ) -> Result<fgit_git_object::LooseObject, LooseGitImportRefusal> {
     control.checkpoint()?;
-    if let Some(object) =
-        try_read_loose_object(git_directory, identity, object_format, max_object_bytes, control)?
-    {
+    if let Some(object) = try_read_loose_object(
+        git_directory,
+        identity,
+        object_format,
+        max_object_bytes,
+        control,
+    )? {
         return Ok(object);
     }
     packed
@@ -1421,8 +1516,13 @@ fn try_read_loose_object(
         max_output_bytes: maximum,
         ..InflateLimits::GIT_OBJECT
     };
-    control::decode_loose(&compressed, inflate_limits,
-        parse_limits(object_format, max_object_bytes), control).map(Some)
+    control::decode_loose(
+        &compressed,
+        inflate_limits,
+        parse_limits(object_format, max_object_bytes),
+        control,
+    )
+    .map(Some)
 }
 
 fn parse_limits(object_format: GitHashAlgorithm, max_object_bytes: u64) -> ParseLimits {
@@ -1436,9 +1536,14 @@ fn parse_limits(object_format: GitHashAlgorithm, max_object_bytes: u64) -> Parse
     }
 }
 
-fn require_directory(path: &Path, expected: &'static str, control: &ImportControl<'_>) -> Result<(), LooseGitImportRefusal> {
+fn require_directory(
+    path: &Path,
+    expected: &'static str,
+    control: &ImportControl<'_>,
+) -> Result<(), LooseGitImportRefusal> {
     control.checkpoint()?;
-    let metadata = control.run(|| fs::symlink_metadata(path))?
+    let metadata = control
+        .run(|| fs::symlink_metadata(path))?
         .map_err(|error| io_refusal("inspect Git source", path.to_path_buf(), error))?;
     if metadata.file_type().is_symlink() {
         return Err(LooseGitImportRefusal::SymbolicLink(Box::new(
@@ -1477,9 +1582,13 @@ fn path_metadata(
     }
 }
 
-fn bounded_directory_entries(path: &Path, control: &ImportControl<'_>) -> Result<Vec<fs::DirEntry>, LooseGitImportRefusal> {
+fn bounded_directory_entries(
+    path: &Path,
+    control: &ImportControl<'_>,
+) -> Result<Vec<fs::DirEntry>, LooseGitImportRefusal> {
     control.checkpoint()?;
-    let entries = control.run(|| fs::read_dir(path))?
+    let entries = control
+        .run(|| fs::read_dir(path))?
         .map_err(|error| io_refusal("list import directory", path.to_path_buf(), error))?;
     let mut collected = Vec::new();
     for entry in entries {

@@ -125,7 +125,10 @@ fn v2_want(repository: &impl UploadPackRepository, target: AnyGitOid) -> Result<
     machine.push_packet(&Packet::Data(b"command=fetch\n".to_vec()), repository)?;
     machine.push_packet(&Packet::Delimiter, repository)?;
     machine
-        .push_packet(&Packet::Data(format!("want {target}\n").into_bytes()), repository)
+        .push_packet(
+            &Packet::Data(format!("want {target}\n").into_bytes()),
+            repository,
+        )
         .map(|_| ())
 }
 
@@ -148,7 +151,10 @@ fn hidden_peeled_metadata_is_guarded_without_a_separate_advertisement_record() {
     for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
         let repository = alias_chain(format, 0, false);
         let view = VisibleUploadPackRepository::new(&repository, &policy(&[b"refs/tags/private"]));
-        assert!(repository.contains_want(oid(format, '3')), "inner-store control");
+        assert!(
+            repository.contains_want(oid(format, '3')),
+            "inner-store control"
+        );
         assert!(!view.contains_want(oid(format, '3')));
         assert!(!view.is_common(oid(format, '3')));
         assert_eq!(view.peeled(oid(format, '2')), None);
@@ -195,7 +201,11 @@ fn peeled_metadata_is_read_once_per_unique_advertised_object() {
     repository.add_tag(b"refs/tags/public", false);
     let view = VisibleUploadPackRepository::new(&repository, &policy(&[b"refs/tags/private"]));
     let calls = repository.peel_calls.borrow().clone();
-    let unique: HashSet<_> = repository.refs.iter().map(|reference| reference.oid).collect();
+    let unique: HashSet<_> = repository
+        .refs
+        .iter()
+        .map(|reference| reference.oid)
+        .collect();
     assert_eq!(calls.len(), unique.len());
     assert!(unique.iter().all(|source| calls.get(source) == Some(&1)));
     for _ in 0..3 {

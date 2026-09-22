@@ -64,6 +64,25 @@ for argument in "$@"; do
 done
 [ "$robot_mode" -eq 1 ] || die 'only bv robot/read-only modes are allowed'
 
+# The projection relies on the explicit --db override, which bv only grew in
+# the 0.22+ line. A stale bv on PATH (for example an old 0.13.0 shadowing the
+# pinned one) otherwise fails mid-invocation with an argparse usage dump and
+# every pane burns a cycle decoding it. Refuse up front, naming the override.
+bv_bin="${BV_BIN:-bv}"
+if ! command -v "$bv_bin" >/dev/null 2>&1; then
+  die "bv binary '$bv_bin' not found; set BV_BIN to the pinned 0.22+ launcher"
+fi
+bv_version="$("$bv_bin" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//')"
+bv_major="${bv_version%%.*}"
+bv_rest="${bv_version#*.}"
+bv_minor="${bv_rest%%.*}"
+if ! [[ "$bv_major" =~ ^[0-9]+$ && "$bv_minor" =~ ^[0-9]+$ ]]; then
+  die "bv binary '$bv_bin' did not report a parsable version (got '$bv_version'); set BV_BIN to the pinned 0.22+ launcher"
+fi
+if [ "$bv_major" -eq 0 ] && [ "$bv_minor" -lt 22 ]; then
+  die "bv $bv_version predates the --db override (need 0.22+); PATH resolves a stale binary — set BV_BIN (for example BV_BIN=\"\$HOME/.local/bin/bv\")"
+fi
+
 if [ -n "${FGIT_REPO_ROOT:-}" ]; then
   repo_root="$(cd "$FGIT_REPO_ROOT" 2>/dev/null && pwd -P)" || die "cannot enter FGIT_REPO_ROOT '$FGIT_REPO_ROOT'"
 else

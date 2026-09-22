@@ -1566,8 +1566,7 @@ fn append_report_packet(
         }
         return Ok(());
     }
-    add_output_packet(output, packet, encoded_len, used, &limits.wire)
-        .map_err(ReceiveError::Wire)
+    add_output_packet(output, packet, encoded_len, used, &limits.wire).map_err(ReceiveError::Wire)
 }
 
 /// Typed receive-pack refusal. No variant represents a successful ref update.

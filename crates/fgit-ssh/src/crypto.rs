@@ -12,8 +12,8 @@ use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::{ChaCha20Legacy, LegacyNonce};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use fgit_crypto::sha256_digest;
-use poly1305::universal_hash::KeyInit;
 use poly1305::Poly1305;
+use poly1305::universal_hash::KeyInit;
 
 use crate::wire::{
     MAX_PACKET_BYTES, MIN_PADDING_BYTES, PACKET_BLOCK_ALIGN, WireReader, WireWriter,
@@ -49,12 +49,20 @@ pub enum CryptoError {
 impl Display for CryptoError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WeakKeyExchange => formatter.write_str("weak Curve25519 shared secret is refused"),
+            Self::WeakKeyExchange => {
+                formatter.write_str("weak Curve25519 shared secret is refused")
+            }
             Self::InvalidPublicKeyLength { observed } => {
-                write!(formatter, "invalid public key length {observed}, expected 32")
+                write!(
+                    formatter,
+                    "invalid public key length {observed}, expected 32"
+                )
             }
             Self::InvalidSignatureLength { observed } => {
-                write!(formatter, "invalid signature length {observed}, expected 64")
+                write!(
+                    formatter,
+                    "invalid signature length {observed}, expected 64"
+                )
             }
             Self::InvalidSignatureScheme { observed } => {
                 write!(formatter, "unsupported signature scheme `{observed}`")
@@ -71,8 +79,14 @@ impl Display for CryptoError {
             Self::PacketTooSmall { observed, min } => {
                 write!(formatter, "packet length {observed} below minimum {min}")
             }
-            Self::InvalidPadding { padding, packet_len } => {
-                write!(formatter, "invalid padding length {padding} for packet {packet_len}")
+            Self::InvalidPadding {
+                padding,
+                packet_len,
+            } => {
+                write!(
+                    formatter,
+                    "invalid padding length {padding} for packet {packet_len}"
+                )
             }
             Self::UnexpectedEof => formatter.write_str("unexpected EOF during crypto operation"),
             Self::KeyDerivationError => formatter.write_str("error during SSH key derivation"),
@@ -112,7 +126,10 @@ impl Curve25519Kex {
     ///
     /// Fails with [`CryptoError::WeakKeyExchange`] if the resulting shared secret is all zeros,
     /// as mandated by RFC 8731 section 3.
-    pub fn compute_shared_secret(&self, peer_pub_bytes: &[u8; 32]) -> Result<[u8; 32], CryptoError> {
+    pub fn compute_shared_secret(
+        &self,
+        peer_pub_bytes: &[u8; 32],
+    ) -> Result<[u8; 32], CryptoError> {
         let shared = x25519(&self.private_key, peer_pub_bytes);
 
         // RFC 8731 §3: "With Curve25519 and Curve448, the server MUST check whether the shared key
@@ -238,7 +255,11 @@ impl OpenSshChaCha20Poly1305 {
         payload_buf.push(padding_len as u8);
         payload_buf.extend_from_slice(payload);
         for i in 0..padding_len {
-            let b = if i < random_pad.len() { random_pad[i] } else { 0 };
+            let b = if i < random_pad.len() {
+                random_pad[i]
+            } else {
+                0
+            };
             payload_buf.push(b);
         }
         main_cipher.apply_keystream(&mut payload_buf);
@@ -364,7 +385,9 @@ pub fn parse_ed25519_public_key(blob: &[u8]) -> Result<[u8; 32], CryptoError> {
             observed: algo.to_owned(),
         });
     }
-    let key_bytes = reader.read_string().map_err(|_| CryptoError::UnexpectedEof)?;
+    let key_bytes = reader
+        .read_string()
+        .map_err(|_| CryptoError::UnexpectedEof)?;
     if key_bytes.len() != 32 {
         return Err(CryptoError::InvalidPublicKeyLength {
             observed: key_bytes.len(),
@@ -402,7 +425,9 @@ pub fn verify_ed25519(
             observed: algo.to_owned(),
         });
     }
-    let sig_bytes = reader.read_string().map_err(|_| CryptoError::UnexpectedEof)?;
+    let sig_bytes = reader
+        .read_string()
+        .map_err(|_| CryptoError::UnexpectedEof)?;
     if sig_bytes.len() != 64 {
         return Err(CryptoError::InvalidSignatureLength {
             observed: sig_bytes.len(),

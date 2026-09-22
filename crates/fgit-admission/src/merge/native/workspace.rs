@@ -80,8 +80,8 @@ where
         Some(version) => ExpectedVersion::Exactly(version),
         None => ExpectedVersion::NewStream,
     };
-    let intent = NativeMergeIntent::new(number, expected, merge.clone())?
-        .with_workspace_snapshot(digest);
+    let intent =
+        NativeMergeIntent::new(number, expected, merge.clone())?.with_workspace_snapshot(digest);
     if intent.event() != &sealed.package.event {
         return Err(super::incoherent("native event adaptation"));
     }

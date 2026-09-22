@@ -101,7 +101,9 @@ fn ls_refs(repository: &impl UploadPackRepository, unborn: bool) -> Vec<Packet> 
         Packet::Delimiter,
         Packet::Data(b"symrefs\n".to_vec()),
     ] {
-        machine.push_packet(&packet, repository).expect("ls-refs request");
+        machine
+            .push_packet(&packet, repository)
+            .expect("ls-refs request");
     }
     if unborn {
         machine
@@ -132,7 +134,11 @@ fn hidden_head_alias_is_indistinguishable_from_an_absent_alias_on_the_wire() {
         assert!(!view.is_common(oid(format, '2')));
         assert!(view.contains_want(oid(format, '1')));
         assert_eq!(ls_refs(&view, true), ls_refs(&absent, true));
-        assert_eq!(view.unborn_symref_target(), None, "hiding is not unbornness");
+        assert_eq!(
+            view.unborn_symref_target(),
+            None,
+            "hiding is not unbornness"
+        );
     }
 }
 
@@ -160,7 +166,10 @@ fn permitted_symbolic_metadata_is_preserved_and_read_only_once() {
     repository.alias(b"HEAD", b"refs/heads/main");
     let view = VisibleUploadPackRepository::new(&repository, &RefVisibility::new());
     assert_eq!(view.advertised_refs(), repository.advertised_refs());
-    assert_eq!(view.symref_target(b"HEAD"), Some(b"refs/heads/main".as_slice()));
+    assert_eq!(
+        view.symref_target(b"HEAD"),
+        Some(b"refs/heads/main".as_slice())
+    );
     let output = ls_refs(&view, false);
     assert!(output.iter().any(|packet| matches!(
         packet,
@@ -219,7 +228,10 @@ fn visible_unborn_head_is_forwarded_only_when_the_client_requests_it() {
         let mut repository = Repository::new(format);
         repository.unborn = Some(b"refs/heads/main".to_vec());
         let view = VisibleUploadPackRepository::new(&repository, &RefVisibility::new());
-        assert_eq!(view.unborn_symref_target(), Some(b"refs/heads/main".as_slice()));
+        assert_eq!(
+            view.unborn_symref_target(),
+            Some(b"refs/heads/main".as_slice())
+        );
         assert_eq!(ls_refs(&view, false), vec![Packet::Flush]);
         assert_eq!(
             ls_refs(&view, true),
@@ -235,7 +247,10 @@ fn visible_unborn_head_is_forwarded_only_when_the_client_requests_it() {
 fn unborn_disclosure_requires_both_head_and_target_to_be_visible() {
     let mut repository = Repository::new(GitObjectFormat::Sha1);
     repository.unborn = Some(b"refs/heads/main".to_vec());
-    for rules in [vec![b"HEAD".as_slice()], vec![b"refs/heads/main".as_slice()]] {
+    for rules in [
+        vec![b"HEAD".as_slice()],
+        vec![b"refs/heads/main".as_slice()],
+    ] {
         let view = VisibleUploadPackRepository::new(&repository, &policy(&rules));
         assert_eq!(view.unborn_symref_target(), None);
         assert_eq!(ls_refs(&view, true), vec![Packet::Flush]);
@@ -244,5 +259,8 @@ fn unborn_disclosure_requires_both_head_and_target_to_be_visible() {
         &repository,
         &policy(&[b"refs/heads", b"!refs/heads/main"]),
     );
-    assert_eq!(view.unborn_symref_target(), Some(b"refs/heads/main".as_slice()));
+    assert_eq!(
+        view.unborn_symref_target(),
+        Some(b"refs/heads/main".as_slice())
+    );
 }

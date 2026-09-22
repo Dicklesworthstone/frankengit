@@ -105,9 +105,11 @@ impl OneNode {
         merge: &NativeMerge,
         input: &[u8],
     ) -> Result<(TxId, TerminalOutcome), NodeWorkspaceRefusal> {
-        let map_admission = |error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)));
-        let key = IdempotencyKey::new(idempotency_key.to_vec())
-            .map_err(|_| NodeWorkspaceRefusal::InvalidWorkspaceCandidate("invalid bounded idempotency key"))?;
+        let map_admission =
+            |error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)));
+        let key = IdempotencyKey::new(idempotency_key.to_vec()).map_err(|_| {
+            NodeWorkspaceRefusal::InvalidWorkspaceCandidate("invalid bounded idempotency key")
+        })?;
         let intent = NativeMergeIntent::new(pull_request, expected_version, merge.clone())
             .map_err(map_admission)?;
         let context = AdmissionContext {
@@ -119,29 +121,48 @@ impl OneNode {
             object_format: self.object_format,
         };
         let attempt = intent.seal_attempt(&context).map_err(map_admission)?;
-        let tx_id = attempt.derive()
-            .map_err(|_| NodeWorkspaceRefusal::InvalidWorkspaceCandidate("native merge identity derivation refused"))?.0;
+        let tx_id = attempt
+            .derive()
+            .map_err(|_| {
+                NodeWorkspaceRefusal::InvalidWorkspaceCandidate(
+                    "native merge identity derivation refused",
+                )
+            })?
+            .0;
         // Resolve an exact prior decision before quarantine or current policy
         // checks. A changed policy cannot rewrite a historical merge/refusal,
         // and a successful retry need not reconstruct the old candidate inputs.
-        if let fgit_authority::OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
-            &self.authority, request.authority(), &self.head_key,
-            self.tenant_id, self.repository_id, tx_id,
-        ).await.map_err(|error| map_admission(error.into()))? {
+        if let fgit_authority::OutcomeLookup::Decided(terminal) =
+            fgit_authority::resolve_outcome_async(
+                &self.authority,
+                request.authority(),
+                &self.head_key,
+                self.tenant_id,
+                self.repository_id,
+                tx_id,
+            )
+            .await
+            .map_err(|error| map_admission(error.into()))?
+        {
             fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
-                .await.map_err(|error| map_admission(error.into()))?;
+                .await
+                .map_err(|error| map_admission(error.into()))?;
             return Ok((tx_id, terminal));
         }
         self.receive_publication_admitted().map_err(receive_error)?;
-        self.push_quota.evaluate(&principal).map_err(receive_error)?;
-        let (quarantined, _) = self.quarantine_reviewed_bundle_in(
-            request,
-            &merge.target_ref,
-            merge.target_tip_before,
-            merge.merge_commit,
-            input,
-            std::slice::from_ref(&merge.source_ref),
-        ).await?;
+        self.push_quota
+            .evaluate(&principal)
+            .map_err(receive_error)?;
+        let (quarantined, _) = self
+            .quarantine_reviewed_bundle_in(
+                request,
+                &merge.target_ref,
+                merge.target_tip_before,
+                merge.merge_commit,
+                input,
+                std::slice::from_ref(&merge.source_ref),
+            )
+            .await?;
         // A received ref command is not a merge decision. The native driver
         // re-reads the staged candidate and authenticates a fresh exact basis;
         // retaining or admitting this source-only proof would split the effect.
@@ -151,16 +172,24 @@ impl OneNode {
         }
         let projection = NodeNativeMergeProjection {
             node: self,
-            inner: self.durable_admission_projection(&context).map_err(map_admission)?,
+            inner: self
+                .durable_admission_projection(&context)
+                .map_err(map_admission)?,
             object_limits: MergeObjectLimits::default(),
             workspace: None,
             workspace_capability: None,
             workspace_clock_floor: 0,
         };
         let terminal = admit_native_merge_async(
-            &self.authority, request.authority(), &context, &intent,
-            AdmissionLimits::default(), &projection,
-        ).await.map_err(map_admission)?;
+            &self.authority,
+            request.authority(),
+            &context,
+            &intent,
+            AdmissionLimits::default(),
+            &projection,
+        )
+        .await
+        .map_err(map_admission)?;
         // Preserve known terminal results even if cancellation arrives now.
         Ok((tx_id, terminal))
     }
@@ -201,19 +230,31 @@ impl OneNode {
         // Authentication and semantic identity still precede this lookup.
         let map_admission = |error| NodeReceiveTransportRefusal::Admission(Box::new(error));
         let attempt = intent.seal_attempt(&context).map_err(map_admission)?;
-        let tx_id = attempt.derive().map_err(|_| map_admission(
-            AdmissionError::AsyncProjectionUnavailable(RefusalCode::CanonicalFramingInvalid),
-        ))?.0;
+        let tx_id = attempt
+            .derive()
+            .map_err(|_| {
+                map_admission(AdmissionError::AsyncProjectionUnavailable(
+                    RefusalCode::CanonicalFramingInvalid,
+                ))
+            })?
+            .0;
         if let fgit_authority::OutcomeLookup::Decided(terminal) =
             fgit_authority::resolve_outcome_async(
-                &self.authority, request.authority(), &self.head_key,
-                self.tenant_id, self.repository_id, tx_id,
-            ).await.map_err(|error| map_admission(error.into()))?
+                &self.authority,
+                request.authority(),
+                &self.head_key,
+                self.tenant_id,
+                self.repository_id,
+                tx_id,
+            )
+            .await
+            .map_err(|error| map_admission(error.into()))?
         {
             // Reconfirm the exact principal/key/request binding. This is not
             // permission to reuse a different request under the same key.
             fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
-                .await.map_err(|error| map_admission(error.into()))?;
+                .await
+                .map_err(|error| map_admission(error.into()))?;
             return Ok(terminal);
         }
         self.push_quota.evaluate(&authenticated.principal_id())?;
@@ -230,7 +271,12 @@ impl OneNode {
             workspace_clock_floor: 0,
         };
         admit_native_merge_async(
-            &self.authority, request.authority(), &context, intent, limits, &projection,
+            &self.authority,
+            request.authority(),
+            &context,
+            intent,
+            limits,
+            &projection,
         )
         .await
         .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
@@ -278,7 +324,8 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
     ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
         // The shared projection already retains symbolic HEAD and binds its
         // prepared ref state to this exact receipt; do not rebuild that state.
-        self.inner.snapshot_async(authority, cx, basis, authenticated)
+        self.inner
+            .snapshot_async(authority, cx, basis, authenticated)
     }
 
     fn materialize_commit_async<'a>(
@@ -290,7 +337,8 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
     ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
-        self.inner.materialize_commit_async(authority, cx, basis, request, fold, closure)
+        self.inner
+            .materialize_commit_async(authority, cx, basis, request, fold, closure)
     }
 
     fn materialize_refusal_async<'a>(
@@ -301,7 +349,8 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
         tx_id: TxId,
         code: RefusalCode,
     ) -> impl Future<Output = Result<RefusalMaterialization, ProjectionFailure>> + Send + 'a {
-        self.inner.materialize_refusal_async(authority, cx, basis, tx_id, code)
+        self.inner
+            .materialize_refusal_async(authority, cx, basis, tx_id, code)
     }
 }
 
@@ -315,12 +364,12 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
     fn merge_checkpoint(&self, cx: &Cx) -> Result<(), RefusalCode> {
         match checkpoint_pack_context(cx) {
             PackContextCheckpoint::Live => Ok(()),
-            PackContextCheckpoint::Stopped { budget_exhaustion: Some(_) } => {
-                Err(RefusalCode::ResourceBudgetExceeded)
-            }
-            PackContextCheckpoint::Stopped { budget_exhaustion: None } => {
-                Err(RefusalCode::CancellationInProgress)
-            }
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: Some(_),
+            } => Err(RefusalCode::ResourceBudgetExceeded),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: None,
+            } => Err(RefusalCode::CancellationInProgress),
         }
     }
     fn merge_publication_checkpoint(&self, cx: &Cx) -> Result<(), RefusalCode> {
@@ -328,7 +377,10 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         self.workspace_live()
     }
 
-    #[expect(clippy::manual_async_fn, reason = "explicit Send is the resolution contract")]
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "explicit Send is the resolution contract"
+    )]
     fn resolve_merge_basis_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -342,7 +394,9 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptInvalid))?
                 != *basis.body()
             {
-                return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
+                return Err(ProjectionFailure::Unavailable(
+                    RefusalCode::AuthorityReceiptStale,
+                ));
             }
             let prepared = self
                 .inner
@@ -352,16 +406,22 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 .take()
                 .ok_or(ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
             if prepared.basis != *basis {
-                return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
+                return Err(ProjectionFailure::Unavailable(
+                    RefusalCode::AuthorityReceiptStale,
+                ));
             }
-            let delivery = fgit_admission::merge::native::delivery::read_in(
-                authority, cx, basis, &|| self.merge_checkpoint(cx).is_err(),
-            )
-            .await
-            .map_err(|error| async_projection_unavailable(
-                crate::AdmissionMaterializationRefusal::Delivery(Box::new(error)),
-            ))?;
-            self.merge_checkpoint(cx).map_err(ProjectionFailure::Unavailable)?;
+            let delivery =
+                fgit_admission::merge::native::delivery::read_in(authority, cx, basis, &|| {
+                    self.merge_checkpoint(cx).is_err()
+                })
+                .await
+                .map_err(|error| {
+                    async_projection_unavailable(crate::AdmissionMaterializationRefusal::Delivery(
+                        Box::new(error),
+                    ))
+                })?;
+            self.merge_checkpoint(cx)
+                .map_err(ProjectionFailure::Unavailable)?;
             Ok(NativeMergeBasis {
                 refs: prepared.ref_state,
                 root_layout: prepared.root_layout,
@@ -371,7 +431,10 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         }
     }
 
-    #[expect(clippy::manual_async_fn, reason = "explicit Send is the native validator's cross-thread contract")]
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "explicit Send is the native validator's cross-thread contract"
+    )]
     fn validate_merge_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -381,18 +444,35 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
         intent: &'a NativeMergeIntent,
     ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
         async move {
-            let selected = self.inner.materializer.materialize_exact_in(
-                authority, cx, self.node.repository_id, basis, authenticated,
-                &|| self.merge_checkpoint(cx).is_err(),
-            )
-            .await
-            .map_err(async_projection_unavailable)?;
-            let merge = intent.merge()
+            let selected = self
+                .inner
+                .materializer
+                .materialize_exact_in(
+                    authority,
+                    cx,
+                    self.node.repository_id,
+                    basis,
+                    authenticated,
+                    &|| self.merge_checkpoint(cx).is_err(),
+                )
+                .await
+                .map_err(async_projection_unavailable)?;
+            let merge = intent
+                .merge()
                 .map_err(|_| ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid))?;
-            if [merge.source_tip, merge.target_tip_before, merge.base_tip].iter()
-                .any(|oid| !selected.selected_closure().closure().objects().contains(oid))
+            if [merge.source_tip, merge.target_tip_before, merge.base_tip]
+                .iter()
+                .any(|oid| {
+                    !selected
+                        .selected_closure()
+                        .closure()
+                        .objects()
+                        .contains(oid)
+                })
             {
-                return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete));
+                return Err(ProjectionFailure::Refuse(
+                    RefusalCode::ObjectClosureIncomplete,
+                ));
             }
             // Finish all synchronous object reads before awaiting policy:
             // neither the reader nor its thread-local budget cell may cross
@@ -402,7 +482,9 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 let source = VerifiedFabricPackSource {
                     fabric: &self.node.fabric,
                     object_format: self.node.object_format,
-                    maximum_object_bytes: self.object_limits.max_object_bytes
+                    maximum_object_bytes: self
+                        .object_limits
+                        .max_object_bytes
                         .min(usize::try_from(self.node.max_object_bytes).unwrap_or(usize::MAX)),
                     database_context: cx,
                     database_exhaustion: &exhaustion,
@@ -419,7 +501,9 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 };
                 let result = validate_merge_objects(&source, merge, self.object_limits, &mut live);
                 if exhaustion.get().is_some() {
-                    return Err(ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded));
+                    return Err(ProjectionFailure::Unavailable(
+                        RefusalCode::ResourceBudgetExceeded,
+                    ));
                 }
                 let closure = result?;
                 if let Some((_, expected_tree, expected_base)) = self.workspace {
@@ -437,8 +521,9 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                     }
                     self.merge_checkpoint(cx)
                         .map_err(ProjectionFailure::Unavailable)?;
-                    let (kind, body) =
-                        read.map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing))?;
+                    let (kind, body) = read.map_err(|_| {
+                        ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing)
+                    })?;
                     let ParsedObject::Commit(commit) = parse_object_body(
                         ObjectType::Commit,
                         &body,
@@ -466,10 +551,16 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 closure
             };
             fgit_admission::merge::native::protection::enforce_merge_at(
-                authority, cx, basis, intent, self.inner.context.principal_id,
+                authority,
+                cx,
+                basis,
+                intent,
+                self.inner.context.principal_id,
                 &|| self.merge_checkpoint(cx).is_err(),
-            ).await?;
-            self.merge_checkpoint(cx).map_err(ProjectionFailure::Unavailable)?;
+            )
+            .await?;
+            self.merge_checkpoint(cx)
+                .map_err(ProjectionFailure::Unavailable)?;
             Ok(closure)
         }
     }

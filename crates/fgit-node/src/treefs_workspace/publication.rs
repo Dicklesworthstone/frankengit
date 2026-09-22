@@ -19,10 +19,12 @@ use fgit_admission::{
     AdmissionLimits, AdmissionResult, BasisBoundValidatedReceive, CommandOutcome, SessionMapping,
 };
 use fgit_authority::{
-    ExpectedOld, IdempotencyKey, OutcomeLookup, ProposedNew, RefCommand, SealAttempt,
-    SemanticRequest, MAX_IDEMPOTENCY_KEY_BYTES, RECEIVE_ADMISSION_SCHEMA,
+    ExpectedOld, IdempotencyKey, MAX_IDEMPOTENCY_KEY_BYTES, OutcomeLookup, ProposedNew,
+    RECEIVE_ADMISSION_SCHEMA, RefCommand, SealAttempt, SemanticRequest,
 };
-use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body};
+use fgit_git_object::{
+    AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body,
+};
 use fgit_object_fabric::ObjectKind;
 use fgit_types::{GitHashAlgorithm, GitOid, PrincipalId, RefName};
 use fgit_wire::receive::{ReceiveContext, ReceiveLimits, ReceivePack, SignedPushProfile};
@@ -56,14 +58,21 @@ impl<'a> CandidateEnvelope<'a> {
         Self::parse_bounded(input, 1)
     }
 
-    fn parse_bounded(input: &'a [u8], maximum_prerequisites: usize) -> Result<Self, NodeWorkspaceRefusal> {
+    fn parse_bounded(
+        input: &'a [u8],
+        maximum_prerequisites: usize,
+    ) -> Result<Self, NodeWorkspaceRefusal> {
         Self::parse_profile(input, maximum_prerequisites, false)
     }
 
     // Only the explicit rebase profile accepts an entirely dropped series
     // whose advertised tip is exactly its one prerequisite. Workspace/merge
     // profiles retain their original, stricter envelope contract.
-    fn parse_profile(input: &'a [u8], maximum_prerequisites: usize, allow_prerequisite_tip: bool) -> Result<Self, NodeWorkspaceRefusal> {
+    fn parse_profile(
+        input: &'a [u8],
+        maximum_prerequisites: usize,
+        allow_prerequisite_tip: bool,
+    ) -> Result<Self, NodeWorkspaceRefusal> {
         if maximum_prerequisites == 0 || maximum_prerequisites > MAX_PREREQUISITES {
             return Err(invalid("invalid bundle prerequisite limit"));
         }
@@ -76,7 +85,11 @@ impl<'a> CandidateEnvelope<'a> {
             b"# v3 git bundle" => match header_line(input, &mut offset)? {
                 b"@object-format=sha1" => GitHashAlgorithm::Sha1,
                 b"@object-format=sha256" => GitHashAlgorithm::Sha256,
-                _ => return Err(invalid("v3 requires exactly one supported object-format capability")),
+                _ => {
+                    return Err(invalid(
+                        "v3 requires exactly one supported object-format capability",
+                    ));
+                }
             },
             _ => return Err(invalid("expected a Git bundle v2 or v3 signature")),
         };
@@ -91,7 +104,8 @@ impl<'a> CandidateEnvelope<'a> {
             if prerequisites.contains(&id) {
                 return Err(invalid("duplicate bundle prerequisite"));
             }
-            prerequisites.try_reserve(1)
+            prerequisites
+                .try_reserve(1)
                 .map_err(|_| invalid("bundle prerequisite allocation refused"))?;
             prerequisites.push(id);
             record = header_line(input, &mut offset)?;
@@ -100,8 +114,8 @@ impl<'a> CandidateEnvelope<'a> {
             return Err(invalid("at least one prerequisite commit is required"));
         }
         let (candidate, name) = split_oid(record, format)?;
-        let reference = RefName::try_new(name)
-            .map_err(|_| invalid("invalid candidate reference"))?;
+        let reference =
+            RefName::try_new(name).map_err(|_| invalid("invalid candidate reference"))?;
         if !reference.as_bytes().starts_with(b"refs/heads/") {
             return Err(invalid("candidate publication requires a branch reference"));
         }
@@ -115,7 +129,13 @@ impl<'a> CandidateEnvelope<'a> {
         if pack.is_empty() {
             return Err(invalid("bundle has no pack"));
         }
-        Ok(Self { format, prerequisites, candidate, reference, pack })
+        Ok(Self {
+            format,
+            prerequisites,
+            candidate,
+            reference,
+            pack,
+        })
     }
 
     fn bind(
@@ -129,13 +149,19 @@ impl<'a> CandidateEnvelope<'a> {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
         }
         if &self.reference != reference {
-            return Err(invalid("bundle branch differs from the explicitly requested branch"));
+            return Err(invalid(
+                "bundle branch differs from the explicitly requested branch",
+            ));
         }
         if !self.prerequisites.contains(&base) {
-            return Err(invalid("bundle prerequisites omit the expected target-before commit"));
+            return Err(invalid(
+                "bundle prerequisites omit the expected target-before commit",
+            ));
         }
         if self.candidate != candidate {
-            return Err(invalid("bundle tip differs from the reviewed candidate commit"));
+            return Err(invalid(
+                "bundle tip differs from the reviewed candidate commit",
+            ));
         }
         Ok(())
     }
@@ -143,16 +169,22 @@ impl<'a> CandidateEnvelope<'a> {
 
 fn header_line<'a>(input: &'a [u8], offset: &mut usize) -> Result<&'a [u8], NodeWorkspaceRefusal> {
     let end = input.len().min(MAX_HEADER_BYTES);
-    let remaining = input.get(*offset..end)
+    let remaining = input
+        .get(*offset..end)
         .ok_or_else(|| invalid("bundle header exceeds its byte limit"))?;
-    let length = remaining.iter().position(|byte| *byte == b'\n')
+    let length = remaining
+        .iter()
+        .position(|byte| *byte == b'\n')
         .ok_or_else(|| invalid("unterminated or oversized bundle header"))?;
     let line = &remaining[..length];
     *offset += length + 1;
     Ok(line)
 }
 
-fn split_oid(line: &[u8], format: GitHashAlgorithm) -> Result<(GitOid, &[u8]), NodeWorkspaceRefusal> {
+fn split_oid(
+    line: &[u8],
+    format: GitHashAlgorithm,
+) -> Result<(GitOid, &[u8]), NodeWorkspaceRefusal> {
     let width = format.digest_len() * 2;
     if line.get(width) != Some(&b' ') {
         return Err(invalid("malformed bundle object record"));
@@ -200,21 +232,44 @@ impl OneNode {
         // A recovered terminal result confirms the sealed ref operation, not
         // the integrity or provenance of a newly supplied transport encoding.
         let envelope = CandidateEnvelope::parse(input)?;
-        envelope.bind(self.object_format, reference, expected_base, expected_candidate)?;
-        if let Some(result) = self.recover_source_publication_in(
-            request, principal_id, &key, reference, expected_base, expected_candidate,
-        ).await? {
+        envelope.bind(
+            self.object_format,
+            reference,
+            expected_base,
+            expected_candidate,
+        )?;
+        if let Some(result) = self
+            .recover_source_publication_in(
+                request,
+                principal_id,
+                &key,
+                reference,
+                expected_base,
+                expected_candidate,
+            )
+            .await?
+        {
             return Ok(result);
         }
         self.receive_publication_admitted().map_err(receive_error)?;
-        self.push_quota.evaluate(&principal_id).map_err(receive_error)?;
+        self.push_quota
+            .evaluate(&principal_id)
+            .map_err(receive_error)?;
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
-        let (validated, parse_limits) = self.quarantine_reviewed_bundle_in(
-            request, reference, expected_base, expected_candidate, input, &[],
-        ).await?;
-        let candidate = self.read_git_object(expected_candidate)
+        let (validated, parse_limits) = self
+            .quarantine_reviewed_bundle_in(
+                request,
+                reference,
+                expected_base,
+                expected_candidate,
+                input,
+                &[],
+            )
+            .await?;
+        let candidate = self
+            .read_git_object(expected_candidate)
             .map_err(|error| NodeWorkspaceRefusal::WorkspaceCandidateRead(Box::new(error)))?;
         if candidate.envelope().object_kind() != ObjectKind::Commit {
             return Err(invalid("candidate must identify a commit"));
@@ -226,8 +281,13 @@ impl OneNode {
         }
         let session = LoopbackReceiveSession::authenticated(principal_id, key);
         self.admit_basis_bound_loopback_receive_durable_in(
-            request, &session, &validated, AdmissionLimits::default(),
-        ).await.map_err(receive_error)
+            request,
+            &session,
+            &validated,
+            AdmissionLimits::default(),
+        )
+        .await
+        .map_err(receive_error)
     }
 
     /// Recover only the canonical single-ref receive decision. Shared by
@@ -244,14 +304,19 @@ impl OneNode {
         candidate: GitOid,
     ) -> Result<Option<AdmissionResult>, NodeWorkspaceRefusal> {
         let semantic = SemanticRequest::build(
-            RECEIVE_ADMISSION_SCHEMA, self.object_format, true,
+            RECEIVE_ADMISSION_SCHEMA,
+            self.object_format,
+            true,
             vec![RefCommand {
                 name: reference.clone(),
                 expected_old: ExpectedOld::Exactly(expected_old),
                 proposed_new: ProposedNew::Update(candidate),
                 force: false,
-            }], vec![], vec![],
-        ).map_err(|_| invalid("invalid source publication request"))?;
+            }],
+            vec![],
+            vec![],
+        )
+        .map_err(|_| invalid("invalid source publication request"))?;
         let attempt = SealAttempt {
             tenant_id: self.tenant_id,
             repository_id: self.repository_id,
@@ -259,17 +324,30 @@ impl OneNode {
             idempotency_key: key.clone(),
             request: semantic,
         };
-        let failure = |error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)));
+        let failure =
+            |error| receive_error(NodeReceiveTransportRefusal::Admission(Box::new(error)));
         let (tx_id, _) = attempt.derive().map_err(|error| failure(error.into()))?;
         let outcome = fgit_authority::resolve_outcome_async(
-            &self.authority, request.authority(), &self.head_key,
-            self.tenant_id, self.repository_id, tx_id,
-        ).await.map_err(|error| failure(error.into()))?;
-        let OutcomeLookup::Decided(terminal) = outcome else { return Ok(None); };
+            &self.authority,
+            request.authority(),
+            &self.head_key,
+            self.tenant_id,
+            self.repository_id,
+            tx_id,
+        )
+        .await
+        .map_err(|error| failure(error.into()))?;
+        let OutcomeLookup::Decided(terminal) = outcome else {
+            return Ok(None);
+        };
         fgit_authority::seal_request_async(&self.authority, request.authority(), &attempt)
-            .await.map_err(|error| failure(error.into()))?;
+            .await
+            .map_err(|error| failure(error.into()))?;
         Ok(Some(AdmissionResult {
-            session: SessionMapping { atomic: true, tx_ids: vec![tx_id] },
+            session: SessionMapping {
+                atomic: true,
+                tx_ids: vec![tx_id],
+            },
             commands: vec![CommandOutcome { tx_id, terminal }],
         }))
     }
@@ -296,9 +374,20 @@ impl OneNode {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
         let envelope = CandidateEnvelope::parse_bounded(input, MAX_PREREQUISITES)?;
-        envelope.bind(self.object_format, reference, expected_base, expected_candidate)?;
-        self.quarantine_bound_envelope_in(request, reference, expected_base, &envelope,
-            additional_visible_refs).await
+        envelope.bind(
+            self.object_format,
+            reference,
+            expected_base,
+            expected_candidate,
+        )?;
+        self.quarantine_bound_envelope_in(
+            request,
+            reference,
+            expected_base,
+            &envelope,
+            additional_visible_refs,
+        )
+        .await
     }
 
     // `expected_old` is the ref lease, not necessarily a pack prerequisite.
@@ -315,11 +404,17 @@ impl OneNode {
         if !workspace_request_live(request) {
             return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
         }
-        let materialized = self.materialize_admission_in(request).await
+        let materialized = self
+            .materialize_admission_in(request)
+            .await
             .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
-        if materialized.snapshot().hidden_refs.hides(reference.as_bytes())
-            || additional_visible_refs.iter().any(|name|
-                materialized.snapshot().hidden_refs.hides(name.as_bytes()))
+        if materialized
+            .snapshot()
+            .hidden_refs
+            .hides(reference.as_bytes())
+            || additional_visible_refs
+                .iter()
+                .any(|name| materialized.snapshot().hidden_refs.hides(name.as_bytes()))
         {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
@@ -327,10 +422,18 @@ impl OneNode {
             if !workspace_request_live(request) {
                 return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
             }
-            if !materialized.selected_closure().closure().objects().contains(prerequisite) {
-                return Err(invalid("prerequisite is outside the authority-selected history"));
+            if !materialized
+                .selected_closure()
+                .closure()
+                .objects()
+                .contains(prerequisite)
+            {
+                return Err(invalid(
+                    "prerequisite is outside the authority-selected history",
+                ));
             }
-            let object = self.read_git_object(*prerequisite)
+            let object = self
+                .read_git_object(*prerequisite)
                 .map_err(|error| NodeWorkspaceRefusal::WorkspaceCandidateRead(Box::new(error)))?;
             if object.envelope().object_kind() != ObjectKind::Commit {
                 return Err(invalid("prerequisite must identify a commit"));
@@ -339,14 +442,19 @@ impl OneNode {
         let mut limits = ReceiveLimits::default();
         limits.pack.max_input_bytes = MAX_BUNDLE_BYTES;
         limits.pack.max_total_expanded_bytes = MAX_BUNDLE_BYTES;
-        limits.pack.max_object_bytes = limits.pack.max_object_bytes
+        limits.pack.max_object_bytes = limits
+            .pack
+            .max_object_bytes
             .min(usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX));
         let parse_limits = ParseLimits {
             max_object_bytes: limits.pack.max_object_bytes,
             tree_reference_bytes: self.object_format.digest_len(),
             ..ParseLimits::default()
         };
-        let capabilities = format!("report-status atomic object-format={}", self.object_format.as_str());
+        let capabilities = format!(
+            "report-status atomic object-format={}",
+            self.object_format.as_str()
+        );
         let advertised = Capabilities::parse_v1(capabilities.as_bytes(), &limits.wire)
             .map_err(|_| invalid("could not construct receive capabilities"))?;
         let wire_format = match self.object_format {
@@ -359,17 +467,27 @@ impl OneNode {
         command.extend_from_slice(capabilities.as_bytes());
         let prefix = encode_packets(&[Packet::Data(command), Packet::Flush], &limits.wire)
             .map_err(|_| invalid("could not encode the bounded ref command"))?;
-        let validator = self.production_quarantine_validator(
-            &materialized, limits.pack.clone(), parse_limits.clone(),
-        ).map_err(|code| receive_error(fgit_wire::receive::ReceiveError::AuthoritativeRefusal(code)))?;
-        let context = ReceiveContext::new(wire_format, advertised, limits, SignedPushProfile::Refuse)
-            .map_err(receive_error)?;
+        let validator = self
+            .production_quarantine_validator(
+                &materialized,
+                limits.pack.clone(),
+                parse_limits.clone(),
+            )
+            .map_err(|code| {
+                receive_error(fgit_wire::receive::ReceiveError::AuthoritativeRefusal(code))
+            })?;
+        let context =
+            ReceiveContext::new(wire_format, advertised, limits, SignedPushProfile::Refuse)
+                .map_err(receive_error)?;
         let mut receive = ReceivePack::new(context).map_err(receive_error)?;
         receive.push_bytes(&prefix).map_err(receive_error)?;
         receive.push_bytes(envelope.pack).map_err(receive_error)?;
-        let mut handoff = ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
+        let mut handoff =
+            ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
         let mut live = || workspace_request_live(request);
-        receive.finish_with_handoff(&mut handoff, &mut live).map_err(receive_error)?;
+        receive
+            .finish_with_handoff(&mut handoff, &mut live)
+            .map_err(receive_error)?;
         let validated = handoff.into_validated_receive().map_err(receive_error)?;
         drop(receive);
         if !workspace_request_live(request) {
@@ -386,16 +504,26 @@ fn check_candidate_commit(
 ) -> Result<(), NodeWorkspaceRefusal> {
     limits.max_object_bytes = limits.max_object_bytes.min(MAX_CANDIDATE_BYTES);
     let ParsedObject::Commit(commit) = parse_object_body(
-        ObjectType::Commit, body, AcceptanceProfile::StrictCreate, &limits,
-    ).map_err(|_| invalid("candidate is not a bounded strict Git commit"))? else {
+        ObjectType::Commit,
+        body,
+        AcceptanceProfile::StrictCreate,
+        &limits,
+    )
+    .map_err(|_| invalid("candidate is not a bounded strict Git commit"))?
+    else {
         return Err(invalid("candidate must identify a commit"));
     };
     let mut parents = commit.parent_references();
-    let parent = parents.next().ok_or_else(|| invalid("candidate must have exactly one parent"))?;
-    let parent = std::str::from_utf8(parent).ok()
+    let parent = parents
+        .next()
+        .ok_or_else(|| invalid("candidate must have exactly one parent"))?;
+    let parent = std::str::from_utf8(parent)
+        .ok()
         .and_then(|text| GitOid::from_hex(expected_base.algorithm(), text).ok());
     if parent != Some(expected_base) || parents.next().is_some() {
-        return Err(invalid("candidate must have exactly the expected base as its sole parent"));
+        return Err(invalid(
+            "candidate must have exactly the expected base as its sole parent",
+        ));
     }
     Ok(())
 }
@@ -420,11 +548,31 @@ mod tests {
             let envelope = CandidateEnvelope::parse(&bytes).unwrap();
             let reference = RefName::try_new(b"refs/heads/main").unwrap();
             assert_eq!(envelope.pack, b"PACK");
-            assert!(envelope.bind(format, &reference, oid(format, '1'), oid(format, '2')).is_ok());
-            assert!(envelope.bind(format, &reference, oid(format, '3'), oid(format, '2')).is_err());
-            assert!(envelope.bind(format, &reference, oid(format, '1'), oid(format, '3')).is_err());
-            assert!(envelope.bind(format, &RefName::try_new(b"refs/heads/other").unwrap(),
-                oid(format, '1'), oid(format, '2')).is_err());
+            assert!(
+                envelope
+                    .bind(format, &reference, oid(format, '1'), oid(format, '2'))
+                    .is_ok()
+            );
+            assert!(
+                envelope
+                    .bind(format, &reference, oid(format, '3'), oid(format, '2'))
+                    .is_err()
+            );
+            assert!(
+                envelope
+                    .bind(format, &reference, oid(format, '1'), oid(format, '3'))
+                    .is_err()
+            );
+            assert!(
+                envelope
+                    .bind(
+                        format,
+                        &RefName::try_new(b"refs/heads/other").unwrap(),
+                        oid(format, '1'),
+                        oid(format, '2')
+                    )
+                    .is_err()
+            );
         }
     }
 
@@ -433,8 +581,14 @@ mod tests {
         let valid = String::from_utf8(bundle(GitHashAlgorithm::Sha1)).unwrap();
         for bad in [
             valid.replace("@object-format=sha1", "@filter=blob:none"),
-            valid.replace("@object-format=sha1", "@object-format=sha1\n@object-format=sha1"),
-            valid.replace("\n\nPACK", &format!("\n{} refs/heads/extra\n\nPACK", "3".repeat(40))),
+            valid.replace(
+                "@object-format=sha1",
+                "@object-format=sha1\n@object-format=sha1",
+            ),
+            valid.replace(
+                "\n\nPACK",
+                &format!("\n{} refs/heads/extra\n\nPACK", "3".repeat(40)),
+            ),
             valid.replace("\n\nPACK", "\nPACK"),
             valid.replace(&"1".repeat(40), &"0".repeat(40)),
             valid.replace("refs/heads/main", "refs/tags/main"),
@@ -450,10 +604,17 @@ mod tests {
     fn every_header_truncation_and_oversized_line_refuses() {
         let bytes = bundle(GitHashAlgorithm::Sha256);
         for end in 0..=bytes.len() - 4 {
-            assert!(CandidateEnvelope::parse(&bytes[..end]).is_err(), "truncation {end}");
+            assert!(
+                CandidateEnvelope::parse(&bytes[..end]).is_err(),
+                "truncation {end}"
+            );
         }
-        let oversized = [b"# v3 git bundle\n@object-format=sha256\n-".as_slice(),
-            &vec![b'a'; MAX_HEADER_BYTES], b"\n\nPACK"].concat();
+        let oversized = [
+            b"# v3 git bundle\n@object-format=sha256\n-".as_slice(),
+            &vec![b'a'; MAX_HEADER_BYTES],
+            b"\n\nPACK",
+        ]
+        .concat();
         assert!(CandidateEnvelope::parse(&oversized).is_err());
     }
 
@@ -462,16 +623,33 @@ mod tests {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let base = oid(format, '1');
             let tree = oid(format, '2');
-            let limits = ParseLimits { tree_reference_bytes: format.digest_len(), ..ParseLimits::default() };
-            let commit = |parents: &str| format!("tree {tree}\n{parents}author Test <t@example.invalid> 1 +0000\ncommitter Test <t@example.invalid> 1 +0000\n\nchange\n");
+            let limits = ParseLimits {
+                tree_reference_bytes: format.digest_len(),
+                ..ParseLimits::default()
+            };
+            let commit = |parents: &str| {
+                format!(
+                    "tree {tree}\n{parents}author Test <t@example.invalid> 1 +0000\ncommitter Test <t@example.invalid> 1 +0000\n\nchange\n"
+                )
+            };
             let permitted = commit(&format!("parent {base}\n"));
             assert!(check_candidate_commit(permitted.as_bytes(), base, limits.clone()).is_ok());
             let epoch_zero = permitted.replace(" 1 +0000\n", " 0 +0000\n");
-            assert!(matches!(check_candidate_commit(epoch_zero.as_bytes(), base, limits.clone()),
-                Err(NodeWorkspaceRefusal::InvalidWorkspaceCandidate("candidate is not a bounded strict Git commit"))));
-            for parents in [String::new(), format!("parent {}\n", oid(format, '3')),
-                format!("parent {base}\nparent {}\n", oid(format, '3'))] {
-                assert!(check_candidate_commit(commit(&parents).as_bytes(), base, limits.clone()).is_err());
+            assert!(matches!(
+                check_candidate_commit(epoch_zero.as_bytes(), base, limits.clone()),
+                Err(NodeWorkspaceRefusal::InvalidWorkspaceCandidate(
+                    "candidate is not a bounded strict Git commit"
+                ))
+            ));
+            for parents in [
+                String::new(),
+                format!("parent {}\n", oid(format, '3')),
+                format!("parent {base}\nparent {}\n", oid(format, '3')),
+            ] {
+                assert!(
+                    check_candidate_commit(commit(&parents).as_bytes(), base, limits.clone())
+                        .is_err()
+                );
             }
         }
     }
@@ -481,27 +659,65 @@ mod tests {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let original = String::from_utf8(bundle(format)).unwrap();
             let extra = format!("-{} common base\n", oid(format, '3'));
-            let bytes = original.replace(&format!("{} refs/heads/main", oid(format, '2')),
-                &format!("{extra}{} refs/heads/main", oid(format, '2')));
+            let bytes = original.replace(
+                &format!("{} refs/heads/main", oid(format, '2')),
+                &format!("{extra}{} refs/heads/main", oid(format, '2')),
+            );
             assert!(CandidateEnvelope::parse(bytes.as_bytes()).is_err());
-            let merge = CandidateEnvelope::parse_bounded(bytes.as_bytes(), MAX_PREREQUISITES).unwrap();
-            assert_eq!(merge.prerequisites, vec![oid(format, '1'), oid(format, '3')]);
-            assert!(merge.bind(format, &RefName::try_new(b"refs/heads/main").unwrap(),
-                oid(format, '1'), oid(format, '2')).is_ok());
-            assert!(merge.bind(format, &RefName::try_new(b"refs/heads/main").unwrap(),
-                oid(format, '4'), oid(format, '2')).is_err());
-            let duplicate = bytes.replace(&extra, &format!("-{} duplicated target\n", oid(format, '1')));
-            assert!(CandidateEnvelope::parse_bounded(duplicate.as_bytes(), MAX_PREREQUISITES).is_err());
+            let merge =
+                CandidateEnvelope::parse_bounded(bytes.as_bytes(), MAX_PREREQUISITES).unwrap();
+            assert_eq!(
+                merge.prerequisites,
+                vec![oid(format, '1'), oid(format, '3')]
+            );
+            assert!(
+                merge
+                    .bind(
+                        format,
+                        &RefName::try_new(b"refs/heads/main").unwrap(),
+                        oid(format, '1'),
+                        oid(format, '2')
+                    )
+                    .is_ok()
+            );
+            assert!(
+                merge
+                    .bind(
+                        format,
+                        &RefName::try_new(b"refs/heads/main").unwrap(),
+                        oid(format, '4'),
+                        oid(format, '2')
+                    )
+                    .is_err()
+            );
+            let duplicate = bytes.replace(
+                &extra,
+                &format!("-{} duplicated target\n", oid(format, '1')),
+            );
+            assert!(
+                CandidateEnvelope::parse_bounded(duplicate.as_bytes(), MAX_PREREQUISITES).is_err()
+            );
         }
     }
 
     #[test]
     fn prerequisite_count_refuses_at_n_plus_one_before_unbounded_allocation() {
         let bytes = |count: usize| {
-            let prerequisites: String = (1..=count).map(|i| format!("-{i:064x} prerequisite\n")).collect();
-            format!("# v3 git bundle\n@object-format=sha256\n{prerequisites}{} refs/heads/main\n\nPACK", "f".repeat(64))
+            let prerequisites: String = (1..=count)
+                .map(|i| format!("-{i:064x} prerequisite\n"))
+                .collect();
+            format!(
+                "# v3 git bundle\n@object-format=sha256\n{prerequisites}{} refs/heads/main\n\nPACK",
+                "f".repeat(64)
+            )
         };
-        assert_eq!(CandidateEnvelope::parse_bounded(bytes(64).as_bytes(), 64).unwrap().prerequisites.len(), 64);
+        assert_eq!(
+            CandidateEnvelope::parse_bounded(bytes(64).as_bytes(), 64)
+                .unwrap()
+                .prerequisites
+                .len(),
+            64
+        );
         assert!(CandidateEnvelope::parse_bounded(bytes(65).as_bytes(), 64).is_err());
         assert!(CandidateEnvelope::parse_bounded(bytes(1).as_bytes(), 0).is_err());
         assert!(CandidateEnvelope::parse_bounded(bytes(1).as_bytes(), 65).is_err());

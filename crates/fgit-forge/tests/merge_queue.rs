@@ -1,8 +1,6 @@
 use fgit_codec::{CryptoBodyIdentity, DecodeLimits, decode_body, encode_body};
 use fgit_diff::{TreeEntry, TreeMode};
-use fgit_forge::aggregate::{
-    AggregateId, AggregateVersion, PullRequestNumber, QueueNumber,
-};
+use fgit_forge::aggregate::{AggregateId, AggregateVersion, PullRequestNumber, QueueNumber};
 use fgit_forge::event::queue::{DequeueReason, NativeQueueEvent, QueueAction};
 use fgit_forge::event::{ForgeEvent, ForgeEventPayload};
 use fgit_forge::merge::{MergedTree, RecordFrame};
@@ -66,7 +64,6 @@ fn dummy_record_frame() -> RecordFrame {
     }
 }
 
-
 #[test]
 fn test_synthetic_queue_ref_namespace() {
     let target = RefName::try_new(b"refs/heads/main").unwrap();
@@ -75,7 +72,12 @@ fn test_synthetic_queue_ref_namespace() {
     assert!(QueueRef::is_queue_ref(&head_ref));
 
     let parsed_head = QueueRef::parse(&head_ref).expect("parse projected head");
-    assert_eq!(parsed_head, QueueRefKind::ProjectedHead { target_ref: target.clone() });
+    assert_eq!(
+        parsed_head,
+        QueueRefKind::ProjectedHead {
+            target_ref: target.clone()
+        }
+    );
 
     let dummy_digest = Digest::new(
         fgit_crypto::InternalDigestAlgorithm::Sha256.id(),
@@ -84,7 +86,11 @@ fn test_synthetic_queue_ref_namespace() {
     let batch_id = QueueBatchId::from_digest(dummy_digest);
     let batch_ref = QueueRef::batch(&target, &batch_id).unwrap();
     assert!(QueueRef::is_queue_ref(&batch_ref));
-    assert!(batch_ref.as_bytes().starts_with(b"refs/queue/main/batches/"));
+    assert!(
+        batch_ref
+            .as_bytes()
+            .starts_with(b"refs/queue/main/batches/")
+    );
 
     let parsed_batch = QueueRef::parse(&batch_ref).expect("parse batch ref");
     assert_eq!(
@@ -118,7 +124,6 @@ fn test_synthetic_queue_ref_namespace() {
     assert!(QueueRef::parse(&tag_ref).is_none());
 }
 
-
 #[test]
 fn test_deterministic_batch_identity_and_receipt() {
     let target = RefName::try_new(b"refs/heads/main").unwrap();
@@ -138,8 +143,10 @@ fn test_deterministic_batch_identity_and_receipt() {
         head_tip: oid(GitHashAlgorithm::Sha256, "b1"),
     };
 
-    let batch_id1 = QueueBatchId::compute(&target, base_tip, &[entry1.clone(), entry2.clone()]).unwrap();
-    let batch_id2 = QueueBatchId::compute(&target, base_tip, &[entry1.clone(), entry2.clone()]).unwrap();
+    let batch_id1 =
+        QueueBatchId::compute(&target, base_tip, &[entry1.clone(), entry2.clone()]).unwrap();
+    let batch_id2 =
+        QueueBatchId::compute(&target, base_tip, &[entry1.clone(), entry2.clone()]).unwrap();
     assert_eq!(batch_id1, batch_id2, "batch id must be deterministic");
 
     // Hex formatting and parsing roundtrip
@@ -149,17 +156,20 @@ fn test_deterministic_batch_identity_and_receipt() {
 
     // Collision freedom: changing base tip changes batch ID
     let moved_base = oid(GitHashAlgorithm::Sha256, "11");
-    let batch_id_moved_base = QueueBatchId::compute(&target, moved_base, &[entry1.clone(), entry2.clone()]).unwrap();
+    let batch_id_moved_base =
+        QueueBatchId::compute(&target, moved_base, &[entry1.clone(), entry2.clone()]).unwrap();
     assert_ne!(batch_id1, batch_id_moved_base);
 
     // Collision freedom: changing candidate tip changes batch ID
     let mut modified_entry1 = entry1.clone();
     modified_entry1.head_tip = oid(GitHashAlgorithm::Sha256, "a2");
-    let batch_id_modified = QueueBatchId::compute(&target, base_tip, &[modified_entry1, entry2.clone()]).unwrap();
+    let batch_id_modified =
+        QueueBatchId::compute(&target, base_tip, &[modified_entry1, entry2.clone()]).unwrap();
     assert_ne!(batch_id1, batch_id_modified);
 
     // Collision freedom: reordering entries changes batch ID
-    let batch_id_reordered = QueueBatchId::compute(&target, base_tip, &[entry2.clone(), entry1.clone()]).unwrap();
+    let batch_id_reordered =
+        QueueBatchId::compute(&target, base_tip, &[entry2.clone(), entry1.clone()]).unwrap();
     assert_ne!(batch_id1, batch_id_reordered);
 
     // Receipt generation and attestation
@@ -192,7 +202,6 @@ fn test_speculative_merge_binding_and_invalidation() {
     let speculative_tip = oid(GitHashAlgorithm::Sha256, "d1");
     let epoch = WorkspaceEpoch::from_u64(1);
 
-
     let step = SpeculativeMergeStep {
         pull_request: pr,
         candidate_source_ref: source_ref,
@@ -211,11 +220,16 @@ fn test_speculative_merge_binding_and_invalidation() {
     };
 
     // Valid when all coordinates match
-    assert!(step.check_validity(candidate_tip, projected_base, epoch).is_ok());
+    assert!(
+        step.check_validity(candidate_tip, projected_base, epoch)
+            .is_ok()
+    );
 
     // Invalidation 1: Candidate tip moved
     let candidate_moved = oid(GitHashAlgorithm::Sha256, "c2");
-    let err_source = step.check_validity(candidate_moved, projected_base, epoch).unwrap_err();
+    let err_source = step
+        .check_validity(candidate_moved, projected_base, epoch)
+        .unwrap_err();
     assert_eq!(
         err_source,
         ForgeRefusal::MergeStale {
@@ -229,7 +243,9 @@ fn test_speculative_merge_binding_and_invalidation() {
 
     // Invalidation 2: Base tip moved
     let base_moved = oid(GitHashAlgorithm::Sha256, "b2");
-    let err_target = step.check_validity(candidate_tip, base_moved, epoch).unwrap_err();
+    let err_target = step
+        .check_validity(candidate_tip, base_moved, epoch)
+        .unwrap_err();
     assert_eq!(
         err_target,
         ForgeRefusal::MergeStale {
@@ -243,7 +259,9 @@ fn test_speculative_merge_binding_and_invalidation() {
 
     // Invalidation 3: Workspace epoch moved
     let epoch_moved = WorkspaceEpoch::from_u64(2);
-    let err_workspace = step.check_validity(candidate_tip, projected_base, epoch_moved).unwrap_err();
+    let err_workspace = step
+        .check_validity(candidate_tip, projected_base, epoch_moved)
+        .unwrap_err();
     assert_eq!(
         err_workspace,
         ForgeRefusal::WorkspaceMoved {
@@ -289,7 +307,6 @@ fn test_single_decision_landing_and_per_pr_atomicity() {
         merged_tree: MergedTree { entries: vec![] },
     };
 
-
     let batch_entries = vec![
         QueueBatchEntry {
             pull_request: pr1,
@@ -334,13 +351,17 @@ fn test_single_decision_landing_and_per_pr_atomicity() {
     assert_eq!(landing_pkg.queue_head_intent.name, b"refs/queue/main/head");
     assert_eq!(landing_pkg.queue_head_intent.new_tip, spec_commit2);
 
-
     // 3. Event batch contains individual PR events + queue event
     assert_eq!(landing_pkg.event_batch.events.len(), 3);
 
     // Event 0: PR 1 NativeMerge
-    assert_eq!(landing_pkg.event_batch.events[0].aggregate, AggregateId::PullRequest(pr1));
-    if let ForgeEventPayload::MergeCommittedNative(merge) = &landing_pkg.event_batch.events[0].payload {
+    assert_eq!(
+        landing_pkg.event_batch.events[0].aggregate,
+        AggregateId::PullRequest(pr1)
+    );
+    if let ForgeEventPayload::MergeCommittedNative(merge) =
+        &landing_pkg.event_batch.events[0].payload
+    {
         assert_eq!(merge.source_tip, pr1_tip);
         assert_eq!(merge.target_tip_before, base_tip);
         assert_eq!(merge.merge_commit, spec_commit1);
@@ -349,8 +370,13 @@ fn test_single_decision_landing_and_per_pr_atomicity() {
     }
 
     // Event 1: PR 2 NativeMerge
-    assert_eq!(landing_pkg.event_batch.events[1].aggregate, AggregateId::PullRequest(pr2));
-    if let ForgeEventPayload::MergeCommittedNative(merge) = &landing_pkg.event_batch.events[1].payload {
+    assert_eq!(
+        landing_pkg.event_batch.events[1].aggregate,
+        AggregateId::PullRequest(pr2)
+    );
+    if let ForgeEventPayload::MergeCommittedNative(merge) =
+        &landing_pkg.event_batch.events[1].payload
+    {
         assert_eq!(merge.source_tip, pr2_tip);
         assert_eq!(merge.target_tip_before, spec_commit1);
         assert_eq!(merge.merge_commit, spec_commit2);
@@ -359,11 +385,21 @@ fn test_single_decision_landing_and_per_pr_atomicity() {
     }
 
     // Event 2: Queue BatchLanded
-    assert_eq!(landing_pkg.event_batch.events[2].aggregate, AggregateId::MergeQueue(queue_num));
+    assert_eq!(
+        landing_pkg.event_batch.events[2].aggregate,
+        AggregateId::MergeQueue(queue_num)
+    );
     assert_eq!(landing_pkg.event_batch.events[2].version, queue_ver);
-    if let ForgeEventPayload::MergeQueueChangedNative(q_event) = &landing_pkg.event_batch.events[2].payload {
+    if let ForgeEventPayload::MergeQueueChangedNative(q_event) =
+        &landing_pkg.event_batch.events[2].payload
+    {
         assert_eq!(q_event.queue_number, queue_num);
-        if let QueueAction::BatchLanded { batch_id: b_id, entries, target_tip } = &q_event.action {
+        if let QueueAction::BatchLanded {
+            batch_id: b_id,
+            entries,
+            target_tip,
+        } = &q_event.action
+        {
             assert_eq!(b_id, plan.batch_id.digest());
             assert_eq!(entries, &[pr1, pr2]);
             assert_eq!(*target_tip, spec_commit2);
@@ -379,7 +415,9 @@ fn test_single_decision_landing_and_per_pr_atomicity() {
     assert!(!roots.ref_intent_root.bytes().is_empty());
     assert!(!roots.forge_event_batch_root.bytes().is_empty());
 
-    let rcr = landing_pkg.seal_into_record(&CryptoBodyIdentity, dummy_record_frame()).unwrap();
+    let rcr = landing_pkg
+        .seal_into_record(&CryptoBodyIdentity, dummy_record_frame())
+        .unwrap();
     assert_eq!(rcr.forge_event_batch_root, roots.forge_event_batch_root);
 }
 
@@ -448,8 +486,12 @@ fn test_canonical_queue_events_codec_roundtrip() {
         };
 
         let encoded = encode_body(&event).expect("encode queue event");
-        let decoded: ForgeEvent = decode_body(&encoded, DecodeLimits::DEFAULT).expect("decode queue event");
-        assert_eq!(event, decoded, "event at version {version} must roundtrip identically");
+        let decoded: ForgeEvent =
+            decode_body(&encoded, DecodeLimits::DEFAULT).expect("decode queue event");
+        assert_eq!(
+            event, decoded,
+            "event at version {version} must roundtrip identically"
+        );
     }
 }
 
@@ -464,7 +506,6 @@ fn test_merge_queue_snapshot_deterministic_ordering_and_lifecycle() {
 
     let alice = principal(0x01);
     let bob = principal(0x02);
-
 
     let pr10 = PullRequestNumber::try_new(10).unwrap();
     let pr20 = PullRequestNumber::try_new(20).unwrap();
@@ -556,7 +597,8 @@ fn test_merge_queue_snapshot_deterministic_ordering_and_lifecycle() {
         })
         .unwrap();
 
-    let raw_order: Vec<PullRequestNumber> = snapshot.entries.iter().map(|e| e.pull_request).collect();
+    let raw_order: Vec<PullRequestNumber> =
+        snapshot.entries.iter().map(|e| e.pull_request).collect();
     assert_eq!(raw_order, vec![pr30, pr20, pr10]);
 
     // Batch formed with PR 30 and PR 20
@@ -579,7 +621,10 @@ fn test_merge_queue_snapshot_deterministic_ordering_and_lifecycle() {
             }),
         })
         .unwrap();
-    assert_eq!(snapshot.active_batch, Some(QueueBatchId::from_digest(dummy_digest)));
+    assert_eq!(
+        snapshot.active_batch,
+        Some(QueueBatchId::from_digest(dummy_digest))
+    );
 
     // Batch landed
     let v6 = v5.next().unwrap();

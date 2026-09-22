@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_git_object::{
-    AcceptanceProfile, LooseObject, ObjectType, ParseLimits, ParsedObject,
-    TagTargetType, parse_annotated_tag, parse_object_body,
+    AcceptanceProfile, LooseObject, ObjectType, ParseLimits, ParsedObject, TagTargetType,
+    parse_annotated_tag, parse_object_body,
 };
 use fgit_pack::Deadline;
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefusalCode};
@@ -46,8 +46,10 @@ pub(super) struct ValidatedImport {
 /// No fabric write occurs here, even when a late dependency is unavailable.
 #[cfg(test)]
 pub(super) fn validate(
-    roots: impl IntoIterator<Item = GitOid>, format: GitHashAlgorithm,
-    parse_limits: &ParseLimits, limits: Limits,
+    roots: impl IntoIterator<Item = GitOid>,
+    format: GitHashAlgorithm,
+    parse_limits: &ParseLimits,
+    limits: Limits,
     load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
 ) -> Result<ValidatedImport, LooseGitImportRefusal> {
     let mut live = || true;
@@ -59,13 +61,21 @@ pub(super) fn validate(
 /// repository import must retain the namespace constraint of every direct ref.
 #[cfg(test)]
 pub(super) fn validate_controlled(
-    roots: impl IntoIterator<Item = GitOid>, format: GitHashAlgorithm,
-    parse_limits: &ParseLimits, limits: Limits,
+    roots: impl IntoIterator<Item = GitOid>,
+    format: GitHashAlgorithm,
+    parse_limits: &ParseLimits,
+    limits: Limits,
     load: impl FnMut(GitOid) -> Result<LooseObject, LooseGitImportRefusal>,
     control: &ImportControl<'_>,
 ) -> Result<ValidatedImport, LooseGitImportRefusal> {
-    validate_typed_controlled(roots.into_iter().map(|id| (id, None)),
-        format, parse_limits, limits, load, control)
+    validate_typed_controlled(
+        roots.into_iter().map(|id| (id, None)),
+        format,
+        parse_limits,
+        limits,
+        load,
+        control,
+    )
 }
 
 pub(super) fn validate_typed_controlled(
@@ -78,17 +88,27 @@ pub(super) fn validate_typed_controlled(
 ) -> Result<ValidatedImport, LooseGitImportRefusal> {
     control.checkpoint()?;
     let maximum = Limits::default();
-    if limits.objects > maximum.objects || limits.edges > maximum.edges
+    if limits.objects > maximum.objects
+        || limits.edges > maximum.edges
         || limits.bytes > maximum.bytes
     {
-        return Err(LooseGitImportRefusal::ObjectLimitExceeded { limit: maximum.objects });
+        return Err(LooseGitImportRefusal::ObjectLimitExceeded {
+            limit: maximum.objects,
+        });
     }
     let mut required = BTreeMap::new();
     let mut pending = BTreeSet::new();
     let mut objects = BTreeMap::<GitOid, LooseObject>::new();
     for (root, kind) in roots {
         control.checkpoint()?;
-        enqueue(root, kind, format, limits.objects, &mut required, &mut pending)?;
+        enqueue(
+            root,
+            kind,
+            format,
+            limits.objects,
+            &mut required,
+            &mut pending,
+        )?;
     }
     let mut total_bytes = 0_u64;
     let mut edges_left = limits.edges;
@@ -99,34 +119,54 @@ pub(super) fn validate_typed_controlled(
         let observed = fgit_crypto::git_object_id(format, object.object_type, &object.body);
         control.checkpoint()?;
         if observed != identity {
-            return Err(LooseGitImportRefusal::ObjectIdentityMismatch { expected: identity, observed });
+            return Err(LooseGitImportRefusal::ObjectIdentityMismatch {
+                expected: identity,
+                observed,
+            });
         }
         if let Some(Some(expected)) = required.get(&identity) {
             require_kind(identity, *expected, object.object_type)?;
         }
-        total_bytes = total_bytes.saturating_add(u64::try_from(object.body.len()).unwrap_or(u64::MAX));
+        total_bytes =
+            total_bytes.saturating_add(u64::try_from(object.body.len()).unwrap_or(u64::MAX));
         if total_bytes > limits.bytes {
             return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
-                limit: limits.bytes, observed: total_bytes,
+                limit: limits.bytes,
+                observed: total_bytes,
             });
         }
-        let parsed = parse_object_body(object.object_type, &object.body,
-            AcceptanceProfile::GitCompatibleImport, parse_limits)
-            .map_err(|error| LooseGitImportRefusal::ObjectStructure(Box::new(error)))?;
+        let parsed = parse_object_body(
+            object.object_type,
+            &object.body,
+            AcceptanceProfile::GitCompatibleImport,
+            parse_limits,
+        )
+        .map_err(|error| LooseGitImportRefusal::ObjectStructure(Box::new(error)))?;
         control.checkpoint()?;
         // Retain the established import refusal vocabulary for these cases.
         match &parsed {
             ParsedObject::Commit(commit) if commit.tree_reference().is_none() => {
                 return Err(LooseGitImportRefusal::CommitTreeMissing(identity));
             }
-            ParsedObject::Tag(tag) if tag.headers().iter().filter(|h| h.name == b"object").count() != 1 => {
+            ParsedObject::Tag(tag)
+                if tag.headers().iter().filter(|h| h.name == b"object").count() != 1 =>
+            {
                 return Err(LooseGitImportRefusal::TagObjectMissing(identity));
             }
             _ => {}
         }
-        let edges = references(format, &parsed, &object.body, parse_limits,
-            &mut edges_left, &mut || control.is_live());
-        let edges = control.after(edges, |code| LooseGitImportRefusal::ObjectGraph { identity, code })?;
+        let edges = references(
+            format,
+            &parsed,
+            &object.body,
+            parse_limits,
+            &mut edges_left,
+            &mut || control.is_live(),
+        );
+        let edges = control.after(edges, |code| LooseGitImportRefusal::ObjectGraph {
+            identity,
+            code,
+        })?;
         // Discard parsed copies before retaining the exact original body.
         drop(parsed);
         objects.insert(identity, object);
@@ -138,25 +178,44 @@ pub(super) fn validate_typed_controlled(
             if let Some(known) = objects.get(&child) {
                 require_kind(child, kind, known.object_type)?;
             }
-            enqueue(child, Some(kind), format, limits.objects, &mut required, &mut pending)?;
+            enqueue(
+                child,
+                Some(kind),
+                format,
+                limits.objects,
+                &mut required,
+                &mut pending,
+            )?;
         }
     }
     control.checkpoint()?;
-    Ok(ValidatedImport { objects, total_bytes })
+    Ok(ValidatedImport {
+        objects,
+        total_bytes,
+    })
 }
 
 fn enqueue(
-    id: GitOid, kind: Option<ObjectType>, format: GitHashAlgorithm, limit: usize,
-    required: &mut BTreeMap<GitOid, Option<ObjectType>>, pending: &mut BTreeSet<GitOid>,
+    id: GitOid,
+    kind: Option<ObjectType>,
+    format: GitHashAlgorithm,
+    limit: usize,
+    required: &mut BTreeMap<GitOid, Option<ObjectType>>,
+    pending: &mut BTreeSet<GitOid>,
 ) -> Result<(), LooseGitImportRefusal> {
     if id.is_zero() || id.algorithm() != format {
-        return Err(LooseGitImportRefusal::ObjectGraph { identity: id, code: RefusalCode::ObjectHeaderInvalid });
+        return Err(LooseGitImportRefusal::ObjectGraph {
+            identity: id,
+            code: RefusalCode::ObjectHeaderInvalid,
+        });
     }
     if let Some(previous) = required.get_mut(&id) {
         if let (Some(first), Some(next)) = (*previous, kind) {
             require_kind(id, first, next)?;
         }
-        if previous.is_none() { *previous = kind; }
+        if previous.is_none() {
+            *previous = kind;
+        }
         return Ok(());
     }
     // Charge at enqueue: a large frontier cannot allocate beyond the object
@@ -169,9 +228,18 @@ fn enqueue(
     Ok(())
 }
 
-fn require_kind(id: GitOid, expected: ObjectType, actual: ObjectType) -> Result<(), LooseGitImportRefusal> {
-    if expected == actual { Ok(()) } else {
-        Err(LooseGitImportRefusal::ObjectGraph { identity: id, code: RefusalCode::EvidenceInvalid })
+fn require_kind(
+    id: GitOid,
+    expected: ObjectType,
+    actual: ObjectType,
+) -> Result<(), LooseGitImportRefusal> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(LooseGitImportRefusal::ObjectGraph {
+            identity: id,
+            code: RefusalCode::EvidenceInvalid,
+        })
     }
 }
 
@@ -179,8 +247,12 @@ fn require_kind(id: GitOid, expected: ObjectType, actual: ObjectType) -> Result<
 /// The original parser and typed annotated-tag view own all byte decoding.
 /// A caller must supply the parsed view of the same native-verified `body`.
 pub(crate) fn references(
-    format: GitHashAlgorithm, parsed: &ParsedObject, body: &[u8],
-    limits: &ParseLimits, edges_left: &mut usize, deadline: &mut impl Deadline,
+    format: GitHashAlgorithm,
+    parsed: &ParsedObject,
+    body: &[u8],
+    limits: &ParseLimits,
+    edges_left: &mut usize,
+    deadline: &mut impl Deadline,
 ) -> Result<Vec<(GitOid, ObjectType)>, RefusalCode> {
     let mut edges = Vec::new();
     checkpoint(deadline)?;
@@ -190,7 +262,8 @@ pub(crate) fn references(
             for entry in entries {
                 checkpoint(deadline)?;
                 charge_edge(edges_left)?;
-                let mode = std::str::from_utf8(&entry.mode).ok()
+                let mode = std::str::from_utf8(&entry.mode)
+                    .ok()
                     .and_then(|mode| u32::from_str_radix(mode, 8).ok())
                     .ok_or(RefusalCode::ObjectHeaderInvalid)?;
                 let kind = match mode & 0o170_000 {
@@ -203,9 +276,19 @@ pub(crate) fn references(
                 };
                 let id = match format {
                     GitHashAlgorithm::Sha1 => GitOid::from(GitOidSha1::from_bytes(
-                        entry.object_id.as_slice().try_into().map_err(|_| RefusalCode::ObjectHeaderInvalid)?)),
+                        entry
+                            .object_id
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| RefusalCode::ObjectHeaderInvalid)?,
+                    )),
                     GitHashAlgorithm::Sha256 => GitOid::from(GitOidSha256::from_bytes(
-                        entry.object_id.as_slice().try_into().map_err(|_| RefusalCode::ObjectHeaderInvalid)?)),
+                        entry
+                            .object_id
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| RefusalCode::ObjectHeaderInvalid)?,
+                    )),
                 };
                 push(&mut edges, id, kind)?;
             }
@@ -219,20 +302,27 @@ pub(crate) fn references(
                     ObjectType::Tree
                 } else if header.name == b"parent" {
                     ObjectType::Commit
-                } else { continue; };
+                } else {
+                    continue;
+                };
                 if !header.continuations.is_empty() || trees > 1 {
                     return Err(RefusalCode::ObjectHeaderInvalid);
                 }
                 charge_edge(edges_left)?;
-                let text = std::str::from_utf8(&header.value).map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
-                let id = GitOid::from_hex(format, text).map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
+                let text = std::str::from_utf8(&header.value)
+                    .map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
+                let id =
+                    GitOid::from_hex(format, text).map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
                 push(&mut edges, id, kind)?;
             }
-            if trees != 1 { return Err(RefusalCode::ObjectHeaderInvalid); }
+            if trees != 1 {
+                return Err(RefusalCode::ObjectHeaderInvalid);
+            }
         }
         ParsedObject::Tag(_) => {
-            let tag = parse_annotated_tag(body, format, AcceptanceProfile::GitCompatibleImport, limits)
-                .map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
+            let tag =
+                parse_annotated_tag(body, format, AcceptanceProfile::GitCompatibleImport, limits)
+                    .map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
             checkpoint(deadline)?;
             let target = tag.target();
             let kind = match target.object_type {
@@ -250,15 +340,29 @@ pub(crate) fn references(
 }
 
 fn checkpoint(deadline: &mut impl Deadline) -> Result<(), RefusalCode> {
-    if deadline.checkpoint() { Ok(()) } else { Err(RefusalCode::CancellationInProgress) }
+    if deadline.checkpoint() {
+        Ok(())
+    } else {
+        Err(RefusalCode::CancellationInProgress)
+    }
 }
 fn charge_edge(remaining: &mut usize) -> Result<(), RefusalCode> {
-    *remaining = remaining.checked_sub(1).ok_or(RefusalCode::ResourceBudgetExceeded)?;
+    *remaining = remaining
+        .checked_sub(1)
+        .ok_or(RefusalCode::ResourceBudgetExceeded)?;
     Ok(())
 }
-fn push(edges: &mut Vec<(GitOid, ObjectType)>, id: GitOid, kind: ObjectType) -> Result<(), RefusalCode> {
-    if id.is_zero() { return Err(RefusalCode::ObjectHeaderInvalid); }
-    edges.try_reserve(1).map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
+fn push(
+    edges: &mut Vec<(GitOid, ObjectType)>,
+    id: GitOid,
+    kind: ObjectType,
+) -> Result<(), RefusalCode> {
+    if id.is_zero() {
+        return Err(RefusalCode::ObjectHeaderInvalid);
+    }
+    edges
+        .try_reserve(1)
+        .map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
     edges.push((id, kind));
     Ok(())
 }

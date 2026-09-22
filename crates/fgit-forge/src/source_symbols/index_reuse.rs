@@ -58,7 +58,12 @@ impl ReuseVerifier {
                 pending.insert(doc.blob, doc.clone());
             }
         }
-        Ok(Self { source: manifest.source().clone(), pending, verified: BTreeMap::new(), names: BTreeMap::new() })
+        Ok(Self {
+            source: manifest.source().clone(),
+            pending,
+            verified: BTreeMap::new(),
+            names: BTreeMap::new(),
+        })
     }
 
     /// The next exact payload to read, in deterministic native-object order.
@@ -70,7 +75,9 @@ impl ReuseVerifier {
     /// and counters. Do not remove responsibility on an error or cancellation.
     pub fn verify_next(&mut self, raw: &[u8], cancelled: &dyn Fn() -> bool) -> Result<(), Error> {
         check(cancelled)?;
-        let doc = self.next_document().ok_or(Error::Invalid("unexpected reuse table"))?;
+        let doc = self
+            .next_document()
+            .ok_or(Error::Invalid("unexpected reuse table"))?;
         let table = decode_table(doc, raw, cancelled)?;
         let names = directory::summarize(&table, cancelled)?;
         check(cancelled)?;
@@ -87,73 +94,138 @@ impl ReuseVerifier {
         if !self.pending.is_empty() {
             return Err(Error::Invalid("unverified reuse tables"));
         }
-        Ok(VerifiedReuse { source: self.source, documents: self.verified, names: self.names })
+        Ok(VerifiedReuse {
+            source: self.source,
+            documents: self.verified,
+            names: self.names,
+        })
     }
 }
 
 impl VerifiedReuse {
-    pub fn source(&self) -> &Source { &self.source }
+    pub fn source(&self) -> &Source {
+        &self.source
+    }
 
     pub(super) fn document(&self, blob: &GitOid) -> Option<&Document> {
         self.documents.get(blob)
     }
     pub(super) fn names(&self, blob: &GitOid) -> Result<&directory::Names, Error> {
-        self.names.get(blob).ok_or(Error::Invalid("missing verified names"))
+        self.names
+            .get(blob)
+            .ok_or(Error::Invalid("missing verified names"))
     }
 }
 
 pub(super) fn same_namespace(left: &Source, right: &Source) -> bool {
-    left.tenant == right.tenant && left.repository == right.repository
-        && left.incarnation == right.incarnation && left.format == right.format
+    left.tenant == right.tenant
+        && left.repository == right.repository
+        && left.incarnation == right.incarnation
+        && left.format == right.format
         && left.reference == right.reference
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fgit_crypto::{IdentityDomain, internal_algorithm_id, internal_digest_value, internal_object_id};
+    use fgit_crypto::{
+        IdentityDomain, internal_algorithm_id, internal_digest_value, internal_object_id,
+    };
     use fgit_types::{CodecVersion, SchemaId};
 
     fn source(format: Format) -> Source {
-        let id = |domain, family| internal_object_id(domain,
-            SchemaId::new(SchemaFamily::from_static(family), 1, 0), CodecVersion::new(1, 0), b"reuse-test");
+        let id = |domain, family| {
+            internal_object_id(
+                domain,
+                SchemaId::new(SchemaFamily::from_static(family), 1, 0),
+                CodecVersion::new(1, 0),
+                b"reuse-test",
+            )
+        };
         Source {
-            tenant: TenantId::from_bytes([1; 16]), repository: RepositoryId::from_bytes([2; 16]),
-            incarnation: RepositoryIncarnationId::from_bytes([3; 16]), format,
+            tenant: TenantId::from_bytes([1; 16]),
+            repository: RepositoryId::from_bytes([2; 16]),
+            incarnation: RepositoryIncarnationId::from_bytes([3; 16]),
+            format,
             reference: RefName::try_new(b"refs/heads/main").unwrap(),
-            head: RepositoryAuthorityHeadId::from_internal_object_id(
-                id(IdentityDomain::RepositoryAuthorityHead, "repository-authority-head")).unwrap(),
-            rcr: RepositoryCommitId::from_internal_object_id(
-                id(IdentityDomain::RepositoryCommitRecord, "repository-commit-record")).unwrap(),
-            forge: Digest::new(internal_algorithm_id(IdentityDomain::MerkleLeaf),
-                internal_digest_value(IdentityDomain::MerkleLeaf,
-                    SchemaId::new(SchemaFamily::from_static("test"), 1, 0), b"forge")),
+            head: RepositoryAuthorityHeadId::from_internal_object_id(id(
+                IdentityDomain::RepositoryAuthorityHead,
+                "repository-authority-head",
+            ))
+            .unwrap(),
+            rcr: RepositoryCommitId::from_internal_object_id(id(
+                IdentityDomain::RepositoryCommitRecord,
+                "repository-commit-record",
+            ))
+            .unwrap(),
+            forge: Digest::new(
+                internal_algorithm_id(IdentityDomain::MerkleLeaf),
+                internal_digest_value(
+                    IdentityDomain::MerkleLeaf,
+                    SchemaId::new(SchemaFamily::from_static("test"), 1, 0),
+                    b"forge",
+                ),
+            ),
             commit: git_object_id(format, GitObjectKind::Commit, b"commit"),
             tree: git_object_id(format, GitObjectKind::Tree, b"tree"),
         }
     }
 
     fn document(format: Format, path: &[u8], bytes: &[u8]) -> (Document, Payload) {
-        let table = table::Table::build(bytes, &mut engine::Budget::new(engine::MAX_WORK).unwrap(), &|| false).unwrap();
+        let table = table::Table::build(
+            bytes,
+            &mut engine::Budget::new(engine::MAX_WORK).unwrap(),
+            &|| false,
+        )
+        .unwrap();
         let blob = git_object_id(format, GitObjectKind::Blob, bytes);
         let payload = table_payload(blob, &table, &|| false).unwrap();
-        (Document { path: path.to_vec(), blob, root: payload.root,
-            encoded_bytes: payload.bytes.len(), source_bytes: bytes.len(), declarations: table.rows().len(),
-            macros: table.macros, attributes: table.attributes }, payload)
+        (
+            Document {
+                path: path.to_vec(),
+                blob,
+                root: payload.root,
+                encoded_bytes: payload.bytes.len(),
+                source_bytes: bytes.len(),
+                declarations: table.rows().len(),
+                macros: table.macros,
+                attributes: table.attributes,
+            },
+            payload,
+        )
     }
 
     fn manifest(format: Format) -> (Manifest, Payload) {
         let (doc, payload) = document(format, b"old.rs", b"pub struct Example;\n");
-        (Manifest { source: source(format), documents: vec![doc], unsupported: 0, non_regular: 0 }, payload)
+        (
+            Manifest {
+                source: source(format),
+                documents: vec![doc],
+                unsupported: 0,
+                non_regular: 0,
+            },
+            payload,
+        )
     }
 
     #[test]
     fn incomplete_reuse_never_becomes_an_empty_success() {
         let (manifest, _) = manifest(Format::Sha1);
         let verifier = ReuseVerifier::new(&manifest, &|| false).unwrap();
-        assert!(matches!(verifier.finish(&|| false), Err(Error::Invalid("unverified reuse tables"))));
-        let empty = Manifest { documents: vec![], ..manifest };
-        assert!(ReuseVerifier::new(&empty, &|| false).unwrap().finish(&|| false).is_ok());
+        assert!(matches!(
+            verifier.finish(&|| false),
+            Err(Error::Invalid("unverified reuse tables"))
+        ));
+        let empty = Manifest {
+            documents: vec![],
+            ..manifest
+        };
+        assert!(
+            ReuseVerifier::new(&empty, &|| false)
+                .unwrap()
+                .finish(&|| false)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -173,7 +245,10 @@ mod tests {
             assert!(verifier.next_document().is_none());
             assert!(verifier.verify_next(&payload.bytes, &|| false).is_err());
             let reuse = verifier.finish(&|| false).unwrap();
-            assert_eq!(reuse.document(&manifest.documents[0].blob), Some(&manifest.documents[0]));
+            assert_eq!(
+                reuse.document(&manifest.documents[0].blob),
+                Some(&manifest.documents[0])
+            );
         }
     }
 
@@ -189,12 +264,21 @@ mod tests {
             assert!(verifier.next_document().is_none());
             let reuse = verifier.finish(&|| false).unwrap();
             let cached = reuse.document(&manifest.documents[0].blob).unwrap();
-            let (rebuilt, rebuilt_payload) = document(format, b"renamed.rs", b"pub struct Example;\n");
+            let (rebuilt, rebuilt_payload) =
+                document(format, b"renamed.rs", b"pub struct Example;\n");
             let mut renamed = cached.clone();
             renamed.path = b"renamed.rs".to_vec();
             assert_eq!(renamed, rebuilt);
             assert_eq!(payload.bytes, rebuilt_payload.bytes);
-            assert!(reuse.document(&git_object_id(format, GitObjectKind::Blob, b"fn Changed() {}\n")).is_none());
+            assert!(
+                reuse
+                    .document(&git_object_id(
+                        format,
+                        GitObjectKind::Blob,
+                        b"fn Changed() {}\n"
+                    ))
+                    .is_none()
+            );
         }
     }
 
@@ -206,8 +290,10 @@ mod tests {
         duplicate.path = b"z.rs".to_vec();
         duplicate.root = other.root;
         manifest.documents.push(duplicate);
-        assert!(matches!(ReuseVerifier::new(&manifest, &|| false),
-            Err(Error::Invalid("conflicting tables for native blob"))));
+        assert!(matches!(
+            ReuseVerifier::new(&manifest, &|| false),
+            Err(Error::Invalid("conflicting tables for native blob"))
+        ));
     }
 
     #[test]

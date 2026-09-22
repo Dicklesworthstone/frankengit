@@ -28,10 +28,9 @@
 //!    - Recursion depth bound enforced hierarchically across delegation tiers
 
 use fgit_agent::{
-    AgentInstanceId, AttenuationRequest, AuthorityBasisRef, Caveat, ClassSet,
-    DelegatedCapability, DelegationLimits, DisclosurePolicy, IntentRun, LogicalTime,
-    OperationClass, RunId, Selector, SubIntent, SubIntentFanOutTracker,
-    SubIntentParams, SubIntentRefusal,
+    AgentInstanceId, AttenuationRequest, AuthorityBasisRef, Caveat, ClassSet, DelegatedCapability,
+    DelegationLimits, DisclosurePolicy, IntentRun, LogicalTime, OperationClass, RunId, Selector,
+    SubIntent, SubIntentFanOutTracker, SubIntentParams, SubIntentRefusal,
     capability::{Capability, CapabilityId, ChainRefused, SealedCapability},
 };
 use fgit_resource::{Grade, ResourceVector};
@@ -324,14 +323,7 @@ fn quota_amplification_is_refused_while_contained_quota_is_permitted() {
     );
 
     // Permitted twin: budget fits within parent capability
-    let permitted = make_valid_sub_intent(
-        &fixture,
-        303,
-        quota(10_000, 5_000),
-        80,
-        vec![],
-        1,
-    );
+    let permitted = make_valid_sub_intent(&fixture, 303, quota(10_000, 5_000), 80, vec![], 1);
     tracker
         .admit_sub_intent(&permitted, &fixture.parent_run, KEY)
         .expect("contained quota is permitted");
@@ -353,14 +345,7 @@ fn quota_amplification_is_refused_while_contained_quota_is_permitted() {
     // When budget in SubIntent exceeds unallocated budget
     // Parent initial is 50,000 bytes; child 303 took 10,000, leaving 40,000 bytes unallocated.
     // A child with a valid 45,000-byte capability asks for 45,000 bytes, exceeding available!
-    let overbudget = make_valid_sub_intent(
-        &fixture,
-        304,
-        quota(45_000, 20_000),
-        80,
-        vec![],
-        1,
-    );
+    let overbudget = make_valid_sub_intent(&fixture, 304, quota(45_000, 20_000), 80, vec![], 1);
     let err = tracker
         .admit_sub_intent(&overbudget, &fixture.parent_run, KEY)
         .expect_err("over-budget must be refused");
@@ -384,27 +369,14 @@ fn deadline_extension_is_refused_while_contained_deadline_is_permitted() {
     );
 
     // Permitted twin: deadline 80 <= parent expiry 100
-    let permitted = make_valid_sub_intent(
-        &fixture,
-        305,
-        quota(1_000, 500),
-        80,
-        vec![],
-        1,
-    );
+    let permitted = make_valid_sub_intent(&fixture, 305, quota(1_000, 500), 80, vec![], 1);
     tracker
         .admit_sub_intent(&permitted, &fixture.parent_run, KEY)
         .expect("deadline within parent expiry is permitted");
 
     // Forbidden case: deadline 120 > parent expiry 100
     // The capability is valid up to 90, but the sub-intent asks for deadline 120 past parent run expiry 100.
-    let child_cap = make_child_delegated_cap(
-        &fixture,
-        3060,
-        quota(1_000, 500),
-        90,
-        vec![],
-    );
+    let child_cap = make_child_delegated_cap(&fixture, 3060, quota(1_000, 500), 90, vec![]);
     let extended = SubIntent::build(SubIntentParams {
         child_run_id: RunId::new(306),
         parent_run_id: fixture.parent_run.run_id(),
@@ -476,14 +448,7 @@ fn dropping_caveats_is_refused_while_preserving_is_permitted() {
     );
 
     // Permitted twin: sub-intent includes the mandatory caveat
-    let permitted = make_valid_sub_intent(
-        &fixture,
-        307,
-        quota(1_000, 500),
-        80,
-        vec![],
-        1,
-    );
+    let permitted = make_valid_sub_intent(&fixture, 307, quota(1_000, 500), 80, vec![], 1);
     let mut new_caveats = permitted.caveats().to_vec();
     new_caveats.push(mandatory_caveat.clone());
     let permitted_params = SubIntentParams {
@@ -508,14 +473,7 @@ fn dropping_caveats_is_refused_while_preserving_is_permitted() {
         .expect("preserving parent caveat is permitted");
 
     // Forbidden case: sub-intent drops the mandatory caveat
-    let dropped = make_valid_sub_intent(
-        &fixture,
-        308,
-        quota(1_000, 500),
-        80,
-        vec![],
-        1,
-    );
+    let dropped = make_valid_sub_intent(&fixture, 308, quota(1_000, 500), 80, vec![], 1);
     let err = tracker
         .admit_sub_intent(&dropped, &fixture.parent_run, KEY)
         .expect_err("dropping parent caveat must be refused");
@@ -551,11 +509,7 @@ fn missing_intermediate_capability_in_chain_is_refused() {
         fixture.sealed_root.clone(),
         broken_sub.attenuated_capabilities()[0].chain()[2].clone(), // Child
     ];
-    let broken_delegated = DelegatedCapability::new(
-        fixture.parent_cap.id(),
-        broken_chain,
-        vec![],
-    );
+    let broken_delegated = DelegatedCapability::new(fixture.parent_cap.id(), broken_chain, vec![]);
     broken_sub.attenuated_capabilities_mut()[0] = broken_delegated;
 
     let err = tracker
@@ -603,11 +557,7 @@ fn forged_intermediate_link_authenticator_is_refused() {
         forged_parent,
         tampered_sub.attenuated_capabilities()[0].chain()[2].clone(),
     ];
-    let forged_delegated = DelegatedCapability::new(
-        fixture.parent_cap.id(),
-        forged_chain,
-        vec![],
-    );
+    let forged_delegated = DelegatedCapability::new(fixture.parent_cap.id(), forged_chain, vec![]);
     tampered_sub.attenuated_capabilities_mut()[0] = forged_delegated;
 
     let err = tracker
@@ -653,11 +603,7 @@ fn forged_leaf_capability_body_is_refused() {
         fixture.sealed_parent.clone(),
         forged_leaf,
     ];
-    let forged_delegated = DelegatedCapability::new(
-        fixture.parent_cap.id(),
-        forged_chain,
-        vec![],
-    );
+    let forged_delegated = DelegatedCapability::new(fixture.parent_cap.id(), forged_chain, vec![]);
     tampered_sub.attenuated_capabilities_mut()[0] = forged_delegated;
 
     let err = tracker
@@ -702,11 +648,7 @@ fn swapped_unrelated_root_is_refused() {
         fixture.sealed_parent.clone(),
         sub.attenuated_capabilities()[0].chain()[2].clone(),
     ];
-    let delegated = DelegatedCapability::new(
-        fixture.parent_cap.id(),
-        swapped_chain,
-        vec![],
-    );
+    let delegated = DelegatedCapability::new(fixture.parent_cap.id(), swapped_chain, vec![]);
     sub.attenuated_capabilities_mut()[0] = delegated;
 
     let err = tracker
@@ -884,14 +826,7 @@ fn fan_out_bound_enforced_with_typed_refusal_at_limit() {
 
     // Admit up to limit (3 children)
     for i in 1..=3 {
-        let child = make_valid_sub_intent(
-            &fixture,
-            600 + i,
-            quota(1_000, 500),
-            80,
-            vec![],
-            1,
-        );
+        let child = make_valid_sub_intent(&fixture, 600 + i, quota(1_000, 500), 80, vec![], 1);
         tracker
             .admit_sub_intent(&child, &fixture.parent_run, KEY)
             .expect("admitting within fan-out limit");
@@ -899,14 +834,7 @@ fn fan_out_bound_enforced_with_typed_refusal_at_limit() {
     assert_eq!(tracker.active_children_count(), 3);
 
     // Attempt child #4: exceeds fan-out limit 3
-    let child_overflow = make_valid_sub_intent(
-        &fixture,
-        604,
-        quota(1_000, 500),
-        80,
-        vec![],
-        1,
-    );
+    let child_overflow = make_valid_sub_intent(&fixture, 604, quota(1_000, 500), 80, vec![], 1);
     let err = tracker
         .admit_sub_intent(&child_overflow, &fixture.parent_run, KEY)
         .expect_err("fan-out overflow must be refused");
@@ -951,14 +879,7 @@ fn recursion_depth_bound_enforced_hierarchically() {
     );
 
     // Depth 1: Child under Root -> Permitted
-    let child_sub = make_valid_sub_intent(
-        &fixture,
-        701,
-        quota(20_000, 10_000),
-        90,
-        vec![],
-        1,
-    );
+    let child_sub = make_valid_sub_intent(&fixture, 701, quota(20_000, 10_000), 90, vec![], 1);
     tracker_depth_0
         .admit_sub_intent(&child_sub, &fixture.parent_run, KEY)
         .expect("depth 1 permitted");
@@ -972,13 +893,7 @@ fn recursion_depth_bound_enforced_hierarchically() {
     // Depth 2: Grandchild under Child -> Permitted (since max_depth is 2)
     // Create child run for depth 1
     let child_run = parent_run(701, 90, quota(20_000, 10_000));
-    let grandchild_cap = make_child_delegated_cap(
-        &fixture,
-        7020,
-        quota(5_000, 2_000),
-        80,
-        vec![],
-    );
+    let grandchild_cap = make_child_delegated_cap(&fixture, 7020, quota(5_000, 2_000), 80, vec![]);
     let grandchild_sub = SubIntent::build(SubIntentParams {
         child_run_id: RunId::new(702),
         parent_run_id: child_run.run_id(),

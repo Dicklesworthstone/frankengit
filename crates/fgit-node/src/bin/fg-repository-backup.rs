@@ -24,7 +24,10 @@ fn main() -> ExitCode {
     match repository::run(&args, &mut std::io::stdout().lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{{\"type\":\"repository_backup_error\",\"schema_version\":1,\"complete\":false,\"error\":{}}}", quote(&error));
+            eprintln!(
+                "{{\"type\":\"repository_backup_error\",\"schema_version\":1,\"complete\":false,\"error\":{}}}",
+                quote(&error)
+            );
             ExitCode::from(2)
         }
     }
@@ -35,15 +38,21 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     hash.update(bytes);
     hash.finish()
 }
-fn hex(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 fn quote(text: &str) -> String {
     let mut out = String::from("\"");
     for c in text.chars() {
         match c {
-            '"' => out.push_str("\\\""), '\\' => out.push_str("\\\\"),
-            c if c.is_control() || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}'
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control()
+                || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}'
                 | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
-                out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            {
+                out.push_str(&format!("\\u{:04x}", u32::from(c)))
+            }
             c => out.push(c),
         }
     }
@@ -51,12 +60,16 @@ fn quote(text: &str) -> String {
     out
 }
 fn emit(output: &mut impl Write, text: &str) -> Result<(), String> {
-    writeln!(output, "{text}").and_then(|()| output.flush()).map_err(|e| e.to_string())
+    writeln!(output, "{text}")
+        .and_then(|()| output.flush())
+        .map_err(|e| e.to_string())
 }
 fn regular(path: &Path) -> Result<u64, String> {
     let metadata = fs::symlink_metadata(path).map_err(|e| format!("cannot inspect input: {e}"))?;
     if !metadata.is_file() || metadata.len() == 0 {
-        return Err("input must be an existing nonempty regular file, not a symlink or device".into());
+        return Err(
+            "input must be an existing nonempty regular file, not a symlink or device".into(),
+        );
     }
     Ok(metadata.len())
 }
@@ -68,12 +81,18 @@ fn require_absent(path: &Path) -> Result<(), String> {
     }
 }
 fn parent(path: &Path) -> &Path {
-    path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> { File::open(path)?.sync_all() }
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
+}
 #[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> { Ok(()) }
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
 fn context(runtime: &NodeRuntime) -> Cx {
     let cx = Cx::new();
     cx.set_native_cx(runtime.request_cx(BudgetClass::Database));
@@ -81,51 +100,85 @@ fn context(runtime: &NodeRuntime) -> Cx {
 }
 /// Top-level host adapter. The backend owns all SQL, transactions and tokens;
 /// cleanup uses its own finite context even after request budget exhaustion.
-fn with_store<T>(path: &Path, instance: StoreInstanceId, existing: bool,
+fn with_store<T>(
+    path: &Path,
+    instance: StoreInstanceId,
+    existing: bool,
     operation: impl FnOnce(&NodeRuntime, &FsqliteAuthorityStore, &Cx) -> Result<T, String>,
 ) -> Result<T, String> {
     let path = path.to_str().ok_or("database path is not UTF-8")?;
-    let runtime = RuntimeProfile::production(2).build().map_err(|e| e.to_string())?;
+    let runtime = RuntimeProfile::production(2)
+        .build()
+        .map_err(|e| e.to_string())?;
     let cx = context(&runtime);
     let opened = if existing {
-        runtime.block_on(FsqliteAuthorityStore::open_portable_source(&cx, path, AuthorityLimits::default()))
+        runtime
+            .block_on(FsqliteAuthorityStore::open_portable_source(
+                &cx,
+                path,
+                AuthorityLimits::default(),
+            ))
             .map_err(|error| error.to_string())
     } else {
-        runtime.block_on(FsqliteAuthorityStore::open(&cx, path, instance, AuthorityLimits::default()))
+        runtime
+            .block_on(FsqliteAuthorityStore::open(
+                &cx,
+                path,
+                instance,
+                AuthorityLimits::default(),
+            ))
             .map_err(|error| error.to_string())
     };
     let result = match opened {
         Ok(mut store) => {
             let result = operation(&runtime, &store, &cx);
             let cleanup = context(&runtime);
-            let closed = runtime.block_on(store.close(&cleanup)).map_err(|e| e.to_string());
+            let closed = runtime
+                .block_on(store.close(&cleanup))
+                .map_err(|e| e.to_string());
             match (result, closed) {
                 (Ok(result), Ok(())) => Ok(result),
                 (Err(error), Ok(())) => Err(error),
-                (Ok(_), Err(error)) => Err(format!("operation finished but store shutdown failed: {error}")),
-                (Err(error), Err(cleanup)) => Err(format!("{error}; store shutdown also failed: {cleanup}")),
+                (Ok(_), Err(error)) => Err(format!(
+                    "operation finished but store shutdown failed: {error}"
+                )),
+                (Err(error), Err(cleanup)) => {
+                    Err(format!("{error}; store shutdown also failed: {cleanup}"))
+                }
             }
         }
         Err(error) => Err(format!("cannot open authority store: {error}")),
     };
     drop(cx);
     if !runtime.join_root(Duration::from_secs(5)) {
-        return Err(format!("{}; runtime did not drain", result.err().unwrap_or_else(|| "operation finished".into())));
+        return Err(format!(
+            "{}; runtime did not drain",
+            result.err().unwrap_or_else(|| "operation finished".into())
+        ));
     }
     result
 }
 fn generation(bundle: &ExportBundle) -> String {
-    bundle.head.as_ref().map_or_else(|| "null".into(), |head| head.generation.to_string())
+    bundle
+        .head
+        .as_ref()
+        .map_or_else(|| "null".into(), |head| head.generation.to_string())
 }
 /// Build and verify through one private read/write handle. The callback must
 /// finish its source verification and node close before any final path exists.
 /// The result is retained until file sync and no-replace publication succeed.
-fn publish_streamed<T>(destination: &Path, build: impl FnOnce(&mut File) -> Result<T, String>) -> Result<T, String> {
+fn publish_streamed<T>(
+    destination: &Path,
+    build: impl FnOnce(&mut File) -> Result<T, String>,
+) -> Result<T, String> {
     require_absent(destination)?;
     let mut staged = None;
     for _ in 0..16 {
         let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-        let path = parent(destination).join(format!(".fg-source-backup-{}-{sequence}.tmp", std::process::id()));
+        let path = parent(destination).join(format!(
+            ".fg-source-backup-{}-{sequence}.tmp",
+            std::process::id()
+        ));
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
         #[cfg(unix)]
@@ -134,14 +187,18 @@ fn publish_streamed<T>(destination: &Path, build: impl FnOnce(&mut File) -> Resu
             options.mode(0o600);
         }
         match options.open(&path) {
-            Ok(file) => { staged = Some((path, file)); break; }
+            Ok(file) => {
+                staged = Some((path, file));
+                break;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(format!("cannot stage repository backup: {error}")),
         }
     }
     let (temporary, mut file) = staged.ok_or("no unused repository backup staging path")?;
     let built = build(&mut file).and_then(|result| {
-        file.sync_all().map_err(|error| format!("repository backup staging sync failed: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("repository backup staging sync failed: {error}"))?;
         Ok(result)
     });
     drop(file);
@@ -150,13 +207,25 @@ fn publish_streamed<T>(destination: &Path, build: impl FnOnce(&mut File) -> Resu
         Err(error) => return Err(remove_stage(&temporary, error)),
     };
     if let Err(error) = fs::hard_link(&temporary, destination) {
-        return Err(remove_stage(&temporary, format!("repository backup publication failed: {error}")));
+        return Err(remove_stage(
+            &temporary,
+            format!("repository backup publication failed: {error}"),
+        ));
     }
-    fs::remove_file(&temporary).map_err(|e| format!("repository backup is visible; staging cleanup failed: {e}"))?;
-    sync_directory(parent(destination)).map_err(|e| format!("repository backup is visible; parent sync failed: {e}"))?;
+    fs::remove_file(&temporary)
+        .map_err(|e| format!("repository backup is visible; staging cleanup failed: {e}"))?;
+    sync_directory(parent(destination))
+        .map_err(|e| format!("repository backup is visible; parent sync failed: {e}"))?;
     Ok(result)
 }
 fn remove_stage(path: &Path, original: String) -> String {
-    fs::remove_file(path).err().map_or_else(|| original.clone(), |cleanup|
-        format!("{original}; staging cleanup also failed at {}: {cleanup}", path.display()))
+    fs::remove_file(path).err().map_or_else(
+        || original.clone(),
+        |cleanup| {
+            format!(
+                "{original}; staging cleanup also failed at {}: {cleanup}",
+                path.display()
+            )
+        },
+    )
 }

@@ -78,7 +78,10 @@ impl Display for NodeSshRefusal {
         match self {
             Self::ZeroSessionLimit => write!(formatter, "zero SSH session limit"),
             Self::ZeroInFlightLimit => write!(formatter, "zero SSH in-flight limit"),
-            Self::LimitsExceeded => write!(formatter, "SSH limits exceeded (max 1000000 sessions, max 16 in-flight)"),
+            Self::LimitsExceeded => write!(
+                formatter,
+                "SSH limits exceeded (max 1000000 sessions, max 16 in-flight)"
+            ),
             Self::Accept(err) => write!(formatter, "cannot accept SSH connection: {err}"),
             Self::Session(err) => write!(formatter, "SSH session protocol error: {err}"),
             Self::Service(err) => write!(formatter, "SSH service error: {err}"),
@@ -199,7 +202,9 @@ impl OneNode {
         deploy_keys: Vec<DeployKeyBinding>,
         allow_receive: bool,
     ) -> Result<SshServerReceipt, NodeSshRefusal> {
-        listener.set_nonblocking(true).map_err(NodeSshRefusal::Accept)?;
+        listener
+            .set_nonblocking(true)
+            .map_err(NodeSshRefusal::Accept)?;
 
         let active = Arc::new(AtomicUsize::new(0));
         let completed = Arc::new(AtomicUsize::new(0));
@@ -259,7 +264,8 @@ impl OneNode {
                 Err(error) => {
                     active.fetch_sub(1, Ordering::AcqRel);
                     refused.fetch_add(1, Ordering::AcqRel);
-                    terminal_refusal = Some(NodeSshRefusal::Node(NodeRefusal::Runtime(Box::new(error))));
+                    terminal_refusal =
+                        Some(NodeSshRefusal::Node(NodeRefusal::Runtime(Box::new(error))));
                     break;
                 }
             };
@@ -363,7 +369,10 @@ impl OneNode {
             }
         };
 
-        let head = match child_node.runtime().block_on(child_node.authenticate_authority_head()) {
+        let head = match child_node
+            .runtime()
+            .block_on(child_node.authenticate_authority_head())
+        {
             Ok(head) => head,
             Err(_) => {
                 let recipient = session.client_channel_id().unwrap_or(0);
@@ -380,7 +389,10 @@ impl OneNode {
             }
         };
 
-        if child_node.bring_into_service(head.receipt().generation()).is_err() {
+        if child_node
+            .bring_into_service(head.receipt().generation())
+            .is_err()
+        {
             let recipient = session.client_channel_id().unwrap_or(0);
             session.send_channel_extended_data(
                 recipient,
@@ -474,9 +486,8 @@ impl OneNode {
             service: GitDaemonService::UploadPack(UploadPackVersion::V0),
         };
 
-        let disclosure = self.prepare_visible_upload_pack(
-            &request, &materialized, &limits, &deadline,
-        )?;
+        let disclosure =
+            self.prepare_visible_upload_pack(&request, &materialized, &limits, &deadline)?;
         let repository = disclosure.repository();
         let advertised_capabilities =
             crate::git_daemon_capabilities(self.object_format, repository.symref_target(b"HEAD"));
@@ -526,7 +537,9 @@ impl OneNode {
                     };
                     self.materialize_selected_pack_in_scope(
                         &materialized,
-                        disclosure.closure_for(&materialized).map_err(crate::GitDaemonServeError::Pack)?,
+                        disclosure
+                            .closure_for(&materialized)
+                            .map_err(crate::GitDaemonServeError::Pack)?,
                         Some((&disclosure, pack_request)),
                         Some(&pack_request.wants),
                         &pack_request.haves,
@@ -564,7 +577,8 @@ impl OneNode {
                     pack.map_err(crate::GitDaemonServeError::Pack)
                 }
             },
-        ).map_err(|error| match error {
+        )
+        .map_err(|error| match error {
             crate::GitDaemonServeError::Transport(t) => NodeGitDaemonServeRefusal::from(t),
             crate::GitDaemonServeError::Pack(p) => NodeGitDaemonServeRefusal::from(p),
         })

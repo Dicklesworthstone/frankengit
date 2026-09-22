@@ -45,7 +45,8 @@ impl Prepared {
         // Do not await another operation after a successful primitive: later
         // cancellation cannot turn an observed publication into a refusal.
         // A malformed success receipt, however, cannot confirm this candidate.
-        if receipt.key() != key || receipt.generation() != expected || receipt.body() != self.bytes {
+        if receipt.key() != key || receipt.generation() != expected || receipt.body() != self.bytes
+        {
             return Err(GenerationAuthorityError::InvalidActivationReceipt);
         }
         Ok(GenerationActivation {
@@ -104,7 +105,9 @@ fn plan(
         return Ok(Step::Initialize);
     };
     let active = decode_body::<GraphGenerationBody>(receipt.body(), DecodeLimits::default())?;
-    if (receipt.generation() == HeadGeneration::FIRST) != active.predecessor_generation_id().is_none() {
+    if (receipt.generation() == HeadGeneration::FIRST)
+        != active.predecessor_generation_id().is_none()
+    {
         return Err(GenerationAuthorityError::HistoryInconsistent);
     }
     if active.graph_view_id() != candidate.graph_view_id() {
@@ -167,17 +170,31 @@ impl<S: AuthorityStore> GenerationAuthority<'_, S> {
         let read = self.store.read_head(&self.head_key)?;
         if let HeadRead::Present(receipt) = &read {
             let authenticated = self.store.authenticate_head_receipt(receipt)?;
-            check_authenticated(self.store.instance_id(), &self.head_key, receipt, &authenticated)?;
+            check_authenticated(
+                self.store.instance_id(),
+                &self.head_key,
+                receipt,
+                &authenticated,
+            )?;
         }
         match plan(candidate, prepared.id, &read)? {
             Step::Initialize => prepared.initialized(
                 &self.head_key,
-                self.store.initialize_head(&self.head_key, HeadGeneration::FIRST, &prepared.bytes)?,
+                self.store.initialize_head(
+                    &self.head_key,
+                    HeadGeneration::FIRST,
+                    &prepared.bytes,
+                )?,
             ),
             Step::Replace { token, generation } => prepared.exchanged(
                 &self.head_key,
                 generation,
-                self.store.compare_exchange_head(&self.head_key, token, generation, &prepared.bytes)?,
+                self.store.compare_exchange_head(
+                    &self.head_key,
+                    token,
+                    generation,
+                    &prepared.bytes,
+                )?,
             ),
         }
     }
@@ -203,17 +220,26 @@ impl<S: AsyncAuthorityStore> GenerationAuthority<'_, S> {
         let read = self.store.read_head(cx, &self.head_key).await?;
         if let HeadRead::Present(receipt) = &read {
             let authenticated = self.store.authenticate_head_receipt(cx, receipt).await?;
-            check_authenticated(self.store.instance_id(), &self.head_key, receipt, &authenticated)?;
+            check_authenticated(
+                self.store.instance_id(),
+                &self.head_key,
+                receipt,
+                &authenticated,
+            )?;
         }
         match plan(candidate, prepared.id, &read)? {
             Step::Initialize => prepared.initialized(
                 &self.head_key,
-                self.store.initialize_head(cx, &self.head_key, HeadGeneration::FIRST, &prepared.bytes).await?,
+                self.store
+                    .initialize_head(cx, &self.head_key, HeadGeneration::FIRST, &prepared.bytes)
+                    .await?,
             ),
             Step::Replace { token, generation } => prepared.exchanged(
                 &self.head_key,
                 generation,
-                self.store.compare_exchange_head(cx, &self.head_key, token, generation, &prepared.bytes).await?,
+                self.store
+                    .compare_exchange_head(cx, &self.head_key, token, generation, &prepared.bytes)
+                    .await?,
             ),
         }
     }

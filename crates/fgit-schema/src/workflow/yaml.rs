@@ -594,16 +594,24 @@ impl Scanner<'_> {
             let raw = &self.source[cursor..next];
             if raw.trim().is_empty() {
                 total = total.checked_add(1).ok_or(WorkflowRefusal::LimitExceeded {
-                    limit: "scalar bytes", allowed: self.limits.max_scalar_bytes,
-                    observed: usize::MAX, span: marker,
+                    limit: "scalar bytes",
+                    allowed: self.limits.max_scalar_bytes,
+                    observed: usize::MAX,
+                    span: marker,
                 })?;
                 if total > self.limits.max_scalar_bytes {
                     return Err(WorkflowRefusal::LimitExceeded {
-                        limit: "scalar bytes", allowed: self.limits.max_scalar_bytes,
-                        observed: total, span: marker,
+                        limit: "scalar bytes",
+                        allowed: self.limits.max_scalar_bytes,
+                        observed: total,
+                        span: marker,
                     });
                 }
-                end = if next < self.source.len() { next + 1 } else { next };
+                end = if next < self.source.len() {
+                    next + 1
+                } else {
+                    next
+                };
             } else {
                 let indent = raw.len() - raw.trim_start_matches(' ').len();
                 if indent <= parent_indent {
@@ -617,20 +625,32 @@ impl Scanner<'_> {
                     });
                 }
                 let bytes = raw.len() - required;
-                total = total.checked_add(bytes).and_then(|n| n.checked_add(1))
+                total = total
+                    .checked_add(bytes)
+                    .and_then(|n| n.checked_add(1))
                     .ok_or(WorkflowRefusal::LimitExceeded {
-                        limit: "scalar bytes", allowed: self.limits.max_scalar_bytes,
-                        observed: usize::MAX, span: marker,
+                        limit: "scalar bytes",
+                        allowed: self.limits.max_scalar_bytes,
+                        observed: usize::MAX,
+                        span: marker,
                     })?;
                 if total > self.limits.max_scalar_bytes {
                     return Err(WorkflowRefusal::LimitExceeded {
-                        limit: "scalar bytes", allowed: self.limits.max_scalar_bytes,
-                        observed: total, span: marker,
+                        limit: "scalar bytes",
+                        allowed: self.limits.max_scalar_bytes,
+                        observed: total,
+                        span: marker,
                     });
                 }
-                end = if next < self.source.len() { next + 1 } else { next };
+                end = if next < self.source.len() {
+                    next + 1
+                } else {
+                    next
+                };
             }
-            if next == self.source.len() { break; }
+            if next == self.source.len() {
+                break;
+            }
             cursor = next + 1;
         }
         let Some(required) = content_indent else {
@@ -658,7 +678,9 @@ impl Scanner<'_> {
                 out.push_str(&raw[required..]);
             }
             out.push('\n');
-            if next >= end || next == self.source.len() { break; }
+            if next >= end || next == self.source.len() {
+                break;
+            }
             cursor = next + 1;
         }
         // Bare | uses clip semantics: internal blank lines remain, while any
@@ -671,10 +693,13 @@ impl Scanner<'_> {
         while after < self.lines.len() && self.lines[after].span.start < end {
             after += 1;
         }
-        Ok((Node::Scalar {
-            value: out,
-            span: Span::new(marker.start, end, marker.line, marker.column),
-        }, after))
+        Ok((
+            Node::Scalar {
+                value: out,
+                span: Span::new(marker.start, end, marker.line, marker.column),
+            },
+            after,
+        ))
     }
 
     fn sequence(

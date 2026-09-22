@@ -365,8 +365,11 @@ mod tests;
 
 /// Reuse the transport's complete typed graph verifier for offline transfer.
 /// The caller has selected the exact visible ref roots at its authenticated head.
-pub(super) fn bundle_visible_closure(source: &VerifiedFabricPackSource<'_>,
-    admitted: &PermittedObjectClosure, roots: impl IntoIterator<Item=GitOid>, limits: &PackLimits)
-    -> Result<PermittedObjectClosure, NodePackMaterializationRefusal> {
+pub(super) fn bundle_visible_closure(
+    source: &VerifiedFabricPackSource<'_>,
+    admitted: &PermittedObjectClosure,
+    roots: impl IntoIterator<Item = GitOid>,
+    limits: &PackLimits,
+) -> Result<PermittedObjectClosure, NodePackMaterializationRefusal> {
     project_visible_graph(source, admitted, roots, limits).map(|graph| graph.closure)
 }

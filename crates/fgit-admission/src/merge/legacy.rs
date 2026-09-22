@@ -94,8 +94,8 @@ pub trait AsyncMergeMaterializer<S: fgit_authority::AsyncAuthorityStore + ?Sized
         basis: &'a fgit_chronicle::PublicationBasis,
         next_state: &'a crate::CanonicalRefState,
     ) -> impl std::future::Future<Output = Result<crate::CommitMaterialization, ProjectionFailure>>
-           + Send
-           + 'a;
+    + Send
+    + 'a;
 }
 
 impl<S, T> AsyncMergeMaterializer<S> for T
@@ -114,8 +114,8 @@ where
         basis: &'a fgit_chronicle::PublicationBasis,
         next_state: &'a crate::CanonicalRefState,
     ) -> impl std::future::Future<Output = Result<crate::CommitMaterialization, ProjectionFailure>>
-           + Send
-           + 'a {
+    + Send
+    + 'a {
         std::future::ready(
             materialize(context, sealed, tx_id, attempt, basis, next_state, self)
                 .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceMissing)),
@@ -354,7 +354,11 @@ pub(crate) fn check_parts_describe_one_merge(
             field: "created objects outside the validated closure",
         });
     }
-    if !sealed.closure.objects.contains(&sealed.package.ref_intent.new_tip) {
+    if !sealed
+        .closure
+        .objects
+        .contains(&sealed.package.ref_intent.new_tip)
+    {
         return Err(AdmissionError::MergeIncoherent {
             field: "new tip outside the validated closure",
         });
@@ -394,7 +398,8 @@ pub(crate) fn check_parts_describe_one_merge(
 ///
 /// [`AdmissionError::MergeIncoherent`] naming the part that disagreed.
 fn check_event_describes_this_merge(sealed: &SealedMerge<'_>) -> Result<(), AdmissionError> {
-    if let fgit_forge::ForgeEventPayload::MergeCommittedNative(event) = &sealed.package.event.payload
+    if let fgit_forge::ForgeEventPayload::MergeCommittedNative(event) =
+        &sealed.package.event.payload
     {
         event
             .validate()
@@ -1043,7 +1048,9 @@ fn materialize(
         let prepared = prepare_native_merge(context, sealed, tx_id, attempt, basis, &resolved)
             .map_err(|_| AdmissionError::MaterializationMismatch("native merge preparation"))?;
         if prepared.refs != *next_state {
-            return Err(AdmissionError::MaterializationMismatch("native merge ref fold"));
+            return Err(AdmissionError::MaterializationMismatch(
+                "native merge ref fold",
+            ));
         }
         commitments
             .stage_native_merge(&prepared)

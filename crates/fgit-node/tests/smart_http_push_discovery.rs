@@ -23,13 +23,15 @@ impl Drop for Scratch {
 #[test]
 fn a_tag_only_repository_has_one_direct_push_ref_in_v0_and_v1() {
     let scratch = Scratch(std::env::temp_dir().join(format!(
-        "frankengit-http-push-discovery-{}", std::process::id()
+        "frankengit-http-push-discovery-{}",
+        std::process::id()
     )));
     let (mut node, _) = OneNode::init(NodeConfig::new(
         scratch.0.clone(),
         TenantId::from_bytes([0xa1; 16]),
         RepositoryId::from_bytes([0xa2; 16]),
-    )).unwrap();
+    ))
+    .unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let session = LoopbackReceiveSession::authenticated(
         PrincipalId::from_bytes([0xa3; 16]),
@@ -38,26 +40,43 @@ fn a_tag_only_repository_has_one_direct_push_ref_in_v0_and_v1() {
     let route = std::str::from_utf8(node.git_daemon_repository_path().as_bytes()).unwrap();
     let oid = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"hi");
     // One blob, stored DEFLATE block, Adler-32 for "hi", native pack trailer.
-    let mut pack = b"PACK\0\0\0\x02\0\0\0\x01\x32\x78\x01\x01\x02\x00\xfd\xffhi\x01\x3b\x00\xd2".to_vec();
+    let mut pack =
+        b"PACK\0\0\0\x02\0\0\0\x01\x32\x78\x01\x01\x02\x00\xfd\xffhi\x01\x3b\x00\xd2".to_vec();
     let checksum = sha1_digest(&pack);
     pack.extend_from_slice(&checksum);
-    let mut body = encode_packets(&[
-        Packet::Data(format!(
-            "{} {oid} refs/tags/only\0report-status", "0".repeat(40)
-        ).into_bytes()),
-        Packet::Flush,
-    ], &WireLimits::default()).unwrap();
+    let mut body = encode_packets(
+        &[
+            Packet::Data(
+                format!("{} {oid} refs/tags/only\0report-status", "0".repeat(40)).into_bytes(),
+            ),
+            Packet::Flush,
+        ],
+        &WireLimits::default(),
+    )
+    .unwrap();
     body.extend_from_slice(&pack);
     let header = format!(
         "POST {route}/git-receive-pack HTTP/1.1\r\nHost: loopback\r\nContent-Type: application/x-git-receive-pack-request\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
-    let request = parse_head(header.as_bytes(), HttpLimits::default()).unwrap().unwrap();
-    let outcome = node.smart_http_receive_rpc_in(
-        &request, &session, &body, HttpLimits::default(), AdmissionLimits::default(),
-        &mut || true, &mut Vec::new(),
-    ).unwrap();
-    assert!(matches!(outcome.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
+    let request = parse_head(header.as_bytes(), HttpLimits::default())
+        .unwrap()
+        .unwrap();
+    let outcome = node
+        .smart_http_receive_rpc_in(
+            &request,
+            &session,
+            &body,
+            HttpLimits::default(),
+            AdmissionLimits::default(),
+            &mut || true,
+            &mut Vec::new(),
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome.commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
 
     for (protocol, version) in [
         ("", ProtocolVersion::V0),
@@ -66,25 +85,45 @@ fn a_tag_only_repository_has_one_direct_push_ref_in_v0_and_v1() {
         let header = format!(
             "GET {route}/info/refs?service=git-receive-pack HTTP/1.1\r\nHost: loopback\r\n{protocol}\r\n"
         );
-        let request = parse_head(header.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+        let request = parse_head(header.as_bytes(), HttpLimits::default())
+            .unwrap()
+            .unwrap();
         // One visible direct ref fits. Adding a synthetic HEAD must not spend
         // another slot, and an unresolved default branch must not block push.
-        let limits = WireLimits { max_advertised_refs: 1, ..WireLimits::default() };
-        let response = node.smart_http_receive_discovery_in(&request, &session, limits.clone())
+        let limits = WireLimits {
+            max_advertised_refs: 1,
+            ..WireLimits::default()
+        };
+        let response = node
+            .smart_http_receive_discovery_in(&request, &session, limits.clone())
             .expect("push discovery does not require a resolvable fetch HEAD");
         assert_eq!(response.version(), version);
-        assert!(response.head().contains("application/x-git-receive-pack-advertisement"));
+        assert!(
+            response
+                .head()
+                .contains("application/x-git-receive-pack-advertisement")
+        );
         let mut decoder = PktLineDecoder::new(limits).unwrap();
         let packets = decoder.push(response.body()).unwrap();
         decoder.finish().unwrap();
         let oid_prefix = format!("{oid} ");
-        let advertised: Vec<&[u8]> = packets.iter().filter_map(|packet| match packet {
-            Packet::Data(data) if data.starts_with(oid_prefix.as_bytes()) => Some(data.as_slice()),
-            _ => None,
-        }).collect();
+        let advertised: Vec<&[u8]> = packets
+            .iter()
+            .filter_map(|packet| match packet {
+                Packet::Data(data) if data.starts_with(oid_prefix.as_bytes()) => {
+                    Some(data.as_slice())
+                }
+                _ => None,
+            })
+            .collect();
         assert_eq!(advertised.len(), 1);
         assert!(advertised[0].starts_with(format!("{oid} refs/tags/only\0").as_bytes()));
-        assert!(!response.body().windows(b" HEAD".len()).any(|w| w == b" HEAD"));
+        assert!(
+            !response
+                .body()
+                .windows(b" HEAD".len())
+                .any(|w| w == b" HEAD")
+        );
     }
     node.shutdown().unwrap();
 }

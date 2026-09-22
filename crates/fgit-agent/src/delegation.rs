@@ -121,9 +121,7 @@ impl Selector {
             (Self::PathPrefix(child), Self::PathPrefix(parent)) => {
                 child.starts_with(parent.as_str())
             }
-            (Self::RefPrefix(child), Self::RefPrefix(parent)) => {
-                child.starts_with(parent.as_str())
-            }
+            (Self::RefPrefix(child), Self::RefPrefix(parent)) => child.starts_with(parent.as_str()),
             (Self::Destination(child), Self::Destination(parent)) => {
                 child == parent || child.ends_with(&format!(".{parent}"))
             }
@@ -327,8 +325,7 @@ impl SubIntent {
         }
 
         let id = SubIntentId(
-            subintent_commitment(&params)
-                .map_err(SubIntentRefusal::CanonicalCommitmentFailure)?,
+            subintent_commitment(&params).map_err(SubIntentRefusal::CanonicalCommitmentFailure)?,
         );
 
         Ok(Self {
@@ -618,13 +615,13 @@ impl SubIntentFanOutTracker {
                 limit: self.limits.max_depth,
             });
         }
-        let expected_depth = self
-            .depth
-            .checked_add(1)
-            .ok_or(SubIntentRefusal::RecursionDepthExceeded {
-                observed: u16::MAX,
-                limit: self.limits.max_depth,
-            })?;
+        let expected_depth =
+            self.depth
+                .checked_add(1)
+                .ok_or(SubIntentRefusal::RecursionDepthExceeded {
+                    observed: u16::MAX,
+                    limit: self.limits.max_depth,
+                })?;
         if sub_intent.depth != expected_depth {
             return Err(SubIntentRefusal::DepthMismatch {
                 expected: expected_depth,
@@ -652,14 +649,14 @@ impl SubIntentFanOutTracker {
         }
 
         // Aggregate budget conservation check: split from unallocated pool
-        let (allocated, remaining) = self
-            .unallocated_budget
-            .split(&sub_intent.budget)
-            .map_err(|deficit| SubIntentRefusal::AggregateBudgetExceeded {
-                deficit,
-                requested: sub_intent.budget,
-                available: self.unallocated_budget,
-            })?;
+        let (allocated, remaining) =
+            self.unallocated_budget
+                .split(&sub_intent.budget)
+                .map_err(|deficit| SubIntentRefusal::AggregateBudgetExceeded {
+                    deficit,
+                    requested: sub_intent.budget,
+                    available: self.unallocated_budget,
+                })?;
 
         // Full ancestry and capability attenuation verification
         for delegated in &sub_intent.attenuated_capabilities {
@@ -671,8 +668,8 @@ impl SubIntentFanOutTracker {
                     },
                 ));
             }
-            let leaf =
-                verify_chain(&delegated.chain, issuer_key).map_err(SubIntentRefusal::ChainRefused)?;
+            let leaf = verify_chain(&delegated.chain, issuer_key)
+                .map_err(SubIntentRefusal::ChainRefused)?;
 
             // Intermediate parent link binding check: link immediately preceding leaf
             // must match parent_capability_ref
@@ -779,17 +776,17 @@ impl SubIntentFanOutTracker {
             return Err(SubIntentRefusal::QuotaAmplified { deficit });
         }
 
-        let (returned, remaining_alloc) = self
-            .allocated_budget
-            .split(&unspent_budget)
-            .map_err(|deficit| {
-                self.active_children.insert(child_run_id, child.clone());
-                SubIntentRefusal::AggregateBudgetExceeded {
-                    deficit,
-                    requested: unspent_budget,
-                    available: self.allocated_budget,
-                }
-            })?;
+        let (returned, remaining_alloc) =
+            self.allocated_budget
+                .split(&unspent_budget)
+                .map_err(|deficit| {
+                    self.active_children.insert(child_run_id, child.clone());
+                    SubIntentRefusal::AggregateBudgetExceeded {
+                        deficit,
+                        requested: unspent_budget,
+                        available: self.allocated_budget,
+                    }
+                })?;
 
         self.allocated_budget = remaining_alloc;
         self.unallocated_budget = self
@@ -815,13 +812,13 @@ impl SubIntentFanOutTracker {
         child_run_id: RunId,
         limits: DelegationLimits,
     ) -> Result<Self, SubIntentRefusal> {
-        let child_depth = self
-            .depth
-            .checked_add(1)
-            .ok_or(SubIntentRefusal::RecursionDepthExceeded {
-                observed: u16::MAX,
-                limit: limits.max_depth,
-            })?;
+        let child_depth =
+            self.depth
+                .checked_add(1)
+                .ok_or(SubIntentRefusal::RecursionDepthExceeded {
+                    observed: u16::MAX,
+                    limit: limits.max_depth,
+                })?;
         if child_depth > limits.max_depth {
             return Err(SubIntentRefusal::RecursionDepthExceeded {
                 observed: child_depth,
@@ -1196,10 +1193,16 @@ impl fmt::Display for SubIntentRefusal {
                 "parent run mismatch: expected {expected}, observed {observed}"
             ),
             Self::ChildRunNotFound { child_run_id } => {
-                write!(formatter, "child run {child_run_id} not found in active children")
+                write!(
+                    formatter,
+                    "child run {child_run_id} not found in active children"
+                )
             }
             Self::CanonicalCommitmentFailure(refusal) => {
-                write!(formatter, "sub-intent canonical commitment failure: {refusal}")
+                write!(
+                    formatter,
+                    "sub-intent canonical commitment failure: {refusal}"
+                )
             }
         }
     }

@@ -69,7 +69,10 @@ forge_counter!(
     PullRequestNumber,
     "Repository-scoped number identifying one pull request aggregate."
 );
-forge_counter!(IssueNumber, "Repository-scoped issue identity, distinct from a pull request number.");
+forge_counter!(
+    IssueNumber,
+    "Repository-scoped issue identity, distinct from a pull request number."
+);
 forge_counter!(
     OrganisationNumber,
     "Tenant-scoped number identifying one organisation aggregate."
@@ -82,7 +85,6 @@ forge_counter!(
     QueueNumber,
     "Repository-scoped number identifying one merge queue aggregate."
 );
-
 
 impl AggregateVersion {
     /// The immediate successor, refusing exhaustion instead of wrapping.
@@ -148,7 +150,10 @@ pub enum AggregateId {
     Team(TeamNumber),
     /// One reviewer's decisions about one PR. Independent reviewer streams
     /// permit concurrent reviewers without mutating the PR's content version.
-    PullRequestReview { pull_request: PullRequestNumber, reviewer: fgit_types::PrincipalId },
+    PullRequestReview {
+        pull_request: PullRequestNumber,
+        reviewer: fgit_types::PrincipalId,
+    },
     /// A canonical repository issue. Existing aggregate encodings are unchanged.
     Issue(IssueNumber),
     /// One repository-scoped merge queue stream.
@@ -166,7 +171,11 @@ pub(crate) const AGGREGATE_KIND_ISSUE: u32 = 4;
 pub(crate) const AGGREGATE_KIND_REVIEW_PROTECTION: u32 = 5;
 /// Wire tag for [`AggregateId::MergeQueue`], written only after a zero slot.
 pub(crate) const AGGREGATE_KIND_MERGE_QUEUE: u32 = 6;
-impl From<IssueNumber> for AggregateId { fn from(number: IssueNumber) -> Self { Self::Issue(number) } }
+impl From<IssueNumber> for AggregateId {
+    fn from(number: IssueNumber) -> Self {
+        Self::Issue(number)
+    }
+}
 
 impl From<QueueNumber> for AggregateId {
     fn from(number: QueueNumber) -> Self {
@@ -200,7 +209,10 @@ impl fmt::Display for AggregateId {
             Self::PullRequest(number) => write!(formatter, "pull-request/{number}"),
             Self::Organisation(number) => write!(formatter, "organisation/{number}"),
             Self::Team(number) => write!(formatter, "team/{number}"),
-            Self::PullRequestReview { pull_request, reviewer } => write!(formatter, "review/{pull_request}/{reviewer}"),
+            Self::PullRequestReview {
+                pull_request,
+                reviewer,
+            } => write!(formatter, "review/{pull_request}/{reviewer}"),
             Self::MergeQueue(number) => write!(formatter, "queue/{number}"),
         }
     }

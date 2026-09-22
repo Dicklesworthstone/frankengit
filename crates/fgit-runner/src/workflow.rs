@@ -298,15 +298,27 @@ fn job_condition(
     needs: &[String],
     completed: &BTreeMap<&str, JobOutcome>,
 ) -> bool {
-    let states = needs.iter().filter_map(|need| completed.get(need.as_str()).copied()).collect::<Vec<_>>();
+    let states = needs
+        .iter()
+        .filter_map(|need| completed.get(need.as_str()).copied())
+        .collect::<Vec<_>>();
     if states.len() != needs.len() {
         return false;
     }
-    let unsafe_terminal = states.iter().any(|state| matches!(state, JobOutcome::Cancelled | JobOutcome::Refused));
+    let unsafe_terminal = states
+        .iter()
+        .any(|state| matches!(state, JobOutcome::Cancelled | JobOutcome::Refused));
     match condition {
         Condition::Success => states.iter().all(|state| *state == JobOutcome::Succeeded),
-        Condition::Failure => !unsafe_terminal && states.iter().any(|state|
-            matches!(state, JobOutcome::Failed | JobOutcome::TimedOut | JobOutcome::OutputLimit)),
+        Condition::Failure => {
+            !unsafe_terminal
+                && states.iter().any(|state| {
+                    matches!(
+                        state,
+                        JobOutcome::Failed | JobOutcome::TimedOut | JobOutcome::OutputLimit
+                    )
+                })
+        }
         Condition::Always => !unsafe_terminal,
     }
 }

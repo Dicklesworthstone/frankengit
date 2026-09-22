@@ -66,9 +66,15 @@ fn every_algorithm_observes_cancellation_during_work_and_retry_is_clean() {
         assert_eq!(
             diff_with_cancellation(&old, &new, options, &cancel),
             Err(DiffError::Cancelled),
-            "profile {:?}, trace bound {}", options.profile, options.limits.max_trace_cells,
+            "profile {:?}, trace bound {}",
+            options.profile,
+            options.limits.max_trace_cells,
         );
-        assert_eq!(calls.get(), 32, "no work may resume after observing cancellation");
+        assert_eq!(
+            calls.get(),
+            32,
+            "no work may resume after observing cancellation"
+        );
         assert_eq!(
             diff_with_cancellation(&old, &new, options, &|| false).unwrap(),
             expected,
@@ -79,12 +85,16 @@ fn every_algorithm_observes_cancellation_during_work_and_retry_is_clean() {
 #[test]
 fn cancellation_at_every_checkpoint_refuses_instead_of_returning_partial_output() {
     for options in profiles() {
-        let (old, new) = (b"one\ntwo\nthree\n".as_slice(), b"three\nfour\none\n".as_slice());
+        let (old, new) = (
+            b"one\ntwo\nthree\n".as_slice(),
+            b"three\nfour\none\n".as_slice(),
+        );
         let observed = Cell::new(0);
         let expected = diff_with_cancellation(old, new, options, &|| {
             observed.set(observed.get() + 1);
             false
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(expected.apply_to(old).unwrap(), new);
         for stop in 1..=observed.get() {
             let calls = Cell::new(0);
@@ -98,10 +108,14 @@ fn cancellation_at_every_checkpoint_refuses_instead_of_returning_partial_output(
         // A cancellation not reached by the completed operation must not turn
         // an otherwise valid result into a fabricated refusal.
         let calls = Cell::new(0);
-        assert_eq!(diff_with_cancellation(old, new, options, &|| {
-            calls.set(calls.get() + 1);
-            calls.get() > observed.get()
-        }).unwrap(), expected);
+        assert_eq!(
+            diff_with_cancellation(old, new, options, &|| {
+                calls.set(calls.get() + 1);
+                calls.get() > observed.get()
+            })
+            .unwrap(),
+            expected
+        );
     }
 }
 
@@ -109,9 +123,18 @@ fn cancellation_at_every_checkpoint_refuses_instead_of_returning_partial_output(
 fn noncancelled_calls_preserve_resource_refusals() {
     for options in profiles() {
         for limits in [
-            DiffLimits { max_input_bytes: 1, ..options.limits },
-            DiffLimits { max_units: 1, ..options.limits },
-            DiffLimits { max_work: 0, ..options.limits },
+            DiffLimits {
+                max_input_bytes: 1,
+                ..options.limits
+            },
+            DiffLimits {
+                max_units: 1,
+                ..options.limits
+            },
+            DiffLimits {
+                max_work: 0,
+                ..options.limits
+            },
         ] {
             let options = DiffOptions { limits, ..options };
             let expected = diff(b"one\ntwo\n", b"three\nfour\n", options);
@@ -129,9 +152,17 @@ fn false_probes_preserve_exact_scripts_on_a_bounded_exhaustive_byte_corpus() {
     let mut corpus = vec![Vec::new()];
     for length in 1..=4 {
         for bits in 0..(1 << length) {
-            corpus.push((0..length).map(|offset| {
-                if bits & (1 << offset) == 0 { b'a' } else { b'b' }
-            }).collect());
+            corpus.push(
+                (0..length)
+                    .map(|offset| {
+                        if bits & (1 << offset) == 0 {
+                            b'a'
+                        } else {
+                            b'b'
+                        }
+                    })
+                    .collect(),
+            );
         }
     }
     for mut options in profiles() {

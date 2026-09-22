@@ -19,7 +19,9 @@ pub use fgit_deflate::{CancellationProbe, InflateLimits, InflateRefusal, StreamP
 use fgit_types::{GitHashAlgorithm as NativeGitHashAlgorithm, GitOid as AnyGitOid};
 
 pub mod reference_target;
-pub use reference_target::{ReferenceTargetKindMismatch, required_ref_target_kind, validate_reference_target_kind};
+pub use reference_target::{
+    ReferenceTargetKindMismatch, required_ref_target_kind, validate_reference_target_kind,
+};
 
 pub mod notes;
 pub use notes::{

@@ -6,14 +6,18 @@
 //! This is an authorized local read, not index maintenance or a retention pin.
 //! Channel semantics remain separate: lexical spans address complete folded
 //! tokens, while symbol spans address source-level declaration names.
-use crate::{NodeRequestContext, NodeWorkspaceRefusal, OneNode, PackContextCheckpoint,
-    checkpoint_pack_context};
+use crate::{
+    NodeRequestContext, NodeWorkspaceRefusal, OneNode, PackContextCheckpoint,
+    checkpoint_pack_context,
+};
 use fgit_forge::source_search::SearchLimits;
-use fgit_forge::source_symbols::{SymbolKind, SymbolMatchMode, SymbolQuery};
 use fgit_forge::source_symbols::index as symbols;
+use fgit_forge::source_symbols::{SymbolKind, SymbolMatchMode, SymbolQuery};
+use fgit_graph::lexical::{
+    self, IndexedLexicalReport, LexicalChannel, LexicalQuery, LexicalQueryLimits,
+    LexicalReadLimits, LexicalSource,
+};
 use fgit_graph::{GenerationActivation, GenerationAuthorityError, GraphGenerationId};
-use fgit_graph::lexical::{self, IndexedLexicalReport, LexicalChannel, LexicalQuery,
-    LexicalQueryLimits, LexicalReadLimits, LexicalSource};
 use fgit_types::{GitOid, HeadGeneration, RefName, RepositoryAuthorityHeadId};
 
 pub const PROFILE: &str = "source-initial-retrieval-v1";
@@ -23,7 +27,10 @@ const MAX_RESULT_BYTES: usize = 2 * 1024 * 1024;
 /// Optional means ONLY uninitialized/stale symbol indexes may be omitted.
 /// Corruption, cancellation, source movement and checkpoint failures are errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SymbolPolicy { Optional, Required }
+pub enum SymbolPolicy {
+    Optional,
+    Required,
+}
 
 #[derive(Clone, Debug)]
 pub struct InitialQuery {
@@ -46,20 +53,36 @@ impl InitialQuery {
     }
     /// Symbol name/mode are explicit: lexical case folding must never silently
     /// alter a case-sensitive declaration query. Its path scope cannot widen.
-    pub fn with_symbols(mut self, name: &[u8], mode: SymbolMatchMode, kinds: &[SymbolKind],
+    pub fn with_symbols(
+        mut self,
+        name: &[u8],
+        mode: SymbolMatchMode,
+        kinds: &[SymbolKind],
         policy: SymbolPolicy,
     ) -> Result<Self, RetrievalError> {
-        let query = SymbolQuery::new(name, mode, kinds, self.content.prefixes(), lexical::MAX_WORK)
-            .map_err(|_| RetrievalError::Invalid("symbol query"))?;
+        let query = SymbolQuery::new(
+            name,
+            mode,
+            kinds,
+            self.content.prefixes(),
+            lexical::MAX_WORK,
+        )
+        .map_err(|_| RetrievalError::Invalid("symbol query"))?;
         self.symbol = Some((query, policy));
         Ok(self)
     }
-    pub fn content(&self) -> &LexicalQuery { &self.content }
-    pub fn path(&self) -> &LexicalQuery { &self.path }
+    pub fn content(&self) -> &LexicalQuery {
+        &self.content
+    }
+    pub fn path(&self) -> &LexicalQuery {
+        &self.path
+    }
     pub fn symbols(&self) -> Option<(&SymbolQuery, SymbolPolicy)> {
         self.symbol.as_ref().map(|(query, policy)| (query, *policy))
     }
-    pub(crate) fn channels(&self) -> usize { 2 + usize::from(self.symbol.is_some()) }
+    pub(crate) fn channels(&self) -> usize {
+        2 + usize::from(self.symbol.is_some())
+    }
 }
 
 /// Immutable generation floors retained independently by the caller. A symbol
@@ -83,18 +106,28 @@ pub struct InitialLimits {
 }
 impl Default for InitialLimits {
     fn default() -> Self {
-        Self { max_results_per_channel: 100, max_work: lexical::MAX_WORK,
-            max_payload_bytes: MAX_PAYLOAD_BYTES, max_result_bytes: MAX_RESULT_BYTES }
+        Self {
+            max_results_per_channel: 100,
+            max_work: lexical::MAX_WORK,
+            max_payload_bytes: MAX_PAYLOAD_BYTES,
+            max_result_bytes: MAX_RESULT_BYTES,
+        }
     }
 }
 impl InitialLimits {
     pub fn validate(self, query: &InitialQuery) -> Result<(), RetrievalError> {
         let channels = query.channels();
-        if self.max_results_per_channel == 0 || self.max_results_per_channel > 1024
-            || self.max_work < channels as u64 || self.max_work > lexical::MAX_WORK
-            || self.max_payload_bytes < channels || self.max_payload_bytes > MAX_PAYLOAD_BYTES
-            || self.max_result_bytes == 0 || self.max_result_bytes > MAX_RESULT_BYTES
-        { return Err(RetrievalError::Invalid("initial retrieval limits")); }
+        if self.max_results_per_channel == 0
+            || self.max_results_per_channel > 1024
+            || self.max_work < channels as u64
+            || self.max_work > lexical::MAX_WORK
+            || self.max_payload_bytes < channels
+            || self.max_payload_bytes > MAX_PAYLOAD_BYTES
+            || self.max_result_bytes == 0
+            || self.max_result_bytes > MAX_RESULT_BYTES
+        {
+            return Err(RetrievalError::Invalid("initial retrieval limits"));
+        }
         Ok(())
     }
 }
@@ -103,7 +136,10 @@ pub(crate) fn share(total: u64, count: usize, ordinal: usize) -> u64 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SymbolUnavailable { Uninitialized, Stale }
+pub enum SymbolUnavailable {
+    Uninitialized,
+    Stale,
+}
 #[derive(Clone, Debug)]
 pub enum SymbolChannel {
     NotRequested,
@@ -127,31 +163,51 @@ pub struct InitialReport {
     result_bytes: usize,
 }
 impl InitialReport {
-    pub fn source(&self) -> &LexicalSource { &self.content.source }
-    pub fn content(&self) -> &IndexedLexicalReport { &self.content }
-    pub fn path(&self) -> &IndexedLexicalReport { &self.path }
-    pub fn symbols(&self) -> &SymbolChannel { &self.symbols }
-    pub fn generations(&self) -> &GenerationVector { &self.vector }
-    pub fn result_bytes(&self) -> usize { self.result_bytes }
+    pub fn source(&self) -> &LexicalSource {
+        &self.content.source
+    }
+    pub fn content(&self) -> &IndexedLexicalReport {
+        &self.content
+    }
+    pub fn path(&self) -> &IndexedLexicalReport {
+        &self.path
+    }
+    pub fn symbols(&self) -> &SymbolChannel {
+        &self.symbols
+    }
+    pub fn generations(&self) -> &GenerationVector {
+        &self.vector
+    }
+    pub fn result_bytes(&self) -> usize {
+        self.result_bytes
+    }
     /// True only if every requested channel was available and untruncated.
     pub fn complete(&self) -> bool {
-        self.content.results.complete && self.path.results.complete && match &self.symbols {
-            SymbolChannel::NotRequested => true,
-            SymbolChannel::Unavailable(_) => false,
-            SymbolChannel::Available(report) => report.complete,
-        }
+        self.content.results.complete
+            && self.path.results.complete
+            && match &self.symbols {
+                SymbolChannel::NotRequested => true,
+                SymbolChannel::Unavailable(_) => false,
+                SymbolChannel::Available(report) => report.complete,
+            }
     }
     /// Successful-channel receipts only. An unavailable channel may have read
     /// metadata before refusing; this is NOT a total physical-I/O measurement.
     pub fn completed_payload_bytes_read(&self) -> usize {
-        self.content.payload_bytes_read + self.path.payload_bytes_read + match &self.symbols {
-            SymbolChannel::Available(report) => report.payload_bytes_read, _ => 0,
-        }
+        self.content.payload_bytes_read
+            + self.path.payload_bytes_read
+            + match &self.symbols {
+                SymbolChannel::Available(report) => report.payload_bytes_read,
+                _ => 0,
+            }
     }
     pub fn completed_work_units(&self) -> u64 {
-        self.content.results.work_units + self.path.results.work_units + match &self.symbols {
-            SymbolChannel::Available(report) => report.work_units, _ => 0,
-        }
+        self.content.results.work_units
+            + self.path.results.work_units
+            + match &self.symbols {
+                SymbolChannel::Available(report) => report.work_units,
+                _ => 0,
+            }
     }
 }
 
@@ -173,38 +229,60 @@ impl std::fmt::Display for RetrievalError {
 impl std::error::Error for RetrievalError {}
 fn live(request: &NodeRequestContext) -> Result<(), RetrievalError> {
     match checkpoint_pack_context(request.authority()) {
-        PackContextCheckpoint::Stopped { budget_exhaustion } =>
-            Err(RetrievalError::Source(NodeWorkspaceRefusal::Cancelled { exhaustion: budget_exhaustion })),
+        PackContextCheckpoint::Stopped { budget_exhaustion } => {
+            Err(RetrievalError::Source(NodeWorkspaceRefusal::Cancelled {
+                exhaustion: budget_exhaustion,
+            }))
+        }
         _ => Ok(()),
     }
 }
 fn add_result(total: &mut usize, amount: usize, maximum: usize) -> Result<(), RetrievalError> {
-    *total = total.checked_add(amount).filter(|n| *n <= maximum)
+    *total = total
+        .checked_add(amount)
+        .filter(|n| *n <= maximum)
         .ok_or(RetrievalError::Limit("retained result bytes"))?;
     Ok(())
 }
-fn lexical_result_bytes(report: &IndexedLexicalReport, total: &mut usize, maximum: usize)
-    -> Result<(), RetrievalError>
-{
+fn lexical_result_bytes(
+    report: &IndexedLexicalReport,
+    total: &mut usize,
+    maximum: usize,
+) -> Result<(), RetrievalError> {
     for hit in &report.results.hits {
         add_result(total, hit.path.len() + hit.spans.len() * 24 + 64, maximum)?;
     }
     Ok(())
 }
-fn check_lexical_join(content: &IndexedLexicalReport, path: &IndexedLexicalReport)
-    -> Result<(), RetrievalError>
-{
-    if content.source != path.source { return Err(RetrievalError::MixedSource); }
-    if content.generation != path.generation { return Err(RetrievalError::MixedGeneration); }
+fn check_lexical_join(
+    content: &IndexedLexicalReport,
+    path: &IndexedLexicalReport,
+) -> Result<(), RetrievalError> {
+    if content.source != path.source {
+        return Err(RetrievalError::MixedSource);
+    }
+    if content.generation != path.generation {
+        return Err(RetrievalError::MixedGeneration);
+    }
     Ok(())
 }
-fn check_symbol_join(source: &LexicalSource, symbol: &symbols::Source) -> Result<(), RetrievalError> {
-    if source.namespace.tenant != symbol.tenant || source.namespace.repository != symbol.repository
-        || source.namespace.incarnation != symbol.incarnation || source.namespace.object_format != symbol.format
-        || source.reference != symbol.reference || source.source_head != symbol.head
-        || source.source_rcr != symbol.rcr || source.forge_position_root != symbol.forge
-        || source.commit != symbol.commit || source.tree != symbol.tree
-    { return Err(RetrievalError::MixedSource); }
+fn check_symbol_join(
+    source: &LexicalSource,
+    symbol: &symbols::Source,
+) -> Result<(), RetrievalError> {
+    if source.namespace.tenant != symbol.tenant
+        || source.namespace.repository != symbol.repository
+        || source.namespace.incarnation != symbol.incarnation
+        || source.namespace.object_format != symbol.format
+        || source.reference != symbol.reference
+        || source.source_head != symbol.head
+        || source.source_rcr != symbol.rcr
+        || source.forge_position_root != symbol.forge
+        || source.commit != symbol.commit
+        || source.tree != symbol.tree
+    {
+        return Err(RetrievalError::MixedSource);
+    }
     Ok(())
 }
 
@@ -221,58 +299,123 @@ impl OneNode {
     /// Optional unbuilt/stale symbols leave lexical results useful and carry a
     /// typed unavailable status, never a successful empty symbol result. All
     /// other failures abort the response. No channel builds or scans source.
-    #[expect(clippy::too_many_arguments, reason = "source pins, independent generation floors and shared read budgets are distinct")]
-    pub async fn search_source_initial_local_in(&self, request: &NodeRequestContext,
-        reference: &RefName, expected_head: Option<RepositoryAuthorityHeadId>, expected_commit: Option<GitOid>,
-        checkpoints: &Checkpoints, query: &InitialQuery, limits: InitialLimits,
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "source pins, independent generation floors and shared read budgets are distinct"
+    )]
+    pub async fn search_source_initial_local_in(
+        &self,
+        request: &NodeRequestContext,
+        reference: &RefName,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+        expected_commit: Option<GitOid>,
+        checkpoints: &Checkpoints,
+        query: &InitialQuery,
+        limits: InitialLimits,
     ) -> Result<InitialReport, RetrievalError> {
         live(request)?;
         limits.validate(query)?;
         if query.symbol.is_none() && checkpoints.symbols.is_some() {
-            return Err(RetrievalError::Invalid("symbol checkpoint without symbol query"));
+            return Err(RetrievalError::Invalid(
+                "symbol checkpoint without symbol query",
+            ));
         }
         let count = query.channels();
         let work = |ordinal| share(limits.max_work, count, ordinal);
         let payload = |ordinal| share(limits.max_payload_bytes as u64, count, ordinal) as usize;
         let lexical_limits = |ordinal| LexicalQueryLimits {
-            max_results: limits.max_results_per_channel, max_work: work(ordinal),
+            max_results: limits.max_results_per_channel,
+            max_work: work(ordinal),
         };
         let read_limits = |ordinal| LexicalReadLimits {
-            max_payload_bytes: payload(ordinal), ..Default::default()
+            max_payload_bytes: payload(ordinal),
+            ..Default::default()
         };
-        let content = self.search_source_index_local_in(request, reference, expected_head, expected_commit,
-            None, checkpoints.lexical.as_ref(), &query.content, None, lexical_limits(0), read_limits(0))
-            .await.map_err(RetrievalError::Source)?;
+        let content = self
+            .search_source_index_local_in(
+                request,
+                reference,
+                expected_head,
+                expected_commit,
+                None,
+                checkpoints.lexical.as_ref(),
+                &query.content,
+                None,
+                lexical_limits(0),
+                read_limits(0),
+            )
+            .await
+            .map_err(RetrievalError::Source)?;
         live(request)?;
         let mut result_bytes = 0;
         lexical_result_bytes(&content, &mut result_bytes, limits.max_result_bytes)?;
-        let path = self.search_source_index_local_in(request, reference,
-            Some(content.source.source_head), Some(content.source.commit), Some(&content.generation),
-            checkpoints.lexical.as_ref(), &query.path, None, lexical_limits(1), read_limits(1))
-            .await.map_err(RetrievalError::Source)?;
+        let path = self
+            .search_source_index_local_in(
+                request,
+                reference,
+                Some(content.source.source_head),
+                Some(content.source.commit),
+                Some(&content.generation),
+                checkpoints.lexical.as_ref(),
+                &query.path,
+                None,
+                lexical_limits(1),
+                read_limits(1),
+            )
+            .await
+            .map_err(RetrievalError::Source)?;
         check_lexical_join(&content, &path)?;
         live(request)?;
         lexical_result_bytes(&path, &mut result_bytes, limits.max_result_bytes)?;
         let channel = if let Some((symbol, policy)) = &query.symbol {
-            let bounded = SymbolQuery::new(symbol.name(), symbol.mode(), symbol.kinds(),
-                query.content.prefixes(), work(2)).map_err(|_| RetrievalError::Invalid("symbol work limit"))?;
-            match self.search_source_symbols_index_snapshot_local_in(request, reference,
-                Some(content.source.source_head), Some(content.source.commit), checkpoints.symbols.as_ref(),
-                &bounded, SearchLimits { max_matches: limits.max_results_per_channel, ..Default::default() }, payload(2)).await
+            let bounded = SymbolQuery::new(
+                symbol.name(),
+                symbol.mode(),
+                symbol.kinds(),
+                query.content.prefixes(),
+                work(2),
+            )
+            .map_err(|_| RetrievalError::Invalid("symbol work limit"))?;
+            match self
+                .search_source_symbols_index_snapshot_local_in(
+                    request,
+                    reference,
+                    Some(content.source.source_head),
+                    Some(content.source.commit),
+                    checkpoints.symbols.as_ref(),
+                    &bounded,
+                    SearchLimits {
+                        max_matches: limits.max_results_per_channel,
+                        ..Default::default()
+                    },
+                    payload(2),
+                )
+                .await
             {
                 Ok(report) => {
                     check_symbol_join(&content.source, &report.source)?;
                     for row in &report.matches {
                         live(request)?;
-                        add_result(&mut result_bytes, row.location.path.len() + row.name.len()
-                            + row.location.excerpt.len() + 96, limits.max_result_bytes)?;
+                        add_result(
+                            &mut result_bytes,
+                            row.location.path.len()
+                                + row.name.len()
+                                + row.location.excerpt.len()
+                                + 96,
+                            limits.max_result_bytes,
+                        )?;
                     }
                     SymbolChannel::Available(Box::new(report))
                 }
-                Err(error) => SymbolChannel::Unavailable(
-                    symbol_unavailable(error, *policy, checkpoints.symbols.is_some())?),
+                Err(error) => SymbolChannel::Unavailable(symbol_unavailable(
+                    error,
+                    *policy,
+                    checkpoints.symbols.is_some(),
+                )?),
             }
-        } else { SymbolChannel::NotRequested };
+        } else {
+            SymbolChannel::NotRequested
+        };
         let symbol_generation = match &channel {
             SymbolChannel::Available(report) => Some(GenerationActivation {
                 generation_id: GraphGenerationId::from_internal_object_id(report.generation)
@@ -283,13 +426,23 @@ impl OneNode {
             _ => None,
         };
         live(request)?;
-        Ok(InitialReport { vector: GenerationVector { lexical: content.generation.clone(), symbols: symbol_generation },
-            content, path, symbols: channel, result_bytes })
+        Ok(InitialReport {
+            vector: GenerationVector {
+                lexical: content.generation.clone(),
+                symbols: symbol_generation,
+            },
+            content,
+            path,
+            symbols: channel,
+            result_bytes,
+        })
     }
 }
-fn symbol_unavailable(error: SymbolError, policy: SymbolPolicy, has_floor: bool)
-    -> Result<SymbolUnavailable, RetrievalError>
-{
+fn symbol_unavailable(
+    error: SymbolError,
+    policy: SymbolPolicy,
+    has_floor: bool,
+) -> Result<SymbolUnavailable, RetrievalError> {
     if policy == SymbolPolicy::Optional && !has_floor {
         match error {
             symbols::AccessError::Uninitialized => return Ok(SymbolUnavailable::Uninitialized),

@@ -33,20 +33,38 @@ pub enum WireError {
 impl Display for WireError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnexpectedEof { expected, available } => {
-                write!(formatter, "unexpected EOF: expected {expected} bytes, available {available}")
+            Self::UnexpectedEof {
+                expected,
+                available,
+            } => {
+                write!(
+                    formatter,
+                    "unexpected EOF: expected {expected} bytes, available {available}"
+                )
             }
             Self::StringTooLarge { observed, limit } => {
-                write!(formatter, "string length {observed} exceeds wire limit {limit}")
+                write!(
+                    formatter,
+                    "string length {observed} exceeds wire limit {limit}"
+                )
             }
             Self::PacketTooLarge { observed, limit } => {
-                write!(formatter, "packet length {observed} exceeds wire limit {limit}")
+                write!(
+                    formatter,
+                    "packet length {observed} exceeds wire limit {limit}"
+                )
             }
             Self::PacketTooSmall { observed, min } => {
                 write!(formatter, "packet length {observed} below minimum {min}")
             }
-            Self::InvalidPadding { padding, packet_len } => {
-                write!(formatter, "invalid padding length {padding} for packet length {packet_len}")
+            Self::InvalidPadding {
+                padding,
+                packet_len,
+            } => {
+                write!(
+                    formatter,
+                    "invalid padding length {padding} for packet length {packet_len}"
+                )
             }
             Self::InvalidBoolean { observed } => {
                 write!(formatter, "invalid boolean wire byte {observed}")
@@ -295,7 +313,11 @@ pub fn encode_cleartext_packet(payload: &[u8], random_pad: &[u8]) -> Vec<u8> {
 
     // Append padding bytes
     for i in 0..padding_len {
-        let b = if i < random_pad.len() { random_pad[i] } else { 0 };
+        let b = if i < random_pad.len() {
+            random_pad[i]
+        } else {
+            0
+        };
         out.push(b);
     }
 

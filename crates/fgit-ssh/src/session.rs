@@ -77,8 +77,12 @@ impl Display for SshSessionError {
             Self::Crypto(err) => write!(formatter, "SSH crypto error: {err}"),
             Self::Auth(err) => write!(formatter, "SSH authentication refusal: {err}"),
             Self::Command(err) => write!(formatter, "SSH command refusal: {err}"),
-            Self::ProtocolViolation { reason } => write!(formatter, "SSH protocol violation: {reason}"),
-            Self::Disconnected { reason } => write!(formatter, "SSH session disconnected: {reason}"),
+            Self::ProtocolViolation { reason } => {
+                write!(formatter, "SSH protocol violation: {reason}")
+            }
+            Self::Disconnected { reason } => {
+                write!(formatter, "SSH session disconnected: {reason}")
+            }
         }
     }
 }
@@ -312,7 +316,8 @@ impl SshServerSession {
                 return Err(WireError::UnexpectedEof {
                     expected: 20,
                     available: input.len(),
-                }.into());
+                }
+                .into());
             }
             let mut len_arr = [0u8; 4];
             len_arr.copy_from_slice(&input[0..4]);
@@ -322,7 +327,8 @@ impl SshServerSession {
                 return Err(WireError::UnexpectedEof {
                     expected: total,
                     available: input.len(),
-                }.into());
+                }
+                .into());
             }
             let payload = cipher.decrypt_packet(&input[..total])?;
             Ok((payload, total))
@@ -331,7 +337,8 @@ impl SshServerSession {
                 return Err(WireError::UnexpectedEof {
                     expected: 5,
                     available: input.len(),
-                }.into());
+                }
+                .into());
             }
             let packet_len = u32::from_be_bytes([input[0], input[1], input[2], input[3]]) as usize;
             let total = 4 + packet_len;
@@ -339,7 +346,8 @@ impl SshServerSession {
                 return Err(WireError::UnexpectedEof {
                     expected: total,
                     available: input.len(),
-                }.into());
+                }
+                .into());
             }
             let payload = decode_cleartext_packet(&input[..total])?.to_vec();
             Ok((payload, total))
@@ -415,7 +423,8 @@ impl SshServerSession {
                 if client_pub.len() != 32 {
                     return Err(CryptoError::InvalidPublicKeyLength {
                         observed: client_pub.len(),
-                    }.into());
+                    }
+                    .into());
                 }
                 let mut client_pub_arr = [0u8; 32];
                 client_pub_arr.copy_from_slice(client_pub);
@@ -534,13 +543,19 @@ impl SshServerSession {
 
                     if has_sig {
                         let sig_blob = reader.read_string()?;
-                        let session_id = self.session_id.ok_or_else(|| {
-                            SshSessionError::ProtocolViolation {
-                                reason: "session ID unavailable during userauth".to_owned(),
-                            }
-                        })?;
+                        let session_id =
+                            self.session_id
+                                .ok_or_else(|| SshSessionError::ProtocolViolation {
+                                    reason: "session ID unavailable during userauth".to_owned(),
+                                })?;
 
-                        match verify_client_signature(&session_id, user_name, service_name, key_blob, sig_blob) {
+                        match verify_client_signature(
+                            &session_id,
+                            user_name,
+                            service_name,
+                            key_blob,
+                            sig_blob,
+                        ) {
                             Ok(pub_key_bytes) => {
                                 self.authenticated_key = Some(pub_key_bytes);
                                 self.phase = SessionPhase::ChannelReady;
@@ -632,16 +647,19 @@ impl SshServerSession {
                         .repository_path()
                         .trim_start_matches('/')
                         .strip_suffix(".git")
-                        .unwrap_or_else(|| parsed_command.repository_path().trim_start_matches('/'));
+                        .unwrap_or_else(|| {
+                            parsed_command.repository_path().trim_start_matches('/')
+                        });
 
-                    let repo_id = if let Ok(id) = RepositoryId::from_hex(&clean_path.to_ascii_lowercase()) {
-                        id
-                    } else {
-                        let digest = sha256_digest(parsed_command.repository_path().as_bytes());
-                        let mut repo_bytes = [0u8; 16];
-                        repo_bytes.copy_from_slice(&digest[..16]);
-                        RepositoryId::from_bytes(repo_bytes)
-                    };
+                    let repo_id =
+                        if let Ok(id) = RepositoryId::from_hex(&clean_path.to_ascii_lowercase()) {
+                            id
+                        } else {
+                            let digest = sha256_digest(parsed_command.repository_path().as_bytes());
+                            let mut repo_bytes = [0u8; 16];
+                            repo_bytes.copy_from_slice(&digest[..16]);
+                            RepositoryId::from_bytes(repo_bytes)
+                        };
 
                     match authorize_deploy_key(
                         &self.deploy_keys,

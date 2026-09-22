@@ -8,31 +8,53 @@ use std::time::{Duration, Instant};
 const REF: &[u8] = b"refs/heads/main";
 const CHILD_DIRECTORY: &str = "FGIT_PROGRESS_OWNER_TEST_DIRECTORY";
 static NEXT: AtomicU64 = AtomicU64::new(0);
-fn state() -> State { State::new("owner test sha256".into(), &[REF.to_vec()]).unwrap() }
+fn state() -> State {
+    State::new("owner test sha256".into(), &[REF.to_vec()]).unwrap()
+}
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("fg-owner-{}-{}",
-            std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let path = std::env::temp_dir().join(format!(
+            "fg-owner-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         Self(path)
     }
 }
-impl Drop for Scratch { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 struct Process(Child);
 impl Process {
     fn start(directory: &Path, phase: &str) -> Self {
         let module = module_path!().split_once("::").unwrap().1;
         let child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &format!("{module}::child_owner"), "--nocapture", "--test-threads=1"])
-            .env(CHILD_DIRECTORY, directory).env("FGIT_PROGRESS_OWNER_TEST_PHASE", phase)
-            .spawn().unwrap();
+            .args([
+                "--exact",
+                &format!("{module}::child_owner"),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_DIRECTORY, directory)
+            .env("FGIT_PROGRESS_OWNER_TEST_PHASE", phase)
+            .spawn()
+            .unwrap();
         let mut process = Self(child);
         let deadline = Instant::now() + Duration::from_secs(20);
         while !directory.join("ready").exists() {
-            assert!(process.0.try_wait().unwrap().is_none(), "child exited before acquiring ownership");
-            assert!(Instant::now() < deadline, "child failed to report durable progress");
+            assert!(
+                process.0.try_wait().unwrap().is_none(),
+                "child exited before acquiring ownership"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "child failed to report durable progress"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         process
@@ -43,23 +65,40 @@ impl Process {
     }
 }
 impl Drop for Process {
-    fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 #[test]
 fn child_owner() {
-    let Some(directory) = std::env::var_os(CHILD_DIRECTORY) else { return; };
+    let Some(directory) = std::env::var_os(CHILD_DIRECTORY) else {
+        return;
+    };
     let directory = PathBuf::from(directory);
     let mut file = ProgressFile::open(&directory, true, state()).unwrap();
     file.state.begin_preparation(REF).unwrap();
-    file.state.completed(REF, Pin { number: 7, digest: [4; 32] }).unwrap();
+    file.state
+        .completed(
+            REF,
+            Pin {
+                number: 7,
+                digest: [4; 32],
+            },
+        )
+        .unwrap();
     file.state.begin_preparation(REF).unwrap();
     if std::env::var("FGIT_PROGRESS_OWNER_TEST_PHASE").unwrap() == "pending" {
         file.arm(REF, [8; 32]).unwrap();
-    } else { file.save().unwrap(); }
+    } else {
+        file.save().unwrap();
+    }
     fs::write(directory.join("ready"), b"durable").unwrap();
     // Deliberately remain alive with progress owned until the parent kills us.
-    loop { std::thread::sleep(Duration::from_secs(1)); }
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 #[test]
@@ -69,7 +108,13 @@ fn process_death_allows_exclusive_resume_without_losing_floor_or_pending_candida
         let mut child = Process::start(&scratch.0, phase);
         let original = fs::read(scratch.0.join("checkpoint")).unwrap();
         let marker = fs::read(scratch.0.join("run.lock")).unwrap();
-        assert_eq!(ProgressFile::open(&scratch.0, false, state()).err().unwrap().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            ProgressFile::open(&scratch.0, false, state())
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
         assert_eq!(fs::read(scratch.0.join("checkpoint")).unwrap(), original);
         child.kill();
         // No release, sentinel deletion, PID probing or progress rewrite.
@@ -77,7 +122,13 @@ fn process_death_allows_exclusive_resume_without_losing_floor_or_pending_candida
         assert!(ProgressFile::open(&scratch.0, true, state()).is_err());
         let mut file = ProgressFile::open(&scratch.0, false, state()).unwrap();
         assert_eq!(file.state.encode().unwrap(), original);
-        assert_eq!(file.state.rows[REF].floor, Some(Pin { number: 7, digest: [4; 32] }));
+        assert_eq!(
+            file.state.rows[REF].floor,
+            Some(Pin {
+                number: 7,
+                digest: [4; 32]
+            })
+        );
         if phase == "pending" {
             assert_eq!(file.state.rows[REF].pending, Some([8; 32]));
             assert!(file.state.begin_preparation(REF).is_err());
@@ -102,35 +153,59 @@ fn crashed_owner_does_not_authorize_wrong_scope_or_discard_an_interrupted_replac
     assert!(ProgressFile::open(&scratch.0, false, foreign).is_err());
     fs::write(scratch.0.join("checkpoint.next"), b"interrupted").unwrap();
     assert!(ProgressFile::open(&scratch.0, false, state()).is_err());
-    assert_eq!(fs::read(scratch.0.join("checkpoint.next")).unwrap(), b"interrupted");
+    assert_eq!(
+        fs::read(scratch.0.join("checkpoint.next")).unwrap(),
+        b"interrupted"
+    );
     assert_eq!(fs::read(scratch.0.join("checkpoint")).unwrap(), original);
     assert_eq!(fs::read(scratch.0.join("run.lock")).unwrap(), marker);
     // Remove only our known injected test artifact, never an operator recovery rule.
     fs::remove_file(scratch.0.join("checkpoint.next")).unwrap();
-    ProgressFile::open(&scratch.0, false, state()).unwrap().release().unwrap();
+    ProgressFile::open(&scratch.0, false, state())
+        .unwrap()
+        .release()
+        .unwrap();
 }
 
 #[test]
 fn clean_releases_keep_one_anchor_inode_and_legacy_or_corrupt_sentinels_stay_blocked() {
     let scratch = Scratch::new();
-    ProgressFile::open(&scratch.0, true, state()).unwrap().release().unwrap();
+    ProgressFile::open(&scratch.0, true, state())
+        .unwrap()
+        .release()
+        .unwrap();
     let anchor = fs::metadata(scratch.0.join("owner.lock")).unwrap();
     let original = fs::read(scratch.0.join("checkpoint")).unwrap();
     for _ in 0..3 {
-        ProgressFile::open(&scratch.0, false, state()).unwrap().release().unwrap();
+        ProgressFile::open(&scratch.0, false, state())
+            .unwrap()
+            .release()
+            .unwrap();
         let next = fs::metadata(scratch.0.join("owner.lock")).unwrap();
         assert_eq!((next.dev(), next.ino()), (anchor.dev(), anchor.ino()));
         assert!(!scratch.0.join("run.lock").exists());
     }
-    for bytes in [b"".as_slice(), b"legacy owner", b"frankengit-index-owner-v1 0 0\n", &[b'x'; 129]] {
+    for bytes in [
+        b"".as_slice(),
+        b"legacy owner",
+        b"frankengit-index-owner-v1 0 0\n",
+        &[b'x'; 129],
+    ] {
         fs::write(scratch.0.join("run.lock"), bytes).unwrap();
-        fs::set_permissions(scratch.0.join("run.lock"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(
+            scratch.0.join("run.lock"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
         assert!(ProgressFile::open(&scratch.0, false, state()).is_err());
         assert_eq!(fs::read(scratch.0.join("run.lock")).unwrap(), bytes);
         assert_eq!(fs::read(scratch.0.join("checkpoint")).unwrap(), original);
         fs::remove_file(scratch.0.join("run.lock")).unwrap();
     }
-    ProgressFile::open(&scratch.0, false, state()).unwrap().release().unwrap();
+    ProgressFile::open(&scratch.0, false, state())
+        .unwrap()
+        .release()
+        .unwrap();
 }
 
 #[test]
@@ -165,5 +240,8 @@ fn ownership_anchor_rejects_symlinks_hardlinks_and_nonprivate_files() {
     assert!(ProgressFile::open(&scratch.0, true, state()).is_err());
     assert!(!scratch.0.join("run.lock").exists());
     fs::set_permissions(&anchor, fs::Permissions::from_mode(0o600)).unwrap();
-    ProgressFile::open(&scratch.0, true, state()).unwrap().release().unwrap();
+    ProgressFile::open(&scratch.0, true, state())
+        .unwrap()
+        .release()
+        .unwrap();
 }

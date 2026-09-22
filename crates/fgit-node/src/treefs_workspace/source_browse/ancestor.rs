@@ -62,10 +62,19 @@ impl OneNode {
         commit: Oid,
         query: &SourceBrowseQuery,
     ) -> Result<SourceBrowseReport, NodeWorkspaceRefusal> {
-        let selection = Some(Selection { expected_ref_tip, commit });
+        let selection = Some(Selection {
+            expected_ref_tip,
+            commit,
+        });
         match self.object_format {
-            Format::Sha1 => self.browse_local_format::<Sha1>(request, reference, query, selection).await,
-            Format::Sha256 => self.browse_local_format::<Sha256>(request, reference, query, selection).await,
+            Format::Sha1 => {
+                self.browse_local_format::<Sha1>(request, reference, query, selection)
+                    .await
+            }
+            Format::Sha256 => {
+                self.browse_local_format::<Sha256>(request, reference, query, selection)
+                    .await
+            }
         }
     }
 }
@@ -96,16 +105,31 @@ pub(super) fn select(
         live(request)?;
         loaded.map_err(|_| invalid_source())
     };
-    walk(source.inner.object_format, tip, commit, Limits::default(), &mut read,
-        &mut || live(request))
+    walk(
+        source.inner.object_format,
+        tip,
+        commit,
+        Limits::default(),
+        &mut read,
+        &mut || live(request),
+    )
 }
 
 #[derive(Clone, Copy)]
-struct Limits { commits: usize, edges: usize, bytes: usize, object_bytes: usize }
+struct Limits {
+    commits: usize,
+    edges: usize,
+    bytes: usize,
+    object_bytes: usize,
+}
 impl Default for Limits {
     fn default() -> Self {
-        Self { commits: MAX_COMMITS, edges: MAX_EDGES,
-            bytes: MAX_ANCESTRY_BYTES, object_bytes: MAX_COMMIT_BYTES }
+        Self {
+            commits: MAX_COMMITS,
+            edges: MAX_EDGES,
+            bytes: MAX_ANCESTRY_BYTES,
+            object_bytes: MAX_COMMIT_BYTES,
+        }
     }
 }
 
@@ -118,7 +142,9 @@ fn budget(name: &'static str) -> NodeWorkspaceRefusal {
 fn parse_oid(bytes: &[u8], format: Format) -> Result<Oid, NodeWorkspaceRefusal> {
     let text = std::str::from_utf8(bytes).map_err(|_| invalid_source())?;
     let id = Oid::from_hex(format, &text.to_ascii_lowercase()).map_err(|_| invalid_source())?;
-    if id.is_zero() { return Err(invalid_source()); }
+    if id.is_zero() {
+        return Err(invalid_source());
+    }
     Ok(id)
 }
 
@@ -134,7 +160,10 @@ fn walk(
     checkpoint: &mut impl FnMut() -> Result<(), NodeWorkspaceRefusal>,
 ) -> Result<Receipt, NodeWorkspaceRefusal> {
     checkpoint()?;
-    if [tip, wanted].iter().any(|id| id.is_zero() || id.algorithm() != format) {
+    if [tip, wanted]
+        .iter()
+        .any(|id| id.is_zero() || id.algorithm() != format)
+    {
         return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
     }
     let mut seen = BTreeSet::from([tip]);
@@ -143,15 +172,25 @@ fn walk(
     let mut edges = 0_usize;
     while let Some(id) = queue.pop_front() {
         checkpoint()?;
-        if seen.len() > limits.commits { return Err(budget("historical commit count")); }
-        let remaining = limits.bytes.checked_sub(bytes)
+        if seen.len() > limits.commits {
+            return Err(budget("historical commit count"));
+        }
+        let remaining = limits
+            .bytes
+            .checked_sub(bytes)
             .ok_or_else(|| budget("historical commit bytes"))?;
         let maximum = remaining.min(limits.object_bytes);
-        if maximum == 0 { return Err(budget("historical commit bytes")); }
+        if maximum == 0 {
+            return Err(budget("historical commit bytes"));
+        }
         let (kind, body) = read(id, maximum)?;
         checkpoint()?;
-        if body.len() > maximum { return Err(budget("historical commit bytes")); }
-        bytes = bytes.checked_add(body.len()).ok_or_else(|| budget("historical commit bytes"))?;
+        if body.len() > maximum {
+            return Err(budget("historical commit bytes"));
+        }
+        bytes = bytes
+            .checked_add(body.len())
+            .ok_or_else(|| budget("historical commit bytes"))?;
         if kind != ObjectType::Commit
             || fgit_crypto::git_object_id(format, GitObjectKind::Commit, &body) != id
         {
@@ -163,14 +202,28 @@ fn walk(
             tree_reference_bytes: format.digest_len(),
             ..ParseLimits::default()
         };
-        let ParsedObject::Commit(parsed) = parse_object_body(ObjectType::Commit, &body,
-            AcceptanceProfile::GitCompatibleImport, &parse).map_err(|_| invalid_source())?
-        else { return Err(invalid_source()); };
+        let ParsedObject::Commit(parsed) = parse_object_body(
+            ObjectType::Commit,
+            &body,
+            AcceptanceProfile::GitCompatibleImport,
+            &parse,
+        )
+        .map_err(|_| invalid_source())?
+        else {
+            return Err(invalid_source());
+        };
         // Native identity alone does not disambiguate imported unusual headers.
         // Never choose one tree header or drop continuation bytes on graph edges.
-        if parsed.headers().iter().filter(|header| header.name == b"tree").count() != 1
-            || parsed.headers().iter().any(|header| (header.name == b"tree" || header.name == b"parent")
-                && !header.continuations.is_empty())
+        if parsed
+            .headers()
+            .iter()
+            .filter(|header| header.name == b"tree")
+            .count()
+            != 1
+            || parsed.headers().iter().any(|header| {
+                (header.name == b"tree" || header.name == b"parent")
+                    && !header.continuations.is_empty()
+            })
         {
             return Err(invalid_source());
         }
@@ -178,18 +231,25 @@ fn walk(
         let mut parents = Vec::new();
         for parent in parsed.parent_references() {
             checkpoint()?;
-            edges = edges.checked_add(1).filter(|count| *count <= limits.edges)
+            edges = edges
+                .checked_add(1)
+                .filter(|count| *count <= limits.edges)
                 .ok_or_else(|| budget("historical parent edges"))?;
             parents.push(parse_oid(parent, format)?);
         }
         checkpoint()?;
         if id == wanted {
-            return Ok(Receipt { body, bytes: bytes as u64 });
+            return Ok(Receipt {
+                body,
+                bytes: bytes as u64,
+            });
         }
         for parent in parents {
             checkpoint()?;
             if !seen.contains(&parent) {
-                if seen.len() >= limits.commits { return Err(budget("historical commit count")); }
+                if seen.len() >= limits.commits {
+                    return Err(budget("historical commit count"));
+                }
                 seen.insert(parent);
                 queue.push_back(parent);
             }

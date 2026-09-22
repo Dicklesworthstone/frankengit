@@ -33,6 +33,7 @@
 pub mod aggregate;
 pub mod bisection;
 pub mod event;
+pub mod federation;
 pub mod history;
 pub mod initial_commit;
 pub mod issue_search;
@@ -43,7 +44,6 @@ pub mod review;
 pub mod snapshot;
 pub mod source_search;
 pub mod source_symbols;
-pub mod federation;
 pub mod webhook;
 
 use core::fmt;
@@ -57,8 +57,8 @@ pub use federation::{
 };
 
 pub use aggregate::{
-    AggregateHead, AggregateId, AggregateVersion, ExpectedVersion, OrganisationNumber,
-    PullRequestNumber, TeamNumber, IssueNumber, QueueNumber,
+    AggregateHead, AggregateId, AggregateVersion, ExpectedVersion, IssueNumber, OrganisationNumber,
+    PullRequestNumber, QueueNumber, TeamNumber,
 };
 pub use merge_queue::{
     BatchLandingPackage, BatchStatus, MergeQueueSnapshot, QueueAction, QueueBatchEntry,
@@ -238,9 +238,9 @@ impl core::error::Error for ForgeRefusal {}
 
 use fgit_codec::CodecRefusal;
 use fgit_diff::TreeMergeError;
-use fgit_types::GitOid;
 /// Exact bounded patch input shared by forge and workspace consumers.
 pub use fgit_diff::patch;
+use fgit_types::GitOid;
 
 /// Snapshot-pinned directory and exact-byte source browsing contracts.
 pub mod source_browse;

@@ -2560,7 +2560,14 @@ fn pr_updates_preserve_namespace_and_forge_permission_checks_without_moving_refs
                 Some(&ForgeStreamPosition::new(2))
             );
             assert_eq!(
-                fixture.state.commits().last().unwrap().effects.forge.get(&stream),
+                fixture
+                    .state
+                    .commits()
+                    .last()
+                    .unwrap()
+                    .effects
+                    .forge
+                    .get(&stream),
                 Some(&vec![event])
             );
         } else {
@@ -2570,7 +2577,10 @@ fn pr_updates_preserve_namespace_and_forge_permission_checks_without_moving_refs
                 RefusalCode::CapabilityScopeViolation
             };
             assert_eq!(report.refusal_code(), Some(expected), "{case}: {report:?}");
-            assert_eq!(fixture.state.roots().forge_positions, before.forge_positions);
+            assert_eq!(
+                fixture.state.roots().forge_positions,
+                before.forge_positions
+            );
             assert_eq!(fixture.state.commits().len(), 1);
         }
         fixture.assert_structurally_sound();

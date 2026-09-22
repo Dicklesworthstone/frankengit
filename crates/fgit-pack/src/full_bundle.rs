@@ -84,12 +84,19 @@ impl<'a> FullBundleInput<'a> {
     /// Accept a bounded prerequisite frontier. Comments are ignored; each
     /// prerequisite and every borrowed dependency still require native admission.
     /// The original `parse` entrypoint remains strictly self-contained.
-    pub fn parse_incremental(input: &'a [u8], limits: FullBundleLimits,
-        deadline: &mut impl Deadline) -> Result<Self, FullBundleError> {
+    pub fn parse_incremental(
+        input: &'a [u8],
+        limits: FullBundleLimits,
+        deadline: &mut impl Deadline,
+    ) -> Result<Self, FullBundleError> {
         Self::parse_profile(input, limits, true, deadline)
     }
-    fn parse_profile(input: &'a [u8], limits: FullBundleLimits,
-        incremental: bool, deadline: &mut impl Deadline) -> Result<Self, FullBundleError> {
+    fn parse_profile(
+        input: &'a [u8],
+        limits: FullBundleLimits,
+        incremental: bool,
+        deadline: &mut impl Deadline,
+    ) -> Result<Self, FullBundleError> {
         checkpoint(deadline)?;
         if input.len() > limits.max_bundle_bytes {
             return Err(FullBundleError::Limit("bundle bytes"));
@@ -128,9 +135,13 @@ impl<'a> FullBundleInput<'a> {
             }
             if let Some(record) = record.strip_prefix(b"-") {
                 if !incremental {
-                    return Err(FullBundleError::Unsupported("incremental bundle prerequisite"));
+                    return Err(FullBundleError::Unsupported(
+                        "incremental bundle prerequisite",
+                    ));
                 }
-                if records != 0 { return Err(FullBundleError::Invalid("prerequisite after reference")); }
+                if records != 0 {
+                    return Err(FullBundleError::Invalid("prerequisite after reference"));
+                }
                 if prerequisites.len() == MAX_BUNDLE_PREREQUISITES {
                     return Err(FullBundleError::Limit("prerequisites"));
                 }
@@ -207,7 +218,9 @@ impl<'a> FullBundleInput<'a> {
         })
     }
     #[must_use]
-    pub fn prerequisites(&self) -> &[ObjectId] { &self.prerequisites }
+    pub fn prerequisites(&self) -> &[ObjectId] {
+        &self.prerequisites
+    }
     #[must_use]
     pub const fn format(&self) -> ObjectFormat {
         self.format
@@ -282,13 +295,28 @@ impl FullBundle {
         limits: FullBundleLimits,
         deadline: &mut impl Deadline,
     ) -> Result<Self, FullBundleError> {
-        Self::write_profile(references, head, &[], &BTreeSet::new(), plan, writer, limits, deadline)
+        Self::write_profile(
+            references,
+            head,
+            &[],
+            &BTreeSet::new(),
+            plan,
+            writer,
+            limits,
+            deadline,
+        )
     }
 
-    fn write_profile(references: &[BundleReference], head: Option<ObjectId>,
-        prerequisites: &[ObjectId], external: &BTreeSet<ObjectId>, plan: &PackPlan,
-        writer: &PackWriter, limits: FullBundleLimits, deadline: &mut impl Deadline)
-        -> Result<Self, FullBundleError> {
+    fn write_profile(
+        references: &[BundleReference],
+        head: Option<ObjectId>,
+        prerequisites: &[ObjectId],
+        external: &BTreeSet<ObjectId>,
+        plan: &PackPlan,
+        writer: &PackWriter,
+        limits: FullBundleLimits,
+        deadline: &mut impl Deadline,
+    ) -> Result<Self, FullBundleError> {
         checkpoint(deadline)?;
         if prerequisites.len() > MAX_BUNDLE_PREREQUISITES {
             return Err(FullBundleError::Limit("prerequisites"));
@@ -296,15 +324,20 @@ impl FullBundle {
         let mut boundary = BTreeSet::new();
         for &id in prerequisites {
             checkpoint(deadline)?;
-            if id.algorithm() != plan.format() || id.is_zero() || !boundary.insert(id)
-                || !external.contains(&id) {
+            if id.algorithm() != plan.format()
+                || id.is_zero()
+                || !boundary.insert(id)
+                || !external.contains(&id)
+            {
                 return Err(FullBundleError::Invalid("prerequisite closure"));
             }
         }
         if boundary.is_empty() && !external.is_empty() {
             return Err(FullBundleError::Invalid("external closure"));
         }
-        if external.len() > 1_000_000 { return Err(FullBundleError::Limit("external closure")); }
+        if external.len() > 1_000_000 {
+            return Err(FullBundleError::Limit("external closure"));
+        }
         for id in external {
             checkpoint(deadline)?;
             if id.is_zero() || id.algorithm() != plan.format() {
@@ -357,7 +390,9 @@ impl FullBundle {
             if !seen.insert(id) {
                 continue;
             }
-            if external.contains(&id) { continue; }
+            if external.contains(&id) {
+                continue;
+            }
             let object = graph.get(&id).ok_or(FullBundleError::MissingObject(id))?;
             for target in object.references() {
                 checkpoint(deadline)?;
@@ -369,7 +404,10 @@ impl FullBundle {
                 }
             }
         }
-        if let Some(id) = graph.keys().find(|id| external.contains(id) || !seen.contains(id)) {
+        if let Some(id) = graph
+            .keys()
+            .find(|id| external.contains(id) || !seen.contains(id))
+        {
             return Err(FullBundleError::UnreachableObject(*id));
         }
         let mut header = match plan.format() {
@@ -385,7 +423,9 @@ impl FullBundle {
             if header.len().checked_add(1).is_none_or(|n| n >= maximum) {
                 return Err(FullBundleError::Limit("header bytes"));
             }
-            header.try_reserve(1).map_err(|_| FullBundleError::Limit("allocation"))?;
+            header
+                .try_reserve(1)
+                .map_err(|_| FullBundleError::Limit("allocation"))?;
             header.push(b'-');
             append_ref(&mut header, id, b"required history", maximum)?;
         }
@@ -467,16 +507,40 @@ impl IncrementalBundle {
     /// declared prerequisites. This is a transfer assumption, never authority.
     /// Every transmitted edge must end in that closure or this exact pack, and
     /// unrelated planned objects are refused before any artifact is returned.
-    pub fn write(references: &[BundleReference], prerequisites: &[ObjectId],
-        prerequisite_closure: &BTreeSet<ObjectId>, plan: &PackPlan,
-        writer: &PackWriter, limits: FullBundleLimits, deadline: &mut impl Deadline)
-        -> Result<Self, FullBundleError> {
-        if prerequisites.is_empty() { return Err(FullBundleError::Invalid("empty prerequisite frontier")); }
-        FullBundle::write_profile(references, None, prerequisites, prerequisite_closure,
-            plan, writer, limits, deadline).map(Self)
+    pub fn write(
+        references: &[BundleReference],
+        prerequisites: &[ObjectId],
+        prerequisite_closure: &BTreeSet<ObjectId>,
+        plan: &PackPlan,
+        writer: &PackWriter,
+        limits: FullBundleLimits,
+        deadline: &mut impl Deadline,
+    ) -> Result<Self, FullBundleError> {
+        if prerequisites.is_empty() {
+            return Err(FullBundleError::Invalid("empty prerequisite frontier"));
+        }
+        FullBundle::write_profile(
+            references,
+            None,
+            prerequisites,
+            prerequisite_closure,
+            plan,
+            writer,
+            limits,
+            deadline,
+        )
+        .map(Self)
     }
-    pub fn bytes(&self) -> &[u8] { self.0.bytes() }
-    pub fn into_bytes(self) -> Vec<u8> { self.0.into_bytes() }
-    pub const fn pack_receipt(&self) -> &PackWriteReceipt { self.0.pack_receipt() }
-    pub const fn header_bytes(&self) -> usize { self.0.header_bytes() }
+    pub fn bytes(&self) -> &[u8] {
+        self.0.bytes()
+    }
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0.into_bytes()
+    }
+    pub const fn pack_receipt(&self) -> &PackWriteReceipt {
+        self.0.pack_receipt()
+    }
+    pub const fn header_bytes(&self) -> usize {
+        self.0.header_bytes()
+    }
 }

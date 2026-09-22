@@ -2,12 +2,11 @@
 //! Comprehensive test suite for the MCP surface registry and capability contracts (FG-096a).
 
 use fgit_schema::mcp::{
-    admit_call, discover_tools, find_tool, validate_registry, validate_tool_entry,
     BudgetDimensions, CancellationBehavior, CapabilityRequirement, DisclosureClass,
     EvidenceReceiptClass, FieldClassification, IdempotencyRequirement,
     InputAuthorityRootRequirement, McpEntityKind, McpField, McpRefusal, McpToolEntry,
-    McpValidationError, PaginationRules, PrincipalRequirement, ReadMutationClass, SupportProfile,
-    REGISTRY,
+    McpValidationError, PaginationRules, PrincipalRequirement, REGISTRY, ReadMutationClass,
+    SupportProfile, admit_call, discover_tools, find_tool, validate_registry, validate_tool_entry,
 };
 
 fn valid_prototype() -> McpToolEntry {
@@ -362,9 +361,11 @@ fn test_generated_artifacts_byte_stability() {
         .iter()
         .find(|a| a.name == "mcp-surface.schema.json")
         .unwrap();
-    assert!(mcp_schema
-        .contents
-        .contains("FrankenGit Model Context Protocol (MCP) surface schema"));
+    assert!(
+        mcp_schema
+            .contents
+            .contains("FrankenGit Model Context Protocol (MCP) surface schema")
+    );
 
     let mcp_tools = artifacts
         .iter()

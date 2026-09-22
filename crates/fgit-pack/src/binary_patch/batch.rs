@@ -33,23 +33,41 @@ pub struct BinaryPatchBatch {
 impl BinaryPatchBatch {
     pub fn new(mut limits: BinaryPatchLimits, files: usize) -> Result<Self, BinaryPatchError> {
         limits.validate()?;
-        if files == 0 || files > 1024 { return Err(BinaryPatchError::InvalidLimits); }
+        if files == 0 || files > 1024 {
+            return Err(BinaryPatchError::InvalidLimits);
+        }
         // Reserve the whole work envelope exactly once. Rounding only narrows.
         limits.max_inflate_work /= files as u64;
         limits.max_delta_work /= files;
         limits.validate()?;
-        Ok(Self { limits, files, usage: BinaryPatchUsage::default(), poisoned: false })
+        Ok(Self {
+            limits,
+            files,
+            usage: BinaryPatchUsage::default(),
+            poisoned: false,
+        })
     }
 
     #[must_use]
-    pub const fn usage(&self) -> BinaryPatchUsage { self.usage }
+    pub const fn usage(&self) -> BinaryPatchUsage {
+        self.usage
+    }
 
-    pub fn apply(&mut self, bytes: &[u8], old: Option<ObjectId>, new: Option<ObjectId>,
-        base: &[u8], deadline: &mut impl Deadline,
+    pub fn apply(
+        &mut self,
+        bytes: &[u8],
+        old: Option<ObjectId>,
+        new: Option<ObjectId>,
+        base: &[u8],
+        deadline: &mut impl Deadline,
     ) -> Result<Vec<u8>, BinaryPatchError> {
-        if self.poisoned { return Err(BinaryPatchError::Invalid("binary batch already refused")); }
+        if self.poisoned {
+            return Err(BinaryPatchError::Invalid("binary batch already refused"));
+        }
         self.poisoned = true;
-        if self.usage.files == self.files { return Err(BinaryPatchError::Limit("binary files")); }
+        if self.usage.files == self.files {
+            return Err(BinaryPatchError::Limit("binary files"));
+        }
         let limits = BinaryPatchLimits {
             max_input_bytes: self.limits.max_input_bytes - self.usage.input_bytes,
             max_expanded_bytes: self.limits.max_expanded_bytes - self.usage.expanded_bytes,

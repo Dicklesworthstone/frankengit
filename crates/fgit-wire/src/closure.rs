@@ -428,7 +428,9 @@ impl Display for ClosureError {
         match self {
             Self::InvalidLimit => formatter.write_str("invalid closure limit"),
             Self::InvalidDeepenDepth => formatter.write_str("deepen depth must be positive"),
-            Self::UnsupportedRelativeDeepening => formatter.write_str("relative deepening requires a native shallow provider"),
+            Self::UnsupportedRelativeDeepening => {
+                formatter.write_str("relative deepening requires a native shallow provider")
+            }
             Self::ObjectFormatMismatch { expected, observed } => {
                 write!(
                     formatter,
