@@ -466,17 +466,15 @@ fn legacy_host_marker_is_refused_without_reinterpreting_its_resource_profile() {
         RegionCloseOutcome::ContainmentFailure(_)
     ));
     let l = ledger();
-    assert!(matches!(
-        SparseWorkspace::reopen(
-            p.clone(),
-            s.parent(),
-            path(b"versioned"),
-            reserve(&l, &p),
-            &capability(),
-            0
-        ),
-        Err(HostRefusal::IdentityMismatch)
-    ));
+    let reopen_res = SparseWorkspace::reopen(
+        p.clone(),
+        s.parent(),
+        path(b"versioned"),
+        reserve(&l, &p),
+        &capability(),
+        0,
+    );
+    assert_eq!(reopen_res.err(), Some(HostRefusal::IdentityMismatch));
     assert!(s.0.join("versioned").exists());
     assert_eq!(l.snapshot().consumed(), ResourceVector::ZERO);
     // Only the test restores its own injected marker. Production must use

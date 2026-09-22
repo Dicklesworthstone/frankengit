@@ -531,8 +531,14 @@ fn job_failure_skips_dependents_and_marks_run_failed() {
     let run = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1)).unwrap();
     match &run.status {
         RunStatus::Running => {
-            // Cancel/terminate the run since no jobs remain eligible
+            // Cancel/terminate the run through request -> drain -> finalize
             coordinator.cancel_run(run_id, CancellationReason::UserRequested).unwrap();
+            let draining = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1)).unwrap();
+            assert!(matches!(draining.status, RunStatus::Draining { .. }));
+
+            let outcome = coordinator.drain_and_finalize(run_id).unwrap();
+            assert!(matches!(outcome, RunOutcome::Cancelled { .. }));
+
             let term = coordinator.lookup_by_idempotency(&IdempotencyKey::of("push", &commit, "test-ci", 1)).unwrap();
             assert!(matches!(term.status, RunStatus::Terminal(RunOutcome::Cancelled { .. })));
         }
