@@ -2,26 +2,29 @@
 //! the same head. Payload bytes stream through a private, unpublished file.
 mod archive;
 mod restore;
+mod profile;
+mod input;
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use fgit_authority::{HeadReadReceipt, StoreInstanceId};
 use fgit_authority_fsqlite::{ExportBundle, PortableStoreLimits, export_bundle};
 use fgit_crypto::GitObjectKind;
-use fgit_node::{NodeConfig, NodeRequestContext, OneNode};
+use fgit_node::{NodeConfig, OneNode};
 use fgit_object_fabric::ObjectKind as FabricKind;
 use fgit_treefs::integrity::{GraphLimits, GraphReport, ObjectGraphAudit};
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
 
 use super::{emit, hex, publish_streamed, quote, regular, require_absent, with_store};
-use archive::{Identity, MAX_ARCHIVE_BYTES, MAX_OBJECT_BYTES, MAX_OBJECTS};
+use archive::{Identity, MAX_OBJECT_BYTES, MAX_OBJECTS};
+use profile::{Profile, ProfileFlags};
 use archive::stream::{StreamDecoder, StreamEncoder, StreamHeader, Seal, TransferLimits};
 
 pub(super) const USAGE: &str = "usage: fg-repository-backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
          --trusted-local [--object-format sha1|sha256]
+         [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
 
 Authority metadata plus every authority-selected Git object, including admitted
 history unreachable from current refs. Source head, complete local graph, native
@@ -32,9 +35,11 @@ No implicit retry, live directory copying, external Git, or remote authorization
 This is a bounded trusted-local SOURCE recovery transport, not a signed capsule
 or a full service backup. External artifacts, private keys, runner workspaces,
 search indexes and routing are excluded. Stable trusted parent paths required.
-Limits: 64 MiB complete transport, 100000 objects, 32 MiB per object, 100000 refs,
-1000000 inspected edges and a 300 second node scan. Codec/runtime limits may
-refuse earlier. The scan timeout is cooperative, not a blocking-I/O interruption.
+Default archive budget: 1 GiB; default operation deadline: 300 seconds.
+Independent bounds: 100000 objects, 32 MiB per object, 100000 refs and
+1000000 inspected edges. Authority metadata retains its separate 64 MiB bound.
+Codec/runtime limits may refuse earlier. The deadline covers all passes, is
+cooperative, and cannot interrupt a blocking filesystem call.
 Export streams payloads through one object buffer and verifies the staged file.
 Export never overwrites an existing file. Save its SHA-256 independently.";
 
@@ -45,15 +50,17 @@ struct Options {
     tenant: TenantId,
     repository: RepositoryId,
     format: GitHashAlgorithm,
+    profile: Profile,
 }
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(6..=8).contains(&args.len()) || args[0] != "export"
+    if !(6..=12).contains(&args.len()) || args[0] != "export"
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
         || args[1].is_empty() || args[2].is_empty()
     { return Err(USAGE.into()); }
     let mut trusted = false;
     let mut format = None;
+    let mut profile = ProfileFlags::default();
     let mut cursor = 5;
     while let Some(flag) = args.get(cursor) {
         cursor += 1;
@@ -67,6 +74,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     _ => return Err("object format must be sha1 or sha256".into()),
                 });
             }
+            "--max-archive-bytes" | "--timeout-secs" => {
+                let value = args.get(cursor).ok_or_else(|| format!("missing value for {flag}"))?;
+                cursor += 1;
+                profile.set(flag, value)?;
+            }
             _ => return Err(format!("unknown or duplicate repository backup option: {flag}")),
         }
     }
@@ -76,18 +88,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
     Ok(Options { root: args[1].clone().into(), destination,
         tenant: TenantId::from_hex(&args[3]).map_err(|e| e.to_string())?,
         repository: RepositoryId::from_hex(&args[4]).map_err(|e| e.to_string())?,
-        format: format.unwrap_or(GitHashAlgorithm::Sha1) })
+        format: format.unwrap_or(GitHashAlgorithm::Sha1), profile: profile.finish() })
 }
-fn limits() -> GraphLimits {
+fn limits(transfer: TransferLimits) -> GraphLimits {
     GraphLimits { max_objects: MAX_OBJECTS, max_object_bytes: MAX_OBJECT_BYTES,
-        max_payload_bytes: MAX_ARCHIVE_BYTES as u64, ..Default::default() }
-}
-fn live(started: Instant, request: &NodeRequestContext) -> Result<(), String> {
-    if started.elapsed() >= Duration::from_secs(300) {
-        request.cancel();
-        return Err("repository backup scan deadline exceeded".into());
-    }
-    Ok(())
+        max_payload_bytes: transfer.max_archive_bytes, ..Default::default() }
 }
 /// Require exact token, key, generation AND bytes, not merely the same generation.
 fn matches_head(bundle: &ExportBundle, current: &HeadReadReceipt) -> bool {
@@ -110,6 +115,7 @@ fn with_node<T>(config: NodeConfig, action: impl FnOnce(&OneNode) -> Result<T, S
     }
 }
 fn export(options: &Options, file: &mut File) -> Result<String, String> {
+    let deadline = options.profile.start();
     let metadata = std::fs::symlink_metadata(&options.root).map_err(|e| e.to_string())?;
     if !metadata.is_dir() { return Err("source root must be an existing directory, not a symlink".into()); }
     let database = options.root.join("authority.fsqlite");
@@ -117,21 +123,21 @@ fn export(options: &Options, file: &mut File) -> Result<String, String> {
     let authority = with_store(&database, StoreInstanceId::from_raw(0), true, |runtime, store, cx|
         runtime.block_on(store.export_portable(cx, PortableStoreLimits::default())).map_err(|e| e.to_string()))?;
     let encoded = export_bundle(&authority).map_err(|error| error.to_string())?;
-    with_node(NodeConfig::new(options.root.clone(), options.tenant, options.repository)
+    deadline.check()?;
+    let result = with_node(NodeConfig::new(options.root.clone(), options.tenant, options.repository)
         .with_object_format(options.format), |node| {
-        let started = Instant::now();
         let request = node.request_context();
         let selected = node.runtime().block_on(node.materialize_admission_in(&request)).map_err(|e| e.to_string())?;
-        live(started, &request)?;
+        deadline.in_request(&request)?;
         if !matches_head(&authority, selected.authenticated().receipt()) {
             return Err("repository head moved after authority capture; no backup published".into());
         }
         let objects = selected.selected_closure().closure().objects();
         let identity = Identity { tenant: options.tenant, repository: options.repository,
             incarnation: node.repository_incarnation_id(), format: options.format };
-        let mut io_live = || live(started, &request);
+        let mut io_live = || deadline.in_request(&request);
         let mut output = StreamEncoder::new(&mut *file, identity, &encoded, objects.len(),
-            TransferLimits::default(), &mut io_live)?;
+            options.profile.transfer, &mut io_live)?;
         for &oid in objects {
             io_live()?;
             let object = node.read_git_object(oid).map_err(|error| format!("backup object {oid}: {error}"))?;
@@ -147,12 +153,12 @@ fn export(options: &Options, file: &mut File) -> Result<String, String> {
         file.seek(SeekFrom::Start(0)).map_err(|e| format!("backup verification seek failed: {e}"))?;
         // Read the actual staged bytes, not a second encoding or source buffer.
         // Their checksum must equal the writer's digest and EOF must be exact.
-        let mut decoded = StreamDecoder::new(&mut *file, TransferLimits::default(), &mut io_live)?;
+        let mut decoded = StreamDecoder::new(&mut *file, options.profile.transfer, &mut io_live)?;
         if decoded.header().identity != identity || decoded.header().authority != authority
             || decoded.header().objects != objects.len()
         { return Err("repository backup transport changed its source snapshot".into()); }
-        let mut checkpoint = || live(started, &request).is_ok();
-        let mut graph = ObjectGraphAudit::new(objects, options.format, limits(), &mut checkpoint)
+        let mut checkpoint = || deadline.in_request(&request).is_ok();
+        let mut graph = ObjectGraphAudit::new(objects, options.format, limits(options.profile.transfer), &mut checkpoint)
             .map_err(|error| error.to_string())?;
         while let Some(record) = decoded.record(&mut io_live)? {
             graph.observe(record.oid, record.kind, record.payload, &mut checkpoint).map_err(|error| error.to_string())?;
@@ -166,7 +172,9 @@ fn export(options: &Options, file: &mut File) -> Result<String, String> {
             return Err("repository head moved during backup; no backup published".into());
         }
         Ok(receipt(&header, report, verified))
-    })
+    })?;
+    deadline.check()?;
+    Ok(result)
 }
 fn receipt(archive: &StreamHeader, graph: GraphReport, seal: Seal) -> String {
     format!(concat!("{{\"type\":\"repository_source_backup_export\",\"schema_version\":1,",

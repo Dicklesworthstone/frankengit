@@ -8,7 +8,7 @@ use fgit_crypto::{DigestHasher, GitObjectKind, Sha256Hasher, git_object_id, git_
 use fgit_types::{CANONICAL_CODEC_VERSION, GitHashAlgorithm, GitOid, RepositoryId,
     RepositoryIncarnationId, TenantId};
 
-use super::{Identity, Record, MAGIC, MAX_ARCHIVE_BYTES, MAX_OBJECT_BYTES, MAX_OBJECTS, kind, kind_byte};
+use super::{Identity, Record, MAGIC, MAX_OBJECT_BYTES, MAX_OBJECTS, kind, kind_byte};
 
 const CHUNK_BYTES: usize = 64 * 1024;
 // Authority portability has its own codec and row bounds. A larger source
@@ -20,7 +20,7 @@ pub(crate) struct TransferLimits {
     pub max_archive_bytes: u64,
 }
 impl Default for TransferLimits {
-    fn default() -> Self { Self { max_archive_bytes: MAX_ARCHIVE_BYTES as u64 } }
+    fn default() -> Self { Self { max_archive_bytes: 1 << 30 } }
 }
 impl TransferLimits {
     pub fn validate(self) -> Result<(), String> {

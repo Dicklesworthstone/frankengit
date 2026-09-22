@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use fgit_authority::{AuthorityLimits, StoreInstanceId};
 use fgit_authority_fsqlite::{ExportBundle, FsqliteAuthorityStore};
+#[cfg(test)]
 use fgit_crypto::{DigestHasher, Sha256Hasher};
 use fgit_runtime::boot::{NodeRuntime, RuntimeProfile};
 use fgit_runtime::meter::BudgetClass;
@@ -28,6 +29,7 @@ fn main() -> ExitCode {
         }
     }
 }
+#[cfg(test)]
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut hash = Sha256Hasher::new();
     hash.update(bytes);

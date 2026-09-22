@@ -41,3 +41,15 @@ fn snapshot_join_checks_key_token_generation_and_exact_bytes_separately() {
     let mut missing = bundle; missing.head = None;
     assert!(!matches_head(&missing, &receipt));
 }
+#[test]
+fn export_profile_controls_total_bytes_without_widening_per_object_or_graph_limits() {
+    let options = parse(&args(&["--object-format", "sha256", "--max-archive-bytes", "2147483648", "--timeout-secs", "900"])).unwrap();
+    assert_eq!(options.profile.transfer.max_archive_bytes, 2 << 30);
+    assert_eq!(options.profile.timeout.as_secs(), 900);
+    let graph = limits(options.profile.transfer);
+    assert_eq!(graph.max_payload_bytes, 2 << 30);
+    assert_eq!(graph.max_object_bytes, 32 * 1024 * 1024);
+    assert_eq!(graph.max_objects, 100_000);
+    assert_eq!(graph.max_edges, 1_000_000);
+    assert!(parse(&args(&["--max-archive-bytes", "1", "--max-archive-bytes", "2"])).is_err());
+}

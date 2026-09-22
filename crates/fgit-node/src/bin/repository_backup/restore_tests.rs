@@ -83,6 +83,18 @@ fn checksum_failure_precedes_destination_creation() {
     let input = scratch.0.join("bad.fg"); fs::write(&input, b"corrupted").unwrap();
     let output = scratch.0.join("must-not-exist");
     let error = execute(&Options { input, output: output.clone(), expected: [1; 32],
-        instance: StoreInstanceId::from_raw(99) }).unwrap_err();
+        instance: StoreInstanceId::from_raw(99), profile: Profile::default() }).unwrap_err();
     assert!(error.contains("checksum mismatch")); assert!(!output.exists());
+}
+
+#[test]
+fn restore_accepts_shared_profile_flags_and_rejects_duplicate_limits() {
+    let mut input = args();
+    input.extend(["--max-archive-bytes".into(), "2147483648".into(), "--timeout-secs".into(), "900".into()]);
+    let options = parse(&input).unwrap();
+    assert_eq!(options.profile.transfer.max_archive_bytes, 2 << 30);
+    assert_eq!(options.profile.timeout.as_secs(), 900);
+    let mut input = args();
+    input.extend(["--max-archive-bytes".into(), "1".into(), "--max-archive-bytes".into(), "2".into()]);
+    assert!(parse(&input).is_err());
 }

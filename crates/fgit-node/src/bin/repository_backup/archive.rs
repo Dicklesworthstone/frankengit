@@ -1,11 +1,16 @@
 //! Versioned local recovery transport, NOT a canonical body or a signed capsule.
 //! No host paths, compression, offsets, SQL statements or source CAS privileges
 //! are interpreted here. The enclosing trusted checksum authenticates these bytes.
+#[cfg(test)]
 use fgit_authority_fsqlite::{ExportBundle, import_bundle};
-use fgit_crypto::{GitObjectKind, git_object_id, git_payload_commitment};
-use fgit_types::{CANONICAL_CODEC_VERSION, GitHashAlgorithm, GitOid, RepositoryId,
-    RepositoryIncarnationId, TenantId};
+use fgit_crypto::GitObjectKind;
+#[cfg(test)]
+use fgit_crypto::{git_object_id, git_payload_commitment};
+#[cfg(test)]
+use fgit_types::CANONICAL_CODEC_VERSION;
+use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId, TenantId};
 
+#[cfg(test)]
 pub(super) const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 pub(super) const MAX_OBJECTS: usize = 100_000;
 pub(super) const MAX_OBJECT_BYTES: usize = 32 * 1024 * 1024;
@@ -24,6 +29,7 @@ pub(super) struct Record<'a> {
     pub kind: GitObjectKind,
     pub payload: &'a [u8],
 }
+#[cfg(test)]
 #[derive(Debug)]
 pub(super) struct Archive<'a> {
     pub identity: Identity,
@@ -102,7 +108,9 @@ fn kind(byte: u8) -> Result<GitObjectKind, String> {
         3 => Ok(GitObjectKind::Blob), 4 => Ok(GitObjectKind::Tag),
         _ => Err("repository backup contains a non-Git object type".into()) }
 }
+#[cfg(test)]
 struct Reader<'a> { bytes: &'a [u8] }
+#[cfg(test)]
 impl<'a> Reader<'a> {
     fn take(&mut self, count: usize) -> Result<&'a [u8], String> {
         let part = self.bytes.get(..count).ok_or("truncated repository backup")?;
@@ -120,6 +128,7 @@ impl<'a> Reader<'a> {
 /// Verify framing, native identity and original payload commitments before a
 /// caller creates destination state. Graph/selection checks additionally need
 /// the canonical authority materializer; successful decoding grants no authority.
+#[cfg(test)]
 pub(super) fn decode(bytes: &[u8], mut live: impl FnMut() -> Result<(), String>)
     -> Result<Archive<'_>, String>
 {
