@@ -54,9 +54,9 @@ fn fixture<A: GitHashAlgorithm>() -> (Source, BaseView<A>, GitOid<A>, GitOid<A>,
     let target_tree = source.tree::<A>(b"target\n");
     let incoming_tree = source.tree::<A>(b"incoming\n");
     let merged_tree = source.tree::<A>(b"resolved\0\xff\n");
-    let target = source.commit(target_tree, &[], "target");
-    let incoming = source.commit(incoming_tree, &[target], "incoming");
-    let candidate = source.commit(merged_tree, &[target, incoming], "explicit resolved result");
+    let target = source.commit::<A>(target_tree, &[], "target");
+    let incoming = source.commit::<A>(incoming_tree, &[target], "incoming");
+    let candidate = source.commit::<A>(merged_tree, &[target, incoming], "explicit resolved result");
     let rcr = RepositoryCommitId::from_digest(DigestAlgorithmId::try_new(0x8001).unwrap(),
         CodecVersion::new(1, 0), DigestBytes::try_new(&[9; 32]).unwrap());
     let base = BaseView::new(RepositoryId::from_bytes([2; 16]), rcr, target, target_tree, limits::<A>(), PathPolicy::default());
@@ -99,7 +99,7 @@ fn copied<A: GitHashAlgorithm>(cancel: bool) {
         let file = workspace.tool_directory().join(std::ffi::OsStr::from_bytes(b"result\xff"));
         assert_eq!(fs::read(file).unwrap(), b"resolved\0\xff\n");
         assert!(matches!(workspace.import(&capability(), 0, &|_| false), Err(HostRefusal::IdentityMismatch)));
-        workspace.close().unwrap();
+        let _ = workspace.close().unwrap();
     }
     assert!(matches!(ledger.close(), RegionCloseOutcome::Quiescent(_)));
     assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
@@ -115,7 +115,7 @@ fn wrong_parents<A: GitHashAlgorithm>() {
         limits::<A>(), SparseLimits::default()), Err(CandidateManifestRefusal::InvalidCandidate(_))));
     for parents in [vec![incoming, *base.base_commit_oid()], vec![*base.base_commit_oid()],
         vec![*base.base_commit_oid(), incoming, *base.base_commit_oid()], vec![*base.base_commit_oid(), *base.base_commit_oid()]] {
-        let id = source.commit(tree, &parents, "bad parent binding");
+        let id = source.commit::<A>(tree, &parents, "bad parent binding");
         assert!(matches!(SparseCandidateManifest::build_merge(&base, &source, id, incoming, &mut capability(), 0,
             limits::<A>(), SparseLimits::default()), Err(CandidateManifestRefusal::InvalidCandidate(_))));
     }

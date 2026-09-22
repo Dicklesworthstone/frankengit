@@ -51,8 +51,8 @@ fn fixture<A: GitHashAlgorithm>() -> (Source, BaseView<A>, GitOid<A>) {
         source.put::<A>(GitObjectKind::Tree, [b"100755 input\xff\0".as_slice(), blob.digest_bytes()].concat())
     };
     let before = tree(b"original\n"); let after = tree(b"\0\xff\r\n");
-    let base_commit = commit(&mut source, before, &[], "base");
-    let candidate = commit(&mut source, after, &[base_commit], "candidate");
+    let base_commit = commit::<A>(&mut source, before, &[], "base");
+    let candidate = commit::<A>(&mut source, after, &[base_commit], "candidate");
     let rcr = RepositoryCommitId::from_digest(DigestAlgorithmId::try_new(0x8001).unwrap(),
         CodecVersion::new(1, 0), DigestBytes::try_new(&[9; 32]).unwrap());
     (source, BaseView::new(RepositoryId::from_bytes([2; 16]), rcr, base_commit, before,
@@ -93,7 +93,7 @@ fn copy_and_close<A: GitHashAlgorithm>() {
         reservation, &capability(), 0, &|_| false).unwrap();
     assert_eq!(fs::read(root.0.join("job").join(std::ffi::OsStr::from_bytes(b"input\xff"))).unwrap(), b"\0\xff\r\n");
     assert!(matches!(workspace.import(&capability(), 0, &|_| false), Err(HostRefusal::IdentityMismatch)));
-    workspace.close().unwrap();
+    let _ = workspace.close().unwrap();
     assert!(matches!(ledger.close(), RegionCloseOutcome::Quiescent(_)));
     assert!(!root.0.join("job").exists());
 }
@@ -105,8 +105,8 @@ fn candidate_inputs_keep_base_provenance_and_materialize_without_import_authorit
 fn parent_integrity_capabilities_and_payload_limits_are_not_bypassed() {
     let (mut source, base, candidate) = fixture::<Sha1>();
     let good = SparseCandidateManifest::build(&base, &source, candidate, &mut capability(), 0, parse_limits::<Sha1>(), SparseLimits::default()).unwrap();
-    let wrong = commit(&mut source, *good.candidate_tree_oid(), &[candidate], "wrong parent");
-    let merged = commit(&mut source, *good.candidate_tree_oid(), &[*base.base_commit_oid(), candidate], "two parents");
+    let wrong = commit::<Sha1>(&mut source, *good.candidate_tree_oid(), &[candidate], "wrong parent");
+    let merged = commit::<Sha1>(&mut source, *good.candidate_tree_oid(), &[*base.base_commit_oid(), candidate], "two parents");
     for id in [wrong, merged, *base.base_commit_oid()] {
         assert!(matches!(SparseCandidateManifest::build(&base, &source, id, &mut capability(), 0, parse_limits::<Sha1>(), SparseLimits::default()), Err(CandidateManifestRefusal::InvalidCandidate(_))));
     }
@@ -122,7 +122,7 @@ fn parent_integrity_capabilities_and_payload_limits_are_not_bypassed() {
 fn candidate_metadata_is_in_the_host_commitment_and_cancelled_copy_settles() {
     let (mut source, base, candidate) = fixture::<Sha256>();
     let first = SparseCandidateManifest::build(&base, &source, candidate, &mut capability(), 0, parse_limits::<Sha256>(), SparseLimits::default()).unwrap();
-    let other = commit(&mut source, *first.candidate_tree_oid(), &[*base.base_commit_oid()], "different metadata");
+    let other = commit::<Sha256>(&mut source, *first.candidate_tree_oid(), &[*base.base_commit_oid()], "different metadata");
     let second = SparseCandidateManifest::build(&base, &source, other, &mut capability(), 0, parse_limits::<Sha256>(), SparseLimits::default()).unwrap();
     assert_eq!(first.entries(), second.entries());
     let plan = SparseWorkspacePlan::for_candidate(Arc::new(first), &capability(), 0, SparseLimits::default()).unwrap();

@@ -31,6 +31,16 @@ pub mod sparse_workspace;
 /// Bounded execution of explicitly trusted, source-selected workflows.
 pub mod workflow;
 
+/// Workflow execution coordinator, runner obligations, and check publication.
+pub mod coordinator;
+
+pub use coordinator::{
+    ActiveRun, AttemptId, CancellationReason, CheckRunConclusion, CheckRunFact, CheckRunStatus,
+    ConcurrencyGroup, CoordinatorLimits, CoordinatorRefusal, DrainReason, IdempotencyKey,
+    JobAttemptId, JobStatus, ObligationSummary, RunOutcome, RunStatus, StepAttemptId,
+    TriggerContext, WorkflowCoordinator, WorkflowRunId,
+};
+
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
