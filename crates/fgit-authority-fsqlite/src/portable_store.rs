@@ -572,6 +572,7 @@ impl FsqliteAuthorityStore {
     }
 }
 
+#[path = "portable_store/resume.rs"]
 mod resume;
 
 #[cfg(test)]

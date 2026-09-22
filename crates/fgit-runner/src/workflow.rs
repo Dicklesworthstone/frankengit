@@ -217,7 +217,8 @@ impl WorkflowPlan {
                                         || observed.outcome == StepOutcome::ContainmentFailure
                                         || (observed.outcome == StepOutcome::Succeeded
                                             && observed.exit_code != Some(0));
-                                    let output_exceeded = observed.stdout.len() > budget.stream_bytes
+                                    let output_exceeded = observed.stdout.len()
+                                        > budget.stream_bytes
                                         || observed.stderr.len() > budget.stream_bytes;
                                     if output_exceeded {
                                         observed.stdout.truncate(budget.stream_bytes);
@@ -468,7 +469,9 @@ impl JobReport {
     /// Whether the owning executor reported unresolved containment. An absent
     /// retention flag cannot override an explicit containment-failure outcome.
     pub fn requires_containment(&self) -> bool {
-        self.failure.as_ref().is_some_and(|failure| failure.retain_workspace)
+        self.failure
+            .as_ref()
+            .is_some_and(|failure| failure.retain_workspace)
             || self.steps.iter().any(|step| {
                 step.observation.retain_workspace
                     || step.observation.outcome == StepOutcome::ContainmentFailure
