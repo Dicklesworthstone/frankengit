@@ -153,6 +153,10 @@ mod schema;
 mod token;
 
 pub use crate::classify::{classify_franken_error, is_retryable_engine_error};
+pub use crate::engine::portable_store::multihead::{
+    MAX_MULTI_HEADS, MultiHeadLimits, MultiHeadSnapshot, decode_multi_head_snapshot,
+    encode_multi_head_snapshot,
+};
 pub use crate::engine::portable_store::{PortableStoreError, PortableStoreLimits};
 pub use crate::engine::{EngineError, FsqliteAuthorityStore, run_with_retry};
 pub use crate::envelope::{

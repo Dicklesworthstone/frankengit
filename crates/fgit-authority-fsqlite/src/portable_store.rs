@@ -86,7 +86,7 @@ impl std::fmt::Display for PortableStoreError {
                 out.write_str("portable token disagrees with its source instance and sequence")
             }
             Self::InvalidLineage => out.write_str(
-                "portable head is not the latest monotonically issued single-head state",
+                "portable head history is not the latest monotonically issued state for each slot",
             ),
             Self::MultipleHeads => out.write_str(
                 "the portable format represents one head; multi-head export is unsupported",
@@ -574,6 +574,9 @@ impl FsqliteAuthorityStore {
 
 #[path = "portable_store/resume.rs"]
 mod resume;
+
+#[path = "portable_store/multihead.rs"]
+pub mod multihead;
 
 #[cfg(test)]
 // Explicit path: rustfmt resolves out-of-line children of `#[path]`-attributed
