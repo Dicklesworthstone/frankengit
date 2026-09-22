@@ -16,7 +16,9 @@ fn head(byte: u8) -> RepositoryAuthorityHeadId {
 
 fn report() -> Report {
     Report { head: head(1), generation: 7, closure_root: "closure\nroot".into(),
-        references: 1, objects: 2, payload_bytes: 9 }
+        references: 1, objects: 2, payload_bytes: 9,
+        graph: Some(GraphReport { objects: 2, references: 1, local_edges: 1,
+            external_gitlinks: 0, payload_bytes: 9 }) }
 }
 
 #[test]
@@ -75,10 +77,12 @@ fn decimal_limits_reject_signs_whitespace_zero_and_overflow() {
 }
 
 #[test]
-fn help_explains_scope_and_does_not_claim_graph_verification() {
+fn help_distinguishes_graph_integrity_from_objects_only_and_strict_fsck() {
     assert!(USAGE.contains("including\nadmitted history"));
-    assert!(USAGE.contains("or verify graph structure"));
+    assert!(USAGE.contains("--objects-only"));
+    assert!(USAGE.contains("not strict Git fsck"));
     assert!(USAGE.contains("not interrupt a blocking filesystem call"));
+    assert!(USAGE.contains("Gitlinks are external data"));
 }
 
 #[test]
@@ -89,16 +93,19 @@ fn parser_accepts_defaults_and_every_explicit_option_together() {
     assert_eq!(defaults.limits.bytes, 512 * MIB);
     assert_eq!(defaults.limits.object_bytes, 32 * MIB);
     assert_eq!(defaults.limits.seconds, 300);
+    assert!(!defaults.objects_only);
+    assert_eq!(defaults.max_edges, 1_000_000);
     assert!(defaults.expected_head.is_none());
     let token = head_token(head(2));
     let all = args(&["--object-format", "sha256", "--expected-generation", "3",
         "--expected-head", &token, "--max-objects", "2", "--max-bytes", "16",
-        "--max-object-bytes", "8", "--timeout-secs", "1"]);
-    assert_eq!(all.len(), 18);
+        "--max-object-bytes", "8", "--timeout-secs", "1", "--max-edges", "4"]);
+    assert_eq!(all.len(), 20);
     let options = parse(&all).unwrap();
     assert_eq!(options.format, GitHashAlgorithm::Sha256);
     assert_eq!(options.expected_generation, Some(3));
     assert_eq!(options.expected_head, Some(head(2)));
+    assert_eq!(options.max_edges, 4);
     assert_eq!((options.limits.objects, options.limits.bytes, options.limits.object_bytes, options.limits.seconds), (2, 16, 8, 1));
 }
 
@@ -109,7 +116,7 @@ fn parser_requires_authorization_and_rejects_duplicate_or_unknown_options() {
     assert!(parse(&untrusted).unwrap_err().contains("--trusted-local"));
     assert!(parse(&args(&["--trusted-local"])).unwrap_err().contains("duplicate"));
     for (flag, value) in [("--max-objects", "1"), ("--max-bytes", "1"),
-        ("--max-object-bytes", "1"), ("--timeout-secs", "1"),
+        ("--max-object-bytes", "1"), ("--timeout-secs", "1"), ("--max-edges", "1"),
         ("--expected-generation", "1"), ("--object-format", "sha1")]
     {
         assert!(parse(&args(&[flag, value, flag, value])).unwrap_err().contains("duplicate"), "{flag}");
@@ -124,7 +131,7 @@ fn parser_requires_authorization_and_rejects_duplicate_or_unknown_options() {
 #[test]
 fn parser_enforces_all_numeric_and_argument_bounds() {
     for (flag, maximum) in [("--max-objects", MAX_OBJECTS as u64), ("--max-bytes", MAX_BYTES),
-        ("--max-object-bytes", 256 * MIB), ("--timeout-secs", 3600)]
+        ("--max-object-bytes", 256 * MIB), ("--timeout-secs", 3600), ("--max-edges", MAX_EDGES as u64)]
     {
         assert!(parse(&args(&[flag, &maximum.to_string()])).is_ok());
         assert!(parse(&args(&[flag, &(maximum + 1).to_string()])).is_err());
@@ -139,7 +146,7 @@ fn parser_enforces_all_numeric_and_argument_bounds() {
     bad = args(&[]);
     bad[1] = "not-a-tenant".into();
     assert!(parse(&bad).is_err());
-    assert!(parse(&vec!["x".into(); 19]).is_err());
+    assert!(parse(&vec!["x".into(); 21]).is_err());
 }
 
 #[test]
@@ -218,11 +225,12 @@ fn complete_receipt_carries_scope_snapshot_and_escaped_strings() {
     assert!(text.ends_with('\n'));
     for field in ["\"type\":\"repository_fsck\"", "\"authority_generation\":7",
         "\"objects_verified\":2", "\"payload_bytes_verified\":9", "\"complete\":true",
-        "\"object_graph_verified\":false", "\"physical_orphans_scanned\":false", "\"node_closed\":true",
-        "\"selected_closure_root\":\"closure\\nroot\""]
+        "\"object_graph_verified\":true", "\"physical_orphans_scanned\":false", "\"node_closed\":true",
+        "\"graph_profile\":\"native-closure-v1\"", "\"local_edges_verified\":1", "\"graph_acyclic\":true"]
     {
         assert!(text.contains(field), "{field}: {text}");
     }
+    assert!(text.contains(&format!("\"selected_closure_root\":{}", quote("closure\nroot"))));
     assert!(text.contains(&format!("\"snapshot_token\":{}", quote(&head_token(head(1))))));
 }
 
@@ -260,4 +268,77 @@ fn write_and_flush_failures_cannot_report_success() {
         assert!(error.contains("fsck receipt output incomplete"));
         assert_eq!(output.written > 0, on_flush);
     }
+}
+
+#[test]
+fn objects_only_is_explicit_and_cannot_accept_graph_only_options() {
+    let options = parse(&args(&["--objects-only"])).unwrap();
+    assert!(options.objects_only);
+    assert!(parse(&args(&["--objects-only", "--objects-only"])).is_err());
+    assert!(parse(&args(&["--objects-only", "--max-edges", "7"])).is_err());
+    assert!(parse(&args(&["--max-edges", "7", "--objects-only"])).is_err());
+    let mut bytes_report = report();
+    bytes_report.graph = None;
+    let mut output = Vec::new();
+    assert_eq!(finish(&mut output, &options, Ok(bytes_report), None), Ok(0));
+    let text = String::from_utf8(output).unwrap();
+    for field in ["\"object_graph_verified\":false", "\"graph_profile\":null",
+        "\"local_edges_verified\":null", "\"external_gitlinks\":null", "\"graph_acyclic\":null"]
+    { assert!(text.contains(field), "{field}: {text}"); }
+}
+
+#[test]
+fn absent_or_inconsistent_graph_evidence_cannot_claim_complete_default_fsck() {
+    let options = parse(&args(&[])).unwrap();
+    let mut cases = Vec::new();
+    let mut absent = report();
+    absent.graph = None;
+    cases.push(absent);
+    for field in 0..3 {
+        let mut mismatch = report();
+        let graph = mismatch.graph.as_mut().unwrap();
+        match field { 0 => graph.objects += 1, 1 => graph.references += 1, _ => graph.payload_bytes += 1 }
+        cases.push(mismatch);
+    }
+    for report in cases {
+        let mut output = Vec::new();
+        assert!(finish(&mut output, &options, Ok(report), None).unwrap_err().contains("accounting mismatch"));
+        assert!(output.is_empty());
+    }
+    let objects_only = parse(&args(&["--objects-only"])).unwrap();
+    let mut output = Vec::new();
+    assert!(finish(&mut output, &objects_only, Ok(report()), None).is_err());
+    assert!(output.is_empty());
+}
+
+#[test]
+fn node_graph_refusals_preserve_budget_snapshot_and_graph_causes_without_fallback() {
+    for (name, flag) in [("objects", "max-objects"), ("object bytes", "max-object-bytes"),
+        ("payload bytes", "max-bytes"), ("edges", "max-edges")]
+    {
+        assert_eq!(graph_error(GraphAuditRefusal::Graph(GraphRefusal::Limit(name))), Refusal::Limit(flag));
+    }
+    assert_eq!(graph_error(GraphAuditRefusal::ExpectedHead), Refusal::ExpectedHead);
+    assert_eq!(graph_error(GraphAuditRefusal::SnapshotChanged), Refusal::SnapshotChanged);
+    assert_eq!(graph_error(GraphAuditRefusal::ExpectedGeneration { expected: 1, observed: 2 }),
+        Refusal::Generation { expected: 1, observed: 2 });
+    let graph = GraphRefusal::MissingTarget { source: None, target: oid(9, GitHashAlgorithm::Sha1) };
+    assert_eq!(graph_error(GraphAuditRefusal::Graph(graph.clone())), Refusal::Graph(graph.clone()));
+    let mut output = Vec::new();
+    let error = finish(&mut output, &parse(&args(&[])).unwrap(), Err(Refusal::Graph(graph)), None).unwrap_err();
+    assert!(error.contains("graph_target_outside_selection"));
+    assert!(output.is_empty());
+}
+
+#[test]
+fn failed_whole_read_cannot_mask_a_post_read_deadline() {
+    let ids = BTreeSet::from([oid(1, GitHashAlgorithm::Sha1)]);
+    let mut probes = 0;
+    let result = check_objects(&ids, GitHashAlgorithm::Sha1, Limits::default(),
+        |_| Err("storage failed".into()), || {
+            probes += 1;
+            if probes == 2 { Err(Refusal::Deadline) } else { Ok(()) }
+        });
+    assert_eq!(result, Err(Refusal::Deadline));
+    assert_eq!(probes, 2);
 }

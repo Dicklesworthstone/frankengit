@@ -121,7 +121,13 @@ fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), GraphRefusal> {
     if live() { Ok(()) } else { Err(GraphRefusal::Cancelled) }
 }
 fn malformed(object: GitOid, cause: ObjectError) -> GraphRefusal {
-    GraphRefusal::Malformed { object, cause: Box::new(cause) }
+    match cause {
+        ObjectError::AllocationFailure => GraphRefusal::Allocation,
+        ObjectError::ObjectTooLarge { .. } => GraphRefusal::Limit("object bytes"),
+        ObjectError::TooManyTreeEntries { .. } => GraphRefusal::Limit("tree entries"),
+        ObjectError::HeaderLimitExceeded { .. } => GraphRefusal::Limit("header structure"),
+        cause => GraphRefusal::Malformed { object, cause: Box::new(cause) },
+    }
 }
 
 impl ObjectGraphAudit {
@@ -201,7 +207,11 @@ impl ObjectGraphAudit {
             }
             ObjectKind::Tree => {
                 let entries = parse_tree(body, AcceptanceProfile::GitCompatibleImport, &limits)
-                    .map_err(|cause| malformed(id, cause))?;
+                    .map_err(|cause| match cause {
+                        ObjectError::TooManyTreeEntries { .. }
+                            if limits.max_tree_entries == self.remaining_edges() => GraphRefusal::Limit("edges"),
+                        cause => malformed(id, cause),
+                    })?;
                 checkpoint(live)?;
                 for entry in entries {
                     checkpoint(live)?;

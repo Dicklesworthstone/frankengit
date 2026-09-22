@@ -63,7 +63,7 @@ fn assert_counts(receipt: &str, refs: usize, objects: usize) {
     assert!(receipt.contains(&format!("\"objects_verified\":{objects},")), "{receipt}");
     assert!(receipt.contains("\"complete\":true"));
     assert!(receipt.contains("\"node_closed\":true"));
-    assert!(receipt.contains("\"object_graph_verified\":false"));
+    assert!(receipt.contains("\"object_graph_verified\":true"));
 }
 
 #[test]
@@ -219,3 +219,6 @@ fn deleted_branch_history_is_still_audited_and_corruption_is_not_repaired() {
     fs::write(&path, original).unwrap();
     assert_eq!(success(audit(&root, "sha1", &[])), after);
 }
+
+#[path = "fg_fsck/graph_cases.rs"]
+mod graph_cases;

@@ -77,8 +77,8 @@ fn external_gitlinks_neither_require_nor_typecheck_local_objects_with_the_same_i
         ]));
         let result = audit(&objects, format, &refs(b"refs/tags/tree", tree), GraphLimits::default()).unwrap();
         assert_eq!((result.local_edges, result.external_gitlinks), (1, 2));
-        assert!(matches!(audit(&objects, format, &BTreeMap::new(),
-            GraphLimits { max_edges: 2, ..Default::default() }), Err(GraphRefusal::Malformed { .. }) | Err(GraphRefusal::Limit("edges"))));
+        assert_eq!(audit(&objects, format, &BTreeMap::new(),
+            GraphLimits { max_edges: 2, ..Default::default() }), Err(GraphRefusal::Limit("edges")));
     }
 }
 
@@ -283,4 +283,17 @@ fn iterative_cycle_walk_handles_deep_graphs_cycles_and_disconnected_components()
     nodes.push(Node { id, kind: Some(ObjectKind::Tree), start: edges.len(), end: edges.len() + 1 });
     edges.push(Edge { target: index, expected: ObjectKind::Tree });
     assert_eq!(verify_acyclic(&nodes, &edges, &mut || true), Err(GraphRefusal::Cycle(id)));
+}
+
+#[test]
+fn parser_budget_exhaustion_is_not_reported_as_object_corruption() {
+    let format = GitHashAlgorithm::Sha1;
+    let mut objects = Objects::new();
+    let tree = put(&mut objects, format, ObjectKind::Tree, Vec::new());
+    let mut body = format!("tree {tree}\n");
+    for _ in 0..=ParseLimits::default().max_header_lines { body.push_str("extra value\n"); }
+    body.push_str("\nmessage\n");
+    put(&mut objects, format, ObjectKind::Commit, body.into_bytes());
+    assert_eq!(audit(&objects, format, &BTreeMap::new(), GraphLimits::default()),
+        Err(GraphRefusal::Limit("header structure")));
 }

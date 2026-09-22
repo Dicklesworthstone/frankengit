@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use fgit_node::{NodeConfig, OneNode};
+use fgit_node::source_retrieval::integrity::{GraphAuditQuery, GraphAuditRefusal, GraphLimits, GraphRefusal, GraphReport};
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, GitHashAlgorithm, GitOid, HeadGeneration,
@@ -19,31 +20,40 @@ use super::publication_support::{quote, set_once};
 
 const MIB: u64 = 1024 * 1024;
 const MAX_OBJECTS: usize = 1_000_000;
+const MAX_REFERENCES: usize = 1_000_000;
+const MAX_EDGES: usize = 8_000_000;
 const MAX_BYTES: u64 = 16 * 1024 * MIB;
 const USAGE: &str = "usage: fg fsck <storage-root> <tenant-id> <repository-id> --trusted-local
   [--object-format sha1|sha256] [--expected-generation <non-zero>]
   [--expected-head <algorithm-qualified-snapshot-token>]
   [--max-objects <1..1000000>] [--max-bytes <1..17179869184>]
   [--max-object-bytes <1..268435456>] [--timeout-secs <1..3600>]
+  [--max-edges <1..8000000> | --objects-only]
 
 Verify EVERY object in the authenticated authority-selected closure, including
 admitted history no longer reachable from current refs. Native Git identity and
 the independent payload commitment are checked by the existing object fabric.
-Every current reference must belong to that closure. The exact authority basis
-is revalidated after the scan; movement refuses the attempt rather than mixing
-snapshots. --expected-generation optionally fences the initial observation.
-For exact identity, pass a previous receipt's snapshot_token as --expected-head;
-a generation alone is not an identity. Both supplied fences must match.
+By default, also verify complete local graph connectivity, commit/tree/tag edge
+types, branch target kinds, and acyclicity. Gitlinks are external data, never
+local traversal edges, and still count against the edge budget. Imported legacy
+syntax is preserved; this is not strict Git fsck or signature verification.
+--objects-only explicitly selects the older byte-integrity/membership audit;
+its receipt says object_graph_verified=false, never an implicit fallback.
 
+Every current reference must belong to the selected closure. The exact authority
+basis is revalidated after the scan; movement refuses rather than mixing snapshots.
+--expected-generation fences the initial observation. For exact identity, pass
+a previous receipt's snapshot_token as --expected-head; both fences must match.
 This local operator command can inspect hidden refs and requires explicit
 whole-repository authorization via --trusted-local. It does not discover orphan
-files, repair storage, change refs, run external Git, or verify graph structure.
-Defaults: 100000 objects, 512 MiB total payload, 32 MiB per object, 300 seconds.
+files, repair storage, change refs, follow symlinks/submodules, or run external Git.
+Defaults: 100000 objects, 1000000 inspected edges, 512 MiB total payload,
+32 MiB per object, 300 seconds; at most 1000000 references in graph mode.
 The per-object ceiling is enforced before allocation; the total counts verified
 payload bytes, not physical I/O. A failing scan may read one additional bounded
 object before refusing. The scan timeout is checked between operations; it does
-not interrupt a blocking filesystem call. Authority materialization has its own
-runtime bounds. Revalidation is an observation, not a lock against later writes.
+not interrupt a blocking filesystem call. Inherited runtime budgets may stop
+work earlier. Revalidation is an observation, not a lock against later writes.
 No success receipt is emitted before all checks and node shutdown complete.
 Exit 0: complete scoped audit; 2: invalid input, incomplete audit, or output error.";
 
@@ -55,6 +65,8 @@ struct Options {
     format: GitHashAlgorithm,
     expected_generation: Option<u64>,
     expected_head: Option<RepositoryAuthorityHeadId>,
+    objects_only: bool,
+    max_edges: usize,
     limits: Limits,
 }
 
@@ -83,6 +95,8 @@ enum Refusal {
     Generation { expected: u64, observed: u64 },
     ExpectedHead,
     SnapshotChanged,
+    Graph(GraphRefusal),
+    NodeGraph(String),
 }
 
 impl Display for Refusal {
@@ -98,6 +112,8 @@ impl Display for Refusal {
                 "authority_generation_mismatch: expected {expected}, observed {observed}"),
             Self::ExpectedHead => out.write_str("authority_head_mismatch: expected snapshot is not current"),
             Self::SnapshotChanged => out.write_str("authority_snapshot_changed: restart the audit"),
+            Self::Graph(error) => Display::fmt(error, out),
+            Self::NodeGraph(detail) => write!(out, "node_graph_audit_failed: {detail}"),
         }
     }
 }
@@ -112,6 +128,7 @@ struct Report {
     references: usize,
     objects: usize,
     payload_bytes: u64,
+    graph: Option<GraphReport>,
 }
 
 fn positive(text: &str, maximum: u64, field: &str) -> Result<u64, String> {
@@ -153,7 +170,7 @@ fn head_token(head: RepositoryAuthorityHeadId) -> String {
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    if args.len() < 4 || args.len() > 18 || args.iter().any(|arg| arg.len() > 8192)
+    if args.len() < 4 || args.len() > 20 || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
         || args[0].is_empty()
     {
@@ -167,11 +184,17 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut bytes = None;
     let mut object_bytes = None;
     let mut seconds = None;
+    let mut objects_only = None;
+    let mut edges = None;
     let mut cursor = 3;
     while let Some(flag) = args.get(cursor) {
         cursor += 1;
         if flag == "--trusted-local" {
             set_once(&mut trusted, true, flag)?;
+            continue;
+        }
+        if flag == "--objects-only" {
+            set_once(&mut objects_only, true, flag)?;
             continue;
         }
         let value = args.get(cursor).ok_or_else(|| format!("missing value for {flag}"))?;
@@ -191,11 +214,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--max-bytes" => set_once(&mut bytes, positive(value, MAX_BYTES, flag)?, flag)?,
             "--max-object-bytes" => set_once(&mut object_bytes, positive(value, 256 * MIB, flag)?, flag)?,
             "--timeout-secs" => set_once(&mut seconds, positive(value, 3600, flag)?, flag)?,
+            "--max-edges" => set_once(&mut edges, positive(value, MAX_EDGES as u64, flag)? as usize, flag)?,
             _ => return Err(format!("unsupported fsck option: {flag}")),
         }
     }
     if trusted != Some(true) {
         return Err("fsck requires --trusted-local and authorization to inspect the entire repository".into());
+    }
+    if objects_only.is_some() && edges.is_some() {
+        return Err("--max-edges cannot be combined with --objects-only".into());
     }
     let defaults = Limits::default();
     Ok(Options {
@@ -205,6 +232,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
         format: format.unwrap_or(GitHashAlgorithm::Sha1),
         expected_generation: generation,
         expected_head: head,
+        objects_only: objects_only.unwrap_or(false),
+        max_edges: edges.unwrap_or(GraphLimits::default().max_edges),
         limits: Limits {
             objects: objects.unwrap_or(defaults.objects),
             bytes: bytes.unwrap_or(defaults.bytes),
@@ -252,8 +281,9 @@ fn check_objects(
         if oid.algorithm() != format || oid.is_zero() {
             return Err(Refusal::ObjectFormat(oid));
         }
-        let size = read(oid).map_err(|detail| Refusal::Object { oid, detail })?;
+        let read = read(oid);
         checkpoint()?;
+        let size = read.map_err(|detail| Refusal::Object { oid, detail })?;
         if size > limits.object_bytes {
             return Err(Refusal::Limit("max-object-bytes"));
         }
@@ -264,7 +294,43 @@ fn check_objects(
     Ok(bytes)
 }
 
+fn graph_error(error: GraphAuditRefusal) -> Refusal {
+    match error {
+        GraphAuditRefusal::Graph(GraphRefusal::Limit("objects")) => Refusal::Limit("max-objects"),
+        GraphAuditRefusal::Graph(GraphRefusal::Limit("object bytes")) => Refusal::Limit("max-object-bytes"),
+        GraphAuditRefusal::Graph(GraphRefusal::Limit("payload bytes")) => Refusal::Limit("max-bytes"),
+        GraphAuditRefusal::Graph(GraphRefusal::Limit("edges")) => Refusal::Limit("max-edges"),
+        GraphAuditRefusal::Graph(error) => Refusal::Graph(error),
+        GraphAuditRefusal::ExpectedHead => Refusal::ExpectedHead,
+        GraphAuditRefusal::ExpectedGeneration { expected, observed } => Refusal::Generation { expected, observed },
+        GraphAuditRefusal::SnapshotChanged => Refusal::SnapshotChanged,
+        GraphAuditRefusal::Deadline => Refusal::Deadline,
+        other => Refusal::NodeGraph(other.to_string()),
+    }
+}
+
+fn inspect_graph(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
+    let query = GraphAuditQuery {
+        expected_head: options.expected_head,
+        expected_generation: options.expected_generation.map(HeadGeneration::try_new).transpose()
+            .map_err(|_| Refusal::Limit("expected generation"))?,
+        limits: GraphLimits { max_objects: options.limits.objects, max_references: MAX_REFERENCES,
+            max_edges: options.max_edges,
+            max_object_bytes: usize::try_from(options.limits.object_bytes).map_err(|_| Refusal::Limit("max-object-bytes"))?,
+            max_payload_bytes: options.limits.bytes },
+        timeout: Duration::from_secs(options.limits.seconds),
+    };
+    let request = node.request_context();
+    let report = node.runtime().block_on(node.audit_selected_object_graph_local_in(&request, query))
+        .map_err(graph_error)?;
+    let graph = *report.graph();
+    Ok(Report { head: report.head(), generation: report.generation().get(),
+        closure_root: report.closure_root().to_string(), references: graph.references,
+        objects: graph.objects, payload_bytes: graph.payload_bytes, graph: Some(graph) })
+}
+
 fn inspect(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
+    if !options.objects_only { return inspect_graph(node, options); }
     let started = Instant::now();
     let request = node.request_context();
     let selected = node.runtime().block_on(node.materialize_admission_in(&request))
@@ -296,6 +362,7 @@ fn inspect(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
         references: selected.snapshot().refs.len(),
         objects: objects.len(),
         payload_bytes,
+        graph: None,
     })
 }
 
@@ -322,21 +389,35 @@ fn emit(output: &mut impl Write, text: &str) -> Result<(), String> {
         .map_err(|error| format!("fsck receipt output incomplete: {error}"))
 }
 
+fn graph_receipt(options: &Options, report: &Report) -> Result<String, String> {
+    match report.graph {
+        None if options.objects_only => Ok(concat!("\"object_graph_verified\":false,\"graph_profile\":null,",
+            "\"local_edges_verified\":null,\"external_gitlinks\":null,\"graph_acyclic\":null").into()),
+        Some(graph) if !options.objects_only && graph.objects == report.objects
+            && graph.references == report.references && graph.payload_bytes == report.payload_bytes =>
+            Ok(format!(concat!("\"object_graph_verified\":true,\"graph_profile\":\"native-closure-v1\",",
+                "\"local_edges_verified\":{},\"external_gitlinks\":{},\"graph_acyclic\":true"),
+                graph.local_edges, graph.external_gitlinks)),
+        _ => Err("no complete integrity report returned; graph profile or accounting mismatch".into()),
+    }
+}
+
 fn finish(output: &mut impl Write, options: &Options, result: Result<Report, Refusal>,
     cleanup: Option<String>) -> Result<u8, String> {
     match (result, cleanup) {
         (Ok(report), None) => {
+            let graph = graph_receipt(options, &report)?;
             emit(output, &format!(concat!("{{\"type\":\"repository_fsck\",\"schema_version\":1,",
                 "\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},",
                 "\"authority_generation\":{},\"references_checked\":{},\"objects_verified\":{},",
                 "\"payload_bytes_verified\":{},\"authority_head\":{},\"snapshot_token\":{},",
                 "\"selected_closure_root\":{},\"scope\":\"authority_selected_objects\",",
-                "\"complete\":true,\"object_graph_verified\":false,\"head_revalidated\":true,",
+                "\"complete\":true,{},\"head_revalidated\":true,",
                 "\"physical_orphans_scanned\":false,\"repository_changed\":false,\"node_closed\":true}}"),
                 quote(&options.tenant.to_string()), quote(&options.repository.to_string()),
                 quote(options.format.as_str()), report.generation, report.references,
                 report.objects, report.payload_bytes, quote(&report.head.to_string()),
-                quote(&head_token(report.head)), quote(&report.closure_root)))?;
+                quote(&head_token(report.head)), quote(&report.closure_root), graph))?;
             Ok(0)
         }
         (result, cleanup) => {
