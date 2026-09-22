@@ -1,7 +1,6 @@
 name: Native review protection activation
 on:
-  push:
-    branches: [tooling/review-protection-activation-20260913]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -16,7 +15,7 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       CARGO_TARGET_DIR: /tmp/fg-review-activation-target
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # actions/checkout v4.2.2
         with:
           persist-credentials: false
       - name: Record tested source and toolchain
@@ -24,10 +23,10 @@ jobs:
           git rev-parse HEAD
           rustc -Vv
       - name: Native activation and enforcement lifecycle
-        run: bash scripts/verify_review_protection.sh
+        run: ./scripts/verify.sh review-protection
       - name: Admission regression suite
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p fgit-admission --all-targets --no-fail-fast
+        run: ./scripts/verify.sh admission-tests
       - name: Preserve test source identity
         if: ${{ !cancelled() }}
         run: |

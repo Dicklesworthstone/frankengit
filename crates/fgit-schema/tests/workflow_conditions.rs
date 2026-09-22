@@ -34,7 +34,7 @@ fn unsupported_expressions_refuse_at_the_condition_span() {
     ] {
         let input = source(bad, "success()");
         let error = compile(&input, &Limits::default()).unwrap_err();
-        assert!(matches!(error, WorkflowRefusal::Malformed { expected: "one of success(), failure(), or always()", .. }));
+        assert!(matches!(error, WorkflowRefusal::Malformed { expected: "one of success(), failure(), or always() (job.if)", .. }));
         assert!(error.span().line >= 9);
     }
 }

@@ -1,37 +1,5 @@
 name: Persistent declaration tables
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/fgit-forge/src/source_symbols/**'
-      - 'crates/fgit-node/src/lib.rs'
-      - 'crates/fgit-node/src/source_retrieval.rs'
-      - 'crates/fgit-node/src/source_retrieval/**'
-      - 'crates/fgit-node/src/smart_http/server/source.rs'
-      - 'crates/fgit-node/src/smart_http/server/source/indexed.rs'
-      - 'crates/fgit-node/src/smart_http/server/source/retrieval.rs'
-      - 'crates/fgit-node/src/smart_http/server/source/retrieval/**'
-      - 'crates/fgit-node/tests/source_initial_retrieval.rs'
-      - 'crates/fgit-node/tests/source_initial_retrieval/**'
-      - 'scripts/verify_source_initial.sh'
-      - 'crates/fgit-node/src/treefs_workspace/source_search.rs'
-      - 'crates/fgit-node/src/treefs_workspace/source_search/tests.rs'
-      - 'crates/fgit-node/src/treefs_workspace/source_search/symbols*'
-      - 'crates/fgit-node/src/treefs_workspace/source_search/symbols/**'
-      - 'crates/fgit-node/src/smart_http/server/source/symbols*'
-      - 'crates/fgit-node/src/smart_http/server/source/symbols/**'
-      - 'crates/fgit-node/src/bin/fg-symbol-index.rs'
-      - 'crates/fgit-node/src/bin/fg-index-maintain.rs'
-      - 'crates/fgit-node/src/bin/index_maintenance/**'
-      - 'crates/fgit-node/tests/source_symbol_index.rs'
-      - 'crates/fgit-node/tests/source_symbol_index/**'
-      - 'crates/fgit-node/tests/source_symbol_directory.rs'
-      - 'crates/fgit-node/tests/source_symbol_reconcile.rs'
-      - 'crates/fgit-node/tests/source_symbol_worker.rs'
-      - 'crates/fgit-node/tests/source_symbol_worker/**'
-      - 'crates/fgit-node/tests/source_index_worker*.rs'
-      - 'scripts/verify_symbol_index.sh'
-      - '.github/workflows/symbol-index.yml'
   workflow_dispatch:
 permissions:
   contents: read
@@ -40,20 +8,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install nightly-2026-08-31 --profile minimal
-      - run: bash scripts/verify_symbol_index.sh
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # actions/checkout v4.2.2
+      - name: Install repository-pinned toolchain
+        run: rustup toolchain install nightly-2026-08-31 --profile minimal
+      - name: Execute repository-owned index lane
+        run: ./scripts/verify.sh symbol-index
   native-check:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install nightly-2026-08-31 --profile minimal
-      - run: bash scripts/verify_symbol_index.sh native
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # actions/checkout v4.2.2
+      - name: Install repository-pinned toolchain
+        run: rustup toolchain install nightly-2026-08-31 --profile minimal
+      - name: Execute repository-owned native index lane
+        run: ./scripts/verify.sh symbol-index-native
   maintenance:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install nightly-2026-08-31 --profile minimal
-      - run: bash scripts/verify_symbol_index.sh maintenance
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # actions/checkout v4.2.2
+      - name: Install repository-pinned toolchain
+        run: rustup toolchain install nightly-2026-08-31 --profile minimal
+      - name: Execute repository-owned maintenance lane
+        run: ./scripts/verify.sh symbol-index-maintenance

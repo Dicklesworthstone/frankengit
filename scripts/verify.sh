@@ -46,6 +46,7 @@ echo_step() { printf '\033[1;36m==> %s\033[0m\n' "$*" >&2; }
 artifact_warning() { printf 'verify: replay artifact unavailable: %s\n' "$1" >&2 || true; }
 print_usage() {
   printf 'usage: %s [--no-artifact] {docs|constitution|fast|full|release}\n' "$0" >&2
+  printf 'feature lanes: exact-patch|index-maintenance|source-symbols|symbol-index|symbol-index-native|symbol-index-maintenance|review-protection|admission-tests|native-rebase-check|native-rebase-test\n' "$0" >&2
 }
 refuse_dormant() {
   printf '\033[1;33m==> %s\033[0m\n' "$1" >&2
@@ -122,6 +123,19 @@ run_lane() {
     fast) run_fast ;;
     full) run_full ;;
     release) run_release ;;
+    # Feature lanes: thin dispatch to repository-owned verification scripts so
+    # workflow manifests delegate to ./scripts/verify.sh instead of embedding
+    # unique correctness invocations (AGENTS.md section 12).
+    exact-patch) exec "$ROOT/scripts/verify_exact_patch.sh" ;;
+    index-maintenance) exec "$ROOT/scripts/verify_index_maintenance.sh" ;;
+    source-symbols) exec "$ROOT/scripts/verify_source_symbols.sh" ;;
+    symbol-index) exec "$ROOT/scripts/verify_symbol_index.sh" ;;
+    symbol-index-native) exec "$ROOT/scripts/verify_symbol_index.sh" native ;;
+    symbol-index-maintenance) exec "$ROOT/scripts/verify_symbol_index.sh" maintenance ;;
+    review-protection) exec "$ROOT/scripts/verify_review_protection.sh" ;;
+    admission-tests) exec cargo test --locked -p fgit-admission --all-targets --no-fail-fast ;;
+    native-rebase-check) exec "$ROOT/scripts/verify_native_rebase.sh" check ;;
+    native-rebase-test) exec "$ROOT/scripts/verify_native_rebase.sh" test ;;
     *)
       print_usage
       return 2

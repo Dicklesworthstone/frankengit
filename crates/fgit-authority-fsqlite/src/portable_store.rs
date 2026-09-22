@@ -53,6 +53,8 @@ pub enum PortableStoreError {
     MultipleHeads,
     SameStoreInstance,
     DestinationNotEmpty,
+    /// An occupied resume target is not the exact intended imported image.
+    DestinationSnapshotMismatch,
     Allocation,
     Engine(EngineError),
     Publication(EngineError),
@@ -71,6 +73,7 @@ impl std::fmt::Display for PortableStoreError {
             Self::MultipleHeads => out.write_str("the portable format represents one head; multi-head export is unsupported"),
             Self::SameStoreInstance => out.write_str("portable import requires a distinct destination store instance"),
             Self::DestinationNotEmpty => out.write_str("portable import requires an empty destination authority store"),
+            Self::DestinationSnapshotMismatch => out.write_str("portable resume destination does not match the complete imported snapshot"),
             Self::Allocation => out.write_str("bounded portable-store allocation failed"),
             Self::Engine(error) => write!(out, "portable-store engine operation failed: {error}"),
             Self::Publication(error) => write!(out, "portable import commit was not confirmed; outcome unknown: {error}"),
@@ -386,6 +389,8 @@ impl FsqliteAuthorityStore {
         }
     }
 }
+
+mod resume;
 
 #[cfg(test)]
 mod tests;

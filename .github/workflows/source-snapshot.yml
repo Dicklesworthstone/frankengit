@@ -1,21 +1,6 @@
 name: Native publication and rebase integration
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/source-snapshot.yml
-      - scripts/verify_native_rebase.sh
-      - scripts/e2e/rebase_smoke.py
-      - crates/fgit-forge/src/preparation/rebase.rs
-      - crates/fgit-forge/src/preparation/rebase/**
-      - crates/fgit-node/src/treefs_workspace/publication.rs
-      - crates/fgit-node/src/treefs_workspace/rebase*.rs
-      - crates/fgit-node/src/treefs_workspace/rebase/**
-      - crates/fgit-node/src/treefs_workspace/branches/tests.rs
-      - crates/fgit-node/tests/workspace_publication.rs
-      - crates/fgit-cli/src/rebase*.rs
-      - crates/fgit-cli/src/rebase/**
-      - crates/fgit-cli/tests/native_rebase_smoke.rs
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -33,7 +18,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_TARGET_DIR: /tmp/fg-native-rebase
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # actions/checkout v4.2.2
         with:
           persist-credentials: false
       - name: Exact source and compiler
@@ -44,13 +29,13 @@ jobs:
           rustc -Vv | tee "$RUNNER_TEMP/native-source/rustc.txt"
           git archive --format=tar.gz --output="$RUNNER_TEMP/native-source/source.tar.gz" HEAD
           (cd "$RUNNER_TEMP/native-source" && sha256sum source.tar.gz > source.tar.gz.sha256)
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact v4.3.1
         with:
           name: native-source-${{ github.sha }}
           path: ${{ runner.temp }}/native-source
           if-no-files-found: error
           retention-days: 1
       - name: Compile production and test targets
-        run: bash scripts/verify_native_rebase.sh check
+        run: ./scripts/verify.sh native-rebase-check
       - name: Execute native integration
-        run: bash scripts/verify_native_rebase.sh test
+        run: ./scripts/verify.sh native-rebase-test
