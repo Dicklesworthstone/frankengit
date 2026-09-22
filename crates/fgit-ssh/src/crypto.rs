@@ -178,6 +178,12 @@ impl OpenSshChaCha20Poly1305 {
     /// First 32 bytes are `k_main`, second 32 bytes are `k_header`.
     #[must_use]
     pub fn new(key_material: &[u8; 64]) -> Self {
+        Self::new_with_sequence(key_material, 0)
+    }
+
+    /// Creates a new cipher instance with an explicit starting sequence number.
+    #[must_use]
+    pub fn new_with_sequence(key_material: &[u8; 64], sequence_number: u64) -> Self {
         let mut k_main = [0u8; 32];
         let mut k_header = [0u8; 32];
         k_main.copy_from_slice(&key_material[0..32]);
@@ -185,7 +191,7 @@ impl OpenSshChaCha20Poly1305 {
         Self {
             k_main,
             k_header,
-            sequence_number: 0,
+            sequence_number,
         }
     }
 
@@ -206,14 +212,15 @@ impl OpenSshChaCha20Poly1305 {
         let nonce_bytes = seq.to_be_bytes();
         let nonce = LegacyNonce::from(nonce_bytes);
 
-        // 1. Determine padding length
+        // 1. Determine padding length: in chacha20-poly1305, the encrypted
+        // contents (payload + padding, packet_length bytes) must be a multiple of 8.
         let unpadded_len = 1 + payload.len();
         let mut padding_len = MIN_PADDING_BYTES;
-        while !(4 + unpadded_len + padding_len).is_multiple_of(PACKET_BLOCK_ALIGN) {
+        while !(unpadded_len + padding_len).is_multiple_of(PACKET_BLOCK_ALIGN) {
             padding_len += 1;
         }
 
-        let packet_length = (1 + payload.len() + padding_len) as u32;
+        let packet_length = (unpadded_len + padding_len) as u32;
 
         // 2. Encrypt packet length using k_header at counter 0
         let mut encrypted_len = packet_length.to_be_bytes();

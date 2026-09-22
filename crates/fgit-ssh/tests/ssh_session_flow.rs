@@ -131,8 +131,8 @@ fn test_end_to_end_ssh_session_flow() {
     c_key_arr.copy_from_slice(&client_key);
     s_key_arr.copy_from_slice(&server_key);
 
-    let mut client_out_cipher = OpenSshChaCha20Poly1305::new(&c_key_arr);
-    let mut client_in_cipher = OpenSshChaCha20Poly1305::new(&s_key_arr);
+    let mut client_out_cipher = OpenSshChaCha20Poly1305::new_with_sequence(&c_key_arr, 3);
+    let mut client_in_cipher = OpenSshChaCha20Poly1305::new_with_sequence(&s_key_arr, 3);
 
     // 5. Client sends NEWKEYS
     let mut client_newkeys = WireWriter::new();

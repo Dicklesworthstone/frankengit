@@ -138,8 +138,11 @@ pub struct SshServerSession {
     ephemeral_kex: Option<Curve25519Kex>,
     session_id: Option<[u8; 32]>,
     inbound_cipher: Option<OpenSshChaCha20Poly1305>,
-    pending_inbound_cipher: Option<OpenSshChaCha20Poly1305>,
+    pending_inbound_key: Option<[u8; 64]>,
     outbound_cipher: Option<OpenSshChaCha20Poly1305>,
+    inbound_packet_count: u64,
+    outbound_packet_count: u64,
+    incoming_buffer: Vec<u8>,
     authenticated_key: Option<[u8; 32]>,
     authenticated_principal: Option<PrincipalId>,
     client_channel_id: Option<u32>,
@@ -168,8 +171,11 @@ impl SshServerSession {
             ephemeral_kex: None,
             session_id: None,
             inbound_cipher: None,
-            pending_inbound_cipher: None,
+            pending_inbound_key: None,
             outbound_cipher: None,
+            inbound_packet_count: 0,
+            outbound_packet_count: 0,
+            incoming_buffer: Vec::new(),
             authenticated_key: None,
             authenticated_principal: None,
             client_channel_id: None,
@@ -242,29 +248,31 @@ impl SshServerSession {
     ///
     /// Returns [`SshSessionError`] if a wire error, cryptographic failure,
     /// or protocol violation occurs.
-    pub fn handle_incoming_bytes(&mut self, mut input: &[u8]) -> Result<(), SshSessionError> {
+    pub fn handle_incoming_bytes(&mut self, input: &[u8]) -> Result<(), SshSessionError> {
+        self.incoming_buffer.extend_from_slice(input);
+
         if self.phase == SessionPhase::Identification {
             // Find line break for client identification
-            if let Some(pos) = input.windows(2).position(|w| w == b"\r\n") {
-                let ident_bytes = &input[..pos];
-                let ident = core::str::from_utf8(ident_bytes)
+            if let Some(pos) = self.incoming_buffer.windows(2).position(|w| w == b"\r\n") {
+                let ident_bytes = self.incoming_buffer[..pos].to_vec();
+                let ident = core::str::from_utf8(&ident_bytes)
                     .map_err(|_| SshSessionError::ProtocolViolation {
                         reason: "client identification is not valid UTF-8".to_owned(),
                     })?
                     .to_owned();
                 self.client_ident = Some(ident);
-                input = &input[pos + 2..];
+                self.incoming_buffer.drain(..pos + 2);
                 self.phase = SessionPhase::KeyExchange;
                 self.send_kexinit();
-            } else if let Some(pos) = input.iter().position(|&b| b == b'\n') {
-                let ident_bytes = &input[..pos];
-                let ident = core::str::from_utf8(ident_bytes)
+            } else if let Some(pos) = self.incoming_buffer.iter().position(|&b| b == b'\n') {
+                let ident_bytes = self.incoming_buffer[..pos].to_vec();
+                let ident = core::str::from_utf8(&ident_bytes)
                     .map_err(|_| SshSessionError::ProtocolViolation {
                         reason: "client identification is not valid UTF-8".to_owned(),
                     })?
                     .to_owned();
                 self.client_ident = Some(ident);
-                input = &input[pos + 1..];
+                self.incoming_buffer.drain(..pos + 1);
                 self.phase = SessionPhase::KeyExchange;
                 self.send_kexinit();
             } else {
@@ -273,19 +281,33 @@ impl SshServerSession {
             }
         }
 
-        // Process packets from input
-        while !input.is_empty() {
-            let (payload, consumed) = self.decode_packet(input)?;
-            input = &input[consumed..];
-            self.handle_packet(&payload)?;
+        // Process packets from incoming_buffer
+        loop {
+            if self.incoming_buffer.is_empty() {
+                break;
+            }
+            match Self::decode_packet(&mut self.inbound_cipher, &self.incoming_buffer) {
+                Ok((payload, consumed)) => {
+                    self.incoming_buffer.drain(..consumed);
+                    self.inbound_packet_count = self.inbound_packet_count.wrapping_add(1);
+                    self.handle_packet(&payload)?;
+                }
+                Err(SshSessionError::Wire(WireError::UnexpectedEof { .. })) => {
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         Ok(())
     }
 
     /// Decodes a packet from incoming slice, returning payload and bytes consumed.
-    fn decode_packet(&mut self, input: &[u8]) -> Result<(Vec<u8>, usize), SshSessionError> {
-        if let Some(ref mut cipher) = self.inbound_cipher {
+    fn decode_packet(
+        inbound_cipher: &mut Option<OpenSshChaCha20Poly1305>,
+        input: &[u8],
+    ) -> Result<(Vec<u8>, usize), SshSessionError> {
+        if let Some(cipher) = inbound_cipher {
             if input.len() < 20 {
                 return Err(WireError::UnexpectedEof {
                     expected: 20,
@@ -333,6 +355,7 @@ impl SshServerSession {
             let wire = encode_cleartext_packet(payload, &[0u8; 16]);
             self.outgoing_bytes.extend_from_slice(&wire);
         }
+        self.outbound_packet_count = self.outbound_packet_count.wrapping_add(1);
     }
 
     /// Sends server KEXINIT packet.
@@ -459,16 +482,24 @@ impl SshServerSession {
                 newkeys.write_u8(msg::NEWKEYS);
                 self.send_packet(&newkeys.into_bytes());
 
-                // Activate outbound cipher
-                self.outbound_cipher = Some(OpenSshChaCha20Poly1305::new(&s_key_arr));
+                // Activate outbound cipher with exact sequence number
+                self.outbound_cipher = Some(OpenSshChaCha20Poly1305::new_with_sequence(
+                    &s_key_arr,
+                    self.outbound_packet_count,
+                ));
 
-                // Stash inbound cipher to activate upon receiving client NEWKEYS
-                self.pending_inbound_cipher = Some(OpenSshChaCha20Poly1305::new(&c_key_arr));
+                // Stash inbound key to activate upon receiving client NEWKEYS
+                self.pending_inbound_key = Some(c_key_arr);
                 self.phase = SessionPhase::UserAuth;
             }
             msg::NEWKEYS => {
                 // Client has activated encryption. Future inbound packets use this cipher.
-                self.inbound_cipher = self.pending_inbound_cipher.take();
+                if let Some(c_key) = self.pending_inbound_key.take() {
+                    self.inbound_cipher = Some(OpenSshChaCha20Poly1305::new_with_sequence(
+                        &c_key,
+                        self.inbound_packet_count,
+                    ));
+                }
             }
             msg::SERVICE_REQUEST => {
                 let service = reader.read_utf8()?;

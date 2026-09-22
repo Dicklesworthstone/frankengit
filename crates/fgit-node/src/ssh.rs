@@ -18,7 +18,7 @@ use fgit_identity::deploy_key::DeployKeyBinding;
 use fgit_ssh::SigningKey;
 use fgit_ssh::command::SshGitService;
 use fgit_ssh::session::{SessionPhase, SshServerSession, SshSessionError};
-use fgit_types::{HeadGeneration, PrincipalId};
+use fgit_types::PrincipalId;
 use fgit_wire::{UploadPackRepository, WireLimits};
 
 use crate::{
