@@ -132,8 +132,10 @@ mod quarantine_validator;
 mod verified_reads;
 mod upload_visibility;
 mod ssh;
+pub mod webhook;
 
 pub use ssh::{NodeSshRefusal, SshServerLimits, SshServerReceipt};
+pub use webhook::{DeadLetterQueue, WebhookDeliveryDestination};
 
 pub use loose_import::{LooseGitImportRefusal, StagedLooseGitImport};
 pub use quarantine_validator::ProductionQuarantineValidator;
@@ -6462,6 +6464,12 @@ impl OneNode {
             )?;
         }
         Ok(())
+    }
+
+    /// Returns the local filesystem root for this node's storage.
+    #[must_use]
+    pub fn storage_root(&self) -> &std::path::Path {
+        &self.storage_root
     }
 
     /// The write-side cell policy for a receive whose intake already happened.

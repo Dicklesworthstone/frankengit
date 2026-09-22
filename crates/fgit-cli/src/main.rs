@@ -23,6 +23,7 @@ mod source_review;
 mod source_search;
 mod tags;
 mod transaction_outcome;
+mod webhook_commands;
 mod workflow_command;
 #[cfg(target_os = "linux")]
 mod workspace;
@@ -39,6 +40,18 @@ fn main() -> ExitCode {
             Err(error) => {
                 eprintln!(
                     "{{\"type\":\"fsck_error\",\"schema_version\":1,\"complete\":false,\"error\":{}}}",
+                    publication_support::quote(&error)
+                );
+                ExitCode::from(2)
+            }
+        };
+    }
+    if arguments.first().is_some_and(|argument| argument == "webhook") {
+        return match webhook_commands::run(&arguments[1..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!(
+                    "{{\"type\":\"webhook_error\",\"schema_version\":1,\"error\":{}}}",
                     publication_support::quote(&error)
                 );
                 ExitCode::from(2)

@@ -42,6 +42,7 @@ pub mod review;
 pub mod snapshot;
 pub mod source_search;
 pub mod source_symbols;
+pub mod webhook;
 
 use core::fmt;
 
