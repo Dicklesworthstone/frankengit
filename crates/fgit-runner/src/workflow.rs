@@ -213,10 +213,19 @@ impl WorkflowPlan {
                                     // Normalize safety outcomes BEFORE clamping output.
                                     // A second metadata defect must never conceal loss of
                                     // containment or turn cancellation into an output error.
-                                    let containment_failed = observed.retain_workspace
-                                        || observed.outcome == StepOutcome::ContainmentFailure
-                                        || (observed.outcome == StepOutcome::Succeeded
-                                            && observed.exit_code != Some(0));
+                                    let invalid_success = observed.outcome
+                                        == StepOutcome::Succeeded
+                                        && (observed.exit_code != Some(0)
+                                            || observed.retain_workspace);
+                                    let explicit_failure =
+                                        observed.outcome == StepOutcome::ContainmentFailure;
+                                    if observed.retain_workspace
+                                        || explicit_failure
+                                        || invalid_success
+                                    {
+                                        observed.retain_workspace = true;
+                                        containment_lost = true;
+                                    }
                                     let output_exceeded = observed.stdout.len()
                                         > budget.stream_bytes
                                         || observed.stderr.len() > budget.stream_bytes;
@@ -225,13 +234,12 @@ impl WorkflowPlan {
                                         observed.stderr.truncate(budget.stream_bytes);
                                         observed.output_complete = false;
                                     }
-                                    if containment_failed {
+                                    if explicit_failure || invalid_success {
                                         observed.outcome = StepOutcome::ContainmentFailure;
-                                        observed.retain_workspace = true;
-                                        containment_lost = true;
                                     } else if observed.outcome == StepOutcome::Cancelled {
                                         cancelled = true;
-                                    } else if output_exceeded
+                                    } else if (output_exceeded
+                                        && observed.outcome != StepOutcome::TimedOut)
                                         || (!observed.output_complete
                                             && observed.outcome == StepOutcome::Succeeded)
                                     {
