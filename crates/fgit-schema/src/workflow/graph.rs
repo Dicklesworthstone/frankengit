@@ -55,16 +55,23 @@ impl Condition {
         }
     }
 }
-fn condition(node: Option<&Node>, span: Span) -> Result<Condition, WorkflowRefusal> {
+fn condition(node: Option<&Node>, construct: &'static str, span: Span) -> Result<Condition, WorkflowRefusal> {
     let Some(node) = node else { return Ok(Condition::Success); };
     match expect_scalar(node, "if")?.trim() {
         "success()" => Ok(Condition::Success),
         "failure()" => Ok(Condition::Failure),
         "always()" => Ok(Condition::Always),
-        _ => Err(WorkflowRefusal::Malformed {
-            expected: "one of success(), failure(), or always()",
-            span: if node.span().is_empty() { span } else { node.span() },
-        }),
+        _ => {
+            let expected = if construct == "job.if" {
+                "one of success(), failure(), or always() (job.if)"
+            } else {
+                "one of success(), failure(), or always() (step.if)"
+            };
+            Err(WorkflowRefusal::Malformed {
+                expected,
+                span: if node.span().is_empty() { span } else { node.span() },
+            })
+        }
     }
 }
 
@@ -283,7 +290,7 @@ fn lower_step(node: &Node) -> Result<Step, WorkflowRefusal> {
     Ok(Step {
         name,
         run,
-        condition: condition(node.get("if"), node.span())?,
+        condition: condition(node.get("if"), "step.if", node.span())?,
         span: node.span(),
     })
 }
@@ -348,7 +355,7 @@ fn lower_job(id: &str, node: &Node, span: Span) -> Result<Job, WorkflowRefusal> 
         runs_on,
         needs,
         steps,
-        condition: condition(node.get("if"), span)?,
+        condition: condition(node.get("if"), "job.if", span)?,
         span,
     })
 }

@@ -1,0 +1,20 @@
+# FG-095c expected-suite manifest -- profile: workflow
+#
+# Columns and semantics match manifests/harness.tsv (FG-091): this profile
+# owns the top-level `suites/workflow` area and pins its exact release
+# surface by full-corpus suite id. Set equality is enforced against discovery:
+# no missing, no unregistered, no renamed alias.
+#
+# columns, tab-separated:
+#   suite_id           the id run_all derives from the script path
+#   owning_bead        the capability bead that owns the suite
+#   gate               the gate/profile this entry belongs to
+#   script_path        repository-relative path
+#   targets            supported target classes, or "any"
+#   classification     required | optional
+#   proof_class        what a pass establishes, in claim-lattice terms
+#   expected_terminal  the terminal status a pass must carry
+#
+suites-workflow-workflow_crash_cancel	frankengit-fg095c-workflow-evidence-6opd	g2	scripts/e2e/suites/workflow/workflow_crash_cancel.sh	any	required	mechanism	pass
+suites-workflow-workflow_execution	frankengit-fg095c-workflow-evidence-6opd	g2	scripts/e2e/suites/workflow/workflow_execution.sh	any	required	mechanism	pass
+suites-workflow-workflow_lowering	frankengit-fg095c-workflow-evidence-6opd	g2	scripts/e2e/suites/workflow/workflow_lowering.sh	any	required	mechanism	pass
