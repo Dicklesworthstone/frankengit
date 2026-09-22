@@ -64,6 +64,13 @@ pub(super) fn restore(input: &Path, destination: &Path, expected: [u8; 32],
     recovery::execute(input, destination, expected, instance, false)
 }
 
+/// Only the explicit all-heads resume command can adopt an owned restore root.
+pub(super) fn resume(input: &Path, destination: &Path, expected: [u8; 32],
+    instance: StoreInstanceId,
+) -> Result<String, String> {
+    recovery::execute(input, destination, expected, instance, true)
+}
+
 #[cfg(test)]
 #[path = "multihead_tests.rs"]
 mod tests;

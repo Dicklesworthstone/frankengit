@@ -26,12 +26,19 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 const USAGE: &str = "usage: fg-authority-backup export <existing-authority.fsqlite> <new-backup-file> --trusted-local [--all-heads]
        fg-authority-backup restore <backup-file> <new-directory> --trusted-local
-         --expected-sha256 <64-lowercase-hex> --destination-instance <positive-integer> [--all-heads]
+         --expected-sha256 <64-lowercase-hex> --destination-instance <positive-integer> [--all-heads [--resume]]
 
 Default format: single-head authority-export v1. Use --all-heads on BOTH commands
 to select authority-export v2 and include every occupied head slot (up to 4096).
 Each slot retains its own generation history in the complete global token ledger.
 The flag is explicit: no v1/v2 fallback or silent format upgrade occurs.
+
+All-heads restore stages into a private quarantine and publishes authority.fsqlite
+last, after complete-image verification and reopen. To continue an owned attempt,
+use restore --all-heads --resume with its ORIGINAL checksum and destination
+instance. Exact completed retries verify only; changed/newer state refuses.
+Legacy directories without the original all-heads intent cannot be adopted.
+Keep the destination offline: restore locks do not exclude ordinary node tools.
 
 Embedded authority metadata only: immutable bodies, published heads and full
 issuance ledger. Git objects, private keys, configuration outside the
@@ -68,6 +75,7 @@ struct Options {
     output: PathBuf,
     mode: Mode,
     all_heads: bool,
+    resume: bool,
 }
 
 fn main() -> ExitCode {
@@ -85,7 +93,7 @@ fn main() -> ExitCode {
 }
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.len() < 4
-        || args.len() > 9
+        || args.len() > 10
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
         || args[1].is_empty()
@@ -95,6 +103,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     let mut trusted = false;
     let mut all_heads = false;
+    let mut resume = false;
     let mut expected = None;
     let mut instance = None;
     let mut cursor = 3;
@@ -112,6 +121,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 return Err("duplicate --all-heads".into());
             }
             all_heads = true;
+            continue;
+        }
+        if flag == "--resume" {
+            if resume {
+                return Err("duplicate --resume".into());
+            }
+            resume = true;
             continue;
         }
         let value = args
@@ -137,6 +153,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if !trusted {
         return Err("--trusted-local and whole-store operator authorization are required".into());
     }
+    if resume && (args[0] != "restore" || !all_heads) {
+        return Err("--resume is supported only by restore --all-heads".into());
+    }
     let mode = match args[0].as_str() {
         "export" if expected.is_none() && instance.is_none() => Mode::Export,
         "restore" => Mode::Restore {
@@ -155,6 +174,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         output,
         mode,
         all_heads,
+        resume,
     })
 }
 fn digest(value: &str) -> Result<[u8; 32], String> {
@@ -305,7 +325,11 @@ fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
     let receipt = match options.mode {
         Mode::Export if options.all_heads => multihead::export(&options.input, &options.output)?,
         Mode::Restore { expected, instance } if options.all_heads => {
-            multihead::restore(&options.input, &options.output, expected, instance)?
+            if options.resume {
+                multihead::resume(&options.input, &options.output, expected, instance)?
+            } else {
+                multihead::restore(&options.input, &options.output, expected, instance)?
+            }
         }
         Mode::Export => export(&options.input, &options.output)?,
         Mode::Restore { expected, instance } => {

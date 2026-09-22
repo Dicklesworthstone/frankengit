@@ -141,3 +141,50 @@ fn empty_whole_store_uses_the_same_publication_and_retry_path() {
     execute(&archive, &root, pin, target(), true).unwrap();
     assert_eq!(observed(&root), first);
 }
+
+#[test]
+fn cli_resume_requires_restore_all_heads_and_the_original_pins() {
+    use super::super::super::parse;
+    let pin = "ab".repeat(32);
+    let base: Vec<String> = ["restore", "archive", "target", "--trusted-local",
+        "--all-heads", "--expected-sha256", &pin, "--destination-instance", "42"]
+        .into_iter().map(str::to_owned).collect();
+    assert!(!parse(&base).unwrap().resume);
+    let mut resumed = base.clone(); resumed.insert(3, "--resume".into());
+    assert!(parse(&resumed).unwrap().resume);
+    let mut duplicate = resumed.clone(); duplicate.push("--resume".into());
+    assert!(parse(&duplicate).is_err());
+    let mut wrong = resumed.clone(); wrong[0] = "export".into(); assert!(parse(&wrong).is_err());
+    let mut old_format = resumed.clone(); old_format.retain(|arg| arg != "--all-heads");
+    assert!(parse(&old_format).is_err());
+    let mut missing_pin = resumed.clone();
+    let index = missing_pin.iter().position(|arg| arg == "--expected-sha256").unwrap();
+    missing_pin.drain(index..index + 2); assert!(parse(&missing_pin).is_err());
+    let mut missing_auth = resumed; missing_auth.retain(|arg| arg != "--trusted-local");
+    assert!(parse(&missing_auth).is_err());
+}
+
+#[test]
+fn lost_success_output_can_be_resolved_without_reimporting_or_minting() {
+    use super::super::super::run;
+    struct Broken;
+    impl std::io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+    let scratch = Scratch::new(); let (archive, pin) = scratch.archive(&source());
+    let root = scratch.0.join("target"); let pin_text = hex(&pin);
+    let mut args: Vec<String> = ["restore", archive.to_str().unwrap(), root.to_str().unwrap(),
+        "--trusted-local", "--all-heads", "--expected-sha256", &pin_text,
+        "--destination-instance", "42"].into_iter().map(str::to_owned).collect();
+    assert!(run(&args, &mut Broken).unwrap_err().contains("operation completed; receipt failed"));
+    let committed = observed(&root);
+    args.push("--resume".into());
+    let mut receipt = Vec::new(); run(&args, &mut receipt).unwrap();
+    assert!(String::from_utf8(receipt).unwrap().contains("\"already_published\":true"));
+    assert_eq!(observed(&root), committed);
+}
