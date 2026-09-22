@@ -169,3 +169,33 @@ fn malformed_branch_requests_cannot_weaken_expected_old_or_atomic_rename() {
     let rename=[delete("refs/heads/a",oid),create("refs/heads/b",oid)];
     assert_eq!(branch_request(GitHashAlgorithm::Sha1,&rename).unwrap(),branch_request(GitHashAlgorithm::Sha1,&[rename[1].clone(),rename[0].clone()]).unwrap());
 }
+
+#[test]
+fn non_fast_forward_branch_update_is_refused_and_fast_forward_is_admitted() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let (node, base, child, _) = fixture(&scratch, format);
+        accepted(apply(&node, &[create("refs/heads/ff-test", base)], "create-base"));
+        // Advancing from base to child is a valid fast-forward:
+        let ff_advance = RefCommand {
+            name: reference("refs/heads/ff-test"),
+            expected_old: ExpectedOld::Exactly(base),
+            proposed_new: ProposedNew::Update(child),
+            force: false,
+        };
+        accepted(apply(&node, &[ff_advance], "ff-advance"));
+
+        // Moving back from child to base is non-fast-forward and must be refused:
+        let non_ff = RefCommand {
+            name: reference("refs/heads/ff-test"),
+            expected_old: ExpectedOld::Exactly(child),
+            proposed_new: ProposedNew::Update(base),
+            force: false,
+        };
+        let err = apply(&node, &[non_ff], "non-ff").unwrap_err();
+        assert!(matches!(err, NodeWorkspaceRefusal::BranchOperation("non-fast-forward branch update is not permitted")));
+
+        node.shutdown().unwrap();
+    }
+}
+

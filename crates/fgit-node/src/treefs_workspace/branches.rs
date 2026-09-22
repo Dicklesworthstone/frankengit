@@ -2,9 +2,10 @@
 //! database, synthetic import receipt, or new publication primitive is involved.
 
 use std::cell::Cell;
+use std::collections::{BTreeSet, VecDeque};
 use fgit_admission::{AdmissionContext, AdmissionLimits, AdmissionResult, CommandOutcome, SessionMapping};
 use fgit_authority::{ExpectedOld, OutcomeLookup, ProposedNew, RefCommand, SealAttempt, SemanticRequest, RECEIVE_ADMISSION_SCHEMA};
-use fgit_git_object::{ObjectType, ParseLimits};
+use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body};
 use fgit_pack::{PackPlanner, PackWriteProfile, PackWriter};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_types::cell::{ReadMode, admits_read};
@@ -18,6 +19,66 @@ use super::publication::receive_error;
 
 fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::BranchOperation(reason)
+}
+
+fn parse_commit_oid(bytes: &[u8], format: GitHashAlgorithm) -> Result<GitOid, NodeWorkspaceRefusal> {
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid("invalid object id in commit header"))?;
+    let id = GitOid::from_hex(format, &text.to_ascii_lowercase())
+        .map_err(|_| invalid("invalid object id hex in commit header"))?;
+    if id.is_zero() { return Err(invalid("zero object id in commit parent header")); }
+    Ok(id)
+}
+
+fn is_fast_forward(
+    source: &VerifiedFabricPackSource,
+    format: GitHashAlgorithm,
+    ancestor: GitOid,
+    tip: GitOid,
+    parse_limits: &ParseLimits,
+    mut live: impl FnMut() -> bool,
+) -> Result<bool, NodeWorkspaceRefusal> {
+    if ancestor == tip {
+        return Ok(true);
+    }
+    const MAX_VISITED_COMMITS: usize = 4096;
+    let mut queue = VecDeque::from([tip]);
+    let mut visited = BTreeSet::from([tip]);
+
+    while let Some(id) = queue.pop_front() {
+        if !live() {
+            return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
+        }
+        if visited.len() > MAX_VISITED_COMMITS {
+            return Err(invalid("commit traversal budget exceeded during fast-forward check"));
+        }
+        let (kind, body) = source.read_object(&id)
+            .map_err(|_| invalid("commit object could not be read during fast-forward check"))?;
+        if kind != ObjectType::Commit {
+            return Err(invalid("non-commit object encountered in commit ancestry"));
+        }
+        let ParsedObject::Commit(parsed) = parse_object_body(
+            ObjectType::Commit,
+            &body,
+            AcceptanceProfile::GitCompatibleImport,
+            parse_limits,
+        ).map_err(|_| invalid("commit parsing failed during fast-forward check"))? else {
+            return Err(invalid("parsed object was not a commit"));
+        };
+
+        for parent_bytes in parsed.parent_references() {
+            if !live() {
+                return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
+            }
+            let parent_oid = parse_commit_oid(parent_bytes, format)?;
+            if parent_oid == ancestor {
+                return Ok(true);
+            }
+            if visited.insert(parent_oid) {
+                queue.push_back(parent_oid);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn branch_request(format: GitHashAlgorithm, commands: &[RefCommand]) -> Result<SemanticRequest, NodeWorkspaceRefusal> {
@@ -138,6 +199,11 @@ impl OneNode {
                 if !live() { return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: exhaustion.get() }); }
                 let (kind, _) = object.map_err(|_| invalid("branch target could not be verified"))?;
                 if kind != ObjectType::Commit { return Err(NodeWorkspaceRefusal::CommitRequired); }
+                if let ExpectedOld::Exactly(old_oid) = command.expected_old {
+                    if old_oid != oid && !is_fast_forward(&source, self.object_format, old_oid, oid, &parse_limits, &mut live)? {
+                        return Err(invalid("non-fast-forward branch update is not permitted"));
+                    }
+                }
             }
         }
         let capability_bytes = format!("report-status atomic delete-refs object-format={}", self.object_format.as_str());
