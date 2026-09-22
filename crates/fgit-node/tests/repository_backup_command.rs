@@ -93,6 +93,7 @@ fn branch(node: &OneNode, key: &[u8], name: &[u8], old: ExpectedOld, new: Propos
         name: RefName::try_new(name).unwrap(),
         expected_old: old,
         proposed_new: new,
+        force: false,
     };
     let request = node.request_context();
     let admission = node
