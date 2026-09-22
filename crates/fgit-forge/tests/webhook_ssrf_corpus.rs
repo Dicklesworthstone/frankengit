@@ -1,8 +1,7 @@
 //! Comprehensive adversarial SSRF corpus, secret rotation, and retry schedule test suite (FG-046b).
 
 use fgit_forge::webhook::{
-    SsrfPolicy, WebhookEventFilter, WebhookId, WebhookRefusal, WebhookRegistration,
-    WebhookRetrySchedule, WebhookSecret, WebhookSecretRotation,
+    SsrfPolicy, WebhookRetrySchedule, WebhookSecret, WebhookSecretRotation,
 };
 use std::time::Duration;
 
@@ -94,6 +93,9 @@ fn ssrf_corpus_blocks_all_forbidden_ipv6_addresses() {
         "http://[::ffff:192.168.1.1]/",          // IPv4-mapped private
         "http://[::ffff:169.254.169.254]/",      // IPv4-mapped metadata
         "http://[64:ff9b::127.0.0.1]/",          // NAT64 prefix
+        "http://[2002:7f00:1::1]/",              // 6to4 prefix embedding 127.0.0.1
+        "http://[2002:0a00:0001::]/",            // 6to4 prefix embedding 10.0.0.1
+        "http://[100::1]/",                      // Discard-only prefix (RFC 6666)
     ];
 
     for probe in ipv6_probes {

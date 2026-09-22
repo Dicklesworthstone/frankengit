@@ -211,6 +211,30 @@ impl SsrfPolicy {
             );
             return self.is_safe_ipv4(v4);
         }
+        // NAT64 well-known prefix: 64:ff9b::/96 (RFC 6052)
+        if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0 && segments[3] == 0 && segments[4] == 0 && segments[5] == 0 {
+            let v4 = Ipv4Addr::new(
+                (segments[6] >> 8) as u8,
+                (segments[6] & 0xff) as u8,
+                (segments[7] >> 8) as u8,
+                (segments[7] & 0xff) as u8,
+            );
+            return self.is_safe_ipv4(v4);
+        }
+        // 6to4 prefix: 2002::/16 (RFC 3056)
+        if segments[0] == 0x2002 {
+            let v4 = Ipv4Addr::new(
+                (segments[1] >> 8) as u8,
+                (segments[1] & 0xff) as u8,
+                (segments[2] >> 8) as u8,
+                (segments[2] & 0xff) as u8,
+            );
+            return self.is_safe_ipv4(v4);
+        }
+        // Discard prefix: 100::/64 (RFC 6666)
+        if segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0 {
+            return false;
+        }
         // fc00::/7 (unique local address / ULA, RFC 4193)
         if (segments[0] & 0xfe00) == 0xfc00 {
             return false;
