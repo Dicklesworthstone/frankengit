@@ -7,7 +7,7 @@
 //! own instance, so portable bytes do not transplant source CAS capabilities.
 
 use super::{EngineError, FsqliteAuthorityStore};
-use super::operation::OperationLease;
+use super::operation::{OperationGate, OperationLease};
 use crate::{BundleRefusal, ExportBundle, ExportedBody, ExportedHead, ExportedIssuance,
     IssuanceSequence, MAX_EXPORT_BODIES, MAX_EXPORT_ISSUANCE, mint_token};
 use crate::marshal::{blob, read_blob, read_unsigned, unsigned};
@@ -180,6 +180,42 @@ fn validate_bundle(bundle: &ExportBundle, limits: PortableStoreLimits, store: Au
 }
 
 impl FsqliteAuthorityStore {
+    /// Open a pre-existing portable source without executing DDL or creating
+    /// an identity row. The local operator supplies a stable existing database
+    /// path; this does not turn arbitrary SQLite data into an authority store.
+    /// Source provenance and filesystem-path authorization remain caller-owned.
+    pub async fn open_portable_source<Caps>(cx: &Cx<Caps>, path: impl Into<String>,
+        limits: AuthorityLimits,
+    ) -> Result<Self, PortableStoreError>
+    where Caps: cap::SubsetOf<cap::All>, cap::None: cap::SubsetOf<Caps>,
+    {
+        live(cx)?;
+        let connection = fsqlite::AsyncConnection::open(cx, path).await
+            .map_err(|error| EngineError::from(&error))?;
+        let mut store = Self { connection, operations: OperationGate::new(),
+            instance: StoreInstanceId::from_raw(0), limits };
+        let identity = async {
+            live(cx)?;
+            let rows = store.query(cx, "identity.read", &[]).await?;
+            if rows.len() != 1 { return Err(PortableStoreError::InvalidLineage); }
+            let recorded = read_unsigned(&rows[0], 0).map_err(EngineError::from)?;
+            let version = read_unsigned(&rows[0], 1).map_err(EngineError::from)?;
+            let found = i64::try_from(version).unwrap_or(i64::MAX);
+            if found != SCHEMA_VERSION {
+                return Err(EngineError::SchemaVersionMismatch { found, expected: SCHEMA_VERSION }.into());
+            }
+            live(cx)?;
+            Ok(StoreInstanceId::from_raw(recorded))
+        }.await;
+        match identity {
+            Ok(instance) => { store.instance = instance; Ok(store) }
+            Err(cause) => match store.close(cx).await {
+                Ok(()) => Err(cause),
+                Err(cleanup) => Err(PortableStoreError::Cleanup { cause: Box::new(cause), cleanup }),
+            },
+        }
+    }
+
     /// Capture every immutable body, the one published head and its full
     /// issuance ledger in one SQL snapshot. Multi-head stores fail explicitly;
     /// this method does not silently select one head from an unordered set.
