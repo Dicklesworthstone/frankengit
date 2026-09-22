@@ -3,4 +3,4 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-exec "${SCRIPT_DIR}/suites/security/account_security_corpus.sh" "$@"
+exec "${SCRIPT_DIR}/suites/account_security/account_security_corpus.sh" "$@"
