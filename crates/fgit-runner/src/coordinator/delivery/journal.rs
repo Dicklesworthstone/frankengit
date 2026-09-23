@@ -90,6 +90,7 @@ pub struct FileCheckJournal {
     records: usize,
     failed: bool,
     batches: BTreeMap<Commitment, StoredBatch>,
+    batch_order: BTreeMap<u64, Commitment>,
     pending: VecDeque<Commitment>,
     evidence: BTreeMap<Commitment, Frame>,
     bindings: BTreeMap<WorkflowRunId, Binding>,
@@ -169,7 +170,7 @@ impl FileCheckJournal {
 
     fn empty(file: File, scope: CheckJournalScope, limits: CheckJournalLimits) -> Self {
         Self { file, scope, limits, pin: CheckJournalPin { bytes: HEADER_BYTES, tail: Commitment::of_bytes(&scope.bytes()) },
-            records: 0, failed: false, batches: BTreeMap::new(), pending: VecDeque::new(),
+            records: 0, failed: false, batches: BTreeMap::new(), batch_order: BTreeMap::new(), pending: VecDeque::new(),
             evidence: BTreeMap::new(), bindings: BTreeMap::new(), phases: BTreeMap::new(), run_ends: BTreeMap::new() }
     }
     pub const fn pin(&self) -> CheckJournalPin { self.pin }
@@ -297,6 +298,7 @@ impl FileCheckJournal {
         self.bindings.entry(batch.run).or_insert_with(|| Binding::of(batch));
         self.run_ends.insert(batch.run, batch.ordinal + batch.facts.len() as u64);
         for fact in &batch.facts { self.phases.insert((batch.run, fact.job_id.clone()), phase(fact.status)); }
+        self.batch_order.insert(frame.offset, id);
         self.batches.insert(id, StoredBatch { frame, delivered: None }); self.pending.push_back(id);
     }
     fn replay(&mut self, payload: &[u8], frame: Frame) -> Result<(), CheckDeliveryRefusal> {
@@ -476,3 +478,7 @@ pub mod attempt;
 
 /// Launch-fenced execution through the existing journal and workflow engine.
 pub mod execution;
+
+
+/// Non-consuming, snapshot-pinned access to accepted and delivered results.
+pub mod history;
