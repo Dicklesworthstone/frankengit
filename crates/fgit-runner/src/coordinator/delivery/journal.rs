@@ -470,3 +470,6 @@ fn private_file(path: &Path, create: bool) -> Result<File, CheckDeliveryRefusal>
 
 #[cfg(test)]
 mod tests;
+
+/// Durable local execution ownership paired with this custody journal.
+pub mod attempt;

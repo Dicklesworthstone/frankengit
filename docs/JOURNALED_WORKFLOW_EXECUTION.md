@@ -44,3 +44,7 @@ work, cancelled drain, exact repeat calls, scope/prefix fences, retained
 containment, and persistence callback failure/unwind. Executors are explicitly
 control-flow fixtures, not containment proofs. Rust compilation and tests were
 not run in the editing environment because Cargo/rustc were unavailable.
+
+For a synced start fence and completed-result lookup across restart, use the
+explicit [durable attempt owner](DURABLE_WORKFLOW_ATTEMPTS.md) and
+`execute_trusted_workflow_durable`. The journaled-only API remains unchanged.
