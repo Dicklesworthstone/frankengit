@@ -105,3 +105,6 @@ impl OneNode {
 
 #[cfg(test)]
 mod tests;
+
+// Read-only node API for CLI/agent recovery without execution capabilities.
+mod inspect;

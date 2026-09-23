@@ -2,6 +2,7 @@
 //! Parsing never opens a repository or interprets workflow text as authority.
 
 mod merge;
+mod recovery;
 use super::publication_support::quote;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, GitHashAlgorithm, GitOid, RefName,
@@ -28,6 +29,7 @@ base. Review and trust those candidate scripts before invoking. The bundle is
 validated without object import, ref publication, or a canonical green check.
 Canonical base provenance and actual executed candidate remain separate in JSON.
 For explicit two-parent merge inputs: fg workflow run-merge-candidate --help.
+For offline saved results/evidence (without replay): fg workflow recover --help.
 
 Linux only. The run parent must already exist with mode 0700. Review and trust
 ALL scripts before invoking: jobs run as your host user, not inside a hostile-code
@@ -74,6 +76,9 @@ struct Options {
 }
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|action| action == "recover") {
+        return recovery::run(args);
+    }
     if args
         .first()
         .is_some_and(|action| action == "run-merge-candidate")
