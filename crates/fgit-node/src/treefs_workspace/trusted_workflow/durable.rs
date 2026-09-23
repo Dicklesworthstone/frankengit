@@ -4,6 +4,8 @@
 //! runner owns scheduling, per-job evidence custody and the execution fence.
 //! Neither a local script's exit status nor a custody receipt grants a check.
 
+mod recovery;
+
 use super::{TrustedWorkflowFailure, TrustedWorkflowRun, hex};
 use fgit_runner::coordinator::delivery::journal::attempt::{
     FileWorkflowAttempt, WorkflowAttemptBinding,

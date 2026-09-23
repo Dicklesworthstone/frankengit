@@ -75,3 +75,33 @@ cargo test --locked -p fgit-node --lib treefs_workspace::trusted_workflow::durab
 cargo test --locked -p fgit-node --test trusted_workflow
 cargo test --locked -p fgit-runner --all-targets
 ```
+
+## Reopening after response or final-report loss
+
+`TrustedWorkflowRun::check_journal_scope` exposes the exact scope to retain;
+`open_check_journal` reopens that result's proposal stream after execution.
+`OneNode::open_trusted_workflow_journal` is an associated function that requires
+neither a live node nor the final report. Supply the selected directory, retained
+scope, optional trusted minimum journal pin, and cancellation predicate. It
+verifies the original bounded, private, regular `attempt.json` against its exact
+commitment before delegating lock acquisition, chain verification and evidence
+readback to `FileCheckJournal::open`.
+
+No JSON parser, source refresh, workflow recompilation, or execution retry is
+involved. Complete or partial custody may be read and forwarded through the
+existing journal API. `next_batch` rechecks all referenced evidence; `forward_next`
+retains custody unless its configured sink durably accepts the exact batch.
+A partial journal, an absent final report, or an available OS lock says nothing
+about whether the prior process executed or was reaped. This read boundary never
+recreates `execution.owner` and cannot substitute for host reconciliation.
+
+A retained pin detects rollback of known journal data. A digest recomputed from
+the same untrusted storage is not an independent anti-rollback witness. The
+original marker may remain available when final output is lost, but recovering
+trust in that marker is the local operator's responsibility.
+
+Five additional authored Rust tests cover complete recovery without source,
+node or final report; producer lock exclusion; partial/empty custody; missing
+and mismatched files/scopes; bounded marker corruption/permissions/symlinks;
+minimum-pin rollback refusal; and cancellation before I/O. These tests, like the
+seven execution tests, have not been compiled or run in the editing environment.

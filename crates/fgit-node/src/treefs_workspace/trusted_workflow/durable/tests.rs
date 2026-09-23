@@ -26,9 +26,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const SOURCE: &str = "name: custody\non: push\njobs:\n  first:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf one > generated; printf first\n      - run: test \"$(cat generated)\" = one; printf second\n  next:\n    runs-on: fgit-trusted-local\n    needs: first\n    steps:\n      - run: test ! -e generated; printf dependent\n";
 static NEXT: AtomicU64 = AtomicU64::new(0);
-struct Temp(PathBuf);
+pub(super) struct Temp(pub(super) PathBuf);
 impl Temp {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         loop {
             let path = std::env::temp_dir().join(format!(
                 "fg-node-workflow-custody-{}-{}",
@@ -51,7 +51,7 @@ fn limits() -> WorkflowLimits {
 
 // Only control-flow unit tests use these fabricated coordinates. Actual source
 // selection/publication is exercised independently by the OneNode test below.
-fn report(temp: &Temp) -> TrustedWorkflowRun {
+pub(super) fn report(temp: &Temp) -> TrustedWorkflowRun {
     let plan = WorkflowPlan::compile(SOURCE).unwrap();
     let digest = DigestBytes::try_new(&[9; 32]).unwrap();
     TrustedWorkflowRun {
@@ -69,17 +69,17 @@ fn report(temp: &Temp) -> TrustedWorkflowRun {
         execution: WorkflowReport { source: plan.source_commitment(), graph: plan.graph_commitment(), limits: limits(), jobs: Vec::new() },
     }
 }
-fn prepare(report: &TrustedWorkflowRun) -> Prepared {
+pub(super) fn prepare(report: &TrustedWorkflowRun) -> Prepared {
     Prepared::new(report, WorkflowPlan::compile(SOURCE).unwrap()).unwrap()
 }
 
-struct Executor {
+pub(super) struct Executor {
     directory: PathBuf,
     started: Vec<String>, closed: usize, observed_lengths: Vec<u64>,
     corrupt_after_close: bool, retain: bool,
 }
 impl Executor {
-    fn new(temp: &Temp) -> Self {
+    pub(super) fn new(temp: &Temp) -> Self {
         Self { directory: temp.0.clone(), started: Vec::new(), closed: 0,
             observed_lengths: Vec::new(), corrupt_after_close: false, retain: false }
     }
