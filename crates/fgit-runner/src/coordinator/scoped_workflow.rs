@@ -10,6 +10,22 @@ use crate::workflow::{
 };
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::cell::Cell;
+use super::delivery::CheckDeliveryRefusal;
+
+/// Optional launch-intent and result barriers. The existing per-job custody
+/// callback remains separate; neither interface authorizes canonical checks.
+/// Only an operator-selected adapter can implement this private boundary.
+pub(super) trait WorkflowCustody {
+    fn identity(&self) -> Commitment;
+    fn before_run(&mut self, coordinator: &mut WorkflowCoordinator, run: WorkflowRunId)
+        -> Result<(), CheckDeliveryRefusal>;
+    fn flush(&mut self, coordinator: &mut WorkflowCoordinator,
+        receipt: Option<&TrustedWorkflowReceipt>) -> Result<(), CheckDeliveryRefusal>;
+}
+
+fn launch_custody_error(error: CheckDeliveryRefusal) -> CoordinatorRefusal {
+    CoordinatorRefusal::ObligationLeak(format!("trusted workflow launch custody: {error}"))
+}
 
 const OBSERVATION_DOMAIN: &[u8] = b"frankengit/coordinated-trusted-observation/v1\0";
 
@@ -29,6 +45,8 @@ pub struct PreparedTrustedWorkflow {
     plan: WorkflowPlan,
     limits: WorkflowLimits,
     attempted: bool,
+    // In-memory mode pin, not a change to canonical run or attempt identity.
+    custody_journal: Option<Commitment>,
     receipt: Option<TrustedWorkflowReceipt>,
 }
 impl PreparedTrustedWorkflow {
@@ -167,7 +185,7 @@ impl WorkflowCoordinator {
             source_commit, plan.graph().clone(), trigger_ctx, sequence, logical_now, profile)?;
         let run = &self.active_runs[&run_id];
         let binding = ObservationBinding::from_run(run);
-        Ok(PreparedTrustedWorkflow { run_id, binding, plan, limits, attempted: false, receipt: None })
+        Ok(PreparedTrustedWorkflow { run_id, binding, plan, limits, attempted: false, custody_journal: None, receipt: None })
     }
 
     /// Execute the complete admitted plan through job scopes, not one shell
@@ -199,6 +217,23 @@ impl WorkflowCoordinator {
         E: WorkflowExecutor,
         F: FnMut(&mut WorkflowCoordinator, Option<&TrustedWorkflowReceipt>) -> Result<(), CoordinatorRefusal>,
     {
+        self.execute_trusted_workflow_with_launch_custody(
+            prepared, executor, logical_now, live, custody, None,
+        )
+    }
+
+    // One interpreter and one responsibility tracker for both journal profiles.
+    // Strong custody adds a synchronized launch intent and a sticky mode pin;
+    // it does not widen the existing compiled-plan execution semantics.
+    pub(super) fn execute_trusted_workflow_with_launch_custody<'a, E, F>(
+        &mut self, prepared: &'a mut PreparedTrustedWorkflow, executor: &mut E,
+        logical_now: u64, live: &dyn Fn() -> bool, custody: &mut F,
+        mut launch_custody: Option<&mut dyn WorkflowCustody>,
+    ) -> Result<&'a TrustedWorkflowReceipt, CoordinatorRefusal>
+    where
+        E: WorkflowExecutor,
+        F: FnMut(&mut WorkflowCoordinator, Option<&TrustedWorkflowReceipt>) -> Result<(), CoordinatorRefusal>,
+    {
         let run_id = prepared.run_id;
         let run = self.active_runs.get(&run_id).ok_or(CoordinatorRefusal::RunNotFound(run_id))?;
         let expected = CoordinatorExecutionProfile::TrustedWorkflow {
@@ -211,6 +246,18 @@ impl WorkflowCoordinator {
                 job_id: String::new(), reason: "prepared workflow does not match the admitted execution profile",
             });
         }
+        let journal_identity = launch_custody.as_ref().map(|adapter| adapter.identity());
+        if (prepared.custody_journal.is_some() || prepared.attempted)
+            && prepared.custody_journal != journal_identity
+        {
+            return Err(CoordinatorRefusal::UnsupportedExecution {
+                job_id: String::new(),
+                reason: "prepared workflow cannot switch launch custody or retroactively acquire it",
+            });
+        }
+        // Select before any potentially mutating I/O. Failed persistence cannot
+        // be bypassed by retrying the same prepared handle through a weaker API.
+        prepared.custody_journal = journal_identity;
         if prepared.receipt.is_some() {
             let receipt = prepared.receipt.as_ref().expect("retained observation");
             if run.job_attempts != receipt.attempts || receipt.report.jobs.iter().any(|job| {
@@ -238,6 +285,10 @@ impl WorkflowCoordinator {
         if self.obligations.workflow_scopes_opened != self.obligations.workflow_scopes_closed {
             return Err(CoordinatorRefusal::ObligationLeak("a previous trusted workflow scope is unresolved".to_owned()));
         }
+        let launch_fenced = launch_custody.is_some();
+        if let Some(adapter) = launch_custody.as_mut() {
+            adapter.before_run(self, run_id).map_err(launch_custody_error)?;
+        }
         custody(self, None)?;
         let binding = prepared.binding.clone();
         prepared.attempted = true;
@@ -251,7 +302,7 @@ impl WorkflowCoordinator {
                 coordinator: self, inner: executor, binding: &binding,
                 source: prepared.plan.source_commitment(), graph: prepared.plan.graph_commitment(),
                 limits: prepared.limits, logical_now, scope_open: false,
-                custody, custody_stopped: &custody_stopped, custody_failure: None,
+                custody, launch_custody, custody_stopped: &custody_stopped, custody_failure: None,
             };
             let result = catch_unwind(AssertUnwindSafe(|| {
                 prepared.plan.execute(prepared.limits, &mut adapter, &execution_live)
@@ -263,11 +314,12 @@ impl WorkflowCoordinator {
             }
             (result, adapter.custody_failure.take())
         };
-        if let Some(error) = custody_failure {
-            // Completed output remains pending in memory; earlier journaled
-            // jobs retain their custody. No synthetic durable success escapes.
-            self.hold_trusted_workflow(run_id);
-            return Err(error);
+        if !launch_fenced {
+            if let Some(error) = custody_failure.as_ref() {
+                // Preserve the existing per-job callback's refusal behavior.
+                self.hold_trusted_workflow(run_id);
+                return Err(error.clone());
+            }
         }
         let report = match result {
             Ok(Ok(report)) => report,
@@ -282,6 +334,12 @@ impl WorkflowCoordinator {
         };
         let attempts = self.active_runs[&run_id].job_attempts.clone();
         prepared.receipt = Some(TrustedWorkflowReceipt { binding, report, attempts, logical_now });
+        if let Some(error) = custody_failure {
+            // A same-process retry may settle these exact retained results;
+            // never execute a second time to reconstruct missing evidence.
+            self.hold_trusted_workflow(run_id);
+            return Err(error);
+        }
         Ok(prepared.receipt.as_ref().expect("completed local observation"))
     }
 
@@ -296,7 +354,7 @@ impl WorkflowCoordinator {
     }
 }
 
-struct CoordinatedExecutor<'a, E, F> {
+struct CoordinatedExecutor<'a, 'c, E, F> {
     coordinator: &'a mut WorkflowCoordinator,
     inner: &'a mut E,
     binding: &'a ObservationBinding,
@@ -306,10 +364,11 @@ struct CoordinatedExecutor<'a, E, F> {
     logical_now: u64,
     scope_open: bool,
     custody: &'a mut F,
+    launch_custody: Option<&'c mut dyn WorkflowCustody>,
     custody_stopped: &'a Cell<bool>,
     custody_failure: Option<CoordinatorRefusal>,
 }
-impl<E, F> WorkflowExecutor for CoordinatedExecutor<'_, E, F>
+impl<E, F> WorkflowExecutor for CoordinatedExecutor<'_, '_, E, F>
 where
     E: WorkflowExecutor,
     F: FnMut(&mut WorkflowCoordinator, Option<&TrustedWorkflowReceipt>) -> Result<(), CoordinatorRefusal>,
@@ -327,6 +386,16 @@ where
             conclusion: None, receipt_commitment: None, timestamp_millis: self.logical_now,
         });
         self.coordinator.obligations.check_publications_emitted += 1;
+        if let Some(adapter) = self.launch_custody.as_mut() {
+            if let Err(error) = adapter.flush(self.coordinator, None) {
+                // No user scope exists yet. The possibly persisted InProgress
+                // phase is nevertheless a conservative may-have-started fence.
+                self.custody_stopped.set(true);
+                self.custody_failure = Some(launch_custody_error(error));
+                self.coordinator.hold_trusted_workflow(self.binding.run);
+                return Err(WorkerFailure::new(error.to_string(), false));
+            }
+        }
         self.coordinator.obligations.workflow_scopes_opened += 1;
         self.scope_open = true;
         let result = self.inner.begin_job(index, job, live);
@@ -351,7 +420,10 @@ where
         result
     }
     fn observe_job(&mut self, report: &JobReport) {
-        self.inner.observe_job(report);
+        // Preserve legacy notification order. Launch-fenced execution instead
+        // retains the result before a fallible external observer can unwind.
+        let launch_fenced = self.launch_custody.is_some();
+        if !launch_fenced { self.inner.observe_job(report); }
         if report.requires_containment() { self.coordinator.hold_trusted_workflow(self.binding.run); }
         let run = self.coordinator.active_runs.get_mut(&self.binding.run).expect("admitted run");
         if matches!(run.job_statuses.get(&report.id), Some(JobStatus::Terminal(_))) { return; }
@@ -382,13 +454,20 @@ where
                 attempts: BTreeMap::from([(report.id.clone(), run.job_attempts[&report.id])]),
                 logical_now: self.logical_now,
             };
-            if let Err(error) = (self.custody)(self.coordinator, Some(&receipt)) {
+            let launch_result = match self.launch_custody.as_mut() {
+                Some(adapter) => adapter.flush(self.coordinator, Some(&receipt))
+                    .map_err(launch_custody_error),
+                None => Ok(()),
+            };
+            let handoff = launch_result.and_then(|()| (self.custody)(self.coordinator, Some(&receipt)));
+            if let Err(error) = handoff {
                 self.custody_failure = Some(error);
                 self.custody_stopped.set(true);
                 self.coordinator.hold_trusted_workflow(self.binding.run);
                 return;
             }
         }
+        if launch_fenced && self.custody_failure.is_none() { self.inner.observe_job(report); }
         // WorkflowPlan reports skips itself. Do not run a second skip pass that
         // could overwrite its cancellation/containment observations.
         self.coordinator.check_and_finalize_run(self.binding.run);
