@@ -42,6 +42,9 @@ pub use delta::{
     CachedResolver, DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ResolutionBudget,
     ScalarResolver, apply_delta,
 };
+/// The bounded compression primitives shared by pack and transport envelopes.
+/// Adapters use the same admitted decoder rather than a second DEFLATE engine.
+pub use fgit_deflate::{CancellationProbe, InflateLimits, InflateRefusal, Inflater, StreamProgress};
 pub use fgit_types::native::{GitHashAlgorithm as ObjectFormat, GitOid as ObjectId};
 pub use idx::{
     IdxChecksumVerifier, IdxEntry, IdxV2, validate_idx_checksum, validate_idx_entry_crc,

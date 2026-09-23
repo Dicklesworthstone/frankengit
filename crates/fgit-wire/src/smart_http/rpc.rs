@@ -6,11 +6,13 @@
 //! state leaks between HTTP requests. Pack construction and receive admission
 //! are withheld until both HTTP framing and Git request grammar are complete.
 
+mod gzip;
+
 use std::fmt::{self, Display, Formatter};
 
 use super::{
-    BodyDecoder, BodyFraming, HttpError, HttpLimits, Operation, ProtocolVersion, RequestHead,
-    Service, discovery_prefix,
+    BodyDecoder, BodyFraming, ContentEncoding, HttpError, HttpLimits, Operation,
+    ProtocolVersion, RequestHead, Service, discovery_prefix,
 };
 use crate::receive::{
     ReceiveCancellation, ReceiveCompletion, ReceiveContext, ReceiveError, ReceivePack,
@@ -88,6 +90,9 @@ fn body_for(
     if request.body == BodyFraming::Empty {
         return Err(HttpError::LengthRequired.into());
     }
+    if service != Service::UploadPack && request.content_encoding != ContentEncoding::Identity {
+        return Err(HttpError::UnsupportedContentEncoding.into());
+    }
     Ok(BodyDecoder::new(request.body, limits)?)
 }
 fn append_packets(
@@ -128,6 +133,7 @@ enum UploadMachine {
 pub struct UploadRpc<'repo, R: UploadPackRepository> {
     repository: &'repo R,
     body: BodyDecoder,
+    gzip: Option<gzip::GzipDecoder>,
     decoder: PktLineDecoder,
     machine: UploadMachine,
     version: ProtocolVersion,
@@ -149,6 +155,10 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
     ) -> Result<Self, RpcError> {
         let body = body_for(request, Service::UploadPack, http_limits)?;
         let decoder = PktLineDecoder::new(wire_limits.clone())?;
+        let gzip = match request.content_encoding {
+            ContentEncoding::Identity => None,
+            ContentEncoding::Gzip => Some(gzip::GzipDecoder::new(http_limits)?),
+        };
         let machine = match selected_version {
             ProtocolVersion::V0 | ProtocolVersion::V1 => {
                 let version = if selected_version == ProtocolVersion::V0 {
@@ -171,6 +181,7 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
         Ok(Self {
             repository,
             body,
+            gzip,
             decoder,
             machine,
             version: selected_version,
@@ -193,6 +204,7 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
             self.machine = UploadMachine::Failed;
             self.output = Vec::new();
             self.pack_request = None;
+            self.gzip = None;
         }
         result
     }
@@ -212,15 +224,47 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
             let step = self.body.push(&input[consumed..])?;
             consumed += step.consumed;
             if !step.data.is_empty() {
-                self.accept_payload(step.data, cancellation)?;
+                self.accept_encoded_payload(step.data, cancellation)?;
+            }
+        }
+        if self.body.is_complete() {
+            if let Some(gzip) = &mut self.gzip {
+                gzip.finish(cancellation)?;
             }
         }
         checkpoint(cancellation)?;
         Ok(RpcProgress {
             consumed,
             body_complete: self.body.is_complete(),
-            decoded_body_bytes: self.body.decoded_bytes(),
+            decoded_body_bytes: self.gzip.as_ref().map_or_else(
+                || self.body.decoded_bytes(),
+                gzip::GzipDecoder::decoded_bytes,
+            ),
         })
+    }
+
+    fn accept_encoded_payload<C: ReceiveCancellation>(
+        &mut self,
+        payload: &[u8],
+        cancellation: &mut C,
+    ) -> Result<(), RpcError> {
+        if self.gzip.is_none() {
+            return self.accept_payload(payload, cancellation);
+        }
+        // A caller can offer an entire HTTP body in one push. Bound inflater
+        // input and drain each tentative output before accepting more input.
+        for fragment in payload.chunks(gzip::INPUT_CHUNK_BYTES) {
+            checkpoint(cancellation)?;
+            let decoded = self
+                .gzip
+                .as_mut()
+                .ok_or(RpcError::FailedRequest)?
+                .push(fragment, cancellation)?;
+            if !decoded.is_empty() {
+                self.accept_payload(&decoded, cancellation)?;
+            }
+        }
+        Ok(())
     }
 
     fn accept_payload<C: ReceiveCancellation>(
@@ -324,6 +368,9 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
         }
         checkpoint(cancellation)?;
         self.body.finish()?;
+        if let Some(gzip) = &mut self.gzip {
+            gzip.finish(cancellation)?;
+        }
         self.decoder.finish()?;
         match &self.machine {
             UploadMachine::Legacy(machine) => machine.finish_stateless_http_round()?,

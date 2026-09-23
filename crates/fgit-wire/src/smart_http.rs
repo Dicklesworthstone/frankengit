@@ -4,17 +4,19 @@
 //! the exact repository route, authenticate and authorize EVERY request before
 //! advertising refs or accepting a receive, and finish HTTP decoding before
 //! admitting any mutation. Never promote a URL or an Authorization header into
-//! a principal. Content-Encoding is refused rather than silently passed to Git.
+//! a principal. Upload-pack RPC supports bounded gzip content decoding; other
+//! endpoints refuse non-identity encodings rather than passing them to Git.
 //!
 //! The deliberately narrow profile accepts canonical ASCII repository routes,
 //! HTTP/1.0 or HTTP/1.1, fixed-length or chunked RPC bodies, and no trailers.
-//! Body decoding is zero-copy and stops exactly at the request boundary.
+//! HTTP transfer decoding is zero-copy and stops exactly at the request boundary.
 //! Failure poisons the decoder: a host must close, not reuse, that connection.
 
 #![forbid(unsafe_code)]
 
 /// Shared bounded HTTP envelopes; endpoint policy remains adapter-owned.
 pub mod head;
+pub use head::ContentEncoding;
 /// Backpressured native pack response streaming and aggregate byte budgets.
 pub mod response;
 /// Composition with the existing native upload-pack and receive-pack machines.
@@ -28,6 +30,8 @@ pub struct HttpLimits {
     pub max_head_bytes: usize,
     pub max_headers: usize,
     pub max_target_bytes: usize,
+    /// Ceiling on both the transfer-decoded body and, for gzip upload RPCs,
+    /// its expanded Git payload. Compression never bypasses the byte limit.
     pub max_body_bytes: u64,
     pub max_body_wire_bytes: u64,
     pub max_chunks: u64,
@@ -77,6 +81,7 @@ pub enum HttpError {
     UnsupportedVersion,
     UnsupportedMediaType,
     UnsupportedContentEncoding,
+    InvalidCompressedBody,
     UnsupportedExpectation,
     AmbiguousFraming,
     LengthRequired,
@@ -182,6 +187,7 @@ pub struct RequestHead<'a> {
     pub requested_version: ProtocolVersion,
     pub http_version: HttpVersion,
     pub body: BodyFraming,
+    pub content_encoding: ContentEncoding,
     pub expect_continue: bool,
     pub consumed: usize,
     authorization: Option<&'a str>,
@@ -201,6 +207,7 @@ impl fmt::Debug for RequestHead<'_> {
             .field("requested_version", &self.requested_version)
             .field("http_version", &self.http_version)
             .field("body", &self.body)
+            .field("content_encoding", &self.content_encoding)
             .field("expect_continue", &self.expect_continue)
             .field("consumed", &self.consumed)
             .field("authorization", &self.authorization.map(|_| "[REDACTED]"))
@@ -245,6 +252,7 @@ pub fn parse_head(input: &[u8], limits: HttpLimits) -> Result<Option<RequestHead
         repository_route,
         requested_version: parse_protocol(envelope.git_protocol)?,
         body: envelope.body,
+        content_encoding: envelope.content_encoding,
         http_version: envelope.version,
         expect_continue: envelope.expect_continue,
         consumed: envelope.consumed,

@@ -8,12 +8,20 @@ use std::fmt;
 
 use super::{BodyFraming, HttpError, HttpLimits, HttpVersion, decimal, token_byte, unique};
 
+/// An explicitly selected content coding, independent of HTTP transfer framing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContentEncoding {
+    Identity,
+    Gzip,
+}
+
 /// Borrowed, syntactically validated HTTP metadata. Credentials are redacted.
 pub struct Envelope<'a> {
     pub method: &'a str,
     pub target: &'a str,
     pub version: HttpVersion,
     pub body: BodyFraming,
+    pub content_encoding: ContentEncoding,
     pub expect_continue: bool,
     pub consumed: usize,
     pub content_type: Option<&'a str>,
@@ -34,6 +42,7 @@ impl fmt::Debug for Envelope<'_> {
             .field("method", &self.method)
             .field("version", &self.version)
             .field("body", &self.body)
+            .field("content_encoding", &self.content_encoding)
             .field("expect_continue", &self.expect_continue)
             .field("consumed", &self.consumed)
             .field("authorization", &self.authorization.map(|_| "[REDACTED]"))
@@ -143,7 +152,21 @@ pub(super) fn parse_with<'a, T>(
     }) {
         return Err(HttpError::InvalidHeader);
     }
-    if encoding.is_some_and(|value| !value.eq_ignore_ascii_case("identity")) {
+    let content_encoding = match encoding {
+        None => ContentEncoding::Identity,
+        Some(value) if value.eq_ignore_ascii_case("identity") => ContentEncoding::Identity,
+        Some(value) if value.eq_ignore_ascii_case("gzip") => ContentEncoding::Gzip,
+        Some(_) => return Err(HttpError::UnsupportedContentEncoding),
+    };
+    // The live gateway first parses this shared envelope even for Git routes.
+    // Permit gzip only at the exact upload RPC route, using the same selector
+    // as parse_head. Native APIs, discovery and receive remain identity-only.
+    if content_encoding == ContentEncoding::Gzip
+        && !matches!(
+            super::route(method, target, limits.max_target_bytes),
+            Ok((super::Operation::Rpc(super::Service::UploadPack), _))
+        )
+    {
         return Err(HttpError::UnsupportedContentEncoding);
     }
     if length.is_some() && transfer.is_some() {
@@ -178,6 +201,7 @@ pub(super) fn parse_with<'a, T>(
                 HttpVersion::Http11
             },
             body,
+            content_encoding,
             expect_continue,
             consumed: end + 4,
             content_type: media,
