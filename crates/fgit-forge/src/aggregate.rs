@@ -158,6 +158,8 @@ pub enum AggregateId {
     Issue(IssueNumber),
     /// One repository-scoped merge queue stream.
     MergeQueue(QueueNumber),
+    /// One immutable, publisher-owned trusted workflow job observation.
+    WorkflowCheck(crate::event::workflow_check::WorkflowCheckId),
 }
 
 /// Wire tag for [`AggregateId::Organisation`], written only after a zero slot.
@@ -171,6 +173,8 @@ pub(crate) const AGGREGATE_KIND_ISSUE: u32 = 4;
 pub(crate) const AGGREGATE_KIND_REVIEW_PROTECTION: u32 = 5;
 /// Wire tag for [`AggregateId::MergeQueue`], written only after a zero slot.
 pub(crate) const AGGREGATE_KIND_MERGE_QUEUE: u32 = 6;
+/// Required workflow observation aggregate; earlier wire tags are unchanged.
+pub(crate) const AGGREGATE_KIND_WORKFLOW_CHECK: u32 = 7;
 impl From<IssueNumber> for AggregateId {
     fn from(number: IssueNumber) -> Self {
         Self::Issue(number)
@@ -214,6 +218,7 @@ impl fmt::Display for AggregateId {
                 reviewer,
             } => write!(formatter, "review/{pull_request}/{reviewer}"),
             Self::MergeQueue(number) => write!(formatter, "queue/{number}"),
+            Self::WorkflowCheck(id) => fmt::Display::fmt(id, formatter),
         }
     }
 }

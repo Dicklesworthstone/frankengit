@@ -19,6 +19,7 @@ pub mod protection;
 pub mod pull_request;
 pub mod queue;
 pub mod review;
+pub mod workflow_check;
 use issue::{IssueAction, NativeIssueEvent};
 use pull_request::{NativePullRequestEvent, PullRequestAction};
 use queue::NativeQueueEvent;
@@ -34,6 +35,7 @@ const KIND_NATIVE_PULL_REQUEST_REVIEWED: u32 = 7;
 const KIND_NATIVE_ISSUE_CHANGED: u32 = 8;
 const KIND_REVIEW_PROTECTION_CHANGED: u32 = 9;
 const KIND_NATIVE_MERGE_QUEUE_CHANGED: u32 = 10;
+const KIND_WORKFLOW_CHECK_OBSERVED: u32 = 11;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -147,6 +149,8 @@ pub enum ForgeEventPayload {
     IssueChangedNative(NativeIssueEvent),
     /// Native merge queue state change event, wire kind 10.
     MergeQueueChangedNative(NativeQueueEvent),
+    /// Immutable reported job evidence, never a successful protected check.
+    WorkflowCheckObservedNative(workflow_check::NativeWorkflowCheck),
 }
 
 impl ForgeEventPayload {
@@ -163,6 +167,7 @@ impl ForgeEventPayload {
             Self::IssueChangedNative(_) => KIND_NATIVE_ISSUE_CHANGED,
             Self::ReviewProtectionChanged(_) => KIND_REVIEW_PROTECTION_CHANGED,
             Self::MergeQueueChangedNative(_) => KIND_NATIVE_MERGE_QUEUE_CHANGED,
+            Self::WorkflowCheckObservedNative(_) => KIND_WORKFLOW_CHECK_OBSERVED,
         }
     }
 }
@@ -176,6 +181,11 @@ pub struct ForgeEvent {
 
 fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
     match aggregate {
+        AggregateId::WorkflowCheck(id) => {
+            out.write_scalar(0_u64);
+            out.write_scalar(crate::aggregate::AGGREGATE_KIND_WORKFLOW_CHECK);
+            out.write_raw(id.as_bytes());
+        }
         AggregateId::ReviewProtection => {
             out.write_scalar(0_u64);
             out.write_scalar(crate::aggregate::AGGREGATE_KIND_REVIEW_PROTECTION);
@@ -221,6 +231,11 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
     let kind_offset = input.offset();
     let kind = input.read_scalar::<u32>("aggregate.kind")?;
     match kind {
+        crate::aggregate::AGGREGATE_KIND_WORKFLOW_CHECK => {
+            let mut bytes = [0_u8; 32];
+            bytes.copy_from_slice(input.take("aggregate.workflow_check", 32)?);
+            Ok(AggregateId::WorkflowCheck(workflow_check::WorkflowCheckId::from_bytes(bytes)))
+        }
         crate::aggregate::AGGREGATE_KIND_REVIEW_PROTECTION => Ok(AggregateId::ReviewProtection),
         AGGREGATE_KIND_ISSUE => Ok(AggregateId::Issue(counter(
             "aggregate.issue",
@@ -320,6 +335,7 @@ fn validate_queue(event: &ForgeEvent) -> Result<(), CodecRefusal> {
 fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal> {
     validate_issue(event)?;
     validate_queue(event)?;
+    workflow_check::validate_event(event)?;
     if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
         != matches!(
             event.payload,
@@ -375,6 +391,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
             review.write(out)?;
         }
         ForgeEventPayload::MergeQueueChangedNative(queue_event) => queue_event.write(out)?,
+        ForgeEventPayload::WorkflowCheckObservedNative(change) => change.write(out)?,
     }
     Ok(())
 }
@@ -421,6 +438,9 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         KIND_REVIEW_PROTECTION_CHANGED => ForgeEventPayload::ReviewProtectionChanged(
             protection::NativeProtectionEvent::read(input)?,
         ),
+        KIND_WORKFLOW_CHECK_OBSERVED => ForgeEventPayload::WorkflowCheckObservedNative(
+            workflow_check::NativeWorkflowCheck::read(input)?,
+        ),
         KIND_NATIVE_MERGE_QUEUE_CHANGED => {
             ForgeEventPayload::MergeQueueChangedNative(NativeQueueEvent::read(input)?)
         }
@@ -439,6 +459,7 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
     };
     validate_issue(&event)?;
     validate_queue(&event)?;
+    workflow_check::validate_event(&event)?;
     if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
         != matches!(
             event.payload,

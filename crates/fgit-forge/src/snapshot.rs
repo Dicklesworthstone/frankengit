@@ -483,7 +483,8 @@ pub fn apply_forge_event_to_prs(
             ForgeEventPayload::ReviewProtectionChanged(_)
             | ForgeEventPayload::IssueChangedNative(_)
             | ForgeEventPayload::PullRequestReviewedNative(_)
-            | ForgeEventPayload::MergeQueueChangedNative(_) => {
+            | ForgeEventPayload::MergeQueueChangedNative(_)
+            | ForgeEventPayload::WorkflowCheckObservedNative(_) => {
                 // Reviews and queues belong to their own aggregate and do not fabricate
                 // or mutate a row in the legacy PR compatibility view.
             }
