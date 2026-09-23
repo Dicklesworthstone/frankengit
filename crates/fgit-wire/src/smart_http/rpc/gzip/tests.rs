@@ -6,7 +6,7 @@ use crate::{
     WireLimits, encode_packets,
 };
 
-fn decode(bytes: &[u8], width: usize, limits: HttpLimits) -> Result<Vec<u8>, RpcError> {
+pub(super) fn decode(bytes: &[u8], width: usize, limits: HttpLimits) -> Result<Vec<u8>, RpcError> {
     let mut decoder = GzipDecoder::new(limits)?;
     let mut output = Vec::new();
     for fragment in bytes.chunks(width.min(INPUT_CHUNK_BYTES)) {
@@ -18,12 +18,12 @@ fn decode(bytes: &[u8], width: usize, limits: HttpLimits) -> Result<Vec<u8>, Rpc
     Ok(output)
 }
 
-fn crc(bytes: &[u8]) -> u32 {
+pub(super) fn crc(bytes: &[u8]) -> u32 {
     !bytes.iter().fold(u32::MAX, |crc, &byte| crc_byte(crc, byte))
 }
 
 // Test-only stored-block encoder; production uses no encoder or reference Git.
-fn stored(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn stored(bytes: &[u8]) -> Vec<u8> {
     let mut result = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255];
     if bytes.is_empty() {
         result.extend_from_slice(&[1, 0, 0, 255, 255]);
@@ -122,7 +122,7 @@ fn cancellation_during_inflate_and_at_finalization_is_terminal() {
     assert!(matches!(decoder.finish(&mut || true), Err(RpcError::FailedRequest)));
 }
 
-fn http_head(path: &str, coding: &str, size: usize, chunked: bool) -> Vec<u8> {
+pub(super) fn http_head(path: &str, coding: &str, size: usize, chunked: bool) -> Vec<u8> {
     let framing = if chunked {
         "Transfer-Encoding: chunked".to_owned()
     } else {
@@ -160,12 +160,12 @@ fn gateway_envelope_and_git_parser_agree_without_enabling_native_gzip() {
     }
 }
 
-struct Repository {
-    refs: Vec<AdvertisedRef>,
+pub(super) struct Repository {
+    pub(super) refs: Vec<AdvertisedRef>,
     format: GitObjectFormat,
 }
 impl Repository {
-    fn new(format: GitObjectFormat) -> Self {
+    pub(super) fn new(format: GitObjectFormat) -> Self {
         let oid = AnyGitOid::from_hex(format, &"11".repeat(format.digest_len())).unwrap();
         Self {
             refs: vec![AdvertisedRef::new(oid, b"refs/heads/main", &WireLimits::default()).unwrap()],
@@ -179,7 +179,7 @@ impl UploadPackRepository for Repository {
     fn contains_want(&self, oid: AnyGitOid) -> bool { oid == self.refs[0].oid }
     fn is_common(&self, oid: AnyGitOid) -> bool { self.contains_want(oid) }
 }
-fn chunks(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn chunks(bytes: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     for part in bytes.chunks(7) {
         output.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
@@ -246,7 +246,7 @@ fn corrupt_gzip_cannot_release_a_completed_git_command() {
 
 // Independent fixtures: Python 3 zlib gzip (wbits=31), fixed and dynamic
 // Huffman blocks respectively. The checked plaintext is specified above.
-const FIXED: &[u8] = &[
+pub(super) const FIXED: &[u8] = &[
     0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0xcb, 0x48,
     0xcd, 0xc9, 0xc9, 0x57, 0x48, 0xaf, 0xca, 0x2c, 0xe0, 0xca, 0xa0, 0x26,
     0x13, 0x00, 0x33, 0x77, 0x18, 0x09, 0x58, 0x00, 0x00, 0x00,

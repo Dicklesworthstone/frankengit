@@ -12,13 +12,14 @@
 //! introduced. Output is tentative until finish; the owning UploadRpc withholds
 //! all replies and pack requests, and poisons itself after any refusal.
 
+mod header;
+
 use fgit_pack::{CancellationProbe, InflateLimits, InflateRefusal, Inflater, StreamProgress};
 
 use super::{HttpError, HttpLimits, ReceiveCancellation, RpcError, checkpoint};
 
 pub(super) const INPUT_CHUNK_BYTES: usize = 1024;
 const TRAILER_BYTES: usize = 8;
-const HEADER_BYTES: usize = 10;
 const ADLER_MODULUS: u32 = 65_521;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -31,8 +32,7 @@ enum State {
 pub(super) struct GzipDecoder {
     inflater: Inflater,
     state: State,
-    header: [u8; HEADER_BYTES],
-    header_len: usize,
+    header: header::Header,
     tail: [u8; TRAILER_BYTES],
     tail_len: usize,
     input_bytes: u64,
@@ -82,8 +82,7 @@ impl GzipDecoder {
         Ok(Self {
             inflater,
             state: State::Active,
-            header: [0; HEADER_BYTES],
-            header_len: 0,
+            header: header::Header::new(limits.max_head_bytes),
             tail: [0; TRAILER_BYTES],
             tail_len: 0,
             input_bytes: 0,
@@ -129,22 +128,12 @@ impl GzipDecoder {
         if self.input_bytes > self.input_limit {
             return Err(HttpError::BodyTooLarge.into());
         }
-        if self.header_len < HEADER_BYTES {
-            let count = input.len().min(HEADER_BYTES - self.header_len);
-            self.header[self.header_len..self.header_len + count].copy_from_slice(&input[..count]);
-            self.header_len += count;
-            input = &input[count..];
-            if self.header_len < HEADER_BYTES {
-                return Ok(Vec::new());
-            }
-            if self.header[..3] != [0x1f, 0x8b, 8] {
-                return Err(HttpError::InvalidCompressedBody.into());
-            }
-            // Git's HTTP compressor emits this fixed header. FTEXT is advisory;
-            // optional metadata is an explicit non-claim of this first profile.
-            if self.header[3] & !1 != 0 {
-                return Err(HttpError::UnsupportedContentEncoding.into());
-            }
+        // Metadata is consumed once, without storing names/comments or using
+        // them as paths. Its independent budget uses the admitted head ceiling.
+        let consumed = self.header.push(input)?;
+        input = &input[consumed..];
+        if !self.header.is_complete() {
+            return Ok(Vec::new());
         }
         let mut pending = [0_u8; INPUT_CHUNK_BYTES + TRAILER_BYTES];
         let total = self.tail_len + input.len();
@@ -200,7 +189,7 @@ impl GzipDecoder {
             State::Failed => return Err(RpcError::FailedRequest),
             State::Active => {}
         }
-        if self.header_len != HEADER_BYTES || self.tail_len != TRAILER_BYTES {
+        if !self.header.is_complete() || self.tail_len != TRAILER_BYTES {
             return Err(HttpError::TruncatedBody.into());
         }
         let expected_crc = u32::from_le_bytes([self.tail[0], self.tail[1], self.tail[2], self.tail[3]]);
@@ -250,3 +239,6 @@ fn crc_byte(crc: u32, byte: u8) -> u32 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod extended_tests;
