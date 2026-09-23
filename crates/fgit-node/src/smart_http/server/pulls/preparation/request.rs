@@ -7,7 +7,7 @@ use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::resolution::{
     ConflictResolution, ResolutionChoice, ResolutionError, validate_resolutions,
 };
-use fgit_forge::preparation::{MergeMetadata, PreparationLimits};
+use fgit_forge::preparation::{MergeMetadata, MergeProfile, PreparationLimits};
 use fgit_forge::{AggregateVersion, PullRequestNumber};
 use fgit_types::{GitHashAlgorithm, GitOid, PolicyEpoch, RefName};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
@@ -19,6 +19,15 @@ pub(crate) struct Request<'a> {
     pub number: PullRequestNumber,
     pub resolution: bool,
     pub boundary: Option<&'a str>,
+}
+
+/// Closed, typed construction semantics. No caller text is used as a driver,
+/// path, executable, review grant or publication command.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct PreparationCommand {
+    pub subject: ReviewSubject,
+    pub metadata: MergeMetadata,
+    pub profile: MergeProfile,
 }
 
 #[derive(Debug)]
@@ -102,13 +111,19 @@ impl<'a> Request<'a> {
         &self,
         bytes: &[u8],
         format: GitHashAlgorithm,
-    ) -> Result<(ReviewSubject, MergeMetadata), ApiError> {
+    ) -> Result<PreparationCommand, ApiError> {
         // A resolution can never fall back to automatic construction.
         if self.resolution {
             return Err(ApiError::bad("resolution_choices_required"));
         }
-        let (fields, _) = self.fields(bytes)?;
-        self.subject_and_metadata(fields, format)
+        let (mut fields, _) = self.fields(bytes)?;
+        let profile = match fields.remove("profile").as_deref() {
+            None | Some("path-merge-v1") => MergeProfile::PathMergeV1,
+            Some("exact-renames-v1") => MergeProfile::ExactRenamesV1,
+            Some(_) => return Err(ApiError::bad("unsupported_merge_profile")),
+        };
+        let (subject, metadata) = self.subject_and_metadata(fields, format)?;
+        Ok(PreparationCommand { subject, metadata, profile })
     }
 
     pub(super) fn resolved_command(
@@ -210,7 +225,7 @@ impl<'a> Request<'a> {
         let maximum = if self.resolution {
             12 + resolution_upload::MAX_FILES
         } else {
-            11
+            12
         };
         for (name, value) in parse_form(bytes, maximum)? {
             if name == "resolution" && self.resolution {
@@ -234,6 +249,7 @@ impl<'a> Request<'a> {
                     | "timestamp"
                     | "message"
             ) && !(name == "merge_base" && self.resolution)
+                && !(name == "profile" && !self.resolution)
             {
                 return Err(ApiError::bad("unknown_preparation_field"));
             }
@@ -359,14 +375,12 @@ mod tests {
         let request = request(false);
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let input = form(format);
-            let (subject, metadata) = request.command(input.as_bytes(), format).unwrap();
-            assert_eq!(subject.source_tip.algorithm(), format);
-            assert_eq!(metadata.author, "Alice <a@example.invalid>");
-            assert_eq!(metadata.message, "Exact 🦀\n%2f".as_bytes());
-            assert_eq!(
-                request.command(input.as_bytes(), format).unwrap(),
-                (subject, metadata)
-            );
+            let command = request.command(input.as_bytes(), format).unwrap();
+            assert_eq!(command.subject.source_tip.algorithm(), format);
+            assert_eq!(command.metadata.author, "Alice <a@example.invalid>");
+            assert_eq!(command.metadata.message, "Exact 🦀\n%2f".as_bytes());
+            assert_eq!(command.profile, MergeProfile::PathMergeV1);
+            assert_eq!(request.command(input.as_bytes(), format).unwrap(), command);
         }
     }
     #[test]
@@ -500,5 +514,51 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn merge_profile_is_explicit_closed_and_does_not_change_subject_or_metadata() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let base = form(format);
+            let default = request(false).command(base.as_bytes(), format).unwrap();
+            let explicit = request(false)
+                .command((base.clone() + "&profile=path-merge-v1").as_bytes(), format)
+                .unwrap();
+            assert_eq!(default, explicit);
+            let exact = request(false)
+                .command((base.clone() + "&profile=exact-renames-v1").as_bytes(), format)
+                .unwrap();
+            assert_eq!(exact.profile, MergeProfile::ExactRenamesV1);
+            assert_eq!(exact.subject, default.subject);
+            assert_eq!(exact.metadata, default.metadata);
+            for value in ["", "PathMergeV1", "EXACT-RENAMES-V1", "exact-renames-v2", "ort",
+                "exact-renames-v1+", "exact-renames-v1%00", "exact-renames-v1%2Cpath-merge-v1"]
+            {
+                let invalid = base.clone() + "&profile=" + value;
+                let error = request(false).command(invalid.as_bytes(), format).unwrap_err();
+                assert!(!error.outcome_unknown);
+                assert!(matches!(error.code, "unsupported_merge_profile" | "nul_not_allowed"), "{}", error.code);
+            }
+        }
+    }
+
+    #[test]
+    fn profile_duplicates_and_resolution_selection_cannot_be_silently_ignored() {
+        let format = GitHashAlgorithm::Sha1;
+        // A short envelope isolates duplicate detection from the aggregate
+        // field-count ceiling. Percent decoding still precedes uniqueness.
+        for duplicate in ["profile", "pr%6ffile"] {
+            let bytes = format!("profile=path-merge-v1&{duplicate}=exact-renames-v1");
+            assert_eq!(request(false).command(bytes.as_bytes(), format).unwrap_err().code,
+                "duplicate_field");
+        }
+        for profile in ["path-merge-v1", "exact-renames-v1"] {
+            let bytes = form(format) + &format!(
+                "&merge_base={}&resolution=61:ours&profile={profile}", "c".repeat(40));
+            let error = request(true)
+                .resolved_command(bytes.as_bytes(), BTreeMap::new(), format).unwrap_err();
+            assert_eq!(error.code, "unknown_preparation_field");
+            assert!(!error.outcome_unknown);
+        }
     }
 }

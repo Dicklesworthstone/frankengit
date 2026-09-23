@@ -14,6 +14,7 @@ use crate::{
 };
 use fgit_admission::ProjectionFailure;
 use fgit_authority::IdempotencyKey;
+use fgit_forge::preparation::renames::RenameRefusal;
 use fgit_forge::preparation::resolution::ResolutionError;
 use fgit_forge::preparation::{MergeSourceError, PreparationError, PreparationLimits};
 use fgit_types::RefusalCode;
@@ -130,17 +131,18 @@ pub(super) fn execute(
             &mut live,
         );
     }
-    let (subject, metadata) = request.command(&bytes, node.object_format)?;
+    let command = request.command(&bytes, node.object_format)?;
     drop(bytes);
     let prepared = drive_request_while(
         node,
         &context,
-        node.prepare_pull_request_bundle_in(
+        node.prepare_pull_request_bundle_with_profile_in(
             &context,
-            &subject,
+            &command.subject,
             &visibility,
-            &metadata,
+            &command.metadata,
             PreparationLimits::default(),
+            command.profile,
         ),
         &mut live,
     )
@@ -151,6 +153,7 @@ pub(super) fn execute(
         &prepared.subject,
         &prepared.outcome,
         prepared.bundle,
+        command.profile,
         maximum,
         &mut live,
     )
@@ -201,6 +204,19 @@ fn preparation_error(error: &NodeWorkspaceRefusal) -> ApiError {
 }
 fn native_preparation_error(error: &PreparationError) -> ApiError {
     match error {
+        // Rename conflicts are inspectable construction refusals, not failed
+        // servers or mutation outcomes. Never reflect raw source paths/IDs.
+        PreparationError::Rename(error) => ApiError::new(
+            Status::Conflict,
+            match error {
+                RenameRefusal::AmbiguousIdentity { .. } => "rename_identity_ambiguous",
+                RenameRefusal::Divergent { .. } => "rename_destinations_diverge",
+                RenameRefusal::RenameDelete { .. } => "rename_delete_conflict",
+                RenameRefusal::DestinationOccupied { .. } => "rename_destination_occupied",
+                RenameRefusal::UnsupportedEntry { .. } => "rename_entry_unsupported",
+                RenameRefusal::AttributesRequireDriver { .. } => "rename_attributes_require_driver",
+            },
+        ),
         PreparationError::NoCommonAncestor => ApiError::new(Status::Conflict, "no_common_ancestor"),
         PreparationError::MultipleMergeBases(_) => {
             ApiError::new(Status::Conflict, "multiple_merge_bases")
@@ -271,6 +287,34 @@ mod tests {
             ResolutionError::Preparation(PreparationError::Source(MergeSourceError::Cancelled)),
         ] {
             assert!(!resolution_error(&error).outcome_unknown);
+        }
+    }
+
+    #[test]
+    fn rename_refusals_are_distinct_safe_conflicts_not_mutation_or_server_failures() {
+        use fgit_forge::preparation::renames::RenameSide;
+        use fgit_types::{GitHashAlgorithm, GitOid};
+        let oid = GitOid::from_hex(GitHashAlgorithm::Sha1, &"de".repeat(20)).unwrap();
+        let private = b"private-path-do-not-reflect".to_vec();
+        for (refusal, code) in [
+            (RenameRefusal::AmbiguousIdentity { side: RenameSide::Source, oid }, "rename_identity_ambiguous"),
+            (RenameRefusal::Divergent { from: private.clone(), target: private.clone(), source: private.clone() }, "rename_destinations_diverge"),
+            (RenameRefusal::RenameDelete { from: private.clone(), to: private.clone() }, "rename_delete_conflict"),
+            (RenameRefusal::DestinationOccupied { path: private.clone() }, "rename_destination_occupied"),
+            (RenameRefusal::UnsupportedEntry { path: private.clone() }, "rename_entry_unsupported"),
+            (RenameRefusal::AttributesRequireDriver { path: private }, "rename_attributes_require_driver"),
+        ] {
+            let error = preparation_error(&NodeWorkspaceRefusal::MergePreparation(PreparationError::Rename(refusal)));
+            assert_eq!(error.status, Status::Conflict);
+            assert_eq!(error.code, code);
+            assert!(!error.outcome_unknown);
+            let mut bytes = Vec::new();
+            error.send_named(&mut bytes, fgit_wire::smart_http::HttpVersion::Http11,
+                "pull_request_error").unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(!text.contains("private-path-do-not-reflect"));
+            assert!(!text.contains(&oid.to_string()));
+            assert!(!text.contains("\"outcome\":\"refused\""));
         }
     }
 }

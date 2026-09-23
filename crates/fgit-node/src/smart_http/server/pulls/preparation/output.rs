@@ -10,7 +10,7 @@ use crate::OneNode;
 use fgit_crypto::sha256_digest;
 use fgit_forge::event::review::ReviewSubject;
 use fgit_forge::preparation::resolution::{ResolutionKind, ResolvedMerge, ResolvedPath};
-use fgit_forge::preparation::{ConflictKind, MergeEntry, MergePreparation};
+use fgit_forge::preparation::{ConflictKind, MergeEntry, MergePreparation, MergeProfile};
 use fgit_types::RepositoryAuthorityHeadId;
 use fgit_wire::smart_http::HttpVersion;
 use std::io::{self, Write};
@@ -175,10 +175,11 @@ pub(super) fn build(
     subject: &ReviewSubject,
     outcome: &MergePreparation,
     bundle: Option<Vec<u8>>,
+    profile: MergeProfile,
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Reply, ApiError> {
-    build_inner(node, head, subject, outcome, bundle, None, maximum, live)
+    build_inner(node, head, subject, outcome, bundle, None, profile, maximum, live)
 }
 
 pub(super) fn build_resolved(
@@ -198,6 +199,7 @@ pub(super) fn build_resolved(
         &MergePreparation::Clean(plan),
         Some(bundle),
         Some(&resolutions),
+        MergeProfile::PathMergeV1,
         maximum,
         live,
     )
@@ -210,6 +212,7 @@ fn build_inner(
     outcome: &MergePreparation,
     bundle: Option<Vec<u8>>,
     resolutions: Option<&[ResolvedPath]>,
+    profile: MergeProfile,
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Reply, ApiError> {
@@ -220,7 +223,9 @@ fn build_inner(
     {
         return Err(ApiError::too_large());
     }
-    if resolutions.is_some() && !matches!(outcome, MergePreparation::Clean(_)) {
+    if resolutions.is_some()
+        && (profile != MergeProfile::PathMergeV1 || !matches!(outcome, MergePreparation::Clean(_)))
+    {
         return Err(ApiError::unavailable());
     }
     let bundle_digest = bundle.as_ref().map(|bytes| hex(&sha256_digest(bytes)));
@@ -235,7 +240,7 @@ fn build_inner(
         concat!(
             "{{\"type\":\"merge_preparation\",\"schema_version\":1,\"tenant_id\":{},\"repository_id\":{},",
             "\"repository_incarnation\":{},\"object_format\":{},\"source_head\":{},\"snapshot_token\":{},",
-            "\"profile\":\"path-merge-v1\",\"read_only\":true,\"objects_staged\":false,",
+            "\"profile\":{},\"read_only\":true,\"objects_staged\":false,",
             "\"transaction_created\":false,\"published\":false,\"merge_authorized\":false,",
             "\"subject\":{{\"pull_request\":{},\"pull_request_version\":{},\"policy_epoch\":{},",
             "{},{},\"source_tip\":{},\"target_tip\":{}}},"
@@ -246,6 +251,10 @@ fn build_inner(
         quote(node.object_format.as_str()),
         quote(&head.to_string()),
         quote(&token),
+        quote(match profile {
+            MergeProfile::PathMergeV1 => "path-merge-v1",
+            MergeProfile::ExactRenamesV1 => "exact-renames-v1",
+        }),
         subject.pull_request.get(),
         subject.pull_request_version.get(),
         subject.policy_epoch.get(),
