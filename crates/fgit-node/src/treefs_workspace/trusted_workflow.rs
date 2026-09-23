@@ -2,6 +2,7 @@
 //! Never expose this local-owner operation as a remote or hostile CI endpoint.
 
 mod candidate;
+mod durable;
 use candidate::WorkflowInputs;
 
 use std::collections::BTreeSet;
@@ -156,6 +157,22 @@ impl TrustedWorkflowRun {
             candidate::merge_json(self.merge.as_ref())
         )
     }
+    // Identity remains stable after execution fills in the job observations.
+    // Retain the historical marker bytes for the original empty plan exactly.
+    fn attempt_marker(&self) -> String {
+        let empty = WorkflowReport {
+            source: self.execution.source,
+            graph: self.execution.graph,
+            limits: self.execution.limits,
+            jobs: Vec::new(),
+        };
+        format!(
+            "{{\"type\":\"trusted_workflow_attempt\",{},\"state\":\"started\",\"execution_plan\":{}}}",
+            self.identity_json(),
+            empty.to_json()
+        )
+    }
+
     /// Output stays bounded by the native workflow report and source profile.
     /// All arbitrary source/output/path bytes use lossless hexadecimal encoding.
     pub fn to_json(&self) -> String {
@@ -189,7 +206,10 @@ impl OneNode {
     /// An exclusive, persistent workflow-<run_id> directory prevents accidental
     /// replay. A synced attempt marker precedes all processes. report.json is
     /// installed without replacement after every started workspace is closed or
-    /// explicitly retained. An incomplete attempt is never automatically rerun.
+    /// explicitly retained. The existing durable runner additionally records an
+    /// execution start fence and journals every closed job before a dependent
+    /// starts. These local proposals never grant a canonical successful check.
+    /// An incomplete attempt is never automatically rerun.
     pub async fn run_trusted_workflow_in(
         &self,
         request: &NodeRequestContext,
@@ -493,6 +513,7 @@ fn run_inputs<A: GitHashAlgorithm>(
             "request stopped during preflight",
         ));
     }
+    let coordinated = durable::Prepared::new(&report, plan)?;
     let metadata = fs::symlink_metadata(parent).map_err(|source| TrustedWorkflowFailure::Io {
         operation: "inspect private run parent",
         source,
@@ -522,11 +543,7 @@ fn run_inputs<A: GitHashAlgorithm>(
         detail,
     };
     let root = File::open(&report.run_directory).map_err(|e| journal_error(e.to_string()))?;
-    let marker = format!(
-        "{{\"type\":\"trusted_workflow_attempt\",{},\"state\":\"started\",\"execution_plan\":{}}}",
-        report.identity_json(),
-        report.execution.to_json()
-    );
+    let marker = report.attempt_marker();
     write_new(
         &report.run_directory.join("attempt.json"),
         marker.as_bytes(),
@@ -550,9 +567,9 @@ fn run_inputs<A: GitHashAlgorithm>(
     };
     // This outer predicate also charges source discovery against the run budget.
     // The scheduler owns every begun job and always calls non-cancellable close.
-    report.execution = plan
-        .execute(limits, &mut worker, &live)
-        .map_err(|e| journal_error(format!("workflow driver failed: {e}")))?;
+    // Queue custody and a durable Started fence precede the first process.
+    // Each normalized job result is synced before a dependent scope can open.
+    report.execution = coordinated.execute(&report.run_directory, &mut worker, &live)?;
     report.workspaces_closed = !worker.retained && worker.current.is_none();
     report.request_interrupted =
         !workspace_request_live(request) || started.elapsed() >= limits.run_timeout;
