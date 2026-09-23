@@ -17,8 +17,19 @@ use fgit_diff::{
 use fgit_types::{GitHashAlgorithm, GitOid};
 
 pub mod rebase;
+pub mod renames;
 pub mod replay;
 pub mod resolution;
+
+/// Explicit preparation semantics; the legacy entry point remains PathMergeV1.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MergeProfile {
+    #[default]
+    PathMergeV1,
+    /// Unique content-identical regular-file moves, including cross-directory
+    /// moves. No similarity scores, copy detection or directory-rename inference.
+    ExactRenamesV1,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitInput {
@@ -201,6 +212,7 @@ pub enum MergePreparation {
 
 #[derive(Debug)]
 pub enum PreparationError {
+    Rename(renames::RenameRefusal),
     InvalidLimits,
     InvalidMetadata,
     ObjectFormat,
@@ -274,6 +286,23 @@ pub fn prepare_merge<S: MergeObjectSource>(
     metadata: &MergeMetadata,
     limits: PreparationLimits,
 ) -> Result<MergePreparation, PreparationError> {
+    prepare_merge_with_profile(
+        source, format, target, incoming, metadata, limits, MergeProfile::PathMergeV1,
+    )
+}
+
+/// Select merge semantics explicitly without changing authority, base selection,
+/// commit parent order or the existing PathMergeV1 entry point. Rename analysis
+/// shares the tree/content planner and all of its aggregate construction limits.
+pub fn prepare_merge_with_profile<S: MergeObjectSource>(
+    source: &S,
+    format: GitHashAlgorithm,
+    target: GitOid,
+    incoming: GitOid,
+    metadata: &MergeMetadata,
+    limits: PreparationLimits,
+    profile: MergeProfile,
+) -> Result<MergePreparation, PreparationError> {
     limits.validate()?;
     metadata.validate()?;
     source.checkpoint()?;
@@ -318,7 +347,14 @@ pub fn prepare_merge<S: MergeObjectSource>(
         conflicts: Vec::new(),
         resolutions: BTreeMap::new(),
     };
-    let tree = planner.directory(Some(base_tree), our_tree, their_tree, &[], 0, false)?;
+    let tree = match profile {
+        MergeProfile::PathMergeV1 => {
+            planner.directory(Some(base_tree), our_tree, their_tree, &[], 0, false)?
+        }
+        MergeProfile::ExactRenamesV1 => {
+            renames::merge(&mut planner, base_tree, our_tree, their_tree)?
+        }
+    };
     source.checkpoint()?;
     if !planner.conflicts.is_empty() {
         planner
