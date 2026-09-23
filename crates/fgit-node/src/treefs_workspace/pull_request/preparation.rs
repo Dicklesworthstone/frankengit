@@ -7,7 +7,7 @@ use fgit_admission::{AdmissionError, ProjectionFailure};
 use fgit_forge::ForgeEventPayload;
 use fgit_forge::event::pull_request::PullRequestAction;
 use fgit_forge::event::review::ReviewSubject;
-use fgit_forge::preparation::{MergeMetadata, MergePreparation, PreparationLimits};
+use fgit_forge::preparation::{MergeMetadata, MergePreparation, MergeProfile, PreparationLimits};
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_types::{RefusalCode, RepositoryAuthorityHeadId};
 use fgit_wire::visibility::RefVisibility;
@@ -41,6 +41,24 @@ impl OneNode {
         metadata: &MergeMetadata,
         limits: PreparationLimits,
     ) -> Result<PreparedPullRequestBundle, NodeWorkspaceRefusal> {
+        self.prepare_pull_request_bundle_with_profile_in(
+            request, subject, visibility, metadata, limits, MergeProfile::PathMergeV1,
+        )
+        .await
+    }
+
+    /// Explicit merge semantics do not relax the exact open-PR subject or
+    /// same-head fence. A rename-aware candidate remains read-only evidence;
+    /// eventual publication must recheck its original tips and review subject.
+    pub async fn prepare_pull_request_bundle_with_profile_in(
+        &self,
+        request: &NodeRequestContext,
+        subject: &ReviewSubject,
+        visibility: &RefVisibility,
+        metadata: &MergeMetadata,
+        limits: PreparationLimits,
+        profile: MergeProfile,
+    ) -> Result<PreparedPullRequestBundle, NodeWorkspaceRefusal> {
         metadata
             .validate()
             .map_err(NodeWorkspaceRefusal::MergePreparation)?;
@@ -51,13 +69,14 @@ impl OneNode {
             .validate_pull_request_preparation_in(request, subject, visibility)
             .await?;
         let prepared = self
-            .prepare_merge_bundle_in(
+            .prepare_merge_bundle_with_profile_in(
                 request,
                 &subject.target_ref,
                 &subject.source_ref,
                 visibility,
                 metadata,
                 limits,
+                profile,
             )
             .await?;
         if prepared.source_head != head {

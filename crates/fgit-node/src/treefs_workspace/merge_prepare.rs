@@ -19,8 +19,8 @@ use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_o
 use fgit_crypto::git_object_id;
 use fgit_forge::event::NativeMerge;
 use fgit_forge::preparation::{
-    CommitInput, MergeEntry, MergeMetadata, MergeObjectSource, MergePreparation, MergeSourceError,
-    PlannedMergeObject, PreparationError, PreparationLimits, PreparedMerge, prepare_merge,
+    CommitInput, MergeEntry, MergeMetadata, MergeObjectSource, MergePreparation, MergeProfile, MergeSourceError,
+    PlannedMergeObject, PreparationError, PreparationLimits, PreparedMerge, prepare_merge, prepare_merge_with_profile,
 };
 use fgit_git_object::{
     AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body,
@@ -72,6 +72,27 @@ impl OneNode {
         visibility: &RefVisibility,
         metadata: &MergeMetadata,
         limits: PreparationLimits,
+    ) -> Result<PreparedMergeBundle, NodeWorkspaceRefusal> {
+        self.prepare_merge_bundle_with_profile_in(
+            request, target, incoming, visibility, metadata, limits, MergeProfile::PathMergeV1,
+        )
+        .await
+    }
+
+    /// Select bounded merge semantics explicitly over the same authenticated
+    /// source, native-object validation and bundle construction as the default.
+    /// ExactRenamesV1 preserves opposite-side edits across unique exact-content
+    /// regular-file moves. Ambiguous moves refuse; no fallback candidate is made.
+    /// Neither profile stages objects, grants review approval or publishes refs.
+    pub async fn prepare_merge_bundle_with_profile_in(
+        &self,
+        request: &NodeRequestContext,
+        target: &RefName,
+        incoming: &RefName,
+        visibility: &RefVisibility,
+        metadata: &MergeMetadata,
+        limits: PreparationLimits,
+        profile: MergeProfile,
     ) -> Result<PreparedMergeBundle, NodeWorkspaceRefusal> {
         limits
             .validate()
@@ -135,14 +156,14 @@ impl OneNode {
             read_bytes: Cell::new(0),
             budget_failed: Cell::new(false),
         };
-        let outcome = prepare_merge(
-            &source,
-            self.object_format,
-            our_tip,
-            their_tip,
-            metadata,
-            limits,
-        )
+        let outcome = match profile {
+            MergeProfile::PathMergeV1 => prepare_merge(
+                &source, self.object_format, our_tip, their_tip, metadata, limits,
+            ),
+            MergeProfile::ExactRenamesV1 => prepare_merge_with_profile(
+                &source, self.object_format, our_tip, their_tip, metadata, limits, profile,
+            ),
+        }
         .map_err(NodeWorkspaceRefusal::MergePreparation)?;
         let bundle = if let MergePreparation::Clean(plan) = &outcome {
             Some(bundle_for_plan(&source, target, incoming, plan, limits)?)
@@ -482,6 +503,13 @@ mod tests {
         format: GitHashAlgorithm,
         conflict: bool,
     ) -> (Scratch, OneNode, GitOid, GitOid) {
+        fixture_with_rename(format, conflict, false)
+    }
+    pub(super) fn fixture_with_rename(
+        format: GitHashAlgorithm,
+        conflict: bool,
+        rename: bool,
+    ) -> (Scratch, OneNode, GitOid, GitOid) {
         let root = std::env::temp_dir().join(format!(
             "fg-merge-prepare-{}-{}",
             std::process::id(),
@@ -530,7 +558,11 @@ mod tests {
         let base = commit(&node, bt, &[], "base", &mut ids);
         let ot = tree(&node, &[("keep", preserved), ("text", ours)], &mut ids);
         let target = commit(&node, ot, &[base], "ours", &mut ids);
-        let tt = tree(&node, &[("keep", preserved), ("text", theirs)], &mut ids);
+        let tt = if rename {
+            tree(&node, &[("keep", preserved), ("moved", original)], &mut ids)
+        } else {
+            tree(&node, &[("keep", preserved), ("text", theirs)], &mut ids)
+        };
         let incoming = commit(&node, tt, &[base], "theirs", &mut ids);
         let zero = GitOid::from_hex(format, &"0".repeat(format.digest_len() * 2)).unwrap();
         let updates = [
@@ -752,3 +784,7 @@ mod tests {
         node.shutdown().unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "merge_prepare/rename_tests.rs"]
+mod rename_tests;
