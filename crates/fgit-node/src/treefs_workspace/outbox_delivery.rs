@@ -1,5 +1,7 @@
 //! Local authenticated composition for bounded canonical forge delivery.
 
+mod selection;
+
 use fgit_admission::merge::native::settlement::{OutboxDestination, deliver_outbox_async};
 use fgit_admission::{AdmissionContext, AdmissionLimits};
 use fgit_codec::CanonicalOutboxEffectState;

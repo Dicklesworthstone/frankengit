@@ -10,6 +10,8 @@ use fgit_types::{AsciiSlug, RepositoryId, TenantId};
 
 use crate::publication_support::quote;
 
+mod delivery;
+
 const USAGE: &str =
     "usage: fg webhook register <storage-root> <tenant-id> <repository-id> --trusted-local
          --id <id> --url <url> --secret <hex-secret>
@@ -22,7 +24,13 @@ usage: fg webhook dead-letter replay <storage-root> <tenant-id> <repository-id> 
          --delivery-id <delivery-id>
 usage: fg webhook deliver <storage-root> <tenant-id> <repository-id> --trusted-local
          --id <id> --delivery-id <delivery-id> [--attempt <num>]
-         [--permissive-for-tests]";
+         [--permissive-for-tests]
+usage: fg webhook outbox <storage-root> <tenant-id> <repository-id> --trusted-local
+         [--object-format sha1|sha256] [--limit <1..100>] [--after <delivery-id>]
+         [--expected-head <snapshot-token>]
+usage: fg webhook inspect <storage-root> <tenant-id> <repository-id> --trusted-local
+         --delivery-id <delivery-id> --destination <canonical-destination>
+         [--object-format sha1|sha256] [--expected-head <snapshot-token>]";
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
     if args.is_empty() || args == ["--help"] {
@@ -36,6 +44,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
         "rotate" => run_rotate(&args[1..]),
         "dead-letter" => run_dead_letter(&args[1..]),
         "deliver" => run_deliver(&args[1..]),
+        "outbox" | "inspect" => delivery::run(args[0].as_str(), &args[1..]),
         _ => Err(format!("unknown webhook subcommand: {}", args[0])),
     }
 }
