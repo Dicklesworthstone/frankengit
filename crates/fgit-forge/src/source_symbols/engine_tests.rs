@@ -385,11 +385,11 @@ fn generated_supported_heads_match_an_independent_name_position_oracle() {
     for (word, tail, kind) in [
         ("fn", "() {}", Kind::Function),
         ("struct", ";", Kind::Struct),
-        ("enum", "{ }", Kind::Enum),
+        ("enum", "{}", Kind::Enum),
         ("mod", ";", Kind::Module),
         ("trait", "{}", Kind::Trait),
         ("type", "=u8;", Kind::Type),
-        ("union", "{x:u8}", Kind::Union),
+        ("union", "{ x: u8 }", Kind::Union),
     ] {
         for gap in [" ", "\n", "/* fake fn hidden(){} */"] {
             for raw in ["", "r#"] {

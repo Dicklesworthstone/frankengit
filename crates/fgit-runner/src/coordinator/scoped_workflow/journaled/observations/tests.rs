@@ -34,11 +34,7 @@ impl WorkflowExecutor for Worker {
     ) -> Result<StepObservation, WorkerFailure> {
         Ok(StepObservation {
             outcome: self.outcome,
-            exit_code: Some(if self.outcome == StepOutcome::Succeeded {
-                0
-            } else {
-                1
-            }),
+            exit_code: Some(i32::from(self.outcome != StepOutcome::Succeeded)),
             stdout: vec![0, 255, 27, b'[', b'm'],
             stderr: "π diagnostic\n".as_bytes().to_vec(),
             elapsed_millis: 1,
@@ -217,7 +213,8 @@ fn valid_hash_never_substitutes_for_any_proposal_subject_coordinate() {
             4 => other.binding.head = Commitment::of_bytes(b"other head"),
             5 => other.binding.source = GitOid::Sha1(GitOidSha1::from_bytes([8; 20])),
             6 => {
-                other.binding.trust = TrustDomain::new(RunnerText::parse("trust", "other").unwrap())
+                other.binding.trust =
+                    TrustDomain::new(RunnerText::parse("trust", "other").unwrap());
             }
             7 => other.report.source = Commitment::of_bytes(b"other workflow"),
             8 => other.report.graph = Commitment::of_bytes(b"other graph"),
@@ -250,7 +247,7 @@ fn full_workflow_wrong_job_and_changed_conclusion_are_not_single_job_proofs() {
             Err(ObservationRefusal::BindingMismatch)
         );
     }
-    let mut failed = receipt.clone();
+    let mut failed = receipt;
     failed.report.jobs[0].outcome = JobOutcome::Failed;
     failed.report.jobs[0].steps[0].observation.outcome = StepOutcome::Failed;
     failed.report.jobs[0].steps[0].observation.exit_code = Some(1);

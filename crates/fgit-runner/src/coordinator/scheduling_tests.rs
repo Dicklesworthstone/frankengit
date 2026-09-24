@@ -199,7 +199,7 @@ fn mutated_graphs_refuse_before_outbox_or_idempotency_state() {
     empty.jobs.clear();
     let mut missing_steps = original.clone();
     missing_steps.jobs[0].steps.clear();
-    let mut huge = original.clone();
+    let mut huge = original;
     huge.jobs[0].steps = vec![huge.jobs[0].steps[0].clone(); MAX_STEPS + 1];
     for g in [duplicate, cycle, empty, missing_steps, huge] {
         let mut c = coordinator();

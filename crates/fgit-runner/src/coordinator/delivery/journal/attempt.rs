@@ -157,7 +157,7 @@ impl FileWorkflowAttempt {
             .and_then(|()| file.sync_all())
             .map_err(storage)?;
         sync_parent(path)?;
-        Ok(Self::empty(file, binding))
+        Ok(Self::empty(file, &binding))
     }
 
     /// Reopen one known attempt. Never recreate missing files, repair a torn
@@ -185,7 +185,7 @@ impl FileWorkflowAttempt {
         if header.as_slice() != binding.bytes().as_slice() {
             return Err(WorkflowAttemptRefusal::IdentityMismatch);
         }
-        let mut owner = Self::empty(file, binding);
+        let mut owner = Self::empty(file, &binding);
         let mut witnessed = minimum.is_none() || minimum == Some(owner.pin);
         while owner.pin.bytes < end {
             if !live() {
@@ -245,10 +245,10 @@ impl FileWorkflowAttempt {
         sync_parent(path)?;
         Ok(owner)
     }
-    fn empty(file: File, binding: WorkflowAttemptBinding) -> Self {
+    fn empty(file: File, binding: &WorkflowAttemptBinding) -> Self {
         Self {
             file,
-            binding,
+            binding: *binding,
             pin: WorkflowAttemptPin {
                 bytes: ATTEMPT_HEADER_BYTES,
                 tail: Commitment::of_bytes(&binding.bytes()),

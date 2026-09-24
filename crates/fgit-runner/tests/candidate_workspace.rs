@@ -14,6 +14,7 @@ use fgit_types::{
 };
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
@@ -91,9 +92,12 @@ fn commit<A: GitHashAlgorithm>(
 ) -> GitOid<A> {
     let mut body = format!("tree {}\n", hex(tree.digest_bytes()));
     for parent in parents {
-        body.push_str(&format!("parent {}\n", hex(parent.digest_bytes())));
+        let _ = writeln!(body, "parent {}", hex(parent.digest_bytes()));
     }
-    body.push_str(&format!("author Test <t@example.invalid> 1 +0000\ncommitter Test <t@example.invalid> 1 +0000\n\n{message}\n"));
+    let _ = writeln!(
+        body,
+        "author Test <t@example.invalid> 1 +0000\ncommitter Test <t@example.invalid> 1 +0000\n\n{message}"
+    );
     source.put::<A>(GitObjectKind::Commit, body.into_bytes())
 }
 fn fixture<A: GitHashAlgorithm>() -> (Source, BaseView<A>, GitOid<A>) {
@@ -145,7 +149,7 @@ impl Scratch {
                     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
                     return Self(path);
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => panic!("private fixture: {e}"),
             }
         }

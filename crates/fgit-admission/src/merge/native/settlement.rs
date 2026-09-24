@@ -206,8 +206,7 @@ where
             .await?;
             continue;
         }
-        let mut dispatch = false;
-        if matches!(progress.state(), ReconcileState::Pending { .. })
+        let dispatch = if matches!(progress.state(), ReconcileState::Pending { .. })
             && !progress.dispatch_in_flight()
         {
             let marked = progress.mark_dispatch().map_err(codec_error)?;
@@ -226,8 +225,10 @@ where
                 continue;
             }
             progress = marked;
-            dispatch = true;
-        }
+            true
+        } else {
+            false
+        };
         let events =
             storage::read_events(store, cx, context.repository_id, entry.payload_root()).await?;
         let request = DeliveryRequest {
@@ -587,7 +588,7 @@ pub(super) fn resource_key(
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
     let mut bytes = [0_u8; 32];
-    for (target, pair) in bytes.iter_mut().zip(key.as_bytes().chunks_exact(2)) {
+    for (target, pair) in bytes.iter_mut().zip(key.as_bytes().as_chunks::<2>().0) {
         let text =
             std::str::from_utf8(pair).map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
         *target =

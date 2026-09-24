@@ -28,9 +28,9 @@ impl WorkspaceProjection {
         }
     }
 
-    fn observe(&self) -> Result<[u8; 32], ProjectionFailure> {
+    fn observe(&self) -> [u8; 32] {
         self.observations.fetch_add(1, Ordering::SeqCst);
-        Ok(*self.observed.lock().unwrap())
+        *self.observed.lock().unwrap()
     }
 }
 
@@ -39,7 +39,7 @@ impl SyncNativeMergeProjection for WorkspaceProjection {
         SyncNativeMergeProjection::merge_checkpoint(&self.inner)
     }
     fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
-        self.observe()
+        Ok(self.observe())
     }
     fn snapshot(
         &self,
@@ -123,7 +123,7 @@ impl NativeMergeProjection<Model> for WorkspaceProjection {
         NativeMergeProjection::merge_checkpoint(&self.inner, cx)
     }
     fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
-        self.observe()
+        Ok(self.observe())
     }
     fn resolve_merge_basis_async<'a>(
         &'a self,

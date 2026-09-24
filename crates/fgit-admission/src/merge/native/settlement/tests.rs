@@ -215,33 +215,31 @@ async fn stage<B: CanonicalBody + Sync>(
 }
 
 impl AsyncAdmissionProjection<Store> for Projection {
-    fn snapshot_async<'a>(
+    async fn snapshot_async<'a>(
         &'a self,
         store: &'a Store,
         (): &'a (),
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
-    ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
-        async move {
-            if authenticated.receipt().body()
-                != fgit_codec::encode_body(basis.body())
-                    .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid))?
-            {
-                return Err(ProjectionFailure::Unavailable(
-                    RefusalCode::AuthorityReceiptStale,
-                ));
-            }
-            let delivery = delivery::read_in(store, &(), basis, &|| false)
-                .await
-                .map_err(unavailable_projection)?;
-            Ok(AdmissionSnapshot {
-                forge_positions: delivery.forge_positions(),
-                outbox: delivery.outbox_bindings(),
-                ..AdmissionSnapshot::default()
-            })
+    ) -> Result<AdmissionSnapshot, ProjectionFailure> {
+        if authenticated.receipt().body()
+            != fgit_codec::encode_body(basis.body())
+                .map_err(|_| ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid))?
+        {
+            return Err(ProjectionFailure::Unavailable(
+                RefusalCode::AuthorityReceiptStale,
+            ));
         }
+        let delivery = delivery::read_in(store, &(), basis, &|| false)
+            .await
+            .map_err(unavailable_projection)?;
+        Ok(AdmissionSnapshot {
+            forge_positions: delivery.forge_positions(),
+            outbox: delivery.outbox_bindings(),
+            ..AdmissionSnapshot::default()
+        })
     }
-    fn materialize_commit_async<'a>(
+    async fn materialize_commit_async<'a>(
         &'a self,
         store: &'a Store,
         (): &'a (),
@@ -249,119 +247,115 @@ impl AsyncAdmissionProjection<Store> for Projection {
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
-        async move {
-            if matches!(self.fault, MaterializationFault::Refuse) {
-                return Err(ProjectionFailure::Refuse(
-                    RefusalCode::PublicationPolicyRefused,
-                ));
-            }
-            let bodies = DecisionEvidenceBodies::derive(&self.context, basis, request, fold)
-                .map_err(ProjectionFailure::Unavailable)?;
-            let repo = self.context.repository_id;
-            stage(
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
+        if matches!(self.fault, MaterializationFault::Refuse) {
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::PublicationPolicyRefused,
+            ));
+        }
+        let bodies = DecisionEvidenceBodies::derive(&self.context, basis, request, fold)
+            .map_err(ProjectionFailure::Unavailable)?;
+        let repo = self.context.repository_id;
+        stage(
+            store,
+            repo,
+            b"frankengit/admission/principal-snapshot/v1/",
+            bodies.principal_snapshot(),
+        )
+        .await?;
+        let evidence = CommitEvidence {
+            principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot())
+                .map_err(ProjectionFailure::Unavailable)?,
+            forge_event_batch_root: stage(
                 store,
                 repo,
-                b"frankengit/admission/principal-snapshot/v1/",
-                bodies.principal_snapshot(),
+                storage::EVENT_NAMESPACE,
+                bodies.forge_event_batch(),
             )
-            .await?;
-            let evidence = CommitEvidence {
-                principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot())
-                    .map_err(ProjectionFailure::Unavailable)?,
-                forge_event_batch_root: stage(
-                    store,
-                    repo,
-                    storage::EVENT_NAMESPACE,
-                    bodies.forge_event_batch(),
-                )
-                .await?,
-                policy_decision_root: stage(
-                    store,
-                    repo,
-                    b"frankengit/admission/policy-decision/v1/",
-                    bodies.policy_decision(),
-                )
-                .await?,
-                invariant_evidence_root: stage(
-                    store,
-                    repo,
-                    storage::INVARIANT_NAMESPACE,
-                    bodies.invariant_evidence(),
-                )
-                .await?,
-                outbox_effect_root: stage(
-                    store,
-                    repo,
-                    history::OUTBOX_EFFECT_NAMESPACE,
-                    bodies.outbox_effect_batch(),
-                )
-                .await?,
-                retention_delta_root: stage(
-                    store,
-                    repo,
-                    b"frankengit/admission/retention-delta/v1/",
-                    bodies.retention_delta(),
-                )
-                .await?,
-            };
-            let prepared = prepare_canonical_commit(
-                basis,
-                request,
-                fold,
-                closure,
-                CanonicalRefState::default(),
-                fgit_types::layout::RootLayoutVersion::LegacyWholeBody,
-                evidence,
+            .await?,
+            policy_decision_root: stage(
+                store,
+                repo,
+                b"frankengit/admission/policy-decision/v1/",
+                bodies.policy_decision(),
             )
-            .map_err(ProjectionFailure::Unavailable)?;
-            stage(store, repo, REF_NAMESPACE, prepared.next_ref_state()).await?;
-            stage(store, repo, CLOSURE_NAMESPACE, prepared.object_closure()).await?;
-            let mut materialization = prepared.into_materialization();
-            match self.fault {
-                MaterializationFault::None | MaterializationFault::Refuse => {}
-                MaterializationFault::Retention => {
-                    materialization.roots.retention_root = digest_of(201);
-                }
-                MaterializationFault::RefRoot => {
-                    materialization.roots.ref_root = digest_of(202);
-                    materialization.record.resulting_ref_root = digest_of(202);
-                }
-                MaterializationFault::Transaction => materialization.record.tx_id = tx_id(),
+            .await?,
+            invariant_evidence_root: stage(
+                store,
+                repo,
+                storage::INVARIANT_NAMESPACE,
+                bodies.invariant_evidence(),
+            )
+            .await?,
+            outbox_effect_root: stage(
+                store,
+                repo,
+                history::OUTBOX_EFFECT_NAMESPACE,
+                bodies.outbox_effect_batch(),
+            )
+            .await?,
+            retention_delta_root: stage(
+                store,
+                repo,
+                b"frankengit/admission/retention-delta/v1/",
+                bodies.retention_delta(),
+            )
+            .await?,
+        };
+        let prepared = prepare_canonical_commit(
+            basis,
+            request,
+            fold,
+            closure,
+            CanonicalRefState::default(),
+            fgit_types::layout::RootLayoutVersion::LegacyWholeBody,
+            evidence,
+        )
+        .map_err(ProjectionFailure::Unavailable)?;
+        stage(store, repo, REF_NAMESPACE, prepared.next_ref_state()).await?;
+        stage(store, repo, CLOSURE_NAMESPACE, prepared.object_closure()).await?;
+        let mut materialization = prepared.into_materialization();
+        match self.fault {
+            MaterializationFault::None | MaterializationFault::Refuse => {}
+            MaterializationFault::Retention => {
+                materialization.roots.retention_root = digest_of(201);
             }
-            Ok(materialization)
+            MaterializationFault::RefRoot => {
+                materialization.roots.ref_root = digest_of(202);
+                materialization.record.resulting_ref_root = digest_of(202);
+            }
+            MaterializationFault::Transaction => materialization.record.tx_id = tx_id(),
         }
+        Ok(materialization)
     }
-    fn materialize_refusal_async<'a>(
+    async fn materialize_refusal_async<'a>(
         &'a self,
         store: &'a Store,
         (): &'a (),
         basis: &'a PublicationBasis,
         tx_id: TxId,
         code: RefusalCode,
-    ) -> impl Future<Output = Result<RefusalMaterialization, ProjectionFailure>> + Send + 'a {
-        async move {
-            let bodies = RefusalEvidenceBodies::derive(&self.context, basis, tx_id, code)
-                .map_err(ProjectionFailure::Unavailable)?;
-            stage(
+    ) -> Result<RefusalMaterialization, ProjectionFailure> {
+        let bodies = RefusalEvidenceBodies::derive(&self.context, basis, tx_id, code)
+            .map_err(ProjectionFailure::Unavailable)?;
+        stage(
+            store,
+            self.context.repository_id,
+            b"frankengit/admission/principal-snapshot/v1/",
+            bodies.principal_snapshot(),
+        )
+        .await?;
+        Ok(RefusalMaterialization {
+            policy_epoch: basis.body().policy_epoch,
+            detail: "scripted admission refusal with derived evidence".to_owned(),
+            evidence_root: stage(
                 store,
                 self.context.repository_id,
-                b"frankengit/admission/principal-snapshot/v1/",
-                bodies.principal_snapshot(),
+                b"frankengit/admission/refusal-evidence/v1/",
+                bodies.refusal_evidence(),
             )
-            .await?;
-            Ok(RefusalMaterialization {
-                policy_epoch: basis.body().policy_epoch,
-                detail: "scripted admission refusal with derived evidence".to_owned(),
-                evidence_root: stage(
-                    store,
-                    self.context.repository_id,
-                    b"frankengit/admission/refusal-evidence/v1/",
-                    bodies.refusal_evidence(),
-                )
-                .await?,
-            })
-        }
+            .await?,
+        })
     }
 }
 

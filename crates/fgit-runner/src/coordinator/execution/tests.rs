@@ -109,7 +109,7 @@ fn command_lowering_preserves_literals_and_never_substitutes_true() {
         ("printf '%s' '*.rs'", &["printf", "%s", "*.rs"]),
         ("echo '$HOME'", &["echo", "$HOME"]),
         (r#"echo "\$HOME""#, &["echo", "$HOME"]),
-        (r#"echo a\;b"#, &["echo", "a;b"]),
+        (r"echo a\;b", &["echo", "a;b"]),
         (r#"echo "a\qb""#, &["echo", r"a\qb"]),
         (" ca\"rg\"o\tcheck \n", &["cargo", "check"]),
     ];

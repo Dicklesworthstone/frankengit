@@ -115,14 +115,22 @@ fn facts(path: &Path) -> Vec<CheckRunFact> {
     }
     facts
 }
+/// One injected executor interruption; each test exercises at most one.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ExecutorFault {
+    /// Panic after the durable launch intent, before the job begins.
+    PanicOnBegin,
+    /// Exit the whole process inside a step.
+    ExitInStep,
+    /// Panic in the observer after custody recorded the job.
+    PanicOnObserve,
+}
 struct Executor<'a> {
     path: PathBuf,
     begun: Vec<String>,
     cancel_on_close: Option<&'a Cell<bool>>,
-    panic_on_observe: bool,
-    panic_on_begin: bool,
+    fault: Option<ExecutorFault>,
     check_disk: bool,
-    exit_in_step: bool,
 }
 impl Executor<'_> {
     fn new(path: PathBuf) -> Self {
@@ -130,10 +138,8 @@ impl Executor<'_> {
             path,
             begun: Vec::new(),
             cancel_on_close: None,
-            panic_on_observe: false,
-            panic_on_begin: false,
+            fault: None,
             check_disk: true,
-            exit_in_step: false,
         }
     }
 }
@@ -161,9 +167,10 @@ impl WorkflowExecutor for Executor<'_> {
             }
         }
         self.begun.push(job.id.clone());
-        if self.panic_on_begin {
-            panic!("uncertain begin after durable launch intent");
-        }
+        assert!(
+            self.fault != Some(ExecutorFault::PanicOnBegin),
+            "uncertain begin after durable launch intent"
+        );
         Ok(())
     }
     fn execute_step(
@@ -173,7 +180,7 @@ impl WorkflowExecutor for Executor<'_> {
         _: StepLimits,
         _: &dyn Fn() -> bool,
     ) -> Result<StepObservation, WorkerFailure> {
-        if self.exit_in_step {
+        if self.fault == Some(ExecutorFault::ExitInStep) {
             std::process::exit(86);
         }
         Ok(StepObservation {
@@ -193,9 +200,10 @@ impl WorkflowExecutor for Executor<'_> {
         Ok(())
     }
     fn observe_job(&mut self, report: &JobReport) {
-        if self.panic_on_observe {
-            panic!("observer interruption after custody");
-        }
+        assert!(
+            self.fault != Some(ExecutorFault::PanicOnObserve),
+            "observer interruption after custody"
+        );
         // Completed readback is asserted only on the clean path. A deliberate
         // journal failure must still let the interpreter finish cancellation.
         if self.check_disk && report.outcome == JobOutcome::Succeeded {
@@ -210,23 +218,29 @@ impl WorkflowExecutor for Executor<'_> {
 
 #[test]
 fn launch_is_synced_before_scope_and_each_result_before_the_next_job() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    let r = c
-        .execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    let receipt = coordinator
+        .execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true,
+        )
         .unwrap();
-    assert!(r.report().succeeded());
-    assert_eq!(e.begun, ["first", "second"]);
-    for job in &r.report().jobs {
-        let root = r.job_commitment(&job.id).unwrap();
+    assert!(receipt.report().succeeded());
+    assert_eq!(executor.begun, ["first", "second"]);
+    for job in &receipt.report().jobs {
+        let root = receipt.job_commitment(&job.id).unwrap();
         assert_eq!(
-            j.read_evidence(root).unwrap(),
-            r.job_frame(&job.id).unwrap()
+            custody.read_evidence(root).unwrap(),
+            receipt.job_frame(&job.id).unwrap()
         );
     }
-    let stored = facts(&d.journal());
+    let stored = facts(&dir.journal());
     assert_eq!(stored.len(), 6);
     assert!(
         stored
@@ -234,74 +248,101 @@ fn launch_is_synced_before_scope_and_each_result_before_the_next_job() {
             .filter(|f| f.status == CheckRunStatus::Completed)
             .all(|f| f.conclusion == Some(CheckRunConclusion::ActionRequired))
     );
-    assert_eq!(c.pending_check_fact_count(), 0);
-    c.verify_quiescence().unwrap();
+    assert_eq!(coordinator.pending_check_fact_count(), 0);
+    coordinator.verify_quiescence().unwrap();
 }
 
 #[test]
 fn completed_repeat_verifies_custody_without_reexecution_or_append() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    let root = c
-        .execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    let root = coordinator
+        .execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true,
+        )
         .unwrap()
         .commitment();
-    let pin = j.pin();
+    let pin = custody.pin();
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 999, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                999,
+                &|| true
+            )
             .unwrap()
             .commitment(),
         root
     );
-    assert_eq!(j.pin(), pin);
-    assert_eq!(e.begun.len(), 2);
+    assert_eq!(custody.pin(), pin);
+    assert_eq!(executor.begun.len(), 2);
 }
 
 #[test]
 fn full_queue_custody_refuses_before_any_executor_scope() {
-    let d = Directory::new();
-    let mut j = journal(&d, 1);
-    let pin = j.pin();
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 1);
+    let pin = custody.pin();
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                200,
+                &|| true
+            )
             .err(),
         Some(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::JournalFull
         ))
     );
-    assert!(e.begun.is_empty());
-    assert_eq!(j.pin(), pin);
-    assert_eq!(c.obligations().workflow_scopes_opened, 0);
+    assert!(executor.begun.is_empty());
+    assert_eq!(custody.pin(), pin);
+    assert_eq!(coordinator.obligations().workflow_scopes_opened, 0);
     // Explicit durable selection cannot silently fall back after failed I/O.
     assert!(
-        c.execute_trusted_workflow(&mut p, &mut e, 200, &|| true)
+        coordinator
+            .execute_trusted_workflow(&mut workflow, &mut executor, 200, &|| true)
             .is_err()
     );
-    assert!(e.begun.is_empty());
+    assert!(executor.begun.is_empty());
 }
 
 #[test]
 fn full_launch_barrier_never_opens_a_scope_and_retains_a_retryable_report() {
-    let d = Directory::new();
-    let mut j = journal(&d, 4);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    e.check_disk = false;
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 4);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    executor.check_disk = false;
     assert!(matches!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true),
+        coordinator.execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true
+        ),
         Err(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::JournalFull
         ))
     ));
-    assert!(e.begun.is_empty());
-    assert_eq!(c.obligations().workflow_scopes_opened, 0);
-    assert!(p.receipt().is_some());
+    assert!(executor.begun.is_empty());
+    assert_eq!(coordinator.obligations().workflow_scopes_opened, 0);
+    assert!(workflow.receipt().is_some());
     assert!(
-        facts(&d.journal())
+        facts(&dir.journal())
             .iter()
             .all(|f| f.status == CheckRunStatus::Queued)
     );
@@ -309,246 +350,336 @@ fn full_launch_barrier_never_opens_a_scope_and_retains_a_retryable_report() {
 
 #[test]
 fn result_capacity_failure_stops_later_jobs_and_reopen_retries_only_custody() {
-    let d = Directory::new();
-    let mut j = journal(&d, 6);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    e.check_disk = false;
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 6);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    executor.check_disk = false;
     assert!(matches!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true),
+        coordinator.execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true
+        ),
         Err(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::JournalFull
         ))
     ));
-    assert_eq!(e.begun, ["first"]);
-    let r = p.receipt().unwrap();
-    assert_eq!(r.report().jobs[0].outcome, JobOutcome::Succeeded);
-    assert_eq!(r.report().jobs[1].outcome, JobOutcome::Cancelled);
-    let root = r.commitment();
-    let pin = j.pin();
-    drop(j);
-    let mut j = FileCheckJournal::open(
-        &d.journal(),
+    assert_eq!(executor.begun, ["first"]);
+    let receipt = workflow.receipt().unwrap();
+    assert_eq!(receipt.report().jobs[0].outcome, JobOutcome::Succeeded);
+    assert_eq!(receipt.report().jobs[1].outcome, JobOutcome::Cancelled);
+    let root = receipt.commitment();
+    let pin = custody.pin();
+    drop(custody);
+    let mut custody = FileCheckJournal::open(
+        &dir.journal(),
         scope(),
         CheckJournalLimits::default(),
         Some(pin),
         &|| true,
     )
     .unwrap();
-    let r = c
-        .execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 300, &|| true)
+    let receipt = coordinator
+        .execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            300,
+            &|| true,
+        )
         .unwrap();
-    assert_eq!(r.commitment(), root);
-    assert_eq!(e.begun, ["first"]);
-    assert_eq!(c.pending_check_fact_count(), 0);
-    c.verify_quiescence().unwrap();
+    assert_eq!(receipt.commitment(), root);
+    assert_eq!(executor.begun, ["first"]);
+    assert_eq!(coordinator.pending_check_fact_count(), 0);
+    coordinator.verify_quiescence().unwrap();
 }
 
 #[test]
 fn observer_unwind_cannot_erase_the_already_cleaned_up_job_result() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    e.panic_on_observe = true;
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    executor.fault = Some(ExecutorFault::PanicOnObserve);
     assert!(matches!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true),
+        coordinator.execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true
+        ),
         Err(JournaledWorkflowRefusal::Coordinator(
             CoordinatorRefusal::ContainmentFailure(_)
         ))
     ));
-    assert_eq!(e.begun, ["first"]);
+    assert_eq!(executor.begun, ["first"]);
     assert!(
-        facts(&d.journal())
+        facts(&dir.journal())
             .iter()
             .any(|f| f.job_id == "first" && f.status == CheckRunStatus::Completed)
     );
-    let pin = j.pin();
-    drop(j);
-    drop(c);
-    drop(p);
-    let mut j = FileCheckJournal::open(
-        &d.journal(),
+    let pin = custody.pin();
+    drop(custody);
+    drop(coordinator);
+    drop(workflow);
+    let mut custody = FileCheckJournal::open(
+        &dir.journal(),
         scope(),
         CheckJournalLimits::default(),
         Some(pin),
         &|| true,
     )
     .unwrap();
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                200,
+                &|| true
+            )
             .err(),
         Some(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::StaleBatch
         ))
     );
-    assert!(e.begun.is_empty());
+    assert!(executor.begun.is_empty());
 }
 
 #[test]
 fn delivered_history_still_fences_a_recreated_execution_handle() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    coordinator
+        .execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true,
+        )
         .unwrap();
-    while let Some(batch) = j.next_batch().unwrap() {
-        j.record_delivery(CheckDeliveryAcknowledgement::after_durable_acceptance(
-            &batch,
-            Commitment::of_bytes(b"fixture downstream custody"),
-        ))
-        .unwrap();
+    while let Some(batch) = custody.next_batch().unwrap() {
+        custody
+            .record_delivery(CheckDeliveryAcknowledgement::after_durable_acceptance(
+                &batch,
+                Commitment::of_bytes(b"fixture downstream custody"),
+            ))
+            .unwrap();
     }
-    assert_eq!(j.pending_batches(), 0);
-    let pin = j.pin();
-    drop(j);
-    drop(c);
-    drop(p);
-    let mut j = FileCheckJournal::open(
-        &d.journal(),
+    assert_eq!(custody.pending_batches(), 0);
+    let pin = custody.pin();
+    drop(custody);
+    drop(coordinator);
+    drop(workflow);
+    let mut custody = FileCheckJournal::open(
+        &dir.journal(),
         scope(),
         CheckJournalLimits::default(),
         Some(pin),
         &|| true,
     )
     .unwrap();
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 300, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                300,
+                &|| true
+            )
             .err(),
         Some(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::StaleBatch
         ))
     );
-    assert!(e.begun.is_empty());
-    assert_eq!(j.pin(), pin);
+    assert!(executor.begun.is_empty());
+    assert_eq!(custody.pin(), pin);
 }
 
 #[test]
 fn cancellation_before_start_does_not_write_or_launch() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let pin = j.pin();
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let pin = custody.pin();
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| false)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                200,
+                &|| false
+            )
             .err(),
         Some(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::Cancelled
         ))
     );
-    assert_eq!(j.pin(), pin);
-    assert!(e.begun.is_empty());
-    c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+    assert_eq!(custody.pin(), pin);
+    assert!(executor.begun.is_empty());
+    coordinator
+        .execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true,
+        )
         .unwrap();
-    assert_eq!(e.begun.len(), 2);
+    assert_eq!(executor.begun.len(), 2);
 }
 
 #[test]
 fn cancellation_during_cleanup_still_persists_all_terminal_observations() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
     let live = Cell::new(true);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    e.cancel_on_close = Some(&live);
-    let r = c
-        .execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| live.get())
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    executor.cancel_on_close = Some(&live);
+    let receipt = coordinator
+        .execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| live.get(),
+        )
         .unwrap();
     assert!(
-        r.report()
+        receipt
+            .report()
             .jobs
             .iter()
             .all(|job| job.outcome == JobOutcome::Cancelled)
     );
-    assert_eq!(e.begun, ["first"]);
+    assert_eq!(executor.begun, ["first"]);
     assert_eq!(
-        facts(&d.journal())
+        facts(&dir.journal())
             .iter()
             .filter(|f| f.status == CheckRunStatus::Completed)
             .count(),
         2
     );
-    c.verify_quiescence().unwrap();
+    coordinator.verify_quiescence().unwrap();
 }
 
 #[test]
 fn volatile_completed_execution_cannot_be_relabelled_as_launch_journaled() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let pin = j.pin();
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    e.check_disk = false;
-    c.execute_trusted_workflow(&mut p, &mut e, 200, &|| true)
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let pin = custody.pin();
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    executor.check_disk = false;
+    coordinator
+        .execute_trusted_workflow(&mut workflow, &mut executor, 200, &|| true)
         .unwrap();
     assert!(matches!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true),
+        coordinator.execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true
+        ),
         Err(JournaledWorkflowRefusal::Coordinator(
             CoordinatorRefusal::UnsupportedExecution { .. }
         ))
     ));
-    assert_eq!(j.pin(), pin);
-    assert_eq!(e.begun.len(), 2);
+    assert_eq!(custody.pin(), pin);
+    assert_eq!(executor.begun.len(), 2);
 }
 
 #[test]
 fn empty_replacement_journal_cannot_certify_a_retained_completed_receipt() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    coordinator
+        .execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true,
+        )
         .unwrap();
     let mut empty =
-        FileCheckJournal::create(&d.0.join("empty"), scope(), CheckJournalLimits::default())
+        FileCheckJournal::create(&dir.0.join("empty"), scope(), CheckJournalLimits::default())
             .unwrap();
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut empty, 200, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut empty,
+                200,
+                &|| true
+            )
             .err(),
         Some(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::EvidenceMissing
         ))
     );
-    assert_eq!(e.begun.len(), 2);
+    assert_eq!(executor.begun.len(), 2);
 }
 
 #[test]
 fn unrelated_pending_run_and_wrong_repository_are_refused_without_custody_transfer() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let pin = j.pin();
-    let (mut c, mut p) = prepared();
-    c.enqueue_trusted_workflow(
-        scope().tenant,
-        scope().repository,
-        Commitment::of_bytes(b"head"),
-        GitOid::Sha1(GitOidSha1::from_bytes([3; 20])),
-        WorkflowPlan::compile(SOURCE).unwrap(),
-        WorkflowLimits::default(),
-        TriggerContext::trusted_push("alice"),
-        2,
-        100,
-    )
-    .unwrap();
-    let mut e = Executor::new(d.journal());
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let pin = custody.pin();
+    let (mut coordinator, mut workflow) = prepared();
+    coordinator
+        .enqueue_trusted_workflow(
+            scope().tenant,
+            scope().repository,
+            Commitment::of_bytes(b"head"),
+            GitOid::Sha1(GitOidSha1::from_bytes([3; 20])),
+            WorkflowPlan::compile(SOURCE).unwrap(),
+            WorkflowLimits::default(),
+            TriggerContext::trusted_push("alice"),
+            2,
+            100,
+        )
+        .unwrap();
+    let mut executor = Executor::new(dir.journal());
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                200,
+                &|| true
+            )
             .err(),
         Some(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::OutOfOrder
         ))
     );
-    assert_eq!(j.pin(), pin);
-    assert!(e.begun.is_empty());
-    let (mut c, mut p) = prepared();
+    assert_eq!(custody.pin(), pin);
+    assert!(executor.begun.is_empty());
+    let (mut coordinator, mut workflow) = prepared();
     let mut foreign = FileCheckJournal::create(
-        &d.0.join("foreign"),
+        &dir.0.join("foreign"),
         CheckJournalScope {
             repository: RepositoryId::from_bytes([9; 16]),
             ..scope()
@@ -557,39 +688,67 @@ fn unrelated_pending_run_and_wrong_repository_are_refused_without_custody_transf
     )
     .unwrap();
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut foreign, 200, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut foreign,
+                200,
+                &|| true
+            )
             .err(),
         Some(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::ScopeMismatch
         ))
     );
     // A scope rejection must not pin the handle to the wrong journal.
-    c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+    coordinator
+        .execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true,
+        )
         .unwrap();
 }
 
 #[test]
 fn corrupted_completed_record_is_not_hidden_by_an_in_memory_receipt() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    coordinator
+        .execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true,
+        )
         .unwrap();
-    let mut f = OpenOptions::new().write(true).open(d.journal()).unwrap();
-    let original = fs::read(d.journal()).unwrap();
+    let mut f = OpenOptions::new().write(true).open(dir.journal()).unwrap();
+    let original = fs::read(dir.journal()).unwrap();
     f.seek(SeekFrom::End(-1)).unwrap();
     f.write_all(&[original[original.len() - 1] ^ 1]).unwrap();
     f.sync_all().unwrap();
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                200,
+                &|| true
+            )
             .err(),
         Some(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::CorruptJournal
         ))
     );
-    assert!(j.is_failed());
-    assert_eq!(e.begun.len(), 2);
+    assert!(custody.is_failed());
+    assert_eq!(executor.begun.len(), 2);
 }
 
 // Helper invoked only by the process-exit test below. Normal test discovery
@@ -600,36 +759,43 @@ fn process_exit_child() {
         return;
     };
     let path = PathBuf::from(directory).join("checks");
-    let mut j = FileCheckJournal::create(&path, scope(), CheckJournalLimits::default()).unwrap();
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(path);
-    e.exit_in_step = true;
-    let _ = c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true);
+    let mut custody =
+        FileCheckJournal::create(&path, scope(), CheckJournalLimits::default()).unwrap();
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(path);
+    executor.fault = Some(ExecutorFault::ExitInStep);
+    let _ = coordinator.execute_journaled_trusted_workflow(
+        &mut workflow,
+        &mut executor,
+        &mut custody,
+        200,
+        &|| true,
+    );
     panic!("child must exit from the executor, not return");
 }
 
 #[test]
 fn actual_process_exit_releases_lock_but_not_the_durable_launch_fence() {
-    let d = Directory::new();
+    let dir = Directory::new();
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "coordinator::delivery::journal::execution::tests::process_exit_child",
             "--nocapture",
         ])
-        .env("FGIT_JOURNALED_WORKFLOW_EXIT_CHILD", &d.0)
+        .env("FGIT_JOURNALED_WORKFLOW_EXIT_CHILD", &dir.0)
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(86));
-    let mut j = FileCheckJournal::open(
-        &d.journal(),
+    let mut custody = FileCheckJournal::open(
+        &dir.journal(),
         scope(),
         CheckJournalLimits::default(),
         None,
         &|| true,
     )
     .unwrap();
-    let stored = facts(&d.journal());
+    let stored = facts(&dir.journal());
     assert_eq!(
         stored
             .iter()
@@ -638,78 +804,106 @@ fn actual_process_exit_releases_lock_but_not_the_durable_launch_fence() {
         1
     );
     assert!(!stored.iter().any(|f| f.status == CheckRunStatus::Completed));
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                200,
+                &|| true
+            )
             .err(),
         Some(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::StaleBatch
         ))
     );
-    assert!(e.begun.is_empty());
+    assert!(executor.begun.is_empty());
     assert_eq!(
-        fs::metadata(d.journal()).unwrap().permissions().mode() & 0o777,
+        fs::metadata(dir.journal()).unwrap().permissions().mode() & 0o777,
         0o600
     );
 }
 
 #[test]
 fn a_different_known_inflight_run_blocks_fresh_coordinator_work() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    e.panic_on_begin = true;
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    executor.fault = Some(ExecutorFault::PanicOnBegin);
     assert!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                200,
+                &|| true
+            )
             .is_err()
     );
-    assert_eq!(e.begun, ["first"]);
+    assert_eq!(executor.begun, ["first"]);
     assert!(
-        facts(&d.journal())
+        facts(&dir.journal())
             .iter()
             .any(|f| f.status == CheckRunStatus::InProgress)
     );
-    let pin = j.pin();
-    drop(c);
-    drop(p);
-    drop(j);
-    let mut j = FileCheckJournal::open(
-        &d.journal(),
+    let pin = custody.pin();
+    drop(coordinator);
+    drop(workflow);
+    drop(custody);
+    let mut custody = FileCheckJournal::open(
+        &dir.journal(),
         scope(),
         CheckJournalLimits::default(),
         Some(pin),
         &|| true,
     )
     .unwrap();
-    let (mut c, mut p) = prepared_sequence(2);
-    let mut e = Executor::new(d.journal());
+    let (mut coordinator, mut workflow) = prepared_sequence(2);
+    let mut executor = Executor::new(dir.journal());
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                200,
+                &|| true
+            )
             .err(),
         Some(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::OutOfOrder
         ))
     );
-    assert!(e.begun.is_empty());
-    assert_eq!(j.pin(), pin);
+    assert!(executor.begun.is_empty());
+    assert_eq!(custody.pin(), pin);
 }
 
 #[test]
 fn failed_launch_selection_cannot_fall_back_to_existing_per_job_journaling() {
-    let d = Directory::new();
-    let mut j = journal(&d, 1);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 1);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
     assert!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                200,
+                &|| true
+            )
             .is_err()
     );
-    let pin = j.pin();
-    drop(j);
-    let mut j = FileCheckJournal::open(
-        &d.journal(),
+    let pin = custody.pin();
+    drop(custody);
+    let mut custody = FileCheckJournal::open(
+        &dir.journal(),
         scope(),
         CheckJournalLimits::default(),
         Some(pin),
@@ -717,59 +911,98 @@ fn failed_launch_selection_cannot_fall_back_to_existing_per_job_journaling() {
     )
     .unwrap();
     assert!(matches!(
-        c.execute_trusted_workflow_journaled(&mut p, &mut e, &mut j, 200, &|| true),
+        coordinator.execute_trusted_workflow_journaled(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true
+        ),
         Err(CoordinatorRefusal::UnsupportedExecution { .. })
     ));
-    assert_eq!(j.pin(), pin);
-    assert!(e.begun.is_empty());
-    c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+    assert_eq!(custody.pin(), pin);
+    assert!(executor.begun.is_empty());
+    coordinator
+        .execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true,
+        )
         .unwrap();
-    assert_eq!(e.begun, ["first", "second"]);
+    assert_eq!(executor.begun, ["first", "second"]);
 }
 
 #[test]
 fn existing_per_job_execution_is_preserved_but_cannot_be_relabelled_launch_fenced() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    e.check_disk = false;
-    let root = c
-        .execute_trusted_workflow_journaled(&mut p, &mut e, &mut j, 200, &|| true)
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    executor.check_disk = false;
+    let root = coordinator
+        .execute_trusted_workflow_journaled(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            200,
+            &|| true,
+        )
         .unwrap()
         .commitment();
-    let pin = j.pin();
+    let pin = custody.pin();
     assert_eq!(
-        c.execute_trusted_workflow_journaled(&mut p, &mut e, &mut j, 201, &|| false)
+        coordinator
+            .execute_trusted_workflow_journaled(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                201,
+                &|| false
+            )
             .unwrap()
             .commitment(),
         root
     );
     assert!(matches!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 201, &|| true),
+        coordinator.execute_journaled_trusted_workflow(
+            &mut workflow,
+            &mut executor,
+            &mut custody,
+            201,
+            &|| true
+        ),
         Err(JournaledWorkflowRefusal::Coordinator(
             CoordinatorRefusal::UnsupportedExecution { .. }
         ))
     ));
-    assert_eq!(e.begun, ["first", "second"]);
-    assert_eq!(j.pin(), pin);
+    assert_eq!(executor.begun, ["first", "second"]);
+    assert_eq!(custody.pin(), pin);
 }
 
 #[test]
 fn a_legacy_drained_queue_cannot_be_interpreted_as_persisted_launch_admission() {
-    let d = Directory::new();
-    let mut j = journal(&d, 100);
-    let (mut c, mut p) = prepared();
-    let mut e = Executor::new(d.journal());
-    assert_eq!(c.drain_check_facts().len(), 2);
-    let pin = j.pin();
+    let dir = Directory::new();
+    let mut custody = journal(&dir, 100);
+    let (mut coordinator, mut workflow) = prepared();
+    let mut executor = Executor::new(dir.journal());
+    assert_eq!(coordinator.drain_check_facts().len(), 2);
+    let pin = custody.pin();
     assert_eq!(
-        c.execute_journaled_trusted_workflow(&mut p, &mut e, &mut j, 200, &|| true)
+        coordinator
+            .execute_journaled_trusted_workflow(
+                &mut workflow,
+                &mut executor,
+                &mut custody,
+                200,
+                &|| true
+            )
             .err(),
         Some(JournaledWorkflowRefusal::Custody(
             CheckDeliveryRefusal::EvidenceMissing
         ))
     );
-    assert!(e.begun.is_empty());
-    assert_eq!(j.pin(), pin);
+    assert!(executor.begun.is_empty());
+    assert_eq!(custody.pin(), pin);
 }

@@ -82,11 +82,11 @@ impl Source {
     ) -> GitOid {
         let mut bytes = format!("tree {tree}\n");
         for parent in parents {
-            let _ = write!(bytes, "parent {parent}\n");
+            let _ = writeln!(bytes, "parent {parent}");
         }
-        let _ = write!(
+        let _ = writeln!(
             bytes,
-            "author Test <t@example.invalid> 1 +0000\ncommitter Test <t@example.invalid> 1 +0000\n\n{label}\n"
+            "author Test <t@example.invalid> 1 +0000\ncommitter Test <t@example.invalid> 1 +0000\n\n{label}"
         );
         let id = git_object_id(format, GitObjectKind::Commit, bytes.as_bytes());
         self.commits.insert(

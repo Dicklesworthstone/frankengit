@@ -397,8 +397,7 @@ impl WorkflowCoordinator {
         // Select before any potentially mutating I/O. Failed persistence cannot
         // be bypassed by retrying the same prepared handle through a weaker API.
         prepared.custody_journal = journal_identity;
-        if prepared.receipt.is_some() {
-            let receipt = prepared.receipt.as_ref().expect("retained observation");
+        if let Some(receipt) = &prepared.receipt {
             if run.job_attempts != receipt.attempts
                 || receipt.report.jobs.iter().any(|job| {
                     run.job_statuses.get(&job.id) != Some(&JobStatus::Terminal(job.outcome))
@@ -409,8 +408,15 @@ impl WorkflowCoordinator {
                     to: "trusted workflow outcome lookup".to_owned(),
                 });
             }
-            custody(self, prepared.receipt.as_ref())?;
-            return Ok(prepared.receipt.as_ref().expect("retained observation"));
+            custody(self, Some(receipt))?;
+            // A fresh borrow on the returning path: returning `receipt` would
+            // extend the conditional borrow over the mutations below.
+            return prepared.receipt.as_ref().ok_or_else(|| {
+                CoordinatorRefusal::InvalidStateTransition {
+                    from: "retained observation vanished".to_owned(),
+                    to: "trusted workflow outcome lookup".to_owned(),
+                }
+            });
         }
         if prepared.attempted
             || !matches!(run.status, RunStatus::Queued)

@@ -39,8 +39,8 @@ mod unix {
             b'a'..=b'f' => Ok(byte - b'a' + 10),
             _ => Err(USAGE),
         };
-        for (slot, pair) in result.iter_mut().zip(value.chunks_exact(2)) {
-            *slot = digit(pair[0])? * 16 + digit(pair[1])?;
+        for (slot, [high, low]) in result.iter_mut().zip(value.as_chunks::<2>().0) {
+            *slot = digit(*high)? * 16 + digit(*low)?;
         }
         Ok(result)
     }

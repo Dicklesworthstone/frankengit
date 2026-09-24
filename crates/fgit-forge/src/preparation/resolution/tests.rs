@@ -49,7 +49,7 @@ impl Source {
     fn store_commit(&mut self, tree: GitOid, parents: &[GitOid], message: &str) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            let _ = write!(body, "parent {parent}\n");
+            let _ = writeln!(body, "parent {parent}");
         }
         let _ = write!(
             body,

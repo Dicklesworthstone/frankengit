@@ -9,6 +9,7 @@ use crate::Commitment;
 pub use fgit_schema::workflow::Job as WorkflowJob;
 use fgit_schema::workflow::{self, Condition, Job, WorkflowGraph};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
@@ -546,7 +547,9 @@ fn quote(value: &str) -> String {
         match c {
             '"' => result.push_str("\\\""),
             '\\' => result.push_str("\\\\"),
-            c if c < '\u{20}' => result.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c < '\u{20}' => {
+                let _ = write!(result, "\\u{:04x}", c as u32);
+            }
             c => result.push(c),
         }
     }

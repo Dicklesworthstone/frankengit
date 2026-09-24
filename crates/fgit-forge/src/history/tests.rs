@@ -58,11 +58,11 @@ impl Source {
     fn commit_tree(&mut self, tree: GitOid, parents: &[GitOid], label: &str) -> GitOid {
         let mut text = format!("tree {tree}\n");
         for parent in parents {
-            let _ = write!(text, "parent {parent}\n");
+            let _ = writeln!(text, "parent {parent}");
         }
-        let _ = write!(
+        let _ = writeln!(
             text,
-            "author Untrusted <u@example.invalid> 1 +0000\ncommitter Untrusted <u@example.invalid> 1 +0000\n\n{label}\n"
+            "author Untrusted <u@example.invalid> 1 +0000\ncommitter Untrusted <u@example.invalid> 1 +0000\n\n{label}"
         );
         let body = text.into_bytes();
         let id = git_object_id(self.format, GitObjectKind::Commit, &body);

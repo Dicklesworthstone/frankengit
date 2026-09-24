@@ -54,11 +54,11 @@ impl Source {
     fn commit_id(&mut self, tree: GitOid, parents: &[GitOid], label: &str) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            let _ = write!(body, "parent {parent}\n");
+            let _ = writeln!(body, "parent {parent}");
         }
-        let _ = write!(
+        let _ = writeln!(
             body,
-            "author T <t@x> 1 +0000\ncommitter T <t@x> 1 +0000\n\n{label}\n"
+            "author T <t@x> 1 +0000\ncommitter T <t@x> 1 +0000\n\n{label}"
         );
         let id = git_object_id(self.format, GitObjectKind::Commit, body.as_bytes());
         self.commits.insert(

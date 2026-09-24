@@ -7,14 +7,26 @@ use fgit_schema::workflow::Job;
 use std::cell::Cell;
 
 const DAG: &str = "name: dependencies\non: push\njobs:\n  a:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf first\n      - run: printf second\n  b:\n    runs-on: fgit-trusted-local\n    needs: a\n    steps:\n      - run: printf dependent\n  c:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: printf independent\n";
+/// The single worker fault a test injects; each test exercises one.
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum Fault {
+    #[default]
+    None,
+    /// `printf first` fails with a nonzero exit.
+    FailFirstStep,
+    /// Steps report incomplete output.
+    TruncatedOutput,
+    /// Steps ask to retain their workspace.
+    RetainWorkspace,
+    /// Job cleanup does not settle.
+    CleanupFailure,
+    /// Steps report success with a nonzero exit code.
+    WrongExit,
+}
 #[derive(Default)]
 struct Fake {
     calls: Vec<String>,
-    fail: bool,
-    truncated: bool,
-    retain: bool,
-    cleanup_failure: bool,
-    wrong_exit: bool,
+    fault: Fault,
 }
 impl WorkflowExecutor for Fake {
     fn begin_job(
@@ -35,24 +47,25 @@ impl WorkflowExecutor for Fake {
     ) -> Result<StepObservation, WorkerFailure> {
         self.calls.push(format!("step:{index}:{script}"));
         Ok(StepObservation {
-            outcome: if self.fail && script == "printf first" {
+            outcome: if self.fault == Fault::FailFirstStep && script == "printf first" {
                 StepOutcome::Failed
             } else {
                 StepOutcome::Succeeded
             },
             exit_code: Some(i32::from(
-                self.wrong_exit || (self.fail && script == "printf first"),
+                self.fault == Fault::WrongExit
+                    || (self.fault == Fault::FailFirstStep && script == "printf first"),
             )),
             stdout: b"output".to_vec(),
             stderr: Vec::new(),
             elapsed_millis: 1,
-            output_complete: !self.truncated,
-            retain_workspace: self.retain,
+            output_complete: self.fault != Fault::TruncatedOutput,
+            retain_workspace: self.fault == Fault::RetainWorkspace,
         })
     }
     fn finish_job(&mut self, retain: bool) -> Result<(), WorkerFailure> {
         self.calls.push(format!("finish:{retain}"));
-        if self.cleanup_failure {
+        if self.fault == Fault::CleanupFailure {
             Err(WorkerFailure::new("cleanup did not settle", true))
         } else {
             Ok(())
@@ -63,7 +76,7 @@ impl WorkflowExecutor for Fake {
 fn ordered_steps_dependency_skip_and_independent_continuation() {
     let plan = WorkflowPlan::compile(DAG).unwrap();
     let mut worker = Fake {
-        fail: true,
+        fault: Fault::FailFirstStep,
         ..Fake::default()
     };
     let report = plan
@@ -168,15 +181,13 @@ fn cancellation_between_steps_still_closes_the_started_job() {
 }
 #[test]
 fn incomplete_output_and_failed_cleanup_can_never_be_green() {
-    for (truncated, retain, cleanup_failure) in [
-        (true, false, false),
-        (false, true, false),
-        (false, false, true),
+    for fault in [
+        Fault::TruncatedOutput,
+        Fault::RetainWorkspace,
+        Fault::CleanupFailure,
     ] {
         let mut worker = Fake {
-            truncated,
-            retain,
-            cleanup_failure,
+            fault,
             ..Fake::default()
         };
         let report = WorkflowPlan::compile(DAG)
@@ -184,7 +195,7 @@ fn incomplete_output_and_failed_cleanup_can_never_be_green() {
             .execute(WorkflowLimits::default(), &mut worker, &|| true)
             .unwrap();
         assert!(!report.succeeded());
-        if retain || cleanup_failure {
+        if matches!(fault, Fault::RetainWorkspace | Fault::CleanupFailure) {
             assert_eq!(report.jobs[1].outcome, JobOutcome::Cancelled);
             assert_eq!(report.jobs[2].outcome, JobOutcome::Cancelled);
         }
@@ -347,7 +358,7 @@ mod process {
 fn a_fabricated_success_exit_is_not_accepted_and_stops_further_jobs() {
     let plan = WorkflowPlan::compile(DAG).unwrap();
     let mut worker = Fake {
-        wrong_exit: true,
+        fault: Fault::WrongExit,
         ..Fake::default()
     };
     let report = plan

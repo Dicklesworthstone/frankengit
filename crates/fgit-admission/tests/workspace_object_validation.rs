@@ -9,6 +9,7 @@ use fgit_forge::event::NativeMerge;
 use fgit_pack::{CanonicalObjectSource, CanonicalPackObject, PackWriteError};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RefusalCode};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 #[derive(Default)]
 struct Source(BTreeMap<GitOid, (GitObjectKind, Vec<u8>)>);
@@ -43,9 +44,12 @@ impl Source {
     ) -> GitOid {
         let mut bytes = format!("tree {tree}\n");
         for parent in parents {
-            bytes.push_str(&format!("parent {parent}\n"));
+            let _ = writeln!(bytes, "parent {parent}");
         }
-        bytes.push_str(&format!("author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}\n"));
+        let _ = writeln!(
+            bytes,
+            "author Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\n{label}"
+        );
         self.put(format, GitObjectKind::Commit, bytes.into_bytes())
     }
 }

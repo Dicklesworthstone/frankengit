@@ -32,14 +32,14 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        let p = std::env::temp_dir().join(format!(
+        let workspace_plan = std::env::temp_dir().join(format!(
             "fgit-host-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir(&p).expect("unique test root");
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
-        Self(p)
+        fs::create_dir(&workspace_plan).expect("unique test root");
+        fs::set_permissions(&workspace_plan, fs::Permissions::from_mode(0o700)).unwrap();
+        Self(workspace_plan)
     }
     fn parent(&self) -> File {
         File::open(&self.0).unwrap()
@@ -97,8 +97,8 @@ fn hex(oid: &Oid) -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
-fn path(p: &[u8]) -> TreePath {
-    TreePath::parse_default(p).unwrap()
+fn path(workspace_plan: &[u8]) -> TreePath {
+    TreePath::parse_default(workspace_plan).unwrap()
 }
 fn entry(mode: &[u8], name: &[u8], oid: Oid) -> TreeEntry {
     TreeEntry {
@@ -188,34 +188,49 @@ fn ledger() -> ObligationLedger {
     )
 }
 fn reserve(
-    l: &ObligationLedger,
-    p: &SparseWorkspacePlan<Sha1>,
+    obligations: &ObligationLedger,
+    workspace_plan: &SparseWorkspacePlan<Sha1>,
 ) -> ReservedObligation<SparseDirectoryLease> {
-    l.reserve(p.reservation(), l.grant(p.budget()).unwrap())
+    obligations
+        .reserve(
+            workspace_plan.reservation(),
+            obligations.grant(workspace_plan.budget()).unwrap(),
+        )
         .unwrap()
 }
 fn create(
-    s: &Scratch,
-    l: &ObligationLedger,
-    p: SparseWorkspacePlan<Sha1>,
+    scratch: &Scratch,
+    obligations: &ObligationLedger,
+    workspace_plan: SparseWorkspacePlan<Sha1>,
     name: &[u8],
 ) -> SparseWorkspace<Sha1> {
-    let r = reserve(l, &p);
-    SparseWorkspace::materialize(p, s.parent(), path(name), r, &capability(), 0, &|_| false)
-        .unwrap()
+    let r = reserve(obligations, &workspace_plan);
+    SparseWorkspace::materialize(
+        workspace_plan,
+        scratch.parent(),
+        path(name),
+        r,
+        &capability(),
+        0,
+        &|_| false,
+    )
+    .unwrap()
 }
-fn quiescent(l: ObligationLedger) {
-    assert!(matches!(l.close(), RegionCloseOutcome::Quiescent(_)));
+fn quiescent(obligations: ObligationLedger) {
+    assert!(matches!(
+        obligations.close(),
+        RegionCloseOutcome::Quiescent(_)
+    ));
 }
 
 #[test]
 fn actual_tool_edit_import_and_disk_object_reopen_preserve_git_identity() {
     let scratch = Scratch::new();
     let (source, base, manifest) = fixture(&scratch.0, None);
-    let l = ledger();
-    let p = plan(manifest.clone());
+    let obligations = ledger();
+    let workspace_plan = plan(manifest.clone());
     let start = Instant::now();
-    let mut w = create(&scratch, &l, p, b"work");
+    let mut w = create(&scratch, &obligations, workspace_plan, b"work");
     let creation = start.elapsed();
     assert_eq!(
         fs::read(w.tool_directory().join("src/input")).unwrap(),
@@ -232,7 +247,8 @@ fn actual_tool_edit_import_and_disk_object_reopen_preserve_git_identity() {
     run_child(&scratch.0, "tool", Some(&w.tool_directory()));
     let log = w.import(&capability(), 0, &|_| false).unwrap();
     assert_eq!(log.len(), 3);
-    let (overlay, evaluation) = log.evaluate(&|p| manifest.entries().iter().any(|e| e.path() == p));
+    let (overlay, evaluation) =
+        log.evaluate(&|candidate| manifest.entries().iter().any(|e| e.path() == candidate));
     assert!(evaluation.errors().is_empty());
     let exported = ExportPlanner::new(ExportLimits::default(), ParseLimits::default())
         .plan(&base, &source, &mut capability(), &overlay, 0, &|| false)
@@ -304,35 +320,35 @@ fn actual_tool_edit_import_and_disk_object_reopen_preserve_git_identity() {
         _ => panic!("successful close acknowledges lease"),
     }
     assert!(!scratch.0.join("work").exists());
-    quiescent(l);
+    quiescent(obligations);
 }
 
 #[test]
 fn rebuild_and_parallel_workspaces_share_only_the_immutable_manifest() {
-    let s = Scratch::new();
-    let (_, _, m) = fixture(&s.0, None);
-    let p = plan(m.clone());
-    let l = ledger();
-    let mut a = create(&s, &l, p.clone(), b"a");
-    let mut b = create(&s, &l, p.clone(), b"b");
-    assert!(Arc::strong_count(&m) >= 4);
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let workspace_plan = plan(manifest.clone());
+    let obligations = ledger();
+    let mut a = create(&scratch, &obligations, workspace_plan.clone(), b"a");
+    let mut b = create(&scratch, &obligations, workspace_plan.clone(), b"b");
+    assert!(Arc::strong_count(&manifest) >= 4);
     fs::write(a.tool_directory().join("src/input"), b"private").unwrap();
     assert_eq!(a.import(&capability(), 0, &|_| false).unwrap().len(), 1);
     assert!(b.import(&capability(), 0, &|_| false).unwrap().is_empty());
     let _ = a.close().unwrap();
     let _ = b.close().unwrap();
-    let mut c = create(&s, &l, p, b"a");
+    let mut c = create(&scratch, &obligations, workspace_plan, b"a");
     assert!(c.import(&capability(), 0, &|_| false).unwrap().is_empty());
     let _ = c.close().unwrap();
-    quiescent(l);
+    quiescent(obligations);
 }
 
 #[test]
 fn repeated_imports_conserve_consumable_bytes_and_entries_through_exact_limits() {
-    let s = Scratch::new();
-    let (_, _, m) = fixture(&s.0, None);
-    let p = SparseWorkspacePlan::new(
-        m,
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let workspace_plan = SparseWorkspacePlan::new(
+        manifest,
         vec![path(b"src/input")],
         &capability(),
         0,
@@ -343,9 +359,9 @@ fn repeated_imports_conserve_consumable_bytes_and_entries_through_exact_limits()
         },
     )
     .unwrap();
-    let budget = p.budget();
-    let l = ledger();
-    let mut w = create(&s, &l, p, b"accounting");
+    let budget = workspace_plan.budget();
+    let obligations = ledger();
+    let mut w = create(&scratch, &obligations, workspace_plan, b"accounting");
     let marker_bytes = fs::metadata(w.tool_directory().join(".fgit-host-receipt"))
         .unwrap()
         .len();
@@ -375,7 +391,7 @@ fn repeated_imports_conserve_consumable_bytes_and_entries_through_exact_limits()
     for _ in 0..3 {
         assert!(
             matches!(w.import(&capability(), 0, &|_| false).unwrap().intents(),
-                         [fgit_treefs::TreeEditIntent::Delete { path: p }] if p == &path(b"src/input"))
+                         [fgit_treefs::TreeEditIntent::Delete { path: workspace_plan }] if workspace_plan == &path(b"src/input"))
         );
     }
     assert_eq!(
@@ -394,15 +410,15 @@ fn repeated_imports_conserve_consumable_bytes_and_entries_through_exact_limits()
     assert_eq!(receipt.imported_bytes, 27);
     assert_eq!(receipt.created_entries, 5);
     assert_eq!(receipt.imported_entries, 6);
-    assert_eq!(l.snapshot().consumed(), budget);
-    assert!(l.snapshot().is_conserved());
-    quiescent(l);
+    assert_eq!(obligations.snapshot().consumed(), budget);
+    assert!(obligations.snapshot().is_conserved());
+    quiescent(obligations);
 }
 
 #[test]
 fn generated_parent_bound_stops_before_visiting_later_outputs() {
-    let s = Scratch::new();
-    let (_, _, m) = fixture(&s.0, None);
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
     let outputs = vec![path(b"generated/a/b/c/file"), path(b"zzz-denied/file")];
     let limits = SparseLimits {
         max_entries: 7,
@@ -412,12 +428,12 @@ fn generated_parent_bound_stops_before_visiting_later_outputs() {
     // The first permitted output exhausts the parent budget. Traversing a
     // later forbidden path first would show the bound was enforced too late.
     assert!(matches!(
-        SparseWorkspacePlan::new(m.clone(), outputs.clone(), &capability(), 0, limits),
+        SparseWorkspacePlan::new(manifest.clone(), outputs.clone(), &capability(), 0, limits),
         Err(HostRefusal::ResourceLimit)
     ));
     assert!(matches!(
         SparseWorkspacePlan::new(
-            m.clone(),
+            manifest.clone(),
             outputs,
             &capability(),
             0,
@@ -428,8 +444,8 @@ fn generated_parent_bound_stops_before_visiting_later_outputs() {
         ),
         Err(HostRefusal::Capability(_))
     ));
-    let p = SparseWorkspacePlan::new(
-        m,
+    let workspace_plan = SparseWorkspacePlan::new(
+        manifest,
         vec![path(b"generated/a/b/c/file")],
         &capability(),
         0,
@@ -439,20 +455,20 @@ fn generated_parent_bound_stops_before_visiting_later_outputs() {
         },
     )
     .unwrap();
-    let l = ledger();
-    let w = create(&s, &l, p, b"parents");
+    let obligations = ledger();
+    let w = create(&scratch, &obligations, workspace_plan, b"parents");
     assert!(w.tool_directory().join("generated/a/b/c").is_dir());
     let _ = w.close().unwrap();
-    quiescent(l);
+    quiescent(obligations);
 }
 
 #[test]
 fn legacy_host_marker_is_refused_without_reinterpreting_its_resource_profile() {
-    let s = Scratch::new();
-    let (_, _, m) = fixture(&s.0, None);
-    let p = plan(m);
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let workspace_plan = plan(manifest);
     let prior = ledger();
-    let w = create(&s, &prior, p.clone(), b"versioned");
+    let w = create(&scratch, &prior, workspace_plan.clone(), b"versioned");
     let marker_path = w.tool_directory().join(".fgit-host-receipt");
     let current = fs::read(&marker_path).unwrap();
     let domain = b"frankengit/sparse-host/linux-openat2/v2\0";
@@ -465,26 +481,26 @@ fn legacy_host_marker_is_refused_without_reinterpreting_its_resource_profile() {
         prior.close(),
         RegionCloseOutcome::ContainmentFailure(_)
     ));
-    let l = ledger();
+    let obligations = ledger();
     let reopen_res = SparseWorkspace::reopen(
-        p.clone(),
-        s.parent(),
+        workspace_plan.clone(),
+        scratch.parent(),
         path(b"versioned"),
-        reserve(&l, &p),
+        reserve(&obligations, &workspace_plan),
         &capability(),
         0,
     );
     assert_eq!(reopen_res.err(), Some(HostRefusal::IdentityMismatch));
-    assert!(s.0.join("versioned").exists());
-    assert_eq!(l.snapshot().consumed(), ResourceVector::ZERO);
+    assert!(scratch.0.join("versioned").exists());
+    assert_eq!(obligations.snapshot().consumed(), ResourceVector::ZERO);
     // Only the test restores its own injected marker. Production must use
     // the owning broker's old receipt/adapter to reap and then rebuild v1.
-    fs::write(s.0.join("versioned/.fgit-host-receipt"), current).unwrap();
+    fs::write(scratch.0.join("versioned/.fgit-host-receipt"), current).unwrap();
     let w = SparseWorkspace::reopen(
-        p.clone(),
-        s.parent(),
+        workspace_plan.clone(),
+        scratch.parent(),
         path(b"versioned"),
-        reserve(&l, &p),
+        reserve(&obligations, &workspace_plan),
         &capability(),
         0,
     )
@@ -498,15 +514,15 @@ fn legacy_host_marker_is_refused_without_reinterpreting_its_resource_profile() {
     assert_eq!(receipt.created_entries, 0);
     assert_eq!(receipt.imported_bytes, 0);
     assert_eq!(receipt.imported_entries, 0);
-    assert_eq!(l.snapshot().consumed(), ResourceVector::ZERO);
-    quiescent(l);
+    assert_eq!(obligations.snapshot().consumed(), ResourceVector::ZERO);
+    quiescent(obligations);
 }
 
 #[test]
 fn traversal_capability_mode_symlink_hardlink_and_budget_refusals_have_positive_twins() {
-    let s = Scratch::new();
-    let (_, _, m) = fixture(&s.0, None);
-    let p = plan(m.clone());
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let workspace_plan = plan(manifest.clone());
     for invalid in [
         &b"../escape"[..],
         b"/absolute",
@@ -522,14 +538,23 @@ fn traversal_capability_mode_symlink_hardlink_and_budget_refusals_have_positive_
         vec![path(b"src")],
     );
     assert!(matches!(
-        SparseWorkspacePlan::new(m.clone(), vec![], &denied, 0, SparseLimits::default()),
+        SparseWorkspacePlan::new(
+            manifest.clone(),
+            vec![],
+            &denied,
+            0,
+            SparseLimits::default()
+        ),
         Err(HostRefusal::Capability(_))
     ));
-    assert!(SparseWorkspacePlan::new(m, vec![], &capability(), 0, SparseLimits::default()).is_ok());
-    let l = ledger();
-    let mut w = create(&s, &l, p, b"work");
+    assert!(
+        SparseWorkspacePlan::new(manifest, vec![], &capability(), 0, SparseLimits::default())
+            .is_ok()
+    );
+    let obligations = ledger();
+    let mut w = create(&scratch, &obligations, workspace_plan, b"work");
     let input = w.tool_directory().join("src/input");
-    let outside = s.0.join("outside");
+    let outside = scratch.0.join("outside");
     fs::write(&outside, b"never read or overwritten").unwrap();
     fs::remove_file(&input).unwrap();
     symlink(&outside, &input).unwrap();
@@ -558,13 +583,13 @@ fn traversal_capability_mode_symlink_hardlink_and_budget_refusals_have_positive_
     assert!(w.import(&capability(), 0, &|_| false).is_ok());
     let _ = w.close().unwrap();
     assert_eq!(fs::read(outside).unwrap(), b"never read or overwritten");
-    quiescent(l);
+    quiescent(obligations);
 }
 
 #[test]
 fn byte_exact_case_and_unicode_paths_remain_distinct_on_the_real_host() {
-    let s = Scratch::new();
-    let (source, base, _) = fixture(&s.0, None);
+    let scratch = Scratch::new();
+    let (source, base, _) = fixture(&scratch.0, None);
     let blob = source.put(GitObjectKind::Blob, b"names");
     let names = ["A", "a", "e\u{301}", "é"];
     let subtree = source.tree(
@@ -582,7 +607,7 @@ fn byte_exact_case_and_unicode_paths_remain_distinct_on_the_real_host() {
         ParseLimits::default(),
         PathPolicy::default(),
     );
-    let m = Arc::new(
+    let manifest = Arc::new(
         SparseManifest::build(
             &base,
             &source,
@@ -592,8 +617,8 @@ fn byte_exact_case_and_unicode_paths_remain_distinct_on_the_real_host() {
         )
         .unwrap(),
     );
-    let l = ledger();
-    let mut w = create(&s, &l, plan(m), b"names");
+    let obligations = ledger();
+    let mut w = create(&scratch, &obligations, plan(manifest), b"names");
     for n in names {
         assert_eq!(
             fs::read(w.tool_directory().join("src").join(n)).unwrap(),
@@ -602,15 +627,15 @@ fn byte_exact_case_and_unicode_paths_remain_distinct_on_the_real_host() {
     }
     assert!(w.import(&capability(), 0, &|_| false).unwrap().is_empty());
     let _ = w.close().unwrap();
-    quiescent(l);
+    quiescent(obligations);
 }
 
 #[test]
 fn cancelled_materialization_and_import_never_return_partial_publication() {
-    let s = Scratch::new();
-    let (_, _, m) = fixture(&s.0, None);
-    let p = plan(m);
-    let l = ledger();
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let workspace_plan = plan(manifest);
+    let obligations = ledger();
     for epoch in [
         HostEpoch::Reserved,
         HostEpoch::Staging,
@@ -620,14 +645,14 @@ fn cancelled_materialization_and_import_never_return_partial_publication() {
         HostEpoch::Visible,
         HostEpoch::Durable,
     ] {
-        let r = reserve(&l, &p);
+        let r = reserve(&obligations, &workspace_plan);
         assert!(
-            matches!(SparseWorkspace::materialize(p.clone(),s.parent(),path(b"cancel"),r,&capability(),0,&|e|e==epoch),Err(HostRefusal::Cancelled(e)) if e==epoch)
+            matches!(SparseWorkspace::materialize(workspace_plan.clone(),scratch.parent(),path(b"cancel"),r,&capability(),0,&|e|e==epoch),Err(HostRefusal::Cancelled(e)) if e==epoch)
         );
-        assert!(!s.0.join("cancel").exists());
-        assert!(!s.0.join(".fgit-staged-cancel").exists());
+        assert!(!scratch.0.join("cancel").exists());
+        assert!(!scratch.0.join(".fgit-staged-cancel").exists());
     }
-    let mut w = create(&s, &l, p, b"cancel");
+    let mut w = create(&scratch, &obligations, workspace_plan, b"cancel");
     fs::write(w.tool_directory().join("src/input"), b"change").unwrap();
     for epoch in [
         HostEpoch::Importing(0),
@@ -641,17 +666,17 @@ fn cancelled_materialization_and_import_never_return_partial_publication() {
     }
     assert_eq!(w.import(&capability(), 0, &|_| false).unwrap().len(), 1);
     let _ = w.close().unwrap();
-    quiescent(l);
+    quiescent(obligations);
 }
 
 #[test]
 fn descriptor_relative_import_refuses_parent_symlink_replacement_and_read_only_edits() {
-    let s = Scratch::new();
-    let (_, _, m) = fixture(&s.0, None);
-    let l = ledger();
-    let mut w = create(&s, &l, plan(m), b"race");
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let obligations = ledger();
+    let mut w = create(&scratch, &obligations, plan(manifest), b"race");
     let root = w.tool_directory();
-    let external = s.0.join("external");
+    let external = scratch.0.join("external");
     fs::create_dir(&external).unwrap();
     fs::write(external.join("input"), b"secret").unwrap();
     // Replace a parent precisely between manifest enumeration and its open.
@@ -676,22 +701,22 @@ fn descriptor_relative_import_refuses_parent_symlink_replacement_and_read_only_e
         Err(HostRefusal::UndeclaredChange(path(b"README")))
     );
     let _ = w.close().unwrap();
-    quiescent(l);
+    quiescent(obligations);
 }
 
 #[test]
 fn live_lease_wrong_plan_and_dropped_workspace_are_not_successful_reopens() {
-    let s = Scratch::new();
-    let (_, _, m) = fixture(&s.0, None);
-    let p = plan(m.clone());
-    let l = ledger();
-    let w = create(&s, &l, p.clone(), b"lease");
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let workspace_plan = plan(manifest.clone());
+    let obligations = ledger();
+    let w = create(&scratch, &obligations, workspace_plan.clone(), b"lease");
     assert!(
         SparseWorkspace::reopen(
-            p.clone(),
-            s.parent(),
+            workspace_plan.clone(),
+            scratch.parent(),
             path(b"lease"),
-            reserve(&l, &p),
+            reserve(&obligations, &workspace_plan),
             &capability(),
             0
         )
@@ -699,12 +724,12 @@ fn live_lease_wrong_plan_and_dropped_workspace_are_not_successful_reopens() {
     );
     drop(w);
     assert!(matches!(
-        l.close(),
+        obligations.close(),
         RegionCloseOutcome::ContainmentFailure(_)
     ));
-    let l = ledger();
+    let obligations = ledger();
     let wrong = SparseWorkspacePlan::new(
-        m,
+        manifest,
         vec![],
         &capability(),
         0,
@@ -718,19 +743,19 @@ fn live_lease_wrong_plan_and_dropped_workspace_are_not_successful_reopens() {
     assert!(matches!(
         SparseWorkspace::reopen(
             wrong.clone(),
-            s.parent(),
+            scratch.parent(),
             path(b"lease"),
-            reserve(&l, &wrong),
+            reserve(&obligations, &wrong),
             &capability(),
             0
         ),
         Err(HostRefusal::IdentityMismatch)
     ));
     let mut recovered = SparseWorkspace::reopen(
-        p.clone(),
-        s.parent(),
+        workspace_plan.clone(),
+        scratch.parent(),
         path(b"lease"),
-        reserve(&l, &p),
+        reserve(&obligations, &workspace_plan),
         &capability(),
         0,
     )
@@ -742,16 +767,16 @@ fn live_lease_wrong_plan_and_dropped_workspace_are_not_successful_reopens() {
             .is_empty()
     );
     let _ = recovered.close().unwrap();
-    quiescent(l);
+    quiescent(obligations);
 }
 
 #[test]
 fn plan_and_host_permissions_refuse_before_io_beside_admitted_inputs() {
-    let s = Scratch::new();
-    let (_, _, m) = fixture(&s.0, None);
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
     assert!(matches!(
         SparseWorkspacePlan::new(
-            m.clone(),
+            manifest.clone(),
             vec![],
             &capability(),
             0,
@@ -765,7 +790,7 @@ fn plan_and_host_permissions_refuse_before_io_beside_admitted_inputs() {
     ));
     assert!(
         SparseWorkspacePlan::new(
-            m.clone(),
+            manifest.clone(),
             vec![],
             &capability(),
             0,
@@ -777,24 +802,24 @@ fn plan_and_host_permissions_refuse_before_io_beside_admitted_inputs() {
         )
         .is_ok()
     );
-    let p = plan(m);
-    let l = ledger();
-    fs::set_permissions(&s.0, fs::Permissions::from_mode(0o755)).unwrap();
+    let workspace_plan = plan(manifest);
+    let obligations = ledger();
+    fs::set_permissions(&scratch.0, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(
         SparseWorkspace::materialize(
-            p.clone(),
-            s.parent(),
+            workspace_plan.clone(),
+            scratch.parent(),
             path(b"private"),
-            reserve(&l, &p),
+            reserve(&obligations, &workspace_plan),
             &capability(),
             0,
             &|_| false
         )
         .is_err()
     );
-    assert!(!s.0.join(".fgit-staged-private").exists());
-    fs::set_permissions(&s.0, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut w = create(&s, &l, p, b"private");
+    assert!(!scratch.0.join(".fgit-staged-private").exists());
+    fs::set_permissions(&scratch.0, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut w = create(&scratch, &obligations, workspace_plan, b"private");
     let mut revoked = capability();
     revoked.revoke();
     assert!(matches!(
@@ -803,19 +828,19 @@ fn plan_and_host_permissions_refuse_before_io_beside_admitted_inputs() {
     ));
     assert!(w.import(&capability(), 0, &|_| false).unwrap().is_empty());
     let _ = w.close().unwrap();
-    quiescent(l);
+    quiescent(obligations);
     let symlink_root = Scratch::new();
-    let (_, _, m) = fixture(&symlink_root.0, Some((b"link", b"120000")));
+    let (_, _, manifest) = fixture(&symlink_root.0, Some((b"link", b"120000")));
     assert!(
-        matches!(SparseWorkspacePlan::new(m,vec![],&capability(),0,SparseLimits::default()),Err(HostRefusal::UnsupportedEntry(p)) if p==path(b"src/link"))
+        matches!(SparseWorkspacePlan::new(manifest,vec![],&capability(),0,SparseLimits::default()),Err(HostRefusal::UnsupportedEntry(workspace_plan)) if workspace_plan==path(b"src/link"))
     );
 }
 
 #[test]
 fn gitlink_refuses_before_host_creation_beside_a_regular_file_at_the_same_path() {
     for gitlink in [false, true] {
-        let s = Scratch::new();
-        let (source, _, _) = fixture(&s.0, None);
+        let scratch = Scratch::new();
+        let (source, _, _) = fixture(&scratch.0, None);
         // The foreign commit is deliberately absent. A gitlink must be
         // refused as a host entry without attempting to read foreign objects.
         let oid = if gitlink {
@@ -851,12 +876,12 @@ fn gitlink_refuses_before_host_creation_beside_a_regular_file_at_the_same_path()
         );
         if gitlink {
             assert!(
-                matches!(manifest, Err(SparseRefusal::SubmoduleUnsupported { path: p }) if p == path(b"src"))
+                matches!(manifest, Err(SparseRefusal::SubmoduleUnsupported { path: workspace_plan }) if workspace_plan == path(b"src"))
             );
-            assert!(!s.0.join("workspace").exists());
+            assert!(!scratch.0.join("workspace").exists());
             assert!(!source.0.join(hex(&oid)).exists());
         } else {
-            let p = SparseWorkspacePlan::new(
+            let workspace_plan = SparseWorkspacePlan::new(
                 Arc::new(manifest.unwrap()),
                 vec![],
                 &capability(),
@@ -868,48 +893,48 @@ fn gitlink_refuses_before_host_creation_beside_a_regular_file_at_the_same_path()
                 },
             )
             .unwrap();
-            let l = ledger();
-            let w = create(&s, &l, p, b"workspace");
+            let obligations = ledger();
+            let w = create(&scratch, &obligations, workspace_plan, b"workspace");
             assert_eq!(
                 fs::read(w.tool_directory().join("src")).unwrap(),
                 b"ordinary file\n"
             );
             let _ = w.close().unwrap();
-            quiescent(l);
+            quiescent(obligations);
         }
     }
 }
 
 #[test]
 fn cleanup_excess_and_root_replacement_report_containment_without_escaped_deletion() {
-    let s = Scratch::new();
-    let (_, _, m) = fixture(&s.0, None);
-    let p = plan(m);
-    let l = ledger();
-    let w = create(&s, &l, p, b"owned");
-    fs::rename(s.0.join("owned"), s.0.join("displaced")).unwrap();
-    fs::create_dir(s.0.join("owned")).unwrap();
-    fs::write(s.0.join("owned/protected"), b"different directory").unwrap();
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let workspace_plan = plan(manifest);
+    let obligations = ledger();
+    let w = create(&scratch, &obligations, workspace_plan, b"owned");
+    fs::rename(scratch.0.join("owned"), scratch.0.join("displaced")).unwrap();
+    fs::create_dir(scratch.0.join("owned")).unwrap();
+    fs::write(scratch.0.join("owned/protected"), b"different directory").unwrap();
     assert!(matches!(w.close(), Err(HostRefusal::Containment { .. })));
     assert_eq!(
-        fs::read(s.0.join("owned/protected")).unwrap(),
+        fs::read(scratch.0.join("owned/protected")).unwrap(),
         b"different directory"
     );
     assert!(matches!(
-        l.close(),
+        obligations.close(),
         RegionCloseOutcome::ContainmentFailure(_)
     ));
-    let s = Scratch::new();
-    let (_, _, m) = fixture(&s.0, None);
-    let l = ledger();
-    let w = create(&s, &l, plan(m), b"excess");
+    let scratch = Scratch::new();
+    let (_, _, manifest) = fixture(&scratch.0, None);
+    let obligations = ledger();
+    let w = create(&scratch, &obligations, plan(manifest), b"excess");
     for n in 0..101 {
         fs::write(w.tool_directory().join(format!("extra-{n}")), b"").unwrap();
     }
     assert!(matches!(w.close(), Err(HostRefusal::Containment { .. })));
-    assert!(s.0.join("excess").exists());
+    assert!(scratch.0.join("excess").exists());
     assert!(matches!(
-        l.close(),
+        obligations.close(),
         RegionCloseOutcome::ContainmentFailure(_)
     ));
 }
@@ -919,36 +944,36 @@ fn fresh_process_crash_windows_recover_complete_or_explicitly_incomplete_roots()
     for epoch in [
         "staging", "parents", "writing", "syncing", "visible", "durable",
     ] {
-        let s = Scratch::new();
-        run_child(&s.0, epoch, None);
-        let (_, _, m) = fixture(&s.0, None);
-        let p = plan(m);
-        let l = ledger();
+        let scratch = Scratch::new();
+        run_child(&scratch.0, epoch, None);
+        let (_, _, manifest) = fixture(&scratch.0, None);
+        let workspace_plan = plan(manifest);
+        let obligations = ledger();
         if matches!(epoch, "staging" | "parents" | "writing" | "syncing") {
             assert!(matches!(
                 SparseWorkspace::reopen(
-                    p.clone(),
-                    s.parent(),
+                    workspace_plan.clone(),
+                    scratch.parent(),
                     path(b"crash"),
-                    reserve(&l, &p),
+                    reserve(&obligations, &workspace_plan),
                     &capability(),
                     0
                 ),
                 Err(HostRefusal::IncompleteWorkspace)
             ));
             let _ = SparseWorkspace::discard_incomplete(
-                p.clone(),
-                s.parent(),
+                workspace_plan.clone(),
+                scratch.parent(),
                 path(b"crash"),
-                reserve(&l, &p),
+                reserve(&obligations, &workspace_plan),
             )
             .unwrap();
         } else {
             let mut w = SparseWorkspace::reopen(
-                p.clone(),
-                s.parent(),
+                workspace_plan.clone(),
+                scratch.parent(),
                 path(b"crash"),
-                reserve(&l, &p),
+                reserve(&obligations, &workspace_plan),
                 &capability(),
                 0,
             )
@@ -956,9 +981,9 @@ fn fresh_process_crash_windows_recover_complete_or_explicitly_incomplete_roots()
             assert!(w.import(&capability(), 0, &|_| false).unwrap().is_empty());
             let _ = w.close().unwrap();
         }
-        assert!(!s.0.join("crash").exists());
-        assert!(!s.0.join(".fgit-staged-crash").exists());
-        quiescent(l);
+        assert!(!scratch.0.join("crash").exists());
+        assert!(!scratch.0.join(".fgit-staged-crash").exists());
+        quiescent(obligations);
     }
 }
 
@@ -1008,10 +1033,10 @@ fn host_subprocess_driver() {
         std::process::exit(77);
     }
     let root = PathBuf::from(std::env::var_os("FGIT_HOST_TEST_ROOT").unwrap());
-    let (_, _, m) = fixture(&root, None);
-    let p = plan(m);
-    let l = ledger();
-    let r = reserve(&l, &p);
+    let (_, _, manifest) = fixture(&root, None);
+    let workspace_plan = plan(manifest);
+    let obligations = ledger();
+    let r = reserve(&obligations, &workspace_plan);
     let epoch = match mode.as_str() {
         "staging" => HostEpoch::Staging,
         "parents" => HostEpoch::CreatingParent(1),
@@ -1022,7 +1047,7 @@ fn host_subprocess_driver() {
         _ => panic!("unknown crash mode"),
     };
     let _workspace = SparseWorkspace::materialize(
-        p,
+        workspace_plan,
         File::open(&root).unwrap(),
         path(b"crash"),
         r,

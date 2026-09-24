@@ -31,9 +31,8 @@ use fgit_types::{
     PrincipalSnapshotId, RefName, RefusalCode,
 };
 
-const fn live() -> Result<(), RefusalCode> {
-    Ok(())
-}
+/// Always-live cancellation probe for the policy store calls below.
+const LIVE: fn() -> Result<(), RefusalCode> = || Ok(());
 
 fn oid(byte: u8) -> GitOid {
     let hex = format!("{:02x}", byte).repeat(20);
@@ -166,10 +165,10 @@ fn persisted_authority_storage_retroactivity_replay() {
     let limits = PolicyStoreLimits::default();
 
     // 1. Stage policy P1 (allow all).
-    let frame_p1 = PolicyFrame::compile("policy p1_open {\n    default allow\n}", limits, &live)
+    let frame_p1 = PolicyFrame::compile("policy p1_open {\n    default allow\n}", limits, &LIVE)
         .expect("P1 compiles into frame");
     let p1_id = frame_p1.id();
-    let receipt_p1 = stage_policy(&store, &frame_p1, &live).expect("stage P1 succeeds");
+    let receipt_p1 = stage_policy(&store, &frame_p1, &LIVE).expect("stage P1 succeeds");
     assert_eq!(receipt_p1.id, p1_id);
     assert_eq!(receipt_p1.disposition, PolicyStageDisposition::Created);
 
@@ -177,7 +176,7 @@ fn persisted_authority_storage_retroactivity_replay() {
     let codes = SubjectCodeMap::default();
 
     // 2. Evaluate under P1 on authority store.
-    let verdict_p1 = evaluate_stored_policy(&store, p1_id, &input, &codes, limits, &live)
+    let verdict_p1 = evaluate_stored_policy(&store, p1_id, &input, &codes, limits, &LIVE)
         .expect("stored P1 evaluation succeeds");
     assert_eq!(verdict_p1.snapshot_id, p1_id);
     assert_eq!(verdict_p1.refusal, None);
@@ -187,15 +186,15 @@ fn persisted_authority_storage_retroactivity_replay() {
     let frame_p2 = PolicyFrame::compile(
         "policy p2_strict {\n    rule no_create {\n        when ref.update == create\n        then deny \"creations prohibited\"\n    }\n    default allow\n}",
         limits,
-        &live,
+        &LIVE,
     )
     .expect("P2 compiles into frame");
     let p2_id = frame_p2.id();
     assert_ne!(p1_id, p2_id);
-    stage_policy(&store, &frame_p2, &live).expect("stage P2 succeeds");
+    stage_policy(&store, &frame_p2, &LIVE).expect("stage P2 succeeds");
 
     // 4. Replay historical decision against P1 in authority store:
-    let replay_p1 = evaluate_stored_policy(&store, p1_id, &input, &codes, limits, &live)
+    let replay_p1 = evaluate_stored_policy(&store, p1_id, &input, &codes, limits, &LIVE)
         .expect("stored P1 replay succeeds");
     assert_eq!(replay_p1.snapshot_id, p1_id);
     assert_eq!(replay_p1.refusal, None);
@@ -205,7 +204,7 @@ fn persisted_authority_storage_retroactivity_replay() {
     );
 
     // 5. Evaluate same input under P2 in authority store:
-    let eval_p2 = evaluate_stored_policy(&store, p2_id, &input, &codes, limits, &live)
+    let eval_p2 = evaluate_stored_policy(&store, p2_id, &input, &codes, limits, &LIVE)
         .expect("stored P2 evaluation succeeds");
     assert_eq!(eval_p2.snapshot_id, p2_id);
     assert_eq!(
@@ -233,9 +232,9 @@ fn toctou_and_substitution_fail_closed() {
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(9902));
     let limits = PolicyStoreLimits::default();
 
-    let frame_p1 = PolicyFrame::compile("policy p1 { default allow }", limits, &live).unwrap();
+    let frame_p1 = PolicyFrame::compile("policy p1 { default allow }", limits, &LIVE).unwrap();
     let frame_p2 =
-        PolicyFrame::compile("policy p2 { default deny \"deny\" }", limits, &live).unwrap();
+        PolicyFrame::compile("policy p2 { default deny \"deny\" }", limits, &LIVE).unwrap();
 
     let p1_id = frame_p1.id();
     let p2_id = frame_p2.id();
@@ -245,7 +244,7 @@ fn toctou_and_substitution_fail_closed() {
     store.put_if_absent(&key_p1, frame_p2.bytes()).unwrap();
 
     // Reading P1 must fail with IdentityMismatch
-    let read_err = read_policy(&store, p1_id, limits, &live).unwrap_err();
+    let read_err = read_policy(&store, p1_id, limits, &LIVE).unwrap_err();
     assert!(
         matches!(
             read_err,

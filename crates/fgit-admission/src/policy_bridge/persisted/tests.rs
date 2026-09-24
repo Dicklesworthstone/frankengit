@@ -11,9 +11,8 @@ use fgit_types::{
 };
 use std::cell::Cell;
 
-fn live() -> Result<(), RefusalCode> {
-    Ok(())
-}
+/// Always-live cancellation probe for the policy store calls below.
+const LIVE: fn() -> Result<(), RefusalCode> = || Ok(());
 fn frame(allow: bool) -> PolicyFrame {
     PolicyFrame::compile(
         if allow {
@@ -22,7 +21,7 @@ fn frame(allow: bool) -> PolicyFrame {
             "policy pinned { default deny \"review required\" }"
         },
         PolicyStoreLimits::default(),
-        &live,
+        &LIVE,
     )
     .unwrap()
 }
@@ -72,14 +71,14 @@ fn staged_policy_round_trips_and_identical_puts_keep_the_identity() {
     let store = store();
     let frame = frame(false);
     let limits = PolicyStoreLimits::default();
-    let first = stage_policy(&store, &frame, &live).unwrap();
+    let first = stage_policy(&store, &frame, &LIVE).unwrap();
     assert_eq!(first.id, frame.id());
     assert_eq!(first.disposition, PolicyStageDisposition::Created);
     assert_eq!(first.encoded_bytes, frame.bytes().len());
-    let second = stage_policy(&store, &frame, &live).unwrap();
+    let second = stage_policy(&store, &frame, &LIVE).unwrap();
     assert_eq!(second.id, first.id);
     assert_eq!(second.disposition, PolicyStageDisposition::IdenticalRetry);
-    let policy = read_policy(&store, frame.id(), limits, &live).unwrap();
+    let policy = read_policy(&store, frame.id(), limits, &LIVE).unwrap();
     assert_eq!(policy.id(), frame.id());
     assert_eq!(policy.encode().unwrap(), frame.bytes());
 }
@@ -92,7 +91,7 @@ fn a_valid_wrong_policy_in_the_requested_slot_is_not_an_allow_verdict() {
     let key = body_key_for_id(deny.id().as_internal_object_id()).unwrap();
     store.put_if_absent(&key, allow.bytes()).unwrap();
     assert!(
-        matches!(read_policy(&store, deny.id(), PolicyStoreLimits::default(), &live),
+        matches!(read_policy(&store, deny.id(), PolicyStoreLimits::default(), &LIVE),
         Err(PolicyStoreError::IdentityMismatch { requested, observed })
             if *requested == deny.id() && *observed == allow.id())
     );
@@ -103,12 +102,12 @@ fn a_valid_wrong_policy_in_the_requested_slot_is_not_an_allow_verdict() {
             &input(),
             &SubjectCodeMap::default(),
             PolicyStoreLimits::default(),
-            &live
+            &LIVE
         ),
         Err(PolicyStoreError::IdentityMismatch { .. })
     ));
     assert!(
-        matches!(stage_policy(&store, &deny, &live), Err(PolicyStoreError::ConflictingSlot { id }) if *id == deny.id())
+        matches!(stage_policy(&store, &deny, &LIVE), Err(PolicyStoreError::ConflictingSlot { id }) if *id == deny.id())
     );
     let ImmutableRead::Present(bytes) = store.read_immutable(&key).unwrap() else {
         panic!("planted slot remains");
@@ -127,14 +126,14 @@ fn allow_and_deny_evaluations_name_the_actual_persisted_snapshot() {
     let codes = SubjectCodeMap::default();
     for allow in [false, true] {
         let frame = frame(allow);
-        stage_policy(&store, &frame, &live).unwrap();
+        stage_policy(&store, &frame, &LIVE).unwrap();
         let result = evaluate_stored_policy(
             &store,
             frame.id(),
             &input,
             &codes,
             PolicyStoreLimits::default(),
-            &live,
+            &LIVE,
         )
         .unwrap();
         assert_eq!(result.snapshot_id, frame.id());
@@ -152,7 +151,7 @@ fn allow_and_deny_evaluations_name_the_actual_persisted_snapshot() {
             &input,
             &codes,
             PolicyStoreLimits::default(),
-            &live,
+            &LIVE,
         )
         .unwrap();
         assert_eq!(repeat.trace, result.trace);
@@ -165,21 +164,21 @@ fn missing_corrupt_and_oversized_policies_do_not_select_a_fallback() {
     let frame = frame(false);
     let limits = PolicyStoreLimits::default();
     assert!(matches!(
-        read_policy(&store(), frame.id(), limits, &live),
+        read_policy(&store(), frame.id(), limits, &LIVE),
         Err(PolicyStoreError::Missing { .. })
     ));
     for end in 0..frame.bytes().len() {
-        assert!(PolicyFrame::from_bytes(&frame.bytes()[..end], limits, &live).is_err());
+        assert!(PolicyFrame::from_bytes(&frame.bytes()[..end], limits, &LIVE).is_err());
     }
     let mut trailing = frame.bytes().to_vec();
     trailing.push(0);
-    assert!(PolicyFrame::from_bytes(&trailing, limits, &live).is_err());
+    assert!(PolicyFrame::from_bytes(&trailing, limits, &LIVE).is_err());
     let small = PolicyStoreLimits {
         frame_bytes: 1,
         ..limits
     };
     assert!(matches!(
-        PolicyFrame::from_bytes(frame.bytes(), small, &live),
+        PolicyFrame::from_bytes(frame.bytes(), small, &LIVE),
         Err(PolicyStoreError::FrameTooLarge { .. })
     ));
     assert!(matches!(
@@ -189,7 +188,7 @@ fn missing_corrupt_and_oversized_policies_do_not_select_a_fallback() {
                 elements: 0,
                 ..limits
             },
-            &live
+            &LIVE
         ),
         Err(PolicyStoreError::InvalidLimits)
     ));
@@ -199,7 +198,7 @@ fn missing_corrupt_and_oversized_policies_do_not_select_a_fallback() {
         .put_if_absent(&key, b"not a canonical policy")
         .unwrap();
     assert!(matches!(
-        read_policy(&store, frame.id(), limits, &live),
+        read_policy(&store, frame.id(), limits, &LIVE),
         Err(PolicyStoreError::Codec(_))
     ));
 }
@@ -217,10 +216,10 @@ fn cancellation_before_put_changes_nothing_and_after_read_returns_no_verdict() {
         ))
     ));
     assert!(matches!(
-        read_policy(&store, frame.id(), limits, &live),
+        read_policy(&store, frame.id(), limits, &LIVE),
         Err(PolicyStoreError::Missing { .. })
     ));
-    stage_policy(&store, &frame, &live).unwrap();
+    stage_policy(&store, &frame, &LIVE).unwrap();
     let calls = Cell::new(0usize);
     let stop_after_read = || {
         let at = calls.get();
@@ -239,7 +238,7 @@ fn cancellation_before_put_changes_nothing_and_after_read_returns_no_verdict() {
     ));
     assert_eq!(calls.get(), 2);
     assert_eq!(
-        read_policy(&store, frame.id(), limits, &live).unwrap().id(),
+        read_policy(&store, frame.id(), limits, &LIVE).unwrap().id(),
         frame.id()
     );
 }
@@ -250,22 +249,22 @@ fn source_compilation_uses_existing_language_and_refuses_ambient_inputs() {
     let a = PolicyFrame::compile(
         "policy ordered { rule a { when true then allow } default deny \"no\" }",
         limits,
-        &live,
+        &LIVE,
     )
     .unwrap();
-    let b = PolicyFrame::from_bytes(a.bytes(), limits, &live).unwrap();
+    let b = PolicyFrame::from_bytes(a.bytes(), limits, &LIVE).unwrap();
     assert_eq!(a.id(), b.id());
     assert_eq!(a.bytes(), b.bytes());
     assert!(matches!(
         PolicyFrame::compile(
             "policy bad { rule x { when env.home == \"x\" then allow } default deny \"no\" }",
             limits,
-            &live
+            &LIVE
         ),
         Err(PolicyStoreError::Compile(_))
     ));
     assert!(matches!(
-        PolicyFrame::compile("policy missing_default {}", limits, &live),
+        PolicyFrame::compile("policy missing_default {}", limits, &LIVE),
         Err(PolicyStoreError::Compile(_))
     ));
 }

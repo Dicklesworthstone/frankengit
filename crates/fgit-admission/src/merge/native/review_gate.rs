@@ -194,35 +194,33 @@ where
         self.inner
             .resolve_merge_basis_async(store, cx, basis, authenticated)
     }
-    fn validate_merge_async<'a>(
+    async fn validate_merge_async<'a>(
         &'a self,
         store: &'a S,
         cx: &'a S::Context,
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
         intent: &'a NativeMergeIntent,
-    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
-        async move {
-            let closure = self
-                .inner
-                .validate_merge_async(store, cx, basis, authenticated, intent)
-                .await?;
-            self.merge_checkpoint(cx)
-                .map_err(ProjectionFailure::Unavailable)?;
-            verify_at(
-                store,
-                cx,
-                basis,
-                intent,
-                self.context.principal_id,
-                self.required,
-                &|| self.merge_checkpoint(cx).is_err(),
-            )
+    ) -> Result<ValidatedClosure, ProjectionFailure> {
+        let closure = self
+            .inner
+            .validate_merge_async(store, cx, basis, authenticated, intent)
             .await?;
-            self.merge_checkpoint(cx)
-                .map_err(ProjectionFailure::Unavailable)?;
-            Ok(closure)
-        }
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        verify_at(
+            store,
+            cx,
+            basis,
+            intent,
+            self.context.principal_id,
+            self.required,
+            &|| self.merge_checkpoint(cx).is_err(),
+        )
+        .await?;
+        self.merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        Ok(closure)
     }
 }
 

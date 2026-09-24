@@ -174,11 +174,17 @@ pub struct SshServerSession {
     active_command: Option<SshGitCommand>,
     outgoing_bytes: Vec<u8>,
     channel_input_data: Vec<u8>,
-    channel_eof_received: bool,
-    channel_closed_received: bool,
-    /// Whether our CHANNEL_CLOSE was sent; RFC 4254 section 5.3 answers a
-    /// peer's CLOSE only when ours has not been sent yet.
-    channel_close_sent: bool,
+    channel_teardown: ChannelTeardown,
+}
+
+/// RFC 4254 section 5.3 end-of-channel progress for the session's channel.
+#[derive(Clone, Copy, Debug, Default)]
+struct ChannelTeardown {
+    eof_received: bool,
+    close_received: bool,
+    /// Whether our CHANNEL_CLOSE was sent; a peer's CLOSE is answered only
+    /// when ours has not been sent yet.
+    close_sent: bool,
 }
 
 impl SshServerSession {
@@ -221,9 +227,7 @@ impl SshServerSession {
             active_command: None,
             outgoing_bytes: Vec::new(),
             channel_input_data: Vec::new(),
-            channel_eof_received: false,
-            channel_closed_received: false,
-            channel_close_sent: false,
+            channel_teardown: ChannelTeardown::default(),
         }
     }
 
@@ -275,13 +279,13 @@ impl SshServerSession {
     /// Whether the client sent EOF on the active channel.
     #[must_use]
     pub const fn is_channel_eof_received(&self) -> bool {
-        self.channel_eof_received
+        self.channel_teardown.eof_received
     }
 
     /// Whether the client sent close on the active channel.
     #[must_use]
     pub const fn is_channel_closed(&self) -> bool {
-        self.channel_closed_received
+        self.channel_teardown.close_received
     }
 
     /// Takes queued outgoing bytes to send to the network transport.
@@ -856,17 +860,17 @@ impl SshServerSession {
                 self.client_window_size = self.client_window_size.saturating_add(bytes_to_add);
             }
             msg::CHANNEL_EOF => {
-                self.channel_eof_received = true;
+                self.channel_teardown.eof_received = true;
             }
             msg::CHANNEL_CLOSE => {
-                self.channel_closed_received = true;
-                if !self.channel_close_sent {
+                self.channel_teardown.close_received = true;
+                if !self.channel_teardown.close_sent {
                     let recipient = self.client_channel_id.unwrap_or(0);
                     let mut close = WireWriter::new();
                     close.write_u8(msg::CHANNEL_CLOSE);
                     close.write_u32(recipient);
                     self.send_packet(&close.into_bytes());
-                    self.channel_close_sent = true;
+                    self.channel_teardown.close_sent = true;
                 }
                 self.phase = SessionPhase::Closed;
             }
@@ -970,7 +974,7 @@ impl SshServerSession {
         close.write_u8(msg::CHANNEL_CLOSE);
         close.write_u32(recipient_channel);
         self.send_packet(&close.into_bytes());
-        self.channel_close_sent = true;
+        self.channel_teardown.close_sent = true;
     }
 
     /// Closes the active client channel with an exit status code.

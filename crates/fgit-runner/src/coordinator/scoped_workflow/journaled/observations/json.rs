@@ -204,8 +204,8 @@ impl Json<'_> {
             return Err(BAD);
         }
         let mut bytes = [0u8; 32];
-        for (slot, pair) in bytes.iter_mut().zip(hex.chunks_exact(2)) {
-            *slot = nibble(pair[0])? * 16 + nibble(pair[1])?;
+        for (slot, [high, low]) in bytes.iter_mut().zip(hex.as_chunks::<2>().0) {
+            *slot = nibble(*high)? * 16 + nibble(*low)?;
         }
         let root = commitment(&bytes)?;
         if root.to_string() != text {

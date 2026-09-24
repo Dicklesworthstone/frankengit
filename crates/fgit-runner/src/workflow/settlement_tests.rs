@@ -8,11 +8,7 @@ const WORKFLOW: &str = "name: settlement\non: push\njobs:\n  first:\n    runs-on
 fn observation(outcome: StepOutcome) -> StepObservation {
     StepObservation {
         outcome,
-        exit_code: Some(if outcome == StepOutcome::Succeeded {
-            0
-        } else {
-            1
-        }),
+        exit_code: Some(i32::from(outcome != StepOutcome::Succeeded)),
         stdout: b"output".to_vec(),
         stderr: Vec::new(),
         elapsed_millis: 1,

@@ -758,15 +758,13 @@ fn aggregate_budget_conservation_property_test() {
             })
             .expect("valid sub");
 
-            let result = tracker.admit_sub_intent(&sub, &p_run, KEY);
-            if result.is_ok() {
-                active_sub_ids.push((child_id, child_budget));
-            } else {
+            match tracker.admit_sub_intent(&sub, &p_run, KEY) {
+                Ok(()) => active_sub_ids.push((child_id, child_budget)),
                 // If refused, it must be AggregateBudgetExceeded
-                assert!(matches!(
-                    result.unwrap_err(),
+                Err(refusal) => assert!(matches!(
+                    refusal,
                     SubIntentRefusal::AggregateBudgetExceeded { .. }
-                ));
+                )),
             }
         } else {
             // Release an active child

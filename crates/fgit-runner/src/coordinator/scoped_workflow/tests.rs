@@ -49,11 +49,7 @@ fn enqueue(
 fn observed(outcome: StepOutcome) -> StepObservation {
     StepObservation {
         outcome,
-        exit_code: Some(if outcome == StepOutcome::Succeeded {
-            0
-        } else {
-            1
-        }),
+        exit_code: Some(i32::from(outcome != StepOutcome::Succeeded)),
         stdout: b"data".to_vec(),
         stderr: b"x".to_vec(),
         elapsed_millis: 1,

@@ -128,7 +128,7 @@ where
         }
         Ok(())
     }
-    fn validate<'a>(
+    async fn validate<'a>(
         &'a self,
         store: &'a S,
         cx: &'a S::Context,
@@ -138,22 +138,19 @@ where
         resolved: &'a super::super::NativeMergeBasis,
         event: &'a ForgeEvent,
         projection: &'a P,
-    ) -> impl Future<Output = Result<ValidatedClosure, PreparationFailure>> + Send + 'a {
-        async move {
-            let command = self.0;
-            let previous = frontier_event(store, cx, &resolved.forge, command.number).await?;
-            validate_transition(previous.as_ref(), event).map_err(ProjectionFailure::Refuse)?;
-            if command.action != PullRequestAction::Close
-                && (snapshot.refs.get(&command.data.source_ref) != Some(&command.data.source_tip)
-                    || snapshot.refs.get(&command.data.target_ref)
-                        != Some(&command.data.target_tip))
-            {
-                return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into());
-            }
-            Ok(projection
-                .validate_pull_request_async(store, cx, basis, authenticated, command)
-                .await?)
+    ) -> Result<ValidatedClosure, PreparationFailure> {
+        let command = self.0;
+        let previous = frontier_event(store, cx, &resolved.forge, command.number).await?;
+        validate_transition(previous.as_ref(), event).map_err(ProjectionFailure::Refuse)?;
+        if command.action != PullRequestAction::Close
+            && (snapshot.refs.get(&command.data.source_ref) != Some(&command.data.source_tip)
+                || snapshot.refs.get(&command.data.target_ref) != Some(&command.data.target_tip))
+        {
+            return Err(ProjectionFailure::Refuse(RefusalCode::TargetRefMoved).into());
         }
+        Ok(projection
+            .validate_pull_request_async(store, cx, basis, authenticated, command)
+            .await?)
     }
 }
 
