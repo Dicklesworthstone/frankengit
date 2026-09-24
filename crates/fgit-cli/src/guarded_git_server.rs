@@ -9,13 +9,16 @@ use fgit_node::{
 };
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 use std::collections::BTreeMap;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16>] [--receive-principal <principal-id-hex>] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]";
+const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16>] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]";
 
 struct Prepared {
+    /// The operator explicitly accepted that any network peer can push as the
+    /// receive principal (the git protocol carries no client authentication).
+    unauthenticated_network_push: bool,
     configuration: NodeConfig,
     listen: String,
     limits: GitDaemonServerLimits,
@@ -42,9 +45,18 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
     }
     let mut flags = BTreeMap::new();
     let mut positional = Vec::new();
+    let mut unauthenticated_network_push = false;
     let mut index = 1;
     while index < arguments.len() {
         let argument = arguments[index].as_str();
+        if argument == "--allow-unauthenticated-network-push" {
+            if unauthenticated_network_push {
+                return Err(format!("duplicate {argument}"));
+            }
+            unauthenticated_network_push = true;
+            index += 1;
+            continue;
+        }
         if argument.starts_with("--") {
             if !matches!(
                 argument,
@@ -77,6 +89,25 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
     let [root, tenant, repository, listen] = positional.as_slice() else {
         return Err(USAGE.into());
     };
+    if unauthenticated_network_push && !flags.contains_key("--receive-principal") {
+        return Err("--allow-unauthenticated-network-push requires --receive-principal".into());
+    }
+    if flags.contains_key("--receive-principal") && !unauthenticated_network_push {
+        // The git daemon protocol authenticates nobody: every client that can
+        // connect pushes as the receive principal. Keep that to this host
+        // unless the operator says, by name, that the network is trusted.
+        let resolved: Vec<SocketAddr> = (*listen)
+            .to_socket_addrs()
+            .map_err(|e| format!("cannot resolve listen address {listen}: {e}"))?
+            .collect();
+        if resolved.is_empty() || resolved.iter().any(|address| !address.ip().is_loopback()) {
+            return Err(format!(
+                "refusing to serve receive-pack on non-loopback {listen}: the git protocol \
+                 carries no client authentication, so any peer could push as the receive \
+                 principal; bind to loopback or pass --allow-unauthenticated-network-push"
+            ));
+        }
+    }
     if flags.contains_key("--max-sessions") != flags.contains_key("--max-in-flight") {
         return Err("--max-sessions and --max-in-flight must be selected together".into());
     }
@@ -160,6 +191,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
             configuration.with_selected_pack_byte_envelope(mib(value, "--pack-max-expanded-mib")?);
     }
     Ok(Prepared {
+        unauthenticated_network_push,
         configuration,
         listen: (*listen).to_owned(),
         limits,
@@ -168,6 +200,13 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
 
 pub(crate) fn run(arguments: &[String]) -> Result<CliOutcome, String> {
     let prepared = parse(arguments)?;
+    if prepared.unauthenticated_network_push {
+        eprintln!(
+            "fg: WARNING: --allow-unauthenticated-network-push: any client that can reach {} \
+             can push as the receive principal",
+            prepared.listen
+        );
+    }
     let listener = TcpListener::bind(&prepared.listen).map_err(|e| e.to_string())?;
     let listen_address = listener.local_addr().map_err(|e| e.to_string())?;
     let mut node = OneNode::open_existing(prepared.configuration).map_err(|e| e.to_string())?;
@@ -213,6 +252,50 @@ mod tests {
         .map(str::to_owned)
         .collect()
     }
+    fn with_listen(listen: &str, extra: &[&str]) -> Vec<String> {
+        let mut arguments = arguments(extra);
+        arguments[4] = listen.to_owned();
+        arguments
+    }
+
+    #[test]
+    fn receive_principal_is_confined_to_loopback_unless_explicitly_opened() {
+        const PRINCIPAL: [&str; 2] = ["--receive-principal", "33333333333333333333333333333333"];
+        // Refused: unauthenticated push on a routable address.
+        let refused = parse(&with_listen("0.0.0.0:9418", &PRINCIPAL))
+            .err()
+            .unwrap();
+        assert!(refused.contains("non-loopback"), "{refused}");
+        // Permitted twins: loopback (v4 and v6), and the named override.
+        for listen in ["127.0.0.1:9418", "[::1]:9418"] {
+            assert!(
+                !parse(&with_listen(listen, &PRINCIPAL))
+                    .unwrap()
+                    .unauthenticated_network_push
+            );
+        }
+        let opened = parse(&with_listen(
+            "0.0.0.0:9418",
+            &[
+                PRINCIPAL[0],
+                PRINCIPAL[1],
+                "--allow-unauthenticated-network-push",
+            ],
+        ))
+        .unwrap();
+        assert!(opened.unauthenticated_network_push);
+        // Read-only serving stays unrestricted, and the override is meaningless
+        // (so refused) without a receive principal.
+        assert!(parse(&with_listen("0.0.0.0:9418", &[])).is_ok());
+        assert!(
+            parse(&with_listen(
+                "0.0.0.0:9418",
+                &["--allow-unauthenticated-network-push"]
+            ))
+            .is_err()
+        );
+    }
+
     #[test]
     fn defaults_remain_single_session_and_all_existing_envelope_flags_are_explicit() {
         let default = parse(&arguments(&[])).unwrap();
