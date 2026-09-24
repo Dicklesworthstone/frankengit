@@ -11,11 +11,12 @@ use super::super::{
     CoordinatorExecutionProfile,
 };
 use crate::coordinator::delivery::{CheckDeliveryBatch, CheckDeliveryRefusal};
+// Imported from the defining module, not the crate-root re-export: the root
+// re-export carries only the type namespace, and this reader must rebuild the
+// identities from their decoded commitments with the tuple constructors.
+use crate::coordinator::{AttemptId, WorkflowRunId};
 use crate::workflow::{JobOutcome, WorkflowReport, MAX_JOBS, MAX_STEPS};
-use crate::{
-    AttemptId, CheckRunConclusion, CheckRunStatus, Commitment, RunnerText, TrustDomain,
-    WorkflowRunId,
-};
+use crate::{CheckRunConclusion, CheckRunStatus, Commitment, RunnerText, TrustDomain};
 use fgit_crypto::{Digest, DigestAlgorithm, DigestBytes};
 use fgit_types::{GitOid, GitOidSha1, GitOidSha256, RepositoryId, TenantId};
 use std::collections::{BTreeMap, BTreeSet};

@@ -86,6 +86,11 @@ impl AttemptId {
         self.0
     }
 }
+impl fmt::Display for AttemptId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "attempt:{}", self.0)
+    }
+}
 
 /// Canonical identity of one job attempt within a run attempt.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
