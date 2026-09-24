@@ -302,6 +302,12 @@ impl WebhookDeliveryDestination {
         request: &DeliveryRequest<'_>,
         attempt: u32,
     ) -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
+        if !self.registration.active || request.destination != self.destination_slug {
+            return Err(RefusalCode::PublicationPolicyRefused);
+        }
+        if attempt == 0 || self.timeout.is_zero() {
+            return Err(RefusalCode::ResourceBudgetExceeded);
+        }
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
@@ -335,7 +341,7 @@ impl WebhookDeliveryDestination {
             ));
         }
 
-        // 2. Resolve DNS safely and check every resolved IP against SSRF policy
+        // 2. Resolve a policy-approved address, then connect to that exact IP.
         let target_addr = match self.resolve_safe_socket_addr(&validated) {
             Ok(addr) => addr,
             Err(reason) => {
@@ -369,8 +375,18 @@ impl WebhookDeliveryDestination {
             }
         };
 
-        let _ = stream.set_read_timeout(Some(self.timeout));
-        let _ = stream.set_write_timeout(Some(self.timeout));
+        if let Err(error) = stream
+            .set_read_timeout(Some(self.timeout))
+            .and_then(|()| stream.set_write_timeout(Some(self.timeout)))
+        {
+            // No request bytes have been sent, so retry remains unambiguous.
+            return self.handle_network_failure(
+                request,
+                attempt,
+                format!("cannot install HTTP timeouts: {error}"),
+                now_secs,
+            );
+        }
 
         let http_req = format!(
             "POST {} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: FrankenGit-Webhook/1.0\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-FrankenGit-Delivery: {}\r\nX-FrankenGit-Signature-256: {}\r\nX-FrankenGit-Timestamp: {}\r\nX-FrankenGit-Attempt: {}\r\nConnection: close\r\n\r\n{}",
@@ -389,8 +405,12 @@ impl WebhookDeliveryDestination {
             .write_all(http_req.as_bytes())
             .and_then(|()| stream.flush())
         {
-            let err_msg = format!("HTTP write error: {e}");
-            return self.handle_network_failure(request, attempt, err_msg, now_secs);
+            // write_all can fail after sending a prefix or the complete body.
+            // A lost response is not proof that the receiver rejected the effect.
+            return Ok((
+                DeliveryVerdict::AmbiguousTimeout,
+                format!("HTTP write outcome unknown: {e}").into_bytes(),
+            ));
         }
 
         // 6. Read HTTP response
@@ -402,12 +422,22 @@ impl WebhookDeliveryDestination {
                 Ok(n) => {
                     response.extend_from_slice(&buf[..n]);
                     if response.len() > 65536 {
+                        return Ok((
+                            DeliveryVerdict::AmbiguousTimeout,
+                            b"HTTP response headers exceed the 64 KiB limit".to_vec(),
+                        ));
+                    }
+                    // A complete final status is the acknowledgement. Do not
+                    // wait for EOF (or a response body) on a keep-alive peer.
+                    if parse_http_status(&response).is_some() {
                         break;
                     }
                 }
                 Err(e) => {
-                    let err_msg = format!("HTTP read error: {e}");
-                    return self.handle_network_failure(request, attempt, err_msg, now_secs);
+                    return Ok((
+                        DeliveryVerdict::AmbiguousTimeout,
+                        format!("HTTP response outcome unknown: {e}").into_bytes(),
+                    ));
                 }
             }
         }
@@ -416,8 +446,10 @@ impl WebhookDeliveryDestination {
         let status_code = match parse_http_status(&response) {
             Some(code) => code,
             None => {
-                let err_msg = "invalid or empty HTTP response".to_string();
-                return self.handle_network_failure(request, attempt, err_msg, now_secs);
+                return Ok((
+                    DeliveryVerdict::AmbiguousTimeout,
+                    b"invalid, incomplete, or empty HTTP response".to_vec(),
+                ));
             }
         };
 
@@ -427,12 +459,8 @@ impl WebhookDeliveryDestination {
                     .lock()
                     .unwrap()
                     .push((request.key, attempt));
-                let verdict = if attempt == 1 {
-                    DeliveryVerdict::Accepted
-                } else {
-                    DeliveryVerdict::DuplicateSuppressed
-                };
-                Ok((verdict, response))
+                // A retry ordinal is not evidence of receiver-side deduplication.
+                Ok((DeliveryVerdict::Accepted, response))
             }
             301 | 302 | 307 | 308 => {
                 // Check Location header for redirect SSRF validation
@@ -541,7 +569,9 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
     }
 
     fn idempotency(&self) -> DownstreamIdempotency {
-        DownstreamIdempotency::Strong
+        // Generic HTTP receivers provide no durable, queryable deduplication
+        // contract. A volatile local ACK cache cannot establish Strong.
+        DownstreamIdempotency::Weak
     }
 
     fn probe<'a>(
@@ -571,28 +601,71 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
     }
 }
 
-fn parse_http_status(response: &[u8]) -> Option<u16> {
-    let text = std::str::from_utf8(response).ok()?;
-    let first_line = text.lines().next()?;
-    let parts: Vec<&str> = first_line.split_whitespace().collect();
-    if parts.len() >= 2 {
-        parts[1].parse::<u16>().ok()
-    } else {
-        None
+/// Select a complete final HTTP/1 response head, skipping at most eight
+/// informational responses. Response bodies are arbitrary bytes, not UTF-8.
+fn final_response_head(mut response: &[u8]) -> Option<(u16, &[u8])> {
+    for _ in 0..=8 {
+        let end = response.windows(4).position(|bytes| bytes == b"\r\n\r\n")?;
+        let head = &response[..end + 2];
+        let mut lines = head.split_inclusive(|byte| *byte == b'\n');
+        let status = lines.next()?.strip_suffix(b"\r\n")?;
+        if !matches!(status.get(..9)?, b"HTTP/1.0 " | b"HTTP/1.1 ")
+            || status.get(12) != Some(&b' ')
+            || !status.get(9..12)?.iter().all(u8::is_ascii_digit)
+            || status.get(13..)?.iter().any(|byte| {
+                byte.is_ascii_control() && *byte != b'\t'
+            })
+        {
+            return None;
+        }
+        let code = u16::from(status[9] - b'0') * 100
+            + u16::from(status[10] - b'0') * 10
+            + u16::from(status[11] - b'0');
+        if !(100..=599).contains(&code) || code == 101 {
+            return None;
+        }
+        for line in lines {
+            let line = line.strip_suffix(b"\r\n")?;
+            let colon = line.iter().position(|byte| *byte == b':')?;
+            if colon == 0
+                || !line[..colon].iter().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || b"!#$%&'*+-.^_`|~".contains(byte)
+                })
+                || line[colon + 1..].iter().any(|byte| {
+                    byte.is_ascii_control() && *byte != b'\t'
+                })
+            {
+                return None;
+            }
+        }
+        if code >= 200 {
+            return Some((code, head));
+        }
+        response = &response[end + 4..];
     }
+    None
+}
+
+fn parse_http_status(response: &[u8]) -> Option<u16> {
+    final_response_head(response).map(|(code, _)| code)
 }
 
 fn extract_header(response: &[u8], header_name: &str) -> Option<String> {
-    let text = std::str::from_utf8(response).ok()?;
-    let needle = header_name.to_ascii_lowercase();
-    for line in text.lines() {
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case(&needle) {
-                return Some(v.trim().to_string());
+    let (_, head) = final_response_head(response)?;
+    let mut found = None;
+    for line in head.split_inclusive(|byte| *byte == b'\n').skip(1) {
+        let line = line.strip_suffix(b"\r\n")?;
+        let colon = line.iter().position(|byte| *byte == b':')?;
+        if line[..colon].eq_ignore_ascii_case(header_name.as_bytes()) {
+            // Conflicting/duplicate routing metadata is not a redirect target.
+            if found.is_some() {
+                return None;
             }
+            found = Some(std::str::from_utf8(&line[colon + 1..]).ok()?.trim().to_owned());
         }
     }
-    None
+    found
 }
 
 fn hex_encode(bytes: impl AsRef<[u8]>) -> String {

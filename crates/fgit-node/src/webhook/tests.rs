@@ -114,7 +114,7 @@ fn webhook_delivery_successful_acknowledgement_and_signature_verification() {
 }
 
 #[test]
-fn webhook_duplicate_delivery_reports_duplicate_suppressed() {
+fn webhook_successful_retry_does_not_fabricate_duplicate_suppression() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let server_addr = listener.local_addr().unwrap();
 
@@ -151,9 +151,9 @@ fn webhook_duplicate_delivery_reports_duplicate_suppressed() {
         events: &empty_events,
     };
 
-    // Attempt 2 (retry) with 200 OK gives DuplicateSuppressed
+    // Attempt 2 with 200 OK proves acceptance, not duplicate suppression.
     let result = dest.dispatch_http(&request, 2).unwrap();
-    assert_eq!(result.0, DeliveryVerdict::DuplicateSuppressed);
+    assert_eq!(result.0, DeliveryVerdict::Accepted);
 
     server_handle.join().unwrap();
 }
@@ -306,4 +306,169 @@ mod hex {
         }
         Ok(bytes)
     }
+}
+
+
+#[test]
+fn webhook_https_is_refused_before_any_cleartext_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("https://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let dest = WebhookDeliveryDestination::new(
+        AsciiSlug::from_static("test-webhook"),
+        test_registration(&url, SsrfPolicy::PERMISSIVE_FOR_TESTS),
+        SsrfPolicy::PERMISSIVE_FOR_TESTS,
+        DeadLetterQueue::new(),
+    );
+    let events = ForgeEventBatch { events: Vec::new() };
+    let request = DeliveryRequest {
+        key: AsciiSlug::from_static("https-must-not-downgrade"),
+        destination: dest.destination_slug,
+        payload_root: dummy_digest(),
+        events: &events,
+    };
+    assert_eq!(dest.dispatch_http(&request, 1).unwrap().0, DeliveryVerdict::PermanentRejection);
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert!(dest.acknowledged.lock().unwrap().is_empty());
+    assert_eq!(dest.dead_letters.list().len(), 1);
+}
+
+#[test]
+fn webhook_refuses_inactive_and_wrong_audience_before_contact() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let mut dest = WebhookDeliveryDestination::new(
+        AsciiSlug::from_static("test-webhook"),
+        test_registration(&url, SsrfPolicy::PERMISSIVE_FOR_TESTS),
+        SsrfPolicy::PERMISSIVE_FOR_TESTS,
+        DeadLetterQueue::new(),
+    );
+    let events = ForgeEventBatch { events: Vec::new() };
+    let mut request = DeliveryRequest {
+        key: AsciiSlug::from_static("audience-bound"),
+        destination: AsciiSlug::from_static("other-webhook"),
+        payload_root: dummy_digest(),
+        events: &events,
+    };
+    assert_eq!(dest.dispatch_http(&request, 1), Err(RefusalCode::PublicationPolicyRefused));
+    request.destination = dest.destination_slug;
+    dest.registration.active = false;
+    assert_eq!(dest.dispatch_http(&request, 1), Err(RefusalCode::PublicationPolicyRefused));
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn webhook_http_status_needs_complete_valid_final_headers_not_utf8_body() {
+    assert_eq!(parse_http_status(b"HTTP/1.1 204 No Content\r\n\r\n"), Some(204));
+    assert_eq!(parse_http_status(b"HTTP/1.0 200 OK\r\n\r\n\xff\xfe"), Some(200));
+    assert_eq!(parse_http_status(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 202 Accepted\r\n\r\n"), Some(202));
+    for response in [
+        b"not-http 200 OK\r\n\r\n".as_slice(),
+        b"HTTP/1.1 200 OK\r\n",
+        b"HTTP/1.1 2000 OK\r\n\r\n",
+        b"HTTP/1.1 999 Nope\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nBad Header: value\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nHeader: value\nInjected: x\r\n\r\n",
+        b"HTTP/1.1 101 Switching Protocols\r\n\r\n",
+        b"HTTP/1.1 100 Continue\r\n\r\n",
+    ] {
+        assert_eq!(parse_http_status(response), None, "{response:?}");
+    }
+}
+
+#[test]
+fn webhook_redirect_headers_cannot_come_from_the_body_or_an_interim_response() {
+    assert_eq!(extract_header(b"HTTP/1.1 302 Found\r\n\r\nLocation: http://example.com/body", "location"), None);
+    assert_eq!(extract_header(b"HTTP/1.1 100 Continue\r\nLocation: http://example.com/interim\r\n\r\nHTTP/1.1 302 Found\r\nLocation: http://example.com/final\r\n\r\n", "location"), Some("http://example.com/final".to_owned()));
+    assert_eq!(extract_header(b"HTTP/1.1 302 Found\r\nLocation: http://example.com/a\r\nlocation: http://example.com/b\r\n\r\n", "location"), None);
+}
+
+fn consume_webhook_request(stream: &mut TcpStream) {
+    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("Content-Length:") {
+            length = value.trim().parse::<usize>().unwrap();
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+}
+
+#[test]
+fn webhook_lost_response_at_attempt_limit_stays_ambiguous_not_dead_lettered() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        consume_webhook_request(&mut stream);
+        // The receiver may have committed its effect before this disconnect.
+    });
+    let dest = WebhookDeliveryDestination::new(
+        AsciiSlug::from_static("test-webhook"),
+        test_registration(&url, SsrfPolicy::PERMISSIVE_FOR_TESTS),
+        SsrfPolicy::PERMISSIVE_FOR_TESTS,
+        DeadLetterQueue::new(),
+    );
+    let events = ForgeEventBatch { events: Vec::new() };
+    let request = DeliveryRequest {
+        key: AsciiSlug::from_static("lost-response"),
+        destination: dest.destination_slug,
+        payload_root: dummy_digest(),
+        events: &events,
+    };
+    let result = dest.dispatch_http(&request, dest.registration.retry_schedule.max_attempts);
+    server.join().unwrap();
+    assert_eq!(result.unwrap().0, DeliveryVerdict::AmbiguousTimeout);
+    assert!(dest.dead_letters.list().is_empty());
+    assert!(dest.acknowledged.lock().unwrap().is_empty());
+}
+
+#[test]
+fn webhook_complete_ack_does_not_wait_for_connection_close() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let (release, wait) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        consume_webhook_request(&mut stream);
+        stream.write_all(b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n").unwrap();
+        wait.recv_timeout(Duration::from_secs(2)).unwrap();
+    });
+    let mut dest = WebhookDeliveryDestination::new(
+        AsciiSlug::from_static("test-webhook"),
+        test_registration(&url, SsrfPolicy::PERMISSIVE_FOR_TESTS),
+        SsrfPolicy::PERMISSIVE_FOR_TESTS,
+        DeadLetterQueue::new(),
+    );
+    dest.timeout = Duration::from_millis(200);
+    let events = ForgeEventBatch { events: Vec::new() };
+    let request = DeliveryRequest {
+        key: AsciiSlug::from_static("keep-alive-ack"),
+        destination: dest.destination_slug,
+        payload_root: dummy_digest(),
+        events: &events,
+    };
+    let result = dest.dispatch_http(&request, 1);
+    release.send(()).unwrap();
+    server.join().unwrap();
+    assert_eq!(result.unwrap().0, DeliveryVerdict::Accepted);
+}
+
+#[test]
+fn webhook_cache_does_not_claim_durable_receiver_idempotency() {
+    let dest = WebhookDeliveryDestination::new(
+        AsciiSlug::from_static("test-webhook"),
+        test_registration("http://example.com/hook", SsrfPolicy::STRICT),
+        SsrfPolicy::STRICT,
+        DeadLetterQueue::new(),
+    );
+    assert_eq!(<WebhookDeliveryDestination as OutboxDestination<Cx>>::idempotency(&dest), DownstreamIdempotency::Weak);
 }
