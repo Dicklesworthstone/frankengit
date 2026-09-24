@@ -1,5 +1,6 @@
 //! Webhook delivery engine, OutboxDestination implementation, and dead-letter queue.
 
+#[cfg(test)]
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
@@ -13,6 +14,7 @@ use fgit_resource::settlement::{DeliveryVerdict, DownstreamIdempotency, ProbeVer
 use fgit_types::{AsciiSlug, RefusalCode};
 use fsqlite_types::cx::Cx;
 
+mod request_io;
 mod transport;
 
 mod payload;
@@ -33,6 +35,7 @@ pub struct WebhookDeliveryDestination {
     pub destination_slug: AsciiSlug,
     pub registration: WebhookRegistration,
     pub ssrf_policy: SsrfPolicy,
+    /// One attempt deadline, not a renewed per-read/write idle timeout.
     pub timeout: Duration,
     pub dead_letters: DeadLetterQueue,
     pub acknowledged: Arc<Mutex<Vec<(AsciiSlug, u32)>>>,
@@ -78,8 +81,21 @@ impl WebhookDeliveryDestination {
         request: &DeliveryRequest<'_>,
         attempt: u32,
     ) -> Result<(&'static str, Vec<u8>), String> {
+        self.deliver_request_with_checkpoint(request, attempt, &|| Ok(()))
+    }
+
+    /// Perform one bounded manual send with caller-owned cancellation checks.
+    /// A stop after a write was attempted returns `AmbiguousTimeout`, not a
+    /// definitive refusal. This does not settle a canonical obligation.
+    /// Blocking OS DNS and local diagnostic persistence are not preemptible.
+    pub fn deliver_request_with_checkpoint<C: Fn() -> Result<(), RefusalCode> + ?Sized>(
+        &self,
+        request: &DeliveryRequest<'_>,
+        attempt: u32,
+        checkpoint: &C,
+    ) -> Result<(&'static str, Vec<u8>), String> {
         let (verdict, body) = self
-            .dispatch_http(request, attempt)
+            .dispatch_http_with_checkpoint(request, attempt, checkpoint)
             .map_err(|code| format!("{code:?}"))?;
         let verdict_str = match verdict {
             DeliveryVerdict::Accepted => "Accepted",
@@ -91,11 +107,21 @@ impl WebhookDeliveryDestination {
         Ok((verdict_str, body))
     }
 
-    /// Transmit one HTTP POST webhook delivery.
+    #[cfg(test)]
     fn dispatch_http(
         &self,
         request: &DeliveryRequest<'_>,
         attempt: u32,
+    ) -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
+        self.dispatch_http_with_checkpoint(request, attempt, &|| Ok(()))
+    }
+
+    /// Transmit one HTTP POST under the same deadline and cancellation scope.
+    fn dispatch_http_with_checkpoint<C: Fn() -> Result<(), RefusalCode> + ?Sized>(
+        &self,
+        request: &DeliveryRequest<'_>,
+        attempt: u32,
+        checkpoint: &C,
     ) -> Result<(DeliveryVerdict, Vec<u8>), RefusalCode> {
         if !self.registration.active || request.destination != self.destination_slug {
             return Err(RefusalCode::PublicationPolicyRefused);
@@ -103,6 +129,7 @@ impl WebhookDeliveryDestination {
         if attempt == 0 || self.timeout.is_zero() {
             return Err(RefusalCode::ResourceBudgetExceeded);
         }
+        let budget = request_io::Attempt::new(self.timeout, checkpoint)?;
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
@@ -142,7 +169,12 @@ impl WebhookDeliveryDestination {
         let payload_bytes = payload.as_bytes();
 
         // 2. Resolve a policy-approved address, then connect to that exact IP.
-        let target_addr = match self.resolve_safe_socket_addr(&validated) {
+        budget.check()?;
+        let resolved = self.resolve_safe_socket_addr(&validated);
+        // The blocking resolver cannot be interrupted here. Its elapsed time
+        // is nevertheless charged; an expired attempt never opens a socket.
+        budget.check()?;
+        let target_addr = match resolved {
             Ok(addr) => addr,
             Err(reason) => {
                 self.record_terminal_failure(request, attempt, &reason, now_secs)?;
@@ -155,7 +187,9 @@ impl WebhookDeliveryDestination {
         let sig_hex = format!("sha256={}", hex_encode(sig_tag));
 
         // 5. Connect and send HTTP request
-        let mut stream = match TcpStream::connect_timeout(&target_addr, self.timeout) {
+        let connected = TcpStream::connect_timeout(&target_addr, budget.check()?);
+        budget.check()?;
+        let mut stream = match connected {
             Ok(s) => s,
             Err(e) => {
                 let err_msg = format!("TCP connection failed: {e}");
@@ -163,21 +197,8 @@ impl WebhookDeliveryDestination {
             }
         };
 
-        if let Err(error) = stream
-            .set_read_timeout(Some(self.timeout))
-            .and_then(|()| stream.set_write_timeout(Some(self.timeout)))
-        {
-            // No request bytes have been sent, so retry remains unambiguous.
-            return self.handle_network_failure(
-                request,
-                attempt,
-                format!("cannot install HTTP timeouts: {error}"),
-                now_secs,
-            );
-        }
-
-        let http_req = format!(
-            "POST {} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: FrankenGit-Webhook/1.0\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-FrankenGit-Delivery: {}\r\nX-FrankenGit-Signature-256: {}\r\nX-FrankenGit-Timestamp: {}\r\nX-FrankenGit-Attempt: {}\r\nConnection: close\r\n\r\n{}",
+        let http_header = format!(
+            "POST {} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: FrankenGit-Webhook/1.0\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-FrankenGit-Delivery: {}\r\nX-FrankenGit-Signature-256: {}\r\nX-FrankenGit-Timestamp: {}\r\nX-FrankenGit-Attempt: {}\r\nConnection: close\r\n\r\n",
             validated.path_and_query(),
             validated.host(),
             validated.port(),
@@ -186,49 +207,26 @@ impl WebhookDeliveryDestination {
             sig_hex,
             now_secs,
             attempt,
-            payload
         );
 
-        if let Err(e) = stream
-            .write_all(http_req.as_bytes())
-            .and_then(|()| stream.flush())
-        {
-            // write_all can fail after sending a prefix or the complete body.
-            // A lost response is not proof that the receiver rejected the effect.
-            return Ok((
-                DeliveryVerdict::AmbiguousTimeout,
-                format!("HTTP write outcome unknown: {e}").into_bytes(),
-            ));
-        }
-
-        // 6. Read HTTP response
-        let mut response = Vec::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            match stream.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    response.extend_from_slice(&buf[..n]);
-                    if response.len() > 65536 {
-                        return Ok((
-                            DeliveryVerdict::AmbiguousTimeout,
-                            b"HTTP response headers exceed the 64 KiB limit".to_vec(),
-                        ));
-                    }
-                    // A complete final status is the acknowledgement. Do not
-                    // wait for EOF (or a response body) on a keep-alive peer.
-                    if parse_http_status(&response).is_some() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    return Ok((
-                        DeliveryVerdict::AmbiguousTimeout,
-                        format!("HTTP response outcome unknown: {e}").into_bytes(),
-                    ));
-                }
+        let exchanged = budget.exchange(&mut stream, http_header.as_bytes(), payload_bytes);
+        // Close before any local persistence, including failure reporting.
+        drop(stream);
+        let response = match exchanged {
+            Ok(response) => response,
+            Err(request_io::Failure::Refused(code)) => return Err(code),
+            Err(request_io::Failure::Unsent(error)) => {
+                return self.handle_network_failure(
+                    request,
+                    attempt,
+                    format!("HTTP setup failed before transmission: {error}"),
+                    now_secs,
+                );
             }
-        }
+            Err(request_io::Failure::Ambiguous(reason)) => {
+                return Ok((DeliveryVerdict::AmbiguousTimeout, reason.into_bytes()));
+            }
+        };
 
         // 7. Parse HTTP response status
         let status_code = match parse_http_status(&response) {
@@ -366,11 +364,12 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
 
     fn probe<'a>(
         &'a mut self,
-        _cx: &'a Cx,
+        cx: &'a Cx,
         request: &'a DeliveryRequest<'_>,
     ) -> impl std::future::Future<Output = Result<(ProbeVerdict, Vec<u8>), RefusalCode>> + Send + 'a
     {
         async move {
+            request_checkpoint(cx)?;
             let acks = self.acknowledged.lock().unwrap();
             if acks.iter().any(|(k, _)| *k == request.key) {
                 Ok((ProbeVerdict::Delivered, Vec::new()))
@@ -382,12 +381,26 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
 
     fn deliver<'a>(
         &'a mut self,
-        _cx: &'a Cx,
+        cx: &'a Cx,
         request: &'a DeliveryRequest<'_>,
         attempt: u32,
     ) -> impl std::future::Future<Output = Result<(DeliveryVerdict, Vec<u8>), RefusalCode>> + Send + 'a
     {
-        async move { self.dispatch_http(request, attempt) }
+        async move {
+            self.dispatch_http_with_checkpoint(request, attempt, &|| request_checkpoint(cx))
+        }
+    }
+}
+
+fn request_checkpoint(cx: &Cx) -> Result<(), RefusalCode> {
+    match crate::checkpoint_pack_context(cx) {
+        crate::PackContextCheckpoint::Live => Ok(()),
+        crate::PackContextCheckpoint::Stopped {
+            budget_exhaustion: Some(_),
+        } => Err(RefusalCode::ResourceBudgetExceeded),
+        crate::PackContextCheckpoint::Stopped {
+            budget_exhaustion: None,
+        } => Err(RefusalCode::CancellationInProgress),
     }
 }
 

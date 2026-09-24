@@ -120,14 +120,9 @@ fn webhook_successful_retry_does_not_fabricate_duplicate_suppression() {
 
     let server_handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut reader = BufReader::new(&mut stream);
-        let mut line = String::new();
-        while reader.read_line(&mut line).is_ok() {
-            if line.trim().is_empty() {
-                break;
-            }
-            line.clear();
-        }
+        // Drain Content-Length before acknowledging: header and body need
+        // not arrive in one packet or one write syscall.
+        consume_webhook_request(&mut stream);
         let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
         stream.write_all(response.as_bytes()).unwrap();
         stream.flush().unwrap();
