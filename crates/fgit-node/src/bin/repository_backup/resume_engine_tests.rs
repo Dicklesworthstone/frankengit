@@ -132,7 +132,7 @@ fn a_published_destination_with_new_work_is_refused_without_rewinding_or_cleanup
         let request = node.request_context();
         let session = LoopbackReceiveSession::authenticated(PrincipalId::from_bytes([3; 16]), IdempotencyKey::new(b"new-work".to_vec()).unwrap());
         let command = RefCommand { name: RefName::try_new(b"refs/heads/new-work").unwrap(),
-            expected_old: ExpectedOld::Absent, proposed_new: ProposedNew::Update(commit) };
+            expected_old: ExpectedOld::Absent, proposed_new: ProposedNew::Update(commit), force: false };
         let result = node.runtime().block_on(node.admit_branch_updates_durable_in(&request, &session, &[command], Default::default())).unwrap();
         assert!(matches!(result.commands[0].terminal.outcome, DecisionOutcome::Committed { .. })); Ok(())
     }).unwrap();

@@ -20,7 +20,7 @@ impl Source {
         Self { format, commits: BTreeMap::new(), trees: BTreeMap::new(), blobs: BTreeMap::new(),
             calls: Cell::new(0), stop: Cell::new(usize::MAX) }
     }
-    fn tree(&mut self, files: &[File<'_>]) -> GitOid {
+    fn write_tree(&mut self, files: &[File<'_>]) -> GitOid {
         let mut leaves = Vec::new();
         let mut directories: BTreeMap<Vec<u8>, Vec<File<'_>>> = BTreeMap::new();
         for &(path, body, mode) in files {
@@ -33,7 +33,7 @@ impl Source {
             }
         }
         for (name, files) in directories {
-            let oid = self.tree(&files);
+            let oid = self.write_tree(&files);
             leaves.push(MergeEntry { name, mode: 0o040000, oid });
         }
         self.directory(leaves)
@@ -55,7 +55,7 @@ impl Source {
         self.trees.insert(oid, entries);
         oid
     }
-    fn commit(&mut self, tree: GitOid, parents: &[GitOid], label: &str) -> GitOid {
+    fn write_commit(&mut self, tree: GitOid, parents: &[GitOid], label: &str) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents { body.push_str(&format!("parent {parent}\n")); }
         body.push_str(&format!("author T <t@x> 1 +0000\ncommitter T <t@x> 1 +0000\n\n{label}"));
@@ -64,12 +64,12 @@ impl Source {
         oid
     }
     fn pair(&mut self, b: &[File<'_>], o: &[File<'_>], t: &[File<'_>]) -> (GitOid, GitOid) {
-        let root = self.tree(b);
-        let base = self.commit(root, &[], "base");
-        let root = self.tree(o);
-        let ours = self.commit(root, &[base], "ours");
-        let root = self.tree(t);
-        let theirs = self.commit(root, &[base], "theirs");
+        let root = self.write_tree(b);
+        let base = self.write_commit(root, &[], "base");
+        let root = self.write_tree(o);
+        let ours = self.write_commit(root, &[base], "ours");
+        let root = self.write_tree(t);
+        let theirs = self.write_commit(root, &[base], "theirs");
         (ours, theirs)
     }
 }
@@ -111,7 +111,7 @@ fn cross_directory_rename_transports_edits_and_mode_without_rewriting_parents() 
                 &[(b"old/file", b"edited\n", 0o100644)],
             );
             if swap { std::mem::swap(&mut o, &mut t); }
-            let expected = s.tree(&[(b"new/nested/name", b"edited\n", 0o100755)]);
+            let expected = s.write_tree(&[(b"new/nested/name", b"edited\n", 0o100755)]);
             let plan = clean(run(&s, o, t));
             assert_eq!(plan.tree, expected);
             assert_eq!(plan.target, o);
@@ -145,7 +145,7 @@ fn same_destination_on_both_sides_preserves_independent_mode_change() {
     let mut s = Source::new(GitHashAlgorithm::Sha256);
     let (o, t) = s.pair(&[(b"old", b"base", 0o100644)],
         &[(b"new", b"base", 0o100755)], &[(b"new", b"base", 0o100644)]);
-    let expected = s.tree(&[(b"new", b"base", 0o100755)]);
+    let expected = s.write_tree(&[(b"new", b"base", 0o100755)]);
     assert_eq!(clean(run(&s, o, t)).tree, expected);
 }
 
@@ -183,7 +183,7 @@ fn copies_are_not_renames_and_unrelated_deletions_remain_deletions() {
     let (o, t) = s.pair(&[(b"old", b"base", 0o100644), (b"gone", b"delete", 0o100644)],
         &[(b"old", b"base", 0o100644), (b"copy", b"base", 0o100644)],
         &[(b"old", b"edited", 0o100644), (b"gone", b"delete", 0o100644)]);
-    let expected = s.tree(&[(b"old", b"edited", 0o100644), (b"copy", b"base", 0o100644)]);
+    let expected = s.write_tree(&[(b"old", b"edited", 0o100644), (b"copy", b"base", 0o100644)]);
     assert_eq!(clean(run(&s, o, t)).tree, expected);
 }
 
@@ -223,7 +223,7 @@ fn source_side_new_files_do_not_follow_a_directory_rename_inference() {
     let (o, t) = s.pair(&[(b"old/a", b"base", 0o100644)],
         &[(b"new/a", b"base", 0o100644)],
         &[(b"old/a", b"edited", 0o100644), (b"old/added", b"keep here", 0o100644)]);
-    let expected = s.tree(&[(b"new/a", b"edited", 0o100644), (b"old/added", b"keep here", 0o100644)]);
+    let expected = s.write_tree(&[(b"new/a", b"edited", 0o100644), (b"old/added", b"keep here", 0o100644)]);
     assert_eq!(clean(run(&s, o, t)).tree, expected);
 }
 
@@ -233,7 +233,7 @@ fn raw_non_utf8_paths_are_preserved_and_unrelated_text_uses_the_existing_merge()
     let (o, t) = s.pair(&[(b"old\xff", b"base", 0o100644), (b"text", b"a\nb\nc\nd\ne\n", 0o100644)],
         &[(b"dir/new\xfe", b"base", 0o100644), (b"text", b"A\nb\nc\nd\ne\n", 0o100644)],
         &[(b"old\xff", b"edited", 0o100644), (b"text", b"a\nb\nc\nd\nE\n", 0o100644)]);
-    let expected = s.tree(&[(b"dir/new\xfe", b"edited", 0o100644), (b"text", b"A\nb\nc\nd\nE\n", 0o100644)]);
+    let expected = s.write_tree(&[(b"dir/new\xfe", b"edited", 0o100644), (b"text", b"A\nb\nc\nd\nE\n", 0o100644)]);
     assert_eq!(clean(run(&s, o, t)).tree, expected);
 }
 
@@ -270,14 +270,14 @@ fn explicit_empty_directories_survive_beside_emptied_rename_parents() {
         (vec![(b"new/a".as_slice(), b"base".as_slice(), 0o100644)], "ours"),
         (vec![(b"old/a".as_slice(), b"edited".as_slice(), 0o100644)], "theirs"),
     ] {
-        let root = s.tree(&files);
+        let root = s.write_tree(&files);
         let mut entries = s.trees[&root].clone();
         entries.push(keep.clone());
         let root = s.directory(entries);
         let parents = if tips.is_empty() { vec![] } else { vec![tips[0]] };
-        tips.push(s.commit(root, &parents, label));
+        tips.push(s.write_commit(root, &parents, label));
     }
-    let root = s.tree(&[(b"new/a", b"edited", 0o100644)]);
+    let root = s.write_tree(&[(b"new/a", b"edited", 0o100644)]);
     let mut entries = s.trees[&root].clone();
     entries.push(keep);
     let expected = s.directory(entries);

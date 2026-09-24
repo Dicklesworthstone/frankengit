@@ -155,14 +155,14 @@ fn actual_publication_survives_reopen_with_exact_evidence_and_no_branch_or_polic
         assert!(matches!(published.1.outcome, DecisionOutcome::Committed { .. }));
         let after = materialize(&node);
         assert_eq!(after.snapshot().refs, before.snapshot().refs);
-        let before_head = before.authenticated_head().body().unwrap(); let after_head = after.authenticated_head().body().unwrap();
+        let before_head = before.basis().body().clone(); let after_head = after.basis().body().clone();
         assert_eq!(before_head.ref_root, after_head.ref_root); assert_eq!(before_head.policy_epoch, after_head.policy_epoch);
         assert_eq!(before_head.retention_root, after_head.retention_root);
         assert_ne!(before_head.forge_position_root, after_head.forge_position_root);
         assert_ne!(before_head.outbox_root, after_head.outbox_root);
         let event = record.proposed_event(publisher(), format).unwrap();
         let fgit_forge::AggregateId::WorkflowCheck(id) = event.aggregate else { panic!("workflow aggregate") };
-        let basis = PublicationBasis::new(after.authenticated_head().head_id(), after_head);
+        let basis = after.basis().clone();
         let saved = node.runtime().block_on(workflow_checks::read_at(
             &node.authority, node.request_context().authority(), &basis, id, &|| false,
         )).unwrap().unwrap();
@@ -171,9 +171,9 @@ fn actual_publication_survives_reopen_with_exact_evidence_and_no_branch_or_polic
         assert_eq!(fs::read(run.run_directory.join("check-proposals.journal")).unwrap(), journal_before);
         node.shutdown().unwrap();
         let mut reopened = OneNode::open_existing(config).unwrap(); serve(&mut reopened);
-        let head = materialize(&reopened).authenticated_head().head_id();
+        let head = materialize(&reopened).basis().id();
         assert_eq!(publish(&reopened, &record, b"publish-build"), published);
-        assert_eq!(materialize(&reopened).authenticated_head().head_id(), head);
+        assert_eq!(materialize(&reopened).basis().id(), head);
         reopened.shutdown().unwrap();
     }
 }
@@ -183,15 +183,15 @@ fn occupied_job_and_evidence_substitution_cannot_create_a_second_delivery() {
     let temp = Temp::new(); let (mut node, _, run) = run_fixture(&temp, GitHashAlgorithm::Sha1, false);
     let record = submitted_record(&run); let first = publish(&node, &record, b"publish-once");
     assert!(matches!(first.1.outcome, DecisionOutcome::Committed { .. }));
-    let outbox = materialize(&node).authenticated_head().body().unwrap().outbox_root;
+    let outbox = materialize(&node).basis().body().clone().outbox_root;
     let duplicate = publish(&node, &record, b"new-key-same-job");
     assert!(matches!(duplicate.1.outcome, DecisionOutcome::Refused { code: RefusalCode::EvidenceStale, .. }));
-    assert_eq!(materialize(&node).authenticated_head().body().unwrap().outbox_root, outbox);
+    assert_eq!(materialize(&node).basis().body().clone().outbox_root, outbox);
     let mut bad = record.clone(); bad.job.push_str("-forged");
     let refused = publish(&node, &bad, b"bad-evidence");
     assert!(matches!(refused.1.outcome, DecisionOutcome::Refused { code: RefusalCode::EvidenceInvalid, .. }));
     assert_eq!(publish(&node, &bad, b"bad-evidence"), refused);
-    assert_eq!(materialize(&node).authenticated_head().body().unwrap().outbox_root, outbox);
+    assert_eq!(materialize(&node).basis().body().clone().outbox_root, outbox);
     bad = record; bad.evidence.push(0);
     assert!(node.runtime().block_on(node.admit_trusted_workflow_check_in(
         &node.request_context(), &session(b"publish-once"), &bad, Default::default()
@@ -210,9 +210,9 @@ fn historical_retry_is_not_rewritten_when_the_current_branch_moves() {
         &node.request_context(), &root, publisher(), b"advance-workflow-source"
     )).unwrap();
     assert!(update.commands.iter().all(|c| matches!(c.terminal.outcome, DecisionOutcome::Committed { .. })));
-    let moved = materialize(&node).authenticated_head().head_id();
+    let moved = materialize(&node).basis().id();
     assert_eq!(publish(&node, &record, b"old-observation"), first);
-    assert_eq!(materialize(&node).authenticated_head().head_id(), moved);
+    assert_eq!(materialize(&node).basis().id(), moved);
     let stale = publish(&node, &record, b"new-request-old-source");
     assert!(matches!(stale.1.outcome, DecisionOutcome::Refused { code: RefusalCode::TargetRefMoved, .. }));
     assert_eq!(materialize(&node).snapshot().refs.get(&source_ref()), Some(&next));

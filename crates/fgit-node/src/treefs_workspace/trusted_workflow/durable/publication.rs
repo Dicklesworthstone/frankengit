@@ -99,7 +99,7 @@ impl OneNode {
 
 impl workflow_checks::WorkflowCheckProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
     fn validate_workflow_check_async<'a>(
-        &'a self, _: &'a FsqliteAuthorityStore, cx: &'a Cx, basis: &'a PublicationBasis,
+        &'a self, store: &'a FsqliteAuthorityStore, cx: &'a Cx, basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead, record: &'a WorkflowCheckRecord,
     ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
         async move {
@@ -110,8 +110,22 @@ impl workflow_checks::WorkflowCheckProjection<FsqliteAuthorityStore> for NodeNat
                 &|| self.merge_checkpoint(cx).is_ok()).map_err(|code| {
                     self.merge_checkpoint(cx).err().map_or(ProjectionFailure::Refuse(code), ProjectionFailure::Unavailable)
                 })?;
-            let materialized = self.inner.materialize_in(cx, authenticated).await.map_err(ProjectionFailure::Unavailable)?;
-            if materialized.snapshot().ref_root != basis.body().ref_root {
+            let materialized = self
+                .inner
+                .materializer
+                .materialize_exact_in(
+                    store,
+                    cx,
+                    self.node.repository_id,
+                    basis,
+                    authenticated,
+                    &|| self.merge_checkpoint(cx).is_err(),
+                )
+                .await
+                .map_err(crate::async_projection_unavailable)?;
+            // The exact materializer selects `basis`; a different basis means the
+            // authenticated receipt and the publication basis no longer agree.
+            if materialized.basis() != basis {
                 return Err(ProjectionFailure::Unavailable(RefusalCode::AuthorityReceiptStale));
             }
             if materialized.snapshot().refs.get(&record.source_ref) != Some(&record.source_commit) {
@@ -120,16 +134,24 @@ impl workflow_checks::WorkflowCheckProjection<FsqliteAuthorityStore> for NodeNat
             if record.source_commit.algorithm() != self.node.object_format {
                 return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid));
             }
-            let closure = materialized.closure();
+            let closure = materialized.selected_closure().closure();
+            if closure.objects().len() > self.object_limits.max_objects {
+                return Err(ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded));
+            }
             if !closure.objects().contains(&record.source_commit) {
                 return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete));
             }
-            let parsed_limits = MergeObjectLimits::default();
             let exhaustion = Cell::new(None);
-            let source = VerifiedFabricPackSource::new(
-                self.node, closure.objects(), parsed_limits.max_objects as u64,
-                parsed_limits.max_payload_bytes as u64, Some(cx), &exhaustion,
-            );
+            let source = VerifiedFabricPackSource {
+                fabric: &self.node.fabric,
+                object_format: self.node.object_format,
+                maximum_object_bytes: self.object_limits.max_object_bytes.min(
+                    usize::try_from(self.node.max_object_bytes).unwrap_or(usize::MAX),
+                ),
+                database_context: cx,
+                database_exhaustion: &exhaustion,
+                session_is_live: None,
+            };
             let result = source.read_object(&record.source_commit);
             self.merge_checkpoint(cx).map_err(ProjectionFailure::Unavailable)?;
             if exhaustion.get().is_some() {
