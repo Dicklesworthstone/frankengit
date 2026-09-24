@@ -1,6 +1,7 @@
 //! Caller-selected limits, not automatic budget increases based on input size.
 use super::archive::stream::TransferLimits;
 use fgit_node::NodeRequestContext;
+use fgit_runtime::{BudgetClass, BudgetPolicy, ClassLimits};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug)]
@@ -17,6 +18,19 @@ impl Default for Profile {
     }
 }
 impl Profile {
+    /// Runtime budgets for the node a backup command opens. The operator's
+    /// `--timeout-secs` bounds its database and request contexts too; the
+    /// per-context 15 s / 30 s defaults size ordinary requests and cancelled a
+    /// large backup or restore mid-store ("cancelled after transmission") no
+    /// matter what timeout the operator chose. Poll and cost quotas stay
+    /// finite at the transfer class's defaults.
+    pub fn node_budgets(self) -> Result<BudgetPolicy, String> {
+        let limits = ClassLimits::finite(self.timeout, 1_000_000, 50_000_000);
+        BudgetPolicy::finite_defaults()
+            .with_class_limits(BudgetClass::Database, limits)
+            .and_then(|policy| policy.with_class_limits(BudgetClass::Request, limits))
+            .map_err(|error| format!("backup runtime budget refused: {error}"))
+    }
     pub fn start(self) -> Deadline {
         Deadline {
             started: Instant::now(),

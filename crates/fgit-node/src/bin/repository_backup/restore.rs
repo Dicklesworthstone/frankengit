@@ -157,11 +157,14 @@ fn create_private(path: &Path) -> Result<(), String> {
         .create(path)
         .map_err(|e| format!("cannot reserve new restore directory: {e}"))
 }
-fn config(root: &Path, archive: &StreamHeader) -> NodeConfig {
+fn config(root: &Path, archive: &StreamHeader, profile: Profile) -> Result<NodeConfig, String> {
     let id = archive.identity;
-    NodeConfig::new(root.to_path_buf(), id.tenant, id.repository)
-        .with_object_format(id.format)
-        .with_expected_repository_incarnation(id.incarnation)
+    Ok(
+        NodeConfig::new(root.to_path_buf(), id.tenant, id.repository)
+            .with_object_format(id.format)
+            .with_expected_repository_incarnation(id.incarnation)
+            .with_runtime_budgets(profile.node_budgets()?),
+    )
 }
 fn verify_stored(node: &OneNode, record: &Record<'_>) -> Result<(), String> {
     let stored = node
@@ -321,6 +324,10 @@ impl PreparedPublication {
             destination: destination.to_path_buf(),
         })
     }
+    /// The no-replace link is the visibility boundary. The quarantine alias is
+    /// then dropped: fsqlite >= 0.4 refuses to open a database path with more
+    /// than one hard link, and the verified image is the same file at the
+    /// destination. A crash between the two is settled on resume.
     fn publish(self) -> Result<(), String> {
         fs::hard_link(
             self.quarantine.join("authority.fsqlite"),
@@ -328,7 +335,12 @@ impl PreparedPublication {
         )
         .map_err(|e| format!("destination authority was not published: {e}"))?;
         sync_directory(&self.destination)
-            .map_err(|e| format!("destination authority is visible; sync failed: {e}"))
+            .map_err(|e| format!("destination authority is visible; sync failed: {e}"))?;
+        fs::remove_file(self.quarantine.join("authority.fsqlite")).map_err(|e| {
+            format!("destination authority is visible; quarantine alias removal failed: {e}")
+        })?;
+        sync_directory(&self.quarantine)
+            .map_err(|e| format!("destination authority is visible; quarantine sync failed: {e}"))
     }
 }
 
@@ -418,6 +430,8 @@ fn execute_with_checkpoints(
     };
     let already_published = intent.published()?;
     let (expected, prior_graph) = if already_published {
+        // Drop a crash-surviving quarantine alias before any engine reopen.
+        intent.settle_publication()?;
         let expected = authority_image(
             &options.output,
             &archive.header().authority,
@@ -441,27 +455,33 @@ fn execute_with_checkpoints(
                 deadline,
             )?;
             checkpoint(Stage::Authority)?;
-            let graph = with_node(config(&quarantine, archive.header()), |node| {
-                graph_from_archive(
-                    node,
-                    &mut archive,
-                    &expected,
-                    true,
-                    options.profile,
-                    deadline,
-                )
-            })?;
+            let graph = with_node(
+                config(&quarantine, archive.header(), options.profile)?,
+                |node| {
+                    graph_from_archive(
+                        node,
+                        &mut archive,
+                        &expected,
+                        true,
+                        options.profile,
+                        deadline,
+                    )
+                },
+            )?;
             checkpoint(Stage::Objects)?;
-            let reopened = with_node(config(&quarantine, archive.header()), |node| {
-                graph_from_archive(
-                    node,
-                    &mut archive,
-                    &expected,
-                    false,
-                    options.profile,
-                    deadline,
-                )
-            })?;
+            let reopened = with_node(
+                config(&quarantine, archive.header(), options.profile)?,
+                |node| {
+                    graph_from_archive(
+                        node,
+                        &mut archive,
+                        &expected,
+                        false,
+                        options.profile,
+                        deadline,
+                    )
+                },
+            )?;
             if reopened != graph {
                 return Err("restored graph changed across quarantine reopen".into());
             }
@@ -482,16 +502,19 @@ fn execute_with_checkpoints(
         (expected, Some(graph))
     };
     checkpoint(Stage::Published).map_err(|e| format!("destination authority is visible; {e}"))?;
-    let graph = with_node(config(&options.output, archive.header()), |node| {
-        graph_from_archive(
-            node,
-            &mut archive,
-            &expected,
-            false,
-            options.profile,
-            deadline,
-        )
-    })
+    let graph = with_node(
+        config(&options.output, archive.header(), options.profile)?,
+        |node| {
+            graph_from_archive(
+                node,
+                &mut archive,
+                &expected,
+                false,
+                options.profile,
+                deadline,
+            )
+        },
+    )
     .map_err(|error| {
         format!("destination authority is visible; final reopen verification failed: {error}")
     })?;

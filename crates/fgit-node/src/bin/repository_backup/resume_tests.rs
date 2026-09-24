@@ -225,3 +225,41 @@ fn symlinked_intent_or_data_never_becomes_a_resume_source() {
             .contains("path kind")
     );
 }
+
+/// A crash between the publishing link and the alias removal leaves two links
+/// to one database; fsqlite >= 0.4 refuses to open such a path. Settling
+/// removes only an alias proven to be the published file.
+#[cfg(unix)]
+#[test]
+fn a_surviving_quarantine_alias_is_settled_only_when_it_is_the_published_file() {
+    let scratch = Scratch::new();
+    let root = scratch.root();
+    let intent = Intent::reserve(&root, PIN, instance()).unwrap();
+    let quarantine = intent.quarantine().unwrap();
+    fs::write(quarantine.join("authority.fsqlite"), b"verified image").unwrap();
+    fs::hard_link(
+        quarantine.join("authority.fsqlite"),
+        root.join("authority.fsqlite"),
+    )
+    .unwrap();
+    assert!(intent.published().unwrap());
+    intent.settle_publication().unwrap();
+    assert!(!quarantine.join("authority.fsqlite").exists());
+    assert_eq!(
+        fs::read(root.join("authority.fsqlite")).unwrap(),
+        b"verified image"
+    );
+    intent.settle_publication().unwrap();
+
+    fs::write(quarantine.join("authority.fsqlite"), b"a different image").unwrap();
+    assert!(
+        intent
+            .settle_publication()
+            .unwrap_err()
+            .contains("differs from the published authority")
+    );
+    assert_eq!(
+        fs::read(quarantine.join("authority.fsqlite")).unwrap(),
+        b"a different image"
+    );
+}

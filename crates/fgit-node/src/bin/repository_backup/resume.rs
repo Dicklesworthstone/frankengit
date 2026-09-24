@@ -143,6 +143,28 @@ impl Intent {
         Ok(quarantine)
     }
 
+    /// Complete a publication whose quarantine database alias survived a crash
+    /// between the no-replace link and its removal. Only an alias proven to be
+    /// the published file (device and inode) is removed; a different file is
+    /// retained and refused.
+    pub(super) fn settle_publication(&self) -> Result<(), String> {
+        let quarantine = self.root.join(".restore-quarantine");
+        let alias = quarantine.join("authority.fsqlite");
+        if !has_kind(&alias, false)? {
+            return Ok(());
+        }
+        if !same_file(&alias, &self.root.join("authority.fsqlite"))? {
+            return Err(
+                "quarantined database differs from the published authority; both retained".into(),
+            );
+        }
+        fs::remove_file(&alias).map_err(|e| {
+            format!("destination authority is visible; quarantine alias removal failed: {e}")
+        })?;
+        sync_directory(&quarantine)
+            .map_err(|e| format!("destination authority is visible; quarantine sync failed: {e}"))
+    }
+
     /// Called only after the final authority image AND all source objects have
     /// reverified and the node closed. The intent and lock files stay for a
     /// lost-response retry; they never claim that validation has completed.
@@ -175,6 +197,19 @@ fn binding(pin: [u8; 32], instance: StoreInstanceId) -> [u8; INTENT_BYTES] {
     bytes[8..40].copy_from_slice(&pin);
     bytes[40..].copy_from_slice(&instance.raw().to_be_bytes());
     bytes
+}
+/// Whether two paths name the same regular file (device and inode), without
+/// following a final symlink.
+#[cfg(unix)]
+fn same_file(left: &Path, right: &Path) -> Result<bool, String> {
+    use std::os::unix::fs::MetadataExt;
+    let left = fs::symlink_metadata(left).map_err(|e| e.to_string())?;
+    let right = fs::symlink_metadata(right).map_err(|e| e.to_string())?;
+    Ok(left.is_file() && right.is_file() && left.dev() == right.dev() && left.ino() == right.ino())
+}
+#[cfg(not(unix))]
+fn same_file(_: &Path, _: &Path) -> Result<bool, String> {
+    Err("cannot prove the quarantine alias is the published file on this platform".into())
 }
 /// Existing symlinks/devices and unexpected path kinds are never treated as
 /// absence. Caller owns stable parent paths; this is not a hostile-host adapter.

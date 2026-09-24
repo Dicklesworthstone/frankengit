@@ -183,7 +183,8 @@ fn each_restore_boundary_resumes_in_both_domains_without_new_authority_tokens() 
                 )
             );
             options.resume = true;
-            let receipt = execute(&options).unwrap();
+            let receipt =
+                execute(&options).unwrap_or_else(|error| panic!("resume after {stage:?}: {error}"));
             assert!(receipt.contains("\"objects\":3,"));
             assert!(receipt.contains("\"resume_requested\":true"));
             assert!(!options.output.join(".restore-quarantine").exists());

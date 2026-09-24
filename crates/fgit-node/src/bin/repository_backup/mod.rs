@@ -169,7 +169,8 @@ fn export(options: &Options, file: &mut File) -> Result<String, String> {
     deadline.check()?;
     let result = with_node(
         NodeConfig::new(options.root.clone(), options.tenant, options.repository)
-            .with_object_format(options.format),
+            .with_object_format(options.format)
+            .with_runtime_budgets(options.profile.node_budgets()?),
         |node| {
             let request = node.request_context();
             let selected = node
