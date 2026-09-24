@@ -16,6 +16,8 @@ use fgit_resource::settlement::{DeliveryVerdict, DownstreamIdempotency, ProbeVer
 use fgit_types::{AsciiSlug, Digest, RefusalCode};
 use fsqlite_types::cx::Cx;
 
+mod transport;
+
 /// In-memory and file-backed Dead Letter Queue for terminally failed webhook deliveries.
 #[derive(Clone, Debug, Default)]
 pub struct DeadLetterQueue {
@@ -321,6 +323,17 @@ impl WebhookDeliveryDestination {
                 return Ok((DeliveryVerdict::PermanentRejection, err_msg.into_bytes()));
             }
         };
+
+        // URL validation admits HTTPS, but this adapter only owns a plain
+        // TCP stream. Refuse before DNS, signing or I/O; never silently
+        // downgrade an operator's HTTPS destination to cleartext HTTP.
+        if let Err(reason) = transport::require_plain_http(&validated) {
+            self.record_terminal_failure(request, attempt, reason, now_secs);
+            return Ok((
+                DeliveryVerdict::PermanentRejection,
+                reason.as_bytes().to_vec(),
+            ));
+        }
 
         // 2. Resolve DNS safely and check every resolved IP against SSRF policy
         let target_addr = match self.resolve_safe_socket_addr(&validated) {
