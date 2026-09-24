@@ -49,6 +49,8 @@ use fgit_authority::{
 };
 use fsqlite::{AsyncConnection, FrankenError, Row, SqliteValue};
 use fsqlite_types::cx::{Cx, cap};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::classify::classify_franken_error;
 use crate::interpret::{
@@ -60,7 +62,8 @@ use crate::marshal::{
     MarshalError, blob, read_blob, read_optional_unsigned, read_unsigned, unsigned,
 };
 use crate::retry::{
-    BackoffPlan, RetryBudget, RetryOutcome, RetryVerdict, TransientClass, decide_after_failure,
+    BackoffPlan, MAX_TRANSIENT_ATTEMPTS, RetryBudget, RetryOutcome, RetryVerdict, TransientClass,
+    decide_after_failure,
 };
 use crate::schema::{SCHEMA_VERSION, ddl_statements, operation_statement};
 use crate::token::{TokenMintError, mint_token, next_issuance_after};
@@ -1186,6 +1189,113 @@ where
     }
 }
 
+/// Production retry profile for one store operation, in millisecond ticks.
+///
+/// Every trait operation below is one whole SQL transaction, so this is the
+/// §3.4 whole-transaction retry, never a statement replay. Seven backoffs from
+/// 2 ms doubling to a 256 ms ceiling fit well inside the 2 s budget.
+const OPERATION_RETRY_BUDGET: RetryBudget = RetryBudget::new(2_000, MAX_TRANSIENT_ATTEMPTS);
+const OPERATION_BACKOFF_BASE_MS: u64 = 2;
+const OPERATION_BACKOFF_CEILING_MS: u64 = 256;
+
+/// Per-call jitter seeds, so concurrent contenders on one store separate
+/// instead of re-colliding on identical delays. Deterministic in call order.
+static OPERATION_RETRY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// The current task's runtime timer, when it has one. Time belongs to the
+/// runtime (§3.3): without a runtime clock the operation is not retried.
+fn runtime_timer() -> Option<asupersync::time::TimerDriverHandle> {
+    asupersync::Cx::current().and_then(|cx| cx.timer_driver())
+}
+
+/// Retry state for one production store operation.
+///
+/// Only transient classes that prove no effect are retried; cancellation,
+/// indeterminate outcomes and permanent errors end the loop on the attempt
+/// that produced them. The decision is [`decide_after_failure`], the same law
+/// [`run_with_retry`] and the synchronous driver apply. Once the law stops,
+/// the last real error is mapped exactly as a single attempt would be, so an
+/// exhausted contention retry is still `Refused(Throttled)`: no effect, never
+/// an ambiguity.
+struct OperationRetry {
+    budget: RetryBudget,
+    backoff: BackoffPlan,
+    elapsed_ticks: u64,
+    attempt: u32,
+}
+
+impl OperationRetry {
+    fn new(instance: StoreInstanceId) -> Self {
+        let budget = if runtime_timer().is_some() {
+            OPERATION_RETRY_BUDGET
+        } else {
+            RetryBudget::new(0, 1)
+        };
+        let seed = instance.raw() ^ OPERATION_RETRY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        Self {
+            budget,
+            backoff: BackoffPlan::new(
+                OPERATION_BACKOFF_BASE_MS,
+                OPERATION_BACKOFF_CEILING_MS,
+                seed,
+            ),
+            elapsed_ticks: 0,
+            attempt: 1,
+        }
+    }
+
+    /// The runtime wait before the next whole-transaction attempt, or the
+    /// contract failure this attempt's error ends the operation with.
+    fn after_failure(
+        &mut self,
+        error: EngineError,
+    ) -> Result<asupersync::time::Sleep, AuthorityFailure> {
+        match decide_after_failure(
+            self.budget,
+            self.backoff,
+            self.attempt,
+            self.elapsed_ticks,
+            error.transient_class(),
+        ) {
+            RetryVerdict::Retry {
+                delay_ticks,
+                budget,
+            } => {
+                let timer = runtime_timer().ok_or_else(|| error.clone().into_failure())?;
+                self.budget = budget;
+                self.elapsed_ticks = self.elapsed_ticks.saturating_add(delay_ticks);
+                self.attempt += 1;
+                Ok(asupersync::time::sleep(
+                    timer.now(),
+                    Duration::from_millis(delay_ticks),
+                ))
+            }
+            RetryVerdict::FreshSnapshotRequired
+            | RetryVerdict::OutcomeIndeterminate
+            | RetryVerdict::Permanent
+            | RetryVerdict::Exhausted(_) => Err(error.into_failure()),
+        }
+    }
+}
+
+/// Re-run `$operation` (one whole SQL transaction) under [`OperationRetry`].
+/// A macro rather than a generic driver keeps each trait future a plain state
+/// machine over the operation's own future, so proving it `Send` stays local.
+macro_rules! with_transient_retry {
+    ($instance:expr, $operation:expr) => {{
+        let mut retry = OperationRetry::new($instance);
+        loop {
+            match $operation.await {
+                Ok(value) => break Ok(value),
+                Err(error) => match retry.after_failure(error) {
+                    Ok(wait) => wait.await,
+                    Err(failure) => break Err(failure),
+                },
+            }
+        }
+    }};
+}
+
 // ---------------------------------------------------------------------------
 // The production trait impl (t7ip condition 2).
 //
@@ -1217,9 +1327,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         key: &ImmutableKey,
         body: &[u8],
     ) -> Result<PutOutcome, AuthorityFailure> {
-        Self::put_if_absent(self, cx, key, body)
-            .await
-            .map_err(EngineError::into_failure)
+        with_transient_retry!(self.instance, Self::put_if_absent(self, cx, key, body))
     }
 
     async fn read_immutable(
@@ -1227,9 +1335,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         cx: &Self::Context,
         key: &ImmutableKey,
     ) -> Result<ImmutableRead, AuthorityFailure> {
-        Self::read_immutable(self, cx, key)
-            .await
-            .map_err(EngineError::into_failure)
+        with_transient_retry!(self.instance, Self::read_immutable(self, cx, key))
     }
 
     async fn initialize_head(
@@ -1239,9 +1345,10 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         generation: HeadGeneration,
         body: &[u8],
     ) -> Result<HeadInit, AuthorityFailure> {
-        Self::initialize_head(self, cx, key, generation, body)
-            .await
-            .map_err(EngineError::into_failure)
+        with_transient_retry!(
+            self.instance,
+            Self::initialize_head(self, cx, key, generation, body)
+        )
     }
 
     async fn read_head(
@@ -1249,9 +1356,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         cx: &Self::Context,
         key: &HeadKey,
     ) -> Result<HeadRead, AuthorityFailure> {
-        Self::read_head(self, cx, key)
-            .await
-            .map_err(EngineError::into_failure)
+        with_transient_retry!(self.instance, Self::read_head(self, cx, key))
     }
 
     async fn compare_exchange_head(
@@ -1262,9 +1367,10 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         new_generation: HeadGeneration,
         new_body: &[u8],
     ) -> Result<CasOutcome, AuthorityFailure> {
-        Self::compare_exchange_head(self, cx, key, expected, new_generation, new_body)
-            .await
-            .map_err(EngineError::into_failure)
+        with_transient_retry!(
+            self.instance,
+            Self::compare_exchange_head(self, cx, key, expected, new_generation, new_body)
+        )
     }
 
     async fn publish_head_with_outcomes(
@@ -1277,18 +1383,19 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         outcomes: &[(ImmutableKey, Vec<u8>)],
         witness: &DuplicateAbsenceWitness,
     ) -> Result<CasOutcome, AuthorityFailure> {
-        Self::publish_head_with_outcomes(
-            self,
-            cx,
-            key,
-            expected,
-            new_generation,
-            new_body,
-            outcomes,
-            witness,
+        with_transient_retry!(
+            self.instance,
+            Self::publish_head_with_outcomes(
+                self,
+                cx,
+                key,
+                expected,
+                new_generation,
+                new_body,
+                outcomes,
+                witness,
+            )
         )
-        .await
-        .map_err(EngineError::into_failure)
     }
 
     async fn authenticate_head_receipt(
@@ -1296,15 +1403,83 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         cx: &Self::Context,
         receipt: &HeadReadReceipt,
     ) -> Result<AuthenticatedHead, AuthorityFailure> {
-        Self::authenticate_head_receipt(self, cx, receipt)
-            .await
-            .map_err(EngineError::into_failure)
+        with_transient_retry!(
+            self.instance,
+            Self::authenticate_head_receipt(self, cx, receipt)
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineError, HeadGeneration, MarshalError, head_generation_from_unsigned};
+    use super::{
+        AuthorityFailure, AuthorityRefusal, EngineError, HeadGeneration, MAX_TRANSIENT_ATTEMPTS,
+        MarshalError, OperationRetry, StoreInstanceId, TransientClass,
+        head_generation_from_unsigned,
+    };
+    use fgit_authority::AmbiguityReason;
+    use fgit_runtime::boot::RuntimeProfile;
+
+    const INSTANCE: StoreInstanceId = StoreInstanceId::from_raw(7);
+
+    #[test]
+    fn production_contention_is_retried_to_the_bound_and_then_still_proves_no_effect() {
+        let runtime = RuntimeProfile::production(1).build().unwrap();
+        runtime.block_on(async {
+            let mut retry = OperationRetry::new(INSTANCE);
+            for attempt in 1..MAX_TRANSIENT_ATTEMPTS {
+                assert!(
+                    retry
+                        .after_failure(EngineError::Engine(TransientClass::Busy))
+                        .is_ok(),
+                    "attempt {attempt} of a busy store is retried under the runtime clock"
+                );
+            }
+            assert_eq!(
+                retry
+                    .after_failure(EngineError::Engine(TransientClass::WriteConflict))
+                    .unwrap_err(),
+                AuthorityFailure::Refused(AuthorityRefusal::Throttled),
+                "exhausted contention is a refusal (no effect), never an ambiguity"
+            );
+        });
+    }
+
+    #[test]
+    fn cancellation_indeterminacy_and_permanent_errors_are_never_retried() {
+        let runtime = RuntimeProfile::production(1).build().unwrap();
+        runtime.block_on(async {
+            for (error, expected) in [
+                (
+                    EngineError::Engine(TransientClass::Cancelled),
+                    AuthorityFailure::Ambiguous(AmbiguityReason::Cancelled),
+                ),
+                (
+                    EngineError::Engine(TransientClass::OutcomeIndeterminate),
+                    AuthorityFailure::Ambiguous(AmbiguityReason::NoResponse),
+                ),
+                (
+                    EngineError::Contract(AuthorityRefusal::Unavailable),
+                    AuthorityFailure::Refused(AuthorityRefusal::Unavailable),
+                ),
+            ] {
+                let mut retry = OperationRetry::new(INSTANCE);
+                assert_eq!(retry.after_failure(error).unwrap_err(), expected);
+            }
+        });
+    }
+
+    #[test]
+    fn without_a_runtime_clock_contention_is_not_retried() {
+        // Time belongs to the runtime: outside one there is no way to back off.
+        let mut retry = OperationRetry::new(INSTANCE);
+        assert_eq!(
+            retry
+                .after_failure(EngineError::Engine(TransientClass::Busy))
+                .unwrap_err(),
+            AuthorityFailure::Refused(AuthorityRefusal::Throttled)
+        );
+    }
 
     #[test]
     fn head_generation_conversion_accepts_live_values_and_truthfully_refuses_zero() {
