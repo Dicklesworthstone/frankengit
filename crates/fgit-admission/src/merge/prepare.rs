@@ -108,6 +108,10 @@ pub(crate) fn prepare_event(
         ForgeEventPayload::ReviewProtectionChanged(_) => {
             event.aggregate == fgit_forge::AggregateId::ReviewProtection
         }
+        ForgeEventPayload::WorkflowCheckObservedNative(change) => {
+            event.aggregate == fgit_forge::AggregateId::WorkflowCheck(change.id())
+                && event.version == fgit_forge::AggregateVersion::FIRST
+        }
         _ => matches!(event.aggregate, fgit_forge::AggregateId::PullRequest(_)),
     };
     if !aggregate_matches
@@ -135,6 +139,26 @@ pub(crate) fn prepare_event(
         .map_err(|_| RefusalCode::EvidenceInvalid)?;
     let entity = ForgeEntityId::new(label);
     let (kind, required_objects, ref_effect) = match &event.payload {
+        ForgeEventPayload::WorkflowCheckObservedNative(change) => {
+            // Bind the actual event, actor and inline evidence to this exact
+            // original seal, not merely to a well-formed request of any kind.
+            let (expected, sealed) = super::native::workflow_checks::proposal(context, &change.record)
+                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+            if expected != *event || sealed != *attempt {
+                return Err(RefusalCode::EvidenceInvalid);
+            }
+            if resolved.refs.refs().get(&change.record.source_ref) != Some(&change.record.source_commit) {
+                return Err(RefusalCode::TargetRefMoved);
+            }
+            (
+                ForgeEventKind::WorkflowCheckObserved {
+                    check: entity,
+                    source: change.record.source_ref.clone(),
+                },
+                vec![change.record.source_commit],
+                None,
+            )
+        }
         ForgeEventPayload::ReviewProtectionChanged(change) => {
             change
                 .validate()

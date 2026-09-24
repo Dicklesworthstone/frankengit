@@ -36,6 +36,7 @@ pub mod progress;
 pub mod protection;
 pub mod pull_request;
 pub mod settlement;
+pub mod workflow_checks;
 mod storage;
 pub use storage::{legacy_genesis_root, load_forge_positions};
 mod workspace;
