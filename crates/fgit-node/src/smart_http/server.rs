@@ -13,6 +13,7 @@ mod issues;
 mod outcomes;
 mod pulls;
 mod source;
+mod stock_receive;
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -103,9 +104,10 @@ impl OneNode {
     /// usernames are nonempty UTF-8, at most 256 bytes, with no ASCII control
     /// characters; they never select a principal or grant additional scopes.
     /// Receive discovery and RPC are
-    /// disabled unless `allow_receive` is explicitly true. Every push RPC must
-    /// additionally carry a client-chosen `Idempotency-Key` header; retrying it
-    /// unchanged resolves an ambiguous response through canonical admission.
+    /// disabled unless `allow_receive` is explicitly true. Stock Git discovery
+    /// selects an attempt-scoped URL carrying a stable retry key; its RPC still
+    /// authenticates independently. Explicit `Idempotency-Key` clients retain
+    /// their existing route and canonical outcome-recovery contract.
     ///
     /// This local capability profile does not implement organization/team IAM
     /// or TLS. Non-loopback listeners are refused. Forwarded identity headers
@@ -805,6 +807,9 @@ fn serve_connection(
     let mut recovery_error = None;
     let served = (|| -> Result<(), Status> {
         let bytes = read_head(&mut reader, profile.http)?;
+        let Some(bytes) = stock_receive::adapt(bytes, profile, &mut version, &mut writer)? else {
+            return Ok(());
+        };
         let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
         version = envelope.version;
         if browser::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer)? {
