@@ -1,218 +1,451 @@
-# FrankenGit reality check and bridge plan — 2026-09-07
+# FrankenGit reality check and bridge plan — 2026-09-23
 
-FrankenGit has a working, bounded pure-Rust Git node and substantial subsystem implementations. It does not yet deliver the integrated forge, agent product, hosted deployment or release system described by its vision. The largest remaining gap is composition: public operations, durable effects, actual adapters and independent verification must connect the existing libraries.
+FrankenGit is a real, bounded, pure-Rust Git server with a genuinely atomic forge core. It serves clone, fetch and push to stock Git clients, and a pull-request merge publishes the ref move, the PR state and the outbox entry in one authority compare-and-swap. It is not yet a forge a team can rely on. The gap has changed shape since 2026-09-07, from "missing composition" to "unverified breadth":
 
-This assessment binds product source to `b74b666dc644c6ed18697f3950690bf289c33114`, on Linux x86_64 with `nightly-2026-08-31`. It distinguishes observed runtime behavior, inspected implementations and future requirements. It is not a security audit, universal compatibility result, benchmark claim or batch-verification certificate.
+- The rate of new surface is far ahead of verification. Main does not compile at HEAD. 163 commits since 2026-09-07 say in their own messages that compilation or tests were not run (115 because Cargo/rustc was unavailable).
+- A 2026-09-22 closure wave marked the SSH transport, hostile-CI campaign, projection substrate and policy rewiring complete when their acceptance was not met.
+- About 68K lines of product crates (agent plane, ATP-Git, RaptorQ/repair/GC, safe Markdown, projections, statistics) are linked into no binary.
 
-**Consumer and retirement:** the repository owner, subsystem assignees and batch orchestrator use this document to sequence the first deployable forge and prevent incomplete library work from receiving product credit. The observed defect classes are missing production adapters, incomplete composition, acceptance/evidence mismatch and stale documentation. Replace this snapshot in place when a later revision-bound assessment supersedes it; implementation evidence and authoritative Beads take over each resolved row. This report grants no runtime authority or capability credit.
+This supersedes the 2026-09-07 snapshot in place.
 
-## 1. What was actually examined
+**Binding.**
+- Source was inspected at `46b922e7` (HEAD at the start of the assessment). HEAD does not compile.
+- Executable evidence was produced in an isolated detached worktree at its parent, `94a77dfb`, the newest commit whose product binary builds. The run used `nightly-2026-08-31` on Linux x86_64, a private target directory, and a private `CARGO_HOME` (symlinked registry, `CARGO_NET_OFFLINE=true`), because other projects' builds held the shared package-cache lock. The repository's own `verify.sh` sets `RCH_CARGO_WRAPPER_BYPASS=1`, and the direct cargo invocations here did the same.
+- Unrelated projects' builds were running concurrently. Timing-sensitive results are labelled as such.
+- This is not a security audit, universal compatibility result, benchmark claim or batch-verification certificate.
 
-All of `AGENTS.md` and `README.md` were read. The assessment also examined the comprehensive plan, architecture, normative protocol contracts, dependency constitution and sibling integration profile, verification specification, threat model, Git compatibility matrix, relevant ADRs, agent control-plane status and reconciliation documents, claims and dependency registries, source and test inventories, public node/CLI dispatch, and selected subsystem implementations and E2E scripts.
+**Consumer and retirement.** The repository owner, the batch orchestrator and every assignee use this document to decide what is actually done and what to build next. The observed defect classes are:
+- uncompiled code on main;
+- acceptance-unmet closures;
+- product crates with no production caller;
+- security defects on shipped listeners;
+- stale public claims.
 
-The authoritative tracker baseline came from `br list --status all --limit 0 --no-db --json`, with `has_more=false`, and `br ready --unassigned --no-db --json`. Advisory analysis used the mandatory `scripts/bv_compat.sh` wrapper. Code review traced important user operations across owning crates; it did not review every line of all 47 first-party crates or exhaustively audit every closed issue.
+Replace this snapshot in place when a later revision-bound assessment supersedes it. The epic `frankengit-root-doctrine-x2mv.4` and its children take over each resolved row. This report grants no capability credit.
 
-Builds ran offline, locally, with `RCH_CARGO_WRAPPER_BYPASS=1` and the private target `/data/frankengit-targets/reality-20260907-VdyQfM`. Full logs, command receipts, tracker snapshots and E2E artifacts are retained in `/tmp/frankengit-reality-20260907-VdyQfM`. No dependencies were upgraded, goldens regenerated, assertions weakened or product source changed.
+## 1. What was examined
 
-## 2. Current executable evidence
+All of `AGENTS.md`, `README.md` and the previous reality check were read. The comprehensive plan's product definition, v1 scope (§4.1), delivery roadmap (§44), success metrics (§48) and definition of done (§49) were read, as were the normative contracts' release-blocking invariants (§32) and the verification specification's structure.
 
-These are results observed during this assessment at the stated source revision, not recalled historical results.
+Six independent read-only audits traced six subsystems through source, tests, docs and the tracker:
+- the Git transport surface;
+- forge workflows;
+- user surfaces (CLI, HTTP, browser, MCP, TUI);
+- the agent plane, TreeFS and CI;
+- search, graphs and projections;
+- durability, operations, release and the constitution.
 
-| Check | Actual result | What it establishes |
+Every critical claim those audits made was re-checked directly before inclusion. Examples:
+- the SSH constant key at `crates/fgit-ssh/src/session.rs:419`;
+- the 4,096-event read cap at `crates/fgit-admission/src/merge/native/pull_request.rs:214-245`;
+- the dummy webhook payload in `crates/fgit-node/src/webhook.rs:268-282`;
+- the hard-coded policy facts at `crates/fgit-admission/src/policy_bridge.rs:277-285`;
+- the fail-open receive check at `crates/fgit-admission/src/lib.rs:2469-2474`;
+- the combiner having no callers;
+- the crate reachability graph derived from every manifest.
+
+The tracker baseline was `br list --status all --limit 0 --no-db --json` (569 records, `has_more=false`), plus `br ready --unassigned --no-db --json` and `br gate list` for every bead closed since 2026-09-17. Git history since 2026-09-07 was classified by bead reference and by self-declared execution status.
+
+## 2. Executable evidence at `94a77dfb`
+
+The host filesystem filled (0 bytes free) late in the first test pass. Every binary from #500 onward, and every failure, was re-run once the owner freed space. The seven race binaries were run a third time from a near-idle host. The counts below combine valid first-pass results with the rerun.
+
+| Check | Result | What it establishes |
 |---|---|---|
-| `./scripts/verify.sh fast` | Exit 1 | Docs and constitution stages succeeded, then formatting failed in seven `fgit-wire` files. The canonical fast lane did not pass or reach its later checks. |
-| `cargo test --workspace --all-targets --locked --no-fail-fast` | Exit 0; 4,590 passed, 0 failed, 24 ignored across 490 test-result groups | The current workspace compiles and its nonignored local tests execute successfully. Ignored differential/fault/benchmark workers still require their owning campaigns. |
-| `cargo build --locked -p fgit-cli` | Exit 0 | A fresh binary exists from the assessed source. |
-| `./scripts/verify.sh constitution`, after that build | Exit 0, with native-linkage evaluation skipped | The implemented checks accept this tree, but build-script linkage evidence discovery is ineffective under this Cargo layout. This is not a complete native-linkage clearance. |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Exit 101 | `visibility_composed_records.rs:55` fails `collapsible_if`. Do not extrapolate one reported error into proof that no later errors exist. |
-| Selected real-node E2E campaign | Exit 0; four suites, 152 distinct acceptance IDs, no failed/skipped/unsupported/timed-out cells | Nonempty clone, raw push, historical `fg at`, and pinned-client incremental fetch work for the exercised profiles. |
-| Separate SHA-256 repository E2E | Exit 0; 26 acceptance IDs | A separately rebuilt binary initializes/refuses formats correctly, serves SHA-256 and transfers a nonempty repository to pinned Git 2.54.0. It does not prove the complete SHA-256 push/fetch matrix. |
-| `./scripts/verify.sh full` | Exit 3, explicitly dormant | The canonical full conformance/lab/fault/fuzz/corpus lane is not complete. |
-| `./scripts/verify.sh release` | Exit 3, explicitly dormant | License checking and a release wiring probe do not produce a releasable target matrix or release publication. |
-
-The selected E2E invocation used the freshly built `FG_BIN` and the repository's `run_all.sh`. `first_clone.sh`, `first_push.sh` and `time_travel.sh` use the ordinary installed Git 2.55.0 client; they are compatibility observations, not the pinned differential lane. `incremental_fetch.sh` uses the verified, sandboxed Git 2.54.0 oracle with source and binary digest checks. Do not promote the ordinary-client cells to the constitution's pinned-oracle claim class. The XL push option was not enabled.
-
-The pinned incremental campaign exercised v1/v2 fetch, three concurrent clients, exact introduced-object counts, packs smaller than the declared fraction of the full clone, strict fsck, exact checked-out bytes, and client/server interruption followed by successful recovery. This is meaningful live protocol evidence. It does not establish throughput leadership, internet transport security, large-repository envelopes or multi-region reliability.
-
-The historical-state suite created nonempty durable history, published a later refusal, recovered an earlier decision by decision and head identity, compared both endpoints and refused a position ahead of authority. Capsule checkpoints and positions inside multi-decision batches remain outside that cell.
-
-Late in the selected E2E work, the audit's eight tracker additions temporarily appeared in the shared tracker because `br` defaults linked worktrees to the canonical tracker. Product source and HEAD remained unchanged; the records were preserved in the isolated tracker and the placement corrected. The results above are source-scoped observations, not an independently recorded `batch_verify` gate. This distinction also applies to any further targeted scenario run while audit metadata was being prepared.
-
-## 3. The vision-to-product map
-
-“Implemented library” below means there is real behavior and a tested boundary; it does not imply the whole deployment product is available. Bead references abbreviate the unique FG numbers where that is clearer. The exact records remain in the tracked issue export.
-
-| Vision area | Present implementation / evidence | Remaining product or proof gap | Existing work |
-|---|---|---|---|
-| Canonical identities and encodings | `fgit-types`, `crypto`, `codec`, `reference`; native hash domains and typed bodies | Complete schema-family coverage, migration and exact producer/consumer evidence | FG-002/003 closed; `b3wy` and incarnation work active |
-| One authority, seal, outcome and RCR | `authority`, `txn`, `admission`, `chronicle`; real embedded CAS/publication and recovery code | Preserve atomic outcomes across every newly wired product effect | FG-004/007/008/009 implemented; relevant integration beads remain |
-| Embedded durable node | `authority-fsqlite` plus `OneNode`; fresh nonempty clone/push/history evidence | Wider operational and concurrency envelopes, service lifecycle and upgrade evidence | FG-005 and FG-028a closed; FG-028b pending |
-| Remote object-store authority | Provider-neutral adapter and strict version-token probe | Built-in HTTPS transport refuses; no live remote product path proved here | FG-006 closed; uncovered residual now tracked |
-| Immutable object fabric | Envelopes, microsegments, verified objects, placement/retention abstractions | Production remote placement and operational campaigns for each sold durability profile | FG-020/021 closed; FG-036/037/077 remain |
-| Git object/pack/DEFLATE | Native parsers, codecs, delta resolution, indexing and writer implementations | Complete pinned corpus, resource, format and transport matrix at one revision | FG-015/016/017 implemented; ignored oracle workers and FG-090 matter |
-| Clone and fetch | Live raw daemon, nonempty clone and pinned incremental fetch | Smart HTTP and authenticated SSH product surfaces; complete compatibility envelope | FG-018/028, FG-105, FG-047 |
-| Push | Real raw-daemon receive path with an operator-supplied principal, quarantine and admission | Transport authentication, full policy composition, protected-ref evidence and broader adversarial cells | `hh37`, `jkbo`, FG-019c pending; FG-043r in progress |
-| Import, export and hash formats | Real import/export paths; typed SHA-1/SHA-256 support | Packed-import completion, full SHA-256 transfer/push matrix and migration behavior | FG-106 active, FG-058 open, FG-059 active |
-| Durable forge merge | Forge state/diff/merge logic and synchronous admission tests | Permitted OneNode merge still refuses before CAS; forge/outbox integration also unfinished | `asa3` in progress; FG-029 evidence pending |
-| PRs, reviews and protection | `fgit-forge`, `fgit-policy` and related typed state machines | Durable user-facing lifecycle, current policy wiring, merge races and delivery | FG-029, FG-043r/c, FG-083 |
-| Issues, discussions and inbox | Planned event-backed product | Complete write/read/notification workflows and projections | FG-045 open |
-| Derived read models | `fgit-projection` exists and uses admitted sqlmodel/FrankenSQLite | Actual consumer projections, transaction outcome/cleanup/retry contract and broad evidence | FG-093a/b pending; FG-093c open |
-| Identity and account security | `fgit-identity` and policy primitives; local tests | Bind authenticated clients to live transport/API operations and account lifecycle evidence | FG-042 epic open, security campaign pending |
-| REST, schema and GitHub compatibility | `fgit-schema` descriptors and schema work | Admitted gateway, real API operations, generated contract/clients where specified, import compatibility | FG-048c blocked; FG-048b/049 open |
-| CLI, doctor, web and TUI | CLI currently dispatches init/import/doctor/serve/export/at | Full machine protocol and useful auth/repository/PR/issue/search/run/evidence workflows; web/TUI | FG-051/050/094 open |
-| TreeFS and materializers | Immutable base, COW overlay, semantic intent/export, archives and sparse manifests | Real safe sparse host directory and optional mounted adapter | FG-026/052/076 closed; uncovered residuals now tracked |
-| ATP-Git acceleration | Conservative whole-object planning, exact reconstruction and trust-scoped cache code | Node/CLI product wiring, adaptive/pack/chunk profiles and measured end-to-end benefit | FG-022/023/075 implemented; remaining profiles and campaigns |
-| RaptorQ, repair and GC | Coding, original-commitment validation, repair/scrub/compaction and retention logic | Deployment-bound backing storage, remaining MUST classes, real clean restore and debt control | FG-024/025/033/078/079 implemented; FG-077 and operational work open |
-| Search and graph intelligence | Substantial `fgit-graph` deterministic/temporal/algorithmic libraries | Lexical/symbol search product, semantic refinement, authorized progressive query surface | FG-031/080/081/082 implemented; FG-032 open |
-| Statistics and optimization | Statistical/fallback/evidence libraries and benchmark/SLO tooling | Production consumers and current exact-profile A/A, baseline/candidate and tail/cost evidence | FG-054/067 and scoped FG-036c closed; no general performance claim |
-| Agent protocol and control plane | Extensive typed run/capability/situation/plan/claim/handoff/recovery code; tests now execute | Concrete task I/O, nine other live collectors, production action executor, durable broker and assembled ECC flow | FG-030 closed; FG-072/074 and uncovered assembly work remain |
-| Agent tools and MCP | Protocol primitives available | Capability-narrow actual server/tools, transport lifecycle and live-client evidence | FG-096 open |
-| Workflow and CI | Workflow lowering plus bounded local process runner and receipts | Workflow coordinator/check publication and hostile-code isolation; descendant/resource enforcement | FG-095b/c open; `25cs` blocked |
-| Build reuse and evidence exchange | Library contracts, verified artifact/evidence handling | Integrated cache/execution/publication service and supported remote exchange behavior | FG-039/040 implemented at bounded scope; consumers still needed |
-| Snapshots and bisection | Historical `fg at` has live evidence; snapshot/bisection libraries exist | Full state/capsule/batch-position scope and bisection campaign | FG-038a/b pending; FG-038c open |
-| Releases and packages | Durable attempt journal, source-tree/key boundaries, inventories and signed local-root mechanisms | Real target execution entrypoint and release gate; package protocol endpoints | `0zjt` and FG-060 pending; FG-091/100 open |
-| Distributed and hosted operations | Cell/routing/read-mode/SLO/fault models and libraries | Live backend integration, multi-region operations, routing decision, incident/restore/readiness evidence | FG-036b pending; FG-065/088 open; `b5ph` blocked |
-| Enterprise/federation/billing | Design and some supporting primitives | Complete declared customer workflows and exact authority/domain boundaries | FG-063/101/102/103/104 and related work open |
-| Proof and security assurance | Bounded models, scoped Lean claims, negative tests and source safety rules | Whole production refinement is unproved; live cross-tenant/runner/storage and independent review gates remain | FG-041 bounded; FG-066/071/072/086 and release gates remain |
-
-This is a breadth map of the documented vision, not an assertion that every code path in each row was audited. The backend, merge, projection, runner, agent and release boundaries received deeper source tracing because they determine whether library breadth becomes a usable forge.
-
-## 4. Findings that should change priorities
-
-### 4.1 Durable merge is blocked before publication
-
-The README says the real store/projection merge path reaches head CAS, leaving only outbox delivery. The source says otherwise, and the call chain supports the source's warning.
-
-[`OneNode::admit_merge_durable_in`](../crates/fgit-node/src/lib.rs) passes its `DurableAdmissionMaterializer` into `admit_merge_async`. That async function's commit branch still invokes synchronous materialization. The materializer's synchronous `stage_ref_state` and forge-body staging methods return `DurabilityProfileUnavailable`. The explicit known-defect comment starts at node line 6698; the rejecting implementations are around lines 2053 and 2141. Thus a permitted durable merge cannot complete this path.
-
-The cited [`merge_admission_race.rs`](../crates/fgit-admission/tests/merge_admission_race.rs) uses synchronous `admit_merge` with a test `Store(Rc<Commitments>)`. Its passing result is useful bounded admission evidence. Promoting it to proof that the durable OneNode composition can commit is proof-class inflation (RH-2). `asa3` already owns the complete fix: retain its full acceptance scope and require a real reopened-node success beside the refusal/race cases. Do not create a duplicate “merge done” bead or close on outbox work alone.
-
-### 4.2 Projection implementation exists, but its acceptance mapping is incomplete
-
-The installed sqlmodel 0.4.2 stack now compiles and the projection tests execute; the README's eight-error sqlmodel blocker is stale. However, `fgit-projection` is primarily a watermark/identity/applied-decision substrate, not an implemented issues/PR/search/API read model.
-
-[`session.rs`](../crates/fgit-projection/src/session.rs) collapses cancellation and panic into `ProjectionError::Interrupted` (`flatten`, lines 79–86), despite the sibling profile requiring preservation of four-way outcomes. Inspection did not find the promised explicit close/join and whole-transaction transient-retry implementation. The code also documents that part of the identity decision-range receipt does not advance with folds. These are specific acceptance concerns for FG-093b, not merely future consumer UI work. Its `batch_pending` status deserves line-by-line review against the existing acceptance criteria before closure. FG-093c's campaign cannot excuse missing implementation in FG-093b.
-
-### 4.3 Release primitives are ahead of the actual release command
-
-[`fgit-release-attempt`](../crates/fgit-release/src/bin/fgit-release-attempt.rs) accepts only `--release-gate-probe`. The attempt library can journal files/results and sign a local root, but its production target step is injected and the default is unavailable. The release E2E script explicitly says its fixture supplies terminal target results and claims neither an OS target executor nor a published release.
-
-`0zjt` nevertheless has acceptance requiring the real host target through runner obligations and `verify.sh release` returning zero for a host-only completed matrix. The current script returns three. Its pending status cannot be treated as satisfaction of those conditions. Preserve FG-091's independently defined required-suite set and complete the real runner/CLI/signing path; do not redefine “release” as a successful probe.
-
-### 4.4 A hosted adapter and a hostile runner are not available by implication
-
-[`fgit-object-store`](../crates/fgit-object-store/src/lib.rs) has real provider-neutral protocol logic, but its built-in TLS constructor unconditionally refuses. Scripted HTTP responses do not establish a live hosted backend.
-
-[`ProcessSubstrate`](../crates/fgit-runner/src/lib.rs) is explicitly for trusted local commands. It does not establish namespaces, cgroups, comprehensive descendant containment or measured CPU/memory/disk/network enforcement. The ADR and blocked `25cs` agree. A typed isolation policy and a passing local command are not sufficient to accept hostile CI workloads.
-
-### 4.5 Agent architecture is extensive; the useful production loop is missing
-
-The current control plane has much more than empty types: exact run identities, claim persistence orchestration, revocation, ancestry, recovery and cross-head transfer logic are substantive. The stale status document even understates the newer cross-head implementation.
-
-But its own boundaries still lack concrete backend I/O, nine production situation collectors, an action executor, a durable broker journal and complete ECC orchestration. The CLI also does not expose the envisaged complete agent operations. Finishing more receipt types without connecting these consumers would deepen the imbalance. Reuse the existing abstractions for one persisted, restartable, authorized source change with real tool evidence and ordinary admission.
-
-### 4.6 The native-linkage checker misses real build evidence
-
-The fresh build emitted, for example, `debug/build/serde/<hash>/run/stdout` and analogous files for libc and crc32c. [`collect_native_linkage`](../tools/registry-check/src/enabled_macros.rs) searches only older `output` paths. The checker therefore repeats “build once” even after a successful build. The missing evidence is observed; forbidden native linkage is not alleged. Fix discovery with exact target/profile/package provenance and planted positive/negative controls, then reevaluate the evidence.
-
-### 4.7 Specifications and snapshots disagree
-
-The comprehensive plan's §0.3 precedence order conflicts with AGENTS.md §2. Its §4.2 puts merge queue in subsequent scope, while its v1 definition of done and the compatibility matrix require it. Its licensing completion criterion conflicts with the already resolved D14 choice, `LicenseRef-MIT-OpenAI-Anthropic-Rider`; the rider must not be called OSI-approved open source. The root Cargo.toml comment also retains the unsafe incremental crate-creation order that AGENTS §16.1 explicitly replaced.
-
-These are contract-reconciliation tasks. This assessment does not silently choose new publication semantics, weaken v1 requirements or reopen the owner's licensing decision. Separately, the README's nonexistent historical-E2E and current sqlmodel-blocker claims should be updated with the newly observed evidence, while its durable-merge claim should be demoted.
-
-## 5. What the tracker does and does not cover
-
-The baseline has **556 non-tombstone issue records**: 445 closed, 69 open, 26 batch_pending, seven in progress, four blocked and five deferred. The wrapper encounters another 25 tombstones in the raw export. The dependency graph has 754 edges and no cycles. `br ready --unassigned --no-db --json` returned an empty array. Advisory importance does not make an assigned or blocked issue claimable.
-
-There is substantial existing coverage for the missing product: HTTP, SSH, policy rewiring, durable merge, projections, search, issues, API, UI, MCP, workflow execution, isolation, packages, hosted operation and release gates already have work. Generating another umbrella backlog for those would create competing ownership rather than progress.
-
-**Implementing only the currently open and in-progress records would not establish the whole vision.** It would omit pending/blocked/deferred work, independent acceptance verification, residual gaps beneath closed beads, and the uncovered adapters above. Even completing all known issues is insufficient if completion continues to mean a narrower library result than its acceptance conditions.
-
-The strongest coverage defects are residuals under closed FG-006 and FG-052, production agent assembly absent from the active task descriptions, and the newly observed native-linkage evidence-discovery defect. Eight additional records cover these plus contract reconciliation. Existing assignees, statuses, acceptance conditions and closure gates are preserved.
-
-## 6. Bridge plan: ship coherent capabilities in dependency order
-
-### A. Restore a usable evidence baseline without confusing it with feature progress
-
-Resolve the current formatting and Clippy findings through the existing wire owner; fix the native-linkage discovery defect; independently review pending acceptance mappings; reconcile contradictory instructions and stale present-tense claims. FG-091 must connect the real exact-suite matrix to `full` and `release`, retaining typed non-pass cells. Exit criterion: a reproducible current fast result and an honest full/release inventory. Formatting alone earns no forge capability credit.
-
-### B. Deliver one authenticated durable forge operation
-
-Prioritize FG-047/105, FG-043r, `asa3`, FG-093 and the forge event/outbox consumer as a single customer-visible chain: authenticate, read protected state, push a proposed change, open/review/merge it, observe the new ref and forge state, restart, and recover the same outcome. UI expansion should consume this chain rather than invent a parallel write path.
-
-Exit evidence must include one real permitted merge through OneNode, two competing merges with exactly one winner, stale/revoked policy refusals, lost-response retry, crash before/after CAS, coherent projection rebuild and idempotent outbox delivery. Ref and forge state must publish in the same RCR. Existing open issue/notification and webhook work remains required for its declared scope; it is not traded away to call this milestone complete.
-
-### C. Make agent-native behavior usable over those real components
-
-Connect the concrete task store, all generation-bound collectors, a safe host TreeFS workspace and the durable action executor. Reuse existing control-plane authorization and recovery APIs. Coordinate with FG-051/096 for public machine interfaces and FG-072/074 for independent verification/delegation; those existing owners retain their work.
-
-The demonstration must survive a fresh-process restart with its original sealed identity, reconcile ambiguous effects, publish through ordinary admission and prove cleanup. A model need not be required for deterministic conformance: a supplied agent action plan can exercise the real product orchestration, while model-mediated behavior has its own recorded harness identity. Do not substitute mocked host effects for the conformance path.
-
-### D. Complete the single-node team product
-
-Implement the remaining declared issues/reviews/inbox, account lifecycle, REST and full CLI, progressive search, workflow coordination, package/artifact and UI surfaces against those shared write/read APIs. Use one watermark contract and authorization before disclosure. Complete the blocked hostile-runner prerequisite before accepting untrusted workflows. Close existing acceptance conditions where they belong; do not move missing functionality to follow-ups to close an epic.
-
-### E. Add real remote operation and recovery
-
-Connect the admitted HTTPS authority transport and chosen backend; validate its nonstandard authority requirements rather than assuming generic object-storage parity. Resolve `b5ph` routing authority before rename/transfer/cutover implementation. Complete current distributed fault, clean restore, RaptorQ-required classes, cross-tenant and operational-degradation work on actual declared storage/runtime profiles.
-
-Measure RPO/RTO, resource floors and repair/checkpoint/outbox debt, plus requests, bytes and cost. Statistical routing or repair heuristics must preserve deterministic fallback and cannot acquire authorization/deletion authority. A single-host multi-cell test is not a multi-region deployment result.
-
-### F. Publish an actual independently verified release
-
-Finish `0zjt` and FG-091 with a real bounded runner target command, exact source snapshot, complete requested assets, key-purpose-bound signatures, verified root-last manifest, clean resume and withheld publication on any missing target. Default host support must not imply a complete cross-platform matrix. Remote releases remain distribution adapters. Include installation, rollback, schema migration and a clean restore rehearsal for the declared release profile.
-
-### G. Earn performance and later-scope claims from the integrated system
-
-Keep ATP profiles, sparse sharing, batching, graph/statistical refinements, federation, managed runners and enterprise extensions in their existing dependency graph. Select optimizations from measured end-to-end bytes/work/latency/cost and preserve A/A controls, scalar/reference equivalence, tails, rollback and negative results. The live incremental-fetch result is a useful starting mechanism witness, not a general speed claim. The optional FUSE adapter stays explicitly optional; it is not silently required to make the unmounted node useful.
-
-## 7. Plan refinement and safeguards
-
-The ambition passes expanded the plan from local test health to (1) a complete durable forge operation, (2) a persisted agent operation and (3) operational recovery, release and economic evidence. They preserve the full documented scope while giving each milestone a real consumer and observable exit.
-
-Four refinement passes checked the proposed work against existing ownership, authority/cancellation contracts, positive and negative runtime evidence, and dependency/readiness behavior. They removed duplicates for merge/release/projection, made the optional mount separate from required host workspaces, made the task adapter's actual atomicity a prerequisite rather than an assumed br capability, and pinned every new acceptance claim to a real operation. The final review retained eight new records and no source implementation changes.
-
-Before implementation, the assignee must rederive HEAD, dirty paths, reservations and exact authoritative readiness. This report does not authorize taking an assigned bead. `batch_pending` remains a handoff, and the batch orchestrator alone records a revision-bound gate and closes a bead.
-
-## 8. Audit-branch additions and evidence appendix
-
-Eight new unassigned records are preserved on `audit/reality-20260907`, in the isolated worktree `/tmp/frankengit-reality-worktree-20260907-VdyQfM`. They are not yet merged into the shared main tracker. To inspect that tracker, explicitly set `BEADS_DIR` to the worktree’s `.beads` directory; a plain br invocation otherwise resolves to the main tracker. Existing issue records remain byte-identical to the baseline.
-
-
-| New bead | Priority/type | Concrete obligation |
-|---|---|---|
-| `frankengit-audit-native-linkage-l0xt` | P1 bug | Current nightly build-script evidence discovery |
-| `frankengit-audit-objectstore-https-88g7` | P1 feature | Live remote authority transport and backend conformance |
-| `frankengit-audit-treefs-host-zb0q` | P2 feature | Real safe sparse host workspace |
-| `frankengit-audit-treefs-fuse-mwck` | P3 feature | Optional real mount; depends on host workspace |
-| `frankengit-audit-agent-task-store-xcu9` | P1 feature | Concrete durable task/Beads adapter |
-| `frankengit-audit-agent-collectors-sjzo` | P1 feature | Actual generation-bound situation sources |
-| `frankengit-audit-agent-execution-p7sa` | P1 feature | Persisted agent execution, recovery and ordinary admission |
-| `frankengit-audit-contract-reconcile-fjsz` | P1 question | Resolve contradictory instructions and stale implementation claims |
-
-The agent task adapter depends on the existing projection implementation. Live collectors depend on that adapter and existing search/compatibility-ledger work. The executor depends on the adapters, real TreeFS host workspace, hostile-isolation prerequisite and verifier-independence work. This keeps the full production acceptance blocked on its real prerequisites while allowing ready foundational tasks to proceed. No existing bead was reassigned, self-closed, split or weakened.
-
-Five selected E2E suites passed **178 distinct acceptance IDs** across two runner invocations. This is intentionally not a full-suite result. Counts by suite: first clone 19, first push 21, historical state 15, pinned incremental fetch 97, SHA-256 repository 26. Both invocations report no containment failure, malformed evidence, hidden skip or retry-laundered pass. The ordinary-client cells and pinned-oracle cells retain their different evidence classes.
-
-The source audit did not execute every ignored corpus worker, a complete Miri/fuzz/Lean campaign, an untrusted-runner escape test, a live remote object-store/multi-region campaign, the XL push envelope, a full cross-target matrix or a signed production release. The absence of those results is not reported as a source failure or a pass.
-
-Selected raw evidence digests (SHA-256), all under the scratch evidence directory named in section 1:
-
-| Artifact | Digest |
+| `cargo check --workspace --all-targets` at HEAD `46b922e7` | exit 101: fgit-runner lib E0423 (`journaled/observations.rs:114-115`) | `fg` cannot be built at HEAD. Newer origin commits (`3a7ab99b`, `bfb3bb30`, `33583151`) were pushed on top, each declaring it was never compiled. |
+| `verify.sh docs` | exit 1 | Stale README claim block (CLM-001 demoted by ecdc799d) plus a hosted write-to-main workflow merged 2026-09-22. |
+| `verify.sh constitution` (after a fresh build) | exit 0 | Checks pass. Native linkage is evaluated against cached observations. psm's `libpsm_s.a` (assembled x86_64 object plus a C flag probe) is admitted by DEP-262. |
+| `cargo fmt --all -- --check` | exit 1 | Drift in 72 files at HEAD, all from post-2026-09-22 commits. |
+| `cargo check --workspace --all-targets` | exit 101 | fgit-forge lib-test target: 29 errors (uncompiled daa87647). |
+| `fgit-schema-gen check` | exit 0 | Generated schema artifacts are current. |
+| `cargo test --workspace --all-targets --no-fail-fast` | exit 101, **zero tests run** | cargo aborts on uncompilable test targets (fgit-forge lib test, and fgit-node `fg-repository-backup` bin test). |
+| All compilable test executables (`cargo build --all-targets --keep-going`, then each binary run) | 629 executables ran. 6,779 passed, **45 failed**, 31 ignored, across 26 failing binaries. The run used `cargo build --all-targets --keep-going` and then ran each binary. It was re-run from #500 on after a host ENOSPC, and the race binaries were run a third time from a near-idle host. | Classes: 7 concurrent-writer race tests where losers get `503 outcome_unknown` (reproducible; `x2mv.4.27`); snapshot-pin contract disagreement (issue/PR); branch-root and fast-forward semantic drift; backup/restore quarantine-cleanup failures; drift from the uncompiled stream (event kind 11, workflow files, bundle form fields, CLI JSON); a TreeFS lease `WouldBlock`; one temp-dir collision. Details in `x2mv.4.26`. |
+| `cargo clippy --workspace --all-targets -D warnings` | exit 101 | At least 30 errors (fgit-diff 23, fgit-schema 5, fgit-resource 1, registry-check 1). Dependents not linted. |
+| `verify.sh full` / `release` | exit 3 / exit 3 | Explicit dormancy. `release` reaches only `--release-gate-probe`. |
+| `cargo build --release -p fgit-cli` | exit 0 | A release `fg` exists for 94a77dfb. |
+| E2E `first_clone`, `first_push`, `time_travel` (debug `fg`, Git 2.55.0) | 19/19, 21/21, 15/15 | Non-empty clone, raw push with its refusal twin, and historical state work through the binary. |
+| E2E `sha256_repo_roundtrip` | 26/26 | SHA-256 repository init/refusal/serve/clone. |
+| E2E `incremental_fetch` (pinned Git 2.54.0 oracle) | debug: 29/30; release: **97/97** | The debug failure was `fg import` hitting its wall-clock deadline (`ResourceBudgetExceeded; exhaustion=Some(Deadline)`) at load average ~39. The release binary passes. |
+| E2E `ssh_transport_security` (OpenSSH client) | 23/23 | Authentication and command refusals only. It does not test confidentiality, and the key exchange is not confidential (§5.3). |
+| E2E `tag_lifecycle` | 7/15 | Suite defects, not a product failure: `ls-remote` shows both tags correctly advertised. |
+| Orphaned smokes (run by no lane): smart_http, source_search, workspace_publication, transaction_outcome | pass | Smart HTTP passes SHA-1 and SHA-256 over v0/v1/v2 with stock Git, **using an injected `Idempotency-Key` header**. |
+| Orphaned smokes: pull_request, issue | **fail** | A stale `--expected-head` pin returns a page (exit 0) where the campaign requires a typed refusal ("stale pin disclosed a mixed page"). The `issue_http` snapshot-walk test also fails. The code, the tests and the campaigns disagree on the snapshot-pin contract, and have since 5c294d6e. |
+
+Ordinary-client cells (`first_clone`, `first_push`, `time_travel`, `tag_lifecycle`, `ssh_transport_security`) use the installed Git 2.55.0 and OpenSSH. They are compatibility observations, not the constitution's pinned-oracle class. `incremental_fetch` uses the verified pinned Git 2.54.0 oracle.
+
+## 3. The short answer
+
+**Where are we really?** Roughly at the end of plan Phase 2 (pure-Rust Git core), with a real but narrow slice of Phase 5 (forge core) and trusted-local fragments of Phases 4 and 6. Phases 3, 7, 8 and 9 exist only as libraries. The README vision of "a forge designed for humans, autonomous coding agents, extreme scale, and independently verifiable recovery" is not delivered in any of its four qualifiers yet.
+
+**What works (with evidence).**
+- The canonical core:
+  - one transaction-identity derivation;
+  - seals;
+  - RCR;
+  - the exact-predecessor head CAS on FrankenSQLite;
+  - lost-response outcome recovery (`fg outcome`).
+- Raw git-daemon clone/fetch/push with quarantine and typed refusals, against real clients.
+- Loose and idx/pack import, and export.
+- SHA-256 repositories.
+- `fg at` time travel over durable history.
+- PR open/update/close/review and a durable merge whose ref, PR state and outbox publish in one RCR. It survives reopen and process death (`crates/fgit-node/tests/native_merge_publication.rs`, `native_merge_durable_crashes.rs`).
+- Issues with comments, labels and linear-scan search.
+- Branches and tags.
+- Trusted-local TreeFS workspaces through `fg workspace run/apply`, on a real openat2-confined sparse host adapter.
+- A loopback-only smart-HTTP server that serves fetch and (with a nonstandard header) push.
+- A stdio MCP server with write tools.
+- A static JavaScript browser shell.
+- Literal, regex, lexical-index and Rust-symbol search.
+
+**What does not work or is not implemented.**
+- Concurrent writers: the losing writer gets `503 outcome_unknown` or the wrong refusal count instead of a deterministic refusal. Seven race tests fail, reproducibly (§5.11).
+- Snapshot-pinned PR/issue reads disagree with their own campaigns and tests about stale pins (§5.11).
+- Authority backup restore reports incomplete on every tested path.
+- SSH is not confidential (§5.3).
+- Stock `git push` over HTTP fails.
+- PR/issue reads stop after 4,096 forge events (§5.5).
+- Policy evaluation fabricates facts and fails open (§5.6).
+- Webhooks send an empty dummy payload.
+- CI is trusted-host only: no triggers, no published checks, no required-check gating.
+- There is no GC, scrub, repair or RaptorQ on node data; the fabric grows forever.
+- No remote authority backend.
+- No per-core lanes or combiner in admission.
+- No ATP-Git on any path.
+- No safe Markdown rendering.
+- No projection read models.
+- The agent plane is an island.
+- No authenticated identity on CLI or MCP writes.
+- No TUI, GitHub import, LFS, merge queue in admission, or release.
+
+**What is blocking us.** In order of leverage:
+1. **Verification collapse.** Code lands on main uncompiled, gates close on "crate tests pass" instead of acceptance lines, and most new work bypasses the tracker (§5.1, §5.2, §5.9). Until this stops, nobody, including the owner, can know what works.
+2. **Composition debt.** Libraries are finished to a much higher standard than their integration. The next unit of value comes from connecting existing crates to the node, not from writing more of them (§5.4).
+3. **Owner decisions:**
+   - ADR-0011 gateway and ADR-0013 web UI versus what shipped;
+   - publishing fastapi_rust and frankentui on Asupersync 0.5;
+   - psm native assembly;
+   - the hostile-CI isolation stance;
+   - routing authority (`b5ph`);
+   - v1 scope precedence (`fjsz`).
+   All are listed in `frankengit-root-doctrine-x2mv.4.14`.
+
+**If every open and in-progress bead were implemented, would the gap close?** No:
+- Most of the gap sits under beads that are already closed (§5.2) or has no bead at all. Examples: SSH confidentiality, the event-log cliff, policy fact fabrication, node GC/repair, combiner integration, safe Markdown, the CI product loop, identity binding, the backup product, and the unwired smoke campaigns.
+- Several open beads describe a product that no longer matches what exists. FG-051a requires CLI commands not to import storage, but every verb opens the node in-process. FG-050 wants a server-rendered UI, but ADR-0013 forbids that and a JavaScript shell shipped instead.
+- There are now 0 in-progress beads, and the stream carrying most new code is not claimed at all.
+
+**Vision goals with no bead before this assessment** are listed in §6. They are now covered by `frankengit-root-doctrine-x2mv.4.*`.
+
+## 4. Vision checklist
+
+Status vocabulary:
+
+| Status | Meaning |
 |---|---|
-| `workspace-tests.stdout` | `9fcc92381cc04940ba7ec0feca5587f60fb9c3b3ccdbb2da9545bfe2a734e197` |
-| `workspace-tests.stderr` | `b4f7245532ab72b2c823c142f03c3a06ea60085fd876b3b56a0ae9230224d912` |
-| `fast.stdout` | `8e658b5e273a88c2991921fd2fd832bfae16b34e9b45ce62cdc491ac456e518a` |
-| `fast.stderr` | `d619c0fb8bf19ba57de50b64ac143a6e05b8ad460e9082465b81f325ba4887eb` |
-| `clippy.stderr` | `1958f1ad3b9ce16ee969f9f6d155389204b30d034caadc91629b4c2e08303baa` |
-| `e2e-selected/receipt.ndjson` | `3ef78a3afe921e24de4216554a2465e17bc3e2578315c62210782b24591026b7` |
-| `e2e-sha256/receipt.ndjson` | `ea6e6ab7947535d5d451b97b73a2611e447e5370126c9eea5140cf2512c86fcd` |
-| `full.stderr` | `85055b83dde3934730c1abf62c2a9c7803b9e877a9692064514037cae9ccd3a7` |
-| `release.stderr` | `0377e6cbc35810f2591ad13f8640e6eb77b5b483cee5f6f32b3c138146e24854` |
+| WORKING | Executed end to end through the product binary in this assessment or its cited revision-bound suite |
+| PARTIAL | Real, but part of the stated goal is missing |
+| LIBRARY-ONLY | Real code with no production caller |
+| STUB | Placeholder behaviour behind a real interface |
+| BROKEN | Present and defective |
+| NOT_STARTED | No code |
 
-Raw logs are local review artifacts, not published durable evidence. Commit and target/toolchain binding, limitations, summary counts and artifact digests are preserved here so these observations cannot be confused with later runs.
+**v1 functional scope (plan §4.1)**
 
-Final tracker validation used the isolated `BEADS_DIR`: 564 non-tombstone records, 768 dependency edges, no cycles in both br and the compatibility-wrapped bv graph. Exactly four new records were authoritatively ready and unassigned: native-linkage discovery, remote HTTPS authority, sparse host workspace, and contract reconciliation. The other four retain their declared dependencies. The pre-existing 556 issue records remain byte-identical; the shared main checkout returned to its original clean state. No bead was claimed or closed during this assessment.
+| # | Goal | Status | Evidence | Work |
+|---|---|---|---|---|
+| 1 | Repository creation/import/export | WORKING (bounded) | `fg init/import/export`; first_clone/first_push at 94a77dfb | FG-106 pending; `e6jj` 128 MiB writer ceiling |
+| 2 | SSH and smart HTTP access | BROKEN / PARTIAL | SSH fixed ephemeral key; HTTP loopback-only, `Idempotency-Key` required, node reopened per request, exits after 1,024 requests | `x2mv.4.4`, `x2mv.4.8`; FG-105a/b open |
+| 3 | Protocol-accurate clone/fetch/push | WORKING for the declared daemon tier | e2e §2; push options never advertised; `atomic` on HTTP only | FG-019 open, FG-098 |
+| 4 | Branch/tag listing and atomic ref updates | WORKING | `fg branch/tag/refs`, HTTP branch/tag APIs | — |
+| 5 | Users, orgs, teams, tokens, deploy keys | PARTIAL | fgit-identity library; only SSH deploy keys and a loopback HTTP token file are used; CLI/MCP principals are self-asserted | `x2mv.4.13` |
+| 6 | Protected refs and policy snapshots | BROKEN | Mandatory review works inline, but the policy engine gets fabricated facts, fails open on receive, and never activates stored snapshots | `x2mv.4.6` |
+| 7 | PRs, reviews, comments, labels, merge | PARTIAL | Atomic durable merge works; no reopen, PR comments, squash/ff, or approval-survival rule; 4,096-event cliff | `x2mv.4.7`, `x2mv.4.20` |
+| 8 | Issues and discussions | PARTIAL | Issues work; no discussions, assignees, milestones or notifications | FG-045 |
+| 9 | Webhooks and event API | STUB / PARTIAL | `fg events` pull feed works; webhook payload is a dummy and there is no worker | FG-046 (rework comment) |
+| 10 | Safe Markdown rendering | LIBRARY-ONLY | fgit-doc has no dependents | `x2mv.4.11` |
+| 11 | Basic lexical and symbol search | PARTIAL | Works on quiet repositories; any write stales the index; builds abort on one bad file | `x2mv.4.19`, FG-032a |
+| 12 | CI with artifacts and cache | PARTIAL (trusted only) | `fg workflow run` durable journal; no triggers, check publication, artifacts, cache or isolation | `x2mv.4.12`, `25cs` |
+| 13 | Agent identities, Intent Runs, workspaces, evidence | PARTIAL / LIBRARY-ONLY | Workspaces work (trusted); IntentRun/broker/ECC are an island | `x2mv.4.24`, `xcu9`, `sjzo`, `p7sa` |
+| 14 | Backup, capsule export, scrub, verify, restore | PARTIAL / BROKEN | Backup binaries exist but restore tests fail at 94a77dfb (§2); capped at 1 GiB/100K objects; no scrub/repair | `x2mv.4.21`, `x2mv.4.10` |
+| 15 | Single-node and object-store deployment | PARTIAL / STUB | Single node works; object-store adapter refuses TLS and speaks a private protocol | `88g7` (comment) |
+| 16 | GitHub import and compatibility matrix | NOT_STARTED / stale | FG-049 open; matrix last edited 2026-09-04 | FG-049, FG-090 |
 
-The two-file audit change consists of this report and the eight added JSONL records. The documentation lane and whitespace check completed successfully on that draft; the handoff also records validation at the final audit commit. Full raw evidence stays outside the source tree.
+**README core innovations**
+
+| Innovation | Status | Evidence |
+|---|---|---|
+| Decisions + RCR, one head CAS for ref and forge | WORKING (merge path) | asa3 chain, reopen/crash tests |
+| Stable retry identity, immutable outcomes | WORKING | `fg outcome`; transaction_outcome recovery |
+| Per-core preparation, flat combiner, witness refinement | LIBRARY-ONLY | `fgit-txn` combiner/lanes have 0 external callers; fgit-witness has 0 dependents (`x2mv.4.9`) |
+| ATP-Git | LIBRARY-ONLY | 0 dependents (`x2mv.4.22`) |
+| TreeFS | PARTIAL | Library plus trusted sparse host adapter; files copied, not shared; no FUSE |
+| Typed graph fabrics | LIBRARY-ONLY | Algorithms real; none of the nine GRAPH views built from canonical data |
+| CALM and obligation-typed effects | PARTIAL | Vocabulary exists; runner "obligations" are counters; no Asupersync regions in runner, agent or TreeFS |
+| Repair through authority | LIBRARY-ONLY | fgit-repair has 0 dependents (`x2mv.4.10`) |
+| Conformal/e-process policy | LIBRARY-ONLY | fgit-statistics consumed only by unlinked crates |
+| Local root-last releases | STUB | `verify.sh release` exits 3; the release attempt is a probe (`0zjt` comment) |
+
+**Beyond parity:**
+- Verified reads: LIBRARY-ONLY; node functions have no transport caller.
+- Time travel: WORKING (`fg at`).
+- Evidence economy: LIBRARY-ONLY (fgit-exchange unlinked).
+- Deterministic build outputs: STUB (in-memory `OutputStore`).
+- Formal core: contained Lean model only, as the README says.
+
+**Constitution:**
+- `#![forbid(unsafe_code)]`: pass (all roots).
+- No Tokio, hyper, OpenSSL, ring or libgit2: pass.
+- No production `git` subprocess: pass.
+- One Asupersync constellation: pass at 0.5.0, but the constitution text still says 0.4.x.
+- Native code: psm assembles and links `libpsm_s.a` (verified in `build/psm/*/out`), which the registry admits while DEP-182 says the opposite (`x2mv.4.15`, D4).
+- Lint-relaxation gate: misses `#[expect(`.
+
+## 5. Findings that should change priorities
+
+### 5.1 Main is being fed code nobody compiled
+
+- About 1,000 non-merge commits landed between 2026-09-07 and origin/main `bfb3bb30`. 163 of them state that compilation or tests were not run, and 115 explicitly say Cargo/rustc was unavailable. The stream stayed active during this assessment: `3a7ab99b` and `bfb3bb30` were pushed on top of the broken HEAD, and both declare they were never compiled. That includes every feature commit from 2026-09-22 onward.
+- HEAD `46b922e7` fails `cargo check` in fgit-runner (`journaled/observations.rs:114-115`, E0423). Because fgit-node and fgit-cli depend on it, `fg` cannot be built at HEAD.
+- At `94a77dfb`:
+  - the fgit-forge lib-test target has 29 compile errors in the uncompiled exact-rename tests (daa87647);
+  - an fgit-node bin-test target misses a struct field (`resume_engine_tests.rs:134`);
+  - the new `WorkflowCheck` event kind broke an existing codec contract test (`crates/fgit-forge/tests/atomic_merge.rs:481`: "kind 11 must be refused").
+- Formatting drift covers 72 files, all from post-2026-09-22 commits.
+
+The 2026-08-31..09-02 toolchain-less stream did the same thing once already (omr4). This is the root cause of most other findings. It gets P0 treatment in `x2mv.4.1` and `x2mv.4.2`.
+
+### 5.2 The 2026-09-22 closure wave overstates delivery
+
+Twenty-eight beads closed on one day. Twelve batch_verify gates have no note and no SHA, which AGENTS.md 16.2 calls unsupported. One gate provider is also the implementer of several beads closed in the same wave.
+
+Beads whose own acceptance lines are demonstrably unmet: FG-047/047b (SSH), FG-095b and FG-095c (workflow, "hostile execution"), FG-072, FG-093b, FG-029b, FG-043r/b/c, FG-096a and FG-094a. Several "e2e" suites cited as evidence are `cargo test` wrappers that grep test names, not product runs.
+
+`x2mv.4.3` lists every line and requires the verifier to reopen or re-close each one with SHA-bound, acceptance-mapped evidence. It also requires the tooling to refuse SHA-less or self-provided gates.
+
+This assessment did not reopen any bead. That transition belongs to the independent verifier.
+
+### 5.3 SSH is not confidential
+
+`crates/fgit-ssh/src/session.rs:419` initialises every session's ephemeral X25519 key from the constant `[0x77; 32]`, and the KEXINIT cookie is constant. Other problems:
+- the MAC comparison is not constant-time;
+- a peer can make the server buffer about 4 GiB before authentication;
+- flow control is ignored;
+- a silent client pins a worker forever;
+- push has never been tested over SSH.
+
+Host-key signatures still authenticate the server. Session contents are recoverable from the transcript. `fg serve-ssh` binds any address. See `x2mv.4.4`.
+
+Separately, `fg serve --receive-principal` also binds any address, so any network peer can push as that principal (`x2mv.4.5`).
+
+### 5.4 About 68K lines of product crates run in no program
+
+Reachability derived from every manifest: 32 of the 48 crates under `crates/` link into `fg`. Of the 16 that do not, five are tooling (lab, benchmark, proof-bridge, slo, release). The other eleven are product crates with neither a production dependent nor a binary, about 68K source lines in total:
+
+fgit-agent, fgit-atp-git, fgit-raptorq, fgit-repair, fgit-compaction, fgit-doc, fgit-projection, fgit-statistics, fgit-witness, fgit-exchange, fgit-object-store.
+
+In addition, the per-core lanes and flat combiner inside fgit-txn have no caller outside that crate. Their closed beads certified library slices. Three README core innovations (per-core preparation, ATP-Git, repair through authority) and two "beyond parity" capabilities (evidence exchange, build reuse) therefore have no runtime effect.
+
+Integration beads now exist for each: `x2mv.4.9`, `.10`, `.11`, `.22`, `.24`, and existing `88g7`.
+
+### 5.5 The forge has a hard event cliff
+
+Settled outbox entries are never removed. Every materialization re-verifies the whole outbox. PR and issue reads refuse above 4,096 forge or outbox entries, and that includes the review check a protected merge performs. At 16,384 entries the codec refuses all forge publication (`crates/fgit-codec/src/canonical_state.rs:21-22`). The projection substrate built to avoid exactly this has no consumer. See `x2mv.4.7`.
+
+### 5.6 Policy evaluation is decorative
+
+- Every principal is presented to the policy engine as `Human` with `MultiFactor` at time zero.
+- Receive-path compile or evaluation errors skip the check (`if let Ok`).
+- Branch names are interpolated into policy source.
+- Any `ci_check` receipt satisfies all required checks regardless of name or commit.
+- The snapshot identity is not bound into the RCR.
+
+Mandatory review protection works only because it is an inline check. See `x2mv.4.6`.
+
+### 5.7 The shipped user surfaces diverge from the accepted ADRs
+
+- `fg serve-http` is a hand-written HTTP/1.1 server carrying Git, about 40 REST routes (form-encoded, hex bytes, no OpenAPI) and the browser. The plan explicitly rejected an owned HTTP surface in favour of fastapi_rust.
+- The browser is about 7.8K lines of hand-written JavaScript that re-implements Git object hashing. ADR-0013 forbids a JavaScript-first primary UI. Its roughly 740 tests use a fake DOM and run in no lane.
+- The CLI and MCP open storage in-process with self-asserted principals.
+
+These may be acceptable interims, but no ADR says so. They are owner decisions D1 and D2 in `x2mv.4.14`.
+
+The external blocker is now concrete. Published fastapi-core 0.4.4 and ftui-runtime 0.7.0 require asupersync ^0.4.9, while the local fastapi_rust and frankentui sources already pin 0.5.0 but are unpublished (D3). FG-094a's closed ftui admission is invalid on 0.5.0.
+
+### 5.8 CI is trusted-host execution with inflatable labels
+
+- `ProcessSubstrate` runs `/bin/sh -eu -c` as a direct child, as the host user, with full network.
+- It ignores the isolation and egress fields that `RunnerPolicy` requires, and always reports one reaped process.
+- Nothing triggers runs from pushes or PRs.
+- Check results are not published to PRs.
+- Required checks cannot pass.
+- The only hostile-isolation bead (`25cs`) has no description.
+
+See `x2mv.4.12` and owner decision D5.
+
+### 5.9 The tracker no longer describes the work
+
+- Only 348 of 1,000 non-merge commits since 2026-09-07 cite a bead.
+- The heaviest streams landed against beads that are open, unassigned and untouched since 2026-08-21: FG-051a (28 commits), FG-032/FG-032a (41), FG-105/FG-105a (13), FG-050, FG-096b. Others went to unrelated closed beads (browser work credited to asa3, FG-044 and FG-058).
+- No bead is in progress.
+- 28 beads are batch_pending, the policy's soft verification-debt limit; the oldest has waited since 2026-08-26.
+- About 40 Python smoke campaigns, and the browser tests, run in no lane, while seven docs tell readers to run them. See `x2mv.4.18` and `x2mv.4.2`.
+
+### 5.10 Documentation is stale in both directions
+
+The README still says:
+- smart HTTP and SSH are absent;
+- no native API, MCP, UI or search exists;
+- the constellation is Asupersync 0.4.x;
+- sqlmodel is 0.4.2.
+
+It also:
+- presents per-core microbatching, clustered object-store deployment and portable capsule backup in the present tense;
+- describes asa3's outbox "reconciliation worker", which does not exist;
+- links a `#reality-snapshot-2026-09-04` anchor that no longer exists.
+
+The negative-evidence ledger has not changed since 2026-08-29. This assessment updates the README snapshot. The remaining reconciliation belongs to `fjsz` and `x2mv.4.15`.
+
+### 5.11 Concurrent writers and pinned reads are not deterministic
+
+Seven race tests fail in three independent runs, including one that started on a near-idle host:
+- `issue_http_race`, `pull_request_http` and `source_change_http`;
+- `initial_commit_http`, `branch_http` and `tag_http`;
+- `guarded_git_daemon`.
+
+Where the tests expect one winner and one typed refusal, the losing writer gets HTTP `503 {"code":"outcome_unknown"}`, or the refusal counts are wrong. This violates the normative rule that a sealed transaction reaches exactly one terminal decision, and that CAS losers re-evaluate the same sealed request. `outcome_unknown` is for genuine transport ambiguity, not a lost race. Relatedly, `fg branch update` on a protected branch reports a deterministic pre-seal refusal as "no terminal outcome ... not evidence of non-commit". See `x2mv.4.27`.
+
+Separately, the PR and issue campaigns and the `issue_http` snapshot-walk tests disagree with the code about stale `--expected-head` pins, and have since `5c294d6e`. A stale pin returns a page where the campaigns require a typed refusal. The contract must be decided explicitly (`x2mv.4.26`).
+
+## 6. Tracker coverage
+
+Baseline counts: 569 records (475 closed, 55 open, 28 batch_pending, 6 blocked, 5 deferred, 0 in progress). `br ready --unassigned` returned four records: FG-032a, FG-045, FG-093c and `xcu9`. Of the eight 2026-09-07 audit beads:
+- two progressed: `zb0q` (with strong evidence) and `l0xt`;
+- none closed;
+- the rest are untouched.
+
+Vision goals that had no owning bead before this assessment:
+- SSH confidentiality and robustness;
+- deterministic concurrent-writer outcomes;
+- daemon bind policy;
+- policy fact integrity;
+- the forge event cliff;
+- smart-HTTP stock-push compatibility and serving lifecycle;
+- combiner integration;
+- node GC/scrub/repair/RaptorQ/compaction;
+- safe Markdown;
+- the CI product loop after FG-095 closed;
+- identity binding on write surfaces;
+- the MCP registry drift;
+- the orphaned campaigns;
+- search usability on active repositories;
+- the PR workflow gaps;
+- the backup product;
+- ATP-Git on a real path;
+- integrating exit tests for a human team and an agent;
+- dogfooding;
+- constitution and registry drift;
+- repository hygiene;
+- stopping uncompiled landings.
+
+## 7. Bridge plan
+
+Order is by leverage, not ease. Existing owners keep their beads.
+
+**A. Make main trustworthy again (P0).**
+1. Compile HEAD and run the never-run tests (`x2mv.4.1`).
+2. Refuse uncompiled landings in the path the producers actually use, and route the unclaimed streams through their beads (`x2mv.4.2`).
+3. Return the canonical fast lane to green (`x2mv.4.26`).
+4. Re-verify the closure wave line by line (`x2mv.4.3`).
+5. Make concurrent-writer losers deterministic (`x2mv.4.27`).
+
+Exit: `verify.sh fast` exits 0 at a named SHA and every listed closure is either re-closed with mapped evidence or reopened. This earns no feature credit. It is what makes every later claim checkable.
+
+**B. Fix the shipped security and integrity defects (P0/P1).** SSH key exchange and robustness (`.4.4`), daemon bind policy (`.4.5`), policy facts and fail-open (`.4.6`), webhook rework (FG-046 comment), and constitution checker holes (`.4.15`).
+
+**C. Make the single-node forge usable by a real team (P1).** Remove the event cliff (`.4.7`), make stock push over HTTP work in a long-running server (`.4.8`), bind identity on every write (`.4.13`), close the CI loop with published and required checks (`.4.12`), and run every orphaned campaign in lanes (`.4.18`). Exit test: **team day** (`.4.23`), one scripted day through the real binary over SSH and HTTP with auth, protection, CI, merge races, crash recovery, backup and restore, with an economics record against upstream Git.
+
+**D. Put the pillars on real paths (P2).** Node GC/scrub/repair/RaptorQ (`.4.10`), combiner integration with an equivalence oracle and measured evidence (`.4.9`), safe Markdown (`.4.11`), usable search (`.4.19`), PR workflow gaps (`.4.20`), backup product (`.4.21`), ATP-Git on one path (`.4.22`), and dogfooding this repository (`.4.25`).
+
+**E. Agents on the designed authority model (P1, after C).** Task store, collectors and executor (existing `xcu9`, `sjzo`, `p7sa`), the MCP server (FG-096b), and the **agent day** exit test (`.4.24`). One agent authority model, not two.
+
+**F. Distributed, hosted and release (existing work).** Remote authority backend (`88g7`, which now also needs a provider protocol mapping), routing authority (`b5ph`), release target execution (`0zjt`, FG-091), and hostile isolation (`25cs` after D5). None of this should start before A-C, except owner decisions.
+
+## 8. How the plan was refined
+
+**Ambition pass 1.** The first draft only repaired gates and the security defects. It was extended so that each pillar that exists only as a library gets a concrete path into the product with measured evidence. Where a claimed benefit (combiner throughput, ATP-Git bytes) is not measured on the real path, negative results must be recorded.
+
+**Ambition pass 2.**
+- Added two integrating exit tests (team day, agent day). Their pass/fail is the only evidence that may back a "usable forge" or "agent-native" claim.
+- Added dogfooding, because hosting this repository would have exposed four of the scale cliffs found here within a day.
+- Added an economics record to team day, so performance claims get a real denominator.
+
+**Refinement passes.**
+- (1) Duplicates. Defects inside existing open implementation beads (FG-105a, FG-032a, FG-096b) became bug beads with `related` edges, so no existing owner's readiness changed. Findings on batch_pending beads became evidence comments, not new beads.
+- (2) Dependencies. Only the exit tests and the closure re-verification carry blocking edges. Everything else can start immediately.
+- (3) Evidence. Every bead requires a permitted twin for each refusal, discovered suites that drive the real binary, SHA-bound results, and explicit labelling of `cargo test` wrappers.
+- (4) Honesty. No bead reopens or reassigns existing work. Removals (debris, the hosted workflow) require explicit owner approval of the exact command.
+- (5) Evidence feedback. After the executed test run, two beads were added: the fast-lane bead with the exact failing list, and the CAS-loser bead for the reproducible race class. A positive comment on `zb0q` was corrected when its sparse-workspace test failed. The priorities of team-day prerequisites were aligned to P1. One suspected search failure (`source_index_reconcile`) was dropped when it passed on rerun; it had been disk-affected.
+
+## 9. Tracker changes made by this assessment
+
+New epic `frankengit-root-doctrine-x2mv.4` with 27 children (`.4.1`-`.4.27`), labelled `reality-check-2026-09-23`:
+
+| Bead | Type | P | Obligation |
+|---|---|---|---|
+| `frankengit-root-doctrine-x2mv.4.1` | bug | P0 | main does not compile: fgit-runner observations.rs E0423 at 46b922e7 and fgit-forge rename tests (29 errors) never compiled |
+| `frankengit-root-doctrine-x2mv.4.2` | bug | P0 | Stop uncompiled commits landing on main and route the unclaimed implementation streams through their beads |
+| `frankengit-root-doctrine-x2mv.4.3` | task | P0 | Re-verify the 2026-09-22 closure wave line by line; reopen closures whose acceptance is unmet; forbid SHA-less and self-provided gates |
+| `frankengit-root-doctrine-x2mv.4.4` | bug | P0 | fgit-ssh is not confidential: fixed ephemeral X25519 key, fixed cookie, non-constant-time MAC check, pre-auth unbounded buffering, ignored flow control |
+| `frankengit-root-doctrine-x2mv.4.5` | bug | P1 | fg serve --receive-principal accepts non-loopback listeners: unauthenticated network push |
+| `frankengit-root-doctrine-x2mv.4.6` | bug | P1 | Policy integrity: fabricated principal facts, fail-open receive checks, policy-source injection, unmatched required checks, unbound snapshot identity |
+| `frankengit-root-doctrine-x2mv.4.7` | bug | P1 | Forge stops serving PR/issue reads after 4,096 events and refuses all publication at 16,384: bound read cost independent of history |
+| `frankengit-root-doctrine-x2mv.4.8` | bug | P1 | Smart HTTP: stock git push fails without Idempotency-Key; node reopened per request; server exits after 1,024 requests; transport capability divergence |
+| `frankengit-root-doctrine-x2mv.4.9` | feature | P2 | Wire per-core preparation lanes, flat combiner and witness refinement into real admission with an equivalence oracle and measured evidence |
+| `frankengit-root-doctrine-x2mv.4.10` | feature | P1 | Wire GC/retention, scrub/repair, RaptorQ and compaction onto real node data (fg gc / fg scrub / fg repair) |
+| `frankengit-root-doctrine-x2mv.4.11` | feature | P1 | Render issue/PR/comment Markdown safely through fgit-doc on HTTP, browser and MCP (v1 scope item 10) |
+| `frankengit-root-doctrine-x2mv.4.12` | feature | P1 | CI product loop: event-triggered runs, canonical check publication, required-check gating, honest substrate receipts, artifacts/cache |
+| `frankengit-root-doctrine-x2mv.4.13` | feature | P1 | Bind authenticated fgit-identity principals to every write surface; operator-asserted principals become explicit and recorded |
+| `frankengit-root-doctrine-x2mv.4.14` | question | P1 | OWNER DECISIONS 2026-09-23: hand-rolled gateway vs ADR-0011, JS web UI vs ADR-0013, publish fastapi_rust/frankentui on asupersync 0.5, psm native assembly, hostile-CI stance |
+| `frankengit-root-doctrine-x2mv.4.15` | bug | P1 | Constitution checker and registry drift: #[expect] lint hole, psm/DEP-182 misstatement, 0.4.x text vs 0.5.0 lock, stale rationales, missing license-file, stale negative-evidence ledger |
+| `frankengit-root-doctrine-x2mv.4.16` | task | P2 | Inventory and (owner-approved) removal of 174 patch-transport files, .visibility-payload and the hosted write-to-main workflow |
+| `frankengit-root-doctrine-x2mv.4.17` | bug | P2 | MCP tool registry and parity manifest disagree with the real fg mcp server; add drift check and stdio live-client e2e |
+| `frankengit-root-doctrine-x2mv.4.18` | task | P1 | Run the ~40 orphaned smoke campaigns and browser tests in lanes; label cargo-test-wrapper suites; remove foreign target dirs and RCH bypass from suites |
+| `frankengit-root-doctrine-x2mv.4.19` | bug | P1 | Indexed search is unusable on an active repository: forge-only writes stale the index, builds abort on one bad file, no in-server maintenance, no index GC |
+| `frankengit-root-doctrine-x2mv.4.20` | feature | P1 | PR workflow gaps: reopen, conversation/line comments, squash/ff merge, approval survival rule, quorum/path ownership, protection admin over HTTP/MCP |
+| `frankengit-root-doctrine-x2mv.4.21` | feature | P1 | Backup/restore as fg subcommands: streaming (no 1 GiB/100k caps), signed manifests, capsule restore, destroy-and-restore drill with RTO |
+| `frankengit-root-doctrine-x2mv.4.22` | feature | P3 | Put ATP-Git on one real transfer path with differential parity and measured bytes/time vs standard transfer |
+| `frankengit-root-doctrine-x2mv.4.23` | test | P1 | EXIT TEST: one real team day through the fg binary over SSH and smart HTTP with auth, protection, CI checks, merge races, crash recovery, backup/restore |
+| `frankengit-root-doctrine-x2mv.4.24` | test | P1 | EXIT TEST: one real agent run through IntentRun, ContextPacket, TreeFS, broker, ECC and ordinary admission (fgit-agent off the island) |
+| `frankengit-root-doctrine-x2mv.4.25` | feature | P2 | Dogfood: host the FrankenGit repository on a long-lived FrankenGit node with daily parity, search and time-travel checks |
+| `frankengit-root-doctrine-x2mv.4.26` | bug | P0 | Canonical fast lane is red at every failable stage: docs, rustfmt (72 files), check (2 uncompilable test targets), clippy, 45 failing tests in 26 binaries, stale-pin campaign failures |
+| `frankengit-root-doctrine-x2mv.4.27` | bug | P1 | Concurrent writers: CAS losers get 503 outcome_unknown or wrong refusal counts instead of a deterministic terminal refusal (7 race tests, reproducible on an idle host) |
+
+Evidence comments were added to FG-046, FG-046b, FG-083a, `0zjt`, FG-036b, `25cs`, `88g7`, `l0xt` and `zb0q` (plus a correction on `zb0q` after its sparse-workspace test failed), and to the new beads `.4.1`, `.4.14`, `.4.18` and `.4.21`. The owner-decision bead `.4.14` is set to `blocked` so agents do not claim it. The priorities of the team-day prerequisites `.4.10`, `.4.11`, `.4.19`, `.4.20` and `.4.21` were raised to P1. No existing bead was claimed, reopened, reassigned or closed, and no product source was changed. Another agent's commit `b4b34777` swept most of these tracker records into origin before this assessment's own commit; the content is identical.
+
+## 10. Evidence appendix
+
+| Artifact (scratchpad-relative) | SHA-256 |
+|---|---|
+| `evidence/check.stderr` | `1aee0413278197c93be9ee7909b6397f13376ce8675ada596a5aae72c602ba9f` |
+| `evidence_wt2/docs.stderr` | `86dca73cd7218481aab5a1bdb552db52d0fc81ec82b270bbdb13d75e3cff107d` |
+| `evidence_wt2/fmt.stdout` | `84bac4f23a5e28717976adcf03b8552877dfe65e8b162be89e34610cc67a7e42` |
+| `evidence_wt2/check.stderr` | `8f15bd4b059224f5d96441adacadd840436d888d2102a54b1afac0a1b1c9f5b9` |
+| `evidence_wt2/test.stderr` | `a84f7bab7c579d36be81186e86d483de73889e1b53f9c9a1ed03256265b738a7` |
+| `evidence_wt2/clippy.stderr` | `728e537f6611e6e96c95993141f09f09ea88dd11ff1e92f47e1477bc23a05260` |
+| `evidence_wt2/constitution_after_build.stderr` | `b6435abac27319409020f9f36bc5519390468403d590bf3eae5deea52e9b50d7` |
+| `evidence_wt2/full.stderr` | `85055b83dde3934730c1abf62c2a9c7803b9e877a9692064514037cae9ccd3a7` |
+| `evidence_wt2/release.stderr` | `52f8e20b710e7075b692deb84e245ea6e11f7f941618006c8c91b5ff2cc3476e` |
+| `evidence_testbins/results.tsv` (first pass; ENOSPC after ~#527) | `c1e4b807194fce01054c190c5aafb66e13a8c65582ccb5dc1a7bcb9e41203cdc` |
+| `evidence_e2e/node/receipt.ndjson` | `d49fa8f678e8ba3213a8ae26853e144c29ccbe74e84d0880e74d0648975f8305` |
+| `evidence_e2e_release/receipt.ndjson` | `6e4d53c725679e13b41b7d4d9e59aa802b087ab6fc3c8bd235b02aa13c2c24e9` |
+| `evidence_e2e/smokes.tsv` | `865231abc6775cf587de3ecc6c424806cf21e0fdf214eeb0f64d7fa3e6a90335` |
+| `evidence_tests/test_forge_integration.stdout` | `952eba193a10284f539991d15a06c0f14c69c8310a113d2b0ac2a1c270255982` |
+| `fg-94a77dfb` (debug) | `ab220a508863b1989dc09b109b70c06c7c017a2eba64eb653f25881fc63c34d2` |
+| `fg-94a77dfb-release` | `37742eca1735e094b8383c48816d3e985134d7141d2f7fc82ab7842517b1aa2d` |
+| `beads_all.json` (tracker baseline) | `9e492495e1f706e82b11814c9cb3db5689a00bee075523444ddac2af6787aae0` |
+| `evidence_testbins_rerun/results.tsv` | `f0fae09d25d17274f8d2700fd06dc25aeb7e2b2a18fbcaa5d693cf76042a3f85` |
+| `evidence_race_idle/results.tsv` | `202cc835d10f9e1142f5699b155519a333b45365ec538919e74fa23de34ead02` |
+| `final_fails.tsv` | `8b1f162dd4721619f213a48a3c82ae4ca288ef1dc729a8a7b0807bf45a1610be` |
+| `final_summary.txt` | `fcae5e94e535d3a4a9184fa08c7587d843795e13a01148095396ac184a2b6510` |
+
+Raw logs, NDJSON receipts and the isolated worktree remain in the session scratchpad. They are review artifacts, not published durable evidence. The commit, toolchain and profile binding, the limitations, and the summary counts are recorded here so these observations cannot be confused with later runs.

@@ -81,10 +81,16 @@ hard ceiling (`--session-timeout-secs`, `--session-secs-per-mib`,
 through report-status, never a silent hangup (see
 [`docs/GIT_COMPATIBILITY_MATRIX.md`](docs/GIT_COMPATIBILITY_MATRIX.md)).
 Ingress time cannot consume the independent server-work budget that starts
-after the pack trailer. Smart HTTP, production SSH, and a native API are still
-absent. Ordinary production push over authenticated transports remains
-unsupported; the raw git-daemon receive lane is the composition slice the
-`first_push.sh` E2E suite exercises with a real `git` client. No command
+after the pack trailer. `fg serve-http` (loopback-only, operator token file)
+and `fg serve-ssh` now exist, but neither is a production authenticated
+transport yet:
+- a stock `git push` over HTTP needs a nonstandard `Idempotency-Key` header;
+- the SSH key exchange uses a constant ephemeral key and is not confidential.
+
+See the [reality snapshot](#reality-snapshot-2026-09-23). Ordinary production
+push over authenticated transports therefore remains unsupported. The raw
+git-daemon receive lane is the composition slice the `first_push.sh` E2E suite
+exercises with a real `git` client. No command
 treats local object placement, a routing hint, or a connection-local ref map
 as canonical state.
 
@@ -121,83 +127,74 @@ then verifies that the authoritative tracker hash did not change. Graph scores
 remain advisory: an agent may claim a bead only when the exact ID appears in
 `br ready --unassigned --no-db --json`.
 
-### Reality snapshot: 2026-09-07
+### Reality snapshot: 2026-09-23
 
-FrankenGit has a working bounded Git node and substantial subsystem code;
-the integrated forge, agent service, hosted backend and release product are
-still incomplete. The [reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md)
-binds its broad source and runtime assessment to
-`b74b666dc644c6ed18697f3950690bf289c33114`. Subsequent bridge results below
-name their own revisions and do not replace an independent batch gate.
+FrankenGit has a real, bounded, pure-Rust Git node and an atomic forge core. It
+is not yet a forge a team can rely on. The
+[reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) binds
+this snapshot:
+- source was inspected at `46b922e7`;
+- executable evidence comes from `94a77dfb`, the newest commit whose `fg`
+  binary builds.
 
-- The canonical core has real typed identities, seals, intent/effect folding,
-  immutable decisions, authenticated heads and exact-predecessor CAS. The
-  embedded node uses the admitted published FrankenSQLite/runtime stack.
-- The clean-room Git substrate includes owned object, DEFLATE, pack/delta,
-  pkt-line, upload-pack, receive-pack, quarantine and loose/packed import
-  implementations. At the assessed revision, selected real-node E2E suites
-  exercised nonempty clone, raw push, historical state, incremental fetch and
-  SHA-256 repository behavior: 178 acceptance IDs across five suites. The
-  report distinguishes ordinary-client observations from pinned-oracle
-  conformance and records the exact limits. This is not the full Git matrix.
-- The dated snapshot found durable forge merge blocked in the production
-  composition: `OneNode::admit_merge_durable_in` reached materializer methods
-  that returned `DurabilityProfileUnavailable` before publication. The six synchronous
-  admission race tests cited in the previous snapshot do not establish a
-  durable OneNode merge. The subsequent `frankengit-asa3` implementation
-  couples the actual merge event,
-  forge position, and canonical outbox state at one authority CAS, with an
-  authenticated delivery reader and persisted reconciliation worker. Native
-  packages through the original sealed API now enter that same driver with
-  their original transaction identity and node-owned object revalidation.
-  Node-owned TreeFS sessions additionally bind real edits, exported trees,
-  and interrupted-request recovery to the admitted workspace snapshot.
-  Admission and node all-target tests passed through RCH at
-  `55e1da66626c014202eee91f9282b251594c91f4`, including actual authority races,
-  process-death recovery and outbox delivery. Independent batch verification
-  remains outstanding. Historical Digest-valued packages retain the
-  unavailable legacy route. Exact execution evidence and scope are in the
-  [delivery contract](docs/MERGE_FORGE_EVENT_DELIVERY_CONTRACT.md#13-current-implementation-boundaries);
-  this focused result does not establish a complete forge or release gate.
-- `fg at` has a real historical path and a nonempty durable-history E2E
-  scenario in `scripts/e2e/suites/node/time_travel.sh`. The 2026-09-07
-  assessment exercised its 15 acceptance IDs, including both diff endpoints
-  and an ahead-of-authority refusal. Capsule checkpoints and positions inside
-  multi-decision batches remain outside that scenario.
-- TreeFS now has a Linux sparse-directory implementation candidate in
-  `fgit-runner`, connected to authority-selected objects by
-  `OneNode::sparse_workspace_manifest_in`. It materializes actual files,
-  imports declared tool outputs as ordinary edit intents, and explicitly
-  closes or reports containment. The runner and node focused tests passed
-  at `875fd14b3e79887b07d692e198531fbe810df640`; their new cases include real
-  tool editing, disk object export/reopen and fresh-process node recovery.
-  [ADR-0017](docs/ADR-0017-TREEFS-HOST-ADAPTER-MATRIX.md) records the candidate
-  profile and dependency boundary. Independent host-profile acceptance,
-  public agent execution and the optional FUSE adapter remain outstanding.
-- `fgit-projection` implements derived identity/watermark/applied-decision
-  infrastructure using sqlmodel 0.4.2. User-facing issue/PR/search read models
-  and the remaining outcome/close/retry acceptance are still unfinished.
-  The previous snapshot's eight-error sqlmodel feature blocker is historical;
-  the assessed constitution command exited zero, with a separate native
-  build-evidence discovery defect described in the report.
-- The native-linkage checker now recognizes the pinned nightly's build
-  output layout and binds observations to package build instances. Its 105
-  focused tests passed at `e8dbdf17fba5b0e29341e3e966e20e8f2babdd77`.
-  The new real-build positive/negative E2E still requires independent batch
-  execution. Cached build observations are not fresh release attestations.
-- Object fabric, ATP-Git, repair, verified reads, graph algorithms and agent
-  protocols have bounded implementations. Live HTTPS object-store authority,
-  authenticated Git transports, complete agent persistence/collectors/effects,
-  hostile-code isolation, REST/MCP, search, UI and actual release publication
-  remain product gaps. A trusted local process is not a hostile runner.
-- The assessed workspace test command exited zero with 4,590 passed and
-  24 ignored. The canonical fast lane failed formatting and a separate
-  Clippy run failed; full and release exited 3 with explicit dormancy.
-  Those historical results do not assert gate status for later bridge code.
-- [Plan §4.2.1](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md#421-unresolved-10-scope-contradiction)
-  records the unresolved merge-queue/package 1.0 scope contradiction and its
-  owner decision boundary. The settled D14 licence remains
-  `LicenseRef-MIT-OpenAI-Anthropic-Rider`; it is not OSI-approved open source.
+Its bridge work is tracked under `frankengit-root-doctrine-x2mv.4`. Neither the
+earlier 2026-09-07 results nor any later bridge result replaces an independent
+batch gate.
+
+- **Main is not currently verifiable.**
+  - `46b922e7` does not compile (fgit-runner, E0423).
+  - 163 commits since 2026-09-07 state that compilation or tests were not run; 115 of them say Cargo/rustc was unavailable.
+  - At `94a77dfb`, two test targets do not compile and rustfmt reports drift in
+    72 files. The docs lane and Clippy fail, and `full`/`release` exit 3
+    (dormant).
+  - Running every compilable test executable gives 6,779 passed, 45 failed and
+    31 ignored. The failures include seven reproducible concurrent-writer race
+    failures, where the loser gets `503 outcome_unknown`.
+- **Working through the `fg` binary with real Git clients at `94a77dfb`:**
+  - raw git-daemon clone, push and time travel (`first_clone` 19/19,
+    `first_push` 21/21, `time_travel` 15/15);
+  - SHA-256 repositories (`sha256_repo_roundtrip` 26/26);
+  - smart-HTTP fetch and push, with the header noted above, over protocols
+    v0/v1/v2.
+
+  A permitted PR merge publishes the ref move, the PR state and the outbox
+  entry in one RCR through one head CAS, and survives reopen and process death.
+  Issues, branches, tags, trusted-local TreeFS workspaces and trusted-local
+  workflow runs also work through `fg`.
+- **Present, but with known defects:**
+  - SSH sessions are not confidential (constant ephemeral key-exchange secret),
+    even though its security suite passes 23/23 on authentication checks.
+  - PR and issue reads refuse after 4,096 forge events.
+  - Policy evaluation is given fabricated principal facts and fails open on
+    the receive path.
+  - Webhooks send a placeholder payload.
+  - CI runs trusted code on the host only, with no triggers or published
+    checks.
+  - Backup-restore tests fail at `94a77dfb`.
+  - PR and issue snapshot-pinned reads disagree with their own campaigns about
+    stale pins.
+  - A native HTTP API, a stdio MCP server and a JavaScript browser shell exist.
+    They diverge from ADR-0011 and ADR-0013 pending owner decisions.
+- **Library-only (no production caller):**
+  - the agent control plane;
+  - ATP-Git;
+  - RaptorQ, repair, GC and compaction;
+  - safe Markdown;
+  - projections;
+  - statistics;
+  - witness refinement;
+  - evidence exchange;
+  - the remote object-store backend;
+  - admission's per-core lanes and combiner.
+- **Closures under review.** Several beads closed on 2026-09-22 do not meet
+  their own acceptance lines, including the SSH transport and the hostile-CI
+  campaign. `frankengit-root-doctrine-x2mv.4.3` requires line-by-line
+  re-verification.
+- **Open scope decision.**
+  [Plan §4.2.1](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md#421-unresolved-10-scope-contradiction)
+  records the unresolved merge-queue/package 1.0 scope contradiction. The
+  settled D14 licence remains `LicenseRef-MIT-OpenAI-Anthropic-Rider`, which is
+  not OSI-approved open source.
 
 The claims registry remains the public proof boundary. Its verified rows cover
 narrow artifact identity and contained Lean-model theorems; they do not prove
@@ -447,7 +444,7 @@ Because canonical state will remain an immutable decision stream, “the entire
 forge at decision N” will be a well-defined object rather than a reconstruction
 heuristic over mutable tables. `fg at <decision>` will open a complete read-only
 forge snapshot, and bisection will generalize from commits to forge state.
-The [dated reality snapshot](#reality-snapshot-2026-09-04) above identifies the
+The [dated reality snapshot](#reality-snapshot-2026-09-23) above identifies the
 bounded implementation and its historical evidence. It records history loading,
 two-ended diff projection, consistency checks, and binary rendering as landed.
 The remaining historical projection work requires non-empty durable-history
@@ -606,7 +603,7 @@ artifact no longer matches its exact digest.
 <!-- franken-claims-status:begin -->
 | Claim | Class | Effective status | Scope | Readiness wording |
 | --- | --- | --- | --- | --- |
-| CLM-001 | CLAIM-006 | verified | claim-artifact-identity-binding | artifact-change-demotes-this-narrow-claim |
+| CLM-001 | CLAIM-006 | demoted: artifact `tools/registry-check/src/main.rs` digest changed: expected b8a704e6a843edb6ac643403b286008af2e5baff9c94c870afc414846d50993d, observed 8bb818c3eabc927334d99c3a5bd02cad4264bb1c116b1ab921b534da31ee8b48 | claim-artifact-identity-binding | artifact-change-demotes-this-narrow-claim |
 | CLM-002 | CLAIM-002 | verified | fg041-lean-theorem:terminal_outcome_is_unique | machine-checked-within-the-contained-lean-model-under-three-named-boundary-assumptions-only |
 | CLM-003 | CLAIM-002 | verified | fg041-lean-theorem:ref_and_forge_visibility_is_atomic | machine-checked-within-the-contained-lean-model-under-three-named-boundary-assumptions-only |
 | CLM-004 | CLAIM-002 | verified | fg041-lean-theorems:accepted_publish_is_continuous,head_chain_is_continuous_and_monotone,interrupted_publication_is_anti_rollback | machine-checked-within-the-contained-lean-model-under-three-named-boundary-assumptions-only |
