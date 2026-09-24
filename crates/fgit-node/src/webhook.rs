@@ -9,16 +9,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fgit_admission::merge::native::settlement::{DeliveryRequest, OutboxDestination};
 use fgit_forge::webhook::{
     DeadLetterEntry, SsrfPolicy, ValidatedWebhookUrl, WebhookEventFilter, WebhookId,
-    WebhookRefusal, WebhookRegistration, WebhookRetrySchedule, WebhookSecret,
-    WebhookSecretRotation,
+    WebhookRefusal, WebhookRegistration, WebhookSecret,
 };
 use fgit_resource::settlement::{DeliveryVerdict, DownstreamIdempotency, ProbeVerdict};
-use fgit_types::{AsciiSlug, Digest, RefusalCode};
+use fgit_types::{AsciiSlug, RefusalCode};
 use fsqlite_types::cx::Cx;
 
 mod transport;
 
 mod payload;
+mod persistence;
+
+use persistence::{
+    parse_dead_letter_line, parse_registration_line, serialize_dead_letter, serialize_registration,
+};
 
 /// In-memory and file-backed Dead Letter Queue for terminally failed webhook deliveries.
 #[derive(Clone, Debug, Default)]
@@ -682,202 +686,6 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
         let _ = write!(s, "{:02x}", byte);
     }
     s
-}
-
-fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
-    if s.len() % 2 != 0 {
-        return Err(());
-    }
-    let mut bytes = Vec::with_capacity(s.len() / 2);
-    for i in (0..s.len()).step_by(2) {
-        let byte = u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| ())?;
-        bytes.push(byte);
-    }
-    Ok(bytes)
-}
-
-fn escape_json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-fn extract_json_str(json: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{}\":", key);
-    let idx = json.find(&needle)? + needle.len();
-    let rest = json[idx..].trim_start();
-    if !rest.starts_with('"') {
-        return None;
-    }
-    let rest = &rest[1..];
-    let mut s = String::new();
-    let mut chars = rest.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                if let Some(escaped) = chars.next() {
-                    match escaped {
-                        '"' => s.push('"'),
-                        '\\' => s.push('\\'),
-                        'n' => s.push('\n'),
-                        'r' => s.push('\r'),
-                        't' => s.push('\t'),
-                        _ => s.push(escaped),
-                    }
-                }
-            }
-            '"' => return Some(s),
-            _ => s.push(c),
-        }
-    }
-    None
-}
-
-fn extract_json_u64(json: &str, key: &str) -> Option<u64> {
-    let needle = format!("\"{}\":", key);
-    let idx = json.find(&needle)? + needle.len();
-    let rest = json[idx..].trim_start();
-    let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    num_str.parse::<u64>().ok()
-}
-
-fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
-    let needle = format!("\"{}\":", key);
-    let idx = json.find(&needle)? + needle.len();
-    let rest = json[idx..].trim_start();
-    if rest.starts_with("true") {
-        Some(true)
-    } else if rest.starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn serialize_registration(reg: &WebhookRegistration) -> String {
-    let filter_str = match &reg.filter {
-        WebhookEventFilter::Wildcard => "\"*\"".to_string(),
-        WebhookEventFilter::Selected(list) => {
-            let items: Vec<String> = list.iter().map(|s| format!("\"{}\"", s)).collect();
-            format!("[{}]", items.join(","))
-        }
-    };
-    let active_secret_hex = hex_encode(reg.secrets.active().as_bytes());
-    let expiring_json = match reg.secrets.expiring() {
-        Some((sec, ts)) => format!(
-            "{{\"secret_hex\":\"{}\",\"expires_at\":{}}}",
-            hex_encode(sec.as_bytes()),
-            ts
-        ),
-        None => "null".to_string(),
-    };
-    format!(
-        "{{\"id\":{},\"url\":\"{}\",\"active_secret_hex\":\"{}\",\"expiring\":{},\"filter\":{},\"active\":{},\"max_attempts\":{},\"initial_delay_ms\":{},\"max_delay_ms\":{}}}",
-        reg.id.0,
-        reg.url.raw(),
-        active_secret_hex,
-        expiring_json,
-        filter_str,
-        reg.active,
-        reg.retry_schedule.max_attempts,
-        reg.retry_schedule.initial_delay.as_millis(),
-        reg.retry_schedule.max_delay.as_millis(),
-    )
-}
-
-fn serialize_dead_letter(entry: &DeadLetterEntry) -> String {
-    format!(
-        "{{\"delivery_id\":\"{}\",\"webhook_id\":{},\"target_url\":\"{}\",\"payload_root\":\"{}\",\"event_name\":\"{}\",\"attempts\":{},\"terminal_reason\":\"{}\",\"failed_at_unix_secs\":{}}}",
-        entry.delivery_id.as_str(),
-        entry.webhook_id.0,
-        entry.target_url,
-        entry.payload_root,
-        entry.event_name,
-        entry.attempts,
-        escape_json(&entry.terminal_reason),
-        entry.failed_at_unix_secs,
-    )
-}
-
-fn parse_registration_line(line: &str) -> Option<WebhookRegistration> {
-    let id_val = extract_json_u64(line, "id")?;
-    let url_raw = extract_json_str(line, "url")?;
-    let secret_hex = extract_json_str(line, "active_secret_hex")?;
-    let secret_bytes = hex_decode(&secret_hex).ok()?;
-    let secret = WebhookSecret::new(secret_bytes).ok()?;
-    let mut rotation = WebhookSecretRotation::new(secret);
-    if let Some(expiring_hex) = extract_json_str(line, "secret_hex") {
-        if let Some(expires_at) = extract_json_u64(line, "expires_at") {
-            if let Ok(exp_bytes) = hex_decode(&expiring_hex) {
-                if let Ok(exp_sec) = WebhookSecret::new(exp_bytes) {
-                    rotation.rotate(exp_sec, 0, expires_at);
-                }
-            }
-        }
-    }
-    let filter = if line.contains("\"filter\":\"*\"") || line.contains("\"filter\": \"*\"") {
-        WebhookEventFilter::Wildcard
-    } else {
-        WebhookEventFilter::Wildcard
-    };
-    let active = extract_json_bool(line, "active").unwrap_or(true);
-    let max_attempts = extract_json_u64(line, "max_attempts").unwrap_or(5) as u32;
-    let initial_delay_ms = extract_json_u64(line, "initial_delay_ms").unwrap_or(1000);
-    let max_delay_ms = extract_json_u64(line, "max_delay_ms").unwrap_or(60000);
-
-    let retry_schedule = WebhookRetrySchedule {
-        max_attempts,
-        initial_delay: Duration::from_millis(initial_delay_ms),
-        max_delay: Duration::from_millis(max_delay_ms),
-    };
-
-    let url = SsrfPolicy::PERMISSIVE_FOR_TESTS
-        .validate_url(&url_raw)
-        .ok()?;
-
-    Some(WebhookRegistration {
-        id: WebhookId(id_val),
-        url,
-        secrets: rotation,
-        filter,
-        active,
-        retry_schedule,
-    })
-}
-
-fn parse_dead_letter_line(line: &str) -> Option<DeadLetterEntry> {
-    let delivery_id_str = extract_json_str(line, "delivery_id")?;
-    let delivery_id = AsciiSlug::try_new("delivery_id", delivery_id_str.as_bytes()).ok()?;
-    let webhook_id_val = extract_json_u64(line, "webhook_id")?;
-    let target_url = extract_json_str(line, "target_url")?;
-    let attempts = extract_json_u64(line, "attempts").unwrap_or(1) as u32;
-    let terminal_reason = extract_json_str(line, "terminal_reason").unwrap_or_default();
-    let failed_at_unix_secs = extract_json_u64(line, "failed_at_unix_secs").unwrap_or(0);
-
-    let dummy_digest = Digest::new(
-        fgit_types::DigestAlgorithmId::try_new(1).unwrap(),
-        fgit_types::DigestBytes::try_new(&[0xaa; 32]).unwrap(),
-    );
-
-    Some(DeadLetterEntry {
-        delivery_id,
-        webhook_id: WebhookId(webhook_id_val),
-        target_url,
-        payload_root: dummy_digest,
-        event_name: "forge-event".to_string(),
-        attempts,
-        terminal_reason,
-        failed_at_unix_secs,
-    })
 }
 
 #[cfg(test)]
