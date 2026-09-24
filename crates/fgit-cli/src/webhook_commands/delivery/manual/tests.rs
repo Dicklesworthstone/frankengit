@@ -4,14 +4,19 @@ use fgit_forge::event::issue::{IssueAction, IssueCommand};
 use fgit_forge::webhook::{WebhookRetrySchedule, WebhookSecret, WebhookSecretRotation};
 use fgit_forge::{AggregateId, AggregateVersion, ExpectedVersion, IssueNumber, PullRequestNumber};
 use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
-use fgit_types::{DecisionOutcome, GitHashAlgorithm, HeadGeneration, PrincipalId, RepositoryId, TenantId};
+use fgit_types::{
+    DecisionOutcome, GitHashAlgorithm, HeadGeneration, PrincipalId, RepositoryId, TenantId,
+};
 use std::{
     collections::BTreeMap,
     fs,
     io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
-    sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -32,7 +37,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let scratch = std::env::temp_dir().join(format!(
-            "fg-webhook-manual-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),
+            "fg-webhook-manual-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
         ));
         fs::create_dir(&scratch).unwrap();
         let storage = scratch.join("node");
@@ -55,28 +62,54 @@ impl Fixture {
                 labels: vec![],
             },
         };
-        let outcome = node.runtime().block_on(node.admit_issue_durable_in(
-            &request, &session, &command, Default::default(),
-        )).unwrap();
-        assert!(matches!(outcome.1.outcome, DecisionOutcome::Committed { .. }));
+        let outcome = node
+            .runtime()
+            .block_on(node.admit_issue_durable_in(&request, &session, &command, Default::default()))
+            .unwrap();
+        assert!(matches!(
+            outcome.1.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
         let request = node.request_context();
-        let page = node.runtime().block_on(node.read_forge_outbox_in(&request, None, 10, None)).unwrap();
+        let page = node
+            .runtime()
+            .block_on(node.read_forge_outbox_in(&request, None, 10, None))
+            .unwrap();
         let entry = &page.entries[0];
         let request = node.request_context();
-        let selected = node.runtime().block_on(node.select_forge_delivery_in(
-            &request, entry.delivery_key(), entry.destination(), Some(page.source_head),
-        )).unwrap();
+        let selected = node
+            .runtime()
+            .block_on(node.select_forge_delivery_in(
+                &request,
+                entry.delivery_key(),
+                entry.destination(),
+                Some(page.source_head),
+            ))
+            .unwrap();
         let frame = fgit_codec::encode_body(&selected.as_request().events.events[0]).unwrap();
         let options = Options {
-            storage, tenant, repository, format: GitHashAlgorithm::Sha1,
+            storage,
+            tenant,
+            repository,
+            format: GitHashAlgorithm::Sha1,
             expected_head: Some(head_token(page.source_head)),
-            after: None, limit: 10,
-            key: Some(entry.delivery_key()), destination: Some(entry.destination()),
-            webhook_id: Some(7), attempt: None, at_least_once: true, permissive: true,
+            after: None,
+            limit: 10,
+            key: Some(entry.delivery_key()),
+            destination: Some(entry.destination()),
+            webhook_id: Some(7),
+            attempt: None,
+            at_least_once: true,
+            permissive: true,
         };
         let root = entry.payload_root();
         node.shutdown().unwrap();
-        Self { scratch, options, root, frame }
+        Self {
+            scratch,
+            options,
+            root,
+            frame,
+        }
     }
 
     fn register(&self, url: &str, filter: WebhookEventFilter) -> WebhookRegistration {
@@ -98,7 +131,9 @@ impl Fixture {
 }
 
 impl Drop for Fixture {
-    fn drop(&mut self) { let _ = fs::remove_dir_all(&self.scratch); }
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.scratch);
+    }
 }
 
 struct Captured {
@@ -138,9 +173,16 @@ impl Receiver {
                     Err(error) => return Err(error),
                 }
             }
-            Err(io::Error::new(io::ErrorKind::TimedOut, "no webhook request received"))
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "no webhook request received",
+            ))
         });
-        Self { url, stop, worker: Some(worker) }
+        Self {
+            url,
+            stop,
+            worker: Some(worker),
+        }
     }
 
     fn finish(mut self) -> Captured {
@@ -162,21 +204,31 @@ fn capture(stream: &mut TcpStream) -> io::Result<Captured> {
     let mut line = String::new();
     reader.read_line(&mut line)?;
     if line != "POST /hook HTTP/1.1\r\n" {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected request target"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected request target",
+        ));
     }
     let mut headers = BTreeMap::new();
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "incomplete headers"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete headers",
+            ));
         }
-        if line == "\r\n" { break; }
-        let (name, value) = line.split_once(':').ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid request header")
-        })?;
+        if line == "\r\n" {
+            break;
+        }
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid request header"))?;
         headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
     }
-    let length = headers.get("content-length").and_then(|value| value.parse::<usize>().ok())
+    let length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value <= 32 * 1024)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid content length"))?;
     let mut body = vec![0; length];
@@ -185,19 +237,39 @@ fn capture(stream: &mut TcpStream) -> io::Result<Captured> {
 }
 
 fn assert_exact_signed_event(fixture: &Fixture, captured: &Captured) {
-    assert_eq!(captured.headers["x-frankengit-signature-256"], secret().sign_hex(&captured.body));
-    assert_eq!(captured.headers["x-frankengit-delivery"], fixture.options.key.unwrap().as_str());
+    assert_eq!(
+        captured.headers["x-frankengit-signature-256"],
+        secret().sign_hex(&captured.body)
+    );
+    assert_eq!(
+        captured.headers["x-frankengit-delivery"],
+        fixture.options.key.unwrap().as_str()
+    );
     let text = std::str::from_utf8(&captured.body).unwrap();
-    let expected: String = fixture.frame.iter().map(|byte| format!("{byte:02x}")).collect();
+    let expected: String = fixture
+        .frame
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     assert!(text.contains(&format!("\"canonical_frame_hex\":\"{expected}\"")));
     assert!(text.contains(&format!("\"payload_root\":\"{}\"", fixture.root)));
     assert!(text.contains("\"events_count\":1"));
     assert!(!text.contains("\"attempt\""));
-    let encoded = text.split("\"canonical_frame_hex\":\"").nth(1).unwrap().split('"').next().unwrap();
-    let bytes: Vec<u8> = (0..encoded.len()).step_by(2)
-        .map(|offset| u8::from_str_radix(&encoded[offset..offset + 2], 16).unwrap()).collect();
-    let actual: ForgeEvent = fgit_codec::decode_body(&bytes, fgit_codec::DecodeLimits::DEFAULT).unwrap();
-    let expected: ForgeEvent = fgit_codec::decode_body(&fixture.frame, fgit_codec::DecodeLimits::DEFAULT).unwrap();
+    let encoded = text
+        .split("\"canonical_frame_hex\":\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let bytes: Vec<u8> = (0..encoded.len())
+        .step_by(2)
+        .map(|offset| u8::from_str_radix(&encoded[offset..offset + 2], 16).unwrap())
+        .collect();
+    let actual: ForgeEvent =
+        fgit_codec::decode_body(&bytes, fgit_codec::DecodeLimits::DEFAULT).unwrap();
+    let expected: ForgeEvent =
+        fgit_codec::decode_body(&fixture.frame, fgit_codec::DecodeLimits::DEFAULT).unwrap();
     assert_eq!(actual, expected);
 }
 
@@ -205,9 +277,15 @@ fn assert_exact_signed_event(fixture: &Fixture, captured: &Captured) {
 fn manual_cli_sends_the_real_committed_event_with_its_original_root_and_signature() {
     let fixture = Fixture::new();
     let receiver = Receiver::new(true);
-    fixture.register(&receiver.url, WebhookEventFilter::Selected(vec!["issue".into()]));
+    fixture.register(
+        &receiver.url,
+        WebhookEventFilter::Selected(vec!["issue".into()]),
+    );
     let result = execute(&fixture.options, false);
-    if result.is_err() { drop(receiver); panic!("manual delivery failed: {result:?}"); }
+    if result.is_err() {
+        drop(receiver);
+        panic!("manual delivery failed: {result:?}");
+    }
     let captured = receiver.finish();
     assert_exact_signed_event(&fixture, &captured);
     let (code, output) = result.unwrap();
@@ -223,14 +301,25 @@ fn dead_letter_replay_contacts_receiver_and_preserves_the_diagnostic() {
     let receiver = Receiver::new(true);
     let registration = fixture.register(&receiver.url, WebhookEventFilter::Wildcard);
     let record = DeadLetterEntry {
-        delivery_id: fixture.options.key.unwrap(), webhook_id: registration.id,
-        target_url: registration.url.raw().into(), payload_root: fixture.root,
-        event_name: "issue".into(), attempts: 5,
-        terminal_reason: "receiver was down".into(), failed_at_unix_secs: 1,
+        delivery_id: fixture.options.key.unwrap(),
+        webhook_id: registration.id,
+        target_url: registration.url.raw().into(),
+        payload_root: fixture.root,
+        event_name: "issue".into(),
+        attempts: 5,
+        terminal_reason: "receiver was down".into(),
+        failed_at_unix_secs: 1,
     };
-    fixture.store().dead_letters().try_push(record.clone()).unwrap();
+    fixture
+        .store()
+        .dead_letters()
+        .try_push(record.clone())
+        .unwrap();
     let result = execute(&fixture.options, true);
-    if result.is_err() { drop(receiver); panic!("manual replay failed: {result:?}"); }
+    if result.is_err() {
+        drop(receiver);
+        panic!("manual replay failed: {result:?}");
+    }
     let captured = receiver.finish();
     assert_exact_signed_event(&fixture, &captured);
     assert_eq!(captured.headers["x-frankengit-attempt"], "6");
@@ -238,7 +327,10 @@ fn dead_letter_replay_contacts_receiver_and_preserves_the_diagnostic() {
     assert_eq!(code, 0);
     assert!(output.contains("\"replay\":true"));
     assert!(output.contains("\"diagnostic_retained\":true"));
-    assert_eq!(fixture.store().get_dead_letter(record.delivery_id), Some(record));
+    assert_eq!(
+        fixture.store().get_dead_letter(record.delivery_id),
+        Some(record)
+    );
 }
 
 #[test]
@@ -247,7 +339,10 @@ fn lost_receiver_acknowledgement_is_not_success_and_does_not_trigger_a_retry() {
     let receiver = Receiver::new(false);
     fixture.register(&receiver.url, WebhookEventFilter::Wildcard);
     let result = execute(&fixture.options, false);
-    if result.is_err() { drop(receiver); panic!("unexpected pre-send refusal: {result:?}"); }
+    if result.is_err() {
+        drop(receiver);
+        panic!("unexpected pre-send refusal: {result:?}");
+    }
     let captured = receiver.finish();
     assert_exact_signed_event(&fixture, &captured);
     let (code, output) = result.unwrap();
@@ -261,10 +356,15 @@ fn persisted_subscription_mismatch_refuses_before_connecting() {
     let fixture = Fixture::new();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    fixture.register(&format!("http://{}/hook", listener.local_addr().unwrap()),
-        WebhookEventFilter::Selected(vec!["pull_request".into()]));
+    fixture.register(
+        &format!("http://{}/hook", listener.local_addr().unwrap()),
+        WebhookEventFilter::Selected(vec!["pull_request".into()]),
+    );
     assert!(execute(&fixture.options, false).is_err());
-    assert_eq!(listener.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
 }
 
 #[test]
@@ -273,10 +373,14 @@ fn stale_or_retargeted_dead_letters_do_not_authorize_replay() {
     let registration = fixture.register("http://example.com/hook", WebhookEventFilter::Wildcard);
     let key = fixture.options.key.unwrap();
     let record = DeadLetterEntry {
-        delivery_id: key, webhook_id: registration.id,
-        target_url: registration.url.raw().into(), payload_root: fixture.root,
-        event_name: "issue".into(), attempts: 5,
-        terminal_reason: "failure".into(), failed_at_unix_secs: 1,
+        delivery_id: key,
+        webhook_id: registration.id,
+        target_url: registration.url.raw().into(),
+        payload_root: fixture.root,
+        event_name: "issue".into(),
+        attempts: 5,
+        terminal_reason: "failure".into(),
+        failed_at_unix_secs: 1,
     };
     assert!(require_replay_binding(&record, &registration, key, fixture.root).is_ok());
     let mut changed = record.clone();
@@ -291,7 +395,15 @@ fn stale_or_retargeted_dead_letters_do_not_authorize_replay() {
         fgit_types::DigestBytes::try_new(&[0xff; 32]).unwrap(),
     );
     assert!(require_replay_binding(&changed, &registration, key, fixture.root).is_err());
-    assert!(require_replay_binding(&record, &registration, AsciiSlug::from_static("different"), fixture.root).is_err());
+    assert!(
+        require_replay_binding(
+            &record,
+            &registration,
+            AsciiSlug::from_static("different"),
+            fixture.root
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -302,9 +414,27 @@ fn event_filter_preserves_whole_batches_and_unknown_outcomes_are_never_success()
         payload: ForgeEventPayload::PullRequestClosed { withdrawn: true },
     };
     assert!(require_subscription(&WebhookEventFilter::Wildcard, &[]).is_err());
-    assert!(require_subscription(&WebhookEventFilter::Selected(vec!["kind:4".into()]), &[event.clone()]).is_ok());
-    assert!(require_subscription(&WebhookEventFilter::Selected(vec!["PULL_REQUEST".into()]), &[event.clone()]).is_ok());
-    assert!(require_subscription(&WebhookEventFilter::Selected(vec!["issue".into()]), &[event.clone()]).is_err());
+    assert!(
+        require_subscription(
+            &WebhookEventFilter::Selected(vec!["kind:4".into()]),
+            &[event.clone()]
+        )
+        .is_ok()
+    );
+    assert!(
+        require_subscription(
+            &WebhookEventFilter::Selected(vec!["PULL_REQUEST".into()]),
+            &[event.clone()]
+        )
+        .is_ok()
+    );
+    assert!(
+        require_subscription(
+            &WebhookEventFilter::Selected(vec!["issue".into()]),
+            &[event.clone()]
+        )
+        .is_err()
+    );
     let mut advanced = event.clone();
     advanced.payload = ForgeEventPayload::PullRequestHeadAdvanced {
         source_tip: Digest::new(
@@ -312,7 +442,13 @@ fn event_filter_preserves_whole_batches_and_unknown_outcomes_are_never_success()
             fgit_types::DigestBytes::try_new(&[1; 32]).unwrap(),
         ),
     };
-    assert!(require_subscription(&WebhookEventFilter::Selected(vec!["kind:4".into()]), &[event, advanced]).is_err());
+    assert!(
+        require_subscription(
+            &WebhookEventFilter::Selected(vec!["kind:4".into()]),
+            &[event, advanced]
+        )
+        .is_err()
+    );
     assert_eq!(exit_code("Accepted"), 0);
     assert_eq!(exit_code("TransientFailure"), 1);
     assert_eq!(exit_code("PermanentRejection"), 2);

@@ -212,7 +212,10 @@ fn parse(action: &str, args: &[String]) -> Result<Options, String> {
             || (matches!(action, "inspect" | "deliver" | "replay")
                 && matches!(flag, "--delivery-id" | "--destination"))
             || (matches!(action, "deliver" | "replay")
-                && matches!(flag, "--id" | "--attempt" | "--at-least-once" | "--permissive-for-tests"));
+                && matches!(
+                    flag,
+                    "--id" | "--attempt" | "--at-least-once" | "--permissive-for-tests"
+                ));
         if !permitted {
             return Err(format!("unknown {action} option {flag}"));
         }
@@ -252,15 +255,22 @@ fn parse(action: &str, args: &[String]) -> Result<Options, String> {
     let destination = slug("--destination")?;
     if action != "outbox" && (key.is_none() || destination.is_none()) {
         return Err(
-            "canonical delivery requires --delivery-id and --destination from fg webhook outbox".into(),
+            "canonical delivery requires --delivery-id and --destination from fg webhook outbox"
+                .into(),
         );
     }
-    let webhook_id = flags.get("--id").map(|value| {
-        value.parse::<u64>().map_err(|_| "invalid webhook id")
-    }).transpose()?;
-    let attempt = flags.get("--attempt").map(|value| {
-        value.parse::<u32>().map_err(|_| "manual attempt must be 1..16")
-    }).transpose()?;
+    let webhook_id = flags
+        .get("--id")
+        .map(|value| value.parse::<u64>().map_err(|_| "invalid webhook id"))
+        .transpose()?;
+    let attempt = flags
+        .get("--attempt")
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .map_err(|_| "manual attempt must be 1..16")
+        })
+        .transpose()?;
     if attempt.is_some_and(|attempt| !(1..=16).contains(&attempt)) {
         return Err("manual attempt must be 1..16".into());
     }
@@ -365,7 +375,14 @@ mod tests {
 
     #[test]
     fn manual_delivery_requires_explicit_duplicate_risk_and_rejects_duplicate_flags() {
-        let base = ["--id", "7", "--delivery-id", "delivery-1", "--destination", "forge-projection"];
+        let base = [
+            "--id",
+            "7",
+            "--delivery-id",
+            "delivery-1",
+            "--destination",
+            "forge-projection",
+        ];
         assert!(parse("deliver", &args(&base)).is_err());
         let mut explicit = base.to_vec();
         explicit.push("--at-least-once");
@@ -379,10 +396,23 @@ mod tests {
     #[test]
     fn manual_attempts_are_bounded_before_opening_storage() {
         for attempt in ["0", "17", "-1", "4294967296"] {
-            assert!(parse("deliver", &args(&[
-                "--id", "7", "--delivery-id", "delivery-1", "--destination", "forge-projection",
-                "--at-least-once", "--attempt", attempt,
-            ])).is_err());
+            assert!(
+                parse(
+                    "deliver",
+                    &args(&[
+                        "--id",
+                        "7",
+                        "--delivery-id",
+                        "delivery-1",
+                        "--destination",
+                        "forge-projection",
+                        "--at-least-once",
+                        "--attempt",
+                        attempt,
+                    ])
+                )
+                .is_err()
+            );
         }
     }
 }

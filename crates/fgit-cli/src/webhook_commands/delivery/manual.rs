@@ -13,7 +13,10 @@ use crate::publication_support::quote;
 
 pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), String> {
     if !options.at_least_once {
-        return Err("manual delivery requires --at-least-once; a repeated send can duplicate an effect".into());
+        return Err(
+            "manual delivery requires --at-least-once; a repeated send can duplicate an effect"
+                .into(),
+        );
     }
     let key = options.key.ok_or("missing --delivery-id")?;
     let destination = options.destination.ok_or("missing --destination")?;
@@ -39,14 +42,19 @@ pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), S
     require_subscription(&registration.filter, &request.events.events)?;
 
     let previous = if replay {
-        let record = store.get_dead_letter(key).ok_or("delivery not present in dead letters")?;
+        let record = store
+            .get_dead_letter(key)
+            .ok_or("delivery not present in dead letters")?;
         require_replay_binding(&record, &registration, key, request.payload_root)?;
         Some(record)
     } else {
         None
     };
     let attempt = if let Some(record) = &previous {
-        let next = record.attempts.checked_add(1).ok_or("manual attempt overflow")?;
+        let next = record
+            .attempts
+            .checked_add(1)
+            .ok_or("manual attempt overflow")?;
         if options.attempt.is_some_and(|attempt| attempt != next) {
             return Err("replay --attempt must follow the retained diagnostic attempt".into());
         }
@@ -63,12 +71,8 @@ pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), S
     } else {
         SsrfPolicy::STRICT
     };
-    let transport = WebhookDeliveryDestination::new(
-        destination,
-        registration,
-        policy,
-        store.dead_letters(),
-    );
+    let transport =
+        WebhookDeliveryDestination::new(destination, registration, policy, store.dead_letters());
     let (verdict, response) = transport.deliver_request(&request, attempt)?;
     // Do not delete a diagnostic and call that a replay. Nor does a 2xx here
     // authorize canonical settlement: that is the strong worker's separate CAS
@@ -76,11 +80,19 @@ pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), S
     let diagnostic_retained = store.get_dead_letter(key).is_some();
     let output = format!(
         "{{\"type\":\"webhook_delivery_observed\",\"schema_version\":1,\"mode\":\"manual-at-least-once\",\"tenant_id\":{},\"repository_id\":{},\"source_head\":{},\"snapshot_token\":{},\"webhook_id\":{},\"delivery_id\":{},\"destination\":{},\"payload_root\":{},\"attempt\":{},\"replay\":{},\"verdict\":{},\"outcome_unknown\":{},\"diagnostic_retained\":{},\"canonical_settled\":false,\"automatic_retry\":false,\"node_closed\":true,\"response_summary\":{}}}",
-        quote(&options.tenant.to_string()), quote(&options.repository.to_string()),
-        quote(&selected.source_head().to_string()), quote(&head_token(selected.source_head())),
-        webhook_id, quote(key.as_str()), quote(destination.as_str()),
-        quote(&request.payload_root.to_string()), attempt, replay, quote(verdict),
-        verdict == "AmbiguousTimeout", diagnostic_retained,
+        quote(&options.tenant.to_string()),
+        quote(&options.repository.to_string()),
+        quote(&selected.source_head().to_string()),
+        quote(&head_token(selected.source_head())),
+        webhook_id,
+        quote(key.as_str()),
+        quote(destination.as_str()),
+        quote(&request.payload_root.to_string()),
+        attempt,
+        replay,
+        quote(verdict),
+        verdict == "AmbiguousTimeout",
+        diagnostic_retained,
         quote(&String::from_utf8_lossy(&response)),
     );
     Ok((exit_code(verdict), output))
@@ -133,7 +145,10 @@ fn require_subscription(filter: &WebhookEventFilter, events: &[ForgeEvent]) -> R
             ForgeEventPayload::WorkflowCheckObservedNative(_) => "workflow_check",
         };
         if !filter.matches(name) && !filter.matches(&format!("kind:{}", event.payload.kind())) {
-            return Err(format!("subscription does not admit every event in this batch (kind {}); no webhook attempted", event.payload.kind()));
+            return Err(format!(
+                "subscription does not admit every event in this batch (kind {}); no webhook attempted",
+                event.payload.kind()
+            ));
         }
     }
     Ok(())
