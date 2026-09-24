@@ -42,7 +42,7 @@ impl<A: GitHashAlgorithm> WorkflowInputs<A> {
             ),
         }
     }
-    pub(super) fn merge(&self) -> Option<&NativeMerge> {
+    pub(super) const fn merge(&self) -> Option<&NativeMerge> {
         match self {
             Self::Canonical(_) => None,
             Self::Candidate { merge, .. } => merge.as_ref(),

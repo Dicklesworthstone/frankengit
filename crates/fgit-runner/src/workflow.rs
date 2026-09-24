@@ -114,13 +114,16 @@ impl WorkflowPlan {
             graph_id,
         })
     }
+    #[must_use]
     pub const fn source_commitment(&self) -> Commitment {
         self.source
     }
+    #[must_use]
     pub const fn graph_commitment(&self) -> Commitment {
         self.graph_id
     }
-    pub fn graph(&self) -> &WorkflowGraph {
+    #[must_use]
+    pub const fn graph(&self) -> &WorkflowGraph {
         &self.graph
     }
 
@@ -425,6 +428,7 @@ pub enum JobOutcome {
     Refused,
 }
 impl StepOutcome {
+    #[must_use]
     pub const fn token(self) -> &'static str {
         match self {
             Self::Succeeded => "succeeded",
@@ -437,6 +441,7 @@ impl StepOutcome {
     }
 }
 impl JobOutcome {
+    #[must_use]
     pub const fn token(self) -> &'static str {
         match self {
             Self::Succeeded => "succeeded",
@@ -476,6 +481,7 @@ pub struct JobReport {
 impl JobReport {
     /// Whether the owning executor reported unresolved containment. An absent
     /// retention flag cannot override an explicit containment-failure outcome.
+    #[must_use]
     pub fn requires_containment(&self) -> bool {
         self.failure
             .as_ref()
@@ -495,6 +501,7 @@ pub struct WorkflowReport {
     pub jobs: Vec<JobReport>,
 }
 impl WorkflowReport {
+    #[must_use]
     pub fn succeeded(&self) -> bool {
         !self.jobs.is_empty()
             && self
@@ -504,6 +511,7 @@ impl WorkflowReport {
     }
     /// Deterministic JSON for a local observation artifact, NOT a canonical
     /// forge event or an independently authorized required-check result.
+    #[must_use]
     pub fn to_json(&self) -> String {
         let jobs = self.jobs.iter().map(|job| {
             let steps = job.steps.iter().map(|step| {

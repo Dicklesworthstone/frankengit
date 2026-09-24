@@ -10,7 +10,7 @@
 mod bundle_review;
 #[path = "rebase_apply.rs"]
 mod rebase_apply;
-pub(crate) use bundle_review::BundleInspectionRefusal;
+pub use bundle_review::BundleInspectionRefusal;
 
 use super::{NodeWorkspaceRefusal, workspace_request_live};
 use crate::quarantine_validator::ProductionReceiveQuarantineHandoff;
@@ -35,7 +35,7 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_PREREQUISITES: usize = 64;
 const MAX_CANDIDATE_BYTES: usize = 2 * 1024 * 1024;
 
-fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
+const fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::InvalidWorkspaceCandidate(reason)
 }
 

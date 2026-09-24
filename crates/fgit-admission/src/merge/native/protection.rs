@@ -28,9 +28,11 @@ pub struct ProtectionState {
     pub event: Option<ForgeEvent>,
 }
 impl ProtectionState {
+    #[must_use]
     pub fn version(&self) -> Option<AggregateVersion> {
         self.event.as_ref().map(|event| event.version)
     }
+    #[must_use]
     pub fn protection(&self) -> Option<&ReviewProtection> {
         self.event.as_ref().and_then(|event| match &event.payload {
             ForgeEventPayload::ReviewProtectionChanged(change) => Some(&change.protection),

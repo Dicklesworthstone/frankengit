@@ -24,7 +24,7 @@ const DELETION_OVERHEAD: usize = concat!(
 const NAMED_POLICY_OVERHEAD: usize =
     concat!("policy forge_branch_protection {\n", "    default allow\n}").len();
 
-fn bounded_source_length(observed: usize) -> Result<(), PolicyCompileRefusal> {
+const fn bounded_source_length(observed: usize) -> Result<(), PolicyCompileRefusal> {
     if observed > MAX_SOURCE_LEN {
         return Err(PolicyCompileRefusal::Syntax(
             PolicySyntaxRefusal::SourceTooLarge {
@@ -143,7 +143,7 @@ where
 /// Check the existing receive default-branch deletion rule. Both sync and
 /// async admission call this through their shared publication preparation.
 /// An absent policy verdict is not evidence that publication is permitted.
-pub(crate) fn receive_refusal(
+pub fn receive_refusal(
     target: &RefName,
     principal_id: PrincipalId,
     refs_before: &BTreeMap<RefName, GitOid>,

@@ -3,7 +3,11 @@
 //! Delivery removes a batch from the pending queue, not from retained history.
 //! This reader includes acknowledged batches without resubmitting, settling,
 //! repairing or running anything. A verified proposal is still not a check.
-use super::*;
+use super::{
+    BTreeMap, BTreeSet, Binding, CheckDeliveryAcknowledgement, CheckDeliveryBatch,
+    CheckDeliveryRefusal, CheckDeliverySink, CheckJournalPin, CheckRunStatus, Commitment,
+    CoordinatorExecutionProfile, FileCheckJournal, HEADER_BYTES, root,
+};
 use std::ops::Bound::{Excluded, Unbounded};
 
 /// Typed local evidence readers. These do not authenticate check issuers.
@@ -23,9 +27,11 @@ pub struct CheckHistoryEntry {
     delivered: Option<Commitment>,
 }
 impl CheckHistoryEntry {
+    #[must_use]
     pub const fn batch(&self) -> &CheckDeliveryBatch {
         &self.batch
     }
+    #[must_use]
     pub const fn delivery_receipt(&self) -> Option<Commitment> {
         self.delivered
     }
@@ -41,12 +47,15 @@ pub struct CheckHistoryPage {
     next_after: Option<Commitment>,
 }
 impl CheckHistoryPage {
+    #[must_use]
     pub const fn snapshot(&self) -> CheckJournalPin {
         self.snapshot
     }
+    #[must_use]
     pub fn entries(&self) -> &[CheckHistoryEntry] {
         &self.entries
     }
+    #[must_use]
     pub const fn next_after(&self) -> Option<Commitment> {
         self.next_after
     }
@@ -55,6 +64,7 @@ impl CheckHistoryPage {
 impl FileCheckJournal {
     /// Number of accepted batches, including acknowledged history. No evidence
     /// or execution-completeness claim follows from this count.
+    #[must_use]
     pub fn retained_batches(&self) -> usize {
         self.batches.len()
     }

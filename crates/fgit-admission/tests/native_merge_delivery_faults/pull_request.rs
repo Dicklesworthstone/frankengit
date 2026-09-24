@@ -25,7 +25,7 @@ enum Prior {
 }
 
 impl Prior {
-    fn refusal(self) -> Option<RefusalCode> {
+    const fn refusal(self) -> Option<RefusalCode> {
         match self {
             Self::Open | Self::Update => None,
             Self::Close | Self::OtherSourceRef | Self::OtherTargetRef => {

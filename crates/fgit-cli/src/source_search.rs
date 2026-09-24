@@ -19,7 +19,7 @@ struct Options {
     limits: SearchLimits,
 }
 
-pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
+pub fn run(arguments: &[String]) -> Result<u8, String> {
     if arguments == ["--help"] {
         println!("{USAGE}");
         return Ok(0);
@@ -183,7 +183,11 @@ fn decimal(text: &str) -> Result<usize, String> {
         .map_err(|_| "limit is outside the platform integer range".to_owned())
 }
 fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
-    if text.is_empty() || text.len() > limit * 2 || text.len() % 2 != 0 || !text.is_ascii() {
+    if text.is_empty()
+        || text.len() > limit * 2
+        || !text.len().is_multiple_of(2)
+        || !text.is_ascii()
+    {
         return Err(
             "hex bytes must be nonempty, even-length and within the field limit".to_owned(),
         );

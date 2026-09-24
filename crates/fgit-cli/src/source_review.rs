@@ -3,7 +3,7 @@
 
 #[path = "bundle_review.rs"]
 mod bundle_review;
-pub(super) use bundle_review::run as inspect_bundle;
+pub use bundle_review::run as inspect_bundle;
 
 use super::publication_support::quote;
 use fgit_forge::review::{
@@ -49,7 +49,7 @@ struct Options {
     review: ReviewOptions,
 }
 
-pub(super) fn run(arguments: &[String], pr: bool) -> Result<(), String> {
+pub fn run(arguments: &[String], pr: bool) -> Result<(), String> {
     if arguments == ["--help"] {
         return emit(&mut std::io::stdout().lock(), USAGE);
     }
@@ -165,7 +165,7 @@ fn parse(arguments: &[String], pr: bool) -> Result<Options, String> {
                 version = Some(
                     AggregateVersion::try_new(decimal(value)?)
                         .ok_or("expected version must be positive")?,
-                )
+                );
             }
             "--path" | "--path-hex" => {
                 if review.paths.len() >= 64 {
@@ -236,7 +236,7 @@ fn size(value: &str) -> Result<usize, String> {
 fn unhex(value: &str, limit: usize) -> Result<Vec<u8>, String> {
     if value.is_empty()
         || value.len() > limit * 2
-        || value.len() % 2 != 0
+        || !value.len().is_multiple_of(2)
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -252,7 +252,9 @@ fn unhex(value: &str, limit: usize) -> Result<Vec<u8>, String> {
     };
     Ok(value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| (digit(pair[0]) << 4) | digit(pair[1]))
         .collect())
 }

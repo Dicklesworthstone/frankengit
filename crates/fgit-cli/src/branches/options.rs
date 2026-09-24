@@ -256,7 +256,7 @@ fn decimal(value: &str) -> Result<u64, String> {
 fn unhex(value: &str, limit: usize) -> Result<Vec<u8>, String> {
     if value.is_empty()
         || value.len() > 2 * limit
-        || value.len() % 2 != 0
+        || !value.len().is_multiple_of(2)
         || !value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -266,7 +266,9 @@ fn unhex(value: &str, limit: usize) -> Result<Vec<u8>, String> {
     let digit = |b| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     Ok(value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| 16 * digit(pair[0]) + digit(pair[1]))
         .collect())
 }

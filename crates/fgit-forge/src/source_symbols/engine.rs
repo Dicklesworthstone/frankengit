@@ -90,7 +90,7 @@ pub struct Budget {
     pub declarations: usize,
 }
 impl Budget {
-    pub fn new(maximum: u64) -> Result<Self, Error> {
+    pub const fn new(maximum: u64) -> Result<Self, Error> {
         if maximum == 0 || maximum > MAX_WORK {
             return Err(Error {
                 kind: ErrorKind::WorkLimit,
@@ -146,13 +146,13 @@ impl Token {
         self.kind == TokenKind::Word(false) && self.text(bytes) == text
     }
 }
-fn start(b: u8) -> bool {
+const fn start(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_'
 }
-fn continuation(b: u8) -> bool {
+const fn continuation(b: u8) -> bool {
     start(b) || b.is_ascii_digit()
 }
-fn keyword(bytes: &[u8]) -> bool {
+const fn keyword(bytes: &[u8]) -> bool {
     matches!(
         bytes,
         b"as"
@@ -215,7 +215,7 @@ fn identifier(token: Token, bytes: &[u8]) -> bool {
         _ => false,
     }
 }
-fn close(open: u8) -> Option<u8> {
+const fn close(open: u8) -> Option<u8> {
     match open {
         b'(' => Some(b')'),
         b'[' => Some(b']'),
@@ -233,7 +233,7 @@ struct Lexer<'a, 'b> {
     look: Option<Token>,
 }
 impl Lexer<'_, '_> {
-    fn error(&self, kind: ErrorKind) -> Error {
+    const fn error(&self, kind: ErrorKind) -> Error {
         Error {
             kind,
             byte_offset: self.at,
@@ -243,7 +243,7 @@ impl Lexer<'_, '_> {
         self.bytes.get(n).copied()
     }
     fn bump(&mut self) -> Result<(), Error> {
-        if self.at % 1024 == 0 {
+        if self.at.is_multiple_of(1024) {
             self.budget.charge(0, self.at, self.cancelled)?;
         }
         self.budget.work = self
@@ -635,46 +635,44 @@ pub fn extract(
         }
         if token.word(bytes, b"macro_rules") && lex.peek()?.is_some_and(|t| t.punct(b'!')) {
             lex.next()?;
-            if let Some(name) = lex.peek()? {
-                if identifier(name, bytes) {
+            if let Some(name) = lex.peek()?
+                && identifier(name, bytes)
+            {
+                lex.next()?;
+                if let Some(open) = lex.peek()?
+                    && tail(Kind::Macro, open, bytes)
+                {
+                    lex.emit(&mut out, Kind::Macro, name)?;
                     lex.next()?;
-                    if let Some(open) = lex.peek()? {
-                        if tail(Kind::Macro, open, bytes) {
-                            lex.emit(&mut out, Kind::Macro, name)?;
-                            lex.next()?;
-                            let TokenKind::Punct(byte) = open.kind else {
-                                return Err(lex.error(ErrorKind::UnbalancedDelimiter));
-                            };
-                            lex.group(byte)?;
-                            out.macro_bodies_skipped += 1;
-                            macro_name = false;
-                            continue;
-                        }
-                    }
+                    let TokenKind::Punct(byte) = open.kind else {
+                        return Err(lex.error(ErrorKind::UnbalancedDelimiter));
+                    };
+                    lex.group(byte)?;
+                    out.macro_bodies_skipped += 1;
+                    macro_name = false;
+                    continue;
                 }
             }
         }
-        if token.punct(b'!') && macro_name {
-            if let Some(open) = lex.peek()? {
-                if let TokenKind::Punct(byte) = open.kind {
-                    if close(byte).is_some() {
-                        lex.next()?;
-                        lex.group(byte)?;
-                        out.macro_bodies_skipped += 1;
-                        macro_name = false;
-                        continue;
-                    }
-                }
-            }
+        if token.punct(b'!')
+            && macro_name
+            && let Some(open) = lex.peek()?
+            && let TokenKind::Punct(byte) = open.kind
+            && close(byte).is_some()
+        {
+            lex.next()?;
+            lex.group(byte)?;
+            out.macro_bodies_skipped += 1;
+            macro_name = false;
+            continue;
         }
-        if let Some(kind) = head_kind(token, bytes) {
-            if let Some(name) = lex.peek()? {
-                if identifier(name, bytes) {
-                    lex.next()?;
-                    if lex.peek()?.is_some_and(|next| tail(kind, next, bytes)) {
-                        lex.emit(&mut out, kind, name)?;
-                    }
-                }
+        if let Some(kind) = head_kind(token, bytes)
+            && let Some(name) = lex.peek()?
+            && identifier(name, bytes)
+        {
+            lex.next()?;
+            if lex.peek()?.is_some_and(|next| tail(kind, next, bytes)) {
+                lex.emit(&mut out, kind, name)?;
             }
         }
         if let TokenKind::Punct(byte) = token.kind {

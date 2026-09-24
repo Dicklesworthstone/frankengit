@@ -1,6 +1,10 @@
 //! Bounded transfer of complete local evidence and its proposal to a second
 //! operator-selected journal. This is durable custody, not check publication.
-use super::*;
+use super::{
+    BTreeMap, BTreeSet, CheckDeliveryAcknowledgement, CheckDeliveryRefusal, CheckDeliverySink,
+    CheckRunStatus, CoordinatorExecutionProfile, FileCheckJournal, MAX_OBSERVATION_BYTES,
+    ObservationRefusal, verify_trusted_job,
+};
 
 impl FileCheckJournal {
     /// Transfer one FIFO batch and every referenced trusted job body. Before

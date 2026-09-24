@@ -185,7 +185,7 @@ fn rpc_refuses_pipelined_suffix_before_writing_any_response() {
     let head = parse_head(&head_bytes, HttpLimits::default())
         .unwrap()
         .unwrap();
-    let mut offered = body.clone();
+    let mut offered = body;
     offered.extend_from_slice(b"NEXT");
     let mut live = || true;
     let mut output = Vec::new();

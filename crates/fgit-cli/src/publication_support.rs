@@ -7,7 +7,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
 
-pub(super) fn set_once<T>(slot: &mut Option<T>, value: T, field: &str) -> Result<(), String> {
+pub fn set_once<T>(slot: &mut Option<T>, value: T, field: &str) -> Result<(), String> {
     if slot.is_some() {
         return Err(format!("duplicate {field}"));
     }
@@ -15,7 +15,7 @@ pub(super) fn set_once<T>(slot: &mut Option<T>, value: T, field: &str) -> Result
     Ok(())
 }
 
-pub(super) fn parse_oid(text: &str) -> Result<GitOid, String> {
+pub fn parse_oid(text: &str) -> Result<GitOid, String> {
     let format = match text.len() {
         40 => GitHashAlgorithm::Sha1,
         64 => GitHashAlgorithm::Sha256,
@@ -28,7 +28,7 @@ pub(super) fn parse_oid(text: &str) -> Result<GitOid, String> {
     Ok(id)
 }
 
-pub(super) fn read_bundle(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+pub fn read_bundle(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     // This local-operator profile requires a stable regular artifact under the
     // operator's control. It is not an adversarial host-filesystem boundary.
     let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
@@ -67,7 +67,7 @@ pub(super) fn read_bundle(path: &Path, limit: usize) -> Result<Vec<u8>, String> 
     Ok(bytes)
 }
 
-pub(super) fn describe(tx_id: TxId, terminal: &TerminalOutcome) -> String {
+pub fn describe(tx_id: TxId, terminal: &TerminalOutcome) -> String {
     match terminal.outcome {
         DecisionOutcome::Committed {
             repository_commit_id,
@@ -79,7 +79,7 @@ pub(super) fn describe(tx_id: TxId, terminal: &TerminalOutcome) -> String {
     }
 }
 
-pub(super) fn write_terminal_receipt(
+pub fn write_terminal_receipt(
     output: &mut impl Write,
     receipt: &str,
     tx_id: TxId,
@@ -95,7 +95,7 @@ pub(super) fn write_terminal_receipt(
         })
 }
 
-pub(super) fn quote(value: &str) -> String {
+pub fn quote(value: &str) -> String {
     let mut out = String::from("\"");
     for c in value.chars() {
         match c {
@@ -108,7 +108,7 @@ pub(super) fn quote(value: &str) -> String {
                 || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}'
                 | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
             {
-                out.push_str(&format!("\\u{:04x}", u32::from(c)))
+                out.push_str(&format!("\\u{:04x}", u32::from(c)));
             }
             c => out.push(c),
         }

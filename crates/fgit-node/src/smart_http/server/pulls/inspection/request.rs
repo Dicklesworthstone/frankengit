@@ -10,7 +10,7 @@ use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
-pub(crate) struct Request<'a> {
+pub struct Request<'a> {
     pub repository_route: &'a str,
     pub number: PullRequestNumber,
     pub boundary: &'a str,

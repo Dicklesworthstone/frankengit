@@ -427,7 +427,7 @@ fn break_glass_successful_execution_retains_displaced_state_and_post_review() {
         "refs/heads/main",
         dummy_oid(10),
         dummy_oid(20),
-        principal.clone(),
+        principal,
         1500,
     );
 

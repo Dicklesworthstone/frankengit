@@ -123,7 +123,7 @@ fn read_deploy_keys_file(
         let scopes = parse_scopes(parts[2])?;
 
         let fgit_key = fgit_crypto::VerifyingKey::from_bytes(pub_bytes);
-        let b1 = DeployKeyBinding::register(repo_id, principal, fgit_key.clone(), &scopes)
+        let b1 = DeployKeyBinding::register(repo_id, principal, fgit_key, &scopes)
             .map_err(|e| format!("line {}: cannot register deploy key: {e}", line_no + 1))?;
         bindings.push(b1);
 
@@ -229,7 +229,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
         let scopes = parse_scopes(scopes_str)?;
 
         let fgit_key = fgit_crypto::VerifyingKey::from_bytes(pub_bytes);
-        let b1 = DeployKeyBinding::register(repository, principal, fgit_key.clone(), &scopes)
+        let b1 = DeployKeyBinding::register(repository, principal, fgit_key, &scopes)
             .map_err(|e| format!("cannot register deploy key: {e}"))?;
         deploy_keys.push(b1);
 
@@ -260,7 +260,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
     })
 }
 
-pub(crate) fn run(arguments: &[String]) -> Result<CliOutcome, String> {
+pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
     let prepared = parse(arguments)?;
     let listener = TcpListener::bind(&prepared.listen).map_err(|e| e.to_string())?;
     let listen_address = listener.local_addr().map_err(|e| e.to_string())?;

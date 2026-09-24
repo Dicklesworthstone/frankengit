@@ -150,19 +150,19 @@ enum ReplyBody {
     BundleExport(bundles::Export),
 }
 impl Reply {
-    fn json(reply: JsonReply) -> Self {
+    const fn json(reply: JsonReply) -> Self {
         Self(ReplyBody::Json(reply))
     }
-    fn patch(reply: changes::PatchReply) -> Self {
+    const fn patch(reply: changes::PatchReply) -> Self {
         Self(ReplyBody::Patch(reply))
     }
-    fn initial(reply: initial::Prepared) -> Self {
+    const fn initial(reply: initial::Prepared) -> Self {
         Self(ReplyBody::Initial(reply))
     }
-    fn candidate(reply: artifact::PreparedReply) -> Self {
+    const fn candidate(reply: artifact::PreparedReply) -> Self {
         Self(ReplyBody::Candidate(reply))
     }
-    fn bundle_export(reply: bundles::Export) -> Self {
+    const fn bundle_export(reply: bundles::Export) -> Self {
         Self(ReplyBody::BundleExport(reply))
     }
     pub(super) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {

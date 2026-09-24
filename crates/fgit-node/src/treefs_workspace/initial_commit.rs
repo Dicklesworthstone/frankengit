@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 
 mod binary;
 
-fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
+const fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::InvalidWorkspaceCandidate(reason)
 }
 fn check_reference(reference: &RefName) -> Result<(), NodeWorkspaceRefusal> {

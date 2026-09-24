@@ -37,12 +37,12 @@ pub enum ProjectionError {
     /// The driver consumed the transaction but did not acknowledge commit.
     /// Resolve the stored prefix using a healthy connection before deciding
     /// whether to replay; this is not evidence of non-commit.
-    CommitUncertain { failure: Box<ProjectionError> },
+    CommitUncertain { failure: Box<Self> },
     /// Rollback did not acknowledge cleanup. `cause` is absent for a failed
     /// replay-only rollback. Do not reuse this connection as if it were clean.
     RollbackFailed {
-        cause: Option<Box<ProjectionError>>,
-        failure: Box<ProjectionError>,
+        cause: Option<Box<Self>>,
+        failure: Box<Self>,
     },
     /// A caller counter cannot be represented exactly by the storage schema.
     OutOfRange {

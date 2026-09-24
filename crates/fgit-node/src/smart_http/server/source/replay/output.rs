@@ -58,7 +58,7 @@ pub(super) fn entry(
         quote(&value.oid.to_string())
     ))
 }
-fn kind(value: ConflictKind) -> &'static str {
+const fn kind(value: ConflictKind) -> &'static str {
     match value {
         ConflictKind::Content => "content",
         ConflictKind::Binary => "binary",

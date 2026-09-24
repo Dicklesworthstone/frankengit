@@ -5,7 +5,7 @@ use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_forge::history::{BlameResult, HistoryCommit, HistoryPage};
 use std::collections::{BTreeMap, BTreeSet};
 
-fn invalid() -> ToolError {
+const fn invalid() -> ToolError {
     ToolError::failed("invalid_history_report")
 }
 fn oid(format: GitHashAlgorithm, value: GitOid) -> Result<(), ToolError> {

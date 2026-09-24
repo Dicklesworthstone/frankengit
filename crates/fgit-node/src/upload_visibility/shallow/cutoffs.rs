@@ -3,14 +3,14 @@
 use super::*;
 use fgit_git_object::ParsedObject;
 
-pub(super) fn requested(request: &PackRequest) -> bool {
+pub(super) const fn requested(request: &PackRequest) -> bool {
     request.deepen_since.is_some() || !request.deepen_not.is_empty()
 }
 
 /// Observe a unique, uncontinued native committer date without changing import
 /// acceptance. A time-filtered request refuses an unusable date when visited;
 /// ordinary and ref-only fetches retain the existing byte-preserving behavior.
-pub(crate) fn committer_time(parsed: &ParsedObject) -> Option<i64> {
+pub fn committer_time(parsed: &ParsedObject) -> Option<i64> {
     let ParsedObject::Commit(commit) = parsed else {
         return None;
     };

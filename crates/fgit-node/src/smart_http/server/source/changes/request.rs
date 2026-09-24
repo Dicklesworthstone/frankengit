@@ -73,7 +73,7 @@ impl<'a> Request<'a> {
     pub(in crate::smart_http::server::source) fn is_mutation(&self) -> bool {
         self.operation == Operation::Apply
     }
-    pub(super) fn kind(&self) -> SourceUploadKind {
+    pub(super) const fn kind(&self) -> SourceUploadKind {
         match self.operation {
             Operation::Prepare => SourceUploadKind::Patch,
             _ => SourceUploadKind::Bundle,

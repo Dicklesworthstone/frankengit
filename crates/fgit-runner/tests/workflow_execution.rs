@@ -40,13 +40,9 @@ impl WorkflowExecutor for Fake {
             } else {
                 StepOutcome::Succeeded
             },
-            exit_code: Some(
-                if self.wrong_exit || (self.fail && script == "printf first") {
-                    1
-                } else {
-                    0
-                },
-            ),
+            exit_code: Some(i32::from(
+                self.wrong_exit || (self.fail && script == "printf first"),
+            )),
             stdout: b"output".to_vec(),
             stderr: Vec::new(),
             elapsed_millis: 1,
@@ -260,7 +256,7 @@ mod process {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
-    fn limits() -> StepLimits {
+    const fn limits() -> StepLimits {
         StepLimits {
             timeout: Duration::from_secs(2),
             stream_bytes: 4096,

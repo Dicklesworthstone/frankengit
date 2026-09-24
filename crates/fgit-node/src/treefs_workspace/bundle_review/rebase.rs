@@ -183,7 +183,7 @@ impl OneNode {
         let review_source = InspectionSource {
             original: &review_original,
             objects: &unpacked.objects,
-            parse_limits: source.parse_limits.clone(),
+            parse_limits: source.parse_limits,
         };
         let mut pairs = Vec::new();
         pairs

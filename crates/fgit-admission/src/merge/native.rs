@@ -101,7 +101,7 @@ impl NativeMergeIntent {
         &self.event
     }
 
-    pub fn merge(&self) -> Result<&NativeMerge, AdmissionError> {
+    pub const fn merge(&self) -> Result<&NativeMerge, AdmissionError> {
         match &self.event.payload {
             ForgeEventPayload::MergeCommittedNative(merge) => Ok(merge),
             _ => Err(incoherent("native event kind")),
@@ -559,9 +559,9 @@ impl From<AdmissionError> for PreparationFailure {
         Self::Admission(Box::new(value))
     }
 }
-fn unavailable(code: RefusalCode) -> AdmissionError {
+const fn unavailable(code: RefusalCode) -> AdmissionError {
     AdmissionError::AsyncProjectionUnavailable(code)
 }
-fn incoherent(field: &'static str) -> AdmissionError {
+const fn incoherent(field: &'static str) -> AdmissionError {
     AdmissionError::MergeIncoherent { field }
 }

@@ -41,11 +41,13 @@ struct Options {
 }
 fn decode_name(text: &str, hex: bool) -> Result<RefName, String> {
     let bytes = if hex {
-        if text.len() % 2 != 0 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !text.len().is_multiple_of(2) || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("reference hex must be complete hexadecimal byte pairs".into());
         }
         text.as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let digit = |b: u8| match b {
                     b'0'..=b'9' => b - b'0',

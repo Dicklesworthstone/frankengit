@@ -313,7 +313,7 @@ fn bytes32(value: Commitment) -> Result<[u8; 32], RefusalCode> {
         .try_into()
         .map_err(|_| RefusalCode::EvidenceInvalid)
 }
-fn conclusion(value: JobOutcome) -> WorkflowCheckConclusion {
+const fn conclusion(value: JobOutcome) -> WorkflowCheckConclusion {
     match value {
         JobOutcome::Succeeded | JobOutcome::Skipped => WorkflowCheckConclusion::ActionRequired,
         JobOutcome::Failed | JobOutcome::Refused | JobOutcome::OutputLimit => {

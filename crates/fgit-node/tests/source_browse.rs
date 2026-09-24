@@ -37,7 +37,7 @@ fn config(path: &Path, format: Format) -> NodeConfig {
 fn reference() -> RefName {
     RefName::try_new(b"refs/heads/main").unwrap()
 }
-fn actor() -> PrincipalId {
+const fn actor() -> PrincipalId {
     PrincipalId::from_bytes([0xa9; 16])
 }
 fn loose(root: &Path, format: Format, kind: GitObjectKind, body: &[u8]) -> GitOid {
@@ -152,7 +152,7 @@ impl Fixture {
             format,
         }
     }
-    fn node(&self) -> &OneNode {
+    const fn node(&self) -> &OneNode {
         self.node.as_ref().unwrap()
     }
     fn browse(&self, query: &Query) -> Result<Report, NodeWorkspaceRefusal> {

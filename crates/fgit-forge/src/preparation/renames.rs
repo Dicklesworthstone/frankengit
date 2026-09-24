@@ -70,7 +70,7 @@ impl PathBudget {
         Ok(())
     }
 }
-fn regular(entry: &MergeEntry) -> bool {
+const fn regular(entry: &MergeEntry) -> bool {
     matches!(entry.mode, 0o100644 | 0o100755)
 }
 fn parent(path: &[u8]) -> &[u8] {
@@ -269,15 +269,15 @@ fn join<S: MergeObjectSource>(
         if moves.len() == MAX_RENAMES {
             return Err(PreparationError::Budget("renames"));
         }
-        if let (Some(l), Some(r)) = (left.get(from), right.get(from)) {
-            if l != r {
-                return Err(RenameRefusal::Divergent {
-                    from: from.clone(),
-                    target: l.clone(),
-                    source: r.clone(),
-                }
-                .into());
+        if let (Some(l), Some(r)) = (left.get(from), right.get(from))
+            && l != r
+        {
+            return Err(RenameRefusal::Divergent {
+                from: from.clone(),
+                target: l.clone(),
+                source: r.clone(),
             }
+            .into());
         }
         if destinations.insert(to.clone(), from.clone()).is_some() {
             return Err(RenameRefusal::DestinationOccupied { path: to.clone() }.into());

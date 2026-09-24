@@ -65,10 +65,10 @@ impl<R: Read + Seek> PinnedArchive<R> {
             limits,
         })
     }
-    pub fn header(&self) -> &StreamHeader {
+    pub const fn header(&self) -> &StreamHeader {
         &self.header
     }
-    pub fn seal(&self) -> Seal {
+    pub const fn seal(&self) -> Seal {
         self.seal
     }
     /// The visitor may compute or stage, never publish: this pass is tentative

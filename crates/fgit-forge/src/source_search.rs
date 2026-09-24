@@ -94,7 +94,7 @@ impl SourceQuery {
                 .any(|prefix| path.starts_with(prefix) || prefix.starts_with(path))
     }
 }
-fn fold(byte: u8, case: SearchCase) -> u8 {
+const fn fold(byte: u8, case: SearchCase) -> u8 {
     match case {
         SearchCase::Exact => byte,
         SearchCase::AsciiInsensitive => byte.to_ascii_lowercase(),

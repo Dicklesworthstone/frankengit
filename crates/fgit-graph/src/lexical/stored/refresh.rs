@@ -3,7 +3,14 @@
 //! verifies. Source membership/completeness and authorization remain the native
 //! tree owner's job; these derived postings are never an access capability.
 
-use super::*;
+use super::{
+    AsyncAuthorityStore, AuthorityStore, BTreeMap, Entry, GenerationActivation, GitOid,
+    ImmutableRead, IndexError, IndexedDocument, LexicalError, LexicalIndexStore, LexicalReadLimits,
+    LexicalSegment, LexicalSelection, LexicalSource, MAX_DOCUMENTS, MAX_FILE_BYTES,
+    MAX_INDEX_BYTES, MAX_INDEX_DOCUMENTS, MAX_POSTINGS, MAX_SEGMENT_BYTES, MAX_SEGMENTS,
+    MAX_SOURCE_BYTES, MAX_TERMS, Postings, PreparedLexicalIndex, SegmentRef, SourceDocument,
+    StoreInstanceId, Term, before_read, bounded_add, check, path_valid, payload, payload_key,
+};
 
 /// A complete new inventory row. `None` explicitly requests the exact prior
 /// path/blob's postings. `Some(&[])` is a freshly read empty blob, not reuse.

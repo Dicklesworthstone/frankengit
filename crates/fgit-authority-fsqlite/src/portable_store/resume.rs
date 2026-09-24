@@ -171,4 +171,8 @@ fn match_image(
 }
 
 #[cfg(test)]
+// This file is loaded through `#[path]`, so an undecorated `mod tests;` would
+// resolve beside it (`portable_store/tests.rs`, the parent's suite) rather than
+// in `resume/`.
+#[path = "resume/tests.rs"]
 mod tests;

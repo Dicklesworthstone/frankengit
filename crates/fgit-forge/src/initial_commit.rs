@@ -217,13 +217,12 @@ fn prepare(
             .ok_or(InitialCommitError::Budget("expanded file bytes"))?;
         let size = result.content.len();
         let blob = objects.emit(GitObjectKind::Blob, result.content)?;
-        if let Some(index) = file.index() {
-            if index.old.len() > format.digest_len() * 2
+        if let Some(index) = file.index()
+            && (index.old.len() > format.digest_len() * 2
                 || !IndexExpectation::matches(&index.old, None)
-                || !IndexExpectation::matches(&index.new, Some(blob.to_string().as_bytes()))
-            {
-                return Err(InitialCommitError::IndexMismatch);
-            }
+                || !IndexExpectation::matches(&index.new, Some(blob.to_string().as_bytes())))
+        {
+            return Err(InitialCommitError::IndexMismatch);
         }
         let parts: Vec<_> = file.path().split(|b| *b == b'/').collect();
         let mut directory = Vec::new();

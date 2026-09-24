@@ -269,7 +269,7 @@ where
     Err(unavailable(RefusalCode::ResourceBudgetExceeded))
 }
 
-fn terminal_transition(
+const fn terminal_transition(
     state: ReconcileState,
 ) -> Option<(LifecycleEvent, OutboxDeliveryDisposition)> {
     match state {
@@ -563,7 +563,7 @@ where
     checkpoint().map_err(unavailable)
 }
 
-fn committed(terminal: fgit_authority::TerminalOutcome) -> Result<bool, AdmissionError> {
+const fn committed(terminal: fgit_authority::TerminalOutcome) -> Result<bool, AdmissionError> {
     match terminal.outcome {
         fgit_types::DecisionOutcome::Committed { .. } => Ok(true),
         fgit_types::DecisionOutcome::Refused { code, .. } => Err(unavailable(code)),
@@ -574,7 +574,7 @@ fn codec_error(_: fgit_codec::CodecRefusal) -> AdmissionError {
     unavailable(RefusalCode::EvidenceInvalid)
 }
 
-fn projection_error(error: ProjectionFailure) -> AdmissionError {
+const fn projection_error(error: ProjectionFailure) -> AdmissionError {
     match error {
         ProjectionFailure::Unavailable(code) | ProjectionFailure::Refuse(code) => unavailable(code),
     }

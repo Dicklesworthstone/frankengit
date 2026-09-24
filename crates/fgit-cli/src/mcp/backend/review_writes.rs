@@ -160,7 +160,7 @@ fn parse(
     ))
 }
 
-pub(super) fn decision_name(decision: ReviewDecision) -> &'static str {
+pub(super) const fn decision_name(decision: ReviewDecision) -> &'static str {
     match decision {
         ReviewDecision::Approve => "approve",
         ReviewDecision::RequestChanges => "request-changes",

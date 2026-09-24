@@ -64,36 +64,47 @@ pub struct VerifiedLocalObservation {
     receipt: TrustedWorkflowReceipt,
 }
 impl VerifiedLocalObservation {
+    #[must_use]
     pub const fn evidence(&self) -> Commitment {
         self.evidence
     }
+    #[must_use]
     pub const fn report(&self) -> &WorkflowReport {
         &self.receipt.report
     }
+    #[must_use]
     pub const fn run_id(&self) -> WorkflowRunId {
         self.receipt.binding.run
     }
+    #[must_use]
     pub const fn attempt_id(&self) -> AttemptId {
         self.receipt.binding.attempt
     }
+    #[must_use]
     pub const fn tenant(&self) -> TenantId {
         self.receipt.binding.tenant
     }
+    #[must_use]
     pub const fn repository(&self) -> RepositoryId {
         self.receipt.binding.repository
     }
+    #[must_use]
     pub const fn authority_head(&self) -> Commitment {
         self.receipt.binding.head
     }
+    #[must_use]
     pub const fn source_commit(&self) -> GitOid {
         self.receipt.binding.source
     }
+    #[must_use]
     pub const fn logical_now(&self) -> u64 {
         self.receipt.logical_now
     }
+    #[must_use]
     pub fn job_attempt(&self, job: &str) -> Option<u32> {
         self.receipt.attempts.get(job).copied()
     }
+    #[must_use]
     pub fn requires_containment(&self) -> bool {
         self.report()
             .jobs
@@ -103,6 +114,7 @@ impl VerifiedLocalObservation {
     /// Existing deterministic report JSON, including authoritative_check=false
     /// and byte-preserving hexadecimal stdout/stderr. No terminal control bytes
     /// from logs are interpreted by this rendering.
+    #[must_use]
     pub fn report_json(&self) -> String {
         self.report().to_json()
     }
@@ -278,7 +290,7 @@ pub fn verify_trusted_job(
     Ok(observed)
 }
 
-fn conclusion(outcome: JobOutcome) -> CheckRunConclusion {
+const fn conclusion(outcome: JobOutcome) -> CheckRunConclusion {
     // Must agree with CoordinatedExecutor::observe_job. Round-trip tests execute
     // the production producer rather than using this mapping to make fixtures.
     match outcome {

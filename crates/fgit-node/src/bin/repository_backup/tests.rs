@@ -65,7 +65,7 @@ fn snapshot_join_checks_key_token_generation_and_exact_bytes_separately() {
             sequence: 1,
             head_key: head.key.clone(),
             generation: 1,
-            body: head.body.clone(),
+            body: head.body,
         }],
     };
     assert!(matches_head(&bundle, &receipt));

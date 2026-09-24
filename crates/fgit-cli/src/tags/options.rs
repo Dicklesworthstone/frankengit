@@ -228,7 +228,7 @@ pub(super) fn hex(bytes: &[u8]) -> String {
 }
 fn unhex(value: &str, maximum: usize) -> Result<Vec<u8>, String> {
     if value.is_empty()
-        || value.len() % 2 != 0
+        || !value.len().is_multiple_of(2)
         || value.len() / 2 > maximum
         || !value
             .bytes()
@@ -238,7 +238,9 @@ fn unhex(value: &str, maximum: usize) -> Result<Vec<u8>, String> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| {
             u8::from_str_radix(std::str::from_utf8(p).map_err(|_| "invalid hex")?, 16)
                 .map_err(|_| "invalid hex".into())

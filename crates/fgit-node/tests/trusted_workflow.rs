@@ -114,7 +114,7 @@ impl Fixture {
             workflow,
         }
     }
-    fn node(&self) -> &OneNode {
+    const fn node(&self) -> &OneNode {
         self.node.as_ref().unwrap()
     }
     fn reopen(&mut self) {

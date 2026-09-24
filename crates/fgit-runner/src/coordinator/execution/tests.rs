@@ -1,10 +1,13 @@
 //! Coordinator regressions. Fixtures test metadata/control flow; the separately
 //! named Linux test uses real trusted direct children, not a hostile sandbox.
 use super::*;
+use crate::{CheckRunConclusion, CoordinatorLimits, ObligationSummary, RunOutcome, TriggerContext};
 use crate::{LogRedactor, ResourceUsage, SandboxPlan, SubstrateObservation, SubstrateRefusal};
 use fgit_resource::kinds::{ContainmentClass, ExitClass, RunnerReaped};
+use fgit_schema::workflow::WorkflowGraph;
 use fgit_schema::workflow::{Job, Limits, compile};
 use fgit_types::GitOidSha1;
+use fgit_types::{GitOid, RepositoryId, TenantId};
 
 fn graph(command: &str) -> WorkflowGraph {
     let mut graph = compile("name: commands\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: true\n", &Limits::default()).unwrap();

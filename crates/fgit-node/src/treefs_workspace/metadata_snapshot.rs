@@ -16,7 +16,7 @@ const MAX_SNAPSHOT_TRANSITIONS: usize = 256;
 const MAX_SNAPSHOT_DECISIONS: usize = 65_536;
 
 #[derive(Debug)]
-pub(crate) enum SnapshotReadRefusal {
+pub enum SnapshotReadRefusal {
     /// Unknown, too old, or across an unsupported policy/retention boundary.
     /// This never authorizes silently substituting the current snapshot.
     Unavailable,
@@ -56,7 +56,7 @@ fn same_read_epoch(
         && current.last_checkpoint_id == older.last_checkpoint_id
 }
 
-pub(crate) async fn select<S, C>(
+pub async fn select<S, C>(
     store: &S,
     cx: &S::Context,
     current: &PublicationBasis,

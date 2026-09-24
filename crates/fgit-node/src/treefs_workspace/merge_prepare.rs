@@ -288,7 +288,7 @@ fn bundle_for_plan(
     Ok(bytes)
 }
 
-fn source_error(error: MergeSourceError) -> NodeWorkspaceRefusal {
+const fn source_error(error: MergeSourceError) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::MergePreparation(PreparationError::Source(error))
 }
 

@@ -27,7 +27,7 @@ fn native(format: GitHashAlgorithm) -> NativeMerge {
         merge_commit: oid(format, "44"),
     }
 }
-fn event(merge: NativeMerge) -> ForgeEvent {
+const fn event(merge: NativeMerge) -> ForgeEvent {
     ForgeEvent {
         aggregate: AggregateId::PullRequest(PullRequestNumber::FIRST),
         version: AggregateVersion::try_new(2).unwrap(),

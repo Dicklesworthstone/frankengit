@@ -4,6 +4,7 @@ use crate::preparation::rebase::resolutions::{
     validate_rebase_resolutions,
 };
 use crate::preparation::resolution::{ConflictResolution, ResolutionChoice, ResolutionError};
+use fgit_crypto::git_object_id;
 
 fn conflicted(format: GitHashAlgorithm, twice: bool) -> (Source, RebaseRequest, [GitOid; 2]) {
     let mut source = Source::new(format);
@@ -285,7 +286,7 @@ fn wrong_original_clean_step_duplicate_or_nonconflict_path_cannot_silently_accep
             ..
         })
     ));
-    let mut duplicate = first.clone();
+    let mut duplicate = first;
     duplicate.paths.push(duplicate.paths[0].clone());
     assert!(matches!(
         run(&[duplicate]),
@@ -462,7 +463,7 @@ fn cancellation_during_discovery_resolution_or_later_replay_never_returns_a_cand
                 result,
                 Err(RebaseError::Preparation(PreparationError::Source(
                     MergeSourceError::Cancelled
-                ))) | Err(RebaseError::Resolution {
+                )) | RebaseError::Resolution {
                     error: ResolutionError::Preparation(PreparationError::Source(
                         MergeSourceError::Cancelled
                     )),

@@ -22,7 +22,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 fn reference() -> RefName {
     RefName::try_new(b"refs/heads/main").unwrap()
 }
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0x73; 16])
 }
 fn metadata() -> MergeMetadata {
@@ -128,7 +128,7 @@ impl Fixture {
             kept,
         }
     }
-    fn node(&self) -> &OneNode {
+    const fn node(&self) -> &OneNode {
         self.node.as_ref().unwrap()
     }
     fn prepare(

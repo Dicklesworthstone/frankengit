@@ -9,7 +9,12 @@ pub use refresh::{LexicalRefreshStats, LexicalReuse, RefreshDocument};
 #[cfg(test)]
 mod tests;
 
-use super::*;
+use super::{
+    BTreeMap, Digest, Entry, GitHashAlgorithm, GitOid, IndexedDocument, LexicalError, LexicalHit,
+    LexicalNamespace, LexicalQuery, LexicalQueryLimits, LexicalReport, LexicalSegment,
+    MAX_DOCUMENTS, MAX_FILE_BYTES, MAX_POSTINGS, MAX_SEGMENT_BYTES, MAX_SOURCE_BYTES, MAX_TERMS,
+    PROFILE, Postings, QueryBudget, SourceDocument, Term, bounded_add, check, path_valid,
+};
 use crate::{
     BuilderProfileId, GenerationActivation, GenerationAuthority, GenerationAuthorityError,
     GenerationReadLimits, GraphAuthorityClass, GraphGenerationBody, GraphGenerationId,
@@ -146,7 +151,7 @@ impl PreparedLexicalIndex {
         })
     }
     #[must_use]
-    pub fn source(&self) -> &LexicalSource {
+    pub const fn source(&self) -> &LexicalSource {
         &self.manifest.source
     }
     #[must_use]
@@ -154,7 +159,7 @@ impl PreparedLexicalIndex {
         self.manifest.document_count()
     }
     #[must_use]
-    pub fn segment_count(&self) -> usize {
+    pub const fn segment_count(&self) -> usize {
         self.segments.len()
     }
     #[must_use]
@@ -211,7 +216,7 @@ pub struct LexicalSelection {
 }
 impl LexicalSelection {
     #[must_use]
-    pub fn source(&self) -> &LexicalSource {
+    pub const fn source(&self) -> &LexicalSource {
         &self.manifest.source
     }
     #[must_use]
@@ -389,7 +394,7 @@ fn payload_key(
     bytes.extend_from_slice(root.bytes().as_bytes());
     Ok(ImmutableKey::new(bytes)?)
 }
-fn accepted_put(outcome: PutOutcome, root: Digest) -> Result<(), IndexError> {
+const fn accepted_put(outcome: PutOutcome, root: Digest) -> Result<(), IndexError> {
     match outcome {
         PutOutcome::Created | PutOutcome::IdenticalRetry => Ok(()),
         PutOutcome::Conflict => Err(IndexError::PayloadConflict(root)),

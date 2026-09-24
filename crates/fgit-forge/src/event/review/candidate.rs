@@ -27,6 +27,7 @@ impl CandidateBinding {
         }
         Ok(())
     }
+    #[must_use]
     pub fn merge(&self, subject: &ReviewSubject) -> super::super::NativeMerge {
         super::super::NativeMerge {
             source_ref: subject.source_ref.clone(),

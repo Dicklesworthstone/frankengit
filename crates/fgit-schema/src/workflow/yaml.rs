@@ -592,26 +592,9 @@ impl Scanner<'_> {
             let rest = &self.source[cursor..];
             let next = rest.find('\n').map_or(self.source.len(), |n| cursor + n);
             let raw = &self.source[cursor..next];
-            if raw.trim().is_empty() {
-                total = total.checked_add(1).ok_or(WorkflowRefusal::LimitExceeded {
-                    limit: "scalar bytes",
-                    allowed: self.limits.max_scalar_bytes,
-                    observed: usize::MAX,
-                    span: marker,
-                })?;
-                if total > self.limits.max_scalar_bytes {
-                    return Err(WorkflowRefusal::LimitExceeded {
-                        limit: "scalar bytes",
-                        allowed: self.limits.max_scalar_bytes,
-                        observed: total,
-                        span: marker,
-                    });
-                }
-                end = if next < self.source.len() {
-                    next + 1
-                } else {
-                    next
-                };
+            // Folded bytes this line contributes, including its newline.
+            let line_bytes = if raw.trim().is_empty() {
+                1
             } else {
                 let indent = raw.len() - raw.trim_start_matches(' ').len();
                 if indent <= parent_indent {
@@ -624,30 +607,29 @@ impl Scanner<'_> {
                         span: Span::new(cursor, next, marker.line.saturating_add(1), 1),
                     });
                 }
-                let bytes = raw.len() - required;
-                total = total
-                    .checked_add(bytes)
-                    .and_then(|n| n.checked_add(1))
-                    .ok_or(WorkflowRefusal::LimitExceeded {
-                        limit: "scalar bytes",
-                        allowed: self.limits.max_scalar_bytes,
-                        observed: usize::MAX,
-                        span: marker,
-                    })?;
-                if total > self.limits.max_scalar_bytes {
-                    return Err(WorkflowRefusal::LimitExceeded {
-                        limit: "scalar bytes",
-                        allowed: self.limits.max_scalar_bytes,
-                        observed: total,
-                        span: marker,
-                    });
-                }
-                end = if next < self.source.len() {
-                    next + 1
-                } else {
-                    next
-                };
+                raw.len() - required + 1
+            };
+            total = total
+                .checked_add(line_bytes)
+                .ok_or(WorkflowRefusal::LimitExceeded {
+                    limit: "scalar bytes",
+                    allowed: self.limits.max_scalar_bytes,
+                    observed: usize::MAX,
+                    span: marker,
+                })?;
+            if total > self.limits.max_scalar_bytes {
+                return Err(WorkflowRefusal::LimitExceeded {
+                    limit: "scalar bytes",
+                    allowed: self.limits.max_scalar_bytes,
+                    observed: total,
+                    span: marker,
+                });
             }
+            end = if next < self.source.len() {
+                next + 1
+            } else {
+                next
+            };
             if next == self.source.len() {
                 break;
             }

@@ -112,7 +112,7 @@ impl AsyncAuthorityStore for Store {
     }
     fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
@@ -120,14 +120,14 @@ impl AsyncAuthorityStore for Store {
     }
     fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         std::future::ready(self.memory.read_immutable(key))
     }
     fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
@@ -136,14 +136,14 @@ impl AsyncAuthorityStore for Store {
     }
     fn read_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         std::future::ready(self.memory.read_head(key))
     }
     fn compare_exchange_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -156,7 +156,7 @@ impl AsyncAuthorityStore for Store {
     }
     fn publish_head_with_outcomes(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -174,7 +174,7 @@ impl AsyncAuthorityStore for Store {
     }
     fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
     ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
         std::future::ready(self.memory.authenticate_head_receipt(receipt))
@@ -218,7 +218,7 @@ impl AsyncAdmissionProjection<Store> for Projection {
     fn snapshot_async<'a>(
         &'a self,
         store: &'a Store,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
     ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
@@ -244,7 +244,7 @@ impl AsyncAdmissionProjection<Store> for Projection {
     fn materialize_commit_async<'a>(
         &'a self,
         store: &'a Store,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
@@ -321,7 +321,7 @@ impl AsyncAdmissionProjection<Store> for Projection {
             match self.fault {
                 MaterializationFault::None | MaterializationFault::Refuse => {}
                 MaterializationFault::Retention => {
-                    materialization.roots.retention_root = digest_of(201)
+                    materialization.roots.retention_root = digest_of(201);
                 }
                 MaterializationFault::RefRoot => {
                     materialization.roots.ref_root = digest_of(202);
@@ -335,7 +335,7 @@ impl AsyncAdmissionProjection<Store> for Projection {
     fn materialize_refusal_async<'a>(
         &'a self,
         store: &'a Store,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         tx_id: TxId,
         code: RefusalCode,
@@ -577,7 +577,7 @@ impl OutboxDestination<()> for Transport {
     }
     fn probe<'a>(
         &'a mut self,
-        _: &'a (),
+        (): &'a (),
         request: &'a DeliveryRequest<'_>,
     ) -> impl Future<Output = Result<(ProbeVerdict, Vec<u8>), RefusalCode>> + Send + 'a {
         self.check(request);
@@ -589,7 +589,7 @@ impl OutboxDestination<()> for Transport {
     }
     fn deliver<'a>(
         &'a mut self,
-        _: &'a (),
+        (): &'a (),
         request: &'a DeliveryRequest<'_>,
         attempt: u32,
     ) -> impl Future<Output = Result<(DeliveryVerdict, Vec<u8>), RefusalCode>> + Send + 'a {

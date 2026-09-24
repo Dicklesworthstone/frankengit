@@ -260,7 +260,7 @@ pub fn parse_head(input: &[u8], limits: HttpLimits) -> Result<Option<RequestHead
     }))
 }
 
-fn unique<'a>(slot: &mut Option<&'a str>, value: &'a str) -> Result<(), HttpError> {
+const fn unique<'a>(slot: &mut Option<&'a str>, value: &'a str) -> Result<(), HttpError> {
     if slot.replace(value).is_some() {
         return Err(HttpError::DuplicateHeader);
     }
@@ -427,7 +427,7 @@ impl BodyDecoder {
     }
     /// Check transport EOF or a host-selected request boundary. A truncated
     /// request permanently poisons the decoder, even if bytes arrive later.
-    pub fn finish(&mut self) -> Result<(), HttpError> {
+    pub const fn finish(&mut self) -> Result<(), HttpError> {
         match self.state {
             DecodeState::Complete => Ok(()),
             DecodeState::Failed => Err(HttpError::FailedDecoder),
@@ -638,7 +638,7 @@ fn skip_ows(bytes: &[u8], cursor: &mut usize) {
 /// Prefix to put before an advertisement produced by the Git wire machine.
 /// V2 is already self-identifying and MUST NOT acquire the legacy preamble.
 /// `version` is the server's selected version, not untrusted request metadata.
-pub fn discovery_prefix(
+pub const fn discovery_prefix(
     service: Service,
     version: ProtocolVersion,
 ) -> Result<&'static [u8], HttpError> {
@@ -753,7 +753,7 @@ impl ResponseEncoder {
     /// Emit the terminal chunk exactly once, or validate a fixed-length body.
     /// For close-delimited output the caller must close the connection after
     /// all payload writes have completed. This method does not perform I/O.
-    pub fn finish(&mut self) -> Result<&'static [u8], HttpError> {
+    pub const fn finish(&mut self) -> Result<&'static [u8], HttpError> {
         let terminal: &'static [u8] = match self.state {
             EncodeState::Chunked => b"0\r\n\r\n",
             EncodeState::Fixed(0) | EncodeState::CloseDelimited => b"",

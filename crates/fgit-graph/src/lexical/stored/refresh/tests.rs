@@ -1,18 +1,24 @@
 //! Reference-store/codecs are real; source stamps and the async adapter below
 //! are explicit fixtures. These tests do not establish durable-backend behavior.
 use super::*;
+use crate::GenerationAuthority;
+use crate::lexical::{LexicalChannel, LexicalNamespace, LexicalQuery};
 use fgit_authority::{
-    AuthenticatedHead, AuthorityLimits, AuthorityVersionToken, CasOutcome, HeadInit, HeadRead,
-    HeadReadReceipt, MemoryAuthorityStore,
+    AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityVersionToken, CasOutcome,
+    HeadInit, HeadKey, HeadRead, HeadReadReceipt, ImmutableKey, MemoryAuthorityStore, PutOutcome,
 };
 use fgit_crypto::{
-    IdentityDomain, internal_algorithm_id, internal_digest_value, internal_object_id,
+    GitObjectKind, IdentityDomain, git_object_id, internal_algorithm_id, internal_digest_value,
+    internal_object_id,
 };
-use fgit_types::{CodecVersion, HeadGeneration};
+use fgit_types::{
+    CodecVersion, Digest, GitHashAlgorithm, HeadGeneration, RefName, RepositoryAuthorityHeadId,
+    RepositoryCommitId, RepositoryId, RepositoryIncarnationId, SchemaFamily, SchemaId, TenantId,
+};
 use std::future::{Future, poll_fn};
 use std::pin::pin;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Wake, Waker};
+use std::sync::Mutex;
+use std::task::{Context, Poll, Waker};
 
 type Corpus = Vec<(Vec<u8>, Vec<u8>)>;
 fn source(format: GitHashAlgorithm, version: u8) -> LexicalSource {
@@ -504,13 +510,13 @@ impl AsyncAuthorityStore for AsyncView<'_> {
     fn limits(&self) -> AuthorityLimits {
         self.inner.limits()
     }
-    async fn put_if_absent(
+    fn put_if_absent(
         &self,
         _: &usize,
         key: &ImmutableKey,
         bytes: &[u8],
-    ) -> Result<PutOutcome, AuthorityFailure> {
-        self.inner.put_if_absent(key, bytes)
+    ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
+        std::future::ready(self.inner.put_if_absent(key, bytes))
     }
     async fn read_immutable(
         &self,
@@ -520,28 +526,28 @@ impl AsyncAuthorityStore for AsyncView<'_> {
         self.wait(*cx).await;
         self.inner.read_immutable(key)
     }
-    async fn initialize_head(
+    fn initialize_head(
         &self,
         _: &usize,
         key: &HeadKey,
         n: HeadGeneration,
         bytes: &[u8],
-    ) -> Result<HeadInit, AuthorityFailure> {
-        self.inner.initialize_head(key, n, bytes)
+    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
+        std::future::ready(self.inner.initialize_head(key, n, bytes))
     }
     async fn read_head(&self, cx: &usize, key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
         self.wait(*cx).await;
         self.inner.read_head(key)
     }
-    async fn compare_exchange_head(
+    fn compare_exchange_head(
         &self,
         _: &usize,
         key: &HeadKey,
         token: AuthorityVersionToken,
         n: HeadGeneration,
         bytes: &[u8],
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        self.inner.compare_exchange_head(key, token, n, bytes)
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        std::future::ready(self.inner.compare_exchange_head(key, token, n, bytes))
     }
     async fn authenticate_head_receipt(
         &self,
@@ -552,14 +558,9 @@ impl AsyncAuthorityStore for AsyncView<'_> {
         self.inner.authenticate_head_receipt(receipt)
     }
 }
-struct Noop;
-impl Wake for Noop {
-    fn wake(self: Arc<Self>) {}
-}
 fn drive<F: Future>(future: F) -> F::Output {
     let mut future = pin!(future);
-    let waker = Waker::from(Arc::new(Noop));
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
     for _ in 0..10_000 {
         if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
             return value;

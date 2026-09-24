@@ -142,7 +142,7 @@ impl Json<'_> {
         self.literal(b"\"")?;
         let mut result = Vec::new();
         loop {
-            if self.position % 1024 == 0 {
+            if self.position.is_multiple_of(1024) {
                 checkpoint(self.live)?;
             }
             let byte = self.peek().ok_or(BAD)?;
@@ -220,7 +220,7 @@ impl Json<'_> {
         let start = self.position;
         let ceiling = maximum.min(*remaining).checked_mul(2).ok_or(BAD)?;
         loop {
-            if self.position % 1024 == 0 {
+            if self.position.is_multiple_of(1024) {
                 checkpoint(self.live)?;
             }
             let byte = self.peek().ok_or(BAD)?;
@@ -234,14 +234,19 @@ impl Json<'_> {
             self.position += 1;
         }
         let length = self.position - start;
-        if length % 2 != 0 {
+        if !length.is_multiple_of(2) {
             return Err(BAD);
         }
         let mut output = Vec::new();
         output
             .try_reserve_exact(length / 2)
             .map_err(|_| ObservationRefusal::AllocationFailed)?;
-        for (index, pair) in self.bytes[start..self.position].chunks_exact(2).enumerate() {
+        for (index, pair) in self.bytes[start..self.position]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .enumerate()
+        {
             if index % 1024 == 0 {
                 checkpoint(self.live)?;
             }
@@ -384,7 +389,7 @@ impl Json<'_> {
         })
     }
 }
-fn nibble(byte: u8) -> Result<u8> {
+const fn nibble(byte: u8) -> Result<u8> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),

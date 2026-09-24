@@ -30,7 +30,7 @@ enum Selector {
     Session,
 }
 impl Selector {
-    fn command_index(self) -> Option<usize> {
+    const fn command_index(self) -> Option<usize> {
         match self {
             Self::Command(index) => Some(index),
             _ => None,
@@ -98,7 +98,7 @@ pub(super) struct ApiError {
     code: &'static str,
 }
 impl ApiError {
-    fn new(status: Status, code: &'static str) -> Self {
+    const fn new(status: Status, code: &'static str) -> Self {
         Self { status, code }
     }
     fn bad(code: &'static str) -> Self {
@@ -218,12 +218,12 @@ struct Reply {
 impl Reply {
     fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
         let result = send_json(writer, version, Status::Success, &self.body);
-        if result.is_err() {
-            if let Some(tx) = self.terminal_tx {
-                eprintln!(
-                    "Outcome HTTP reply lost after resolving canonical transaction {tx}; repeat the read-only lookup"
-                );
-            }
+        if result.is_err()
+            && let Some(tx) = self.terminal_tx
+        {
+            eprintln!(
+                "Outcome HTTP reply lost after resolving canonical transaction {tx}; repeat the read-only lookup"
+            );
         }
         result
     }

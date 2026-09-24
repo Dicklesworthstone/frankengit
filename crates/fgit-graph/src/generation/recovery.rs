@@ -257,13 +257,13 @@ impl Walk {
         {
             return Err(GenerationAuthorityError::HistoryInconsistent);
         }
-        if let Some(minimum) = &self.minimum {
-            if self.position == minimum.authority_generation {
-                if observed != minimum.generation_id {
-                    return Err(GenerationAuthorityError::CheckpointUnresolved);
-                }
-                self.minimum_seen = true;
+        if let Some(minimum) = &self.minimum
+            && self.position == minimum.authority_generation
+        {
+            if observed != minimum.generation_id {
+                return Err(GenerationAuthorityError::CheckpointUnresolved);
             }
+            self.minimum_seen = true;
         }
         if self.target == Some(observed) {
             self.found = Some(GenerationActivation {

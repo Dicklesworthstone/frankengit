@@ -38,7 +38,7 @@ are bounded exact bytes, including newlines, and never appear in receipts.
 For a first commit without a source repository, use fg patch prepare-initial --help.
 Exit 0: prepared/committed; 3: canonical refusal; 2: input/infrastructure/output error.";
 
-pub(super) fn run(args: &[String]) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     if args
         .first()
         .is_some_and(|s| matches!(s.as_str(), "prepare-initial" | "apply-initial"))

@@ -181,9 +181,9 @@ fn field_and_collection_bounds_have_inclusive_permitted_twins() {
             labels: labels.clone(),
         },
         IssueAction::Open {
-            title: title.clone(),
-            body: body.clone(),
-            labels: [labels.clone(), vec!["zz".into()]].concat(),
+            title,
+            body,
+            labels: [labels, vec!["zz".into()]].concat(),
         },
         IssueAction::Edit(IssueEdit::default()),
         IssueAction::Comment {

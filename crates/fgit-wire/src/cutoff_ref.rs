@@ -1,7 +1,7 @@
 //! Bounded advertised-ref-only DWIM for shallow exclusions.
-use super::*;
+use super::{AnyGitOid, UploadPackRepository, WireError, WireLimits, parse_ref_name};
 
-pub(super) fn resolve(
+pub fn resolve(
     repository: &impl UploadPackRepository,
     text: &[u8],
     limits: &WireLimits,
@@ -50,6 +50,10 @@ pub(super) fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        AdvertisedRef, Capabilities, GitObjectFormat, LegacyUploadPack, Packet, UploadPackVersion,
+        V2UploadPack, WireEvent,
+    };
     struct Repo {
         format: GitObjectFormat,
         refs: Vec<AdvertisedRef>,
@@ -151,7 +155,7 @@ mod tests {
                 b"public",
                 &WireLimits {
                     max_advertised_refs: 1,
-                    ..limits.clone()
+                    ..limits
                 }
             ),
             Err(WireError::TooManyAdvertisedRefs { .. })
@@ -162,7 +166,7 @@ mod tests {
                 b"public",
                 &WireLimits {
                     max_ref_name_bytes: 2,
-                    ..limits.clone()
+                    ..limits
                 }
             ),
             Err(WireError::RefNameTooLarge { .. })
@@ -212,7 +216,7 @@ mod tests {
             for packet in [line("command=fetch"), Packet::Delimiter]
                 .iter()
                 .chain(arguments.iter())
-                .chain([line("done")].iter())
+                .chain(std::iter::once(&line("done")))
             {
                 machine.push_packet(packet, &repository).unwrap();
             }

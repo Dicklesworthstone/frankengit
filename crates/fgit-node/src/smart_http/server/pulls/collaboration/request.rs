@@ -15,24 +15,24 @@ use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Page {
+pub struct Page {
     pub after: Option<PrincipalId>,
     pub limit: u16,
     pub expected_head: Option<RepositoryAuthorityHeadId>,
 }
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Operation {
+pub enum Operation {
     List(Page),
     Review(ReviewDecision),
     Merge,
 }
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Encoding<'a> {
+pub enum Encoding<'a> {
     Form,
     Multipart(&'a str),
 }
 #[derive(Debug)]
-pub(crate) struct Request<'a> {
+pub struct Request<'a> {
     pub repository_route: &'a str,
     pub number: PullRequestNumber,
     pub operation: Operation,
@@ -133,7 +133,7 @@ impl<'a> Request<'a> {
             encoding,
         }))
     }
-    pub(crate) fn is_mutation(&self) -> bool {
+    pub(crate) const fn is_mutation(&self) -> bool {
         !matches!(self.operation, Operation::List(_))
     }
 
@@ -287,7 +287,7 @@ fn page(query: Option<&str>) -> Result<Page, ApiError> {
             "after" if after.is_none() => after = Some(principal_id(&value)?),
             "limit" if limit.is_none() => limit = Some(parse_decimal(&value)?),
             "expected_head" if expected_head.is_none() => {
-                expected_head = Some(parse_snapshot(&value)?)
+                expected_head = Some(parse_snapshot(&value)?);
             }
             _ => return Err(ApiError::bad("unknown_or_duplicate_query_field")),
         }

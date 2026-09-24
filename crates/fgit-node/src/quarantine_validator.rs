@@ -176,12 +176,12 @@ struct VerifiedObject {
 
 type VerifiedPackObjects = (BTreeMap<GitOid, VerifiedObject>, BTreeMap<u64, GitOid>);
 
+#[cfg(test)]
 impl<'node> ProductionQuarantineValidator<'node> {
     /// Unit-fixture constructor with explicit object-level source permission.
     /// Production MUST use the authenticated materialization factory below,
     /// which derives visible roots from real refs even when that set is empty.
     /// Visibility tests narrow these synthetic roots explicitly.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn new(
         node: &'node OneNode,
@@ -197,7 +197,9 @@ impl<'node> ProductionQuarantineValidator<'node> {
             parse_limits,
         }
     }
+}
 
+impl ProductionQuarantineValidator<'_> {
     fn empty_closure() -> Result<ValidatedClosure, RefusalCode> {
         let objects = BTreeSet::new();
         Ok(ValidatedClosure {

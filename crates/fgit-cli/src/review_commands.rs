@@ -43,7 +43,7 @@ required. Exit 0: committed mutation/complete page; 3: canonical refusal;
 4: PR absent or hidden; 2: input/infrastructure/output error, not non-commit.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Mode {
+pub enum Mode {
     Review,
     Reviews,
     Apply,
@@ -73,7 +73,7 @@ struct ReadOptions {
     head: Option<RepositoryAuthorityHeadId>,
 }
 
-pub(super) fn run(args: &[String], mode: Mode) -> Result<u8, String> {
+pub fn run(args: &[String], mode: Mode) -> Result<u8, String> {
     if args == ["--help"] {
         emit(&mut std::io::stdout().lock(), USAGE)?;
         return Ok(0);
@@ -514,7 +514,7 @@ fn subject_fields(subject: &ReviewSubject, candidate: Option<CandidateBinding>) 
         candidate.map_or_else(|| "null".into(), |c| quote(&c.merge_base.to_string()))
     )
 }
-fn decision_name(decision: ReviewDecision) -> &'static str {
+const fn decision_name(decision: ReviewDecision) -> &'static str {
     match decision {
         ReviewDecision::Approve => "approve",
         ReviewDecision::RequestChanges => "request-changes",
@@ -671,7 +671,9 @@ fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
     let digit = |b| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     let bytes: Vec<_> = digest
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| digit(p[0]) * 16 + digit(p[1]))
         .collect();
     let digest = DigestBytes::try_new(&bytes).map_err(|_| "invalid digest width")?;

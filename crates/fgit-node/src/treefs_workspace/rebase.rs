@@ -50,19 +50,19 @@ pub enum RebasePreparationRefusal {
 }
 impl RebasePreparationRefusal {
     /// Transport classification without exposing backend details or object IDs.
-    pub fn is_snapshot_moved(&self) -> bool {
+    pub const fn is_snapshot_moved(&self) -> bool {
         matches!(self, Self::SnapshotMoved)
     }
-    pub fn is_tip_moved(&self) -> bool {
+    pub const fn is_tip_moved(&self) -> bool {
         matches!(self, Self::TipMoved)
     }
-    pub fn is_unavailable(&self) -> bool {
+    pub const fn is_unavailable(&self) -> bool {
         matches!(self, Self::RefUnavailable)
     }
-    pub fn is_invalid_input(&self) -> bool {
+    pub const fn is_invalid_input(&self) -> bool {
         matches!(self, Self::InvalidInput(_))
     }
-    pub fn is_resource_refusal(&self) -> bool {
+    pub const fn is_resource_refusal(&self) -> bool {
         matches!(
             self,
             Self::BudgetExceeded
@@ -72,7 +72,7 @@ impl RebasePreparationRefusal {
                 ))
         )
     }
-    pub fn is_cancelled(&self) -> bool {
+    pub const fn is_cancelled(&self) -> bool {
         matches!(
             self,
             Self::Source(MergeSourceError::Cancelled)
@@ -87,7 +87,7 @@ impl RebasePreparationRefusal {
             _ => None,
         }
     }
-    pub fn source_refusal(&self) -> Option<&MergeSourceError> {
+    pub const fn source_refusal(&self) -> Option<&MergeSourceError> {
         match self {
             Self::Source(error) => Some(error),
             _ => None,

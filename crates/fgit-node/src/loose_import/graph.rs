@@ -246,7 +246,7 @@ fn require_kind(
 /// One shared native-edge vocabulary for local import and receive quarantine.
 /// The original parser and typed annotated-tag view own all byte decoding.
 /// A caller must supply the parsed view of the same native-verified `body`.
-pub(crate) fn references(
+pub fn references(
     format: GitHashAlgorithm,
     parsed: &ParsedObject,
     body: &[u8],

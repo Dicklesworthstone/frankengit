@@ -71,7 +71,7 @@ const _: () = assert!(std::mem::size_of::<InterruptedSession>() <= 128);
 impl InterruptedSession {
     /// Stable transaction mapping, present once the entire request was lowered.
     #[must_use]
-    pub fn session(&self) -> Option<&SessionMapping> {
+    pub const fn session(&self) -> Option<&SessionMapping> {
         self.session.as_ref()
     }
 
@@ -213,7 +213,9 @@ async fn bind_session_keys<S>(
 where
     S: AsyncAuthorityStore + ?Sized,
 {
-    let whole = if !plan.atomic {
+    let whole = if plan.atomic {
+        None
+    } else {
         let commands = input
             .updates
             .iter()
@@ -246,8 +248,6 @@ where
         // excluded by the existing canonical SemanticRequest/SealAttempt rules.
         bind_idempotency_key_async(store, cx, &whole, identity).await?;
         Some(whole)
-    } else {
-        None
     };
     for (lowered, identity) in plan.lowered.iter().zip(&plan.tx_ids) {
         bind_idempotency_key_async(store, cx, &seal_attempt(context, lowered), *identity).await?;

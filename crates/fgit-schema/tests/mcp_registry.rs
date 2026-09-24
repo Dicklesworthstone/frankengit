@@ -9,7 +9,7 @@ use fgit_schema::mcp::{
     SupportProfile, admit_call, discover_tools, find_tool, validate_registry, validate_tool_entry,
 };
 
-fn valid_prototype() -> McpToolEntry {
+const fn valid_prototype() -> McpToolEntry {
     McpToolEntry {
         name: "frankengit_prototype_tool",
         version: 1,

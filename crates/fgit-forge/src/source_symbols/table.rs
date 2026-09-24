@@ -45,7 +45,7 @@ fn check(cancelled: &dyn Fn() -> bool) -> Result<(), Error> {
         Ok(())
     }
 }
-fn tag(kind: Kind) -> u8 {
+const fn tag(kind: Kind) -> u8 {
     match kind {
         Kind::Function => 0,
         Kind::Struct => 1,
@@ -57,7 +57,7 @@ fn tag(kind: Kind) -> u8 {
         Kind::Macro => 7,
     }
 }
-fn kind(tag: u8) -> Result<Kind, Error> {
+const fn kind(tag: u8) -> Result<Kind, Error> {
     Ok(match tag {
         0 => Kind::Function,
         1 => Kind::Struct,
@@ -220,8 +220,7 @@ impl Table {
             }
         }
         // Deterministic comparison sorting is separately charged conservatively.
-        let comparisons =
-            out.len() as u64 * (usize::BITS - out.len().max(1).leading_zeros()) as u64;
+        let comparisons = out.len() as u64 * u64::from(out.len().max(1).bit_width());
         work.charge(comparisons, cancelled)?;
         out.sort_unstable();
         check(cancelled)?;
@@ -327,7 +326,7 @@ struct Input<'a> {
     at: usize,
 }
 impl<'a> Input<'a> {
-    fn remaining(&self) -> usize {
+    const fn remaining(&self) -> usize {
         self.bytes.len() - self.at
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
@@ -355,7 +354,7 @@ pub struct Work {
     maximum: u64,
 }
 impl Work {
-    pub fn new(maximum: u64) -> Result<Self, Error> {
+    pub const fn new(maximum: u64) -> Result<Self, Error> {
         if maximum == 0 || maximum > engine::MAX_WORK {
             return Err(Error::Limit("query work"));
         }

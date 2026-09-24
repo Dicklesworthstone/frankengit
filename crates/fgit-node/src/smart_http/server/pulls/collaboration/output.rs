@@ -61,14 +61,14 @@ fn subject(value: &ReviewSubject) -> String {
         quote(&value.target_tip.to_string())
     )
 }
-fn decision(value: ReviewDecision) -> &'static str {
+const fn decision(value: ReviewDecision) -> &'static str {
     match value {
         ReviewDecision::Approve => "approve",
         ReviewDecision::RequestChanges => "request-changes",
         ReviewDecision::Withdraw => "withdraw",
     }
 }
-fn freshness(value: ReviewFreshness) -> &'static str {
+const fn freshness(value: ReviewFreshness) -> &'static str {
     match value {
         ReviewFreshness::Current => "current",
         ReviewFreshness::Withdrawn => "withdrawn",
@@ -91,8 +91,8 @@ pub(super) fn page(
     result: Option<&ReviewPage>,
     maximum: usize,
 ) -> Result<String, ApiError> {
-    if let Some(result) = result {
-        if result.pull_request != number
+    if let Some(result) = result
+        && (result.pull_request != number
             || result.reviews.len() > usize::from(requested.limit)
             || requested
                 .expected_head
@@ -109,10 +109,9 @@ pub(super) fn page(
             || result.next_after.is_some_and(|next| {
                 result.reviews.len() != usize::from(requested.limit)
                     || result.reviews.last().map(|row| row.event.reviewer) != Some(next)
-            })
-        {
-            return Err(ApiError::unavailable());
-        }
+            }))
+    {
+        return Err(ApiError::unavailable());
     }
     let mut out = String::new();
     append(

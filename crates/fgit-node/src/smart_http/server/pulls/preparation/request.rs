@@ -14,7 +14,7 @@ use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
-pub(crate) struct Request<'a> {
+pub struct Request<'a> {
     pub repository_route: &'a str,
     pub number: PullRequestNumber,
     pub resolution: bool,
@@ -330,7 +330,7 @@ fn oid(text: &str, format: GitHashAlgorithm) -> Result<GitOid, ApiError> {
 fn path_bytes(text: &str) -> Result<Vec<u8>, ApiError> {
     if text.is_empty()
         || text.len() > 2 * PreparationLimits::default().max_path_bytes
-        || text.len() % 2 != 0
+        || !text.len().is_multiple_of(2)
         || !text
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -348,7 +348,7 @@ fn path_bytes(text: &str) -> Result<Vec<u8>, ApiError> {
     bytes
         .try_reserve_exact(text.len() / 2)
         .map_err(|_| ApiError::unavailable())?;
-    for pair in text.as_bytes().chunks_exact(2) {
+    for pair in text.as_bytes().as_chunks::<2>().0 {
         bytes.push((digit(pair[0]) << 4) | digit(pair[1]));
     }
     Ok(bytes)

@@ -36,7 +36,7 @@
 use core::fmt;
 use std::collections::BTreeMap;
 
-use fgit_codec::{CodecRefusal, Encoder};
+use fgit_codec::Encoder;
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_resource::{ResourceError, ResourceVector};
 
@@ -213,7 +213,7 @@ impl DelegatedCapability {
     }
 
     /// Mutable access to the chain (for constructing test tampered chains).
-    pub fn chain_mut(&mut self) -> &mut Vec<SealedCapability> {
+    pub const fn chain_mut(&mut self) -> &mut Vec<SealedCapability> {
         &mut self.chain
     }
 
@@ -324,9 +324,7 @@ impl SubIntent {
             });
         }
 
-        let id = SubIntentId(
-            subintent_commitment(&params).map_err(SubIntentRefusal::CanonicalCommitmentFailure)?,
-        );
+        let id = SubIntentId(subintent_commitment(&params));
 
         Ok(Self {
             id,
@@ -390,7 +388,7 @@ impl SubIntent {
     }
 
     /// Mutable attenuated capabilities (for creating tampered instances in adversarial tests).
-    pub fn attenuated_capabilities_mut(&mut self) -> &mut Vec<DelegatedCapability> {
+    pub const fn attenuated_capabilities_mut(&mut self) -> &mut Vec<DelegatedCapability> {
         &mut self.attenuated_capabilities
     }
 
@@ -483,7 +481,7 @@ pub struct SubIntentFanOutTracker {
 impl SubIntentFanOutTracker {
     /// Creates a new delegation tracker for a root or parent run.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         parent_run_id: RunId,
         initial_budget: ResourceVector,
         depth: u16,
@@ -715,13 +713,13 @@ impl SubIntentFanOutTracker {
 
         // Caveat enforcement: MaxContextBytes
         for caveat in &sub_intent.caveats {
-            if let Caveat::MaxContextBytes(max_bytes) = caveat {
-                if sub_intent.context_bytes > *max_bytes {
-                    return Err(SubIntentRefusal::ContextDuplicationExceeded {
-                        observed_bytes: sub_intent.context_bytes,
-                        limit_bytes: *max_bytes,
-                    });
-                }
+            if let Caveat::MaxContextBytes(max_bytes) = caveat
+                && sub_intent.context_bytes > *max_bytes
+            {
+                return Err(SubIntentRefusal::ContextDuplicationExceeded {
+                    observed_bytes: sub_intent.context_bytes,
+                    limit_bytes: *max_bytes,
+                });
             }
         }
 
@@ -1053,46 +1051,43 @@ pub enum SubIntentRefusal {
         /// Child run ID.
         child_run_id: RunId,
     },
-    /// Canonical commitment encoding failure.
-    CanonicalCommitmentFailure(CodecRefusal),
 }
 
 impl SubIntentRefusal {
     /// Returns true if this refusal is due to an authority amplification attempt.
     #[must_use]
-    pub fn is_amplification(&self) -> bool {
-        match self {
+    pub const fn is_amplification(&self) -> bool {
+        matches!(
+            self,
             Self::SelectorAmplified { .. }
-            | Self::DeadlineAmplified { .. }
-            | Self::QuotaAmplified { .. }
-            | Self::OperationsAmplified { .. }
-            | Self::DisclosurePolicyAmplified { .. }
-            | Self::ChainRefused(
-                ChainRefused::OperationsAmplified { .. }
-                | ChainRefused::QuotaAmplified { .. }
-                | ChainRefused::WindowWidened { .. },
-            ) => true,
-            _ => false,
-        }
+                | Self::DeadlineAmplified { .. }
+                | Self::QuotaAmplified { .. }
+                | Self::OperationsAmplified { .. }
+                | Self::DisclosurePolicyAmplified { .. }
+                | Self::ChainRefused(
+                    ChainRefused::OperationsAmplified { .. }
+                        | ChainRefused::QuotaAmplified { .. }
+                        | ChainRefused::WindowWidened { .. },
+                )
+        )
     }
 
     /// Returns true if this refusal is due to broken, missing, or forged capability ancestry.
     #[must_use]
-    pub fn is_ancestry_failure(&self) -> bool {
-        match self {
+    pub const fn is_ancestry_failure(&self) -> bool {
+        matches!(
+            self,
             Self::ChainRefused(
                 ChainRefused::MissingAncestry { .. }
-                | ChainRefused::AuthenticatorMismatch { .. }
-                | ChainRefused::AncestryMismatch { .. }
-                | ChainRefused::ParentTagMismatch { .. }
-                | ChainRefused::ParentTagMissing { .. }
-                | ChainRefused::EmptyChain
-                | ChainRefused::RootCarriesParentTag,
-            )
-            | Self::EmptyCapabilities
-            | Self::ParentRunMismatch { .. } => true,
-            _ => false,
-        }
+                    | ChainRefused::AuthenticatorMismatch { .. }
+                    | ChainRefused::AncestryMismatch { .. }
+                    | ChainRefused::ParentTagMismatch { .. }
+                    | ChainRefused::ParentTagMissing { .. }
+                    | ChainRefused::EmptyChain
+                    | ChainRefused::RootCarriesParentTag,
+            ) | Self::EmptyCapabilities
+                | Self::ParentRunMismatch { .. }
+        )
     }
 }
 
@@ -1198,19 +1193,13 @@ impl fmt::Display for SubIntentRefusal {
                     "child run {child_run_id} not found in active children"
                 )
             }
-            Self::CanonicalCommitmentFailure(refusal) => {
-                write!(
-                    formatter,
-                    "sub-intent canonical commitment failure: {refusal}"
-                )
-            }
         }
     }
 }
 
 impl core::error::Error for SubIntentRefusal {}
 
-fn subintent_commitment(params: &SubIntentParams) -> Result<[u8; 32], CodecRefusal> {
+fn subintent_commitment(params: &SubIntentParams) -> [u8; 32] {
     let mut encoder = Encoder::with_capacity(1024);
     encoder.write_raw(SUBINTENT_DOMAIN);
     encoder.write_raw(&params.child_run_id.value().to_be_bytes());
@@ -1249,7 +1238,7 @@ fn subintent_commitment(params: &SubIntentParams) -> Result<[u8; 32], CodecRefus
     let bytes = encoder.into_bytes();
     let mut hasher = <Sha256 as GitHashAlgorithm>::Hasher::new();
     hasher.update(&bytes);
-    Ok(hasher.finish())
+    hasher.finish()
 }
 
 fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8; 32]) -> fmt::Result {

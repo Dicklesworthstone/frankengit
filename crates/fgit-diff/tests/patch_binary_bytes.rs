@@ -3,9 +3,9 @@
 //! No Git subprocess, filesystem checkout, or external decoder runs here.
 use fgit_diff::patch::{FileChange, PatchError, PatchLimits, UnifiedPatch};
 
+/// Line count: every newline-terminated line plus an unterminated tail.
 fn count(bytes: &[u8]) -> usize {
-    bytes.iter().filter(|b| **b == b'\n').count()
-        + usize::from(!bytes.is_empty() && bytes.last() != Some(&b'\n'))
+    bytes.split_inclusive(|byte| *byte == b'\n').count()
 }
 fn literal(before: Option<&[u8]>, after: Option<&[u8]>) -> Vec<u8> {
     let mut out = b"diff --git a/asset.bin b/asset.bin\n".to_vec();

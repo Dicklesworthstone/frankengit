@@ -32,7 +32,7 @@ struct Options {
     arguments: Vec<String>,
 }
 
-pub(super) fn run(arguments: &[String]) -> Result<(), String> {
+pub fn run(arguments: &[String]) -> Result<(), String> {
     let options = parse(arguments)?;
     match fs::symlink_metadata(&options.destination) {
         Ok(_) => return Err("bundle destination already exists; no tool was run".to_owned()),

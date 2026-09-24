@@ -54,13 +54,13 @@ pub(super) fn ref_fields(name: &'static str, reference: &fgit_types::RefName) ->
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ApiError {
+pub struct ApiError {
     pub(super) status: Status,
     pub(super) code: &'static str,
     pub(super) outcome_unknown: bool,
 }
 impl ApiError {
-    pub(super) fn new(status: Status, code: &'static str) -> Self {
+    pub(super) const fn new(status: Status, code: &'static str) -> Self {
         Self {
             status,
             code,
@@ -88,7 +88,7 @@ impl ApiError {
     pub(super) fn snapshot_moved() -> Self {
         Self::new(Status::Conflict, "snapshot_moved")
     }
-    pub(super) fn unknown() -> Self {
+    pub(super) const fn unknown() -> Self {
         Self {
             status: Status::Unavailable,
             code: "outcome_unknown",
@@ -156,12 +156,12 @@ pub(super) struct Reply {
 impl Reply {
     pub(super) fn send(&self, writer: &mut impl Write, version: HttpVersion) -> io::Result<()> {
         let delivered = write_json(writer, version, self.status, &self.body);
-        if delivered.is_err() {
-            if let Some((tx, _)) = self.terminal {
-                eprintln!(
-                    "Forge HTTP reply lost after canonical outcome for transaction {tx}; retry the identical command and Idempotency-Key"
-                );
-            }
+        if delivered.is_err()
+            && let Some((tx, _)) = self.terminal
+        {
+            eprintln!(
+                "Forge HTTP reply lost after canonical outcome for transaction {tx}; retry the identical command and Idempotency-Key"
+            );
         }
         delivered
     }
@@ -224,12 +224,11 @@ pub(super) fn authenticate(
 pub(super) fn admission_error(error: NodeReceiveTransportRefusal) -> ApiError {
     // Reusing a key is a request rejection, not a new terminal refusal.
     // Infrastructure failures remain ambiguous even after earlier work.
-    if let NodeReceiveTransportRefusal::Admission(error) = &error {
-        if matches!(error.as_ref(), AdmissionError::Seal(source)
+    if let NodeReceiveTransportRefusal::Admission(error) = &error
+        && matches!(error.as_ref(), AdmissionError::Seal(source)
             if matches!(source.as_ref(), SealFailure::Rejected(_)))
-        {
-            return ApiError::new(Status::Conflict, "idempotency_key_reuse");
-        }
+    {
+        return ApiError::new(Status::Conflict, "idempotency_key_reuse");
     }
     ApiError::unknown()
 }

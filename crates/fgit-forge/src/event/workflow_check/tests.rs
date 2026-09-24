@@ -104,7 +104,7 @@ fn publisher_run_attempt_and_exact_job_name_have_independent_identities() {
         }
         assert!(ids.insert(other.id()));
     }
-    let mut accent = initial.clone();
+    let mut accent = initial;
     accent.record.job = "caf\u{e9}".to_owned();
     let mut combining = accent.clone();
     combining.record.job = "cafe\u{301}".to_owned();
@@ -142,7 +142,8 @@ fn mismatched_aggregate_forged_identity_and_later_versions_refuse() {
         match field {
             0 => invalid.aggregate = AggregateId::PullRequest(PullRequestNumber::FIRST),
             1 => {
-                invalid.aggregate = AggregateId::WorkflowCheck(WorkflowCheckId::from_bytes([0; 32]))
+                invalid.aggregate =
+                    AggregateId::WorkflowCheck(WorkflowCheckId::from_bytes([0; 32]));
             }
             _ => invalid.version = AggregateVersion::FIRST.next().unwrap(),
         }

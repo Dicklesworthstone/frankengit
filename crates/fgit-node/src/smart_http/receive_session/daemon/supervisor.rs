@@ -111,7 +111,7 @@ impl OneNode {
             );
             let task = self.runtime.submit_blocking(move || {
                 let mut completion = completion;
-                let mut node = match OneNode::open_existing(config) {
+                let mut node = match Self::open_existing(config) {
                     Ok(node) => node,
                     Err(error) => {
                         eprintln!("guarded daemon child open failed: {error}");

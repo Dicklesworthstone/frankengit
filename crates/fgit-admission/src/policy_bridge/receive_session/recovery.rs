@@ -128,7 +128,7 @@ struct Descriptor {
     wire_order: Vec<usize>,
 }
 
-fn invalid() -> AdmissionError {
+const fn invalid() -> AdmissionError {
     AdmissionError::MaterializationMismatch("receive session descriptor")
 }
 fn codec(_: fgit_codec::CodecRefusal) -> AdmissionError {

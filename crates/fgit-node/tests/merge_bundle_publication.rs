@@ -38,7 +38,7 @@ impl Drop for Scratch {
         }
     }
 }
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0x93; 16])
 }
 fn target() -> RefName {

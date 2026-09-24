@@ -50,9 +50,11 @@ impl ReviewRequirements {
             reviewers,
         })
     }
+    #[must_use]
     pub fn reviewers(&self) -> &[PrincipalId] {
         &self.reviewers
     }
+    #[must_use]
     pub const fn policy_epoch(&self) -> PolicyEpoch {
         self.policy_epoch
     }
@@ -456,11 +458,11 @@ mod tests {
                 0 => wrong.candidate = None,
                 1 => {
                     wrong.candidate.as_mut().unwrap().commit =
-                        GitOid::from_hex(GitHashAlgorithm::Sha1, &"e".repeat(40)).unwrap()
+                        GitOid::from_hex(GitHashAlgorithm::Sha1, &"e".repeat(40)).unwrap();
                 }
                 2 => {
                     wrong.subject.pull_request_version =
-                        wrong.subject.pull_request_version.next().unwrap()
+                        wrong.subject.pull_request_version.next().unwrap();
                 }
                 3 => wrong.subject.policy_epoch = PolicyEpoch::try_new(2).unwrap(),
                 4 => {

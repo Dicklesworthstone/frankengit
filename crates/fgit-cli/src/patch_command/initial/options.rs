@@ -121,7 +121,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         let text = &args[4];
         if text.is_empty()
             || text.len() > 8192
-            || text.len() % 2 != 0
+            || !text.len().is_multiple_of(2)
             || !text
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -130,7 +130,9 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         }
         let digit = |b| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
         text.as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| 16 * digit(p[0]) + digit(p[1]))
             .collect::<Vec<_>>()
     } else {

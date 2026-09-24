@@ -9,14 +9,14 @@ mod relative;
 /// Shared only with the repository view for the lifetime of this connection.
 /// This is a derived proof, not a persisted promise or an authority root.
 #[derive(Clone, Debug)]
-pub(crate) struct ShallowProof {
+pub struct ShallowProof {
     objects: Arc<BTreeMap<GitOid, FilterObject>>,
     limits: PackLimits,
     deadline: GitDaemonSessionDeadline,
 }
 
 impl ShallowProof {
-    pub(super) fn new(
+    pub(super) const fn new(
         objects: Arc<BTreeMap<GitOid, FilterObject>>,
         limits: PackLimits,
         deadline: GitDaemonSessionDeadline,
@@ -36,7 +36,7 @@ impl ShallowProof {
     }
 }
 
-pub(crate) fn requested(request: &PackRequest) -> bool {
+pub const fn requested(request: &PackRequest) -> bool {
     request.options.deepen_relative()
         || !request.shallows.is_empty()
         || request.deepen.is_some()

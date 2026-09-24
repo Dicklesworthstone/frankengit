@@ -51,10 +51,10 @@ impl UploadPackRepository for Repository {
     fn advertised_refs(&self) -> &[AdvertisedRef] {
         let reads = self.reads.get();
         self.reads.set(reads + 1);
-        if reads > 0 {
-            if let Some(refs) = &self.later_refs {
-                return refs;
-            }
+        if reads > 0
+            && let Some(refs) = &self.later_refs
+        {
+            return refs;
         }
         &self.refs
     }

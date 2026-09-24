@@ -131,7 +131,7 @@ fn duplicate_out_of_order_non_rust_and_foreign_format_catalogs_refuse() {
     };
     assert!(manifest.encode(&|| false).is_ok());
     let mut duplicate = manifest.clone();
-    duplicate.documents.push(doc.clone());
+    duplicate.documents.push(doc);
     assert!(duplicate.encode(&|| false).is_err());
     for path in [b"../x.rs".as_slice(), b"a.txt", b".git/x.rs"] {
         let mut m = manifest.clone();

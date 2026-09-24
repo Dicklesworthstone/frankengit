@@ -45,7 +45,7 @@ fn quota(bytes: u64, cpu: u64) -> ResourceVector {
     ResourceVector::from_grades(&[(Grade::Bytes, bytes), (Grade::CpuMicros, cpu)])
 }
 
-fn test_authority_basis() -> AuthorityBasisRef {
+const fn test_authority_basis() -> AuthorityBasisRef {
     AuthorityBasisRef {
         repository_id: 42,
         authority_head_generation: 1,
@@ -450,7 +450,7 @@ fn dropping_caveats_is_refused_while_preserving_is_permitted() {
     // Permitted twin: sub-intent includes the mandatory caveat
     let permitted = make_valid_sub_intent(&fixture, 307, quota(1_000, 500), 80, vec![], 1);
     let mut new_caveats = permitted.caveats().to_vec();
-    new_caveats.push(mandatory_caveat.clone());
+    new_caveats.push(mandatory_caveat);
     let permitted_params = SubIntentParams {
         child_run_id: permitted.child_run_id(),
         parent_run_id: permitted.parent_run_id(),
@@ -518,8 +518,9 @@ fn missing_intermediate_capability_in_chain_is_refused() {
 
     assert!(err.is_ancestry_failure());
     match err {
-        SubIntentRefusal::ChainRefused(ChainRefused::AncestryMismatch { .. })
-        | SubIntentRefusal::ChainRefused(ChainRefused::ParentTagMismatch { .. }) => {}
+        SubIntentRefusal::ChainRefused(
+            ChainRefused::AncestryMismatch { .. } | ChainRefused::ParentTagMismatch { .. },
+        ) => {}
         other => panic!("expected AncestryMismatch or ParentTagMismatch, got {other:?}"),
     }
 }

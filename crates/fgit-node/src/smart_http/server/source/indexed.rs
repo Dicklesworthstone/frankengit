@@ -116,7 +116,7 @@ pub(super) fn positive(
 }
 pub(super) fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
     if text.is_empty()
-        || text.len() % 2 != 0
+        || !text.len().is_multiple_of(2)
         || text.len() > maximum * 2
         || !text
             .bytes()
@@ -127,7 +127,9 @@ pub(super) fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
     let digit = |b| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     Ok(text
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| digit(p[0]) * 16 + digit(p[1]))
         .collect())
 }

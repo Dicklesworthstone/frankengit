@@ -1,7 +1,11 @@
 //! A commitment-bound inverted name directory, not a source of authorization.
 //! Every entry is derived from complete verified tables. The directory is only
 //! a candidate filter: returned rows still come from verified original tables.
-use super::*;
+use super::{
+    BTreeMap, CanonicalBody, CodecRefusal, DecodeLimits, Decoder, Digest, DomainTag, Encoder,
+    Error, MAX_INDEX_BYTES, MAX_PAYLOAD, Manifest, Payload, Query, SchemaFamily, SymbolMatchMode,
+    add, check, decode_body, decode_limits, encode_body, engine, payload, root, table,
+};
 
 /// Generation layout profile. Existing v1 tables and manifests keep their
 /// canonical bytes; this names the additional manifest-bound lookup payload.
@@ -20,7 +24,7 @@ const KINDS: [engine::Kind; 8] = [
     engine::Kind::Union,
     engine::Kind::Macro,
 ];
-fn kind_tag(kind: engine::Kind) -> u8 {
+const fn kind_tag(kind: engine::Kind) -> u8 {
     match kind {
         engine::Kind::Function => 0,
         engine::Kind::Struct => 1,

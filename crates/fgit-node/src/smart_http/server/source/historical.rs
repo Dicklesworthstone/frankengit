@@ -180,7 +180,7 @@ fn positive(
 }
 fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
     if text.is_empty()
-        || text.len() % 2 != 0
+        || !text.len().is_multiple_of(2)
         || text.len() > maximum * 2
         || !text
             .bytes()
@@ -197,7 +197,9 @@ fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
     };
     Ok(text
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| digit(pair[0]) << 4 | digit(pair[1]))
         .collect())
 }

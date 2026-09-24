@@ -9,13 +9,13 @@ use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Operation {
+pub enum Operation {
     Prepare,
     Apply,
 }
 
 #[derive(Debug)]
-pub(crate) struct Request<'a> {
+pub struct Request<'a> {
     pub repository_route: &'a str,
     pub boundary: &'a str,
     pub operation: Operation,
@@ -74,7 +74,7 @@ impl<'a> Request<'a> {
     pub(crate) fn is_mutation(&self) -> bool {
         self.operation == Operation::Apply
     }
-    pub(super) fn kind(&self) -> SourceUploadKind {
+    pub(super) const fn kind(&self) -> SourceUploadKind {
         match self.operation {
             Operation::Prepare => SourceUploadKind::Patch,
             Operation::Apply => SourceUploadKind::Bundle,

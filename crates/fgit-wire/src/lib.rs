@@ -1744,6 +1744,67 @@ fn oid_hex(oid: AnyGitOid) -> String {
     }
 }
 
+/// Request-body framing of one upload-pack machine. Only a stateless HTTP
+/// request can end a negotiation round with acknowledgments and no pack, so
+/// "round complete" exists only inside that variant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestFraming {
+    /// One connection carries every negotiation round (git://, SSH, file).
+    Connection,
+    /// Each HTTP request body owns a fresh machine for one round.
+    StatelessHttp { round_complete: bool },
+}
+
+impl RequestFraming {
+    const fn is_stateless_http(self) -> bool {
+        matches!(self, Self::StatelessHttp { .. })
+    }
+
+    const fn round_complete(self) -> bool {
+        matches!(
+            self,
+            Self::StatelessHttp {
+                round_complete: true
+            }
+        )
+    }
+
+    /// Record that this HTTP round ended without selecting a pack. A
+    /// connection-framed machine has no such state and is left unchanged.
+    const fn complete_round(&mut self) {
+        if let Self::StatelessHttp { round_complete } = self {
+            *round_complete = true;
+        }
+    }
+}
+
+/// Shallow-update handling for a v0/v1 fetch. Only a machine that resolves
+/// shallow updates itself can have negotiated a changed shallow boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShallowUpdates {
+    /// Parser-only handoff: the enclosing adapter owns the shallow exchange.
+    Deferred,
+    /// The machine resolves and frames shallow-info before haves;
+    /// `negotiated` records that this request changed the shallow boundary.
+    Resolved { negotiated: bool },
+}
+
+impl ShallowUpdates {
+    const fn is_resolved(self) -> bool {
+        matches!(self, Self::Resolved { .. })
+    }
+
+    const fn negotiated(self) -> bool {
+        matches!(self, Self::Resolved { negotiated: true })
+    }
+
+    const fn record_negotiated(&mut self, changed_boundary: bool) {
+        if let Self::Resolved { negotiated } = self {
+            *negotiated = changed_boundary;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LegacyState {
     AwaitWant,
@@ -1771,10 +1832,8 @@ pub struct LegacyUploadPack {
     no_done: bool,
     last_common: Option<AnyGitOid>,
     saw_want_capabilities: bool,
-    automatic_shallow_updates: bool,
-    shallow_negotiated: bool,
-    stateless_http: bool,
-    http_round_complete: bool,
+    shallow: ShallowUpdates,
+    framing: RequestFraming,
 }
 
 /// Bounded stateless-RPC envelope adapter for a legacy upload-pack request.
@@ -1873,15 +1932,17 @@ impl LegacyUploadPack {
     /// for; `done` (or a justified negotiated `no-done`) selects a pack.
     /// The host must validate the complete HTTP body before releasing outputs.
     #[must_use]
-    pub fn with_stateless_http_rounds(mut self) -> Self {
-        self.stateless_http = true;
+    pub const fn with_stateless_http_rounds(mut self) -> Self {
+        self.framing = RequestFraming::StatelessHttp {
+            round_complete: false,
+        };
         self
     }
 
     /// A have-batch flush ended this HTTP round without selecting a pack.
     #[must_use]
     pub const fn is_http_negotiation_complete(&self) -> bool {
-        self.http_round_complete
+        self.framing.round_complete()
     }
 
     /// Validate HTTP EOF against protocol state as well as packet framing.
@@ -1889,11 +1950,11 @@ impl LegacyUploadPack {
     /// arbitrary wants-only or unterminated have streams cannot.
     pub fn finish_stateless_http_round(&self) -> Result<(), WireError> {
         self.finish()?;
-        if self.stateless_http
+        if self.framing.is_stateless_http()
             && (self.is_complete()
-                || self.http_round_complete
+                || self.framing.round_complete()
                 || (self.state == LegacyState::AwaitHave
-                    && self.shallow_negotiated
+                    && self.shallow.negotiated()
                     && self.haves.is_empty()))
         {
             Ok(())
@@ -1910,8 +1971,8 @@ impl LegacyUploadPack {
     /// Without this opt-in the machine retains its low-level parser contract:
     /// the enclosing adapter is responsible for the shallow exchange itself.
     #[must_use]
-    pub fn with_shallow_updates(mut self) -> Self {
-        self.automatic_shallow_updates = true;
+    pub const fn with_shallow_updates(mut self) -> Self {
+        self.shallow = ShallowUpdates::Resolved { negotiated: false };
         self
     }
 
@@ -1946,10 +2007,8 @@ impl LegacyUploadPack {
             no_done: false,
             last_common: None,
             saw_want_capabilities: false,
-            automatic_shallow_updates: false,
-            shallow_negotiated: false,
-            stateless_http: false,
-            http_round_complete: false,
+            shallow: ShallowUpdates::Deferred,
+            framing: RequestFraming::Connection,
         })
     }
 
@@ -1984,7 +2043,7 @@ impl LegacyUploadPack {
         packet: &Packet,
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
-        if self.http_round_complete {
+        if self.framing.round_complete() {
             return Err(WireError::IllegalTransition {
                 state: "completed stateless HTTP negotiation round",
                 packet: packet_name(packet),
@@ -2013,20 +2072,23 @@ impl LegacyUploadPack {
                 let request = self.pack_request();
                 shallow_response::validate_relative_depth(&request)?;
                 let shallow_negotiated =
-                    self.automatic_shallow_updates && shallow_response::changes_boundary(&request);
+                    self.shallow.is_resolved() && shallow_response::changes_boundary(&request);
                 let mut output =
-                    if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
+                    if self.shallow.is_resolved() && shallow_response::has_controls(&request) {
                         shallow_response::response(repository, &request, &self.limits)?
                     } else {
                         Vec::new()
                     };
-                if !self.stateless_http && !shallow_negotiated && self.ack_mode != AckMode::None {
+                if !self.framing.is_stateless_http()
+                    && !shallow_negotiated
+                    && self.ack_mode != AckMode::None
+                {
                     output.push(line_packet(b"NAK\n"));
                 }
-                if self.automatic_shallow_updates && shallow_response::has_controls(&request) {
+                if self.shallow.is_resolved() && shallow_response::has_controls(&request) {
                     let _ = encode_packets(&output, &self.limits)?;
                 }
-                self.shallow_negotiated = shallow_negotiated;
+                self.shallow.record_negotiated(shallow_negotiated);
                 self.state = LegacyState::AwaitHave;
                 Ok(Transition {
                     output,
@@ -2149,7 +2211,7 @@ impl LegacyUploadPack {
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
         if matches!(packet, Packet::Flush) {
-            if self.stateless_http {
+            if self.framing.is_stateless_http() {
                 return self.finish_http_have_batch(repository);
             }
             if !self.no_done {
@@ -2192,7 +2254,10 @@ impl LegacyUploadPack {
                 let first_common = self.last_common.is_none();
                 self.last_common = Some(oid);
                 let mut transition = self.common_ack_transition(oid);
-                if self.stateless_http && self.ack_mode == AckMode::None && first_common {
+                if self.framing.is_stateless_http()
+                    && self.ack_mode == AckMode::None
+                    && first_common
+                {
                     transition
                         .output
                         .push(line_packet(format!("ACK {}\n", oid_hex(oid))));
@@ -2241,12 +2306,10 @@ impl LegacyUploadPack {
                 .iter()
                 .all(|oid| common.binary_search(oid).is_ok() && repository.is_common(*oid));
         let mut transition = Transition::empty();
-        if ready {
-            if let Some(oid) = self.last_common {
-                transition
-                    .output
-                    .push(line_packet(format!("ACK {} ready\n", oid_hex(oid))));
-            }
+        if ready && let Some(oid) = self.last_common {
+            transition
+                .output
+                .push(line_packet(format!("ACK {} ready\n", oid_hex(oid))));
         }
         if self.ack_mode != AckMode::None || self.last_common.is_none() {
             transition.output.push(line_packet(b"NAK\n"));
@@ -2258,7 +2321,7 @@ impl LegacyUploadPack {
                 .push(WireEvent::PackRequested(self.pack_request()));
             self.state = LegacyState::Complete;
         } else {
-            self.http_round_complete = true;
+            self.framing.complete_round();
         }
         Ok(transition)
     }
@@ -2324,7 +2387,7 @@ impl LegacyUploadPack {
     }
 
     fn final_ack_transition(&self) -> Transition {
-        if self.stateless_http {
+        if self.framing.is_stateless_http() {
             let output = match self.last_common {
                 Some(_) if self.ack_mode == AckMode::None => Vec::new(),
                 Some(oid) => vec![line_packet(format!("ACK {}\n", oid_hex(oid)))],
@@ -2345,7 +2408,7 @@ impl LegacyUploadPack {
                 )],
             },
             None => {
-                if self.shallow_negotiated || self.ack_mode == AckMode::None {
+                if self.shallow.negotiated() || self.ack_mode == AckMode::None {
                     vec![line_packet(b"NAK\n")]
                 } else {
                     Vec::new()
@@ -2456,8 +2519,7 @@ pub struct V2UploadPack {
     ref_prefixes: Vec<Vec<u8>>,
     ls_refs: LsRefsOptions,
     automatic_shallow_updates: bool,
-    stateless_http: bool,
-    http_round_complete: bool,
+    framing: RequestFraming,
     wait_for_done: bool,
 }
 
@@ -2466,21 +2528,23 @@ impl V2UploadPack {
     /// A client may send a new request carrying its wants and haves again; it
     /// never needs server-local negotiation state from an earlier HTTP call.
     #[must_use]
-    pub fn with_stateless_http_rounds(mut self) -> Self {
-        self.stateless_http = true;
+    pub const fn with_stateless_http_rounds(mut self) -> Self {
+        self.framing = RequestFraming::StatelessHttp {
+            round_complete: false,
+        };
         self
     }
 
     /// The current HTTP request finished with acknowledgments but no pack.
     #[must_use]
     pub const fn is_http_negotiation_complete(&self) -> bool {
-        self.http_round_complete
+        self.framing.round_complete()
     }
 
     /// Resolve and frame shallow-info before the packfile section.
     /// The default remains a parser-only handoff for existing low-level users.
     #[must_use]
-    pub fn with_shallow_updates(mut self) -> Self {
+    pub const fn with_shallow_updates(mut self) -> Self {
         self.automatic_shallow_updates = true;
         self
     }
@@ -2506,8 +2570,7 @@ impl V2UploadPack {
             ref_prefixes: Vec::new(),
             ls_refs: LsRefsOptions::default(),
             automatic_shallow_updates: false,
-            stateless_http: false,
-            http_round_complete: false,
+            framing: RequestFraming::Connection,
             wait_for_done: false,
         })
     }
@@ -2752,7 +2815,7 @@ impl V2UploadPack {
             return Ok(Transition::empty());
         }
         if line == b"sideband-all" {
-            if self.stateless_http {
+            if self.framing.is_stateless_http() {
                 self.require_fetch_feature(b"sideband-all")?;
             } else if !self.server_capabilities.contains(b"sideband-all") {
                 return Err(WireError::UnknownCapability {
@@ -2775,7 +2838,7 @@ impl V2UploadPack {
         ) {
             return Ok(Transition::empty());
         }
-        if line == b"wait-for-done" && self.stateless_http {
+        if line == b"wait-for-done" && self.framing.is_stateless_http() {
             self.require_fetch_feature(b"wait-for-done")?;
             if self.wait_for_done {
                 return Err(WireError::MalformedRequestLine {
@@ -2997,7 +3060,7 @@ impl V2UploadPack {
             // Without an ancestry oracle, only exact wanted common tips prove
             // a sufficient cut. Conservatively ask for another round otherwise;
             // the client's explicit `done` can always terminate negotiation.
-            let ready = if self.stateless_http {
+            let ready = if self.framing.is_stateless_http() {
                 let mut sorted = Vec::new();
                 sorted
                     .try_reserve_exact(self.haves.len())
@@ -3019,7 +3082,7 @@ impl V2UploadPack {
             };
             if !ready {
                 add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, &self.limits)?;
-                self.http_round_complete = true;
+                self.framing.complete_round();
                 self.state = V2State::Complete;
                 return Ok(Transition {
                     output,

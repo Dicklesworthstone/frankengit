@@ -1,7 +1,7 @@
 //! Annotated-tag projections derived only from the verified visible graph.
 use super::*;
 
-pub(crate) struct TagProjection {
+pub struct TagProjection {
     pub(super) peels: BTreeMap<GitOid, GitOid>,
     followers: BTreeMap<GitOid, Vec<GitOid>>,
 }
@@ -118,7 +118,7 @@ impl TagProjection {
 
 /// Expand only legacy advertisements. Protocol v2 uses the peeled attribute,
 /// never synthesized refs with a ^{} suffix in the repository's actual view.
-pub(crate) fn legacy_advertised_refs(
+pub fn legacy_advertised_refs(
     repository: &impl UploadPackRepository,
     limits: &WireLimits,
 ) -> Result<Vec<AdvertisedRef>, WireError> {
@@ -255,7 +255,7 @@ mod tests {
 /// Negotiation must use the same expanded advertisement the legacy client saw.
 /// In particular, a peeled target in a tag-only repository is an advertised
 /// legacy want, not an exception to the unadvertised-ancestor restriction.
-pub(crate) struct LegacyTagRepository<'a, R: UploadPackRepository> {
+pub struct LegacyTagRepository<'a, R: UploadPackRepository> {
     source: &'a R,
     refs: Vec<AdvertisedRef>,
 }

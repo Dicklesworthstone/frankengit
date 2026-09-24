@@ -330,7 +330,7 @@ fn stable_identity_covers_every_semantic_binding_and_actual_observation() {
     let mut changed = initial.clone();
     changed.origin_effect_root = digest_of(13);
     variants.push(changed);
-    let mut changed = initial.clone();
+    let mut changed = initial;
     changed.max_attempts = 5;
     variants.push(changed);
     for changed in variants {

@@ -86,7 +86,7 @@ fn malformed_encodings_overflow_and_global_compound_budget_are_refused() {
     ));
     assert!(matches!(
         parse_filter(
-            &vec![b'x'; 100],
+            &[b'x'; 100],
             format,
             &WireLimits {
                 max_packet_bytes: 32,

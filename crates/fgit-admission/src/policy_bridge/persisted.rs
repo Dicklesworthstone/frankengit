@@ -178,9 +178,11 @@ impl PolicyFrame {
             bytes: bytes.to_vec(),
         })
     }
+    #[must_use]
     pub const fn id(&self) -> PolicySnapshotId {
         self.id
     }
+    #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }

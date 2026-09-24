@@ -32,7 +32,7 @@ struct Options {
     candidate: GitOid,
 }
 
-pub(super) fn run(arguments: &[String]) -> Result<(), String> {
+pub fn run(arguments: &[String]) -> Result<(), String> {
     let options = parse(arguments)?;
     let input = read_bundle(&options.bundle, MAX_BUNDLE_BYTES)?;
     let mut node = OneNode::open_existing(NodeConfig::new(

@@ -140,7 +140,7 @@ fn path_valid(path: &[u8]) -> bool {
 fn under(path: &[u8], prefix: &[u8]) -> bool {
     path == prefix || (path.starts_with(prefix) && path.get(prefix.len()) == Some(&b'/'))
 }
-fn word(byte: u8) -> bool {
+const fn word(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 fn tokens(
@@ -323,10 +323,9 @@ impl LexicalSegment {
                 return Err(LexicalError::Limit("documents"));
             }
             if let (Some(left), Some(right)) = (result.documents.last(), segment.documents.first())
+                && (left.id >= right.id || left.path >= right.path)
             {
-                if left.id >= right.id || left.path >= right.path {
-                    return Err(LexicalError::Invalid("overlapping segment ranges"));
-                }
+                return Err(LexicalError::Invalid("overlapping segment ranges"));
             }
             for document in &segment.documents {
                 check(live)?;
@@ -578,7 +577,7 @@ impl Default for LexicalQueryLimits {
     }
 }
 impl LexicalQueryLimits {
-    pub fn validate(self) -> Result<(), LexicalError> {
+    pub const fn validate(self) -> Result<(), LexicalError> {
         if self.max_results == 0
             || self.max_results > MAX_RESULTS
             || self.max_work == 0

@@ -6,7 +6,7 @@ use fgit_forge::review::{ComparisonMode, ReviewOptions, SourceReview};
 use fgit_types::GitOid;
 use fgit_wire::visibility::RefVisibility;
 
-pub(crate) use super::publication::BundleInspectionRefusal;
+pub use super::publication::BundleInspectionRefusal;
 use crate::{NodeRequestContext, NodeWorkspaceRefusal, OneNode};
 
 /// Transport measurements from the native inspector, not a closure proof or

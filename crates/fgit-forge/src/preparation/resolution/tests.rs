@@ -1,6 +1,7 @@
 use super::super::{CommitInput, ConflictKind, MergePreparation, prepare_merge};
 use super::*;
 use std::cell::Cell;
+use std::fmt::Write as _;
 
 struct Source {
     format: GitHashAlgorithm,
@@ -48,11 +49,12 @@ impl Source {
     fn store_commit(&mut self, tree: GitOid, parents: &[GitOid], message: &str) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            let _ = write!(body, "parent {parent}\n");
         }
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             "author T <t@x> 1 +0000\ncommitter T <t@x> 1 +0000\n\n{message}"
-        ));
+        );
         let oid = git_object_id(self.format, GitObjectKind::Commit, body.as_bytes());
         self.commits.insert(
             oid,
@@ -405,14 +407,18 @@ fn discovery_and_reconstruction_share_one_work_budget() {
 
 #[test]
 fn attribute_conflicts_use_explicit_bytes_and_clean_changes_cannot_be_overridden() {
-    let mut s = Source::new(GitHashAlgorithm::Sha1);
-    let a = s.file(b".gitattributes", b"* merge=external\n", 0o100644);
-    let b = s.file(b"file", b"a\nb\nc\n", 0o100644);
-    let o = s.file(b"file", b"A\nb\nc\n", 0o100644);
-    let t = s.file(b"file", b"a\nb\nC\n", 0o100644);
-    let inputs = s.fork(vec![a.clone(), b], vec![a.clone(), o], vec![a.clone(), t]);
+    let mut source = Source::new(GitHashAlgorithm::Sha1);
+    let attributes = source.file(b".gitattributes", b"* merge=external\n", 0o100644);
+    let base = source.file(b"file", b"a\nb\nc\n", 0o100644);
+    let ours = source.file(b"file", b"A\nb\nc\n", 0o100644);
+    let theirs = source.file(b"file", b"a\nb\nC\n", 0o100644);
+    let inputs = source.fork(
+        vec![attributes.clone(), base],
+        vec![attributes.clone(), ours],
+        vec![attributes, theirs],
+    );
     let result = run(
-        &s,
+        &source,
         inputs,
         &[resolution(
             b"file",
@@ -429,7 +435,7 @@ fn attribute_conflicts_use_explicit_bytes_and_clean_changes_cannot_be_overridden
     );
     assert!(matches!(
         run(
-            &s,
+            &source,
             inputs,
             &[
                 resolution(b"file", ResolutionChoice::Theirs),
@@ -438,12 +444,12 @@ fn attribute_conflicts_use_explicit_bytes_and_clean_changes_cannot_be_overridden
         ),
         Err(ResolutionError::NonConflictPath(_))
     ));
-    let empty = s.store_tree(vec![]);
-    let first = s.store_commit(empty, &[], "first");
-    let next = s.store_commit(empty, &[first], "next");
+    let empty = source.store_tree(vec![]);
+    let first = source.store_commit(empty, &[], "first");
+    let next = source.store_commit(empty, &[first], "next");
     assert!(matches!(
         run(
-            &s,
+            &source,
             ResolutionInputs {
                 base: first,
                 target: first,

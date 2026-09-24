@@ -34,7 +34,7 @@ struct Options {
     expected_head: Option<RepositoryAuthorityHeadId>,
 }
 
-pub(super) fn run(args: &[String]) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"] {
         write_page(&mut std::io::stdout().lock(), USAGE)?;
         return Ok(0);
@@ -209,7 +209,7 @@ fn parse_cursor(value: &str) -> Result<EventCursor, String> {
 fn unhex(value: &str) -> Result<Vec<u8>, String> {
     if value.is_empty()
         || value.len() > 128
-        || value.len() % 2 != 0
+        || !value.len().is_multiple_of(2)
         || !value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -219,7 +219,9 @@ fn unhex(value: &str) -> Result<Vec<u8>, String> {
     let digit = |b| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     Ok(value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| 16 * digit(p[0]) + digit(p[1]))
         .collect())
 }

@@ -71,12 +71,15 @@ impl InitialQuery {
         self.symbol = Some((query, policy));
         Ok(self)
     }
-    pub fn content(&self) -> &LexicalQuery {
+    #[must_use]
+    pub const fn content(&self) -> &LexicalQuery {
         &self.content
     }
-    pub fn path(&self) -> &LexicalQuery {
+    #[must_use]
+    pub const fn path(&self) -> &LexicalQuery {
         &self.path
     }
+    #[must_use]
     pub fn symbols(&self) -> Option<(&SymbolQuery, SymbolPolicy)> {
         self.symbol.as_ref().map(|(query, policy)| (query, *policy))
     }
@@ -163,25 +166,32 @@ pub struct InitialReport {
     result_bytes: usize,
 }
 impl InitialReport {
-    pub fn source(&self) -> &LexicalSource {
+    #[must_use]
+    pub const fn source(&self) -> &LexicalSource {
         &self.content.source
     }
-    pub fn content(&self) -> &IndexedLexicalReport {
+    #[must_use]
+    pub const fn content(&self) -> &IndexedLexicalReport {
         &self.content
     }
-    pub fn path(&self) -> &IndexedLexicalReport {
+    #[must_use]
+    pub const fn path(&self) -> &IndexedLexicalReport {
         &self.path
     }
-    pub fn symbols(&self) -> &SymbolChannel {
+    #[must_use]
+    pub const fn symbols(&self) -> &SymbolChannel {
         &self.symbols
     }
-    pub fn generations(&self) -> &GenerationVector {
+    #[must_use]
+    pub const fn generations(&self) -> &GenerationVector {
         &self.vector
     }
-    pub fn result_bytes(&self) -> usize {
+    #[must_use]
+    pub const fn result_bytes(&self) -> usize {
         self.result_bytes
     }
     /// True only if every requested channel was available and untruncated.
+    #[must_use]
     pub fn complete(&self) -> bool {
         self.content.results.complete
             && self.path.results.complete
@@ -193,6 +203,7 @@ impl InitialReport {
     }
     /// Successful-channel receipts only. An unavailable channel may have read
     /// metadata before refusing; this is NOT a total physical-I/O measurement.
+    #[must_use]
     pub fn completed_payload_bytes_read(&self) -> usize {
         self.content.payload_bytes_read
             + self.path.payload_bytes_read
@@ -201,6 +212,7 @@ impl InitialReport {
                 _ => 0,
             }
     }
+    #[must_use]
     pub fn completed_work_units(&self) -> u64 {
         self.content.results.work_units
             + self.path.results.work_units

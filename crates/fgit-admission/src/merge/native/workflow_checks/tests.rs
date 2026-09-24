@@ -153,7 +153,7 @@ fn exact_retry_identity_is_stable_but_changed_result_does_not_alias_the_original
         );
         assert_ne!(other_seal.derive().unwrap().0, seal.derive().unwrap().0);
     }
-    let mut other_actor = context.clone();
+    let mut other_actor = context;
     other_actor.principal_id = PrincipalId::from_bytes([7; 16]);
     assert_ne!(
         proposal(&other_actor, &record).unwrap().0.aggregate,

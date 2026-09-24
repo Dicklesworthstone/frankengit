@@ -169,7 +169,7 @@ impl OneNode {
         .map_err(|source| IssueReadRefusal::Admission(Box::new(source)))
     }
 }
-fn validate_page(
+const fn validate_page(
     after: u64,
     limit: u16,
     expected: Option<RepositoryAuthorityHeadId>,

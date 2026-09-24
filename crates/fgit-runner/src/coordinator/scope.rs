@@ -1,6 +1,9 @@
 //! Repository/trust-scoped concurrency and recovery for the in-memory scheduler.
 //! Queue ordering is accepted-call order, never hash-map or wall-clock order.
-use super::*;
+use super::{
+    ActiveRun, CancellationReason, Commitment, DrainReason, JobOutcome, JobStatus, RepositoryId,
+    RunOutcome, RunStatus, TenantId, TriggerContext, WorkflowCoordinator, WorkflowRunId,
+};
 
 impl WorkflowCoordinator {
     pub(super) fn enqueue_concurrency_group(
@@ -112,7 +115,11 @@ impl WorkflowCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        ConcurrencyGroup, CoordinatorLimits, CoordinatorRefusal, IdempotencyKey, ResourceCeilings,
+    };
     use fgit_schema::workflow::{Limits, compile};
+    use fgit_types::GitOid;
     use fgit_types::GitOidSha1;
 
     const SOURCE: &str = "name: scoped\non: push\njobs:\n  build:\n    runs-on: fgit-trusted-local\n    steps:\n      - run: true\n";

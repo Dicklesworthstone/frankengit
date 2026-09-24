@@ -1,6 +1,7 @@
 //! Real trusted foreground shells with private file-backed capture. This tests
 //! multi-step composition, not native Git admission or hostile containment.
 use super::*;
+use crate::RunOutcome;
 use std::fs::{self, File};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;

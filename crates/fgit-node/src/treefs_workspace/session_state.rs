@@ -207,7 +207,7 @@ impl<A: GitHashAlgorithm> SessionState<A> {
         self.ledger.is_none()
     }
 
-    fn require_editable(&self) -> Result<(), WorkspaceSessionRefusal> {
+    const fn require_editable(&self) -> Result<(), WorkspaceSessionRefusal> {
         if self.is_closed() {
             return Err(WorkspaceSessionRefusal::Closed);
         }
@@ -453,7 +453,7 @@ fn charges(stats: OverlayStats) -> ResourceVector {
     ])
 }
 
-fn check_limit(
+const fn check_limit(
     resource: &'static str,
     observed: usize,
     limit: usize,

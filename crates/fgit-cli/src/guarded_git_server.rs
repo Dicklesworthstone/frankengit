@@ -198,7 +198,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
     })
 }
 
-pub(crate) fn run(arguments: &[String]) -> Result<CliOutcome, String> {
+pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
     let prepared = parse(arguments)?;
     if prepared.unauthenticated_network_push {
         eprintln!(

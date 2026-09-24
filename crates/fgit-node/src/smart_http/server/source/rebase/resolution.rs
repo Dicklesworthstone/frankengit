@@ -202,10 +202,10 @@ fn validate(
     if positions.len() != steps.len() {
         return Err(ApiError::unavailable());
     }
-    if let Some(original) = empty_stop {
-        if positions.insert(original, steps.len()).is_some() {
-            return Err(ApiError::unavailable());
-        }
+    if let Some(original) = empty_stop
+        && positions.insert(original, steps.len()).is_some()
+    {
+        return Err(ApiError::unavailable());
     }
     let supplied: BTreeMap<_, _> = recipes
         .iter()

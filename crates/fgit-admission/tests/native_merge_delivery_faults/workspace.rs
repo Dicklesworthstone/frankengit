@@ -204,7 +204,7 @@ fn bound_default_projection_is_unavailable_then_matching_observation_commits_and
 
         let projection = WorkspaceProjection::new(&fixture, [41; 32]);
         let committed = run_native(&fixture, &projection, synchronous).unwrap();
-        fixture.assert_committed(committed.clone());
+        fixture.assert_committed(committed);
         assert_eq!(projection.observations.load(Ordering::SeqCst), 1);
         assert_eq!(projection.validations.load(Ordering::SeqCst), 1);
         let head = fixture.head();

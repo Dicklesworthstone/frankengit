@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    Digest, IndexError, LexicalError, LexicalNamespace, LexicalSegment, LexicalSource,
+    MAX_DOCUMENTS, MAX_INDEX_BYTES, MAX_INDEX_DOCUMENTS, MAX_POSTINGS, MAX_SEGMENT_BYTES,
+    MAX_SEGMENTS, MAX_SOURCE_BYTES, MAX_TERMS, RepositoryAuthorityHeadId, RepositoryCommitId,
+    SchemaFamily, SchemaId, bounded_add, check, path_valid,
+};
 use crate::lexical::encoding::{
     count, decode_limits, namespace_read, namespace_write, oid_read, payload_root,
 };
@@ -28,7 +33,7 @@ frame!(PostingsFrame, "source-lexical-postings");
 frame!(EvidenceFrame, "source-lexical-evidence");
 frame!(ProfileFrame, "source-lexical-profile");
 
-pub(super) fn schema() -> SchemaId {
+pub(super) const fn schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("source-lexical-index"), 1, 0)
 }
 pub(super) fn profile_root() -> Result<Digest, LexicalError> {

@@ -29,7 +29,7 @@ use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, encode_packets};
 use std::{cell::Cell, collections::BTreeSet};
 
-fn refused(reason: TagRefusal) -> NodeWorkspaceRefusal {
+const fn refused(reason: TagRefusal) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::Tag(reason)
 }
 fn checkpoint(request: &NodeRequestContext) -> Result<(), NodeWorkspaceRefusal> {

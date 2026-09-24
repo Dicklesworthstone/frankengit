@@ -34,7 +34,7 @@ impl AsyncAuthorityStore for AsyncView {
     }
     fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
@@ -43,7 +43,7 @@ impl AsyncAuthorityStore for AsyncView {
     }
     fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         let result = self.0.read_immutable(key);
@@ -51,7 +51,7 @@ impl AsyncAuthorityStore for AsyncView {
     }
     fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
@@ -61,7 +61,7 @@ impl AsyncAuthorityStore for AsyncView {
     }
     fn read_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         let result = self.0.read_head(key);
@@ -69,7 +69,7 @@ impl AsyncAuthorityStore for AsyncView {
     }
     fn compare_exchange_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -82,7 +82,7 @@ impl AsyncAuthorityStore for AsyncView {
     }
     fn publish_head_with_outcomes(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -97,7 +97,7 @@ impl AsyncAuthorityStore for AsyncView {
     }
     fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
     ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
         let result = self.0.authenticate_head_receipt(receipt);

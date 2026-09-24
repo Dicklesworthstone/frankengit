@@ -42,7 +42,9 @@ fn decode(text: &str, bytes: usize) -> Result<Vec<u8>, String> {
     let nibble = |b| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     Ok(text
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| nibble(p[0]) * 16 + nibble(p[1]))
         .collect())
 }

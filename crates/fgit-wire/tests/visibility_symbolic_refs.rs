@@ -27,7 +27,7 @@ struct Repository {
 }
 
 impl Repository {
-    fn new(format: GitObjectFormat) -> Self {
+    const fn new(format: GitObjectFormat) -> Self {
         Self {
             format,
             refs: Vec::new(),

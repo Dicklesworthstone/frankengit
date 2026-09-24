@@ -298,10 +298,10 @@ fn enqueue(
         check_kind(*actual, expected)?;
     }
     if let Some(previous) = requirements.get_mut(&id) {
-        if let (Some(previous), Some(expected)) = (*previous, expected) {
-            if previous != expected {
-                return Err(RefusalCode::EvidenceInvalid);
-            }
+        if let (Some(previous), Some(expected)) = (*previous, expected)
+            && previous != expected
+        {
+            return Err(RefusalCode::EvidenceInvalid);
         }
         if previous.is_none() {
             *previous = expected;

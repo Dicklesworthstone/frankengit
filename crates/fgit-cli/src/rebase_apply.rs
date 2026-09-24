@@ -28,7 +28,7 @@ Stdin keys contain 1..256 exact bytes, including any newline; keys are never pri
 Retry identical inputs/key or use fg outcome after an interrupted response.
 Exit 0: committed; 3: canonical refusal; 2: input, infrastructure or cleanup error.";
 
-pub(super) fn run(args: &[String]) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"] {
         writeln!(std::io::stdout().lock(), "{USAGE}").map_err(|error| error.to_string())?;
         return Ok(0);

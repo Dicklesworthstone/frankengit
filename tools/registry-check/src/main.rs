@@ -1004,15 +1004,15 @@ fn check_attack_matrix(root: &Path, report: &mut Report) {
         }
         let threat_ref = fields[1].trim();
         let suite_path = fields[3].trim();
-        if !expected_controls.contains(threat_ref) {
+        if expected_controls.contains(threat_ref) {
+            covered_controls.insert(threat_ref.to_owned());
+        } else {
             report.error(format!(
                 "attack row at {display}:{} references unknown threat control `{threat_ref}`; \
                  SECURITY_THREAT_MODEL.md section 7 declares only {:?}",
                 line_index + 1,
                 expected_controls
             ));
-        } else {
-            covered_controls.insert(threat_ref.to_owned());
         }
         let target_file = root.join(suite_path);
         if !target_file.is_file() {

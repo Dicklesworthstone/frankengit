@@ -84,7 +84,7 @@ fn sha256_uses_the_existing_crypto_implementation_and_strict_hex_pins() {
     );
     assert_eq!(digest(&hex(&sha256(b"abc"))).unwrap(), sha256(b"abc"));
     for bad in [
-        "".to_owned(),
+        String::new(),
         "a".repeat(63),
         "a".repeat(65),
         "AB".repeat(32),

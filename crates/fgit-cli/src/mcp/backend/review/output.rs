@@ -2,7 +2,7 @@
 use super::*;
 use fgit_forge::review::{ChangeKind, EntryIdentity, ReviewContent, ReviewHunk, ReviewSpan};
 
-fn invalid() -> ToolError {
+const fn invalid() -> ToolError {
     ToolError::failed("invalid_review_report")
 }
 fn under(path: &[u8], prefix: &[u8]) -> bool {
@@ -46,13 +46,13 @@ fn hunk(value: &ReviewHunk) -> Value {
         ("after_hex", text(hex(&value.after))),
     ])
 }
-fn mode_name(mode: ComparisonMode) -> &'static str {
+const fn mode_name(mode: ComparisonMode) -> &'static str {
     match mode {
         ComparisonMode::Direct => "direct",
         ComparisonMode::MergeBase => "merge-base",
     }
 }
-fn kind_name(kind: ChangeKind) -> &'static str {
+const fn kind_name(kind: ChangeKind) -> &'static str {
     match kind {
         ChangeKind::Added => "added",
         ChangeKind::Deleted => "deleted",
@@ -277,15 +277,14 @@ fn validate(
                 Some((*before_bytes, *after_bytes))
             }
         };
-        if let Some((old, new)) = lengths {
-            if old > limits.max_blob_bytes
+        if let Some((old, new)) = lengths
+            && (old > limits.max_blob_bytes
                 || new > limits.max_blob_bytes
                 || (!is_blob(entry.before) && old != 0)
                 || (!is_blob(entry.after) && new != 0)
-                || (!is_blob(entry.before) && !is_blob(entry.after))
-            {
-                return Err(invalid());
-            }
+                || (!is_blob(entry.before) && !is_blob(entry.after)))
+        {
+            return Err(invalid());
         }
     }
     Ok(())

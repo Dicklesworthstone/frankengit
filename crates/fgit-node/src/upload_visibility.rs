@@ -6,15 +6,15 @@
 //! rewrite the canonical per-decision closure or the trusted local exporter.
 use super::*;
 mod partial_clone;
-pub(super) mod shallow;
-pub(super) mod tags;
+pub mod shallow;
+pub mod tags;
 
 const MAX_DISCLOSURE_EDGES: usize = 4_000_000;
 const DISCLOSURE_OPERATION: &str = "verify visible upload-pack graph";
 
 /// Constructible only after the entire selected graph has been checked.
 /// The derived set is not an RCR root and is deliberately not persisted.
-pub(super) struct VisibleUploadPack {
+pub struct VisibleUploadPack {
     basis: PublicationBasis,
     closure: PermittedObjectClosure,
     repository: AdmissionUploadPackRepository,
@@ -47,7 +47,7 @@ impl VisibleUploadPack {
         Ok(())
     }
 
-    pub(super) fn repository(&self) -> &AdmissionUploadPackRepository {
+    pub(super) const fn repository(&self) -> &AdmissionUploadPackRepository {
         &self.repository
     }
 
@@ -136,7 +136,7 @@ impl OneNode {
     }
 }
 
-fn disclosure_refusal(code: RefusalCode) -> NodePackMaterializationRefusal {
+const fn disclosure_refusal(code: RefusalCode) -> NodePackMaterializationRefusal {
     NodePackMaterializationRefusal::DisclosureGraph(code)
 }
 
@@ -365,7 +365,7 @@ mod tests;
 
 /// Reuse the transport's complete typed graph verifier for offline transfer.
 /// The caller has selected the exact visible ref roots at its authenticated head.
-pub(super) fn bundle_visible_closure(
+pub fn bundle_visible_closure(
     source: &VerifiedFabricPackSource<'_>,
     admitted: &PermittedObjectClosure,
     roots: impl IntoIterator<Item = GitOid>,

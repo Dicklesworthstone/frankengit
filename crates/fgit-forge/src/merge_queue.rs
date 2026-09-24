@@ -118,6 +118,7 @@ impl QueueRef {
     }
 
     /// Parses a reference name into a structured [`QueueRefKind`], if it is a valid queue reference.
+    #[must_use]
     pub fn parse(ref_name: &RefName) -> Option<QueueRefKind> {
         let bytes = ref_name.as_bytes();
         let rest = bytes.strip_prefix(QUEUE_REF_PREFIX)?;
@@ -177,7 +178,7 @@ impl QueueBatchEntry {
 
     pub fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         let pr_val = input.read_scalar::<u64>("pull_request")?;
-        let pull_request = PullRequestNumber::try_new(pr_val).ok_or_else(|| {
+        let pull_request = PullRequestNumber::try_new(pr_val).ok_or({
             CodecRefusal::ValueUnrepresentable {
                 field: "pull_request",
                 observed: pr_val,
@@ -636,7 +637,7 @@ pub struct MergeQueueSnapshot {
 impl MergeQueueSnapshot {
     /// Creates an empty queue snapshot at version 1.
     #[must_use]
-    pub fn new(queue_number: QueueNumber, target_ref: RefName) -> Self {
+    pub const fn new(queue_number: QueueNumber, target_ref: RefName) -> Self {
         Self {
             queue_number,
             target_ref,
@@ -648,13 +649,13 @@ impl MergeQueueSnapshot {
 
     /// True when the queue has no active entries.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Number of active entries in the queue.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 

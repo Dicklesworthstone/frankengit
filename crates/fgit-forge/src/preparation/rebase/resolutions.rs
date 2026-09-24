@@ -4,7 +4,10 @@
 //! sequencer, implicit branch movement, conflict-marker interpretation or
 //! successful-prefix publication. Ours means the accumulated rebased tree;
 //! theirs means the original commit being replayed, and base its sole parent.
-use super::*;
+use super::{
+    BTreeSet, GitHashAlgorithm, GitOid, PreparationError, PreparationLimits, RebaseCommitter,
+    RebaseError, RebaseObjectSource, RebasePreparation, RebaseRequest, prepare_rebase_inner,
+};
 use crate::preparation::resolution::{
     ConflictResolution, ResolutionChoice, ResolutionError, ResolvedPath, validate_resolutions,
 };

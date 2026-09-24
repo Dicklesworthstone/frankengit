@@ -297,16 +297,17 @@ impl SshServerSession {
     /// to reopen.
     pub fn take_channel_input(&mut self) -> Vec<u8> {
         let taken = core::mem::take(&mut self.channel_input_data);
-        if !taken.is_empty() && self.server_window_size <= DEFAULT_WINDOW_SIZE / 2 {
-            if let Some(channel) = self.client_channel_id {
-                let increment = DEFAULT_WINDOW_SIZE - self.server_window_size;
-                let mut adjust = WireWriter::new();
-                adjust.write_u8(msg::CHANNEL_WINDOW_ADJUST);
-                adjust.write_u32(channel);
-                adjust.write_u32(increment);
-                self.send_packet(&adjust.into_bytes());
-                self.server_window_size = DEFAULT_WINDOW_SIZE;
-            }
+        if !taken.is_empty()
+            && self.server_window_size <= DEFAULT_WINDOW_SIZE / 2
+            && let Some(channel) = self.client_channel_id
+        {
+            let increment = DEFAULT_WINDOW_SIZE - self.server_window_size;
+            let mut adjust = WireWriter::new();
+            adjust.write_u8(msg::CHANNEL_WINDOW_ADJUST);
+            adjust.write_u32(channel);
+            adjust.write_u32(increment);
+            self.send_packet(&adjust.into_bytes());
+            self.server_window_size = DEFAULT_WINDOW_SIZE;
         }
         taken
     }
@@ -356,7 +357,7 @@ impl SshServerSession {
                     })?
                     .to_owned();
                 self.client_ident = Some(ident);
-                self.incoming_buffer.drain(..pos + 1);
+                self.incoming_buffer.drain(..=pos);
                 self.phase = SessionPhase::KeyExchange;
                 self.send_kexinit();
             } else {

@@ -167,7 +167,7 @@ fn decimal(text: &str) -> Result<u64, String> {
 }
 fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
     if text.is_empty()
-        || text.len() % 2 != 0
+        || !text.len().is_multiple_of(2)
         || text.len() > 2 * limit
         || !text
             .bytes()
@@ -184,7 +184,9 @@ fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
     };
     Ok(text
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| 16 * nibble(pair[0]) + nibble(pair[1]))
         .collect())
 }

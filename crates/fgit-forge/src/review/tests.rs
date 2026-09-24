@@ -2,6 +2,7 @@ use super::*;
 use crate::preparation::{CommitInput, MergeEntry};
 use fgit_crypto::{GitObjectKind, git_object_id};
 use std::cell::Cell;
+use std::fmt::Write as _;
 
 /// Pure planner fixtures, not an authority or durable-store substitute.
 #[derive(Default)]
@@ -81,9 +82,12 @@ impl Source {
     ) -> GitOid {
         let mut bytes = format!("tree {tree}\n");
         for parent in parents {
-            bytes.push_str(&format!("parent {parent}\n"));
+            let _ = write!(bytes, "parent {parent}\n");
         }
-        bytes.push_str(&format!("author Test <t@example.invalid> 1 +0000\ncommitter Test <t@example.invalid> 1 +0000\n\n{label}\n"));
+        let _ = write!(
+            bytes,
+            "author Test <t@example.invalid> 1 +0000\ncommitter Test <t@example.invalid> 1 +0000\n\n{label}\n"
+        );
         let id = git_object_id(format, GitObjectKind::Commit, bytes.as_bytes());
         self.commits.insert(
             id,
@@ -151,9 +155,9 @@ fn context_hunks_reconstruct_exact_bytes_in_both_hash_domains() {
                     assert_eq!(&new[hunk.new.byte_start..hunk.new.byte_end], hunk.after);
                     assert_eq!(
                         old[..hunk.old.byte_start]
-                            .iter()
-                            .filter(|byte| **byte == b'\n')
-                            .count(),
+                            .split(|byte| *byte == b'\n')
+                            .count()
+                            - 1,
                         hunk.old.line_start
                     );
                 }

@@ -2,7 +2,10 @@
 //! comparison returns no successful prefix. The ordinary Walker remains the
 //! only path/content/diff implementation.
 
-use super::*;
+use super::{
+    ComparisonMode, GitHashAlgorithm, GitOid, MergeObjectSource, ReviewError, ReviewOptions,
+    SourceComparison, Walker,
+};
 
 /// One final-tree comparison plus at most 256 rewritten commits.
 pub const MAX_SERIES_COMPARISONS: usize = 257;
@@ -29,11 +32,9 @@ pub fn compare_source_series<S: MergeObjectSource>(
     if pairs.len() > MAX_SERIES_COMPARISONS {
         return Err(ReviewError::Budget("series comparisons"));
     }
-    for &(before, after) in pairs {
-        for id in [before, after] {
-            if id.is_zero() || id.algorithm() != format {
-                return Err(ReviewError::InvalidObject(id));
-            }
+    for id in pairs.iter().copied().flat_map(<[GitOid; 2]>::from) {
+        if id.is_zero() || id.algorithm() != format {
+            return Err(ReviewError::InvalidObject(id));
         }
     }
     source.checkpoint()?;

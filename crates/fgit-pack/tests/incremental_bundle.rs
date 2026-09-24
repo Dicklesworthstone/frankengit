@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 use fgit_pack::full_bundle::{FullBundleInput, FullBundleLimits, MAX_BUNDLE_PREREQUISITES};
 use fgit_types::{GitHashAlgorithm, GitOid};
+use std::fmt::Write as _;
 fn oid(format: GitHashAlgorithm, byte: u8) -> GitOid {
     GitOid::from_hex(format, &format!("{byte:02x}").repeat(format.digest_len())).unwrap()
 }
@@ -64,7 +65,7 @@ fn prerequisite_header_count_and_byte_limits_are_inclusive_and_cancellable() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut text = prefix(format);
         for byte in 1..=MAX_BUNDLE_PREREQUISITES {
-            text += &format!("-{} required\n", oid(format, byte as u8));
+            let _ = writeln!(text, "-{} required", oid(format, byte as u8));
         }
         let ref_line = format!("{} refs/heads/main\n\n", oid(format, 100));
         let data = format!("{text}{ref_line}PACK");
@@ -72,7 +73,7 @@ fn prerequisite_header_count_and_byte_limits_are_inclusive_and_cancellable() {
             parse(data.as_bytes()).unwrap().prerequisites().len(),
             MAX_BUNDLE_PREREQUISITES
         );
-        text += &format!("-{} excess\n", oid(format, 101));
+        let _ = writeln!(text, "-{} excess", oid(format, 101));
         assert!(parse(format!("{text}{ref_line}PACK").as_bytes()).is_err());
         let header = data.len() - 4;
         let limits = FullBundleLimits {

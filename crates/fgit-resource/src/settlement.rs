@@ -224,7 +224,7 @@ impl ReconcilePlan {
     /// Restores an authenticated persisted state without restarting its budget.
     /// Storage owners must verify the complete predecessor/observation chain;
     /// this constructor checks the state-local attempt bounds.
-    pub fn from_state(
+    pub const fn from_state(
         key: IdempotencyKey,
         idempotency: DownstreamIdempotency,
         policy: ReconcilePolicy,

@@ -45,13 +45,13 @@ pub(super) enum Selection {
     Show(PullRequestNumber),
 }
 impl ReadOptions {
-    pub fn after(&self) -> u64 {
+    pub const fn after(&self) -> u64 {
         match self.selection {
             Selection::List { after, .. } => after,
             Selection::Show(number) => number.get() - 1,
         }
     }
-    pub fn limit(&self) -> u16 {
+    pub const fn limit(&self) -> u16 {
         match self.selection {
             Selection::List { limit, .. } => limit,
             Selection::Show(_) => 1,
@@ -79,11 +79,11 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
     }
     let tenant = TenantId::from_hex(&arguments[2]).map_err(|_| "invalid tenant ID")?;
     let repository = RepositoryId::from_hex(&arguments[3]).map_err(|_| "invalid repository ID")?;
-    let number = if action != "list" {
+    let number = if action == "list" {
+        None
+    } else {
         let text = arguments.get(4).ok_or("a PR number is required")?;
         Some(PullRequestNumber::try_new(decimal(text)?).ok_or("PR number must be positive")?)
-    } else {
-        None
     };
     let mut flags = BTreeMap::new();
     let mut trusted = false;
@@ -286,7 +286,7 @@ pub(super) fn decimal(text: &str) -> Result<u64, String> {
 fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
     if text.is_empty()
         || text.len() > limit * 2
-        || text.len() % 2 != 0
+        || !text.len().is_multiple_of(2)
         || !text
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -294,7 +294,9 @@ fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
         return Err("expected bounded nonempty lowercase hexadecimal bytes".to_owned());
     }
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let nibble = |byte: u8| {
                 if byte.is_ascii_digit() {

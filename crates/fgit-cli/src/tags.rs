@@ -74,7 +74,7 @@ enum Completed {
     Mutation(TxId, TerminalOutcome),
     Read(String),
 }
-pub(super) fn run(args: &[String]) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"]
         || (args.len() == 2
             && args[1] == "--help"

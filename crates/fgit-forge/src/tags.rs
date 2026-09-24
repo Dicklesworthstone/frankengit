@@ -76,7 +76,8 @@ pub fn validate_tag_name(name: &RefName) -> Result<(), TagRefusal> {
     Ok(())
 }
 impl TagCommand {
-    pub fn reference(&self) -> &RefName {
+    #[must_use]
+    pub const fn reference(&self) -> &RefName {
         match self {
             Self::Lightweight { name, .. }
             | Self::Annotated { name, .. }
@@ -308,7 +309,7 @@ mod tests {
             }
             assert!(bad.prepare(format).is_err());
         }
-        let mut empty = original.clone();
+        let mut empty = original;
         if let TagCommand::Annotated { metadata, .. } = &mut empty {
             metadata.message.clear();
         }

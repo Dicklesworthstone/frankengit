@@ -22,14 +22,13 @@ use super::{
     stage_evidence_body_in,
 };
 
-pub(crate) const FORGE_POSITION_KEY_PREFIX: &[u8] =
-    b"frankengit/admission/forge-position-state/v1/";
-pub(crate) const OUTBOX_KEY_PREFIX: &[u8] = b"frankengit/admission/outbox-state/v1/";
-pub(crate) const EFFECT_STATE_KEY_PREFIX: &[u8] = b"frankengit/admission/outbox-effect-state/v1/";
+pub const FORGE_POSITION_KEY_PREFIX: &[u8] = b"frankengit/admission/forge-position-state/v1/";
+pub const OUTBOX_KEY_PREFIX: &[u8] = b"frankengit/admission/outbox-state/v1/";
+pub const EFFECT_STATE_KEY_PREFIX: &[u8] = b"frankengit/admission/outbox-effect-state/v1/";
 
 /// One immutable authority-selected pair, never an independent pending table.
 #[derive(Clone, Debug)]
-pub(crate) struct DeliveryState {
+pub struct DeliveryState {
     pub(crate) forge: CanonicalForgePositionState,
     pub(crate) outbox: CanonicalOutboxState,
 }
@@ -63,9 +62,7 @@ impl DeliveryState {
 }
 
 /// Aggregate spelling is owned by the canonical forge aggregate type.
-pub(crate) fn event_stream(
-    event: &ForgeEvent,
-) -> Result<AsciiSlug, AdmissionMaterializationRefusal> {
+pub fn event_stream(event: &ForgeEvent) -> Result<AsciiSlug, AdmissionMaterializationRefusal> {
     AsciiSlug::try_new("forge_stream", event.aggregate.to_string().as_bytes())
         .map_err(|error| AdmissionMaterializationRefusal::CanonicalFrame(error.into()))
 }
@@ -73,7 +70,7 @@ pub(crate) fn event_stream(
 /// Resolve both roots and every retained payload/effect dependency. The two
 /// exact legacy empty-genesis sentinels are the only bodies omitted by old
 /// repository initialization; arbitrary absence never means an empty map.
-pub(crate) async fn read_in<Authority, IsCancelled>(
+pub async fn read_in<Authority, IsCancelled>(
     authority: &Authority,
     cx: &Authority::Context,
     repository_id: RepositoryId,
@@ -152,7 +149,7 @@ where
 /// Verify a current effect and its complete, bounded immutable predecessor
 /// chain. The codec checks local transition legality; this reader establishes
 /// that the recorded predecessor really is the committed predecessor body.
-pub(crate) async fn read_effect_in<Authority, IsCancelled>(
+pub async fn read_effect_in<Authority, IsCancelled>(
     authority: &Authority,
     cx: &Authority::Context,
     repository_id: RepositoryId,
@@ -215,7 +212,7 @@ where
 
 /// Stage a merge's complete delivery successor before the authority CAS. Every
 /// immutable put is awaited through the production store's transaction path.
-pub(crate) async fn stage_in<Authority, IsCancelled>(
+pub async fn stage_in<Authority, IsCancelled>(
     authority: &Authority,
     cx: &Authority::Context,
     state: &DeliveryState,
@@ -296,7 +293,7 @@ where
 
 /// Stage one settlement successor and its outbox index. The caller publishes
 /// the corresponding normal authority decision after these bodies are staged.
-pub(crate) async fn stage_effect_and_outbox_in<Authority, IsCancelled>(
+pub async fn stage_effect_and_outbox_in<Authority, IsCancelled>(
     authority: &Authority,
     cx: &Authority::Context,
     outbox: &CanonicalOutboxState,
@@ -445,7 +442,7 @@ fn require_repository(
     Ok(())
 }
 
-fn invalid() -> AdmissionMaterializationRefusal {
+const fn invalid() -> AdmissionMaterializationRefusal {
     AdmissionMaterializationRefusal::CanonicalRoot(RefusalCode::EvidenceInvalid)
 }
 

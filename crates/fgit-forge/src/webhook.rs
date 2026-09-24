@@ -83,7 +83,7 @@ impl ValidatedWebhookUrl {
     }
 
     #[must_use]
-    pub fn port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         self.port
     }
 
@@ -93,7 +93,7 @@ impl ValidatedWebhookUrl {
     }
 
     #[must_use]
-    pub fn ip_literal(&self) -> Option<IpAddr> {
+    pub const fn ip_literal(&self) -> Option<IpAddr> {
         self.ip_literal
     }
 
@@ -472,7 +472,7 @@ impl SsrfPolicy {
                 if (current.scheme == "https" && current.port == 443)
                     || (current.scheme == "http" && current.port == 80)
                 {
-                    "".to_string()
+                    String::new()
                 } else {
                     format!(":{}", current.port)
                 },
@@ -555,7 +555,8 @@ pub struct WebhookSecretRotation {
 }
 
 impl WebhookSecretRotation {
-    pub fn new(initial_secret: WebhookSecret) -> Self {
+    #[must_use]
+    pub const fn new(initial_secret: WebhookSecret) -> Self {
         Self {
             active: initial_secret,
             expiring: None,
@@ -563,7 +564,7 @@ impl WebhookSecretRotation {
     }
 
     #[must_use]
-    pub fn active(&self) -> &WebhookSecret {
+    pub const fn active(&self) -> &WebhookSecret {
         &self.active
     }
 
@@ -600,16 +601,17 @@ impl WebhookSecretRotation {
         if self.active.verify(payload, candidate_signature) {
             return true;
         }
-        if let Some((expiring_secret, expires_at)) = &self.expiring {
-            if now_unix_secs <= *expires_at && expiring_secret.verify(payload, candidate_signature)
-            {
-                return true;
-            }
+        if let Some((expiring_secret, expires_at)) = &self.expiring
+            && now_unix_secs <= *expires_at
+            && expiring_secret.verify(payload, candidate_signature)
+        {
+            return true;
         }
         false
     }
 
     /// Verify hex signature (e.g. "sha256=<hex>").
+    #[must_use]
     pub fn verify_hex(&self, payload: &[u8], header_value: &str, now_unix_secs: u64) -> bool {
         let hex_str = if let Some(stripped) = header_value.strip_prefix("sha256=") {
             stripped
@@ -682,11 +684,11 @@ impl WebhookRetrySchedule {
 
         // Deterministic pseudorandom jitter in range [-20%, +20%]
         // Hash combination of seed and attempt:
-        let hash_input = [jitter_seed.to_le_bytes(), (attempt as u64).to_le_bytes()].concat();
+        let hash_input = [jitter_seed.to_le_bytes(), u64::from(attempt).to_le_bytes()].concat();
         let digest = fgit_crypto::sha256_digest(&hash_input);
         let rand_val = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
         // Map 0..u32::MAX to -200..+200 (representing -20.0% to +20.0%)
-        let jitter_permille = (rand_val % 401) as i64 - 200;
+        let jitter_permille = i64::from(rand_val % 401) - 200;
         let delta = (exp_millis as i64 * jitter_permille) / 1000;
         let final_millis = (exp_millis as i64 + delta).max(0) as u64;
         Duration::from_millis(final_millis)
@@ -750,7 +752,7 @@ mod hex {
     }
 
     pub fn decode(s: &str) -> Result<Vec<u8>, ()> {
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return Err(());
         }
         let mut bytes = Vec::with_capacity(s.len() / 2);

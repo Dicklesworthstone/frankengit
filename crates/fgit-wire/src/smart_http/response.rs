@@ -41,12 +41,12 @@ impl UploadReply {
     /// Bind exactly the pack requested by this complete HTTP RPC. The source
     /// must be selected from the same authorized immutable repository view.
     /// It retains responsibility for pack identity, checksums and closure.
-    pub fn into_response<'source, Source: PackPayloadSource + ?Sized>(
+    pub fn into_response<Source: PackPayloadSource + ?Sized>(
         self,
-        source: Option<&'source mut Source>,
+        source: Option<&mut Source>,
         limits: WireLimits,
         maximum_response_bytes: u64,
-    ) -> Result<UploadResponse<'source, Source>, RpcError> {
+    ) -> Result<UploadResponse<'_, Source>, RpcError> {
         limits.validate()?;
         let wants_pack = self.pack_request.is_some();
         match (wants_pack, source.is_some()) {

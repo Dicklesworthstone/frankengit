@@ -1,13 +1,22 @@
 //! Real private-file custody tests with fixture execution. No hostile sandbox
 //! or canonical forge-admission claim; the process-exit case is named explicitly.
 use super::*;
+use crate::coordinator::delivery::CheckDeliveryAcknowledgement;
+use crate::coordinator::delivery::journal::{
+    CheckJournalLimits, CheckJournalScope, HEADER_BYTES, frame_hash,
+};
 use crate::workflow::{
     JobReport, StepLimits, StepObservation, StepOutcome, WorkerFailure, WorkflowLimits,
     WorkflowPlan,
 };
+use crate::{CheckRunFact, CoordinatorLimits, ResourceCeilings, TriggerContext};
 use fgit_types::GitOidSha1;
+use fgit_types::{GitOid, RepositoryId, TenantId};
 use std::cell::Cell;
+use std::fs::{self, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 

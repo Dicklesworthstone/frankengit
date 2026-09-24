@@ -189,7 +189,7 @@ impl<S: AuthorityStore + Sync + ?Sized> AsyncAuthorityStore for SyncAuthorityAsA
     }
     fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
@@ -197,14 +197,14 @@ impl<S: AuthorityStore + Sync + ?Sized> AsyncAuthorityStore for SyncAuthorityAsA
     }
     fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         ready(self.0.read_immutable(key))
     }
     fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
@@ -213,14 +213,14 @@ impl<S: AuthorityStore + Sync + ?Sized> AsyncAuthorityStore for SyncAuthorityAsA
     }
     fn read_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         ready(self.0.read_head(key))
     }
     fn compare_exchange_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -233,7 +233,7 @@ impl<S: AuthorityStore + Sync + ?Sized> AsyncAuthorityStore for SyncAuthorityAsA
     }
     fn publish_head_with_outcomes(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -248,7 +248,7 @@ impl<S: AuthorityStore + Sync + ?Sized> AsyncAuthorityStore for SyncAuthorityAsA
     }
     fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
     ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
         ready(self.0.authenticate_head_receipt(receipt))
@@ -266,7 +266,7 @@ where
     fn snapshot_async<'a>(
         &'a self,
         _: &'a SyncAuthorityAsAsync<'store, S>,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
     ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
@@ -275,7 +275,7 @@ where
     fn materialize_commit_async<'a>(
         &'a self,
         _: &'a SyncAuthorityAsAsync<'store, S>,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
@@ -286,7 +286,7 @@ where
     fn materialize_refusal_async<'a>(
         &'a self,
         _: &'a SyncAuthorityAsAsync<'store, S>,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         tx_id: TxId,
         code: RefusalCode,
@@ -301,10 +301,10 @@ where
     S: AuthorityStore + Sync + ?Sized,
     P: SyncNativeMergeProjection + ?Sized,
 {
-    fn merge_checkpoint(&self, _: &()) -> Result<(), RefusalCode> {
+    fn merge_checkpoint(&self, (): &()) -> Result<(), RefusalCode> {
         self.0.merge_checkpoint()
     }
-    fn merge_publication_checkpoint(&self, _: &()) -> Result<(), RefusalCode> {
+    fn merge_publication_checkpoint(&self, (): &()) -> Result<(), RefusalCode> {
         self.0.merge_publication_checkpoint()
     }
     fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
@@ -313,7 +313,7 @@ where
     fn resolve_merge_basis_async<'a>(
         &'a self,
         _: &'a SyncAuthorityAsAsync<'store, S>,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
     ) -> impl Future<Output = Result<NativeMergeBasis, ProjectionFailure>> + Send + 'a {
@@ -322,7 +322,7 @@ where
     fn validate_merge_async<'a>(
         &'a self,
         _: &'a SyncAuthorityAsAsync<'store, S>,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
         intent: &'a NativeMergeIntent,

@@ -2,6 +2,7 @@ use super::super::ConflictKind;
 use super::super::resolution::{ResolutionChoice, ResolutionKind};
 use super::*;
 use std::cell::{Cell, RefCell};
+use std::fmt::Write as _;
 
 struct Source {
     format: GitHashAlgorithm,
@@ -53,11 +54,12 @@ impl Source {
     fn commit_id(&mut self, tree: GitOid, parents: &[GitOid], label: &str) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            let _ = write!(body, "parent {parent}\n");
         }
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             "author T <t@x> 1 +0000\ncommitter T <t@x> 1 +0000\n\n{label}\n"
-        ));
+        );
         let id = git_object_id(self.format, GitObjectKind::Commit, body.as_bytes());
         self.commits.insert(
             id,

@@ -245,11 +245,10 @@ fn graph(
         for parent in &commit.parents {
             source.checkpoint()?;
             check_oid(format, *parent)?;
-            if !seen.contains(parent) {
-                if seen.len() >= limits.max_commits {
-                    return Err(HistoryError::Budget("commits"));
-                }
-                seen.insert(*parent);
+            if seen.len() >= limits.max_commits && !seen.contains(parent) {
+                return Err(HistoryError::Budget("commits"));
+            }
+            if seen.insert(*parent) {
                 pending.insert(*parent);
             }
         }
@@ -447,8 +446,8 @@ impl<S: HistorySource> Walker<'_, S> {
         if body.contains(&0) {
             return Err(HistoryError::BinaryContent);
         }
-        let count = body.iter().filter(|b| **b == b'\n').count()
-            + usize::from(!body.is_empty() && body.last() != Some(&b'\n'));
+        // Newline-terminated lines plus an unterminated tail.
+        let count = body.split_inclusive(|byte| *byte == b'\n').count();
         if count > self.limits.max_lines {
             return Err(HistoryError::Budget("line count"));
         }

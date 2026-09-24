@@ -184,7 +184,9 @@ fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
     };
     let bytes = digest
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| 16 * nibble(pair[0]) + nibble(pair[1]))
         .collect::<Vec<_>>();
     let digest = DigestBytes::try_new(&bytes).map_err(|_| "invalid snapshot digest width")?;
@@ -250,7 +252,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 set_once(&mut format, value, flag)?;
             }
             "--expected-generation" => {
-                set_once(&mut generation, positive(value, u64::MAX, flag)?, flag)?
+                set_once(&mut generation, positive(value, u64::MAX, flag)?, flag)?;
             }
             "--expected-head" => set_once(&mut head, parse_head(value)?, flag)?,
             "--max-objects" => set_once(
@@ -260,7 +262,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             )?,
             "--max-bytes" => set_once(&mut bytes, positive(value, MAX_BYTES, flag)?, flag)?,
             "--max-object-bytes" => {
-                set_once(&mut object_bytes, positive(value, 256 * MIB, flag)?, flag)?
+                set_once(&mut object_bytes, positive(value, 256 * MIB, flag)?, flag)?;
             }
             "--timeout-secs" => set_once(&mut seconds, positive(value, 3600, flag)?, flag)?,
             "--max-edges" => set_once(
@@ -312,13 +314,13 @@ fn check_fences(
     head: RepositoryAuthorityHeadId,
     generation: u64,
 ) -> Result<(), Refusal> {
-    if let Some(expected) = options.expected_generation {
-        if expected != generation {
-            return Err(Refusal::Generation {
-                expected,
-                observed: generation,
-            });
-        }
+    if let Some(expected) = options.expected_generation
+        && expected != generation
+    {
+        return Err(Refusal::Generation {
+            expected,
+            observed: generation,
+        });
     }
     if options
         .expected_head
@@ -470,7 +472,7 @@ fn inspect(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
     })
 }
 
-pub(super) fn run(args: &[String]) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"] {
         emit(&mut std::io::stdout().lock(), USAGE)?;
         return Ok(0);
@@ -485,7 +487,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     let result = node
         .bring_into_service(HeadGeneration::FIRST)
         .map_err(|error| Refusal::Source(error.to_string()))
-        .and_then(|_| inspect(&node, &options));
+        .and_then(|()| inspect(&node, &options));
     let cleanup = node.shutdown().err().map(|error| error.to_string());
     finish(&mut std::io::stdout().lock(), &options, result, cleanup)
 }

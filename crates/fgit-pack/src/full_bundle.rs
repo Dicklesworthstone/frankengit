@@ -365,16 +365,15 @@ impl FullBundle {
                 return Err(FullBundleError::Invalid("duplicate reference"));
             }
         }
-        if let Some(id) = head {
-            if id.algorithm() != plan.format()
+        if let Some(id) = head
+            && (id.algorithm() != plan.format()
                 || !refs
                     .iter()
-                    .any(|(name, tip)| name.as_bytes().starts_with(b"refs/heads/") && *tip == id)
-            {
-                return Err(FullBundleError::Invalid(
-                    "HEAD must name an advertised branch tip",
-                ));
-            }
+                    .any(|(name, tip)| name.as_bytes().starts_with(b"refs/heads/") && *tip == id))
+        {
+            return Err(FullBundleError::Invalid(
+                "HEAD must name an advertised branch tip",
+            ));
         }
         let mut graph = BTreeMap::new();
         for entry in plan.entries() {
@@ -531,15 +530,19 @@ impl IncrementalBundle {
         )
         .map(Self)
     }
+    #[must_use]
     pub fn bytes(&self) -> &[u8] {
         self.0.bytes()
     }
+    #[must_use]
     pub fn into_bytes(self) -> Vec<u8> {
         self.0.into_bytes()
     }
+    #[must_use]
     pub const fn pack_receipt(&self) -> &PackWriteReceipt {
         self.0.pack_receipt()
     }
+    #[must_use]
     pub const fn header_bytes(&self) -> usize {
         self.0.header_bytes()
     }

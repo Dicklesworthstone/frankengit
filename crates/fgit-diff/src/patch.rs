@@ -100,6 +100,7 @@ pub struct IndexExpectation {
 }
 impl IndexExpectation {
     /// The all-zero name is Git's absent-side sentinel, not an object ID.
+    #[must_use]
     pub fn matches(prefix: &[u8], id: Option<&[u8]>) -> bool {
         match id {
             None => prefix.iter().all(|byte| *byte == b'0'),
@@ -144,7 +145,7 @@ struct Line<'a> {
     no_newline: bool,
 }
 
-fn syntax(line: usize, reason: &'static str) -> PatchError {
+const fn syntax(line: usize, reason: &'static str) -> PatchError {
     PatchError::Syntax {
         line: line + 1,
         reason,
@@ -171,7 +172,7 @@ fn number(bytes: &[u8], at: usize) -> Result<usize, PatchError> {
             .ok_or_else(|| syntax(at, "range overflow"))
     })
 }
-fn mode(bytes: &[u8], at: usize) -> Result<u32, PatchError> {
+const fn mode(bytes: &[u8], at: usize) -> Result<u32, PatchError> {
     match bytes {
         b"100644" => Ok(0o100644),
         b"100755" => Ok(0o100755),
@@ -705,10 +706,10 @@ impl<'a> UnifiedPatch<'a> {
             if !paths.insert(file.path.as_slice()) {
                 return Err(PatchError::DuplicatePath);
             }
-            if let Some(source) = file.renamed_from() {
-                if !paths.insert(source) {
-                    return Err(PatchError::DuplicatePath);
-                }
+            if let Some(source) = file.renamed_from()
+                && !paths.insert(source)
+            {
+                return Err(PatchError::DuplicatePath);
             }
         }
         for path in &paths {
@@ -722,39 +723,47 @@ impl<'a> UnifiedPatch<'a> {
         checkpoint(cancelled)?;
         Ok(Self { files, limits })
     }
+    #[must_use]
     pub fn files(&self) -> &[FilePatch<'a>] {
         &self.files
     }
-    pub fn limits(&self) -> PatchLimits {
+    #[must_use]
+    pub const fn limits(&self) -> PatchLimits {
         self.limits
     }
 }
 impl FilePatch<'_> {
     /// Destination path (the deleted path for a deletion).
+    #[must_use]
     pub fn path(&self) -> &[u8] {
         &self.path
     }
     /// Source path to resolve against the original, independently selected tree.
+    #[must_use]
     pub fn source_path(&self) -> &[u8] {
         self.renamed_from.as_deref().unwrap_or(&self.path)
     }
     /// Additional path to remove atomically after successful rename application.
+    #[must_use]
     pub fn renamed_from(&self) -> Option<&[u8]> {
         self.renamed_from.as_deref()
     }
     /// File-content presence change. A rename is `Modify`; `renamed_from()`
     /// separately carries its required two-path tree effect.
-    pub fn change(&self) -> FileChange {
+    #[must_use]
+    pub const fn change(&self) -> FileChange {
         self.change
     }
-    pub fn index(&self) -> Option<&IndexExpectation> {
+    #[must_use]
+    pub const fn index(&self) -> Option<&IndexExpectation> {
         self.index.as_ref()
     }
     /// Includes both encoded binary members, when present.
     pub fn hunk_count(&self) -> usize {
         self.hunks.len() + self.binary.as_ref().map_or(0, BinaryHunks::member_count)
     }
-    pub fn binary_hunks(&self) -> Option<&BinaryHunks<'_>> {
+    #[must_use]
+    pub const fn binary_hunks(&self) -> Option<&BinaryHunks<'_>> {
         self.binary.as_ref()
     }
     /// Apply at the exact declared offsets. The caller must bind the source

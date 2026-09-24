@@ -44,7 +44,7 @@ Read-only: no publication credentials, host checkout, implicit latest-tip mutati
 symlink traversal or external Git. Limits bound decoded objects and whole reads,
 not just output ranges. Exit 0: complete page/export; 2: input/read/cleanup/output error.";
 
-pub(super) fn run(args: &[String], file: bool) -> Result<u8, String> {
+pub fn run(args: &[String], file: bool) -> Result<u8, String> {
     if args == ["--help"] {
         emit(&mut std::io::stdout().lock(), USAGE)?;
         return Ok(0);

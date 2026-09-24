@@ -4,7 +4,12 @@
 //! Every MCP entity has a single authoritative definition here. No ambient
 //! discovery, no unvalidated commands, no generic admin bypasses.
 
-use super::types::*;
+use super::types::{
+    BudgetDimensions, CancellationBehavior, CapabilityRequirement, DisclosureClass,
+    EvidenceReceiptClass, FieldClassification, IdempotencyRequirement,
+    InputAuthorityRootRequirement, McpEntityKind, McpField, McpToolEntry, PaginationRules,
+    PrincipalRequirement, ReadMutationClass, SupportProfile,
+};
 
 /// The complete, immutable, authoritatively validated MCP surface registry.
 /// Entries are sorted in strict ASCII order by `(name, version)`.

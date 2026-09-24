@@ -76,7 +76,7 @@ fn raw_names_keep_original_byte_span_but_never_act_as_keywords() {
 }
 #[test]
 fn lifetimes_labels_chars_and_function_pointer_types_are_not_heads() {
-    let text = br#"fn f<'a>(x: &'a str, cb: fn(u8)) { 'outer: loop { let _ = '{'; let _ = '\''; let _ = b'}'; break 'outer; } } type Callback = for<'a> fn(&'a str);"#;
+    let text = br"fn f<'a>(x: &'a str, cb: fn(u8)) { 'outer: loop { let _ = '{'; let _ = '\''; let _ = b'}'; break 'outer; } } type Callback = for<'a> fn(&'a str);";
     assert_eq!(
         names(text),
         vec![
@@ -385,7 +385,7 @@ fn generated_supported_heads_match_an_independent_name_position_oracle() {
     for (word, tail, kind) in [
         ("fn", "() {}", Kind::Function),
         ("struct", ";", Kind::Struct),
-        ("enum", "{}", Kind::Enum),
+        ("enum", "{ }", Kind::Enum),
         ("mod", ";", Kind::Module),
         ("trait", "{}", Kind::Trait),
         ("type", "=u8;", Kind::Type),

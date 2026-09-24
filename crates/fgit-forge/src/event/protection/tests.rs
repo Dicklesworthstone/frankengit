@@ -208,7 +208,7 @@ fn every_administrator_reviewer_branch_and_epoch_is_identity_material() {
             2 => change.protection.administrators = vec![actor(2)],
             3 => change.protection.branches[0].reviewers = vec![actor(5)],
             _ => {
-                change.protection.branches[0].name = RefName::try_new(b"refs/heads/other").unwrap()
+                change.protection.branches[0].name = RefName::try_new(b"refs/heads/other").unwrap();
             }
         }
         assert_ne!(encode_body(&changed).unwrap(), bytes);

@@ -311,7 +311,7 @@ fn check_pin(
     }
     Ok(())
 }
-fn failure(error: Option<&HistoryError>) -> ToolError {
+const fn failure(error: Option<&HistoryError>) -> ToolError {
     match error {
         Some(HistoryError::InvalidOptions) => ToolError::invalid("invalid_history_options"),
         Some(HistoryError::LineRange) => ToolError::invalid("range_outside_history"),

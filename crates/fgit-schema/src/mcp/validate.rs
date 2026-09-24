@@ -246,8 +246,8 @@ pub fn validate_tool_entry(entry: &McpToolEntry) -> Result<(), McpValidationErro
         return Err(McpValidationError::BudgetCeilingExceeded {
             tool: entry.name,
             dimension: "max_depth",
-            actual: entry.budget.max_depth as u32,
-            ceiling: MAX_DEPTH_CEILING as u32,
+            actual: u32::from(entry.budget.max_depth),
+            ceiling: u32::from(MAX_DEPTH_CEILING),
         });
     }
     if entry.budget.max_items == 0 {

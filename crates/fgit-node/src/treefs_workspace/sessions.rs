@@ -55,7 +55,7 @@ pub struct WorkspaceShutdownBlocked {
 }
 
 impl WorkspaceShutdownBlocked {
-    pub(crate) fn new(node: OneNode, cause: NodeWorkspaceRefusal) -> Self {
+    pub(crate) const fn new(node: OneNode, cause: NodeWorkspaceRefusal) -> Self {
         Self { node, cause }
     }
     pub const fn cause(&self) -> &NodeWorkspaceRefusal {
@@ -75,21 +75,27 @@ impl std::fmt::Debug for WorkspaceShutdownBlocked {
 }
 
 impl MergeWorkspaceReceipt {
+    #[must_use]
     pub const fn workspace_id(&self) -> WorkspaceId {
         self.workspace_id
     }
+    #[must_use]
     pub const fn snapshot_digest(&self) -> [u8; 32] {
         self.snapshot_digest
     }
+    #[must_use]
     pub const fn epochs(&self) -> EpochSet {
         self.epochs
     }
+    #[must_use]
     pub const fn tree(&self) -> GitOid {
         self.tree
     }
+    #[must_use]
     pub const fn base_commit(&self) -> GitOid {
         self.base_commit
     }
+    #[must_use]
     pub const fn base_rcr(&self) -> RepositoryCommitId {
         self.base_rcr
     }
@@ -118,7 +124,7 @@ struct Slots {
 }
 
 #[derive(Default)]
-pub(crate) struct NodeWorkspaceSessions {
+pub struct NodeWorkspaceSessions {
     slots: Mutex<Slots>,
 }
 
@@ -186,10 +192,10 @@ impl NodeWorkspaceSessions {
     }
 }
 
-fn unavailable() -> NodeWorkspaceRefusal {
+const fn unavailable() -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::WorkspaceHandleUnavailable
 }
-fn state_error(error: super::WorkspaceSessionRefusal) -> NodeWorkspaceRefusal {
+const fn state_error(error: super::WorkspaceSessionRefusal) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::WorkspaceSession(error)
 }
 fn authority_error(error: crate::NodeRefusal) -> NodeWorkspaceRefusal {

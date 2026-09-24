@@ -330,7 +330,7 @@ struct ReadBudget {
     objects: Cell<u64>,
 }
 impl ReadBudget {
-    fn new(bytes: u64, objects: u64) -> Self {
+    const fn new(bytes: u64, objects: u64) -> Self {
         Self {
             bytes: Cell::new(bytes),
             objects: Cell::new(objects),
@@ -410,7 +410,7 @@ struct BrowseParams<'a> {
 fn browse_at<A: GitHashAlgorithm>(
     base: &BaseView<A>,
     original: &NodeTreeSource<'_>,
-    mut params: BrowseParams<'_>,
+    params: BrowseParams<'_>,
 ) -> Result<SourceBrowseReport, NodeWorkspaceRefusal> {
     live(params.request)?;
     let source = BoundedSource {

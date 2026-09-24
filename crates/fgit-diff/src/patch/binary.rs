@@ -10,16 +10,20 @@ pub struct BinaryHunks<'a> {
     declared: [usize; 2],
 }
 impl BinaryHunks<'_> {
-    pub fn bytes(&self) -> &[u8] {
+    #[must_use]
+    pub const fn bytes(&self) -> &[u8] {
         self.bytes
     }
-    pub fn member_count(&self) -> usize {
+    #[must_use]
+    pub const fn member_count(&self) -> usize {
         self.members
     }
-    pub fn line_count(&self) -> usize {
+    #[must_use]
+    pub const fn line_count(&self) -> usize {
         self.lines
     }
     /// Literal bytes or inflated delta PROGRAM bytes, not delta result sizes.
+    #[must_use]
     pub fn declared_inflated_bytes(&self) -> usize {
         self.declared.iter().sum()
     }

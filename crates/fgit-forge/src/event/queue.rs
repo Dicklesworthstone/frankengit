@@ -30,7 +30,7 @@ impl DequeueReason {
         self as u32
     }
 
-    pub fn from_wire_value(value: u32) -> Result<Self, CodecRefusal> {
+    pub const fn from_wire_value(value: u32) -> Result<Self, CodecRefusal> {
         match value {
             1 => Ok(Self::Withdrawn),
             2 => Ok(Self::Conflict),

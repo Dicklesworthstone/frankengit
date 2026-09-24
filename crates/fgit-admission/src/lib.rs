@@ -1249,31 +1249,31 @@ impl CanonicalRefState {
     }
 
     pub fn apply(&self, effects: &BTreeMap<RefName, RefEffect>) -> Result<Self, RefusalCode> {
-        if let Some(target) = &self.head_target {
-            if matches!(effects.get(target), Some(RefEffect::Delete)) {
-                // Evaluated through fg043 PolicySnapshot via evaluate_protection,
-                // replacing the ad-hoc inline check with deterministic policy evaluation.
-                let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
-                let policy = crate::policy_bridge::compile_branch_protection_policy(
-                    std::str::from_utf8(target.as_bytes())
-                        .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?,
-                )
-                .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?;
-                let id = source.pin(policy);
-                let verdict = crate::policy_bridge::evaluate_effects_protection(
-                    &source,
-                    &id,
-                    &crate::policy_bridge::SubjectCodeMap::default(),
-                    fgit_types::PrincipalId::from_bytes([0; 16]),
-                    crate::policy_bridge::default_principal_snapshot_id(),
-                    &self.refs,
-                    effects,
-                    fgit_policy::PolicyInstant::from_seconds(0),
-                )
-                .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?;
-                if let Some(code) = verdict.refusal {
-                    return Err(code);
-                }
+        if let Some(target) = &self.head_target
+            && matches!(effects.get(target), Some(RefEffect::Delete))
+        {
+            // Evaluated through fg043 PolicySnapshot via evaluate_protection,
+            // replacing the ad-hoc inline check with deterministic policy evaluation.
+            let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
+            let policy = crate::policy_bridge::compile_branch_protection_policy(
+                std::str::from_utf8(target.as_bytes())
+                    .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?,
+            )
+            .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?;
+            let id = source.pin(policy);
+            let verdict = crate::policy_bridge::evaluate_effects_protection(
+                &source,
+                &id,
+                &crate::policy_bridge::SubjectCodeMap::default(),
+                fgit_types::PrincipalId::from_bytes([0; 16]),
+                crate::policy_bridge::default_principal_snapshot_id(),
+                &self.refs,
+                effects,
+                fgit_policy::PolicyInstant::from_seconds(0),
+            )
+            .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?;
+            if let Some(code) = verdict.refusal {
+                return Err(code);
             }
         }
         let mut refs = self.refs.clone();
@@ -2463,15 +2463,15 @@ fn prepare_publication_from_snapshot(
     }
     // A required protection verdict must exist before publication can proceed.
     // Compilation and evaluation errors are typed refusals, never skipped checks.
-    if let Some(target) = &snapshot.head_target {
-        if let Some(code) = crate::policy_bridge::receive_refusal(
+    if let Some(target) = &snapshot.head_target
+        && let Some(code) = crate::policy_bridge::receive_refusal(
             target,
             context.principal_id,
             &snapshot.refs,
             lowered.semantic.ref_commands(),
-        ) {
-            return Ok(PublicationPreparation::Refuse(code));
-        }
+        )
+    {
+        return Ok(PublicationPreparation::Refuse(code));
     }
     let fold = IntentEvaluator::new().evaluate(snapshot.as_fold_basis(), &model_request);
     match &fold.outcome {
@@ -4652,7 +4652,7 @@ mod tests {
         let main = RefName::try_new(b"refs/heads/main").expect("main is a valid branch ref");
         let state = CanonicalRefState::new_with_head_target(
             BTreeMap::from([(main.clone(), oid(35))]),
-            main.clone(),
+            main,
         )
         .expect("a populated branch HEAD is canonical");
         let ref_root = canonical_ref_state_root(&state).expect("canonical state has a root");

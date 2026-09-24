@@ -92,14 +92,14 @@ fn check(deadline: &mut impl Deadline) -> Result<(), BinaryPatchError> {
         Err(BinaryPatchError::Cancelled)
     }
 }
-fn inflate_error(error: InflateRefusal) -> BinaryPatchError {
+const fn inflate_error(error: InflateRefusal) -> BinaryPatchError {
     match error {
         InflateRefusal::Cancelled => BinaryPatchError::Cancelled,
         InflateRefusal::ResourceLimit { .. } => BinaryPatchError::Limit("inflate"),
         _ => BinaryPatchError::Invalid("zlib member"),
     }
 }
-fn delta_error(error: PackError) -> BinaryPatchError {
+const fn delta_error(error: PackError) -> BinaryPatchError {
     match error {
         PackError::DeadlineExceeded => BinaryPatchError::Cancelled,
         PackError::InputLimit { .. }
@@ -165,7 +165,7 @@ fn decode_row(row: &[u8], output: &mut [u8; 52]) -> Result<usize, BinaryPatchErr
     if row.len() != 1 + count.div_ceil(4) * 5 {
         return Err(BinaryPatchError::Invalid("base85 row size"));
     }
-    for (i, digits) in row[1..].chunks_exact(5).enumerate() {
+    for (i, digits) in row[1..].as_chunks::<5>().0.iter().enumerate() {
         let mut word = 0u32;
         for digit in digits {
             let value = DECODE[usize::from(*digit)];

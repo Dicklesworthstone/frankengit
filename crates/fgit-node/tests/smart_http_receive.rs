@@ -154,7 +154,7 @@ fn blob_pack(format: GitHashAlgorithm, body: &[u8]) -> Vec<u8> {
     pack
 }
 
-fn format_name(format: GitHashAlgorithm) -> &'static str {
+const fn format_name(format: GitHashAlgorithm) -> &'static str {
     match format {
         GitHashAlgorithm::Sha1 => "sha1",
         GitHashAlgorithm::Sha256 => "sha256",

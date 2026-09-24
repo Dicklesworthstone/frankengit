@@ -36,13 +36,13 @@ impl std::error::Error for NodeReviewRefusal {}
 impl NodeReviewRefusal {
     // Transport adapters classify typed failures without parsing Debug text
     // or exposing the private source owner and backend diagnostics.
-    pub(crate) fn is_snapshot_moved(&self) -> bool {
+    pub(crate) const fn is_snapshot_moved(&self) -> bool {
         matches!(self, Self::SnapshotMoved)
     }
-    pub(crate) fn is_version_moved(&self) -> bool {
+    pub(crate) const fn is_version_moved(&self) -> bool {
         matches!(self, Self::VersionMoved)
     }
-    pub(crate) fn is_unavailable(&self) -> bool {
+    pub(crate) const fn is_unavailable(&self) -> bool {
         matches!(self, Self::Unavailable)
     }
     pub(crate) fn review_error(&self) -> Option<&ReviewError> {

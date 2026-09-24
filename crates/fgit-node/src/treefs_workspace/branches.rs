@@ -27,7 +27,7 @@ use fgit_wire::{Capabilities, GitObjectFormat, Packet, encode_packets};
 use std::cell::Cell;
 use std::collections::{BTreeSet, VecDeque};
 
-fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
+const fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::BranchOperation(reason)
 }
 
@@ -302,19 +302,18 @@ impl OneNode {
                 if kind != ObjectType::Commit {
                     return Err(NodeWorkspaceRefusal::CommitRequired);
                 }
-                if let ExpectedOld::Exactly(old_oid) = command.expected_old {
-                    if old_oid != oid
-                        && !is_fast_forward(
-                            &source,
-                            self.object_format,
-                            old_oid,
-                            oid,
-                            &parse_limits,
-                            &mut live,
-                        )?
-                    {
-                        return Err(invalid("non-fast-forward branch update is not permitted"));
-                    }
+                if let ExpectedOld::Exactly(old_oid) = command.expected_old
+                    && old_oid != oid
+                    && !is_fast_forward(
+                        &source,
+                        self.object_format,
+                        old_oid,
+                        oid,
+                        &parse_limits,
+                        &mut live,
+                    )?
+                {
+                    return Err(invalid("non-fast-forward branch update is not permitted"));
                 }
             }
         }

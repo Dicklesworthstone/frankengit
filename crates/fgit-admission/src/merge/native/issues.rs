@@ -154,7 +154,7 @@ fn checkpoint(cancelled: &impl Fn() -> bool) -> Result<(), AdmissionError> {
         Ok(())
     }
 }
-fn limit(limit: u16) -> Result<(), AdmissionError> {
+const fn limit(limit: u16) -> Result<(), AdmissionError> {
     if limit == 0 || limit > MAX_PAGE {
         Err(unavailable(RefusalCode::ResourceBudgetExceeded))
     } else {

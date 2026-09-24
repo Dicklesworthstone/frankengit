@@ -3,7 +3,12 @@
 //! The operator assigns one stable path per attempt. A synced Started record
 //! precedes user work. Reopening Started never grants permission to rerun: the
 //! previous process may have escaped or completed with a lost response.
-use super::*;
+use super::{
+    AttemptId, CheckDeliveryRefusal, CheckJournalPin, CheckJournalScope, Commitment,
+    CoordinatorRefusal, File, FileCheckJournal, Frame, HEADER_BYTES, Input, Path, Read, Seek,
+    SeekFrom, TrustedWorkflowReceipt, WorkflowRunId, Write, check_parent, fmt, private_file,
+    read_error, root, storage, write_frame,
+};
 
 const ATTEMPT_HEADER: &[u8; 8] = b"FGWA0001";
 const ATTEMPT_HEADER_BYTES: u64 = 168;
@@ -20,12 +25,15 @@ pub struct WorkflowAttemptBinding {
     pub(in crate::coordinator) request: Commitment,
 }
 impl WorkflowAttemptBinding {
+    #[must_use]
     pub const fn run_id(self) -> WorkflowRunId {
         self.run
     }
+    #[must_use]
     pub const fn request_commitment(self) -> Commitment {
         self.request
     }
+    #[must_use]
     pub const fn journal_scope(self) -> CheckJournalScope {
         self.scope
     }
@@ -51,12 +59,15 @@ pub struct WorkflowAttemptPin {
     tail: Commitment,
 }
 impl WorkflowAttemptPin {
+    #[must_use]
     pub const fn new(bytes: u64, tail: Commitment) -> Self {
         Self { bytes, tail }
     }
+    #[must_use]
     pub const fn byte_len(self) -> u64 {
         self.bytes
     }
+    #[must_use]
     pub const fn tail(self) -> Commitment {
         self.tail
     }
@@ -102,18 +113,23 @@ pub struct RecordedWorkflowReceipt {
     containment: bool,
 }
 impl RecordedWorkflowReceipt {
+    #[must_use]
     pub const fn binding(&self) -> WorkflowAttemptBinding {
         self.binding
     }
+    #[must_use]
     pub fn frame(&self) -> &[u8] {
         &self.frame
     }
+    #[must_use]
     pub fn commitment(&self) -> Commitment {
         Commitment::of_bytes(&self.frame)
     }
+    #[must_use]
     pub const fn journal_pin(&self) -> CheckJournalPin {
         self.journal
     }
+    #[must_use]
     pub const fn requires_containment(&self) -> bool {
         self.containment
     }
@@ -242,12 +258,15 @@ impl FileWorkflowAttempt {
             failed: false,
         }
     }
+    #[must_use]
     pub const fn binding(&self) -> WorkflowAttemptBinding {
         self.binding
     }
+    #[must_use]
     pub const fn pin(&self) -> WorkflowAttemptPin {
         self.pin
     }
+    #[must_use]
     pub const fn status(&self) -> WorkflowAttemptStatus {
         if self.completed.is_some() {
             WorkflowAttemptStatus::Completed
@@ -257,9 +276,11 @@ impl FileWorkflowAttempt {
             WorkflowAttemptStatus::Prepared
         }
     }
+    #[must_use]
     pub const fn is_failed(&self) -> bool {
         self.failed
     }
+    #[must_use]
     pub const fn starting_journal_pin(&self) -> Option<CheckJournalPin> {
         self.started
     }

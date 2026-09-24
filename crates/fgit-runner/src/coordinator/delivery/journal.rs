@@ -4,7 +4,13 @@
 //! authority backend. The operator owns stable private parent paths. File locks
 //! are advisory; hostile same-UID mutation and storage that lies about fsync are
 //! outside this profile. A trusted minimum pin detects rollback of known data.
-use super::*;
+use super::{
+    AttemptId, BTreeMap, BTreeSet, CheckDeliveryAcknowledgement, CheckDeliveryBatch,
+    CheckDeliveryRefusal, CheckDeliverySink, CheckRunConclusion, CheckRunStatus, Commitment,
+    CoordinatorExecutionProfile, CoordinatorRefusal, GitOid, Input, MAX_BATCH_BYTES,
+    PreparedTrustedWorkflow, RepositoryId, TenantId, TrustDomain, TrustedWorkflowReceipt, VecDeque,
+    WorkflowCoordinator, WorkflowRunId, fmt, root,
+};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -50,7 +56,7 @@ impl Default for CheckJournalLimits {
     }
 }
 impl CheckJournalLimits {
-    fn validate(self) -> Result<(), CheckDeliveryRefusal> {
+    const fn validate(self) -> Result<(), CheckDeliveryRefusal> {
         if self.journal_bytes < HEADER_BYTES
             || self.journal_bytes > 4 * 1024 * 1024 * 1024
             || self.records == 0
@@ -72,12 +78,15 @@ pub struct CheckJournalPin {
     tail: Commitment,
 }
 impl CheckJournalPin {
+    #[must_use]
     pub const fn new(bytes: u64, tail: Commitment) -> Self {
         Self { bytes, tail }
     }
+    #[must_use]
     pub const fn byte_len(self) -> u64 {
         self.bytes
     }
+    #[must_use]
     pub const fn tail(self) -> Commitment {
         self.tail
     }
@@ -270,15 +279,19 @@ impl FileCheckJournal {
             run_ends: BTreeMap::new(),
         }
     }
+    #[must_use]
     pub const fn pin(&self) -> CheckJournalPin {
         self.pin
     }
+    #[must_use]
     pub const fn scope(&self) -> CheckJournalScope {
         self.scope
     }
+    #[must_use]
     pub fn pending_batches(&self) -> usize {
         self.pending.len()
     }
+    #[must_use]
     pub const fn is_failed(&self) -> bool {
         self.failed
     }
@@ -423,7 +436,7 @@ impl FileCheckJournal {
         Ok(Some(acknowledgement))
     }
 
-    fn healthy(&self) -> Result<(), CheckDeliveryRefusal> {
+    const fn healthy(&self) -> Result<(), CheckDeliveryRefusal> {
         if self.failed {
             Err(CheckDeliveryRefusal::FailedJournal)
         } else {
@@ -488,7 +501,7 @@ impl FileCheckJournal {
                 .copied()
                 .unwrap_or(0);
             let phase = phase(fact.status);
-            if !matches!((previous, phase), (0, 1) | (1, 2) | (1, 3) | (2, 3)) {
+            if !matches!((previous, phase), (0, 1) | (1, 2 | 3) | (2, 3)) {
                 return Err(CheckDeliveryRefusal::StaleBatch);
             }
             if fact
@@ -729,7 +742,7 @@ impl WorkflowCoordinator {
     }
 }
 
-fn phase(status: CheckRunStatus) -> u8 {
+const fn phase(status: CheckRunStatus) -> u8 {
     match status {
         CheckRunStatus::Queued => 1,
         CheckRunStatus::InProgress => 2,

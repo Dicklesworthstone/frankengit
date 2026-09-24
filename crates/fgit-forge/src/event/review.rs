@@ -71,7 +71,8 @@ impl NativeReviewEvent {
         }
         Ok(())
     }
-    pub fn aggregate(&self) -> AggregateId {
+    #[must_use]
+    pub const fn aggregate(&self) -> AggregateId {
         AggregateId::PullRequestReview {
             pull_request: self.subject.pull_request,
             reviewer: self.reviewer,
@@ -283,6 +284,7 @@ pub enum ReviewFreshness {
     PolicyChanged,
 }
 
+#[must_use]
 pub fn review_freshness(
     review: &NativeReviewEvent,
     current: Option<&ForgeEvent>,

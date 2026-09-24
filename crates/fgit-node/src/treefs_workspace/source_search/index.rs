@@ -94,7 +94,7 @@ fn segments(
 }
 
 impl OneNode {
-    fn lexical_namespace(&self) -> LexicalNamespace {
+    const fn lexical_namespace(&self) -> LexicalNamespace {
         LexicalNamespace {
             tenant: self.tenant_id,
             repository: self.repository_id,

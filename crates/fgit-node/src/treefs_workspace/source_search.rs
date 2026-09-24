@@ -478,7 +478,7 @@ impl LocalSearch for SourceQuery {
 impl LocalSearch for SourceQueryBatch {
     type Report = SourceSearchBatchReport;
     fn scope(&self) -> &SourceQuery {
-        SourceQueryBatch::scope(self)
+        Self::scope(self)
     }
     fn empty(&self, source: SourceSearchReport) -> Self::Report {
         self.empty_report(
@@ -516,7 +516,7 @@ struct SearchSource<'a, 'source> {
     objects: Cell<usize>,
     max_bytes: usize,
 }
-fn bounded_source<'a, 'source>(
+const fn bounded_source<'a, 'source>(
     source: &'a NodeTreeSource<'source>,
     request: &'a NodeRequestContext,
     limits: SearchLimits,

@@ -161,7 +161,7 @@ fn global_ledger_gaps_foreign_tokens_and_per_slot_rollback_are_rejected() {
                 value.issuance[0].token =
                     mint_token(StoreInstanceId::from_raw(42), IssuanceSequence::FIRST)
                         .to_opaque_bytes()
-                        .to_vec()
+                        .to_vec();
             }
             5 => value.issuance[1].generation = 0,
             _ => value.issuance[1].generation = u64::MAX,

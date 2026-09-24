@@ -107,6 +107,9 @@ impl ReviewOptions {
         self.selected(path) || self.paths.iter().any(|prefix| under(prefix, path))
     }
 }
+/// One raw tree name's entry on each side of a comparison.
+type EntryPair = (Option<TreeEntry<GitOid>>, Option<TreeEntry<GitOid>>);
+
 fn under(path: &[u8], prefix: &[u8]) -> bool {
     path == prefix
         || path
@@ -333,13 +336,13 @@ struct Walker<'a, S> {
     output_bytes: usize,
     hunks: usize,
 }
-fn is_tree(mode: u32) -> bool {
+const fn is_tree(mode: u32) -> bool {
     mode == 0o040000
 }
-fn is_blob(mode: u32) -> bool {
+const fn is_blob(mode: u32) -> bool {
     matches!(mode, 0o100644 | 0o100755 | 0o120000)
 }
-fn identity(entry: &TreeEntry<GitOid>) -> EntryIdentity {
+const fn identity(entry: &TreeEntry<GitOid>) -> EntryIdentity {
     EntryIdentity {
         mode: entry.mode.0,
         oid: entry.object,
@@ -413,8 +416,7 @@ impl<S: MergeObjectSource> Walker<'_, S> {
         // Git's directory terminator can reorder a file->directory transition
         // around names such as `a.b`. Coalesce the two sides by exact raw name
         // before recursion; otherwise one path could be emitted twice.
-        let mut pairs: BTreeMap<Vec<u8>, (Option<TreeEntry<GitOid>>, Option<TreeEntry<GitOid>>)> =
-            BTreeMap::new();
+        let mut pairs: BTreeMap<Vec<u8>, EntryPair> = BTreeMap::new();
         for change in differences.changes {
             let (old, new) = match change {
                 TreeChange::Added(new) => (None, Some(new)),

@@ -20,7 +20,7 @@ pub struct ForgeEventCursor {
     pub event_index: u32,
 }
 impl ForgeEventCursor {
-    pub fn new(repository_sequence: u64, event_index: u32) -> Result<Self, RefusalCode> {
+    pub const fn new(repository_sequence: u64, event_index: u32) -> Result<Self, RefusalCode> {
         if repository_sequence == 0 {
             return Err(RefusalCode::EvidenceInvalid);
         }
@@ -68,7 +68,7 @@ fn page_limit(limit: u16) -> Result<usize, AdmissionError> {
         Ok(usize::from(limit))
     }
 }
-fn charge_page_bytes(total: &mut usize, next: usize) -> Result<bool, AdmissionError> {
+const fn charge_page_bytes(total: &mut usize, next: usize) -> Result<bool, AdmissionError> {
     if next > MAX_PAGE_EVENT_BYTES {
         return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
     }

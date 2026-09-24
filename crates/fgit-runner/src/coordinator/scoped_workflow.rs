@@ -4,7 +4,12 @@
 //! execute through WorkflowPlan, not a second shell interpreter. These local
 //! observations are NOT CheckReceipt values and cannot issue a green check.
 use super::delivery::CheckDeliveryRefusal;
-use super::*;
+use super::{
+    ActiveRun, AttemptId, BTreeMap, CheckRunConclusion, CheckRunFact, CheckRunStatus, Commitment,
+    CoordinatorRefusal, DrainReason, Duration, GitOid, Instant, JobOutcome, JobStatus,
+    RepositoryId, RunStatus, StepObservation, TenantId, TriggerContext, TrustDomain,
+    WorkflowCoordinator, WorkflowRunId,
+};
 use crate::workflow::{
     JobReport, StepLimits, WorkerFailure, WorkflowExecutor, WorkflowLimits, WorkflowPlan,
     WorkflowReport,
@@ -59,12 +64,15 @@ pub struct PreparedTrustedWorkflow {
     receipt: Option<TrustedWorkflowReceipt>,
 }
 impl PreparedTrustedWorkflow {
+    #[must_use]
     pub const fn run_id(&self) -> WorkflowRunId {
         self.run_id
     }
+    #[must_use]
     pub const fn limits(&self) -> WorkflowLimits {
         self.limits
     }
+    #[must_use]
     pub const fn receipt(&self) -> Option<&TrustedWorkflowReceipt> {
         self.receipt.as_ref()
     }
@@ -105,14 +113,17 @@ pub struct TrustedWorkflowReceipt {
     logical_now: u64,
 }
 impl TrustedWorkflowReceipt {
+    #[must_use]
     pub const fn run_id(&self) -> WorkflowRunId {
         self.binding.run
     }
+    #[must_use]
     pub const fn report(&self) -> &WorkflowReport {
         &self.report
     }
 
     /// Versioned local-observation bytes; not a new canonical repository schema.
+    #[must_use]
     pub fn frame(&self) -> Vec<u8> {
         observation_frame(
             &self.binding,
@@ -121,12 +132,14 @@ impl TrustedWorkflowReceipt {
             self.logical_now,
         )
     }
+    #[must_use]
     pub fn commitment(&self) -> Commitment {
         Commitment::of_bytes(&self.frame())
     }
 
     /// Resolve the exact per-job observation referenced by a check proposal.
     /// A zero attempt denotes a job skipped/cancelled without opening a scope.
+    #[must_use]
     pub fn job_commitment(&self, job_id: &str) -> Option<Commitment> {
         let job = self.report.jobs.iter().find(|job| job.id == job_id)?;
         let attempt = *self.attempts.get(job_id)?;
@@ -142,6 +155,7 @@ impl TrustedWorkflowReceipt {
     /// Exact local per-job evidence bytes referenced by a check proposal.
     /// Persist these bytes before relinquishing the prepared receipt; the full
     /// workflow frame has a different commitment and cannot substitute for it.
+    #[must_use]
     pub fn job_frame(&self, job_id: &str) -> Option<Vec<u8>> {
         let job = self.report.jobs.iter().find(|job| job.id == job_id)?;
         let attempt = *self.attempts.get(job_id)?;
@@ -325,10 +339,7 @@ impl WorkflowCoordinator {
     ) -> Result<&'a TrustedWorkflowReceipt, CoordinatorRefusal>
     where
         E: WorkflowExecutor,
-        F: FnMut(
-            &mut WorkflowCoordinator,
-            Option<&TrustedWorkflowReceipt>,
-        ) -> Result<(), CoordinatorRefusal>,
+        F: FnMut(&mut Self, Option<&TrustedWorkflowReceipt>) -> Result<(), CoordinatorRefusal>,
     {
         self.execute_trusted_workflow_with_launch_custody(
             prepared,
@@ -354,10 +365,7 @@ impl WorkflowCoordinator {
     ) -> Result<&'a TrustedWorkflowReceipt, CoordinatorRefusal>
     where
         E: WorkflowExecutor,
-        F: FnMut(
-            &mut WorkflowCoordinator,
-            Option<&TrustedWorkflowReceipt>,
-        ) -> Result<(), CoordinatorRefusal>,
+        F: FnMut(&mut Self, Option<&TrustedWorkflowReceipt>) -> Result<(), CoordinatorRefusal>,
     {
         let run_id = prepared.run_id;
         let run = self
@@ -470,12 +478,10 @@ impl WorkflowCoordinator {
             }
             (result, adapter.custody_failure.take())
         };
-        if !launch_fenced {
-            if let Some(error) = custody_failure.as_ref() {
-                // Preserve the existing per-job callback's refusal behavior.
-                self.hold_trusted_workflow(run_id);
-                return Err(error.clone());
-            }
+        if !launch_fenced && let Some(error) = custody_failure.as_ref() {
+            // Preserve the existing per-job callback's refusal behavior.
+            self.hold_trusted_workflow(run_id);
+            return Err(error.clone());
         }
         let report = match result {
             Ok(Ok(report)) => report,
@@ -583,15 +589,15 @@ where
             timestamp_millis: self.logical_now,
         });
         self.coordinator.obligations.check_publications_emitted += 1;
-        if let Some(adapter) = self.launch_custody.as_mut() {
-            if let Err(error) = adapter.flush(self.coordinator, None) {
-                // No user scope exists yet. The possibly persisted InProgress
-                // phase is nevertheless a conservative may-have-started fence.
-                self.custody_stopped.set(true);
-                self.custody_failure = Some(launch_custody_error(error));
-                self.coordinator.hold_trusted_workflow(self.binding.run);
-                return Err(WorkerFailure::new(error.to_string(), false));
-            }
+        if let Some(adapter) = self.launch_custody.as_mut()
+            && let Err(error) = adapter.flush(self.coordinator, None)
+        {
+            // No user scope exists yet. The possibly persisted InProgress
+            // phase is nevertheless a conservative may-have-started fence.
+            self.custody_stopped.set(true);
+            self.custody_failure = Some(launch_custody_error(error));
+            self.coordinator.hold_trusted_workflow(self.binding.run);
+            return Err(WorkerFailure::new(error.to_string(), false));
         }
         self.coordinator.obligations.workflow_scopes_opened += 1;
         self.scope_open = true;

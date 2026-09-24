@@ -391,10 +391,10 @@ impl NativeMergeProjection<CrashAuthority> for Projection<'_> {
     }
 }
 
-fn repository() -> RepositoryId {
+const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([0xc4; 16])
 }
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0xc5; 16])
 }
 fn config(root: &Path, format: GitHashAlgorithm) -> NodeConfig {

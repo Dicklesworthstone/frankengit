@@ -289,7 +289,7 @@ where
 fn check<C: Fn() -> Result<(), RefusalCode>>(checkpoint: &C) -> Result<(), RecoveryFailure> {
     checkpoint().map_err(RecoveryFailure::Interrupted)
 }
-fn bounded(bytes: &[u8], limit: usize, field: &'static str) -> Result<(), RecoveryFailure> {
+const fn bounded(bytes: &[u8], limit: usize, field: &'static str) -> Result<(), RecoveryFailure> {
     if bytes.len() > limit {
         return Err(RecoveryFailure::BoundExceeded {
             field,
@@ -299,7 +299,7 @@ fn bounded(bytes: &[u8], limit: usize, field: &'static str) -> Result<(), Recove
     }
     Ok(())
 }
-fn integrity(field: &'static str) -> RecoveryFailure {
+const fn integrity(field: &'static str) -> RecoveryFailure {
     RecoveryFailure::Integrity { field }
 }
 fn head_receipt(read: HeadRead) -> Result<HeadReadReceipt, RecoveryFailure> {

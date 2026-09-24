@@ -94,7 +94,7 @@ impl From<PackError> for BundleInspectionRefusal {
         Self::Pack(Box::new(error))
     }
 }
-fn invalid(message: &'static str) -> BundleInspectionRefusal {
+const fn invalid(message: &'static str) -> BundleInspectionRefusal {
     BundleInspectionRefusal::InvalidCandidate(message)
 }
 

@@ -51,7 +51,9 @@ fn generation(text: &str) -> Result<GraphGenerationId, String> {
     let digit = |b| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     let bytes: Vec<_> = raw
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| digit(p[0]) * 16 + digit(p[1]))
         .collect();
     if bytes.iter().all(|b| *b == 0) {

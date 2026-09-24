@@ -1,9 +1,18 @@
 //! Production scanner/table/manifest codecs; scalar queries are the oracle.
 use super::*;
-use fgit_crypto::{
-    IdentityDomain, internal_algorithm_id, internal_digest_value, internal_object_id,
+use crate::source_search::{SearchCompletion, SourceSearchReport};
+use crate::source_symbols::SymbolQuery;
+use crate::source_symbols::index::{
+    Corpus, Document, Format, ReuseVerifier, Source, TenantId, table_payload,
 };
-use fgit_types::{CodecVersion, SchemaId};
+use fgit_crypto::{
+    GitObjectKind, IdentityDomain, git_object_id, internal_algorithm_id, internal_digest_value,
+    internal_object_id,
+};
+use fgit_types::{
+    CodecVersion, RefName, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId,
+    RepositoryIncarnationId, SchemaId,
+};
 
 fn source(format: Format) -> Source {
     let id = |domain, family| {
@@ -241,7 +250,7 @@ fn complete_document_counts_invalid_names_kinds_and_duplicate_postings_are_check
         }
         assert!(bad.encode(&manifest, &|| false).is_err());
     }
-    let mut bad = directory.clone();
+    let mut bad = directory;
     let rows = bad.names.remove(b"Alpha".as_slice()).unwrap();
     bad.names.insert(b"r#Alpha".to_vec(), rows);
     assert!(bad.encode(&manifest, &|| false).is_err());

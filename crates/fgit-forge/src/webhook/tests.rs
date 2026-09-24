@@ -211,7 +211,7 @@ fn webhook_secret_rotation_window() {
     let window_secs = 300u64; // 5 minute rotation window
 
     // Rotate to new secret at t0:
-    rotation.rotate(new_secret.clone(), window_secs, t0);
+    rotation.rotate(new_secret, window_secs, t0);
 
     // During window (e.g. t0 + 100s): BOTH old and new signatures verify!
     assert!(rotation.verify(payload, &old_sig, t0 + 100));

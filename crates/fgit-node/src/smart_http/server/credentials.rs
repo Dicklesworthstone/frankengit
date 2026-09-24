@@ -58,13 +58,13 @@ pub(super) struct Grant {
     merges_write: bool,
 }
 impl Grant {
-    pub fn permits(self, service: Service) -> bool {
+    pub const fn permits(self, service: Service) -> bool {
         match service {
             Service::UploadPack => self.read,
             Service::ReceivePack => self.receive,
         }
     }
-    pub fn permits_issues(self, mutation: bool) -> bool {
+    pub const fn permits_issues(self, mutation: bool) -> bool {
         if mutation {
             self.issues_write
         } else {
@@ -72,7 +72,7 @@ impl Grant {
         }
     }
     /// PR metadata authority is separate from code publication and reviews.
-    pub fn permits_pulls(self, mutation: bool) -> bool {
+    pub const fn permits_pulls(self, mutation: bool) -> bool {
         if mutation {
             self.pulls_write
         } else {
@@ -80,7 +80,7 @@ impl Grant {
         }
     }
     /// A vote always uses this credential's principal, not a form field.
-    pub fn permits_reviews(self, mutation: bool) -> bool {
+    pub const fn permits_reviews(self, mutation: bool) -> bool {
         if mutation {
             self.reviews_write
         } else {
@@ -89,12 +89,12 @@ impl Grant {
     }
     /// Allows reviewed code publication and selection of additional named
     /// reviewers. Mandatory repository protection remains enforced at CAS.
-    pub fn permits_reviewed_merge(self) -> bool {
+    pub const fn permits_reviewed_merge(self) -> bool {
         self.merges_write
     }
     /// Recovery is separately grantable after write access has been withdrawn.
     /// It never permits inspecting another principal's transaction namespace.
-    pub fn permits_outcomes(self) -> bool {
+    pub const fn permits_outcomes(self) -> bool {
         self.outcomes_read
     }
 }
@@ -231,7 +231,7 @@ fn decode_basic(input: &[u8], output: &mut [u8; MAX_BASIC_BYTES]) -> Option<usiz
     {
         return None;
     }
-    fn sextet(byte: u8) -> Option<u8> {
+    const fn sextet(byte: u8) -> Option<u8> {
         match byte {
             b'A'..=b'Z' => Some(byte - b'A'),
             b'a'..=b'z' => Some(byte - b'a' + 26),
@@ -242,7 +242,7 @@ fn decode_basic(input: &[u8], output: &mut [u8; MAX_BASIC_BYTES]) -> Option<usiz
         }
     }
     let mut written = 0;
-    for (index, quartet) in input.chunks_exact(4).enumerate() {
+    for (index, quartet) in input.as_chunks::<4>().0.iter().enumerate() {
         let a = sextet(quartet[0])?;
         let b = sextet(quartet[1])?;
         let last = index + 1 == input.len() / 4;

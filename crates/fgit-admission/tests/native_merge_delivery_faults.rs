@@ -245,7 +245,7 @@ impl AsyncAuthorityStore for Model {
     }
     fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
     ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
@@ -253,14 +253,14 @@ impl AsyncAuthorityStore for Model {
     }
     fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
     ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
         std::future::ready(self.backend.read_immutable(key))
     }
     fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
@@ -269,14 +269,14 @@ impl AsyncAuthorityStore for Model {
     }
     fn read_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
     ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
         std::future::ready(self.backend.read_head(key))
     }
     fn compare_exchange_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -289,7 +289,7 @@ impl AsyncAuthorityStore for Model {
     }
     fn publish_head_with_outcomes(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: HeadGeneration,
@@ -301,7 +301,7 @@ impl AsyncAuthorityStore for Model {
     }
     fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
     ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
         std::future::ready(self.backend.authenticate_head_receipt(receipt))
@@ -645,7 +645,7 @@ impl AsyncAdmissionProjection<Model> for Projection {
     fn snapshot_async<'a>(
         &'a self,
         _: &'a Model,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
     ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
@@ -658,7 +658,7 @@ impl AsyncAdmissionProjection<Model> for Projection {
     fn materialize_commit_async<'a>(
         &'a self,
         _: &'a Model,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         request: &'a TransactionRequest,
         fold: &'a fgit_txn::TransactionFoldReport,
@@ -672,7 +672,7 @@ impl AsyncAdmissionProjection<Model> for Projection {
     fn materialize_refusal_async<'a>(
         &'a self,
         _: &'a Model,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         tx_id: TxId,
         code: RefusalCode,
@@ -685,13 +685,13 @@ impl AsyncAdmissionProjection<Model> for Projection {
     }
 }
 impl NativeMergeProjection<Model> for Projection {
-    fn merge_checkpoint(&self, _: &()) -> Result<(), RefusalCode> {
+    fn merge_checkpoint(&self, (): &()) -> Result<(), RefusalCode> {
         Ok(())
     }
     fn resolve_merge_basis_async<'a>(
         &'a self,
         _: &'a Model,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
     ) -> impl Future<Output = Result<NativeMergeBasis, ProjectionFailure>> + Send + 'a {
@@ -700,7 +700,7 @@ impl NativeMergeProjection<Model> for Projection {
     fn validate_merge_async<'a>(
         &'a self,
         _: &'a Model,
-        _: &'a (),
+        (): &'a (),
         _: &'a PublicationBasis,
         _: &'a AuthenticatedHead,
         intent: &'a NativeMergeIntent,
@@ -1198,7 +1198,7 @@ enum NativeDriver {
     Async,
 }
 impl NativeDriver {
-    fn other(self) -> Self {
+    const fn other(self) -> Self {
         match self {
             Self::Sync => Self::Async,
             Self::Async => Self::Sync,
@@ -1474,7 +1474,7 @@ struct OwnedSealedMerge {
     workspace_epoch_now: WorkspaceEpoch,
 }
 impl OwnedSealedMerge {
-    fn borrowed(&self) -> SealedMerge<'_> {
+    const fn borrowed(&self) -> SealedMerge<'_> {
         SealedMerge {
             package: &self.package,
             attempt: &self.attempt,

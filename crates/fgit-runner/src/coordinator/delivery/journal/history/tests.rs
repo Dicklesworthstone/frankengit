@@ -1,6 +1,11 @@
 //! Real private-file custody tests, not producer-authentication or CI proofs.
 use super::*;
+use crate::coordinator::delivery::journal::{CheckJournalLimits, CheckJournalScope};
+use crate::coordinator::{AttemptId, WorkflowRunId};
+use crate::{CheckRunConclusion, CheckRunFact, RunnerText, TrustDomain};
+use fgit_types::{GitOid, RepositoryId, TenantId};
 use std::cell::Cell;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -1,9 +1,12 @@
 //! Bounded Git filter grammar, including percent-encoded compound filters.
-use super::*;
+use super::{
+    GitObjectFormat, ObjectFilter, WireError, WireLimits, parse_object_id, parse_unsigned,
+    validate_opaque_path,
+};
 
 const MAX_FILTER_NESTING: usize = 32;
 
-pub(super) fn parse(
+pub fn parse(
     text: &[u8],
     format: GitObjectFormat,
     limits: &WireLimits,
@@ -23,7 +26,7 @@ fn invalid(text: &[u8]) -> WireError {
         filter: text.to_vec(),
     }
 }
-fn parts_limit(limits: &WireLimits) -> WireError {
+const fn parts_limit(limits: &WireLimits) -> WireError {
     WireError::TooManyFilterParts {
         limit: limits.max_filter_parts,
     }
@@ -99,7 +102,7 @@ fn scaled_size(value: &[u8]) -> Option<u64> {
     parse_unsigned(digits).ok()?.checked_mul(scale)
 }
 
-fn hex(byte: u8) -> Option<u8> {
+const fn hex(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),

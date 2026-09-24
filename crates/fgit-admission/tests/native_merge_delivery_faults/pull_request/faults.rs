@@ -67,7 +67,7 @@ impl AsyncAdmissionProjection<Model> for PrProjection {
 }
 
 impl NativeMergeProjection<Model> for PrProjection {
-    fn merge_checkpoint(&self, _: &()) -> Result<(), RefusalCode> {
+    fn merge_checkpoint(&self, (): &()) -> Result<(), RefusalCode> {
         if self.cancellation.load(Ordering::SeqCst) == CANCEL_BEFORE_SEAL {
             Err(RefusalCode::CancellationInProgress)
         } else {
@@ -109,7 +109,7 @@ impl PullRequestProjection<Model> for PrProjection {
     fn validate_pull_request_async<'a>(
         &'a self,
         _: &'a Model,
-        _: &'a (),
+        (): &'a (),
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
         command: &'a PullRequestCommand,

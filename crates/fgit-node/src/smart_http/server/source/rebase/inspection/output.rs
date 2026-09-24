@@ -30,7 +30,7 @@ impl Output {
             maximum: maximum.min(MAX_RESPONSE),
         }
     }
-    fn remaining(&self) -> usize {
+    const fn remaining(&self) -> usize {
         self.maximum.saturating_sub(self.body.len())
     }
     fn reserve(&mut self, count: usize) -> Result<(), ApiError> {

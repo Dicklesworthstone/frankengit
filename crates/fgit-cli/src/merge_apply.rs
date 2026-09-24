@@ -1,7 +1,7 @@
 //! Native merge preparation and independently reviewed artifact publication.
 //! Preparation and Ref + Forge + Outbox publication remain separate commands.
 
-pub(crate) mod preparation;
+pub mod preparation;
 
 use fgit_authority::{IdempotencyKey, TerminalOutcome};
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber};
@@ -33,7 +33,7 @@ struct Options {
     merge: NativeMerge,
 }
 
-pub(super) fn run(arguments: &[String]) -> Result<(), String> {
+pub fn run(arguments: &[String]) -> Result<(), String> {
     if arguments
         .first()
         .is_some_and(|argument| argument == "prepare" || argument == "resolve")

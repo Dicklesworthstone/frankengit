@@ -87,7 +87,7 @@ impl Fixture {
             format,
         }
     }
-    fn node(&self) -> &OneNode {
+    const fn node(&self) -> &OneNode {
         self.node.as_ref().unwrap()
     }
     fn prepare(
@@ -140,7 +140,7 @@ fn config(root: &Path, format: GitHashAlgorithm) -> NodeConfig {
 fn reference() -> RefName {
     RefName::try_new(b"refs/heads/main").unwrap()
 }
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0xd3; 16])
 }
 fn metadata() -> MergeMetadata {
@@ -174,7 +174,7 @@ fn loose(root: &Path, format: GitHashAlgorithm, kind: GitObjectKind, body: &[u8]
     fs::write(dir.join(&hex[2..]), z).unwrap();
     id
 }
-fn simple_patch() -> &'static [u8] {
+const fn simple_patch() -> &'static [u8] {
     b"diff --git a/edit.txt b/edit.txt\n--- a/edit.txt\n+++ b/edit.txt\n@@ -1 +1 @@\n-before\n+after\n"
 }
 fn apply(

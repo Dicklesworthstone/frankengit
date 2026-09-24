@@ -114,11 +114,11 @@ fn every_semantic_input_and_reviewer_changes_the_event_identity_input() {
             3 => changed.subject.target_ref = RefName::try_new(b"refs/heads/other-target").unwrap(),
             4 => {
                 changed.subject.source_tip =
-                    GitOid::from_hex(GitHashAlgorithm::Sha1, &"c".repeat(40)).unwrap()
+                    GitOid::from_hex(GitHashAlgorithm::Sha1, &"c".repeat(40)).unwrap();
             }
             5 => {
                 changed.subject.target_tip =
-                    GitOid::from_hex(GitHashAlgorithm::Sha1, &"d".repeat(40)).unwrap()
+                    GitOid::from_hex(GitHashAlgorithm::Sha1, &"d".repeat(40)).unwrap();
             }
             6 => changed.subject.policy_epoch = PolicyEpoch::try_new(2).unwrap(),
             7 => changed.expected_version = ExpectedVersion::Exactly(AggregateVersion::FIRST),
@@ -297,12 +297,12 @@ fn malformed_text_domains_and_exhausted_versions_refuse() {
             }
             3 => {
                 bad.subject.source_tip =
-                    GitOid::from_hex(GitHashAlgorithm::Sha256, &"a".repeat(64)).unwrap()
+                    GitOid::from_hex(GitHashAlgorithm::Sha256, &"a".repeat(64)).unwrap();
             }
             4 => bad.subject.source_ref = bad.subject.target_ref.clone(),
             _ => {
                 bad.expected_version =
-                    ExpectedVersion::Exactly(AggregateVersion::try_new(u64::MAX).unwrap())
+                    ExpectedVersion::Exactly(AggregateVersion::try_new(u64::MAX).unwrap());
             }
         }
         assert!(

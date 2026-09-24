@@ -18,7 +18,7 @@ struct WriteGrants {
     merges: bool,
 }
 impl WriteGrants {
-    fn any(self) -> bool {
+    const fn any(self) -> bool {
         self.issues || self.pulls || self.source || self.reviews || self.merges
     }
 }
@@ -55,7 +55,7 @@ impl Options {
         Ok(())
     }
 }
-pub(super) fn run(arguments: &[String]) -> Result<(), String> {
+pub fn run(arguments: &[String]) -> Result<(), String> {
     if arguments
         .first()
         .is_some_and(|value| value == "--protection-admin")

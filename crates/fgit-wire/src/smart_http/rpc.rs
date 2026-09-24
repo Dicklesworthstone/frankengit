@@ -227,10 +227,10 @@ impl<'repo, R: UploadPackRepository> UploadRpc<'repo, R> {
                 self.accept_encoded_payload(step.data, cancellation)?;
             }
         }
-        if self.body.is_complete() {
-            if let Some(gzip) = &mut self.gzip {
-                gzip.finish(cancellation)?;
-            }
+        if self.body.is_complete()
+            && let Some(gzip) = &mut self.gzip
+        {
+            gzip.finish(cancellation)?;
         }
         checkpoint(cancellation)?;
         Ok(RpcProgress {
@@ -405,7 +405,7 @@ impl UploadReply {
         &self.prefix
     }
     #[must_use]
-    pub fn pack_request(&self) -> Option<&PackRequest> {
+    pub const fn pack_request(&self) -> Option<&PackRequest> {
         self.pack_request.as_ref()
     }
 }

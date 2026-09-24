@@ -64,10 +64,10 @@ impl WorkspacePatchCandidate {
     }
 }
 
-fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
+const fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::InvalidWorkspaceCandidate(reason)
 }
-fn patch_error(error: PatchError) -> NodeWorkspaceRefusal {
+const fn patch_error(error: PatchError) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::WorkspacePatch(error)
 }
 fn live(request: &NodeRequestContext) -> Result<(), NodeWorkspaceRefusal> {
@@ -77,7 +77,7 @@ fn live(request: &NodeRequestContext) -> Result<(), NodeWorkspaceRefusal> {
         Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None })
     }
 }
-fn capability_error(error: fgit_treefs::CapabilityRefusal) -> NodeWorkspaceRefusal {
+const fn capability_error(error: fgit_treefs::CapabilityRefusal) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::Manifest(fgit_treefs::SparseRefusal::Capability(error))
 }
 fn paths(patch: &UnifiedPatch<'_>) -> Result<Vec<TreePath>, NodeWorkspaceRefusal> {

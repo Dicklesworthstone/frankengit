@@ -178,7 +178,7 @@ fn read_file(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn kind_name(kind: ResolutionKind) -> &'static str {
+const fn kind_name(kind: ResolutionKind) -> &'static str {
     match kind {
         ResolutionKind::Base => "base",
         ResolutionKind::Ours => "ours",

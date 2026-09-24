@@ -45,6 +45,7 @@ impl ReviewProtection {
         }
         Ok(())
     }
+    #[must_use]
     pub fn branch(&self, name: &RefName) -> Option<&ProtectedBranch> {
         self.branches
             .binary_search_by(|rule| rule.name.cmp(name))

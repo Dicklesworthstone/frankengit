@@ -13,7 +13,7 @@ use support::*;
 fn reference() -> RefName {
     RefName::try_new(b"refs/heads/main").unwrap()
 }
-fn refusal() -> NodeWorkspaceRefusal {
+const fn refusal() -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::WorkspaceCapacity
 }
 fn selected(node: &OneNode) -> Result<GenerationActivation, NodeWorkspaceRefusal> {

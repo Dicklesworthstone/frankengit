@@ -537,7 +537,7 @@ fn read_observation(input: &mut Decoder<'_>) -> Result<Observation, CodecRefusal
     )
 }
 
-fn invalid(field: &'static str, observed: u32) -> CodecRefusal {
+const fn invalid(field: &'static str, observed: u32) -> CodecRefusal {
     CodecRefusal::VariantUnknown {
         field,
         observed,

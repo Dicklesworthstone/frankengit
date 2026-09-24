@@ -39,7 +39,7 @@ struct Input {
     merge: Option<NativeMerge>,
 }
 
-pub(crate) fn run(arguments: &[String], merging: bool) -> Result<(), String> {
+pub fn run(arguments: &[String], merging: bool) -> Result<(), String> {
     if arguments == ["--help"] {
         return emit(&mut std::io::stdout().lock(), USAGE);
     }

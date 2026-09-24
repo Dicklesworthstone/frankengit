@@ -22,7 +22,7 @@ fn oid(byte: u8) -> GitOid {
     GitOid::from_hex(GitHashAlgorithm::Sha1, &hex).expect("valid oid hex")
 }
 
-fn sample_principal_id() -> PrincipalId {
+const fn sample_principal_id() -> PrincipalId {
     PrincipalId::from_bytes([9; 16])
 }
 
@@ -193,7 +193,7 @@ fn planted_bypass_effects_protection_catches_unadmitted_updates() {
 
     // 1. Delete on protected main -> refused
     let mut del_effects = BTreeMap::new();
-    del_effects.insert(main_ref.clone(), RefEffect::Delete);
+    del_effects.insert(main_ref, RefEffect::Delete);
     let eval_del = evaluate_effects_protection(
         &source,
         &id,
@@ -272,7 +272,7 @@ fn planted_bypass_historical_snapshot_replay_invariance() {
         sample_principal_id(),
         default_principal_snapshot_id(),
         &refs,
-        &[update_cmd.clone()],
+        std::slice::from_ref(&update_cmd),
         fgit_policy::PolicyInstant::from_seconds(0),
     )
     .expect("eval succeeds");
@@ -288,7 +288,7 @@ fn planted_bypass_historical_snapshot_replay_invariance() {
         sample_principal_id(),
         default_principal_snapshot_id(),
         &refs,
-        &[update_cmd.clone()],
+        std::slice::from_ref(&update_cmd),
         fgit_policy::PolicyInstant::from_seconds(0),
     )
     .expect("replay eval succeeds");

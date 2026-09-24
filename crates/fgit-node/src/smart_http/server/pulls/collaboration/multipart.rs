@@ -116,7 +116,7 @@ fn part_head(head: &[u8]) -> Result<(&str, &str), Error> {
     Ok((name.ok_or(Error::Framing)?, media.ok_or(Error::Framing)?))
 }
 
-pub(super) fn command_media(media: &str) -> bool {
+pub(super) const fn command_media(media: &str) -> bool {
     media.eq_ignore_ascii_case("application/x-www-form-urlencoded")
         || media.eq_ignore_ascii_case("application/x-www-form-urlencoded; charset=utf-8")
 }

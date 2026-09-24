@@ -20,13 +20,13 @@ impl SourceUploadKind {
             Self::Bundle => multipart::MAX_BUNDLE_BYTES,
         }
     }
-    fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             Self::Patch => "patch",
             Self::Bundle => "bundle",
         }
     }
-    fn media(self, value: &str) -> bool {
+    const fn media(self, value: &str) -> bool {
         value.eq_ignore_ascii_case("application/octet-stream")
             || match self {
                 Self::Patch => value.eq_ignore_ascii_case("text/x-diff"),

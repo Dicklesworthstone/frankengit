@@ -2,6 +2,7 @@
 //! real trusted shells; none of these fixtures claims hostile-code isolation.
 use super::*;
 use crate::workflow::StepOutcome;
+use crate::{ConcurrencyGroup, CoordinatorLimits, ResourceCeilings, RunOutcome, RunnerText};
 use fgit_types::GitOidSha1;
 use std::cell::Cell;
 use std::collections::VecDeque;

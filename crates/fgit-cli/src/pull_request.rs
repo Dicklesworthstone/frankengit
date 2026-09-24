@@ -41,7 +41,7 @@ Exit 0: committed mutation or successful read; 3: canonical command refusal;
 4: show found no visible native PR; 2: input/infrastructure/cleanup/output error.
 This is a trusted local-operator interface, not a remote authorization service.";
 
-pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
+pub fn run(arguments: &[String]) -> Result<u8, String> {
     if arguments == ["--help"]
         || (arguments.len() == 2
             && arguments[1] == "--help"

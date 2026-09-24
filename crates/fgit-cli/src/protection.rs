@@ -306,12 +306,12 @@ fn publication_json(
         cleanup.map(quote).unwrap_or_else(|| "null".into())
     )
 }
-pub(super) fn run(args: &[String]) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"]
         || (args.len() == 2 && matches!(args[0].as_str(), "show" | "set") && args[1] == "--help")
     {
         return writeln!(std::io::stdout().lock(), "{USAGE}")
-            .map(|_| 0)
+            .map(|()| 0)
             .map_err(|e| e.to_string());
     }
     let options = parse(args)?;
@@ -329,7 +329,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
         Set(TxId, TerminalOutcome),
     }
     let result: Result<ResultValue, String> = match &options.operation {
-        Operation::Show => service.and_then(|_| node.runtime().block_on(node.read_review_protection_in(&request)).map_err(|e| e.to_string())).map(|state| {
+        Operation::Show => service.and_then(|()| node.runtime().block_on(node.read_review_protection_in(&request)).map_err(|e| e.to_string())).map(|state| {
             let policy = state.protection().map(policy_json).unwrap_or_else(|| "null".into());
             ResultValue::Show(format!("{{\"type\":\"review_protection\",\"schema_version\":1,\"source_head\":{},\"policy_epoch\":{},\"version\":{},\"installed\":{},\"policy\":{},\"node_closed\":true}}",
                 quote(&state.source_head.to_string()), state.policy_epoch.get(), state.version().map_or(0, AggregateVersion::get), state.event.is_some(), policy))
@@ -348,7 +348,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
             }
             let mut out = std::io::stdout().lock();
             writeln!(out, "{report}")
-                .and_then(|_| out.flush())
+                .and_then(|()| out.flush())
                 .map_err(|e| e.to_string())?;
             Ok(0)
         }

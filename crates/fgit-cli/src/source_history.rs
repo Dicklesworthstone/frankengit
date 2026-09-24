@@ -53,7 +53,7 @@ enum Answer {
     Blame(BlameResult),
 }
 
-pub(super) fn run(arguments: &[String], is_blame: bool) -> Result<(), String> {
+pub fn run(arguments: &[String], is_blame: bool) -> Result<(), String> {
     if arguments == ["--help"] {
         return emit(&mut std::io::stdout().lock(), USAGE);
     }
@@ -250,7 +250,7 @@ fn size(text: &str) -> Result<usize, String> {
 fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
     if text.is_empty()
         || text.len() > limit * 2
-        || text.len() % 2 != 0
+        || !text.len().is_multiple_of(2)
         || !text
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -260,7 +260,9 @@ fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
     let digit = |b| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     Ok(text
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| digit(pair[0]) * 16 + digit(pair[1]))
         .collect())
 }

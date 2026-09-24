@@ -20,7 +20,7 @@ const CHUNK_BYTES: usize = 64 * 1024;
 const MAX_AUTHORITY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TransferLimits {
+pub struct TransferLimits {
     pub max_archive_bytes: u64,
 }
 impl Default for TransferLimits {
@@ -40,13 +40,13 @@ impl TransferLimits {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Seal {
+pub struct Seal {
     pub digest: [u8; 32],
     pub bytes: u64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct StreamHeader {
+pub struct StreamHeader {
     pub identity: Identity,
     pub authority: ExportBundle,
     pub objects: usize,
@@ -54,7 +54,7 @@ pub(crate) struct StreamHeader {
 
 /// Owns neither the destination path nor publication. A failed writer is
 /// poisoned, so ignoring a short write/cancellation cannot yield a success seal.
-pub(crate) struct StreamEncoder<W> {
+pub struct StreamEncoder<W> {
     output: W,
     hash: Sha256Hasher,
     bytes: u64,
@@ -291,7 +291,7 @@ impl<R: Read> Input<R> {
 /// Header/record access is tentative until finish verifies the COMPLETE file.
 /// Callers must not publish effects using these views alone. Each subsequent
 /// pass on the same open input is rehashed against the independently trusted pin.
-pub(crate) struct StreamDecoder<R> {
+pub struct StreamDecoder<R> {
     input: Input<R>,
     header: StreamHeader,
     remaining: usize,
@@ -360,7 +360,7 @@ impl<R: Read> StreamDecoder<R> {
             failed: false,
         })
     }
-    pub fn header(&self) -> &StreamHeader {
+    pub const fn header(&self) -> &StreamHeader {
         &self.header
     }
     /// At most one 32 MiB payload is retained; the borrow prevents a caller from

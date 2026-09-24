@@ -231,7 +231,7 @@ fn parse_input(arguments: &[String]) -> Result<Input, String> {
 fn unhex_path(value: &str) -> Result<Vec<u8>, String> {
     if value.is_empty()
         || value.len() > 8192
-        || value.len() % 2 != 0
+        || !value.len().is_multiple_of(2)
         || !value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -241,7 +241,9 @@ fn unhex_path(value: &str) -> Result<Vec<u8>, String> {
     let digit = |b| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     Ok(value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| (digit(pair[0]) << 4) | digit(pair[1]))
         .collect())
 }

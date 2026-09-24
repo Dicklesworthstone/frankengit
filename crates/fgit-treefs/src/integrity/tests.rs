@@ -1,4 +1,5 @@
 use super::*;
+use std::fmt::Write as _;
 
 type Objects = BTreeMap<GitOid, (ObjectKind, Vec<u8>)>;
 
@@ -27,7 +28,7 @@ fn tree_body(entries: &[(&[u8], &[u8], GitOid)]) -> Vec<u8> {
 fn commit_body(tree: GitOid, parents: &[GitOid]) -> Vec<u8> {
     let mut body = format!("tree {tree}\n");
     for parent in parents {
-        body.push_str(&format!("parent {parent}\n"));
+        let _ = writeln!(body, "parent {parent}");
     }
     body.push_str("author A <a@example.invalid> 1 +0000\ncommitter C <c@example.invalid> 1 +0000\n\nmessage\n");
     body.into_bytes()

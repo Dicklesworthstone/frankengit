@@ -19,7 +19,7 @@ const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 pub(super) const MAX_REPLY_BYTES: usize = MAX_METADATA_BYTES + MAX_BUNDLE_BYTES + 16 * 1024;
 
-pub(crate) struct Reply(Body);
+pub struct Reply(Body);
 enum Body {
     Json {
         status: Status,
@@ -104,7 +104,7 @@ fn entry(value: Option<&MergeEntry>) -> String {
         },
     )
 }
-fn kind(value: ConflictKind) -> &'static str {
+const fn kind(value: ConflictKind) -> &'static str {
     match value {
         ConflictKind::Content => "content",
         ConflictKind::Binary => "binary",

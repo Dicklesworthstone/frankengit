@@ -89,7 +89,7 @@ pub fn prepare_native_merge(
 /// Shared evaluator and evidence builder. Drivers authenticate the predecessor,
 /// enforce the aggregate lifecycle and validate native object bytes first.
 /// This function independently verifies roots, scope and the complete normal form.
-pub(crate) fn prepare_event(
+pub fn prepare_event(
     context: &AdmissionContext,
     event: &ForgeEvent,
     closure: &ValidatedClosure,

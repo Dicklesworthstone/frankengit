@@ -12,7 +12,7 @@ use crate::OneNode;
 
 pub(super) const MAX_REPLY_BYTES: usize = 48 * 1024 * 1024;
 
-pub(super) fn action(value: PullRequestAction) -> &'static str {
+pub(super) const fn action(value: PullRequestAction) -> &'static str {
     match value {
         PullRequestAction::Open => "open",
         PullRequestAction::Update => "update",

@@ -524,7 +524,7 @@ fn invalid_configuration(message: &'static str) -> NodeSmartHttpRefusal {
         io::Error::new(io::ErrorKind::InvalidInput, message),
     )
 }
-fn io_error(operation: &'static str, source: io::Error) -> NodeSmartHttpRefusal {
+const fn io_error(operation: &'static str, source: io::Error) -> NodeSmartHttpRefusal {
     NodeSmartHttpRefusal::Io { operation, source }
 }
 
@@ -546,7 +546,7 @@ enum Status {
     Unavailable,
 }
 impl Status {
-    fn line(self) -> &'static str {
+    const fn line(self) -> &'static str {
         match self {
             Self::Success => "200 OK",
             Self::BadRequest => "400 Bad Request",

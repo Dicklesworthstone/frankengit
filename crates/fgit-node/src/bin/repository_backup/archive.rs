@@ -135,7 +135,7 @@ impl Encoder {
         Ok(())
     }
 }
-fn kind_byte(kind: GitObjectKind) -> u8 {
+const fn kind_byte(kind: GitObjectKind) -> u8 {
     match kind {
         GitObjectKind::Commit => 1,
         GitObjectKind::Tree => 2,

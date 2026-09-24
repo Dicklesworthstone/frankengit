@@ -38,7 +38,7 @@ impl Default for PortableStoreLimits {
     }
 }
 impl PortableStoreLimits {
-    fn validate(self) -> Result<(), PortableStoreError> {
+    const fn validate(self) -> Result<(), PortableStoreError> {
         if self.max_bodies > MAX_EXPORT_BODIES
             || self.max_issuance > MAX_EXPORT_ISSUANCE
             || self.max_field_bytes == 0
@@ -147,7 +147,7 @@ fn add_bytes(total: &mut u64, amount: u64, maximum: u64) -> Result<(), PortableS
         .ok_or(PortableStoreError::Limit("retained field bytes"))?;
     Ok(())
 }
-fn check_body(body: &[u8], limits: AuthorityLimits) -> Result<(), PortableStoreError> {
+const fn check_body(body: &[u8], limits: AuthorityLimits) -> Result<(), PortableStoreError> {
     if body.len() > limits.body_bytes {
         return Err(PortableStoreError::Limit("authority body bytes"));
     }

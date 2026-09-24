@@ -354,10 +354,10 @@ fn parse_oid(format: GitHashAlgorithm, bytes: &[u8]) -> Result<GitOid, Projectio
     // object bytes stay unchanged and are what the native hash verifies.
     GitOid::from_hex(format, &hex.to_ascii_lowercase()).map_err(|_| invalid())
 }
-fn invalid() -> ProjectionFailure {
+const fn invalid() -> ProjectionFailure {
     ProjectionFailure::Refuse(RefusalCode::EvidenceInvalid)
 }
-fn budget() -> ProjectionFailure {
+const fn budget() -> ProjectionFailure {
     ProjectionFailure::Unavailable(RefusalCode::ResourceBudgetExceeded)
 }
 fn checkpoint(deadline: &mut impl Deadline) -> Result<(), ProjectionFailure> {
@@ -369,7 +369,7 @@ fn checkpoint(deadline: &mut impl Deadline) -> Result<(), ProjectionFailure> {
         ))
     }
 }
-fn source_failure(error: PackWriteError) -> ProjectionFailure {
+const fn source_failure(error: PackWriteError) -> ProjectionFailure {
     match error {
         PackWriteError::Pack(PackError::DeadlineExceeded) => {
             ProjectionFailure::Unavailable(RefusalCode::CancellationInProgress)

@@ -6,16 +6,16 @@ use fgit_types::{GitOid, RepositoryAuthorityHeadId};
 
 type SymbolFailure = symbols::AccessError<NodeWorkspaceRefusal, GenerationAuthorityError>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum IndexKind {
+pub enum IndexKind {
     Lexical,
     Symbols,
 }
 
-pub(super) struct Source {
+pub struct Source {
     pub source_head: RepositoryAuthorityHeadId,
     pub commit: GitOid,
 }
-pub(super) enum AttemptFailure {
+pub enum AttemptFailure {
     Refused(String),
     Publication {
         candidate: GraphGenerationId,
@@ -70,7 +70,7 @@ impl From<SymbolFailure> for AttemptFailure {
     }
 }
 impl IndexKind {
-    pub(super) fn name(self) -> &'static str {
+    pub(super) const fn name(self) -> &'static str {
         match self {
             Self::Lexical => "lexical",
             Self::Symbols => "symbols",

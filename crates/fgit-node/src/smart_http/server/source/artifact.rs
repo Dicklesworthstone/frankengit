@@ -51,7 +51,7 @@ impl Bundle {
         checkpoint(live)?;
         Ok(Self { bytes, digest })
     }
-    pub(super) fn len(&self) -> usize {
+    pub(super) const fn len(&self) -> usize {
         self.bytes.len()
     }
     pub(super) fn digest_hex(&self) -> String {

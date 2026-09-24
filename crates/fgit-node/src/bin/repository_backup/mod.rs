@@ -22,7 +22,7 @@ use archive::stream::{Seal, StreamDecoder, StreamEncoder, StreamHeader, Transfer
 use archive::{Identity, MAX_OBJECT_BYTES, MAX_OBJECTS};
 use profile::{Profile, ProfileFlags};
 
-pub(super) const USAGE: &str = "usage: fg-repository-backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
+pub const USAGE: &str = "usage: fg-repository-backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
          --trusted-local [--object-format sha1|sha256]
          [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
 
@@ -294,7 +294,7 @@ fn receipt(archive: &StreamHeader, graph: GraphReport, seal: Seal) -> String {
         graph.external_gitlinks
     )
 }
-pub(super) fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
+pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
     if args == ["--help"] {
         emit(output, USAGE)?;
         return emit(output, restore::USAGE);

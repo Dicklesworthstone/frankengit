@@ -346,12 +346,11 @@ where
                 let ForgeEventPayload::PullRequestChangedNative(change) = event.payload else {
                     continue;
                 };
-                if change.action == PullRequestAction::Open {
-                    if let Some(previous) = openers.insert(number, change.actor)
-                        && previous != change.actor
-                    {
-                        return Err(unavailable(RefusalCode::EvidenceInvalid));
-                    }
+                if change.action == PullRequestAction::Open
+                    && let Some(previous) = openers.insert(number, change.actor)
+                    && previous != change.actor
+                {
+                    return Err(unavailable(RefusalCode::EvidenceInvalid));
                 }
                 if metadata
                     .get(&number)
@@ -465,7 +464,7 @@ mod tests {
             proposal(&context, &changed).unwrap().1.derive().unwrap().0,
             seal.derive().unwrap().0
         );
-        let mut actor = context.clone();
+        let mut actor = context;
         actor.principal_id = PrincipalId::from_bytes([4; 16]);
         assert_ne!(
             proposal(&actor, &command).unwrap().1.derive().unwrap().0,

@@ -1,5 +1,6 @@
 //! Custody state-machine tests; the fixture sink is not durable storage.
 use super::*;
+use crate::{CoordinatorLimits, ResourceCeilings, RunStatus, TriggerContext};
 use fgit_schema::workflow::{Limits, compile};
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};

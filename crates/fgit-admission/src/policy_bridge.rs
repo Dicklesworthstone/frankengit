@@ -228,13 +228,13 @@ impl<'a, S: fgit_authority::AuthorityStore + ?Sized> AuthorityPolicySource<'a, S
     }
 
     #[must_use]
-    pub fn with_limits(store: &'a S, limits: persisted::PolicyStoreLimits) -> Self {
+    pub const fn with_limits(store: &'a S, limits: persisted::PolicyStoreLimits) -> Self {
         Self { store, limits }
     }
 }
 
-impl<'a, S: fgit_authority::AuthorityStore + ?Sized> PolicySnapshotSource
-    for AuthorityPolicySource<'a, S>
+impl<S: fgit_authority::AuthorityStore + ?Sized> PolicySnapshotSource
+    for AuthorityPolicySource<'_, S>
 {
     fn snapshot_by_id(
         &self,
@@ -324,14 +324,13 @@ pub fn ref_updates_from_commands(
 ) -> Result<Vec<fgit_policy::RefUpdateFact>, fgit_policy::error::PolicyInputRefusal> {
     let mut facts = Vec::with_capacity(commands.len());
     for command in commands {
-        let previous =
-            refs_before
-                .get(&command.name)
-                .copied()
-                .or_else(|| match command.expected_old {
-                    fgit_authority::ExpectedOld::Exactly(oid) => Some(oid),
-                    _ => None,
-                });
+        let previous = refs_before
+            .get(&command.name)
+            .copied()
+            .or(match command.expected_old {
+                fgit_authority::ExpectedOld::Exactly(oid) => Some(oid),
+                _ => None,
+            });
         let (next, kind) = match command.proposed_new {
             fgit_authority::ProposedNew::Delete => (None, fgit_policy::RefUpdateKind::Delete),
             fgit_authority::ProposedNew::Update(oid) => {
@@ -467,7 +466,7 @@ mod tests {
         ));
         let id = source.pin(policy.clone());
         assert_eq!(checked_snapshot(&source, &id).unwrap(), policy);
-        assert_eq!(source.pin(policy.clone()), id);
+        assert_eq!(source.pin(policy), id);
         assert_eq!(checked_snapshot(&source, &id).unwrap().id(), id);
     }
 }

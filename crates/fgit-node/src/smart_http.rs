@@ -239,9 +239,10 @@ fn upload_capabilities(
         fgit_wire::GitObjectFormat::Sha1 => "sha1",
         fgit_wire::GitObjectFormat::Sha256 => "sha256",
     };
-    let fetch = match repository.supports_shallow() {
-        true => b"fetch=shallow filter\n".as_slice(),
-        false => b"fetch=filter\n".as_slice(),
+    let fetch = if repository.supports_shallow() {
+        b"fetch=shallow filter\n".as_slice()
+    } else {
+        b"fetch=filter\n".as_slice()
     };
     let packets = vec![
         Packet::Data(b"version 2\n".to_vec()),

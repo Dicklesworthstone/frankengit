@@ -123,7 +123,7 @@ impl Fixture {
             genesis,
         }
     }
-    pub fn node(&self) -> &OneNode {
+    pub const fn node(&self) -> &OneNode {
         self.node.as_ref().unwrap()
     }
     pub fn parent(&self) -> PathBuf {
@@ -205,7 +205,7 @@ pub fn generation(node: &OneNode) -> u64 {
         .generation()
         .get()
 }
-pub(super) fn tree_bytes(left: GitOid, right: GitOid, workflow: GitOid) -> Vec<u8> {
+pub fn tree_bytes(left: GitOid, right: GitOid, workflow: GitOid) -> Vec<u8> {
     [
         b"100644 left\0".as_slice(),
         left.as_bytes(),
@@ -216,7 +216,7 @@ pub(super) fn tree_bytes(left: GitOid, right: GitOid, workflow: GitOid) -> Vec<u
     ]
     .concat()
 }
-pub(super) fn commit_bytes(tree: GitOid, parents: &[GitOid], message: &str) -> Vec<u8> {
+pub fn commit_bytes(tree: GitOid, parents: &[GitOid], message: &str) -> Vec<u8> {
     let mut body = format!("tree {tree}\n");
     for parent in parents {
         body.push_str(&format!("parent {parent}\n"));

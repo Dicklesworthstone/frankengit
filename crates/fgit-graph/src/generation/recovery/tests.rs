@@ -194,7 +194,7 @@ fn missing_or_substituted_ancestors_never_produce_a_negative_answer() {
         );
         match result {
             Err(GenerationAuthorityError::MissingGeneration { generation_id }) if !substituted => {
-                assert_eq!(*generation_id, first.generation_id().unwrap())
+                assert_eq!(*generation_id, first.generation_id().unwrap());
             }
             Err(GenerationAuthorityError::GenerationIdentityMismatch { expected, observed })
                 if substituted =>

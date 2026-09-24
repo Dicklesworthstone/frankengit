@@ -201,7 +201,7 @@ fn dual_secret_rotation_window_full_lifecycle() {
     assert!(!rotation.verify_hex(payload, &sig_v2, 1000));
 
     // 2. Rotate to v2 with a 3600-second window (expires at timestamp 4600)
-    rotation.rotate(secret_v2.clone(), 3600, 1000);
+    rotation.rotate(secret_v2, 3600, 1000);
 
     // 3. During rotation window (ts = 2000): BOTH v1 and v2 validate!
     assert!(rotation.verify_hex(payload, &sig_v1, 2000));

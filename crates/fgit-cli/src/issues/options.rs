@@ -293,7 +293,7 @@ pub(super) fn decimal(text: &str) -> Result<u64, String> {
     text.parse()
         .map_err(|_| "decimal integer overflow".to_owned())
 }
-pub(super) fn expected_version(command: &IssueCommand) -> u64 {
+pub(super) const fn expected_version(command: &IssueCommand) -> u64 {
     match command.expected_version {
         ExpectedVersion::NewStream => 0,
         ExpectedVersion::Exactly(version) => version.get(),
@@ -330,7 +330,9 @@ pub(super) fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String
     }
     let bytes = digest
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let n = |b: u8| {
                 if b.is_ascii_digit() {

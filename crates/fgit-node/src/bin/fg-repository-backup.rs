@@ -51,7 +51,7 @@ fn quote(text: &str) -> String {
                 || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}'
                 | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
             {
-                out.push_str(&format!("\\u{:04x}", u32::from(c)))
+                out.push_str(&format!("\\u{:04x}", u32::from(c)));
             }
             c => out.push(c),
         }

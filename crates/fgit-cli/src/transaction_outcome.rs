@@ -24,7 +24,7 @@ enum KeyInput {
     Stdin,
 }
 
-pub(super) fn run(args: &[String]) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"] {
         emit(&mut std::io::stdout().lock(), USAGE)?;
         return Ok(0);
@@ -177,7 +177,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         index += 1;
         match flag {
             "--principal" => {
-                principal = Some(PrincipalId::from_hex(value).map_err(|_| "invalid principal ID")?)
+                principal = Some(PrincipalId::from_hex(value).map_err(|_| "invalid principal ID")?);
             }
             "--object-format" => {
                 format = match value.as_str() {
@@ -225,7 +225,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
 }
 fn unhex_key(text: &str) -> Result<Vec<u8>, String> {
     if text.len() > 2 * MAX_IDEMPOTENCY_KEY_BYTES
-        || text.len() % 2 != 0
+        || !text.len().is_multiple_of(2)
         || !text
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -241,7 +241,9 @@ fn unhex_key(text: &str) -> Result<Vec<u8>, String> {
     };
     Ok(text
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| digit(pair[0]) * 16 + digit(pair[1]))
         .collect())
 }

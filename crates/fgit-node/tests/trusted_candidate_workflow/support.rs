@@ -92,7 +92,7 @@ impl Fixture {
             workflow,
         }
     }
-    pub fn node(&self) -> &OneNode {
+    pub const fn node(&self) -> &OneNode {
         self.node.as_ref().unwrap()
     }
     pub fn parent(&self) -> PathBuf {

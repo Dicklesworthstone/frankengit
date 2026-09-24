@@ -244,7 +244,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 fn unhex(value: &str, maximum: usize) -> Result<Vec<u8>, ToolError> {
     if value.len() > maximum * 2
-        || value.len() % 2 != 0
+        || !value.len().is_multiple_of(2)
         || !value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -254,7 +254,9 @@ fn unhex(value: &str, maximum: usize) -> Result<Vec<u8>, ToolError> {
     let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     Ok(value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| digit(p[0]) * 16 + digit(p[1]))
         .collect())
 }

@@ -380,7 +380,7 @@ fn read_token(path: &Path) -> Result<[u8; 32], String> {
     token_digest(&bytes)
 }
 
-pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
+pub fn run(arguments: &[String]) -> Result<u8, String> {
     if arguments == ["--help"] {
         println!("{USAGE}");
         return Ok(0);

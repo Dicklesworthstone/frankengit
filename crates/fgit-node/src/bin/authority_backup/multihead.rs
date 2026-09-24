@@ -14,7 +14,7 @@ use super::{MAX_BYTES, hex, publish_new, quote, regular, require_absent, sha256,
 #[path = "multihead_restore.rs"]
 mod recovery;
 
-pub(super) fn export(input: &Path, destination: &Path) -> Result<String, String> {
+pub fn export(input: &Path, destination: &Path) -> Result<String, String> {
     regular(input)?;
     require_absent(destination)?;
     let (bytes, bodies, heads, issuance, instance) = with_store(
@@ -68,7 +68,7 @@ pub(super) fn export(input: &Path, destination: &Path) -> Result<String, String>
     ))
 }
 
-pub(super) fn restore(
+pub fn restore(
     input: &Path,
     destination: &Path,
     expected: [u8; 32],
@@ -78,7 +78,7 @@ pub(super) fn restore(
 }
 
 /// Only the explicit all-heads resume command can adopt an owned restore root.
-pub(super) fn resume(
+pub fn resume(
     input: &Path,
     destination: &Path,
     expected: [u8; 32],

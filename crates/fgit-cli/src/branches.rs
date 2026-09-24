@@ -1,7 +1,7 @@
 //! Trusted local branch commands; the node owns validation and publication.
 mod inventory;
 mod options;
-pub(super) fn run_inventory(args: &[String]) -> Result<u8, String> {
+pub fn run_inventory(args: &[String]) -> Result<u8, String> {
     inventory::run(args)
 }
 use super::publication_support::{describe, quote, write_terminal_receipt};
@@ -38,7 +38,7 @@ Retry with identical inputs and key, or recover read-only with fg outcome. Stdin
 keys are bounded and byte-exact, including any newline; keys are never printed.
 Exit 0: committed/read; 3: canonical refusal; 2: input, infrastructure or cleanup error.";
 
-pub(super) fn run(args: &[String]) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"]
         || (args.len() == 2
             && args[1] == "--help"

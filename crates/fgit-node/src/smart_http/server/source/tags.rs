@@ -27,7 +27,7 @@ impl<'a> Request<'a> {
     pub(super) fn is_mutation(&self) -> bool {
         self.0.is_mutation()
     }
-    pub(super) fn route(&self) -> &str {
+    pub(super) const fn route(&self) -> &str {
         self.0.repository_route
     }
 }

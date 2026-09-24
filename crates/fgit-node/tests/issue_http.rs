@@ -63,7 +63,7 @@ fn reopened(config: NodeConfig) -> OneNode {
     node.bring_into_service(generation).unwrap();
     node
 }
-fn principal(byte: u8) -> PrincipalId {
+const fn principal(byte: u8) -> PrincipalId {
     PrincipalId::from_bytes([byte; 16])
 }
 fn row(token: char, principal: u8, scope: &str) -> String {

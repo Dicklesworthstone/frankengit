@@ -20,7 +20,7 @@ fn hash(val: &[u8]) -> Commitment {
     Commitment::of_bytes(val)
 }
 
-fn sample_oid(val: u8) -> GitOid {
+const fn sample_oid(val: u8) -> GitOid {
     let mut bytes = [0u8; 20];
     bytes[0] = val;
     GitOid::Sha1(GitOidSha1::from_bytes(bytes))

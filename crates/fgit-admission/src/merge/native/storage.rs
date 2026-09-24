@@ -329,6 +329,7 @@ pub(super) fn root<B: CanonicalBody>(body: &B) -> Result<Digest, AdmissionError>
 }
 
 /// The historical empty-node sentinel, preserved byte-for-byte for old heads.
+#[must_use]
 pub fn legacy_genesis_root(repository_id: RepositoryId, label: &[u8]) -> Digest {
     let mut bytes = Vec::with_capacity(label.len() + repository_id.as_bytes().len());
     bytes.extend_from_slice(label);

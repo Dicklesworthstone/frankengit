@@ -2,10 +2,10 @@
 //! backing, never an optional cache that can silently fall back after damage.
 use super::*;
 
-pub(super) fn schema() -> SchemaId {
+pub(super) const fn schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("source-symbol-index"), 1, 0)
 }
-fn directory_schema() -> SchemaId {
+const fn directory_schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("source-symbol-index"), 1, 1)
 }
 pub(super) fn symbol_manifest_root(body: &GraphGenerationBody) -> Result<Digest, Failure> {

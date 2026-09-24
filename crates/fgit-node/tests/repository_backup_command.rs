@@ -81,7 +81,7 @@ fn checksum(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([3; 16])
 }
 fn branch(node: &OneNode, key: &[u8], name: &[u8], old: ExpectedOld, new: ProposedNew) {

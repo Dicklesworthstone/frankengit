@@ -79,7 +79,10 @@ fn checkpoint(cancellation: &mut impl ReceiveCancellation) -> Result<(), NodeSma
     }
 }
 
-fn exact_consumption(offered: usize, progress: RpcProgress) -> Result<(), NodeSmartHttpRefusal> {
+const fn exact_consumption(
+    offered: usize,
+    progress: RpcProgress,
+) -> Result<(), NodeSmartHttpRefusal> {
     if progress.consumed != offered {
         return Err(NodeSmartHttpRefusal::TrailingRequestBytes {
             count: offered.saturating_sub(progress.consumed),

@@ -1,21 +1,23 @@
 //! Real codecs and reference authority writes; the async forwarding/fault
 //! adapter below is a test double, not a disk or production-runtime backend.
 use super::*;
+use crate::lexical::LexicalChannel;
 use fgit_authority::{
     AmbiguityReason, AuthenticatedHead, AuthorityLimits, AuthorityRefusal, AuthorityVersionToken,
     CasOutcome, HeadInit, HeadRead, HeadReadReceipt, MemoryAuthorityStore,
 };
 use fgit_crypto::{
-    IdentityDomain, internal_algorithm_id, internal_digest_value, internal_object_id,
+    GitObjectKind, IdentityDomain, git_object_id, internal_algorithm_id, internal_digest_value,
+    internal_object_id,
 };
-use fgit_types::{CodecVersion, HeadGeneration};
+use fgit_types::{CodecVersion, HeadGeneration, RepositoryId, RepositoryIncarnationId, TenantId};
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::sync::{
-    Arc, Mutex,
+    Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 struct Store {
     inner: MemoryAuthorityStore,
@@ -92,10 +94,10 @@ impl AuthorityStore for Store {
         if self.missing.lock().unwrap().as_ref() == Some(key) {
             return Ok(ImmutableRead::Absent);
         }
-        if let Some((target, value)) = self.changed.lock().unwrap().as_ref() {
-            if target == key {
-                return Ok(ImmutableRead::Present(value.clone()));
-            }
+        if let Some((target, value)) = self.changed.lock().unwrap().as_ref()
+            && target == key
+        {
+            return Ok(ImmutableRead::Present(value.clone()));
         }
         self.inner.read_immutable(key)
     }
@@ -194,14 +196,9 @@ impl AsyncAuthorityStore for Store {
         AuthorityStore::authenticate_head_receipt(self, receipt)
     }
 }
-struct Noop;
-impl Wake for Noop {
-    fn wake(self: Arc<Self>) {}
-}
 fn drive<F: Future>(future: F) -> F::Output {
     let mut future = pin!(future);
-    let waker = Waker::from(Arc::new(Noop));
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
     for _ in 0..10_000 {
         if let Poll::Ready(result) = future.as_mut().poll(&mut cx) {
             return result;
@@ -787,12 +784,12 @@ fn unpolled_or_cancelled_async_queries_do_not_issue_storage_work() {
     assert!(store.contexts.lock().unwrap().is_empty());
     let mut live = || true;
     store.suspend.store(true, Ordering::SeqCst);
-    let mut future = pin!(idx.publish_async(&3, &p, None, &mut live));
-    let waker = Waker::from(Arc::new(Noop));
-    let mut cx = Context::from_waker(&waker);
+    let mut future = Box::pin(idx.publish_async(&3, &p, None, &mut live));
+    let mut cx = Context::from_waker(Waker::noop());
     assert!(future.as_mut().poll(&mut cx).is_pending());
     assert!(store.operations.lock().unwrap().is_empty());
     drop(future);
+    assert!(store.operations.lock().unwrap().is_empty());
 }
 #[test]
 fn catalogs_with_a_wrong_generation_authority_class_cannot_be_searched() {

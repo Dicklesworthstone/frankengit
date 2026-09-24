@@ -214,7 +214,7 @@ fn pin_fields(value: &IndexPin) -> String {
         value.number
     )
 }
-fn definite_race(error: &IndexError) -> bool {
+const fn definite_race(error: &IndexError) -> bool {
     matches!(
         error,
         IndexError::Generation(
@@ -285,8 +285,10 @@ fn run(node: &OneNode, options: &Options, progress: &mut ProgressFile) -> io::Re
                     &mut stop,
                 );
                 match result {
-                    Ok(GenerationRecovery::Active { selected })
-                    | Ok(GenerationRecovery::Superseded { selected, .. }) => {
+                    Ok(
+                        GenerationRecovery::Active { selected }
+                        | GenerationRecovery::Superseded { selected, .. },
+                    ) => {
                         let pin = checkpoint(selected.activation())?;
                         progress.state.acknowledge(
                             reference.as_bytes(),

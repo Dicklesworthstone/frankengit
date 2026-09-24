@@ -61,7 +61,7 @@ impl<'a> ImportControl<'a> {
         Ok(result)
     }
 
-    pub(super) fn cpu_probe(&self) -> CpuProbe<'_, 'a> {
+    pub(super) const fn cpu_probe(&self) -> CpuProbe<'_, 'a> {
         CpuProbe {
             control: self,
             remaining: 0,
@@ -80,7 +80,7 @@ impl<'a> ImportControl<'a> {
     }
 }
 
-pub(super) fn interrupted(code: RefusalCode) -> LooseGitImportRefusal {
+pub(super) const fn interrupted(code: RefusalCode) -> LooseGitImportRefusal {
     LooseGitImportRefusal::Interrupted {
         code,
         exhaustion: None,
@@ -89,9 +89,7 @@ pub(super) fn interrupted(code: RefusalCode) -> LooseGitImportRefusal {
 
 /// Check the ORIGINAL request context; there is no budget extension or child
 /// context here. Exhaustion retains the runtime's exact failed dimension.
-pub(crate) fn checkpoint_request(
-    request: &NodeRequestContext,
-) -> Result<(), LooseGitImportRefusal> {
+pub fn checkpoint_request(request: &NodeRequestContext) -> Result<(), LooseGitImportRefusal> {
     match checkpoint_pack_context(request.authority()) {
         PackContextCheckpoint::Live => Ok(()),
         PackContextCheckpoint::Stopped { budget_exhaustion } => {

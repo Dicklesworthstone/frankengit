@@ -122,7 +122,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 let number = value
                     .parse::<u64>()
                     .ok()
-                    .filter(|n| *n > 0 && *n <= i64::MAX as u64)
+                    .filter(|n| *n > 0 && i64::try_from(*n).is_ok())
                     .ok_or("destination instance must fit a positive SQL integer")?;
                 instance = Some(StoreInstanceId::from_raw(number));
             }

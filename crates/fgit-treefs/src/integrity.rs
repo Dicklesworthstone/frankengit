@@ -309,15 +309,14 @@ impl ObjectGraphAudit {
                     if target.is_zero() {
                         return Err(GraphRefusal::ObjectFormat(target));
                     }
-                    let expected =
-                        tree_target_kind(&entry.mode).ok_or(GraphRefusal::InvalidTreeMode(id))?;
-                    if let Some(expected) = expected {
-                        self.add_edge(id, target, expected)?;
-                    } else {
-                        // A gitlink is a foreign commit datum, not permission to
-                        // read local bytes, even when this ID is in the selection.
-                        self.charge_edge()?;
-                        self.gitlinks += 1;
+                    match tree_target_kind(&entry.mode).ok_or(GraphRefusal::InvalidTreeMode(id))? {
+                        TreeTarget::Object(expected) => self.add_edge(id, target, expected)?,
+                        TreeTarget::Gitlink => {
+                            // A gitlink is a foreign commit datum, not permission to
+                            // read local bytes, even when this ID is in the selection.
+                            self.charge_edge()?;
+                            self.gitlinks += 1;
+                        }
                     }
                 }
             }
@@ -350,13 +349,13 @@ impl ObjectGraphAudit {
         Ok(())
     }
 
-    fn remaining_edges(&self) -> usize {
+    const fn remaining_edges(&self) -> usize {
         self.limits
             .max_edges
             .saturating_sub(self.edges.len())
             .saturating_sub(self.gitlinks)
     }
-    fn charge_edge(&self) -> Result<(), GraphRefusal> {
+    const fn charge_edge(&self) -> Result<(), GraphRefusal> {
         if self.remaining_edges() == 0 {
             Err(GraphRefusal::Limit("edges"))
         } else {
@@ -464,10 +463,19 @@ fn native_bytes(format: GitHashAlgorithm, bytes: &[u8]) -> Result<GitOid, Object
     .map_err(|_| ObjectError::MalformedObjectReference)
 }
 
+/// What a tree entry's mode says its object ID names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TreeTarget {
+    /// A local object of this kind; the edge is verified like any other.
+    Object(ObjectKind),
+    /// A submodule commit in a foreign repository; never read locally.
+    Gitlink,
+}
+
 /// Octal value, not spelling: imported 0160000 remains a gitlink. Import's
 /// historical regular-file permission variants have the same blob edge kind.
 /// No unknown file type is silently treated as a blob or discarded edge.
-fn tree_target_kind(mode: &[u8]) -> Option<Option<ObjectKind>> {
+fn tree_target_kind(mode: &[u8]) -> Option<TreeTarget> {
     let mut value = 0_u32;
     if mode.is_empty() {
         return None;
@@ -482,9 +490,9 @@ fn tree_target_kind(mode: &[u8]) -> Option<Option<ObjectKind>> {
         return None;
     }
     match value & 0o170000 {
-        0o040000 => Some(Some(ObjectKind::Tree)),
-        0o100000 | 0o120000 => Some(Some(ObjectKind::Blob)),
-        0o160000 => Some(None),
+        0o040000 => Some(TreeTarget::Object(ObjectKind::Tree)),
+        0o100000 | 0o120000 => Some(TreeTarget::Object(ObjectKind::Blob)),
+        0o160000 => Some(TreeTarget::Gitlink),
         _ => None,
     }
 }

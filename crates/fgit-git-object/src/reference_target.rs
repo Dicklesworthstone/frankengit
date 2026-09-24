@@ -39,10 +39,10 @@ pub fn validate_reference_target_kind(
     name: &[u8],
     actual: ObjectType,
 ) -> Result<(), ReferenceTargetKindMismatch> {
-    if let Some(expected) = required_ref_target_kind(name) {
-        if expected != actual {
-            return Err(ReferenceTargetKindMismatch { expected, actual });
-        }
+    if let Some(expected) = required_ref_target_kind(name)
+        && expected != actual
+    {
+        return Err(ReferenceTargetKindMismatch { expected, actual });
     }
     Ok(())
 }

@@ -80,7 +80,7 @@ impl Bytes {
         set
     }
 }
-fn word(byte: u8) -> bool {
+const fn word(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
@@ -101,7 +101,7 @@ struct Parser<'a> {
     insensitive: bool,
 }
 impl Parser<'_> {
-    fn error(&self, kind: RegexErrorKind) -> RegexError {
+    const fn error(&self, kind: RegexErrorKind) -> RegexError {
         RegexError {
             byte_offset: self.at,
             kind,
@@ -393,7 +393,7 @@ impl Program {
         program.start = program.compile_expr(&expression, 0, &mut work)?;
         Ok(program)
     }
-    pub(super) fn states(&self) -> usize {
+    pub(super) const fn states(&self) -> usize {
         self.states.len()
     }
     fn emit(&mut self, state: State) -> Result<usize, RegexError> {
@@ -480,7 +480,7 @@ pub(super) struct Budget {
 }
 impl Budget {
     fn charge(&mut self, cancelled: &dyn Fn() -> bool) -> Result<(), ScanError> {
-        if self.used % 1024 == 0 && cancelled() {
+        if self.used.is_multiple_of(1024) && cancelled() {
             return Err(ScanError::Cancelled);
         }
         if self.used == self.maximum {
@@ -567,7 +567,7 @@ impl<'a> Runner<'a> {
                         self.stack.push(Thread {
                             state,
                             start: thread.start,
-                        })
+                        });
                     };
                     match self.program.states[thread.state] {
                         State::Byte(_, _) => self.active.push(thread),
@@ -584,12 +584,12 @@ impl<'a> Runner<'a> {
                                 follow(next);
                             }
                         }
-                        State::Accept => {
+                        State::Accept
                             if best.is_none_or(|(start, end)| {
                                 thread.start < start || (thread.start == start && position > end)
-                            }) {
-                                best = Some((thread.start, position));
-                            }
+                            }) =>
+                        {
+                            best = Some((thread.start, position));
                         }
                         _ => {}
                     }
@@ -602,13 +602,13 @@ impl<'a> Runner<'a> {
                     if best.is_some_and(|(start, _)| thread.start > start) {
                         continue;
                     }
-                    if let State::Byte(set, next) = self.program.states[thread.state] {
-                        if set.contains(byte) {
-                            self.next.push(Thread {
-                                state: next,
-                                start: thread.start,
-                            });
-                        }
+                    if let State::Byte(set, next) = self.program.states[thread.state]
+                        && set.contains(byte)
+                    {
+                        self.next.push(Thread {
+                            state: next,
+                            start: thread.start,
+                        });
                     }
                 }
             }

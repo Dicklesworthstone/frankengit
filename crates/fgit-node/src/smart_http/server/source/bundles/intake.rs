@@ -28,7 +28,7 @@ const MAX_MAPPINGS: usize = 64;
 fn ref_hex(text: &str) -> Result<RefName, ApiError> {
     if text.is_empty()
         || text.len() > 8192
-        || text.len() % 2 != 0
+        || !text.len().is_multiple_of(2)
         || !text
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -44,7 +44,9 @@ fn ref_hex(text: &str) -> Result<RefName, ApiError> {
     };
     let bytes: Vec<_> = text
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| (digit(pair[0]) << 4) | digit(pair[1]))
         .collect();
     let name = RefName::try_new(&bytes).map_err(|_| ApiError::bad("invalid_bundle_ref"))?;

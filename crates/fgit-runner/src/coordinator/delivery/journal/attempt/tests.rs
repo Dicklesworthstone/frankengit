@@ -1,9 +1,16 @@
 //! Real file lifecycle tests and explicitly labelled executor fixtures.
 use super::*;
+use crate::coordinator::PreparedTrustedWorkflow;
+use crate::coordinator::delivery::CheckDeliveryAcknowledgement;
+use crate::coordinator::delivery::journal::CheckJournalLimits;
+use crate::workflow::StepObservation;
 use crate::workflow::{
     StepLimits, StepOutcome, WorkerFailure, WorkflowExecutor, WorkflowLimits, WorkflowPlan,
 };
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use crate::{CoordinatorLimits, ResourceCeilings, TriggerContext, WorkflowCoordinator};
+use fgit_types::{GitOid, GitOidSha1, RepositoryId, TenantId};
+use std::fs::{self, OpenOptions};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 

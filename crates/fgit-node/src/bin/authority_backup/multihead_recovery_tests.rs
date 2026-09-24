@@ -287,7 +287,7 @@ fn cli_resume_requires_restore_all_heads_and_the_original_pins() {
     .map(str::to_owned)
     .collect();
     assert!(!parse(&base).unwrap().resume);
-    let mut resumed = base.clone();
+    let mut resumed = base;
     resumed.insert(3, "--resume".into());
     assert!(parse(&resumed).unwrap().resume);
     let mut duplicate = resumed.clone();

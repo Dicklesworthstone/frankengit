@@ -24,7 +24,7 @@ const RETENTION: &[u8] = b"frankengit/admission/retention-delta/v1/";
 
 /// Check all body/record links before the first write. The preparation itself
 /// was derived against an authenticated predecessor, not supplied by a client.
-pub(crate) fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), AdmissionError> {
+pub fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), AdmissionError> {
     validate_epoch_transition(prepared)?;
     let record = &prepared.materialization.record;
     let roots = &prepared.materialization.roots;
@@ -103,7 +103,7 @@ pub(crate) fn validate_prepared(prepared: &PreparedNativeMerge) -> Result<(), Ad
 /// Persist every dependency through the same request-owned async authority
 /// store used for the head CAS. Errors preserve undecided status. Identical
 /// orphaned bodies from an interrupted or losing attempt are safe to reuse.
-pub(crate) async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
+pub async fn stage_prepared<S: AsyncAuthorityStore + ?Sized>(
     store: &S,
     cx: &S::Context,
     prepared: &PreparedNativeMerge,
@@ -215,10 +215,10 @@ async fn stage_at<S: AsyncAuthorityStore + ?Sized, B: CanonicalBody + Sync>(
 fn root<B: CanonicalBody>(body: &B) -> Result<Digest, AdmissionError> {
     evidence_root(body).map_err(unavailable)
 }
-fn unavailable(code: RefusalCode) -> AdmissionError {
+const fn unavailable(code: RefusalCode) -> AdmissionError {
     AdmissionError::AsyncProjectionUnavailable(code)
 }
-fn invalid() -> AdmissionError {
+const fn invalid() -> AdmissionError {
     unavailable(RefusalCode::EvidenceInvalid)
 }
 

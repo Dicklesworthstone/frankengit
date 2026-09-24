@@ -62,7 +62,7 @@ impl Drop for Scratch {
         fs::remove_dir_all(&self.0).unwrap();
     }
 }
-fn repository() -> RepositoryId {
+const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([0x81; 16])
 }
 fn config(root: &Path, format: GitHashAlgorithm) -> NodeConfig {
@@ -335,7 +335,7 @@ struct Package {
     workspace_epoch_now: WorkspaceEpoch,
 }
 impl Package {
-    fn sealed(&self) -> SealedMerge<'_> {
+    const fn sealed(&self) -> SealedMerge<'_> {
         SealedMerge {
             package: &self.effect,
             attempt: &self.attempt,

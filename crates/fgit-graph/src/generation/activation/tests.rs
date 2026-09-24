@@ -123,6 +123,46 @@ impl AsyncStore {
         }
         Ok(receipt)
     }
+    fn initialize_head_now(
+        &self,
+        cx: u64,
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<HeadInit, AuthorityFailure> {
+        self.observe(cx, "initialize")?;
+        match self.inner.initialize_head(key, generation, body)? {
+            HeadInit::Created(receipt) => self.returned(receipt).map(HeadInit::Created),
+            HeadInit::IdenticalRetry(receipt) => {
+                self.returned(receipt).map(HeadInit::IdenticalRetry)
+            }
+            HeadInit::Conflict => Ok(HeadInit::Conflict),
+        }
+    }
+    fn compare_exchange_head_now(
+        &self,
+        cx: u64,
+        key: &HeadKey,
+        token: AuthorityVersionToken,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        self.observe(cx, "cas")?;
+        let race = self.race.lock().unwrap().take();
+        if let Some((next, bytes)) = race {
+            assert!(matches!(
+                self.inner.compare_exchange_head(key, token, next, &bytes)?,
+                CasOutcome::Committed(_)
+            ));
+        }
+        match self
+            .inner
+            .compare_exchange_head(key, token, generation, body)?
+        {
+            CasOutcome::Committed(receipt) => self.returned(receipt).map(CasOutcome::Committed),
+            CasOutcome::PredecessorMismatch => Ok(CasOutcome::PredecessorMismatch),
+        }
+    }
 }
 impl AsyncAuthorityStore for AsyncStore {
     type Context = u64;
@@ -153,65 +193,54 @@ impl AsyncAuthorityStore for AsyncStore {
         self.observe(*cx, "put")?;
         self.inner.put_if_absent(key, body)
     }
-    async fn read_immutable(
+    fn read_immutable(
         &self,
         cx: &u64,
         key: &ImmutableKey,
-    ) -> Result<ImmutableRead, AuthorityFailure> {
-        self.observe(*cx, "immutable")?;
-        self.inner.read_immutable(key)
+    ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
+        std::future::ready(
+            self.observe(*cx, "immutable")
+                .and_then(|()| self.inner.read_immutable(key)),
+        )
     }
-    async fn initialize_head(
+    fn initialize_head(
         &self,
         cx: &u64,
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
-    ) -> Result<HeadInit, AuthorityFailure> {
-        self.observe(*cx, "initialize")?;
-        match self.inner.initialize_head(key, generation, body)? {
-            HeadInit::Created(receipt) => self.returned(receipt).map(HeadInit::Created),
-            HeadInit::IdenticalRetry(receipt) => {
-                self.returned(receipt).map(HeadInit::IdenticalRetry)
-            }
-            HeadInit::Conflict => Ok(HeadInit::Conflict),
-        }
+    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
+        std::future::ready(self.initialize_head_now(*cx, key, generation, body))
     }
-    async fn read_head(&self, cx: &u64, key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
-        self.observe(*cx, "head")?;
-        let foreign = self.foreign_read.lock().unwrap();
-        self.inner.read_head(foreign.as_ref().unwrap_or(key))
+    fn read_head(
+        &self,
+        cx: &u64,
+        key: &HeadKey,
+    ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
+        std::future::ready(self.observe(*cx, "head").and_then(|()| {
+            let foreign = self.foreign_read.lock().unwrap();
+            self.inner.read_head(foreign.as_ref().unwrap_or(key))
+        }))
     }
-    async fn compare_exchange_head(
+    fn compare_exchange_head(
         &self,
         cx: &u64,
         key: &HeadKey,
         token: AuthorityVersionToken,
         generation: HeadGeneration,
         body: &[u8],
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        self.observe(*cx, "cas")?;
-        if let Some((next, bytes)) = self.race.lock().unwrap().take() {
-            assert!(matches!(
-                self.inner.compare_exchange_head(key, token, next, &bytes)?,
-                CasOutcome::Committed(_)
-            ));
-        }
-        match self
-            .inner
-            .compare_exchange_head(key, token, generation, body)?
-        {
-            CasOutcome::Committed(receipt) => self.returned(receipt).map(CasOutcome::Committed),
-            CasOutcome::PredecessorMismatch => Ok(CasOutcome::PredecessorMismatch),
-        }
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        std::future::ready(self.compare_exchange_head_now(*cx, key, token, generation, body))
     }
-    async fn authenticate_head_receipt(
+    fn authenticate_head_receipt(
         &self,
         cx: &u64,
         receipt: &HeadReadReceipt,
-    ) -> Result<AuthenticatedHead, AuthorityFailure> {
-        self.observe(*cx, "authenticate")?;
-        self.inner.authenticate_head_receipt(receipt)
+    ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
+        std::future::ready(
+            self.observe(*cx, "authenticate")
+                .and_then(|()| self.inner.authenticate_head_receipt(receipt)),
+        )
     }
 }
 

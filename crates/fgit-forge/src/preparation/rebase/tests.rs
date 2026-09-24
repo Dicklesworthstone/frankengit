@@ -1,4 +1,6 @@
 use super::*;
+use crate::preparation::MergeEntry;
+use fgit_crypto::git_object_id;
 use std::cell::Cell;
 
 struct Source {

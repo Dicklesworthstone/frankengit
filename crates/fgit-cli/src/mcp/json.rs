@@ -18,7 +18,7 @@ pub enum Value {
     Object(Object),
 }
 impl Value {
-    pub fn object(&self) -> Option<&Object> {
+    pub const fn object(&self) -> Option<&Object> {
         if let Self::Object(value) = self {
             Some(value)
         } else {
@@ -113,7 +113,7 @@ impl Parser<'_> {
             false
         }
     }
-    fn node(&mut self) -> Result<(), &'static str> {
+    const fn node(&mut self) -> Result<(), &'static str> {
         if self.nodes == MAX_NODES {
             return Err("node_limit");
         }
@@ -340,7 +340,7 @@ impl Output {
                     || matches!(ch, '\u{061c}' | '\u{200e}' | '\u{200f}'
                     | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}') =>
                 {
-                    self.append(&format!("\\u{:04x}", u32::from(ch)))?
+                    self.append(&format!("\\u{:04x}", u32::from(ch)))?;
                 }
                 ch => {
                     let mut buffer = [0; 4];

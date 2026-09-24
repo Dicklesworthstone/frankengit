@@ -7,7 +7,11 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use super::*;
+use super::{
+    BaseView, Discovery, DiscoveryContext, GitHashAlgorithm, GitObjectKind, GitOid, ObjectSource,
+    RepositoryCommitId, RepositoryId, SearchCase, SearchCompletion, SearchError, SearchLimits,
+    SourceMatch, SourceQuery, TreeCapability, checkpoint, discover, fold, oid,
+};
 
 pub const MAX_BATCH_QUERIES: usize = 32;
 const MAX_RETAINED_MATCHES: usize = 4096;
@@ -378,6 +382,7 @@ impl Collector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source_search::Format;
     use std::cell::Cell;
 
     fn batch(needles: &[&[u8]], case: SearchCase) -> SourceQueryBatch {

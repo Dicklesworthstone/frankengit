@@ -23,7 +23,7 @@ fn oid(format: GitHashAlgorithm, hex_byte: &str) -> GitOid {
     GitOid::from_hex(format, &hex_byte.repeat(width)).unwrap()
 }
 
-fn principal(tag: u8) -> PrincipalId {
+const fn principal(tag: u8) -> PrincipalId {
     PrincipalId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 

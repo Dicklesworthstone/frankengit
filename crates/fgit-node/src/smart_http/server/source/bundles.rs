@@ -115,7 +115,7 @@ fn export_command(
         match name.as_str() {
             "object_format" if object_format.is_none() => object_format = Some(value),
             "expected_head" if expected_head.is_none() => {
-                expected_head = Some(parse_snapshot(&value)?)
+                expected_head = Some(parse_snapshot(&value)?);
             }
             _ => return Err(ApiError::bad("unknown_or_duplicate_bundle_field")),
         }

@@ -37,7 +37,7 @@ Every mutation requires a stable retry key and explicit predecessor. No latest-v
 Exit 0: committed/read; 3: canonical refusal; 4: missing issue; 2: input/infrastructure/output error.
 This is a trusted local repository interface, not remote authentication or an issue ACL.";
 
-pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
+pub fn run(arguments: &[String]) -> Result<u8, String> {
     if arguments
         .first()
         .is_some_and(|argument| argument == "search")

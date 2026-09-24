@@ -4506,7 +4506,7 @@ struct DeadlineTcpStream<'stream> {
 }
 
 impl<'stream> DeadlineTcpStream<'stream> {
-    fn new(stream: &'stream mut TcpStream, deadline: GitDaemonSessionDeadline) -> Self {
+    const fn new(stream: &'stream mut TcpStream, deadline: GitDaemonSessionDeadline) -> Self {
         Self { stream, deadline }
     }
 
@@ -6012,7 +6012,7 @@ impl NodeConfig {
     /// wire-crate default profile couples them; a `None` component keeps the
     /// documented default.
     #[must_use]
-    pub fn with_git_daemon_receive_byte_envelope(
+    pub const fn with_git_daemon_receive_byte_envelope(
         mut self,
         max_input_bytes: Option<usize>,
         max_expanded_bytes: Option<usize>,
@@ -6036,7 +6036,7 @@ impl NodeConfig {
     /// deployment serving repositories larger than the documented 128 MiB
     /// default widens it explicitly.
     #[must_use]
-    pub fn with_selected_pack_byte_envelope(mut self, max_expanded_bytes: usize) -> Self {
+    pub const fn with_selected_pack_byte_envelope(mut self, max_expanded_bytes: usize) -> Self {
         self.selected_pack_limits.max_total_expanded_bytes = max_expanded_bytes;
         self.selected_pack_limits.max_cached_bytes = max_expanded_bytes;
         self

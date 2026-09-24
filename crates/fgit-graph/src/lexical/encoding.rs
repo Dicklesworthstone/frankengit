@@ -1,6 +1,11 @@
 //! One registered identity domain, distinct versioned payload families. The
 //! inner payload uses the same canonical scalar/byte codec, not ambient serde.
-use super::*;
+use super::{
+    BTreeMap, Digest, GitHashAlgorithm, GitOid, IndexedDocument, LexicalChannel, LexicalError,
+    LexicalNamespace, LexicalSegment, MAX_DOCUMENTS, MAX_FILE_BYTES, MAX_POSTINGS,
+    MAX_SEGMENT_BYTES, MAX_SOURCE_BYTES, MAX_TERM_BYTES, MAX_TERMS, Postings, RepositoryId,
+    RepositoryIncarnationId, TenantId, Term, bounded_add, check, path_valid, word,
+};
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder, body_id,
     decode_body, encode_body,

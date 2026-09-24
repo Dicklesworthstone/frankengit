@@ -40,7 +40,10 @@ impl SshServerLimits {
         max_in_flight: 16,
     };
 
-    pub fn try_new(max_sessions: usize, max_in_flight: usize) -> Result<Self, NodeSshRefusal> {
+    pub const fn try_new(
+        max_sessions: usize,
+        max_in_flight: usize,
+    ) -> Result<Self, NodeSshRefusal> {
         if max_sessions == 0 {
             return Err(NodeSshRefusal::ZeroSessionLimit);
         }
@@ -254,13 +257,13 @@ impl SshConnectionState {
 struct SshReader<'a>(&'a RefCell<SshConnectionState>);
 struct SshWriter<'a>(&'a RefCell<SshConnectionState>);
 
-impl<'a> Read for SshReader<'a> {
+impl Read for SshReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.borrow_mut().read_channel(buf)
     }
 }
 
-impl<'a> Write for SshWriter<'a> {
+impl Write for SshWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0.borrow_mut().write_channel(buf)
     }
@@ -270,7 +273,7 @@ impl<'a> Write for SshWriter<'a> {
     }
 }
 
-impl<'a> ReceiveResponseWriter for SshWriter<'a> {
+impl ReceiveResponseWriter for SshWriter<'_> {
     fn restart_deadline(&mut self, _deadline: crate::GitDaemonSessionDeadline) {}
 }
 

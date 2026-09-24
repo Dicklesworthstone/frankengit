@@ -33,7 +33,7 @@ struct Options {
     resolutions: Option<Vec<resolution::LocalResolution>>,
 }
 
-pub(super) fn run(args: &[String], direction: ReplayDirection) -> Result<u8, String> {
+pub fn run(args: &[String], direction: ReplayDirection) -> Result<u8, String> {
     if args == ["--help"] || args == ["prepare", "--help"] || args == ["resolve", "--help"] {
         write_receipt(&mut std::io::stdout().lock(), USAGE, false)?;
         return Ok(0);
@@ -345,7 +345,7 @@ fn parse(args: &[String], direction: ReplayDirection) -> Result<Options, String>
         resolutions,
     })
 }
-pub(super) fn decimal(text: &str) -> Result<u64, String> {
+pub fn decimal(text: &str) -> Result<u64, String> {
     if text.is_empty()
         || !text.bytes().all(|b| b.is_ascii_digit())
         || (text.len() > 1 && text.starts_with('0'))
@@ -354,10 +354,10 @@ pub(super) fn decimal(text: &str) -> Result<u64, String> {
     }
     text.parse().map_err(|_| "integer overflow".into())
 }
-pub(super) fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
+pub fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
     if text.is_empty()
         || text.len() > limit * 2
-        || text.len() % 2 != 0
+        || !text.len().is_multiple_of(2)
         || !text
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -367,14 +367,16 @@ pub(super) fn unhex(text: &str, limit: usize) -> Result<Vec<u8>, String> {
     let digit = |b| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     Ok(text
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| digit(pair[0]) * 16 + digit(pair[1]))
         .collect())
 }
-pub(super) fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-pub(super) fn token(head: RepositoryAuthorityHeadId) -> String {
+pub fn token(head: RepositoryAuthorityHeadId) -> String {
     let id = head.as_internal_object_id();
     format!(
         "alg:{}:{}",
@@ -382,7 +384,7 @@ pub(super) fn token(head: RepositoryAuthorityHeadId) -> String {
         hex(id.digest().as_bytes())
     )
 }
-pub(super) fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
+pub fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
     let (algorithm, bytes) = text
         .strip_prefix("alg:")
         .and_then(|s| s.split_once(':'))
@@ -526,7 +528,7 @@ fn render(
     }
     Ok((receipt, code))
 }
-pub(super) fn write_receipt(
+pub fn write_receipt(
     out: &mut impl Write,
     receipt: &str,
     artifact_published: bool,

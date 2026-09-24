@@ -2,7 +2,7 @@
 
 mod branches;
 mod candidate;
-pub(crate) mod candidate_inspection;
+pub mod candidate_inspection;
 mod full_bundle;
 mod initial_commit;
 mod merge_prepare;
@@ -13,10 +13,9 @@ mod tags;
 pub use patch::{PatchPathReceipt, WorkspacePatchCandidate};
 mod events;
 mod issues;
+mod protection;
 mod publication;
 mod pull_request;
-pub use events::ForgeEventReadRefusal;
-mod protection;
 pub use issues::IssueReadRefusal;
 mod session_state;
 mod sessions;
@@ -25,7 +24,7 @@ mod source_search;
 use fgit_forge::source_browse::SourceBrowseError;
 mod transaction_recovery;
 pub use session_state::WorkspaceSessionRefusal;
-pub(crate) use sessions::NodeWorkspaceSessions;
+pub use sessions::NodeWorkspaceSessions;
 pub use sessions::{MergeWorkspaceReceipt, WorkspaceShutdownBlocked};
 #[cfg(target_os = "linux")]
 mod trusted_tool;

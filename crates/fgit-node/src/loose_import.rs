@@ -12,9 +12,9 @@
 #[cfg(test)]
 mod cancellation_tests;
 mod control;
-pub(crate) mod graph;
+pub mod graph;
 
-pub(crate) use control::checkpoint_request;
+pub use control::checkpoint_request;
 use control::{ImportControl, ReadFailure};
 
 use std::collections::{BTreeMap, BTreeSet};

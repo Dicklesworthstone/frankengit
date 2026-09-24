@@ -356,11 +356,10 @@ impl<S: MergeObjectSource> History<'_, S> {
             // Reverse push means the first stored parent is visited first.
             for parent in commit.parents.iter().rev() {
                 self.source.checkpoint()?;
-                if !seen.contains(parent) {
-                    if seen.len() >= self.limits.max_commits {
-                        return Err(PreparationError::Budget("history frontier").into());
-                    }
-                    seen.insert(*parent);
+                if seen.len() >= self.limits.max_commits && !seen.contains(parent) {
+                    return Err(PreparationError::Budget("history frontier").into());
+                }
+                if seen.insert(*parent) {
                     pending.push(*parent);
                 }
             }

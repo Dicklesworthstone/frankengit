@@ -321,9 +321,7 @@ const MERGE_WORKSPACE_EPOCH_KEY: fgit_types::AsciiSlug =
 /// # Errors
 ///
 /// [`AdmissionError::MergeIncoherent`] naming the part that disagreed.
-pub(crate) fn check_parts_describe_one_merge(
-    sealed: &SealedMerge<'_>,
-) -> Result<(), AdmissionError> {
+pub fn check_parts_describe_one_merge(sealed: &SealedMerge<'_>) -> Result<(), AdmissionError> {
     if sealed.attempt.target_ref != sealed.package.ref_intent.name {
         return Err(AdmissionError::MergeIncoherent {
             field: "target ref",
@@ -618,7 +616,7 @@ fn legacy_seal_attempt_for(
 }
 
 /// One replan's decision: publish the merge, or publish why it cannot be.
-pub(crate) enum MergePlan {
+pub enum MergePlan {
     /// The merge is fresh at this basis, and this is the ref state it results
     /// in.
     ///
@@ -637,10 +635,7 @@ pub(crate) enum MergePlan {
 /// two differ only in how they obtain the snapshot and publish the result, and
 /// a second copy of this logic is the thing that would let them drift about
 /// when a merge is admissible.
-pub(crate) fn decide_from_snapshot(
-    sealed: &SealedMerge<'_>,
-    snapshot: AdmissionSnapshot,
-) -> MergePlan {
+pub fn decide_from_snapshot(sealed: &SealedMerge<'_>, snapshot: AdmissionSnapshot) -> MergePlan {
     for name in [&sealed.attempt.source_ref, &sealed.attempt.target_ref] {
         if snapshot.hidden_refs.hides(name) {
             return MergePlan::Refuse(RefusalCode::PublicationPolicyRefused);
@@ -665,7 +660,7 @@ pub(crate) fn decide_from_snapshot(
 }
 
 /// Decides one attempt against one basis, reading the snapshot synchronously.
-pub(crate) fn plan_attempt<Projection>(
+pub fn plan_attempt<Projection>(
     sealed: &SealedMerge<'_>,
     basis: &fgit_chronicle::PublicationBasis,
     authenticated: &AuthenticatedHead,
@@ -688,7 +683,7 @@ where
 /// Reused rather than re-derived: folding entries collected at one head against
 /// a different head produces a well-formed root that commits to the wrong
 /// history, and the token comparison is what makes that unrepresentable.
-pub(crate) fn outcomes_match_basis(
+pub fn outcomes_match_basis(
     outcomes: &CumulativeOutcomes,
     receipt: &fgit_authority::HeadReadReceipt,
 ) -> bool {

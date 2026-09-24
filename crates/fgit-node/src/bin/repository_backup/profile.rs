@@ -95,7 +95,7 @@ mod tests {
         flags.set("--timeout-secs", "86400").unwrap();
         let profile = flags.finish();
         assert_eq!(profile.transfer.max_archive_bytes, 1 << 40);
-        assert_eq!(profile.timeout, Duration::from_secs(86400));
+        assert_eq!(profile.timeout, Duration::from_hours(24));
     }
     #[test]
     fn malformed_duplicate_and_excessive_budgets_refuse() {

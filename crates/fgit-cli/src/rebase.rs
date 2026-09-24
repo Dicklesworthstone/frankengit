@@ -38,7 +38,7 @@ struct Options {
     resolutions: Vec<RebaseCommitResolution>,
 }
 
-pub(super) fn run(args: &[String]) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"] || args == ["prepare", "--help"] {
         write_receipt(&mut std::io::stdout().lock(), USAGE, false)?;
         return Ok(0);

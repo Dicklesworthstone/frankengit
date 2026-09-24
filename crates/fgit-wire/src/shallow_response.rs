@@ -1,12 +1,15 @@
 //! Bounded shallow-update framing for adapters that opt into resolved updates.
-use super::*;
+use super::{
+    PackRequest, Packet, UploadPackRepository, UploadPackVersion, WireError, WireLimits,
+    add_output_packet, line_packet, oid_hex,
+};
 use std::collections::BTreeSet;
 
-pub(super) fn has_controls(request: &PackRequest) -> bool {
+pub const fn has_controls(request: &PackRequest) -> bool {
     request.options.deepen_relative() || !request.shallows.is_empty() || changes_boundary(request)
 }
 
-pub(super) fn validate_relative_depth(request: &PackRequest) -> Result<(), WireError> {
+pub const fn validate_relative_depth(request: &PackRequest) -> Result<(), WireError> {
     if request.options.deepen_relative()
         && (!matches!(request.deepen, Some(1..=2_147_483_647))
             || request.deepen_since.is_some()
@@ -17,11 +20,11 @@ pub(super) fn validate_relative_depth(request: &PackRequest) -> Result<(), WireE
     Ok(())
 }
 
-pub(super) fn changes_boundary(request: &PackRequest) -> bool {
+pub const fn changes_boundary(request: &PackRequest) -> bool {
     request.deepen.is_some() || request.deepen_since.is_some() || !request.deepen_not.is_empty()
 }
 
-pub(super) fn response(
+pub fn response(
     repository: &impl UploadPackRepository,
     request: &PackRequest,
     limits: &WireLimits,

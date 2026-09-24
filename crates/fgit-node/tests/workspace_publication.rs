@@ -34,7 +34,7 @@ impl Drop for Scratch {
 fn reference() -> RefName {
     RefName::try_new(b"refs/heads/main").unwrap()
 }
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0x83; 16])
 }
 fn config(root: &Path, format: GitHashAlgorithm) -> NodeConfig {

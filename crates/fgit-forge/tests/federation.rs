@@ -24,7 +24,7 @@ use fgit_forge::federation::{
 };
 use fgit_types::GitOid;
 
-fn test_root_secret(seed: u8) -> RootSecret {
+const fn test_root_secret(seed: u8) -> RootSecret {
     RootSecret::from_bytes([seed; 32])
 }
 
@@ -32,11 +32,11 @@ fn test_secret_key(seed: u8) -> SecretKey<Identity> {
     SecretKey::<Identity>::derive(&test_root_secret(seed), KeyEpoch::FIRST, KeyScope::OPERATOR)
 }
 
-fn sample_git_oid(byte: u8) -> GitOid {
+const fn sample_git_oid(byte: u8) -> GitOid {
     GitOid::Sha1(fgit_types::GitOidSha1::from_bytes([byte; 20]))
 }
 
-fn sample_basis_capsule(generation: u64, tip_byte: u8) -> BasisCapsule {
+const fn sample_basis_capsule(generation: u64, tip_byte: u8) -> BasisCapsule {
     BasisCapsule {
         capsule_id: [0xaa; 32],
         repo_id: [0x11; 32],
@@ -85,15 +85,9 @@ fn offline_work_bundle_codec_round_trip() {
         payload: b"independent verification artifact".to_vec(),
     }];
 
-    let original_bundle = create_offline_bundle(
-        basis.clone(),
-        peer_id,
-        &signer,
-        intents.clone(),
-        effects.clone(),
-        evidence.clone(),
-    )
-    .expect("bundle creation must succeed");
+    let original_bundle =
+        create_offline_bundle(basis, peer_id, &signer, intents, effects, evidence)
+            .expect("bundle creation must succeed");
 
     // Canonical serialization
     let encoded = encode_body(&original_bundle).expect("encoding must succeed");
@@ -293,7 +287,7 @@ fn proposed_reftxn_evaluation_against_authority_head() {
     let proposal = ProposedRefTxn {
         proposal_id: ProposedTxnId::from_bytes([0x99; 32]),
         peer_id,
-        target_ref: target.clone(),
+        target_ref: target,
         expected_basis: expected,
         proposed_tip: proposed,
         intent_id: [0x12; 32],
@@ -349,7 +343,7 @@ fn equivocation_fixture_produces_durable_evidence_and_routes_to_review() {
 
     // Idempotent duplicate ignored
     let outcome2 = detector
-        .observe_claim(claim1.clone(), 1001)
+        .observe_claim(claim1, 1001)
         .expect("duplicate claim");
     assert_eq!(outcome2, ObservationOutcome::DuplicateIgnored);
     assert!(!detector.is_quarantined(&peer_id));
@@ -365,7 +359,7 @@ fn equivocation_fixture_produces_durable_evidence_and_routes_to_review() {
     };
 
     let outcome3 = detector
-        .observe_claim(claim2.clone(), 1002)
+        .observe_claim(claim2, 1002)
         .expect("equivocation detection");
 
     match outcome3 {

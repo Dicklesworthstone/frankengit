@@ -2,7 +2,10 @@
 //! This private sum type cannot turn an unpublished candidate into a canonical
 //! SparseManifest. Candidate plans have no output-import authority.
 
-use super::*;
+use super::{
+    Arc, Encoder, GitHashAlgorithm, HostRefusal, NativeObjectIdentity, SparseLimits,
+    SparseManifest, SparseWorkspacePlan, TreeCapability, frame,
+};
 use fgit_crypto::GitOid;
 use fgit_treefs::{SparseCandidateManifest, SparseEntry};
 use fgit_types::{RepositoryCommitId, RepositoryId};
@@ -20,19 +23,19 @@ pub(super) struct SourceIdentity<'a, A: GitHashAlgorithm> {
     payload: usize,
 }
 impl<'a, A: GitHashAlgorithm> SourceIdentity<'a, A> {
-    pub(super) fn repository_id(&self) -> RepositoryId {
+    pub(super) const fn repository_id(&self) -> RepositoryId {
         self.repository
     }
-    pub(super) fn source_rcr_id(&self) -> RepositoryCommitId {
+    pub(super) const fn source_rcr_id(&self) -> RepositoryCommitId {
         self.rcr
     }
-    pub(super) fn source_commit_oid(&self) -> &'a GitOid<A> {
+    pub(super) const fn source_commit_oid(&self) -> &'a GitOid<A> {
         self.commit
     }
-    pub(super) fn source_tree_oid(&self) -> &'a GitOid<A> {
+    pub(super) const fn source_tree_oid(&self) -> &'a GitOid<A> {
         self.tree
     }
-    pub(super) fn payload_bytes(&self) -> usize {
+    pub(super) const fn payload_bytes(&self) -> usize {
         self.payload
     }
 }
@@ -62,7 +65,7 @@ impl<A: GitHashAlgorithm> WorkspaceManifest<A> {
             },
         }
     }
-    pub(super) fn is_candidate(&self) -> bool {
+    pub(super) const fn is_candidate(&self) -> bool {
         matches!(self, Self::Candidate(_))
     }
     pub(super) fn bind_candidate(&self, bytes: &mut Encoder) -> Result<(), HostRefusal> {

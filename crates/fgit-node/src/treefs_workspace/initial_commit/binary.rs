@@ -8,7 +8,7 @@ use fgit_forge::preparation::MergeMetadata;
 use fgit_pack::binary_patch::{BinaryPatchBatch, BinaryPatchError, BinaryPatchLimits};
 use fgit_types::{GitHashAlgorithm, GitOid};
 
-fn invalid(reason: &'static str) -> PatchError {
+const fn invalid(reason: &'static str) -> PatchError {
     PatchError::Syntax { line: 1, reason }
 }
 fn target(index: &IndexExpectation, format: GitHashAlgorithm) -> Result<GitOid, PatchError> {

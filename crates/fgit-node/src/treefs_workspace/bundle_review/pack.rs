@@ -170,7 +170,7 @@ fn reconstruct(
                 .ok_or_else(|| invalid("missing pack offset"))?;
             match &mut inputs[index] {
                 PackObject::Base { id: slot, .. } | PackObject::TypedBase { id: slot, .. } => {
-                    *slot = Some(id)
+                    *slot = Some(id);
                 }
                 PackObject::Delta(delta) => delta.id = Some(id),
             }
@@ -205,7 +205,7 @@ fn reconstruct(
         dependencies,
     })
 }
-fn offset(object: &PackObject) -> u64 {
+const fn offset(object: &PackObject) -> u64 {
     match object {
         PackObject::Base { offset, .. } | PackObject::TypedBase { offset, .. } => *offset,
         PackObject::Delta(delta) => delta.offset,

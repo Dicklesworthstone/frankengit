@@ -183,7 +183,7 @@ fn render_entry(entry: Option<&MergeEntry>) -> String {
         |entry| format!("{{\"mode\":{},\"oid\":\"{}\"}}", entry.mode, entry.oid),
     )
 }
-pub(crate) fn render_conflict(conflict: &MergeConflict) -> String {
+pub fn render_conflict(conflict: &MergeConflict) -> String {
     format!(
         "{{\"path_hex\":\"{}\",\"kind\":{},\"base\":{},\"ours\":{},\"theirs\":{}}}",
         hex(&conflict.path),
@@ -304,7 +304,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     })
 }
 
-pub(crate) fn require_absent(path: &Path) -> Result<(), String> {
+pub fn require_absent(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(_) => Err(
             "output path already exists; refusing to replace a file, symlink or directory"
@@ -319,7 +319,7 @@ pub(crate) fn require_absent(path: &Path) -> Result<(), String> {
 /// the destination directory, synchronized before an atomic create-only hard
 /// link. Unsupported filesystems refuse; there is no overwrite-rename fallback.
 /// This is a trusted local-operator filesystem, not an adversarial host boundary.
-pub(crate) fn publish_new_bundle(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub fn publish_new_bundle(path: &Path, bytes: &[u8]) -> Result<(), String> {
     require_absent(path)?;
     let parent = path
         .parent()

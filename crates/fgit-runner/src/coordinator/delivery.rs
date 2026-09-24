@@ -3,7 +3,12 @@
 //! Preparing or reading a batch never settles responsibility. A configured sink
 //! must durably retain its exact bytes before acknowledging custody. Canonical
 //! check admission, authorization and source/policy revalidation remain separate.
-use super::*;
+use super::{
+    AttemptId, BTreeMap, BTreeSet, CheckRunConclusion, CheckRunFact, CheckRunStatus, Commitment,
+    CoordinatorExecutionProfile, CoordinatorRefusal, Digest, DigestAlgorithm, DigestBytes,
+    Duration, GitOid, PreparedTrustedWorkflow, RepositoryId, RunnerText, TenantId, TrustDomain,
+    TrustedWorkflowReceipt, VecDeque, WorkflowCoordinator, WorkflowRunId, fmt,
+};
 use fgit_types::{GitOidSha1, GitOidSha256};
 
 const MAGIC: &[u8; 8] = b"FGCP0001";
@@ -56,42 +61,55 @@ pub struct CheckDeliveryBatch {
     body: Vec<u8>,
 }
 impl CheckDeliveryBatch {
+    #[must_use]
     pub const fn tenant(&self) -> TenantId {
         self.tenant
     }
+    #[must_use]
     pub const fn repository(&self) -> RepositoryId {
         self.repository
     }
+    #[must_use]
     pub const fn run_id(&self) -> WorkflowRunId {
         self.run
     }
+    #[must_use]
     pub const fn attempt_id(&self) -> AttemptId {
         self.attempt
     }
+    #[must_use]
     pub const fn authority_head(&self) -> Commitment {
         self.head
     }
+    #[must_use]
     pub const fn source_commit(&self) -> GitOid {
         self.source
     }
+    #[must_use]
     pub const fn graph_commitment(&self) -> Commitment {
         self.graph
     }
+    #[must_use]
     pub const fn trust_domain(&self) -> &TrustDomain {
         &self.trust
     }
+    #[must_use]
     pub const fn execution_profile(&self) -> CoordinatorExecutionProfile {
         self.profile
     }
+    #[must_use]
     pub const fn ordinal(&self) -> u64 {
         self.ordinal
     }
+    #[must_use]
     pub fn facts(&self) -> &[CheckRunFact] {
         &self.facts
     }
+    #[must_use]
     pub fn body(&self) -> &[u8] {
         &self.body
     }
+    #[must_use]
     pub fn id(&self) -> Commitment {
         Commitment::of_bytes(&self.body)
     }
@@ -351,15 +369,18 @@ pub struct CheckDeliveryAcknowledgement {
     receipt: Commitment,
 }
 impl CheckDeliveryAcknowledgement {
+    #[must_use]
     pub fn after_durable_acceptance(batch: &CheckDeliveryBatch, receipt: Commitment) -> Self {
         Self {
             batch: batch.id(),
             receipt,
         }
     }
+    #[must_use]
     pub const fn batch_id(&self) -> Commitment {
         self.batch
     }
+    #[must_use]
     pub const fn receipt_root(&self) -> Commitment {
         self.receipt
     }
@@ -376,7 +397,8 @@ pub trait CheckDeliverySink {
 }
 
 impl WorkflowCoordinator {
-    pub fn pending_check_fact_count(&self) -> usize {
+    #[must_use]
+    pub const fn pending_check_fact_count(&self) -> usize {
         self.outbox_facts.len()
     }
 

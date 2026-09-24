@@ -33,6 +33,7 @@ impl WorkflowCheckId {
 
     /// Decode exactly the spelling emitted by Display. Nonzero padding bits,
     /// uppercase, aliases, short IDs and trailing bytes never select a stream.
+    #[must_use]
     pub fn from_label(label: &str) -> Option<Self> {
         let encoded = label.strip_prefix("check/")?.as_bytes();
         if encoded.len() != 52 {

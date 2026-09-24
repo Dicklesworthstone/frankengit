@@ -88,7 +88,7 @@ impl RegexQuery {
         self.maximum_steps
     }
     #[must_use]
-    pub fn state_count(&self) -> usize {
+    pub const fn state_count(&self) -> usize {
         self.program.states()
     }
 }
@@ -106,7 +106,7 @@ pub struct RegexSearchReport {
     pub lines_searched: usize,
 }
 
-fn scan_error(error: engine::ScanError) -> SearchError {
+const fn scan_error(error: engine::ScanError) -> SearchError {
     match error {
         engine::ScanError::Cancelled => SearchError::Cancelled,
         engine::ScanError::WorkLimit => SearchError::Budget("regex VM work"),

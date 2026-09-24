@@ -31,7 +31,7 @@ use fgit_types::{
     PrincipalSnapshotId, RefName, RefusalCode,
 };
 
-fn live() -> Result<(), RefusalCode> {
+const fn live() -> Result<(), RefusalCode> {
     Ok(())
 }
 
@@ -40,7 +40,7 @@ fn oid(byte: u8) -> GitOid {
     GitOid::from_hex(GitHashAlgorithm::Sha1, &hex).expect("valid oid hex")
 }
 
-fn sample_principal_id() -> PrincipalId {
+const fn sample_principal_id() -> PrincipalId {
     PrincipalId::from_bytes([7; 16])
 }
 
@@ -111,7 +111,7 @@ fn in_memory_retroactivity_replay_drill() {
         verdict_d1.refusal, None,
         "policy P1 must allow fast-forward on main"
     );
-    let trace_d1 = verdict_d1.trace.clone();
+    let trace_d1 = verdict_d1.trace;
     assert!(!trace_d1.is_empty(), "trace must record rule evaluation");
 
     // 4. Compile policy P2 (tightened later: prohibit direct pushes to main).
@@ -181,7 +181,7 @@ fn persisted_authority_storage_retroactivity_replay() {
         .expect("stored P1 evaluation succeeds");
     assert_eq!(verdict_p1.snapshot_id, p1_id);
     assert_eq!(verdict_p1.refusal, None);
-    let trace_p1 = verdict_p1.trace.clone();
+    let trace_p1 = verdict_p1.trace;
 
     // 3. Stage policy P2 (tightened: deny creations).
     let frame_p2 = PolicyFrame::compile(
@@ -324,7 +324,7 @@ fn receive_pack_and_effects_protection_bridge() {
 
     // 2. Receive-pack command to update topic -> allowed!
     let update_topic_cmd = RefCommand {
-        name: topic_ref.clone(),
+        name: topic_ref,
         expected_old: fgit_authority::ExpectedOld::Exactly(oid(20)),
         proposed_new: fgit_authority::ProposedNew::Update(oid(21)),
         force: false,

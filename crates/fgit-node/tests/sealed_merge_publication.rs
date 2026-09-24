@@ -63,7 +63,7 @@ impl Drop for Scratch {
         fs::remove_dir_all(&self.0).unwrap();
     }
 }
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0x53; 16])
 }
 fn main_ref() -> RefName {
@@ -114,7 +114,7 @@ struct Offer {
     predecessor_evidence: CommitEvidence,
 }
 impl Offer {
-    fn sealed(&self, now: WorkspaceEpoch) -> SealedMerge<'_> {
+    const fn sealed(&self, now: WorkspaceEpoch) -> SealedMerge<'_> {
         SealedMerge {
             package: &self.package,
             attempt: &self.attempt,

@@ -21,7 +21,7 @@ pub(super) struct Row<'a> {
     pub last_metadata_actor: Option<PrincipalId>,
 }
 
-pub(super) fn action_name(action: PullRequestAction) -> &'static str {
+pub(super) const fn action_name(action: PullRequestAction) -> &'static str {
     match action {
         PullRequestAction::Open => "open",
         PullRequestAction::Update => "update",

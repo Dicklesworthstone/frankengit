@@ -1,7 +1,7 @@
 //! Incremental preparation reuses only complete, commitment-checked tables.
 //! The caller must select the manifest through authenticated generation state.
 //! Neither a manifest nor a table grants access to a current source path.
-use super::*;
+use super::{BTreeMap, Document, Error, GitOid, Manifest, Source, check, decode_table, directory};
 
 /// Actual refresh work, separate from canonical manifest identity. Reused
 /// files still count toward all resulting-corpus size/declaration ceilings.
@@ -67,6 +67,7 @@ impl ReuseVerifier {
     }
 
     /// The next exact payload to read, in deterministic native-object order.
+    #[must_use]
     pub fn next_document(&self) -> Option<&Document> {
         self.pending.first_key_value().map(|(_, doc)| doc)
     }
@@ -103,7 +104,8 @@ impl ReuseVerifier {
 }
 
 impl VerifiedReuse {
-    pub fn source(&self) -> &Source {
+    #[must_use]
+    pub const fn source(&self) -> &Source {
         &self.source
     }
 
@@ -128,10 +130,17 @@ pub(super) fn same_namespace(left: &Source, right: &Source) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fgit_crypto::{
-        IdentityDomain, internal_algorithm_id, internal_digest_value, internal_object_id,
+    use crate::source_symbols::index::{
+        Format, Payload, SchemaFamily, TenantId, engine, table, table_payload,
     };
-    use fgit_types::{CodecVersion, SchemaId};
+    use fgit_crypto::{
+        GitObjectKind, IdentityDomain, git_object_id, internal_algorithm_id, internal_digest_value,
+        internal_object_id,
+    };
+    use fgit_types::{
+        CodecVersion, Digest, RefName, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId,
+        RepositoryIncarnationId, SchemaId,
+    };
 
     fn source(format: Format) -> Source {
         let id = |domain, family| {

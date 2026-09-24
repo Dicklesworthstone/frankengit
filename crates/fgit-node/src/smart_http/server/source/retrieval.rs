@@ -1,14 +1,14 @@
 //! Authenticated read-only model-free Initial retrieval. This route composes
 //! existing persisted content/path/symbol readers; it does not build indexes.
 use super::super::issues::{ApiError, parse_form, parse_snapshot, quote, ref_fields};
-use super::indexed::{activation, append, check, hex, positive, read_route, token, unhex};
+use super::indexed::{activation, append, check, positive, read_route, token, unhex};
 use super::request::Selection;
 use super::*;
 use crate::source_retrieval::{
     Checkpoints, InitialLimits, InitialQuery, InitialReport, PROFILE, RetrievalError,
     SymbolChannel, SymbolPolicy, SymbolUnavailable,
 };
-use fgit_forge::source_symbols::{SymbolKind, SymbolMatchMode};
+use fgit_forge::source_symbols::SymbolMatchMode;
 use fgit_graph::lexical::{LexicalQueryLimits, LexicalReadLimits};
 use fgit_treefs::TreePath;
 use fgit_types::{GitHashAlgorithm, GitOid, RefName};

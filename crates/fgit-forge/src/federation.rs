@@ -167,18 +167,18 @@ impl PeerKeyHistory {
     }
 
     /// Marks the peer key as revoked from a given epoch forward.
-    pub fn revoke(&mut self, epoch: u64) {
+    pub const fn revoke(&mut self, epoch: u64) {
         self.revoked_at = Some(epoch);
     }
 
     /// Retrieves the verifying key for an epoch, checking for revocation.
     pub fn key_for_epoch(&self, epoch: u64) -> Result<VerifyingKey, FederationRefusal> {
-        if let Some(rev_epoch) = self.revoked_at {
-            if epoch >= rev_epoch {
-                return Err(FederationRefusal::PeerKeyRevoked {
-                    revoked_at_epoch: rev_epoch,
-                });
-            }
+        if let Some(rev_epoch) = self.revoked_at
+            && epoch >= rev_epoch
+        {
+            return Err(FederationRefusal::PeerKeyRevoked {
+                revoked_at_epoch: rev_epoch,
+            });
         }
         self.keys
             .get(&epoch)
@@ -650,7 +650,7 @@ impl EquivocationDetector {
 
     /// Number of durable equivocation evidence records retained.
     #[must_use]
-    pub fn evidence_count(&self) -> usize {
+    pub const fn evidence_count(&self) -> usize {
         self.evidence_ledger.len()
     }
 
@@ -1042,7 +1042,7 @@ impl CanonicalBody for OfflineWorkBundle {
                 unknown => {
                     return Err(CodecRefusal::VariantUnknown {
                         field: "intent_tag",
-                        observed: unknown as u32,
+                        observed: u32::from(unknown),
                         offset: input.offset(),
                     });
                 }
@@ -1106,7 +1106,7 @@ impl CanonicalBody for OfflineWorkBundle {
         let purpose =
             KeyPurpose::from_code_point(purpose_code).ok_or(CodecRefusal::VariantUnknown {
                 field: "signature.purpose",
-                observed: purpose_code as u32,
+                observed: u32::from(purpose_code),
                 offset: input.offset(),
             })?;
         let epoch_val = input.read_scalar::<u32>("signature.epoch")?;

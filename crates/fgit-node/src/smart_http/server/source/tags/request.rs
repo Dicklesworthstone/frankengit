@@ -251,7 +251,7 @@ fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
     if text.len() > maximum * 2 {
         return Err(ApiError::too_large());
     }
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err(ApiError::bad("invalid_hex"));
     }
     let digit = |byte| match byte {
@@ -260,7 +260,9 @@ fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, ApiError> {
         _ => Err(ApiError::bad("invalid_hex")),
     };
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Ok((digit(pair[0])? << 4) | digit(pair[1])?))
         .collect()
 }

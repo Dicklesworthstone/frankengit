@@ -545,7 +545,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -609,7 +609,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -673,7 +673,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -737,7 +737,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -802,7 +802,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -867,7 +867,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -932,7 +932,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -997,7 +997,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -1060,7 +1060,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -1123,7 +1123,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -1186,7 +1186,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -1206,7 +1206,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval_exp = evaluate_protected_ref(&[rule.clone()], &input_exp, &ref_name);
+        let eval_exp = evaluate_protected_ref(std::slice::from_ref(&rule), &input_exp, &ref_name);
         assert_eq!(eval_exp.decision, Decision::Deny);
         assert!(
             eval.denial_reason.as_ref().unwrap().contains("code review")
@@ -1266,7 +1266,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -1286,7 +1286,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval_exp = evaluate_protected_ref(&[rule.clone()], &input_exp, &ref_name);
+        let eval_exp = evaluate_protected_ref(std::slice::from_ref(&rule), &input_exp, &ref_name);
         assert_eq!(eval_exp.decision, Decision::Deny);
         assert!(
             eval_exp
@@ -1344,7 +1344,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval = evaluate_protected_ref(&[rule.clone()], &input, &ref_name);
+        let eval = evaluate_protected_ref(std::slice::from_ref(&rule), &input, &ref_name);
         assert_eq!(eval.decision, Decision::Deny);
         assert!(
             eval.denial_reason
@@ -1364,7 +1364,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![],
             100,
         );
-        let eval_exp = evaluate_protected_ref(&[rule.clone()], &input_exp, &ref_name);
+        let eval_exp = evaluate_protected_ref(std::slice::from_ref(&rule), &input_exp, &ref_name);
         assert_eq!(eval_exp.decision, Decision::Deny);
         assert!(
             eval_exp
@@ -1392,7 +1392,7 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
     // 14. unresolved_findings check
     {
         let rule = ProtectedRefRule {
-            pattern: main_pattern.clone(),
+            pattern: main_pattern,
             allow_actors: BTreeSet::new(),
             allow_principal_kinds: BTreeSet::new(),
             allow_teams: BTreeSet::new(),
@@ -1422,7 +1422,8 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
             vec![("unresolved_findings", 3)],
             100,
         );
-        let eval_findings = evaluate_protected_ref(&[rule.clone()], &input_findings, &ref_name);
+        let eval_findings =
+            evaluate_protected_ref(std::slice::from_ref(&rule), &input_findings, &ref_name);
         assert_eq!(eval_findings.decision, Decision::Deny);
         assert!(
             eval_findings
@@ -1501,7 +1502,8 @@ fn composition_fixtures_composite_governance_rule() {
         vec![("unresolved_findings", 0)],
         100,
     );
-    let eval_ok = evaluate_protected_ref(&[composite_rule.clone()], &input_ok, &ref_name);
+    let eval_ok =
+        evaluate_protected_ref(std::slice::from_ref(&composite_rule), &input_ok, &ref_name);
     assert_eq!(eval_ok.decision, Decision::Allow);
     assert!(eval_ok.is_protected);
     assert_eq!(eval_ok.denial_reason, None);
@@ -1517,7 +1519,11 @@ fn composition_fixtures_composite_governance_rule() {
         vec![("unresolved_findings", 0)],
         100,
     );
-    let eval_no_rev = evaluate_protected_ref(&[composite_rule.clone()], &input_no_rev, &ref_name);
+    let eval_no_rev = evaluate_protected_ref(
+        std::slice::from_ref(&composite_rule),
+        &input_no_rev,
+        &ref_name,
+    );
     assert_eq!(eval_no_rev.decision, Decision::Deny);
     assert!(
         eval_no_rev
@@ -1621,7 +1627,7 @@ fn revocation_and_temporal_expiry_fixtures() {
         vec![],
         99,
     );
-    let eval_before = evaluate_protected_ref(&[rule.clone()], &input_before, &ref_name);
+    let eval_before = evaluate_protected_ref(std::slice::from_ref(&rule), &input_before, &ref_name);
     assert_eq!(eval_before.decision, Decision::Deny);
 
     // 2. Exactly at window start (t=100) -> Live and admitted
@@ -1634,7 +1640,7 @@ fn revocation_and_temporal_expiry_fixtures() {
         vec![],
         100,
     );
-    let eval_start = evaluate_protected_ref(&[rule.clone()], &input_start, &ref_name);
+    let eval_start = evaluate_protected_ref(std::slice::from_ref(&rule), &input_start, &ref_name);
     assert_eq!(eval_start.decision, Decision::Allow);
 
     // 3. Inside validity window (t=150) -> Live and admitted
@@ -1647,7 +1653,7 @@ fn revocation_and_temporal_expiry_fixtures() {
         vec![],
         150,
     );
-    let eval_mid = evaluate_protected_ref(&[rule.clone()], &input_mid, &ref_name);
+    let eval_mid = evaluate_protected_ref(std::slice::from_ref(&rule), &input_mid, &ref_name);
     assert_eq!(eval_mid.decision, Decision::Allow);
 
     // 4. Past validity window (t=201) -> Expired and refused

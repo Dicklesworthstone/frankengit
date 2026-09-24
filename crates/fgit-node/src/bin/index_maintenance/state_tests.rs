@@ -52,7 +52,7 @@ fn malformed_noncanonical_truncated_and_oversized_states_refuse() {
     for suffix in [b"\n".as_slice(), b" ", b"injected"] {
         assert!(State::decode(&[bytes.as_slice(), suffix].concat(), &state()).is_err());
     }
-    let text = String::from_utf8(bytes.clone()).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
     let lines: Vec<_> = text.lines().collect();
     assert!(
         State::decode(

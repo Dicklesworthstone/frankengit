@@ -106,7 +106,7 @@ impl NativeMerge {
     }
 }
 
-fn invalid_native(field: &'static str) -> CodecRefusal {
+const fn invalid_native(field: &'static str) -> CodecRefusal {
     CodecRefusal::ValueUnrepresentable {
         field,
         observed: 0,
@@ -362,7 +362,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
             out.write_digest(target_tip)?;
         }
         ForgeEventPayload::PullRequestHeadAdvanced { source_tip } => {
-            out.write_digest(source_tip)?
+            out.write_digest(source_tip)?;
         }
         ForgeEventPayload::MergeCommitted {
             merge_commit,

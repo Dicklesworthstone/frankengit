@@ -5,7 +5,13 @@ use crate::workflow::{
     StepLimits, StepObservation, StepOutcome, WorkerFailure, WorkflowExecutor, WorkflowLimits,
     WorkflowPlan,
 };
+use crate::{
+    CheckRunFact, ContainmentSubstrate, CoordinatorLimits, ResourceCeilings, SourceObject,
+    TriggerContext,
+};
+use fgit_crypto::sha256_digest;
 use fgit_schema::workflow::{Job, Limits, compile};
+use fgit_types::{GitOidSha1, GitOidSha256};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

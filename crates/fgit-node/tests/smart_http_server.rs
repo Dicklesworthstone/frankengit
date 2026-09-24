@@ -372,10 +372,10 @@ fn round_trip(format: GitHashAlgorithm) {
     decoder.finish().unwrap();
     let mut selected = Vec::new();
     for packet in decoded {
-        if let Packet::Data(bytes) = packet {
-            if bytes.first() == Some(&1) {
-                selected.extend_from_slice(&bytes[1..]);
-            }
+        if let Packet::Data(bytes) = packet
+            && bytes.first() == Some(&1)
+        {
+            selected.extend_from_slice(&bytes[1..]);
         }
     }
     let received = fgit_pack::read_verified_pack(

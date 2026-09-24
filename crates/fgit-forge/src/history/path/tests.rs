@@ -2,6 +2,7 @@ use super::*;
 use crate::preparation::{CommitInput, MergeEntry, MergeObjectSource, MergeSourceError};
 use fgit_crypto::{GitObjectKind, git_object_id};
 use std::cell::Cell;
+use std::fmt::Write as _;
 
 // Native object bytes and IDs, not fabricated graph IDs. No blob method may
 // run: path history is tree-entry history, including binary/large files.
@@ -51,9 +52,12 @@ impl Source {
     fn add_commit(&mut self, tree: GitOid, parents: &[GitOid], label: &str) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            let _ = write!(body, "parent {parent}\n");
         }
-        body.push_str(&format!("author Untrusted <a@invalid> 1 +0000\ncommitter Untrusted <a@invalid> 1 +0000\n\n{label}\n"));
+        let _ = write!(
+            body,
+            "author Untrusted <a@invalid> 1 +0000\ncommitter Untrusted <a@invalid> 1 +0000\n\n{label}\n"
+        );
         let body = body.into_bytes();
         let id = git_object_id(self.format, GitObjectKind::Commit, &body);
         self.commits.insert(

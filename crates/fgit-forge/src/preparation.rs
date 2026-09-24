@@ -420,7 +420,7 @@ struct Planner<'a, S> {
 }
 
 impl<'a, S: MergeObjectSource> Planner<'a, S> {
-    fn new(source: &'a S, format: GitHashAlgorithm, limits: PreparationLimits) -> Self {
+    const fn new(source: &'a S, format: GitHashAlgorithm, limits: PreparationLimits) -> Self {
         Self {
             source,
             format,
@@ -768,6 +768,7 @@ impl<'a, S: MergeObjectSource> Planner<'a, S> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::fmt::Write as _;
 
     struct Source {
         format: GitHashAlgorithm,
@@ -815,11 +816,12 @@ mod tests {
         fn store_commit(&mut self, tree: GitOid, parents: &[GitOid], label: &str) -> GitOid {
             let mut body = format!("tree {tree}\n");
             for parent in parents {
-                body.push_str(&format!("parent {parent}\n"));
+                let _ = write!(body, "parent {parent}\n");
             }
-            body.push_str(&format!(
+            let _ = write!(
+                body,
                 "author T <t@x> 1 +0000\ncommitter T <t@x> 1 +0000\n\n{label}"
-            ));
+            );
             let id = git_object_id(self.format, GitObjectKind::Commit, body.as_bytes());
             self.commits.insert(
                 id,

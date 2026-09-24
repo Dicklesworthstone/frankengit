@@ -62,7 +62,7 @@ impl DiskSource {
                 f.sync_all().unwrap();
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                assert_eq!(fs::read(path).unwrap(), body)
+                assert_eq!(fs::read(path).unwrap(), body);
             }
             Err(e) => panic!("object write: {e}"),
         }
@@ -250,7 +250,7 @@ fn actual_tool_edit_import_and_disk_object_reopen_preserve_git_identity() {
         ParseLimits::default(),
         PathPolicy::default(),
     );
-    let reopened_source = DiskSource(source.0.clone());
+    let reopened_source = DiskSource(source.0);
     let mut cap = capability();
     // Include the explicitly generated output in the read capability.
     cap = TreeCapability::new(
@@ -525,10 +525,7 @@ fn traversal_capability_mode_symlink_hardlink_and_budget_refusals_have_positive_
         SparseWorkspacePlan::new(m.clone(), vec![], &denied, 0, SparseLimits::default()),
         Err(HostRefusal::Capability(_))
     ));
-    assert!(
-        SparseWorkspacePlan::new(m.clone(), vec![], &capability(), 0, SparseLimits::default())
-            .is_ok()
-    );
+    assert!(SparseWorkspacePlan::new(m, vec![], &capability(), 0, SparseLimits::default()).is_ok());
     let l = ledger();
     let mut w = create(&s, &l, p, b"work");
     let input = w.tool_directory().join("src/input");

@@ -75,7 +75,7 @@ struct Options {
     candidate: Option<Candidate>,
 }
 
-pub(super) fn run(args: &[String]) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     if args.first().is_some_and(|action| action == "recover") {
         return recovery::run(args);
     }
@@ -295,7 +295,7 @@ fn validate_path(path: &[u8]) -> Result<(), String> {
 }
 fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, String> {
     if text.is_empty()
-        || text.len() % 2 != 0
+        || !text.len().is_multiple_of(2)
         || text.len() > maximum * 2
         || !text
             .bytes()
@@ -306,7 +306,9 @@ fn unhex(text: &str, maximum: usize) -> Result<Vec<u8>, String> {
     let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     Ok(text
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| (digit(p[0]) << 4) | digit(p[1]))
         .collect())
 }
@@ -407,11 +409,7 @@ fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> R
             _ => return Err("candidate input was not loaded; no workflow started".into()),
         }
         .map_err(|e| e.to_string())?;
-        Ok((
-            result.to_json(),
-            result.succeeded(),
-            result.run_directory.clone(),
-        ))
+        Ok((result.to_json(), result.succeeded(), result.run_directory))
     })();
     let cleanup = node.shutdown().err().map(|e| e.to_string());
     match operation {
@@ -445,10 +443,8 @@ fn finish(
         .and_then(|()| output.flush()).map_err(|e| format!("workflow receipt output incomplete: {e}"))?;
     Ok(if cleanup.is_some() {
         2
-    } else if succeeded {
-        0
     } else {
-        1
+        u8::from(!succeeded)
     })
 }
 

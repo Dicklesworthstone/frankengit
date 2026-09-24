@@ -109,21 +109,27 @@ pub struct SelectedGraphAudit {
     graph: GraphReport,
 }
 impl SelectedGraphAudit {
+    #[must_use]
     pub const fn repository_id(&self) -> RepositoryId {
         self.repository
     }
+    #[must_use]
     pub const fn repository_incarnation_id(&self) -> RepositoryIncarnationId {
         self.incarnation
     }
+    #[must_use]
     pub const fn head(&self) -> RepositoryAuthorityHeadId {
         self.head
     }
+    #[must_use]
     pub const fn generation(&self) -> HeadGeneration {
         self.generation
     }
+    #[must_use]
     pub const fn closure_root(&self) -> Digest {
         self.closure_root
     }
+    #[must_use]
     pub const fn graph(&self) -> &GraphReport {
         &self.graph
     }
@@ -185,13 +191,13 @@ impl OneNode {
             selected.map_err(|error| GraphAuditRefusal::Materialization(Box::new(error)))?;
         let head = selected.basis().id();
         let generation = selected.basis().generation();
-        if let Some(expected) = query.expected_generation {
-            if expected != generation {
-                return Err(GraphAuditRefusal::ExpectedGeneration {
-                    expected: expected.get(),
-                    observed: generation.get(),
-                });
-            }
+        if let Some(expected) = query.expected_generation
+            && expected != generation
+        {
+            return Err(GraphAuditRefusal::ExpectedGeneration {
+                expected: expected.get(),
+                observed: generation.get(),
+            });
         }
         if query.expected_head.is_some_and(|expected| expected != head) {
             return Err(GraphAuditRefusal::ExpectedHead);

@@ -352,7 +352,7 @@ pub fn apply_event(
         }
         IssueAction::Close if previous.state == IssueState::Open => next.state = IssueState::Closed,
         IssueAction::Reopen if previous.state == IssueState::Closed => {
-            next.state = IssueState::Open
+            next.state = IssueState::Open;
         }
         IssueAction::Close | IssueAction::Reopen => {
             return Err(RefusalCode::ProtectedRefTransitionDenied);
@@ -361,7 +361,7 @@ pub fn apply_event(
             next.comments = next
                 .comments
                 .checked_add(1)
-                .ok_or(RefusalCode::ResourceBudgetExceeded)?
+                .ok_or(RefusalCode::ResourceBudgetExceeded)?;
         }
     }
     next.version = event.version;

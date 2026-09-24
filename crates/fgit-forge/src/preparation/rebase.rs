@@ -1,6 +1,10 @@
 //! Bounded linear rebase using the existing path/content merge planner.
 //! This module constructs immutable candidates; it never moves a branch.
-use super::*;
+use super::{
+    BTreeMap, BTreeSet, CommitInput, GitHashAlgorithm, GitObjectKind, GitOid, MergeConflict,
+    MergeMetadata, MergeObjectSource, MergeSourceError, PlannedMergeObject, Planner,
+    PreparationError, PreparationLimits, resolution,
+};
 
 pub mod resolutions;
 use resolutions::{RebaseResolvedStep, ResolvedRebasePreparation};

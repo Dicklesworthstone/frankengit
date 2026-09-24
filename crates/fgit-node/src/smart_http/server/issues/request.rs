@@ -12,14 +12,14 @@ use super::ApiError;
 pub(super) const MAX_FORM_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Page {
+pub struct Page {
     pub after: u64,
     pub limit: u16,
     pub expected_head: Option<RepositoryAuthorityHeadId>,
 }
 
 #[derive(Debug)]
-pub(crate) enum Operation<'a> {
+pub enum Operation<'a> {
     List(Page),
     Show {
         number: IssueNumber,
@@ -33,7 +33,7 @@ pub(crate) enum Operation<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct Request<'a> {
+pub struct Request<'a> {
     pub repository_route: &'a str,
     pub operation: Operation<'a>,
 }
@@ -114,7 +114,7 @@ impl<'a> Request<'a> {
         }))
     }
 
-    pub(crate) fn is_mutation(&self) -> bool {
+    pub(crate) const fn is_mutation(&self) -> bool {
         matches!(self.operation, Operation::Mutate { .. })
     }
 
@@ -130,7 +130,7 @@ impl<'a> Request<'a> {
                 "expected_version" => set_once(&mut version, decimal(&value)?)?,
                 "title" if matches!(action, "open" | "edit") => set_once(&mut title, value)?,
                 "body" if matches!(action, "open" | "edit" | "comment") => {
-                    set_once(&mut text, value)?
+                    set_once(&mut text, value)?;
                 }
                 "label" if matches!(action, "open" | "edit") => {
                     if labels.len() == MAX_LABELS {
@@ -139,7 +139,7 @@ impl<'a> Request<'a> {
                     labels.push(value);
                 }
                 "clear_labels" if action == "edit" && value == "true" => {
-                    set_once(&mut clear_labels, true)?
+                    set_once(&mut clear_labels, true)?;
                 }
                 _ => return Err(ApiError::bad("unknown_or_inapplicable_field")),
             }
@@ -328,7 +328,9 @@ pub(super) fn parse_head_token(text: &str) -> Result<RepositoryAuthorityHeadId, 
     }
     let bytes = digest
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Ok((digit(pair[0])? << 4) | digit(pair[1])?))
         .collect::<Result<Vec<_>, ApiError>>()?;
     let digest =

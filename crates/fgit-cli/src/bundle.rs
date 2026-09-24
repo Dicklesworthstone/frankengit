@@ -146,7 +146,7 @@ fn key_bytes(key: &Key, input: &mut impl Read) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
-pub(super) fn run(args: &[String]) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     if args
         .first()
         .is_some_and(|arg| matches!(arg.as_str(), "sync-export" | "sync-import"))

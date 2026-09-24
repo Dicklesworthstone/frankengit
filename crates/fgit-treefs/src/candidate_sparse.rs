@@ -179,7 +179,7 @@ impl<A: GitHashAlgorithm> SparseCandidateManifest<A> {
             candidate,
             tree,
             parse_limits,
-            base.path_policy().clone(),
+            *base.path_policy(),
         );
         let content = SparseManifest::build(&cursor, source, capability, now, limits)
             .map_err(CandidateManifestRefusal::Sparse)?;
@@ -191,23 +191,23 @@ impl<A: GitHashAlgorithm> SparseCandidateManifest<A> {
             content,
         })
     }
-    pub fn repository_id(&self) -> RepositoryId {
+    pub const fn repository_id(&self) -> RepositoryId {
         self.content.receipt().repository_id()
     }
     /// Canonical RCR of the BASE, never a record admitting the candidate.
-    pub fn base_rcr_id(&self) -> RepositoryCommitId {
+    pub const fn base_rcr_id(&self) -> RepositoryCommitId {
         self.base_rcr
     }
-    pub fn base_commit_oid(&self) -> &GitOid<A> {
+    pub const fn base_commit_oid(&self) -> &GitOid<A> {
         &self.base_commit
     }
-    pub fn base_tree_oid(&self) -> &GitOid<A> {
+    pub const fn base_tree_oid(&self) -> &GitOid<A> {
         &self.base_tree
     }
-    pub fn candidate_commit_oid(&self) -> &GitOid<A> {
+    pub const fn candidate_commit_oid(&self) -> &GitOid<A> {
         self.content.receipt().source_commit_oid()
     }
-    pub fn candidate_tree_oid(&self) -> &GitOid<A> {
+    pub const fn candidate_tree_oid(&self) -> &GitOid<A> {
         self.content.receipt().source_tree_oid()
     }
     /// Verified native order, not parent identities supplied by a report.
@@ -217,7 +217,7 @@ impl<A: GitHashAlgorithm> SparseCandidateManifest<A> {
     pub fn entries(&self) -> &[SparseEntry<A>] {
         self.content.entries()
     }
-    pub fn payload_bytes(&self) -> usize {
+    pub const fn payload_bytes(&self) -> usize {
         self.content.receipt().payload_bytes()
     }
 }

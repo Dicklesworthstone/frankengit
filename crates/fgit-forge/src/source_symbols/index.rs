@@ -127,7 +127,7 @@ macro_rules! frame {
 frame!(TableFrame, "source-symbol-table");
 frame!(ManifestFrame, "source-symbol-manifest");
 frame!(ProfileFrame, "source-symbol-profile");
-fn decode_limits() -> DecodeLimits {
+const fn decode_limits() -> DecodeLimits {
     DecodeLimits {
         frame_bytes: MAX_PAYLOAD as u64,
         byte_string_bytes: MAX_PAYLOAD as u64,
@@ -197,21 +197,27 @@ pub struct Manifest {
     non_regular: usize,
 }
 impl Manifest {
-    pub fn source(&self) -> &Source {
+    #[must_use]
+    pub const fn source(&self) -> &Source {
         &self.source
     }
+    #[must_use]
     pub fn documents(&self) -> &[Document] {
         &self.documents
     }
-    pub fn unsupported_files(&self) -> usize {
+    #[must_use]
+    pub const fn unsupported_files(&self) -> usize {
         self.unsupported
     }
-    pub fn non_regular_entries(&self) -> usize {
+    #[must_use]
+    pub const fn non_regular_entries(&self) -> usize {
         self.non_regular
     }
+    #[must_use]
     pub fn source_bytes(&self) -> usize {
         self.documents.iter().map(|d| d.source_bytes).sum()
     }
+    #[must_use]
     pub fn declarations(&self) -> usize {
         self.documents.iter().map(|d| d.declarations).sum()
     }
@@ -467,7 +473,8 @@ pub struct Corpus {
     names: Vec<directory::Names>,
 }
 impl Corpus {
-    pub fn empty(source: SourceSearchReport) -> Self {
+    #[must_use]
+    pub const fn empty(source: SourceSearchReport) -> Self {
         Self {
             source,
             documents: Vec::new(),
@@ -525,11 +532,13 @@ impl Corpus {
         check(cancelled)?;
         Ok((manifest, tables, directory))
     }
-    pub fn source(&self) -> &SourceSearchReport {
+    #[must_use]
+    pub const fn source(&self) -> &SourceSearchReport {
         &self.source
     }
     /// Current paths whose tables were reused without fetching/scanning blobs.
-    pub fn reused_files(&self) -> usize {
+    #[must_use]
+    pub const fn reused_files(&self) -> usize {
         self.reused
     }
 }
@@ -741,6 +750,7 @@ impl Query {
             tables: 0,
         })
     }
+    #[must_use]
     pub fn includes(&self, doc: &Document) -> bool {
         let prefixes = self.query.source_scope().prefixes();
         prefixes.is_empty()
@@ -798,6 +808,7 @@ impl Query {
         }
         Ok(false)
     }
+    #[must_use]
     pub fn finish(
         self,
         manifest: &Manifest,

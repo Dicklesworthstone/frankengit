@@ -6,7 +6,7 @@ use fgit_forge::patch::{
 use fgit_pack::binary_patch::{BinaryPatchBatch, BinaryPatchError, BinaryPatchLimits};
 use fgit_types::{GitHashAlgorithm, GitOid};
 
-fn invalid(reason: &'static str) -> PatchError {
+const fn invalid(reason: &'static str) -> PatchError {
     PatchError::Syntax { line: 1, reason }
 }
 fn identity(bytes: &[u8], format: GitHashAlgorithm) -> Result<Option<GitOid>, PatchError> {

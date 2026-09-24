@@ -5,7 +5,7 @@
 //! machine-readable refusal code and parameter spans. It never silently fails,
 //! panics, or falls through to an alternative operation.
 
-use core::fmt;
+use core::fmt::{self, Write as _};
 
 /// Typed refusal returned when an MCP call cannot be dispatched or admitted.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -241,7 +241,7 @@ fn escape_json(input: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             control if (control as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", control as u32));
+                let _ = write!(out, "\\u{:04x}", control as u32);
             }
             other => out.push(other),
         }

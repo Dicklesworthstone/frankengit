@@ -88,12 +88,11 @@ where
                 OutboxRecordEvidence::Ordinary => {}
                 OutboxRecordEvidence::Progress(progress) => chain.progress(progress)?,
                 OutboxRecordEvidence::Effect(effect) => {
-                    if effect.delivery_key() == key {
-                        if let Some(receipt) =
+                    if effect.delivery_key() == key
+                        && let Some(receipt) =
                             read_effect_receipt(store, cx, &effect, cancelled).await?
-                        {
-                            chain.terminal(&effect, receipt)?;
-                        }
+                    {
+                        chain.terminal(&effect, receipt)?;
                     }
                     chain.effect(&effect)?;
                 }
@@ -349,7 +348,7 @@ struct ReverseProgress {
 }
 
 impl ReverseProgress {
-    fn new(key: AsciiSlug) -> Self {
+    const fn new(key: AsciiSlug) -> Self {
         Self {
             key,
             latest: None,

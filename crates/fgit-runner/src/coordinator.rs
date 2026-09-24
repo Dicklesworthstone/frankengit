@@ -35,6 +35,7 @@ pub const COMMAND_ONLY_PROFILE: &str = "coordinator-command-only-v1";
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WorkflowRunId(Commitment);
 impl WorkflowRunId {
+    #[must_use]
     pub fn derive(
         tenant: &TenantId,
         repo: &RepositoryId,
@@ -55,6 +56,7 @@ impl WorkflowRunId {
         bytes.extend_from_slice(&sequence.to_be_bytes());
         Self(commitment(&bytes))
     }
+    #[must_use]
     pub const fn commitment(&self) -> Commitment {
         self.0
     }
@@ -75,6 +77,7 @@ fn commitment(bytes: &[u8]) -> Commitment {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AttemptId(Commitment);
 impl AttemptId {
+    #[must_use]
     pub fn derive(run_id: WorkflowRunId, attempt_number: u32) -> Self {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(ATTEMPT_DOMAIN);
@@ -82,6 +85,7 @@ impl AttemptId {
         bytes.extend_from_slice(&attempt_number.to_be_bytes());
         Self(commitment(&bytes))
     }
+    #[must_use]
     pub const fn commitment(&self) -> Commitment {
         self.0
     }
@@ -96,6 +100,7 @@ impl fmt::Display for AttemptId {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct JobAttemptId(Commitment);
 impl JobAttemptId {
+    #[must_use]
     pub fn derive(attempt_id: AttemptId, job_id: &str, job_attempt: u32) -> Self {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(JOB_ATTEMPT_DOMAIN);
@@ -104,6 +109,7 @@ impl JobAttemptId {
         bytes.extend_from_slice(&job_attempt.to_be_bytes());
         Self(commitment(&bytes))
     }
+    #[must_use]
     pub const fn commitment(&self) -> Commitment {
         self.0
     }
@@ -113,6 +119,7 @@ impl JobAttemptId {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StepAttemptId(Commitment);
 impl StepAttemptId {
+    #[must_use]
     pub fn derive(job_attempt: JobAttemptId, step_index: usize) -> Self {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(STEP_ATTEMPT_DOMAIN);
@@ -120,6 +127,7 @@ impl StepAttemptId {
         bytes.extend_from_slice(&(step_index as u64).to_be_bytes());
         Self(commitment(&bytes))
     }
+    #[must_use]
     pub const fn commitment(&self) -> Commitment {
         self.0
     }
@@ -132,6 +140,7 @@ impl IdempotencyKey {
     pub fn new(key: impl Into<String>) -> Self {
         Self(key.into())
     }
+    #[must_use]
     pub fn of(
         trigger_name: &str,
         source_commit: &GitOid,
@@ -142,6 +151,7 @@ impl IdempotencyKey {
             "{trigger_name}:{source_commit}:{workflow_path}:{sequence}"
         ))
     }
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -215,9 +225,11 @@ pub enum RunOutcome {
     Invalidated { reason: String },
 }
 impl RunOutcome {
+    #[must_use]
     pub const fn is_success(&self) -> bool {
         matches!(self, Self::Succeeded)
     }
+    #[must_use]
     pub const fn token(&self) -> &'static str {
         match self {
             Self::Succeeded => "succeeded",
@@ -317,6 +329,7 @@ pub struct ObligationSummary {
     pub workflow_scopes_closed: usize,
 }
 impl ObligationSummary {
+    #[must_use]
     pub fn is_quiescent(&self) -> bool {
         self.runner_slots_committed
             .checked_add(self.runner_slots_aborted)
@@ -409,6 +422,7 @@ pub enum CheckRunConclusion {
     ActionRequired,
 }
 impl CheckRunFact {
+    #[must_use]
     pub fn canonical_commitment(&self) -> Commitment {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(CHECK_FACT_DOMAIN);
@@ -501,7 +515,8 @@ impl WorkflowCoordinator {
             obligations: ObligationSummary::default(),
         })
     }
-    pub fn obligations(&self) -> &ObligationSummary {
+    #[must_use]
+    pub const fn obligations(&self) -> &ObligationSummary {
         &self.obligations
     }
 
@@ -955,6 +970,7 @@ impl WorkflowCoordinator {
 
     /// Lookup within the exact tenant/repository namespace. No key from another
     /// namespace can select a run or cause a duplicate-trigger refusal.
+    #[must_use]
     pub fn lookup_in_repository(
         &self,
         tenant: TenantId,
@@ -968,6 +984,7 @@ impl WorkflowCoordinator {
 
     /// Compatibility lookup for callers with one repository. Ambiguous keys
     /// fail closed instead of selecting whichever tenant happens to sort first.
+    #[must_use]
     pub fn lookup_by_idempotency(&self, key: &IdempotencyKey) -> Option<&ActiveRun> {
         let mut matches = self
             .idempotency_map
