@@ -49,3 +49,6 @@ rustc-ice-*.txt
 # Per-host gate wrappers at the repo root.
 /.gate_*.sh
 /.verify_*.sh
+# Python bytecode from the scripts/e2e smoke campaigns run by cargo test harnesses.
+__pycache__/
+*.pyc
