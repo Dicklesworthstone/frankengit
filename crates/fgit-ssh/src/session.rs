@@ -176,6 +176,9 @@ pub struct SshServerSession {
     channel_input_data: Vec<u8>,
     channel_eof_received: bool,
     channel_closed_received: bool,
+    /// Whether our CHANNEL_CLOSE was sent; RFC 4254 section 5.3 answers a
+    /// peer's CLOSE only when ours has not been sent yet.
+    channel_close_sent: bool,
 }
 
 impl SshServerSession {
@@ -220,6 +223,7 @@ impl SshServerSession {
             channel_input_data: Vec::new(),
             channel_eof_received: false,
             channel_closed_received: false,
+            channel_close_sent: false,
         }
     }
 
@@ -855,11 +859,14 @@ impl SshServerSession {
             }
             msg::CHANNEL_CLOSE => {
                 self.channel_closed_received = true;
-                let recipient = self.client_channel_id.unwrap_or(0);
-                let mut close = WireWriter::new();
-                close.write_u8(msg::CHANNEL_CLOSE);
-                close.write_u32(recipient);
-                self.send_packet(&close.into_bytes());
+                if !self.channel_close_sent {
+                    let recipient = self.client_channel_id.unwrap_or(0);
+                    let mut close = WireWriter::new();
+                    close.write_u8(msg::CHANNEL_CLOSE);
+                    close.write_u32(recipient);
+                    self.send_packet(&close.into_bytes());
+                    self.channel_close_sent = true;
+                }
                 self.phase = SessionPhase::Closed;
             }
             _ => {
@@ -962,6 +969,7 @@ impl SshServerSession {
         close.write_u8(msg::CHANNEL_CLOSE);
         close.write_u32(recipient_channel);
         self.send_packet(&close.into_bytes());
+        self.channel_close_sent = true;
     }
 
     /// Closes the active client channel with an exit status code.

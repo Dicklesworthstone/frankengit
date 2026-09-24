@@ -99,24 +99,35 @@ impl From<NodeRefusal> for NodeSshRefusal {
     }
 }
 
-/// Finishes a connection without discarding the client's last bytes.
+/// Finishes a connection without discarding output the client has not
+/// delivered yet.
 ///
-/// Closing a TCP socket that still holds unread input (here: the client's
-/// CHANNEL_WINDOW_ADJUST and CHANNEL_CLOSE packets) makes the kernel send RST,
-/// and an RST can destroy output the client has not read yet: a completed
-/// clone then fails with "connection reset by peer". Half-close our side and
-/// drain until the client disconnects, bounded in time and bytes.
-fn close_gracefully(stream: &mut TcpStream) {
+/// After our CHANNEL_CLOSE the client still drains buffered channel output to
+/// its local program (git fetch-pack) and then sends its own CLOSE and
+/// disconnects. Closing or half-closing TCP before that makes OpenSSH report
+/// "connection closed by remote host" and exit immediately, truncating a
+/// completed clone; dropping a socket with unread input sends RST, which can
+/// destroy output too. So keep processing the client's packets (window
+/// adjustments, its CLOSE) until it disconnects, bounded in time and bytes.
+fn close_gracefully(session: &mut SshServerSession, stream: &mut TcpStream) {
     let _ = stream.flush();
-    let _ = stream.shutdown(std::net::Shutdown::Write);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let started = std::time::Instant::now();
     let mut drained = 0usize;
     let mut buf = [0u8; 16384];
-    while started.elapsed() < Duration::from_secs(5) && drained < 4 * 1024 * 1024 {
+    while started.elapsed() < Duration::from_secs(10) && drained < 4 * 1024 * 1024 {
         match stream.read(&mut buf) {
             Ok(0) | Err(_) => break,
-            Ok(n) => drained += n,
+            Ok(n) => {
+                drained += n;
+                if session.handle_incoming_bytes(&buf[..n]).is_err() {
+                    break;
+                }
+                let out = session.take_outgoing_bytes();
+                if !out.is_empty() && (stream.write_all(&out).is_err() || stream.flush().is_err()) {
+                    break;
+                }
+            }
         }
     }
 }
@@ -427,6 +438,7 @@ impl OneNode {
             let out = session.take_outgoing_bytes();
             let _ = stream.write_all(&out);
             let _ = stream.flush();
+            close_gracefully(&mut session, &mut stream);
             return false;
         }
 
@@ -439,6 +451,7 @@ impl OneNode {
                 let out = session.take_outgoing_bytes();
                 let _ = stream.write_all(&out);
                 let _ = stream.flush();
+                close_gracefully(&mut session, &mut stream);
                 return false;
             }
         };
@@ -458,6 +471,7 @@ impl OneNode {
                 let out = session.take_outgoing_bytes();
                 let _ = stream.write_all(&out);
                 let _ = stream.flush();
+                close_gracefully(&mut session, &mut stream);
                 let _ = child_node.shutdown();
                 return false;
             }
@@ -476,6 +490,7 @@ impl OneNode {
             let out = session.take_outgoing_bytes();
             let _ = stream.write_all(&out);
             let _ = stream.flush();
+            close_gracefully(&mut session, &mut stream);
             let _ = child_node.shutdown();
             return false;
         }
@@ -513,7 +528,7 @@ impl OneNode {
             let _ = final_state.stream.write_all(&final_out);
             let _ = final_state.stream.flush();
         }
-        close_gracefully(&mut final_state.stream);
+        close_gracefully(&mut final_state.session, &mut final_state.stream);
 
         let cleanup = child_node.shutdown();
         success && cleanup.is_ok()

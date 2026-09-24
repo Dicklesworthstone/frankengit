@@ -467,7 +467,9 @@ fn an_unknown_event_kind_on_the_wire_is_refused_and_a_known_one_is_not() {
         "the located field must be the tag that says PullRequestClosed"
     );
 
-    for unknown in [0_u32, 11, 99, u32::from(u16::MAX)] {
+    // Kinds 1..=11 are assigned (11 = workflow check observed, 94a77dfb);
+    // 12 is the first unassigned kind. Zero and far-out values stay refused.
+    for unknown in [0_u32, 12, 99, u32::from(u16::MAX)] {
         let mut corrupted = bytes.clone();
 
         corrupted[kind_offset..kind_offset + 4].copy_from_slice(&unknown.to_be_bytes());
