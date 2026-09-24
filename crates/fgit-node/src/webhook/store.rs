@@ -5,6 +5,11 @@
 //! acknowledging success. Independent handles cannot overwrite unseen updates.
 //! Lock contention refuses without waiting. A post-rename sync failure is an
 //! explicitly unknown durability outcome; reopening observes the visible file.
+//!
+//! Record and lock slots must be regular files, not symlinks or special files.
+//! Check before opening so a dangling link cannot mean empty state and a FIFO
+//! cannot block startup. Parent directories must remain operator-owned: these
+//! path checks are not confinement against concurrent hostile directory edits.
 
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
@@ -29,23 +34,41 @@ const MAX_RECORDS: usize = 4096;
 #[cfg(unix)]
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Inspect the directory entry itself. Only a genuinely absent slot may be
+/// initialized; following a dangling link would erase the distinction.
+fn regular_slot(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(Some(metadata)),
+        Ok(_) => Err(
+            "webhook store slot must be a regular file, not a link or special file".into(),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot inspect webhook store slot: {error}")),
+    }
+}
+
+fn check_record_file(metadata: &std::fs::Metadata) -> Result<(), String> {
+    if !metadata.is_file() {
+        return Err("webhook store is not a regular file".into());
+    }
+    if metadata.len() > MAX_STORE_BYTES as u64 {
+        return Err("webhook store exceeds the 16 MiB limit".into());
+    }
+    Ok(())
+}
+
 fn read_records<T, K: Ord>(
     path: &Path,
     parse: fn(&str) -> Option<T>,
     key: fn(&T) -> K,
 ) -> Result<Vec<T>, String> {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("cannot read webhook store: {error}")),
+    let Some(metadata) = regular_slot(path)? else {
+        return Ok(Vec::new());
     };
-    if !file
-        .metadata()
-        .map_err(|error| error.to_string())?
-        .is_file()
-    {
-        return Err("webhook store is not a regular file".into());
-    }
+    // Refuse oversized/special files before allocating or performing any read.
+    check_record_file(&metadata)?;
+    let file = File::open(path).map_err(|error| format!("cannot read webhook store: {error}"))?;
+    check_record_file(&file.metadata().map_err(|error| error.to_string())?)?;
     let mut bytes = Vec::new();
     file.take((MAX_STORE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
@@ -57,11 +80,15 @@ fn read_records<T, K: Ord>(
     let mut records = Vec::new();
     let mut keys = BTreeSet::new();
     for (index, line) in text.lines().enumerate() {
+        // Padding and comments still consume the per-record input budget.
+        if line.len() > MAX_RECORD_BYTES {
+            return Err(format!("webhook store limit at line {}", index + 1));
+        }
         let line = line.trim_matches([' ', '\t', '\r']);
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if records.len() >= MAX_RECORDS || line.len() > MAX_RECORD_BYTES {
+        if records.len() >= MAX_RECORDS {
             return Err(format!("webhook store limit at line {}", index + 1));
         }
         let record =
@@ -100,16 +127,27 @@ fn encode_records<T: PartialEq>(
 fn lock_writer(path: &Path) -> Result<File, String> {
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
+    let lock_path = PathBuf::from(name);
+    let exists = regular_slot(&lock_path)?.is_some();
     let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
+    // An absent lock is created exclusively; if a competing writer installs
+    // it first, refuse and let the caller retry rather than following its path.
+    options
+        .read(true)
+        .write(true)
+        .create_new(!exists)
+        .truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     let file = options
-        .open(PathBuf::from(name))
+        .open(&lock_path)
         .map_err(|error| format!("cannot open webhook writer lock: {error}"))?;
+    if !file.metadata().map_err(|error| error.to_string())?.is_file() {
+        return Err("webhook writer lock is not a regular file".into());
+    }
     file.try_lock()
         .map_err(|error| format!("webhook writer lock unavailable: {error}"))?;
     // Never unlink this inode: another process may already be waiting on it.
@@ -215,8 +253,17 @@ fn load_dead_letters(path: &Path) -> Result<Vec<DeadLetterEntry>, String> {
     read_records(path, parse_dead_letter_line, |entry| entry.delivery_id)
 }
 
+fn checked_registration(line: &str) -> Option<WebhookRegistration> {
+    let registration = parse_registration_line(line)?;
+    let schedule = registration.retry_schedule;
+    if schedule.initial_delay.is_zero() || schedule.max_delay < schedule.initial_delay {
+        return None;
+    }
+    Some(registration)
+}
+
 fn load_registrations(path: &Path) -> Result<Vec<WebhookRegistration>, String> {
-    read_records(path, parse_registration_line, |entry| entry.id)
+    read_records(path, checked_registration, |entry| entry.id)
 }
 
 #[derive(Debug, Default)]
@@ -403,7 +450,7 @@ impl WebhookStore {
         let _writer = lock_writer(&path)?;
         let mut next = load_registrations(&path)?;
         let value = change(&mut next)?;
-        let bytes = encode_records(&next, serialize_registration, parse_registration_line)?;
+        let bytes = encode_records(&next, serialize_registration, checked_registration)?;
         replace_file(&path, &bytes)?;
         *current = next;
         Ok(value)
@@ -721,5 +768,234 @@ mod tests {
         assert!(WebhookStore::open(dir.0.clone()).is_err());
         std::fs::write(&path, [0xff]).unwrap();
         assert!(WebhookStore::open(dir.0.clone()).is_err());
+    }
+
+    #[test]
+    fn linked_record_slots_refuse_without_disclosing_or_replacing_the_target() {
+        use std::os::unix::fs::symlink;
+        for filename in ["registrations.json", "dead_letters.jsonl"] {
+            for dangling in [false, true] {
+                let dir = Directory::new();
+                let path = dir.0.join(filename);
+                let target = dir.0.join("outside-records");
+                let record = if filename == "registrations.json" {
+                    serialize_registration(&registration(1))
+                } else {
+                    serialize_dead_letter(&letter())
+                };
+                if !dangling {
+                    std::fs::write(&target, &record).unwrap();
+                }
+                symlink(&target, &path).unwrap();
+                let error = WebhookStore::open(dir.0.clone()).unwrap_err();
+                assert!(error.contains("regular file"));
+                assert_eq!(std::fs::read_link(&path).unwrap(), target);
+                if dangling {
+                    assert!(!target.exists());
+                } else {
+                    assert_eq!(std::fs::read_to_string(&target).unwrap(), record);
+                }
+                std::fs::remove_file(&path).unwrap();
+                std::fs::write(&path, &record).unwrap();
+                let reopened = WebhookStore::open(dir.0.clone()).unwrap();
+                if filename == "registrations.json" {
+                    assert_eq!(reopened.list(), vec![registration(1)]);
+                } else {
+                    assert_eq!(reopened.list_dead_letters(), vec![letter()]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn special_record_slots_refuse_before_open_and_regular_empty_files_are_allowed() {
+        use std::os::unix::net::UnixListener;
+        for filename in ["registrations.json", "dead_letters.jsonl"] {
+            let dir = Directory::new();
+            let path = dir.0.join(filename);
+            std::fs::create_dir(&path).unwrap();
+            assert!(
+                WebhookStore::open(dir.0.clone())
+                    .unwrap_err()
+                    .contains("regular file")
+            );
+            std::fs::remove_dir(&path).unwrap();
+            let listener = UnixListener::bind(&path).unwrap();
+            assert!(
+                WebhookStore::open(dir.0.clone())
+                    .unwrap_err()
+                    .contains("regular file")
+            );
+            drop(listener);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::write(&path, b"").unwrap();
+            let reopened = WebhookStore::open(dir.0.clone()).unwrap();
+            assert!(reopened.list().is_empty());
+            assert!(reopened.list_dead_letters().is_empty());
+        }
+    }
+
+    #[test]
+    fn linked_writer_locks_refuse_without_creating_a_dangling_target() {
+        use std::os::unix::fs::symlink;
+        for filename in ["registrations.json", "dead_letters.jsonl"] {
+            for dangling in [false, true] {
+                let dir = Directory::new();
+                let path = dir.0.join(filename);
+                let lock_path = dir.0.join(format!("{filename}.lock"));
+                let target = dir.0.join("outside-lock");
+                if !dangling {
+                    std::fs::write(&target, b"untouched").unwrap();
+                }
+                symlink(&target, &lock_path).unwrap();
+                assert!(lock_writer(&path).unwrap_err().contains("regular file"));
+                assert_eq!(std::fs::read_link(&lock_path).unwrap(), target);
+                if dangling {
+                    assert!(!target.exists());
+                } else {
+                    assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+                }
+                std::fs::remove_file(&lock_path).unwrap();
+                let lease = lock_writer(&path).unwrap();
+                assert!(lock_writer(&path).is_err());
+                drop(lease);
+                assert!(lock_writer(&path).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn registration_reload_refuses_a_link_installed_after_open_without_cache_change() {
+        use std::os::unix::fs::symlink;
+        let dir = Directory::new();
+        let store = WebhookStore::open(dir.0.clone()).unwrap();
+        store.register(registration(1)).unwrap();
+        let path = dir.0.join("registrations.json");
+        let target = dir.0.join("saved-registration");
+        std::fs::rename(&path, &target).unwrap();
+        let before = std::fs::read(&target).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(store.register(registration(2)).is_err());
+        assert_eq!(store.list(), vec![registration(1)]);
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&target, &path).unwrap();
+        store.register(registration(2)).unwrap();
+        assert_eq!(WebhookStore::open(dir.0.clone()).unwrap().list().len(), 2);
+    }
+
+    #[test]
+    fn dead_letter_reload_refuses_a_link_without_losing_replay_evidence() {
+        use std::os::unix::fs::symlink;
+        let dir = Directory::new();
+        let path = dir.0.join("dead_letters.jsonl");
+        let queue = DeadLetterQueue::try_with_persist_path(path.clone()).unwrap();
+        queue.try_push(letter()).unwrap();
+        let target = dir.0.join("saved-dead-letter");
+        std::fs::rename(&path, &target).unwrap();
+        let before = std::fs::read(&target).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(queue.try_remove(letter().delivery_id).is_err());
+        assert_eq!(queue.get(letter().delivery_id), Some(letter()));
+        assert!(queue.persistence_error().is_some());
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&target, &path).unwrap();
+        assert_eq!(
+            queue.try_remove(letter().delivery_id).unwrap(),
+            Some(letter())
+        );
+        assert!(queue.persistence_error().is_none());
+    }
+
+    #[test]
+    fn raw_line_budget_applies_before_ignoring_padding_and_comments() {
+        let dir = Directory::new();
+        let path = dir.0.join("registrations.json");
+        for prefix in ["", "#"] {
+            let permitted = format!("{prefix}{}", " ".repeat(MAX_RECORD_BYTES - prefix.len()));
+            std::fs::write(&path, &permitted).unwrap();
+            assert!(load_registrations(&path).unwrap().is_empty());
+            std::fs::write(&path, format!("{permitted} ")).unwrap();
+            assert!(load_registrations(&path).is_err());
+        }
+        let record = serialize_registration(&registration(1));
+        let permitted = format!("{}{}", " ".repeat(MAX_RECORD_BYTES - record.len()), record);
+        std::fs::write(&path, &permitted).unwrap();
+        assert_eq!(load_registrations(&path).unwrap(), vec![registration(1)]);
+        std::fs::write(&path, format!(" {permitted}")).unwrap();
+        assert!(load_registrations(&path).is_err());
+    }
+
+    #[test]
+    fn file_metadata_budget_has_an_exact_permitted_boundary() {
+        let dir = Directory::new();
+        let path = dir.0.join("registrations.json");
+        let file = File::create(path).unwrap();
+        file.set_len(MAX_STORE_BYTES as u64).unwrap();
+        assert!(check_record_file(&file.metadata().unwrap()).is_ok());
+        file.set_len((MAX_STORE_BYTES + 1) as u64).unwrap();
+        assert!(check_record_file(&file.metadata().unwrap()).is_err());
+    }
+
+    #[test]
+    fn stale_writer_rotates_the_current_key_and_preserves_its_expiry() {
+        let dir = Directory::new();
+        let first = WebhookStore::open(dir.0.clone()).unwrap();
+        first.register(registration(1)).unwrap();
+        let second = WebhookStore::open(dir.0.clone()).unwrap();
+        let middle = WebhookSecret::new(vec![2; 32]).unwrap();
+        first
+            .rotate_secret(WebhookId(1), middle.clone(), 60, 1000)
+            .unwrap();
+        let newest = WebhookSecret::new(vec![3; 32]).unwrap();
+        second
+            .rotate_secret(WebhookId(1), newest.clone(), 10, 1005)
+            .unwrap();
+        let restored = WebhookStore::open(dir.0.clone())
+            .unwrap()
+            .get(WebhookId(1))
+            .unwrap();
+        assert_eq!(restored.secrets.active(), &newest);
+        assert_eq!(restored.secrets.expiring(), Some((&middle, 1015)));
+        assert!(
+            restored
+                .secrets
+                .verify(b"event", &middle.sign(b"event"), 1015)
+        );
+        assert!(
+            !restored
+                .secrets
+                .verify(b"event", &middle.sign(b"event"), 1016)
+        );
+    }
+
+    #[test]
+    fn invalid_retry_delay_bounds_refuse_both_publication_and_reopen() {
+        for (initial, maximum) in [(0, 10), (2, 1)] {
+            let dir = Directory::new();
+            let store = WebhookStore::open(dir.0.clone()).unwrap();
+            store.register(registration(1)).unwrap();
+            let path = dir.0.join("registrations.json");
+            let before = std::fs::read(&path).unwrap();
+            let mut invalid = registration(2);
+            invalid.retry_schedule.initial_delay = Duration::from_millis(initial);
+            invalid.retry_schedule.max_delay = Duration::from_millis(maximum);
+            assert!(store.register(invalid.clone()).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(store.list(), vec![registration(1)]);
+            std::fs::write(&path, serialize_registration(&invalid)).unwrap();
+            assert!(WebhookStore::open(dir.0.clone()).is_err());
+            std::fs::write(&path, before).unwrap();
+            invalid.retry_schedule.initial_delay = Duration::from_millis(1);
+            invalid.retry_schedule.max_delay = Duration::from_millis(1);
+            store.register(invalid.clone()).unwrap();
+            assert_eq!(
+                WebhookStore::open(dir.0.clone()).unwrap().get(WebhookId(2)),
+                Some(invalid)
+            );
+        }
     }
 }
