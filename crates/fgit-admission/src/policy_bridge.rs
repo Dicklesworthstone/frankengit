@@ -23,6 +23,8 @@ pub mod persisted;
 /// Authority-bound reuse of validation evidence between receive commands.
 pub mod receive_session;
 
+mod compiled_protection;
+
 use crate::RefusalCode;
 use fgit_policy::content::PolicySnapshotId;
 use fgit_policy::{Decision, PolicyEvaluation};
@@ -358,10 +360,7 @@ pub fn ref_updates_from_commands(
 pub fn compile_branch_protection_policy(
     pattern: &str,
 ) -> Result<fgit_policy::PolicySnapshot, fgit_policy::error::PolicyCompileRefusal> {
-    let source = format!(
-        "policy branch_protection {{\n    rule protect {{\n        when ref.name matches \"{pattern}\" and ref.update == delete\n        then deny \"ref deletion is prohibited\"\n    }}\n    default allow\n}}"
-    );
-    fgit_policy::compile_and_seal(&source)
+    compiled_protection::branch_deletion(pattern)
 }
 
 /// Compiles a policy snapshot that prohibits direct updates to named protected branches.
@@ -371,21 +370,7 @@ pub fn compile_protected_branch_rules<'a, I>(
 where
     I: IntoIterator<Item = &'a str>,
 {
-    let mut rules = String::new();
-    let mut idx = 0;
-    for branch in branches {
-        idx += 1;
-        let pattern = if branch.starts_with("refs/") {
-            branch.to_string()
-        } else {
-            format!("refs/heads/{branch}")
-        };
-        rules.push_str(&format!(
-            "    rule protect_branch_{idx} {{\n        when ref.name matches \"{pattern}\"\n        then deny \"direct update to protected branch {branch} prohibited\"\n    }}\n"
-        ));
-    }
-    let source = format!("policy forge_branch_protection {{\n{rules}    default allow\n}}");
-    fgit_policy::compile_and_seal(&source)
+    compiled_protection::named_branches(branches)
 }
 
 /// Evaluates receive-pack ref protection against a pinned snapshot.
