@@ -24,6 +24,7 @@ pub mod persisted;
 pub mod receive_session;
 
 mod compiled_protection;
+pub(crate) use compiled_protection::receive_refusal;
 
 use crate::RefusalCode;
 use fgit_policy::content::PolicySnapshotId;

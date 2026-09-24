@@ -11,6 +11,8 @@ use fgit_policy::syntax::{
     SourceRule, Spanned,
 };
 use fgit_policy::{PolicyCompileRefusal, PolicySnapshot, PolicySnapshotBody, PolicySyntaxRefusal};
+use fgit_types::{GitOid, PrincipalId, RefName, RefusalCode};
+use std::collections::BTreeMap;
 
 // Preserve the old source-size envelope even though no dynamic source is parsed.
 const DELETION_OVERHEAD: usize = concat!(
@@ -138,11 +140,56 @@ where
     })
 }
 
+/// Check the existing receive default-branch deletion rule. Both sync and
+/// async admission call this through their shared publication preparation.
+/// An absent policy verdict is not evidence that publication is permitted.
+pub(crate) fn receive_refusal(
+    target: &RefName,
+    principal_id: PrincipalId,
+    refs_before: &BTreeMap<RefName, GitOid>,
+    commands: &[fgit_authority::RefCommand],
+) -> Option<RefusalCode> {
+    if !commands.iter().any(|command| {
+        command.name == *target
+            && matches!(command.proposed_new, fgit_authority::ProposedNew::Delete)
+    }) {
+        return None;
+    }
+    let fail_closed = Some(RefusalCode::ProtectedRefTransitionDenied);
+    // RefName permits non-UTF-8 names. Do not replace one with a wildcard or
+    // silently skip the protection when this policy profile cannot express it.
+    let Ok(pattern) = std::str::from_utf8(target.as_bytes()) else {
+        return fail_closed;
+    };
+    let Ok(policy) = branch_deletion(pattern) else {
+        return fail_closed;
+    };
+    let mut source = super::InMemoryPolicySnapshots::new();
+    let id = source.pin(policy);
+    // This existing template reads ref facts only. Activation of policies that
+    // inspect actor attributes or time still requires the separate authenticated
+    // facts integration; this fix does not claim that integration is complete.
+    match super::evaluate_receive_pack_protection(
+        &source,
+        &id,
+        &super::SubjectCodeMap::default(),
+        principal_id,
+        super::default_principal_snapshot_id(),
+        refs_before,
+        commands,
+        fgit_policy::PolicyInstant::from_seconds(0),
+    ) {
+        Ok(verdict) => verdict.refusal,
+        Err(_) => fail_closed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use fgit_policy::{Decision, PolicyInstant, RefUpdateFact, RefUpdateKind};
-    use fgit_types::{GitOid, GitOidSha1, PrincipalId, RefName};
+    use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
+    use fgit_types::GitOidSha1;
 
     fn allows(snapshot: &PolicySnapshot, name: &str, delete: bool) -> bool {
         let old = GitOid::Sha1(GitOidSha1::from_bytes([1; 20]));
@@ -270,5 +317,167 @@ mod tests {
         assert!(branch_deletion("refs/heads/**").is_ok());
         assert!(named_branches(["refs/**/main"]).is_err());
         assert!(named_branches(["refs/heads/main"]).is_ok());
+    }
+    fn command(target: &RefName, delete: bool) -> RefCommand {
+        RefCommand {
+            name: target.clone(),
+            expected_old: ExpectedOld::Exactly(GitOid::Sha1(GitOidSha1::from_bytes([1; 20]))),
+            proposed_new: if delete {
+                ProposedNew::Delete
+            } else {
+                ProposedNew::Update(GitOid::Sha1(GitOidSha1::from_bytes([2; 20])))
+            },
+            force: false,
+        }
+    }
+
+    #[test]
+    fn unrepresentable_head_names_fail_closed_only_for_the_protected_operation() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let refs = BTreeMap::new();
+        for name in [
+            b"refs/heads/main".as_slice(),
+            b"refs/heads/nested/non-utf8-\xff".as_slice(),
+            "refs/heads/caf\u{00e9}".as_bytes(),
+            b"refs/heads/release\"or\"true".as_slice(),
+        ] {
+            let target = RefName::try_new(name).unwrap();
+            assert_eq!(
+                receive_refusal(&target, principal, &refs, &[command(&target, true)]),
+                Some(RefusalCode::ProtectedRefTransitionDenied)
+            );
+            assert_eq!(
+                receive_refusal(&target, principal, &refs, &[command(&target, false)]),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn evaluation_failure_cannot_remove_receive_protection() {
+        let principal = PrincipalId::from_bytes([7; 16]);
+        let target = RefName::try_new(b"refs/heads/main").unwrap();
+        let refs = BTreeMap::new();
+        let delete = command(&target, true);
+        let duplicate_commands = [delete.clone(), delete];
+        let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
+        let id = source.pin(branch_deletion("refs/heads/main").unwrap());
+        // Establish that the planted failure actually reaches input validation,
+        // rather than merely exercising an ordinary policy-denial result.
+        assert!(crate::policy_bridge::evaluate_receive_pack_protection(
+            &source,
+            &id,
+            &crate::policy_bridge::SubjectCodeMap::default(),
+            principal,
+            crate::policy_bridge::default_principal_snapshot_id(),
+            &refs,
+            &duplicate_commands,
+            PolicyInstant::from_seconds(0),
+        )
+        .is_err());
+        assert_eq!(
+            receive_refusal(&target, principal, &refs, &duplicate_commands),
+            Some(RefusalCode::ProtectedRefTransitionDenied)
+        );
+        assert_eq!(
+            receive_refusal(&target, principal, &refs, &[command(&target, false)]),
+            None
+        );
+    }
+
+    #[test]
+    fn canonical_materialization_cannot_replace_a_non_utf8_head_with_a_wildcard() {
+        use fgit_reference::effect::RefEffect;
+        let old = GitOid::Sha1(GitOidSha1::from_bytes([1; 20]));
+        let new = GitOid::Sha1(GitOidSha1::from_bytes([2; 20]));
+        for name in [
+            b"refs/heads/nested/plain".as_slice(),
+            b"refs/heads/nested/quoted\"name".as_slice(),
+            b"refs/heads/nested/non-utf8-\xff".as_slice(),
+        ] {
+            let target = RefName::try_new(name).unwrap();
+            let state = crate::CanonicalRefState::new_with_head_target(
+                BTreeMap::from([(target.clone(), old)]),
+                target.clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                state.apply(&BTreeMap::from([(target.clone(), RefEffect::Delete)])),
+                Err(RefusalCode::ProtectedRefTransitionDenied)
+            );
+            let updated = state
+                .apply(&BTreeMap::from([(target.clone(), RefEffect::Set(new))]))
+                .unwrap();
+            assert_eq!(updated.refs().get(&target), Some(&new));
+            assert_eq!(updated.head_target(), Some(&target));
+        }
+    }
+
+    #[test]
+    fn shared_publication_preparation_enforces_head_protection_before_the_fold() {
+        let mut names = vec![
+            b"refs/heads/main".to_vec(),
+            b"refs/heads/nested/non-utf8-\xff".to_vec(),
+            "refs/heads/caf\u{00e9}".as_bytes().to_vec(),
+            b"refs/heads/release\"or\"true".to_vec(),
+        ];
+        // Legal Git name outside the policy profile's pattern-length envelope.
+        names.push(format!("refs/heads/{}", "x".repeat(513)).into_bytes());
+        for bytes in names {
+            let target = RefName::try_new(&bytes).unwrap();
+            let old = GitOid::Sha1(GitOidSha1::from_bytes([1; 20]));
+            let context = crate::AdmissionContext {
+                head_key: fgit_authority::HeadKey::new(b"policy-guard-test".to_vec()).unwrap(),
+                tenant_id: fgit_types::TenantId::from_bytes([1; 16]),
+                repository_id: fgit_types::RepositoryId::from_bytes([2; 16]),
+                principal_id: PrincipalId::from_bytes([3; 16]),
+                idempotency_key: fgit_authority::IdempotencyKey::new(b"head-delete".to_vec())
+                    .unwrap(),
+                object_format: fgit_types::GitHashAlgorithm::Sha1,
+            };
+            let lowered = crate::LoweredRequest {
+                semantic: fgit_authority::SemanticRequest::build(
+                    fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+                    context.object_format,
+                    true,
+                    vec![command(&target, true)],
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .unwrap(),
+                idempotency_key: context.idempotency_key.clone(),
+            };
+            let objects = std::collections::BTreeSet::from([old]);
+            let closure = crate::ValidatedClosure {
+                object_closure_root: crate::permitted_object_closure_root(
+                    &crate::PermittedObjectClosure::new(objects.clone()),
+                )
+                .unwrap(),
+                objects,
+            };
+            let tx_id = crate::derive_tx_id(&context, &lowered).unwrap();
+            for protected in [true, false] {
+                let snapshot = crate::AdmissionSnapshot {
+                    refs: BTreeMap::from([(target.clone(), old)]),
+                    head_target: protected.then(|| target.clone()),
+                    ..crate::AdmissionSnapshot::default()
+                };
+                let prepared = crate::prepare_publication_from_snapshot(
+                    &context, &lowered, &closure, tx_id, snapshot,
+                )
+                .unwrap();
+                if protected {
+                    assert!(matches!(
+                        prepared,
+                        crate::PublicationPreparation::Refuse(
+                            RefusalCode::ProtectedRefTransitionDenied
+                        )
+                    ));
+                } else {
+                    // Same exact request, with only the HEAD protection absent.
+                    assert!(matches!(prepared, crate::PublicationPreparation::Commit(_)));
+                }
+            }
+        }
     }
 }

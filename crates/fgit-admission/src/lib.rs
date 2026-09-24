@@ -1255,7 +1255,8 @@ impl CanonicalRefState {
                 // replacing the ad-hoc inline check with deterministic policy evaluation.
                 let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
                 let policy = crate::policy_bridge::compile_branch_protection_policy(
-                    std::str::from_utf8(target.as_bytes()).unwrap_or("refs/heads/*"),
+                    std::str::from_utf8(target.as_bytes())
+                        .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?,
                 )
                 .map_err(|_| RefusalCode::ProtectedRefTransitionDenied)?;
                 let id = source.pin(policy);
@@ -2460,32 +2461,16 @@ fn prepare_publication_from_snapshot(
             RefusalCode::HiddenRefUnauthorized,
         ));
     }
-    // Wire receive-pack protection checks through fg043 PolicySnapshot via evaluate_protection:
+    // A required protection verdict must exist before publication can proceed.
+    // Compilation and evaluation errors are typed refusals, never skipped checks.
     if let Some(target) = &snapshot.head_target {
-        let targets_head_delete = lowered.semantic.ref_commands().iter().any(|cmd| {
-            cmd.name == *target && matches!(cmd.proposed_new, fgit_authority::ProposedNew::Delete)
-        });
-        if targets_head_delete {
-            let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
-            if let Ok(policy) = crate::policy_bridge::compile_branch_protection_policy(
-                std::str::from_utf8(target.as_bytes()).unwrap_or("refs/heads/*"),
-            ) {
-                let id = source.pin(policy);
-                if let Ok(verdict) = crate::policy_bridge::evaluate_receive_pack_protection(
-                    &source,
-                    &id,
-                    &crate::policy_bridge::SubjectCodeMap::default(),
-                    context.principal_id,
-                    crate::policy_bridge::default_principal_snapshot_id(),
-                    &snapshot.refs,
-                    lowered.semantic.ref_commands(),
-                    fgit_policy::PolicyInstant::from_seconds(0),
-                ) {
-                    if let Some(code) = verdict.refusal {
-                        return Ok(PublicationPreparation::Refuse(code));
-                    }
-                }
-            }
+        if let Some(code) = crate::policy_bridge::receive_refusal(
+            target,
+            context.principal_id,
+            &snapshot.refs,
+            lowered.semantic.ref_commands(),
+        ) {
+            return Ok(PublicationPreparation::Refuse(code));
         }
     }
     let fold = IntentEvaluator::new().evaluate(snapshot.as_fold_basis(), &model_request);
