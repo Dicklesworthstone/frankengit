@@ -99,6 +99,28 @@ impl From<NodeRefusal> for NodeSshRefusal {
     }
 }
 
+/// Finishes a connection without discarding the client's last bytes.
+///
+/// Closing a TCP socket that still holds unread input (here: the client's
+/// CHANNEL_WINDOW_ADJUST and CHANNEL_CLOSE packets) makes the kernel send RST,
+/// and an RST can destroy output the client has not read yet: a completed
+/// clone then fails with "connection reset by peer". Half-close our side and
+/// drain until the client disconnects, bounded in time and bytes.
+fn close_gracefully(stream: &mut TcpStream) {
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let started = std::time::Instant::now();
+    let mut drained = 0usize;
+    let mut buf = [0u8; 16384];
+    while started.elapsed() < Duration::from_secs(5) && drained < 4 * 1024 * 1024 {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => drained += n,
+        }
+    }
+}
+
 struct SshConnectionState {
     session: SshServerSession,
     stream: TcpStream,
@@ -491,6 +513,7 @@ impl OneNode {
             let _ = final_state.stream.write_all(&final_out);
             let _ = final_state.stream.flush();
         }
+        close_gracefully(&mut final_state.stream);
 
         let cleanup = child_node.shutdown();
         success && cleanup.is_ok()
