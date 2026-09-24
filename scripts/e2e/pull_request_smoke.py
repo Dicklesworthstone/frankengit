@@ -207,7 +207,15 @@ def run_format(binary, algorithm):
         page(listing("--limit", 3), algorithm, [2, 7, 10], limit=3)
         page(listing("--after", 10, "--expected-head", first["snapshot_token"]), algorithm, [], after=10, head=first["source_head"])
         mutate("open", 3, 0, "pr-open-3", original)
-        require(not invoke(binary, read_args("list", "--after", 7, "--expected-head", first["snapshot_token"]), 2).stdout, "stale pin disclosed a mixed page")
+        # A pinned token selects that exact retained ancestor (HTTP_ISSUE_API.md;
+        # the PR list shares the selector, 5c294d6e): PR 3, opened after the
+        # pin, stays absent and every page names the pinned head.
+        page(listing("--after", 7, "--expected-head", first["snapshot_token"]), algorithm, [10], after=7, head=first["source_head"])
+        page(listing("--expected-head", first["snapshot_token"]), algorithm, [2, 7, 10], head=first["source_head"])
+        page(listing(), algorithm, [2, 3, 7, 10])
+        # Refusal twin: a token naming no retained ancestor is refused with empty stdout.
+        unknown = first["snapshot_token"][:-1] + ("e" if first["snapshot_token"].endswith("f") else "f")
+        require(not invoke(binary, read_args("list", "--after", 7, "--expected-head", unknown), 2).stdout, "an unknown pin disclosed a page")
         closing = mutate("close", 7, 2, "pr-close-7", updated)
         row(showing(7)["pull_request"], 7, 3, "closed", updated)
         mutate("update", 7, 3, "pr-resurrection", updated, "ProtectedRefTransitionDenied")

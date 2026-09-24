@@ -100,8 +100,16 @@ def run_case(fg, root, fmt):
     assert events == final['events'], 'paging must not skip, repeat, or rewrite actions'
     missing = read(number=8, expected=4); assert not missing['found'] and missing['issue'] is None and missing['events'] == []
     mutation('comment', 9, 1, 'second-comment-private-key', ['--body', 'advance snapshot'])
+    # A pinned token selects that exact retained ancestor (HTTP_ISSUE_API.md,
+    # 5c294d6e): an intervening comment does not force a restart, and the
+    # continuation still shows issue 9 as it was at the pin.
+    retained = read('list', fields=['--after', '7', '--expected-head', page['snapshot_token']])
+    assert retained['snapshot_token'] == page['snapshot_token']
+    assert retained['issues'] == tail['issues'] and retained['next_after'] is None
+    # Refusal twin: a token that names no retained ancestor is refused, empty stdout.
+    unknown = page['snapshot_token'][:-1] + ('e' if page['snapshot_token'].endswith('f') else 'f')
     stale_read = ['issue', 'list', root, tenant, repository, '--trusted-local', '--object-format', fmt,
-                  '--after', '7', '--expected-head', page['snapshot_token']]
+                  '--after', '7', '--expected-head', unknown]
     assert invoke(stale_read, 2, False).stdout == b''
     before_invalid = read('list')['snapshot_token']
     invalid = ['issue', 'comment', root, tenant, repository, '7', '--trusted-local', '--object-format', fmt,

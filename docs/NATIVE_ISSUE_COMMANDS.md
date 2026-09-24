@@ -79,11 +79,16 @@ first response's exact `snapshot_token` in `--expected-head`. Page sizes are 1â€
 The CLI checks aggregate identity, numeric order, contiguous event versions,
 limits, cursors and the supplied snapshot equality before emitting a result.
 
-A token is an equality precondition on the selected current head, not permission
-to read an arbitrary historical database snapshot. Any intervening canonical
-repository change can invalidate continuation, including a change to another
-issue. Restart a read at the new snapshot rather than merging pages from different
-heads. Neither reading nor pagination mutates canonical state.
+A token selects that exact retained ancestor of the current head, with the same
+bounded retained-snapshot selector as the HTTP API (`docs/HTTP_ISSUE_API.md`,
+"Retained snapshot bounds and authorization"). Ordinary intervening
+publications, including changes to other issues, do not force a restart: a
+continuation still shows the list and history as they were at the pinned head,
+never a mix of heads. A token that names no retained ancestor within the
+bounded walk (unknown, too old, or across a policy, configuration, checkpoint or
+compaction boundary) is refused rather than substituted; restart the read at a
+new snapshot then. A token is not permission to read an arbitrary historical
+database snapshot, and neither reading nor pagination mutates canonical state.
 
 ## Publication, retry, and lost responses
 

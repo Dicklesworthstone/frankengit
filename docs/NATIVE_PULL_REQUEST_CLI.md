@@ -136,10 +136,13 @@ fg pr list "$STORAGE_ROOT" "$TENANT_ID" "$REPOSITORY_ID" \
   --after "$NEXT_AFTER" --expected-head "$SNAPSHOT_TOKEN"
 ```
 
-A nonzero `--after` requires an expected head. The node refuses when that head
-no longer equals its selected current snapshot; it does not combine pages
-from different repository states or silently restart the query. Keep the
-original token for the traversal rather than adopting a newer token midway.
+A nonzero `--after` requires an expected head. The token selects that exact
+retained ancestor through the same bounded selector as the issue reader
+(`docs/HTTP_ISSUE_API.md`), so ordinary intervening publications do not force a
+restart and later PRs do not enter a pinned traversal. The node refuses a token
+that names no retained ancestor; it never combines pages from different
+repository states or silently substitutes another head. Keep the original
+token for the traversal rather than adopting a newer token midway.
 
 Merged PR rows retain recorded title/body/opener when the native history
 contains them. A merge-only receipt has `kind: "merge_receipt"` and does not

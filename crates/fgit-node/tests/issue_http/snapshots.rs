@@ -74,7 +74,11 @@ fn issue_list_walk_survives_insert_edit_close_and_listener_restart() {
         let fresh = get(&server, "/api/v1/issues?limit=100", 'a'); // 10
         status(&fresh, 200);
         assert_ne!(token(&fresh), pin);
-        assert!(fresh.body.contains("\"count\":4"));
+        // `issue_page` has no count field; the fresh page lists all four rows.
+        assert_eq!(fresh.body.matches("\"number\":").count(), 4);
+        for number in [1, 2, 3, 5] {
+            assert!(fresh.body.contains(&format!("\"number\":{number},")));
+        }
         assert!(
             fresh.body.contains("Inserted-after-pin") && fresh.body.contains("Edited-after-pin")
         );
