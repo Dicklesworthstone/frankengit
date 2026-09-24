@@ -5,6 +5,8 @@
 //! progress resumes its next dispatch. Automatic dispatch requires durable
 //! downstream idempotency; weaker destinations need a separate fenced owner.
 
+mod publication;
+
 use std::future::Future;
 
 use fgit_authority::{
@@ -317,9 +319,9 @@ impl RuntimeMutation<'_> {
     }
 }
 
-// true means this exact mutation is canonically committed; false means the
-// selected lifecycle/progress changed and the caller must reload. A refused
-// terminal decision NEVER authorizes a call or returns a fabricated successor.
+// true means this invocation won the exact publication CAS and authenticated
+// its commit. false means recovery or changed state: reload and probe rather
+// than sending under another invocation's marker. A refusal never authorizes I/O.
 async fn publish_mutation<S, P, C>(
     store: &S,
     cx: &S::Context,
@@ -385,7 +387,7 @@ where
         )
         .await?
         {
-            return committed(terminal);
+            return publication::recovered(terminal);
         }
         let (basis, head_receipt, authenticated) =
             crate::read_basis_async(store, cx, &context.head_key).await?;
@@ -514,16 +516,17 @@ where
             head_receipt.token(),
         )?;
         checkpoint().map_err(unavailable)?;
-        if let Some(terminal) = crate::outcome_after_publish_async(
+        if let Some(owned) = publication::publish_owned(
             store,
             cx,
             &settlement_context,
             head_receipt.token(),
             &publication,
+            admission.tx_id(),
         )
         .await?
         {
-            return committed(terminal);
+            return Ok(owned);
         }
     }
     Err(AdmissionError::CasReplanLimitExceeded {
@@ -562,13 +565,6 @@ where
     )
     .await?;
     checkpoint().map_err(unavailable)
-}
-
-const fn committed(terminal: fgit_authority::TerminalOutcome) -> Result<bool, AdmissionError> {
-    match terminal.outcome {
-        fgit_types::DecisionOutcome::Committed { .. } => Ok(true),
-        fgit_types::DecisionOutcome::Refused { code, .. } => Err(unavailable(code)),
-    }
 }
 
 fn codec_error(_: fgit_codec::CodecRefusal) -> AdmissionError {
