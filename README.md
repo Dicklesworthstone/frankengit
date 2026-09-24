@@ -603,7 +603,7 @@ artifact no longer matches its exact digest.
 <!-- franken-claims-status:begin -->
 | Claim | Class | Effective status | Scope | Readiness wording |
 | --- | --- | --- | --- | --- |
-| CLM-001 | CLAIM-006 | demoted: artifact `tools/registry-check/src/main.rs` digest changed: expected b8a704e6a843edb6ac643403b286008af2e5baff9c94c870afc414846d50993d, observed 8bb818c3eabc927334d99c3a5bd02cad4264bb1c116b1ab921b534da31ee8b48 | claim-artifact-identity-binding | artifact-change-demotes-this-narrow-claim |
+| CLM-001 | CLAIM-006 | verified | claim-artifact-identity-binding | artifact-change-demotes-this-narrow-claim |
 | CLM-002 | CLAIM-002 | verified | fg041-lean-theorem:terminal_outcome_is_unique | machine-checked-within-the-contained-lean-model-under-three-named-boundary-assumptions-only |
 | CLM-003 | CLAIM-002 | verified | fg041-lean-theorem:ref_and_forge_visibility_is_atomic | machine-checked-within-the-contained-lean-model-under-three-named-boundary-assumptions-only |
 | CLM-004 | CLAIM-002 | verified | fg041-lean-theorems:accepted_publish_is_continuous,head_chain_is_continuous_and_monotone,interrupted_publication_is_anti_rollback | machine-checked-within-the-contained-lean-model-under-three-named-boundary-assumptions-only |
