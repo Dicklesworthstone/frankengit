@@ -342,8 +342,10 @@ impl OpenSshChaCha20Poly1305 {
         let poly = Poly1305::new_from_slice(poly_key).expect("32-byte key is valid for Poly1305");
         let computed_tag = poly.compute_unpadded(&mac_input);
 
-        // Constant-time tag check
-        if computed_tag.as_slice() != observed_tag {
+        // Constant-time tag check: every byte is examined whatever the
+        // first mismatch, so timing does not reveal how much of a forged tag
+        // was right.
+        if !constant_time_eq(computed_tag.as_slice(), observed_tag) {
             return Err(CryptoError::MacVerificationFailed);
         }
 
@@ -365,6 +367,21 @@ impl OpenSshChaCha20Poly1305 {
         self.sequence_number = self.sequence_number.wrapping_add(1);
         Ok(payload)
     }
+}
+
+/// Constant-time equality for authentication tags. Lengths are public (both
+/// are fixed 16-byte tags); contents never short-circuit.
+#[must_use]
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    // Branch only on the accumulated difference, after the full pass.
+    core::hint::black_box(diff) == 0
 }
 
 /// Encodes an Ed25519 public key in SSH wire format (`ssh-ed25519` key blob).

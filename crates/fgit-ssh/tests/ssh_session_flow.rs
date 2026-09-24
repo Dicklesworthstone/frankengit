@@ -33,7 +33,11 @@ fn test_end_to_end_ssh_session_flow() {
     )
     .expect("register deploy key failed");
 
-    let mut session = SshServerSession::new(host_signing_key.clone(), vec![binding]);
+    let mut session = SshServerSession::new(
+        host_signing_key.clone(),
+        vec![binding],
+        std::sync::Arc::new(asupersync::util::DetEntropy::new(7)),
+    );
 
     // 1. Start session: server emits identification
     session.start();
@@ -269,7 +273,10 @@ fn test_end_to_end_ssh_session_flow() {
 
     // Server sends output to client
     let git_server_response = b"0008NAK\n";
-    session.send_channel_data(git_server_response);
+    assert_eq!(
+        session.send_channel_data(git_server_response),
+        git_server_response.len()
+    );
     let server_data_wire = session.take_outgoing_bytes();
     let server_data_payload = client_in_cipher
         .decrypt_packet(&server_data_wire)

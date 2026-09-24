@@ -5,7 +5,9 @@
 //! and typed Git command dispatch.
 
 use core::fmt::{self, Display, Formatter};
+use std::sync::Arc;
 
+use asupersync::util::EntropySource;
 use ed25519_dalek::SigningKey;
 use fgit_crypto::sha256_digest;
 use fgit_identity::deploy_key::DeployKeyBinding;
@@ -20,7 +22,8 @@ use crate::crypto::{
     encode_ed25519_public_key, sign_ed25519,
 };
 use crate::wire::{
-    WireError, WireReader, WireWriter, decode_cleartext_packet, encode_cleartext_packet,
+    MAX_PACKET_BYTES, WireError, WireReader, WireWriter, decode_cleartext_packet,
+    encode_cleartext_packet,
 };
 
 /// FrankenGit SSH identification string.
@@ -30,6 +33,15 @@ pub const SERVER_IDENTIFICATION: &str = "SSH-2.0-FrankenGit-0.1";
 pub const DEFAULT_WINDOW_SIZE: u32 = 2 * 1024 * 1024;
 /// Maximum channel packet size (32 KiB).
 pub const DEFAULT_MAX_PACKET_SIZE: u32 = 32 * 1024;
+/// RFC 4253 section 4.2: the identification line, including CR LF, is at most
+/// 255 bytes. Anything longer is refused before it can grow the input buffer.
+pub const MAX_IDENTIFICATION_BYTES: usize = 255;
+/// OpenSSH strict key exchange markers (Terrapin mitigation, CVE-2023-48795).
+pub const KEX_STRICT_SERVER: &str = "kex-strict-s-v00@openssh.com";
+/// The client-side strict key exchange marker.
+pub const KEX_STRICT_CLIENT: &str = "kex-strict-c-v00@openssh.com";
+/// Bytes of CHANNEL_DATA framing around the data string: type, channel, length.
+const CHANNEL_DATA_OVERHEAD: u32 = 1 + 4 + 4;
 
 /// SSH message type codes (RFC 4250 / RFC 4253 / RFC 4254).
 pub mod msg {
@@ -133,6 +145,10 @@ pub enum SessionPhase {
 /// A server-side SSH session.
 pub struct SshServerSession {
     phase: SessionPhase,
+    /// Runtime-owned entropy for the ephemeral key, KEXINIT cookie and padding.
+    entropy: Arc<dyn EntropySource>,
+    /// Whether both sides negotiated OpenSSH strict key exchange.
+    strict_kex: bool,
     server_signing_key: SigningKey,
     deploy_keys: Vec<DeployKeyBinding>,
     server_ident: String,
@@ -152,6 +168,8 @@ pub struct SshServerSession {
     client_channel_id: Option<u32>,
     server_channel_id: u32,
     client_window_size: u32,
+    /// The client's maximum CHANNEL_DATA size from CHANNEL_OPEN.
+    client_max_packet: u32,
     server_window_size: u32,
     active_command: Option<SshGitCommand>,
     outgoing_bytes: Vec<u8>,
@@ -162,10 +180,20 @@ pub struct SshServerSession {
 
 impl SshServerSession {
     /// Creates a new SSH server session with given host signing key and deploy key bindings.
+    ///
+    /// `entropy` supplies every per-session secret: the ephemeral Curve25519
+    /// key, the KEXINIT cookie and packet padding. Production passes the
+    /// runtime's OS entropy; deterministic tests pass a seeded source.
     #[must_use]
-    pub fn new(server_signing_key: SigningKey, deploy_keys: Vec<DeployKeyBinding>) -> Self {
+    pub fn new(
+        server_signing_key: SigningKey,
+        deploy_keys: Vec<DeployKeyBinding>,
+        entropy: Arc<dyn EntropySource>,
+    ) -> Self {
         Self {
             phase: SessionPhase::Identification,
+            entropy,
+            strict_kex: false,
             server_signing_key,
             deploy_keys,
             server_ident: SERVER_IDENTIFICATION.to_owned(),
@@ -185,6 +213,7 @@ impl SshServerSession {
             client_channel_id: None,
             server_channel_id: 0,
             client_window_size: DEFAULT_WINDOW_SIZE,
+            client_max_packet: DEFAULT_MAX_PACKET_SIZE,
             server_window_size: DEFAULT_WINDOW_SIZE,
             active_command: None,
             outgoing_bytes: Vec::new(),
@@ -198,6 +227,27 @@ impl SshServerSession {
     #[must_use]
     pub const fn phase(&self) -> &SessionPhase {
         &self.phase
+    }
+
+    /// The session identifier: the first key exchange's hash `H`, which the
+    /// client signs during publickey authentication. It is transcript-derived
+    /// and public, not key material.
+    #[must_use]
+    pub const fn session_id(&self) -> Option<[u8; 32]> {
+        self.session_id
+    }
+
+    /// Whether OpenSSH strict key exchange (Terrapin mitigation) is in force.
+    #[must_use]
+    pub const fn strict_kex(&self) -> bool {
+        self.strict_kex
+    }
+
+    /// Draws `N` fresh bytes from the session's entropy source.
+    fn random_bytes<const N: usize>(&self) -> [u8; N] {
+        let mut bytes = [0u8; N];
+        self.entropy.fill_bytes(&mut bytes);
+        bytes
     }
 
     /// The authenticated principal, if publickey authentication has succeeded.
@@ -236,8 +286,25 @@ impl SshServerSession {
     }
 
     /// Takes queued channel data (stdin to Git).
+    ///
+    /// Consuming input is what frees receive window: once the unused window
+    /// falls to half its size, a CHANNEL_WINDOW_ADJUST restores it, so a
+    /// client streaming a large pack is never stalled by a window we forgot
+    /// to reopen.
     pub fn take_channel_input(&mut self) -> Vec<u8> {
-        core::mem::take(&mut self.channel_input_data)
+        let taken = core::mem::take(&mut self.channel_input_data);
+        if !taken.is_empty() && self.server_window_size <= DEFAULT_WINDOW_SIZE / 2 {
+            if let Some(channel) = self.client_channel_id {
+                let increment = DEFAULT_WINDOW_SIZE - self.server_window_size;
+                let mut adjust = WireWriter::new();
+                adjust.write_u8(msg::CHANNEL_WINDOW_ADJUST);
+                adjust.write_u32(channel);
+                adjust.write_u32(increment);
+                self.send_packet(&adjust.into_bytes());
+                self.server_window_size = DEFAULT_WINDOW_SIZE;
+            }
+        }
+        taken
     }
 
     /// Begins the session by emitting the identification banner.
@@ -256,6 +323,15 @@ impl SshServerSession {
         self.incoming_buffer.extend_from_slice(input);
 
         if self.phase == SessionPhase::Identification {
+            let line_end = self.incoming_buffer.iter().position(|&b| b == b'\n');
+            if line_end.map_or(self.incoming_buffer.len(), |end| end + 1) > MAX_IDENTIFICATION_BYTES
+            {
+                return Err(SshSessionError::ProtocolViolation {
+                    reason: format!(
+                        "client identification exceeds {MAX_IDENTIFICATION_BYTES} bytes"
+                    ),
+                });
+            }
             // Find line break for client identification
             if let Some(pos) = self.incoming_buffer.windows(2).position(|w| w == b"\r\n") {
                 let ident_bytes = self.incoming_buffer[..pos].to_vec();
@@ -322,6 +398,16 @@ impl SshServerSession {
             let mut len_arr = [0u8; 4];
             len_arr.copy_from_slice(&input[0..4]);
             let packet_len = cipher.decrypt_packet_length(&len_arr) as usize;
+            // Refuse an oversized declaration before waiting for (and
+            // buffering) the bytes it claims: an unauthenticated peer must
+            // not be able to make the server hold gigabytes.
+            if packet_len > MAX_PACKET_BYTES {
+                return Err(WireError::PacketTooLarge {
+                    observed: packet_len,
+                    limit: MAX_PACKET_BYTES,
+                }
+                .into());
+            }
             let total = 4 + packet_len + 16;
             if input.len() < total {
                 return Err(WireError::UnexpectedEof {
@@ -333,15 +419,23 @@ impl SshServerSession {
             let payload = cipher.decrypt_packet(&input[..total])?;
             Ok((payload, total))
         } else {
-            if input.len() < 5 {
+            if input.len() < 4 {
                 return Err(WireError::UnexpectedEof {
-                    expected: 5,
+                    expected: 4,
                     available: input.len(),
                 }
                 .into());
             }
+            // Bound the declaration as soon as it is readable.
             let packet_len = u32::from_be_bytes([input[0], input[1], input[2], input[3]]) as usize;
-            let total = 4 + packet_len;
+            if packet_len > MAX_PACKET_BYTES {
+                return Err(WireError::PacketTooLarge {
+                    observed: packet_len,
+                    limit: MAX_PACKET_BYTES,
+                }
+                .into());
+            }
+            let total = (4 + packet_len).max(5);
             if input.len() < total {
                 return Err(WireError::UnexpectedEof {
                     expected: total,
@@ -356,11 +450,13 @@ impl SshServerSession {
 
     /// Sends a packet with payload.
     fn send_packet(&mut self, payload: &[u8]) {
+        // RFC 4253 section 6: padding SHOULD be random.
+        let padding: [u8; 16] = self.random_bytes();
         if let Some(ref mut cipher) = self.outbound_cipher {
-            let wire = cipher.encrypt_packet(payload, &[0u8; 16]);
+            let wire = cipher.encrypt_packet(payload, &padding);
             self.outgoing_bytes.extend_from_slice(&wire);
         } else {
-            let wire = encode_cleartext_packet(payload, &[0u8; 16]);
+            let wire = encode_cleartext_packet(payload, &padding);
             self.outgoing_bytes.extend_from_slice(&wire);
         }
         self.outbound_packet_count = self.outbound_packet_count.wrapping_add(1);
@@ -370,10 +466,15 @@ impl SshServerSession {
     fn send_kexinit(&mut self) {
         let mut writer = WireWriter::new();
         writer.write_u8(msg::KEXINIT);
-        // 16-byte cookie
-        writer.write_raw(&[0x42; 16]);
-        // KEX algorithms
-        writer.write_name_list(&[KEX_CURVE25519_SHA256, KEX_CURVE25519_SHA256_LIBSSH]);
+        // 16-byte random cookie (RFC 4253 section 7.1)
+        let cookie: [u8; 16] = self.random_bytes();
+        writer.write_raw(&cookie);
+        // KEX algorithms; the strict-KEX marker is a capability, never selected
+        writer.write_name_list(&[
+            KEX_CURVE25519_SHA256,
+            KEX_CURVE25519_SHA256_LIBSSH,
+            KEX_STRICT_SERVER,
+        ]);
         // Server host key algorithms
         writer.write_name_list(&[SSH_ED25519_ALGORITHM]);
         // Ciphers
@@ -403,6 +504,18 @@ impl SshServerSession {
         let mut reader = WireReader::new(payload);
         let msg_type = reader.read_u8()?;
 
+        // Strict KEX: until the client's first NEWKEYS, only key-exchange
+        // messages are legal. A stray IGNORE/DEBUG injected there is exactly
+        // how the Terrapin prefix truncation shifts sequence numbers.
+        if self.strict_kex
+            && self.inbound_cipher.is_none()
+            && !matches!(msg_type, msg::KEXINIT | msg::KEX_ECDH_INIT | msg::NEWKEYS)
+        {
+            return Err(SshSessionError::ProtocolViolation {
+                reason: format!("message {msg_type} is not allowed during strict key exchange"),
+            });
+        }
+
         match msg_type {
             msg::DISCONNECT => {
                 let reason_code = reader.read_u32().unwrap_or(0);
@@ -414,9 +527,21 @@ impl SshServerSession {
             }
             msg::IGNORE => {}
             msg::KEXINIT => {
+                // cookie (16 bytes), then the client's kex algorithm list
+                let _cookie = reader.read_exact(16)?;
+                let client_kex = reader.read_name_list()?;
+                if self.session_id.is_none() && client_kex.contains(&KEX_STRICT_CLIENT) {
+                    // The client's KEXINIT must be its first packet under strict KEX.
+                    if self.inbound_packet_count != 1 {
+                        return Err(SshSessionError::ProtocolViolation {
+                            reason: "strict KEX requires KEXINIT to be the first packet".to_owned(),
+                        });
+                    }
+                    self.strict_kex = true;
+                }
                 self.client_kexinit_payload = Some(payload.to_vec());
-                // Prepare Curve25519 ephemeral key
-                self.ephemeral_kex = Some(Curve25519Kex::from_private_bytes([0x77; 32]));
+                // A fresh ephemeral Curve25519 secret for every key exchange.
+                self.ephemeral_kex = Some(Curve25519Kex::from_private_bytes(self.random_bytes()));
             }
             msg::KEX_ECDH_INIT => {
                 let client_pub = reader.read_string()?;
@@ -429,7 +554,9 @@ impl SshServerSession {
                 let mut client_pub_arr = [0u8; 32];
                 client_pub_arr.copy_from_slice(client_pub);
 
-                let kex = self.ephemeral_kex.as_ref().ok_or_else(|| {
+                // The ephemeral secret is single-use: taking it here means a
+                // replayed KEX_ECDH_INIT cannot reuse it.
+                let kex = self.ephemeral_kex.take().ok_or_else(|| {
                     SshSessionError::ProtocolViolation {
                         reason: "KEX_ECDH_INIT received before KEXINIT".to_owned(),
                     }
@@ -491,10 +618,16 @@ impl SshServerSession {
                 newkeys.write_u8(msg::NEWKEYS);
                 self.send_packet(&newkeys.into_bytes());
 
-                // Activate outbound cipher with exact sequence number
+                // Activate outbound cipher. Strict KEX resets the sequence
+                // number to zero after NEWKEYS; otherwise it continues.
+                let outbound_sequence = if self.strict_kex {
+                    0
+                } else {
+                    self.outbound_packet_count
+                };
                 self.outbound_cipher = Some(OpenSshChaCha20Poly1305::new_with_sequence(
                     &s_key_arr,
-                    self.outbound_packet_count,
+                    outbound_sequence,
                 ));
 
                 // Stash inbound key to activate upon receiving client NEWKEYS
@@ -504,9 +637,14 @@ impl SshServerSession {
             msg::NEWKEYS => {
                 // Client has activated encryption. Future inbound packets use this cipher.
                 if let Some(c_key) = self.pending_inbound_key.take() {
+                    let inbound_sequence = if self.strict_kex {
+                        0
+                    } else {
+                        self.inbound_packet_count
+                    };
                     self.inbound_cipher = Some(OpenSshChaCha20Poly1305::new_with_sequence(
                         &c_key,
-                        self.inbound_packet_count,
+                        inbound_sequence,
                     ));
                 }
             }
@@ -583,11 +721,12 @@ impl SshServerSession {
                 let channel_type = reader.read_utf8()?;
                 let sender_channel = reader.read_u32()?;
                 let initial_window = reader.read_u32()?;
-                let _max_packet = reader.read_u32()?;
+                let max_packet = reader.read_u32()?;
 
                 if channel_type == "session" {
                     self.client_channel_id = Some(sender_channel);
                     self.client_window_size = initial_window;
+                    self.client_max_packet = max_packet;
                     let mut confirm = WireWriter::new();
                     confirm.write_u8(msg::CHANNEL_OPEN_CONFIRMATION);
                     confirm.write_u32(sender_channel);
@@ -697,6 +836,13 @@ impl SshServerSession {
             msg::CHANNEL_DATA => {
                 let _recipient_channel = reader.read_u32()?;
                 let data = reader.read_string()?;
+                let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+                if len > self.server_window_size {
+                    return Err(SshSessionError::ProtocolViolation {
+                        reason: "client sent channel data beyond the advertised window".to_owned(),
+                    });
+                }
+                self.server_window_size -= len;
                 self.channel_input_data.extend_from_slice(data);
             }
             msg::CHANNEL_WINDOW_ADJUST => {
@@ -755,14 +901,40 @@ impl SshServerSession {
         self.send_packet(&ext.into_bytes());
     }
 
-    /// Sends Git stdout data over the active channel.
-    pub fn send_channel_data(&mut self, data: &[u8]) {
+    /// Queues as much of `data` as the client's channel window allows, in
+    /// CHANNEL_DATA packets no larger than the client's maximum packet size,
+    /// and returns how many bytes were accepted.
+    ///
+    /// Zero means the window is exhausted: the caller must feed incoming
+    /// bytes (a CHANNEL_WINDOW_ADJUST) before offering the rest again.
+    pub fn send_channel_data(&mut self, data: &[u8]) -> usize {
         let channel = self.client_channel_id.unwrap_or(0);
-        let mut msg = WireWriter::new();
-        msg.write_u8(msg::CHANNEL_DATA);
-        msg.write_u32(channel);
-        msg.write_string(data);
-        self.send_packet(&msg.into_bytes());
+        let chunk_limit = self
+            .client_max_packet
+            .min(DEFAULT_MAX_PACKET_SIZE)
+            .saturating_sub(CHANNEL_DATA_OVERHEAD)
+            .max(1) as usize;
+        let mut accepted = 0;
+        while accepted < data.len() && self.client_window_size > 0 {
+            let len = (data.len() - accepted)
+                .min(chunk_limit)
+                .min(self.client_window_size as usize);
+            let mut message = WireWriter::new();
+            message.write_u8(msg::CHANNEL_DATA);
+            message.write_u32(channel);
+            message.write_string(&data[accepted..accepted + len]);
+            self.send_packet(&message.into_bytes());
+            // `len` is bounded by the u32 window above.
+            self.client_window_size -= len as u32;
+            accepted += len;
+        }
+        accepted
+    }
+
+    /// Remaining bytes the client allows us to send on the channel.
+    #[must_use]
+    pub const fn client_window(&self) -> u32 {
+        self.client_window_size
     }
 
     /// Sends channel EOF.

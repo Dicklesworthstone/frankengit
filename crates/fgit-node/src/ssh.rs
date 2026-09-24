@@ -116,6 +116,38 @@ impl SshConnectionState {
         Ok(())
     }
 
+    /// Reads one burst from the client and feeds it to the session. A socket
+    /// read timeout is idleness, not a transient condition: it ends the
+    /// session instead of spinning.
+    fn pump_incoming(&mut self) -> io::Result<usize> {
+        // Anything queued (such as a receive-window adjustment) must reach the
+        // client before we block waiting for it to send more.
+        self.flush_outgoing()?;
+        let mut wire_buf = [0u8; 16384];
+        let n = match self.stream.read(&mut wire_buf) {
+            Ok(n) => n,
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "ssh client idle beyond the session read timeout",
+                ));
+            }
+            Err(source) => return Err(source),
+        };
+        if n > 0 {
+            if let Err(err) = self.session.handle_incoming_bytes(&wire_buf[..n]) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, err.to_string()));
+            }
+            self.flush_outgoing()?;
+        }
+        Ok(n)
+    }
+
     fn read_channel(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.read_pos < self.read_buf.len() {
             let available = &self.read_buf[self.read_pos..];
@@ -129,26 +161,23 @@ impl SshConnectionState {
         self.read_pos = 0;
 
         loop {
+            // Data already decoded (for example while waiting for window
+            // space in `write_channel`) is delivered before EOF is reported.
+            let new_data = self.session.take_channel_input();
+            if !new_data.is_empty() {
+                self.read_buf = new_data;
+                let to_copy = self.read_buf.len().min(buf.len());
+                buf[..to_copy].copy_from_slice(&self.read_buf[..to_copy]);
+                self.read_pos = to_copy;
+                return Ok(to_copy);
+            }
             if self.session.is_channel_eof_received() || self.session.is_channel_closed() {
                 return Ok(0);
             }
 
-            let mut wire_buf = [0u8; 16384];
-            let n = match self.stream.read(&mut wire_buf) {
-                Ok(0) => return Ok(0),
-                Ok(n) => n,
-                Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(1));
-                    continue;
-                }
-                Err(source) => return Err(source),
-            };
-
-            if let Err(err) = self.session.handle_incoming_bytes(&wire_buf[..n]) {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, err.to_string()));
+            if self.pump_incoming()? == 0 {
+                return Ok(0);
             }
-
-            self.flush_outgoing()?;
 
             let new_data = self.session.take_channel_input();
             if !new_data.is_empty() {
@@ -162,8 +191,29 @@ impl SshConnectionState {
     }
 
     fn write_channel(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.session.send_channel_data(buf);
-        self.flush_outgoing()?;
+        let mut written = 0;
+        while written < buf.len() {
+            let accepted = self.session.send_channel_data(&buf[written..]);
+            written += accepted;
+            self.flush_outgoing()?;
+            if accepted == 0 {
+                // The client's window is exhausted: only its
+                // CHANNEL_WINDOW_ADJUST can reopen it. Channel input that
+                // arrives meanwhile stays queued in the session for the reader.
+                if self.session.is_channel_closed() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "ssh channel closed while output was pending",
+                    ));
+                }
+                if self.pump_incoming()? == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "ssh client disconnected while its channel window was exhausted",
+                    ));
+                }
+            }
+        }
         Ok(buf.len())
     }
 }
@@ -298,7 +348,9 @@ impl OneNode {
         config: NodeConfig,
         allow_receive: bool,
     ) -> bool {
-        let mut session = SshServerSession::new(host_key, deploy_keys);
+        // Per-session secrets come from the runtime's OS entropy source.
+        let mut session =
+            SshServerSession::new(host_key, deploy_keys, Arc::new(asupersync::util::OsEntropy));
         session.start();
 
         let initial_bytes = session.take_outgoing_bytes();
