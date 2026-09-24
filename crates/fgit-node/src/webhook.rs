@@ -2,14 +2,12 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fgit_admission::merge::native::settlement::{DeliveryRequest, OutboxDestination};
 use fgit_forge::webhook::{
-    DeadLetterEntry, SsrfPolicy, ValidatedWebhookUrl, WebhookEventFilter, WebhookId,
-    WebhookRefusal, WebhookRegistration, WebhookSecret,
+    DeadLetterEntry, SsrfPolicy, ValidatedWebhookUrl, WebhookRefusal, WebhookRegistration,
 };
 use fgit_resource::settlement::{DeliveryVerdict, DownstreamIdempotency, ProbeVerdict};
 use fgit_types::{AsciiSlug, RefusalCode};
@@ -20,223 +18,8 @@ mod transport;
 mod payload;
 mod persistence;
 
-use persistence::{
-    parse_dead_letter_line, parse_registration_line, serialize_dead_letter, serialize_registration,
-};
-
-/// In-memory and file-backed Dead Letter Queue for terminally failed webhook deliveries.
-#[derive(Clone, Debug, Default)]
-pub struct DeadLetterQueue {
-    entries: Arc<Mutex<Vec<DeadLetterEntry>>>,
-    persist_path: Option<PathBuf>,
-}
-
-impl DeadLetterQueue {
-    pub fn new() -> Self {
-        Self {
-            entries: Arc::new(Mutex::new(Vec::new())),
-            persist_path: None,
-        }
-    }
-
-    pub fn with_persist_path(path: PathBuf) -> Self {
-        let loaded = Self::load_from_path(&path);
-        Self {
-            entries: Arc::new(Mutex::new(loaded)),
-            persist_path: Some(path),
-        }
-    }
-
-    fn load_from_path(path: &Path) -> Vec<DeadLetterEntry> {
-        if !path.exists() {
-            return Vec::new();
-        }
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return Vec::new();
-        };
-        let mut list = Vec::new();
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if let Some(entry) = parse_dead_letter_line(trimmed) {
-                list.push(entry);
-            }
-        }
-        list
-    }
-
-    pub fn push(&self, entry: DeadLetterEntry) {
-        let mut list = self.entries.lock().unwrap();
-        // Keep unique by delivery_id
-        list.retain(|existing| existing.delivery_id != entry.delivery_id);
-        list.push(entry);
-        if let Some(path) = &self.persist_path {
-            Self::persist_all(path, &list);
-        }
-    }
-
-    fn persist_all(path: &Path, entries: &[DeadLetterEntry]) {
-        if let Ok(mut file) = std::fs::File::create(path) {
-            for entry in entries {
-                let _ = writeln!(file, "{}", serialize_dead_letter(entry));
-            }
-            let _ = file.flush();
-        }
-    }
-
-    #[must_use]
-    pub fn list(&self) -> Vec<DeadLetterEntry> {
-        self.entries.lock().unwrap().clone()
-    }
-
-    #[must_use]
-    pub fn get(&self, delivery_id: AsciiSlug) -> Option<DeadLetterEntry> {
-        self.entries
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|e| e.delivery_id == delivery_id)
-            .cloned()
-    }
-
-    pub fn remove(&self, delivery_id: AsciiSlug) -> Option<DeadLetterEntry> {
-        let mut list = self.entries.lock().unwrap();
-        if let Some(pos) = list.iter().position(|e| e.delivery_id == delivery_id) {
-            let removed = list.remove(pos);
-            if let Some(path) = &self.persist_path {
-                Self::persist_all(path, &list);
-            }
-            Some(removed)
-        } else {
-            None
-        }
-    }
-}
-
-/// Persistent storage for webhook registrations and dead letters under `storage_root/webhooks/`.
-#[derive(Clone, Debug)]
-pub struct WebhookStore {
-    root_dir: PathBuf,
-    dead_letters: DeadLetterQueue,
-    registrations: Arc<Mutex<Vec<WebhookRegistration>>>,
-}
-
-impl WebhookStore {
-    pub fn open(root_dir: PathBuf) -> Result<Self, String> {
-        std::fs::create_dir_all(&root_dir)
-            .map_err(|e| format!("failed to create webhook directory: {e}"))?;
-        let dl_path = root_dir.join("dead_letters.jsonl");
-        let dead_letters = DeadLetterQueue::with_persist_path(dl_path);
-
-        let reg_path = root_dir.join("registrations.json");
-        let regs = Self::load_registrations(&reg_path)?;
-
-        Ok(Self {
-            root_dir,
-            dead_letters,
-            registrations: Arc::new(Mutex::new(regs)),
-        })
-    }
-
-    fn load_registrations(path: &Path) -> Result<Vec<WebhookRegistration>, String> {
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read registrations: {e}"))?;
-        let mut list = Vec::new();
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            if let Some(reg) = parse_registration_line(trimmed) {
-                list.push(reg);
-            }
-        }
-        Ok(list)
-    }
-
-    fn persist_registrations(&self) -> Result<(), String> {
-        let path = self.root_dir.join("registrations.json");
-        let list = self.registrations.lock().unwrap();
-        let mut file = std::fs::File::create(path)
-            .map_err(|e| format!("failed to open registrations file for write: {e}"))?;
-        for reg in list.iter() {
-            let line = serialize_registration(reg);
-            writeln!(file, "{line}").map_err(|e| format!("failed to write registration: {e}"))?;
-        }
-        file.flush()
-            .map_err(|e| format!("failed to flush registrations: {e}"))?;
-        Ok(())
-    }
-
-    pub fn register(&self, reg: WebhookRegistration) -> Result<(), String> {
-        {
-            let mut list = self.registrations.lock().unwrap();
-            list.retain(|existing| existing.id != reg.id);
-            list.push(reg);
-        }
-        self.persist_registrations()
-    }
-
-    #[must_use]
-    pub fn list(&self) -> Vec<WebhookRegistration> {
-        self.registrations.lock().unwrap().clone()
-    }
-
-    #[must_use]
-    pub fn get(&self, id: WebhookId) -> Option<WebhookRegistration> {
-        self.registrations
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|r| r.id == id)
-            .cloned()
-    }
-
-    pub fn rotate_secret(
-        &self,
-        id: WebhookId,
-        new_secret: WebhookSecret,
-        window_duration_secs: u64,
-        now_unix_secs: u64,
-    ) -> Result<WebhookRegistration, String> {
-        let updated = {
-            let mut list = self.registrations.lock().unwrap();
-            let reg = list
-                .iter_mut()
-                .find(|r| r.id == id)
-                .ok_or_else(|| format!("webhook id {} not found", id.0))?;
-            reg.secrets
-                .rotate(new_secret, window_duration_secs, now_unix_secs);
-            reg.clone()
-        };
-        self.persist_registrations()?;
-        Ok(updated)
-    }
-
-    #[must_use]
-    pub fn dead_letters(&self) -> DeadLetterQueue {
-        self.dead_letters.clone()
-    }
-
-    #[must_use]
-    pub fn list_dead_letters(&self) -> Vec<DeadLetterEntry> {
-        self.dead_letters.list()
-    }
-
-    #[must_use]
-    pub fn get_dead_letter(&self, delivery_id: AsciiSlug) -> Option<DeadLetterEntry> {
-        self.dead_letters.get(delivery_id)
-    }
-
-    pub fn replay_dead_letter(&self, delivery_id: AsciiSlug) -> Option<DeadLetterEntry> {
-        self.dead_letters.remove(delivery_id)
-    }
-}
+mod store;
+pub use store::{DeadLetterQueue, WebhookStore};
 
 impl crate::OneNode {
     /// Opens the persistent webhook store for this node.
@@ -329,7 +112,7 @@ impl WebhookDeliveryDestination {
         let validated = match self.ssrf_policy.validate_url(self.registration.url.raw()) {
             Ok(v) => v,
             Err(WebhookRefusal::SsrfBlocked { reason, .. }) => {
-                self.record_terminal_failure(request, attempt, reason, now_secs);
+                self.record_terminal_failure(request, attempt, reason, now_secs)?;
                 return Ok((
                     DeliveryVerdict::PermanentRejection,
                     reason.as_bytes().to_vec(),
@@ -337,7 +120,7 @@ impl WebhookDeliveryDestination {
             }
             Err(e) => {
                 let err_msg = e.to_string();
-                self.record_terminal_failure(request, attempt, &err_msg, now_secs);
+                self.record_terminal_failure(request, attempt, &err_msg, now_secs)?;
                 return Ok((DeliveryVerdict::PermanentRejection, err_msg.into_bytes()));
             }
         };
@@ -346,7 +129,7 @@ impl WebhookDeliveryDestination {
         // TCP stream. Refuse before DNS, signing or I/O; never silently
         // downgrade an operator's HTTPS destination to cleartext HTTP.
         if let Err(reason) = transport::require_plain_http(&validated) {
-            self.record_terminal_failure(request, attempt, reason, now_secs);
+            self.record_terminal_failure(request, attempt, reason, now_secs)?;
             return Ok((
                 DeliveryVerdict::PermanentRejection,
                 reason.as_bytes().to_vec(),
@@ -362,7 +145,7 @@ impl WebhookDeliveryDestination {
         let target_addr = match self.resolve_safe_socket_addr(&validated) {
             Ok(addr) => addr,
             Err(reason) => {
-                self.record_terminal_failure(request, attempt, &reason, now_secs);
+                self.record_terminal_failure(request, attempt, &reason, now_secs)?;
                 return Ok((DeliveryVerdict::PermanentRejection, reason.into_bytes()));
             }
         };
@@ -476,7 +259,7 @@ impl WebhookDeliveryDestination {
                             Ok((DeliveryVerdict::TransientFailure, response))
                         }
                         Err(WebhookRefusal::SsrfBlocked { reason, .. }) => {
-                            self.record_terminal_failure(request, attempt, reason, now_secs);
+                            self.record_terminal_failure(request, attempt, reason, now_secs)?;
                             Ok((
                                 DeliveryVerdict::PermanentRejection,
                                 reason.as_bytes().to_vec(),
@@ -484,7 +267,7 @@ impl WebhookDeliveryDestination {
                         }
                         Err(e) => {
                             let reason = e.to_string();
-                            self.record_terminal_failure(request, attempt, &reason, now_secs);
+                            self.record_terminal_failure(request, attempt, &reason, now_secs)?;
                             Ok((DeliveryVerdict::PermanentRejection, reason.into_bytes()))
                         }
                     }
@@ -497,7 +280,7 @@ impl WebhookDeliveryDestination {
             }
             400..=499 if status_code != 429 => {
                 let reason = format!("receiver returned HTTP {status_code}");
-                self.record_terminal_failure(request, attempt, &reason, now_secs);
+                self.record_terminal_failure(request, attempt, &reason, now_secs)?;
                 Ok((DeliveryVerdict::PermanentRejection, response))
             }
             _ => {
@@ -506,7 +289,7 @@ impl WebhookDeliveryDestination {
                 if attempt < self.registration.retry_schedule.max_attempts {
                     Ok((DeliveryVerdict::TransientFailure, response))
                 } else {
-                    self.record_terminal_failure(request, attempt, &reason, now_secs);
+                    self.record_terminal_failure(request, attempt, &reason, now_secs)?;
                     Ok((DeliveryVerdict::PermanentRejection, response))
                 }
             }
@@ -543,7 +326,7 @@ impl WebhookDeliveryDestination {
         if attempt < self.registration.retry_schedule.max_attempts {
             Ok((DeliveryVerdict::TransientFailure, err_msg.into_bytes()))
         } else {
-            self.record_terminal_failure(request, attempt, &err_msg, now_secs);
+            self.record_terminal_failure(request, attempt, &err_msg, now_secs)?;
             Ok((DeliveryVerdict::PermanentRejection, err_msg.into_bytes()))
         }
     }
@@ -554,8 +337,8 @@ impl WebhookDeliveryDestination {
         attempt: u32,
         reason: &str,
         now_secs: u64,
-    ) {
-        self.dead_letters.push(DeadLetterEntry {
+    ) -> Result<(), RefusalCode> {
+        self.dead_letters.try_push(DeadLetterEntry {
             delivery_id: request.key,
             webhook_id: self.registration.id,
             target_url: self.registration.url.raw().to_string(),
@@ -564,7 +347,7 @@ impl WebhookDeliveryDestination {
             attempts: attempt,
             terminal_reason: reason.to_string(),
             failed_at_unix_secs: now_secs,
-        });
+        }).map_err(|_| RefusalCode::EvidenceMissing)
     }
 }
 
