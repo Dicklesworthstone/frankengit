@@ -76,3 +76,6 @@ fn flush_run(
 mod tests;
 
 mod durable;
+
+/// Typed, exact-subject reads of persisted local observations, never check authority.
+pub mod observations;

@@ -6,6 +6,12 @@
 use super::*;
 use std::ops::Bound::{Excluded, Unbounded};
 
+/// Typed local evidence readers. These do not authenticate check issuers.
+pub use crate::coordinator::scoped_workflow::journaled::observations::{
+    MAX_OBSERVATION_BYTES, ObservationRefusal, VerifiedLocalObservation,
+    decode_trusted_observation, verify_trusted_job,
+};
+
 pub const MAX_HISTORY_BATCHES: usize = 128;
 pub const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 
@@ -75,6 +81,41 @@ impl FileCheckJournal {
             }
         }
         Ok(CheckHistoryEntry { batch, delivered: delivered.map(|(receipt, _)| receipt) })
+    }
+
+    /// Decode one completed job's retained evidence at an exact journal snapshot.
+    /// Selection is checked before reading evidence, including the body-size
+    /// ceiling before allocating it. Delivered batches remain inspectable. No
+    /// proposal is settled, forwarded or converted into a canonical check.
+    /// The caller authorizes disclosure of the retained source and logs.
+    pub fn read_trusted_job(
+        &mut self,
+        expected: CheckJournalPin,
+        batch_id: Commitment,
+        fact_index: usize,
+        maximum_evidence_bytes: usize,
+        live: &dyn Fn() -> bool,
+    ) -> Result<VerifiedLocalObservation, ObservationRefusal> {
+        self.healthy()?;
+        if maximum_evidence_bytes == 0 || maximum_evidence_bytes > MAX_OBSERVATION_BYTES {
+            return Err(ObservationRefusal::InvalidLimits);
+        }
+        if !live() { return Err(ObservationRefusal::Cancelled); }
+        if expected != self.pin { return Err(CheckDeliveryRefusal::StaleBatch.into()); }
+        self.verify_checkpoint(expected)?;
+        let retained = self.read_retained_batch(batch_id)?;
+        if !matches!(retained.batch.execution_profile(), CoordinatorExecutionProfile::TrustedWorkflow { .. }) {
+            return Err(ObservationRefusal::UnsupportedProfile);
+        }
+        let fact = retained.batch.facts().get(fact_index).ok_or(ObservationRefusal::FactNotCompleted)?;
+        if fact.status != CheckRunStatus::Completed { return Err(ObservationRefusal::FactNotCompleted); }
+        let id = fact.receipt_commitment.ok_or(ObservationRefusal::EvidenceMissing)?;
+        let stored = self.evidence.get(&id).ok_or(ObservationRefusal::EvidenceMissing)?;
+        let bytes = stored.length.checked_sub(33).ok_or(CheckDeliveryRefusal::CorruptJournal)?;
+        if bytes > maximum_evidence_bytes { return Err(ObservationRefusal::RecordTooLarge); }
+        if !live() { return Err(ObservationRefusal::Cancelled); }
+        let evidence = self.read_evidence(id)?;
+        verify_trusted_job(&retained.batch, fact_index, &evidence, maximum_evidence_bytes, live)
     }
 
     /// Page all accepted batches, including delivered batches, without changing
@@ -156,3 +197,5 @@ impl FileCheckJournal {
 
 #[cfg(test)]
 mod tests;
+
+mod exchange;
