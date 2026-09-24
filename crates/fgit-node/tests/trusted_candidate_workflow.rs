@@ -96,7 +96,21 @@ fn unpublished_input_runs_in_fresh_jobs_and_cannot_publish_or_replay_after_resta
             fs::read_to_string(run.run_directory.join("report.json")).unwrap(),
             json
         );
-        assert_eq!(fs::read_dir(&run.run_directory).unwrap().count(), 2);
+        // docs/NODE_WORKFLOW_CUSTODY.md: marker, report and the two custody sidecars.
+        let mut names = fs::read_dir(&run.run_directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "attempt.json",
+                "check-proposals.journal",
+                "execution.owner",
+                "report.json"
+            ]
+        );
         let marker = fs::read_to_string(run.run_directory.join("attempt.json")).unwrap();
         assert!(
             marker.contains(&candidate.candidate_commit.to_string())

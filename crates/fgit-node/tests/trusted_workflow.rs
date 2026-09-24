@@ -253,10 +253,14 @@ fn one_source_snapshot_fresh_job_copies_and_persistent_report_in_both_formats() 
             .map(|e| e.unwrap().file_name())
             .collect::<Vec<_>>();
         names.sort();
+        // docs/NODE_WORKFLOW_CUSTODY.md: the marker and report plus the two
+        // private custody sidecars, and nothing else.
         assert_eq!(
             names,
             [
                 std::ffi::OsString::from("attempt.json"),
+                std::ffi::OsString::from("check-proposals.journal"),
+                std::ffi::OsString::from("execution.owner"),
                 std::ffi::OsString::from("report.json")
             ]
         );

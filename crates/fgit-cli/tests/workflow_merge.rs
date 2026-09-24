@@ -95,7 +95,21 @@ fn cli_executes_merged_bytes_records_all_coordinates_and_refuses_replay() {
         assert!(
             saved.contains("\"succeeded\":true") && saved.contains("\"authoritative_check\":false")
         );
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        // docs/NODE_WORKFLOW_CUSTODY.md: marker, report and the two custody sidecars.
+        let mut names = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "attempt.json",
+                "check-proposals.journal",
+                "execution.owner",
+                "report.json"
+            ]
+        );
         unchanged(&mut f, before, &merge);
         let again = command(&f, &merge, "31", true).output().unwrap();
         exit(&again, 2);
