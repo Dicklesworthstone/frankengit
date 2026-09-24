@@ -65,7 +65,10 @@ fn publish(node: &OneNode, number: u64) {
             AdmissionLimits::default(),
         ))
         .unwrap();
-    assert!(matches!(result.1.outcome, DecisionOutcome::Committed { .. }), "{result:?}");
+    assert!(
+        matches!(result.1.outcome, DecisionOutcome::Committed { .. }),
+        "{result:?}"
+    );
 }
 
 fn page(
@@ -117,7 +120,10 @@ fn selected_payload_is_committed_exact_and_survives_node_reopen() {
         );
         assert_eq!(request.events.events.len(), 1);
         let bytes = fgit_codec::encode_body(request.events).unwrap();
-        assert_eq!(page(&node, None, 10, None).unwrap().source_head, before.source_head);
+        assert_eq!(
+            page(&node, None, 10, None).unwrap().source_head,
+            before.source_head
+        );
         node.shutdown().unwrap();
 
         let mut reopened = OneNode::open_existing(scratch.config(format)).unwrap();
@@ -130,7 +136,10 @@ fn selected_payload_is_committed_exact_and_survives_node_reopen() {
         )
         .unwrap();
         assert_eq!(restored.source_head(), before.source_head);
-        assert_eq!(fgit_codec::encode_body(restored.as_request().events).unwrap(), bytes);
+        assert_eq!(
+            fgit_codec::encode_body(restored.as_request().events).unwrap(),
+            bytes
+        );
         reopened.shutdown().unwrap();
     }
 }
@@ -156,7 +165,12 @@ fn outbox_pages_are_disjoint_and_stale_pins_refuse_without_empty_success() {
         Err(ForgeDeliveryReadRefusal::SnapshotMoved),
     ));
     assert!(matches!(
-        select(&node, first.entries[0].delivery_key(), first.entries[0].destination(), Some(first.source_head)),
+        select(
+            &node,
+            first.entries[0].delivery_key(),
+            first.entries[0].destination(),
+            Some(first.source_head)
+        ),
         Err(ForgeDeliveryReadRefusal::SnapshotMoved),
     ));
     for limit in [0, 101] {
@@ -177,14 +191,27 @@ fn missing_or_wrongly_addressed_delivery_cannot_select_event_bytes() {
     let before = page(&node, None, 10, None).unwrap();
     let entry = &before.entries[0];
     assert!(matches!(
-        select(&node, AsciiSlug::from_static("absent-delivery"), entry.destination(), None),
+        select(
+            &node,
+            AsciiSlug::from_static("absent-delivery"),
+            entry.destination(),
+            None
+        ),
         Err(ForgeDeliveryReadRefusal::MissingDelivery),
     ));
     assert!(matches!(
-        select(&node, entry.delivery_key(), AsciiSlug::from_static("other-destination"), None),
+        select(
+            &node,
+            entry.delivery_key(),
+            AsciiSlug::from_static("other-destination"),
+            None
+        ),
         Err(ForgeDeliveryReadRefusal::DestinationMismatch),
     ));
-    assert_eq!(page(&node, None, 10, None).unwrap().source_head, before.source_head);
+    assert_eq!(
+        page(&node, None, 10, None).unwrap().source_head,
+        before.source_head
+    );
     node.shutdown().unwrap();
 }
 
@@ -200,8 +227,11 @@ fn staging_new_event_bytes_does_not_replace_a_canonical_delivery() {
     let original_frame = fgit_codec::encode_body(original.as_request().events).unwrap();
     let mut staged = original.as_request().events.clone();
     staged.events[0].version = fgit_forge::AggregateVersion::try_new(2).unwrap();
-    if let fgit_forge::ForgeEventPayload::IssueChangedNative(change) = &mut staged.events[0].payload {
-        change.action = IssueAction::Comment { body: "staged but never published".into() };
+    if let fgit_forge::ForgeEventPayload::IssueChangedNative(change) = &mut staged.events[0].payload
+    {
+        change.action = IssueAction::Comment {
+            body: "staged but never published".into(),
+        };
     } else {
         panic!("fixture must be a native issue event");
     }
@@ -218,7 +248,10 @@ fn staging_new_event_bytes_does_not_replace_a_canonical_delivery() {
         .unwrap();
     let selected = select(&node, entry.delivery_key(), entry.destination(), None).unwrap();
     assert_eq!(selected.source_head(), before.source_head);
-    assert_eq!(fgit_codec::encode_body(selected.as_request().events).unwrap(), original_frame);
+    assert_eq!(
+        fgit_codec::encode_body(selected.as_request().events).unwrap(),
+        original_frame
+    );
     assert_eq!(selected.entry().payload_root(), entry.payload_root());
     node.shutdown().unwrap();
 }

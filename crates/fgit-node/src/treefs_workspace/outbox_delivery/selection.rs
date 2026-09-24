@@ -8,9 +8,8 @@ use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
 use fgit_types::{AsciiSlug, RepositoryAuthorityHeadId};
 
 use crate::{
-    ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX, AdmissionMaterializationRefusal,
-    NodeRequestContext, OneNode, PackContextCheckpoint, checkpoint_pack_context,
-    read_evidence_body_in,
+    ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX, AdmissionMaterializationRefusal, NodeRequestContext,
+    OneNode, PackContextCheckpoint, checkpoint_pack_context, read_evidence_body_in,
 };
 
 /// A selection failure never constitutes a transport or settlement observation.

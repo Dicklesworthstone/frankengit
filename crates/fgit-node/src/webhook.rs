@@ -338,16 +338,18 @@ impl WebhookDeliveryDestination {
         reason: &str,
         now_secs: u64,
     ) -> Result<(), RefusalCode> {
-        self.dead_letters.try_push(DeadLetterEntry {
-            delivery_id: request.key,
-            webhook_id: self.registration.id,
-            target_url: self.registration.url.raw().to_string(),
-            payload_root: request.payload_root,
-            event_name: "forge_event".into(),
-            attempts: attempt,
-            terminal_reason: reason.to_string(),
-            failed_at_unix_secs: now_secs,
-        }).map_err(|_| RefusalCode::EvidenceMissing)
+        self.dead_letters
+            .try_push(DeadLetterEntry {
+                delivery_id: request.key,
+                webhook_id: self.registration.id,
+                target_url: self.registration.url.raw().to_string(),
+                payload_root: request.payload_root,
+                event_name: "forge_event".into(),
+                attempts: attempt,
+                terminal_reason: reason.to_string(),
+                failed_at_unix_secs: now_secs,
+            })
+            .map_err(|_| RefusalCode::EvidenceMissing)
     }
 }
 

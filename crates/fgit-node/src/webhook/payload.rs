@@ -133,7 +133,7 @@ mod tests {
         let marker = "\"canonical_frame_hex\":\"";
         let start = body.find(marker).unwrap() + marker.len();
         let encoded = body[start..].split('"').next().unwrap();
-        let frame = super::super::hex_decode(encoded).unwrap();
+        let frame = super::super::persistence::hex_decode(encoded).unwrap();
         let decoded =
             fgit_codec::decode_body::<ForgeEvent>(&frame, fgit_codec::DecodeLimits::DEFAULT)
                 .unwrap();
