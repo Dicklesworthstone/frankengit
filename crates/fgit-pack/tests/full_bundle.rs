@@ -256,3 +256,25 @@ fn writer_refuses_missing_edges_and_unrelated_retained_objects_before_pack_work(
 
 #[path = "full_bundle/fetch.rs"]
 mod fetch;
+
+/// A non-bundle or truncated header is invalid (a client error); only a header
+/// that exhausts its byte budget without a delimiter is the header limit.
+#[test]
+fn a_header_without_a_delimiter_is_invalid_unless_it_exhausts_the_budget() {
+    for input in [b"not a Git bundle".as_slice(), b"# v2 git bundle", b""] {
+        assert_eq!(
+            FullBundleInput::parse(input, FullBundleLimits::default(), &mut || true).unwrap_err(),
+            FullBundleError::Invalid("header line without delimiter"),
+            "{}",
+            String::from_utf8_lossy(input)
+        );
+    }
+    let limits = FullBundleLimits {
+        max_header_bytes: 8,
+        ..FullBundleLimits::default()
+    };
+    assert_eq!(
+        FullBundleInput::parse(b"# v2 git bundle\n", limits, &mut || true).unwrap_err(),
+        FullBundleError::Limit("header bytes")
+    );
+}

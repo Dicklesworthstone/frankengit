@@ -260,7 +260,13 @@ pub(super) fn form(bytes: &[u8], maximum_fields: usize) -> Result<Vec<(String, S
             .position(|&b| b == b'=')
             .ok_or_else(|| ApiError::bad("invalid_form"))?;
         let key = decode(&field[..equals], 32)?;
-        if key.is_empty() || !key.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
+        // A lowercase letter, then lowercase letters, digits or underscores:
+        // documented names such as `artifact_sha256` must parse.
+        if !key.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
             return Err(ApiError::bad("invalid_field_name"));
         }
         let value = decode(&field[equals + 1..], MAX_BODY_BYTES)?;
@@ -345,7 +351,28 @@ pub(super) fn parse_head_token(text: &str) -> Result<RepositoryAuthorityHeadId, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use fgit_wire::smart_http::{HttpLimits, head};
+
+    #[test]
+    fn field_names_admit_digits_after_a_leading_lowercase_letter() {
+        let fields = form(b"object_format=sha1&artifact_sha256=ab", 4).unwrap();
+        assert_eq!(fields[1].0, "artifact_sha256");
+        for rejected in [
+            b"=x".as_slice(),
+            b"2fa=x",
+            b"_hidden=x",
+            b"Upper=x",
+            b"dash-name=x",
+        ] {
+            assert_eq!(
+                form(rejected, 4).unwrap_err().code,
+                "invalid_field_name",
+                "{}",
+                String::from_utf8_lossy(rejected)
+            );
+        }
+    }
 
     fn command(action: &str, form: &[u8]) -> Result<IssueCommand, ApiError> {
         let bytes = format!(

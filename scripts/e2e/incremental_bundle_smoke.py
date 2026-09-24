@@ -85,7 +85,9 @@ def run_format(binary, algorithm):
         protection = ["protection", "set", fresh, TENANT, REPOSITORY, "--trusted-local", "--object-format", algorithm,
                       "--principal", PRINCIPAL, "--idempotency-key", "protect-main", "--expected-version", "0", "--expected-epoch", "1",
                       "--admin", PRINCIPAL, "--require-reviewer", "refs/heads/main:" + "e4" * 16]
-        require(document(invoke(binary, protection))["command_committed"], "protection activation")
+        # `fg protection set` receipts name the decision `committed` (the
+        # branch and bundle receipts use `command_committed`).
+        require(document(invoke(binary, protection))["committed"] is True, "protection activation")
         protected = refs(fresh)
         result = document(invoke(binary, upload(fresh, output), code=3, data=b"protected-sync"))
         require(result["refusal_code"] == "ProtectedRefTransitionDenied", "incremental transfer bypassed required review")

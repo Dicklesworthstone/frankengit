@@ -265,15 +265,26 @@ fn line<'a>(
 ) -> Result<&'a [u8], FullBundleError> {
     let end = maximum.min(input.len());
     if *cursor >= end {
-        return Err(FullBundleError::Limit("header bytes or missing delimiter"));
+        return Err(missing_delimiter(input, maximum));
     }
     let length = input[*cursor..end]
         .iter()
         .position(|b| *b == b'\n')
-        .ok_or(FullBundleError::Limit("header bytes or missing delimiter"))?;
+        .ok_or_else(|| missing_delimiter(input, maximum))?;
     let record = &input[*cursor..*cursor + length];
     *cursor += length + 1;
     Ok(record)
+}
+
+/// No line delimiter before the header budget ends. When the input itself
+/// ended first it is a truncated or non-bundle header (invalid), not an
+/// oversized one; at or past the budget it is the header limit.
+const fn missing_delimiter(input: &[u8], maximum: usize) -> FullBundleError {
+    if input.len() < maximum {
+        FullBundleError::Invalid("header line without delimiter")
+    } else {
+        FullBundleError::Limit("header bytes")
+    }
 }
 
 /// A complete stream produced only through the existing verified pack writer.
