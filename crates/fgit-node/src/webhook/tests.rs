@@ -472,3 +472,95 @@ fn webhook_cache_does_not_claim_durable_receiver_idempotency() {
     );
     assert_eq!(<WebhookDeliveryDestination as OutboxDestination<Cx>>::idempotency(&dest), DownstreamIdempotency::Weak);
 }
+
+#[test]
+fn webhook_key_only_entry_point_refuses_instead_of_fabricating_events() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let dest = WebhookDeliveryDestination::new(
+        AsciiSlug::from_static("test-webhook"),
+        test_registration(&url, SsrfPolicy::PERMISSIVE_FOR_TESTS),
+        SsrfPolicy::PERMISSIVE_FOR_TESTS,
+        DeadLetterQueue::new(),
+    );
+    let error = dest.deliver_simple(AsciiSlug::from_static("missing-payload"), 1).unwrap_err();
+    assert!(error.starts_with("EvidenceMissing:"));
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn webhook_real_events_reach_http_receiver_unchanged_on_retry() {
+    use fgit_forge::{
+        AggregateId, AggregateVersion, ForgeEvent, ForgeEventPayload, PullRequestNumber,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let receiver = thread::spawn(move || {
+        let mut deliveries = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut length = 0;
+            let mut signature = String::new();
+            let mut attempt = String::new();
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.strip_prefix("Content-Length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+                if let Some(value) = line.strip_prefix("X-FrankenGit-Signature-256:") {
+                    signature = value.trim().to_owned();
+                }
+                if let Some(value) = line.strip_prefix("X-FrankenGit-Attempt:") {
+                    attempt = value.trim().to_owned();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            deliveries.push((body, signature, attempt));
+            stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap();
+        }
+        deliveries
+    });
+    let dest = WebhookDeliveryDestination::new(
+        AsciiSlug::from_static("test-webhook"),
+        test_registration(&url, SsrfPolicy::PERMISSIVE_FOR_TESTS),
+        SsrfPolicy::PERMISSIVE_FOR_TESTS,
+        DeadLetterQueue::new(),
+    );
+    let events = ForgeEventBatch {
+        events: vec![ForgeEvent {
+            aggregate: AggregateId::PullRequest(PullRequestNumber::try_new(11).unwrap()),
+            version: AggregateVersion::try_new(2).unwrap(),
+            payload: ForgeEventPayload::PullRequestClosed { withdrawn: true },
+        }],
+    };
+    let request = DeliveryRequest {
+        key: AsciiSlug::from_static("real-event-retry"),
+        destination: dest.destination_slug,
+        payload_root: fgit_admission::evidence::evidence_root(&events).unwrap(),
+        events: &events,
+    };
+    for attempt in 1..=2 {
+        assert_eq!(dest.deliver_request(&request, attempt).unwrap().0, "Accepted");
+    }
+    let deliveries = receiver.join().unwrap();
+    let expected = payload::encode(&request).unwrap();
+    assert_eq!(deliveries[0].0, expected.as_bytes());
+    assert_eq!(deliveries[1].0, deliveries[0].0);
+    assert_eq!(deliveries[1].1, deliveries[0].1);
+    assert_eq!(deliveries[0].2, "1");
+    assert_eq!(deliveries[1].2, "2");
+    let tag_bytes = hex::decode(deliveries[0].1.strip_prefix("sha256=").unwrap()).unwrap();
+    let tag: [u8; 32] = tag_bytes.try_into().unwrap();
+    assert!(test_secret().verify(&deliveries[0].0, &tag));
+    assert!(expected.contains("\"events_count\":1"));
+    assert!(expected.contains("\"canonical_frame_hex\":"));
+}

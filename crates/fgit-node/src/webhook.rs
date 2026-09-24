@@ -18,6 +18,8 @@ use fsqlite_types::cx::Cx;
 
 mod transport;
 
+mod payload;
+
 /// In-memory and file-backed Dead Letter Queue for terminally failed webhook deliveries.
 #[derive(Clone, Debug, Default)]
 pub struct DeadLetterQueue {
@@ -266,25 +268,28 @@ impl WebhookDeliveryDestination {
         }
     }
 
-    /// Transmit one HTTP POST webhook delivery for CLI execution or direct driver.
+    /// Legacy entry point without canonical payload evidence.
+    ///
+    /// A key and retry ordinal cannot reconstruct a committed event. Callers
+    /// must select a verified outbox request and use `deliver_request`; this
+    /// compatibility entry point refuses instead of transmitting a fake root.
     pub fn deliver_simple(
         &self,
-        key: AsciiSlug,
+        _key: AsciiSlug,
+        _attempt: u32,
+    ) -> Result<(&'static str, Vec<u8>), String> {
+        Err("EvidenceMissing: webhook delivery requires an authority-selected DeliveryRequest".into())
+    }
+
+    /// Deliver the exact payload selected and verified by the canonical outbox
+    /// reader. This direct adapter call does not itself settle an obligation.
+    pub fn deliver_request(
+        &self,
+        request: &DeliveryRequest<'_>,
         attempt: u32,
     ) -> Result<(&'static str, Vec<u8>), String> {
-        let empty_events = fgit_forge::ForgeEventBatch { events: Vec::new() };
-        let dummy_digest = Digest::new(
-            fgit_types::DigestAlgorithmId::try_new(1).unwrap(),
-            fgit_types::DigestBytes::try_new(&[0xaa; 32]).unwrap(),
-        );
-        let request = DeliveryRequest {
-            key,
-            destination: self.destination_slug,
-            payload_root: dummy_digest,
-            events: &empty_events,
-        };
         let (verdict, body) = self
-            .dispatch_http(&request, attempt)
+            .dispatch_http(request, attempt)
             .map_err(|code| format!("{code:?}"))?;
         let verdict_str = match verdict {
             DeliveryVerdict::Accepted => "Accepted",
@@ -341,6 +346,11 @@ impl WebhookDeliveryDestination {
             ));
         }
 
+        // Serialize full, ordered canonical events. Retry metadata remains in
+        // HTTP headers, so one delivery key always signs the same payload bytes.
+        let payload = payload::encode(request)?;
+        let payload_bytes = payload.as_bytes();
+
         // 2. Resolve a policy-approved address, then connect to that exact IP.
         let target_addr = match self.resolve_safe_socket_addr(&validated) {
             Ok(addr) => addr,
@@ -349,18 +359,6 @@ impl WebhookDeliveryDestination {
                 return Ok((DeliveryVerdict::PermanentRejection, reason.into_bytes()));
             }
         };
-
-        // 3. Construct JSON payload
-        let payload = format!(
-            "{{\"delivery_id\":\"{}\",\"destination\":\"{}\",\"payload_root\":\"{}\",\"events_count\":{},\"attempt\":{},\"timestamp\":{}}}",
-            request.key.as_str(),
-            request.destination.as_str(),
-            request.payload_root,
-            request.events.events.len(),
-            attempt,
-            now_secs
-        );
-        let payload_bytes = payload.as_bytes();
 
         // 4. Compute HMAC signature using active secret
         let sig_tag = self.registration.secrets.sign_active(payload_bytes);
