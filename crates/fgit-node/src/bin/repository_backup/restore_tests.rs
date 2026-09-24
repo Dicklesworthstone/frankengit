@@ -81,7 +81,10 @@ fn interruption_after_data_preparation_leaves_no_public_authority() {
         fs::read(target.join("authority.fsqlite-wal")).unwrap(),
         b"closed-WAL"
     );
-    assert!(!stage.join("authority.fsqlite-wal").exists(), "WAL has exactly one recovery location");
+    assert!(
+        !stage.join("authority.fsqlite-wal").exists(),
+        "WAL has exactly one recovery location"
+    );
     assert!(!target.join("authority.fsqlite-shm").exists());
     drop(ready);
     assert!(
@@ -118,7 +121,10 @@ fn file_publication_keeps_data_and_retains_quarantine_until_final_verification()
         .unwrap()
         .publish()
         .unwrap();
-    assert!(stage.exists(), "publication alone cannot clean recovery evidence");
+    assert!(
+        stage.exists(),
+        "publication alone cannot clean recovery evidence"
+    );
     assert_eq!(
         fs::read(target.join("authority.fsqlite")).unwrap(),
         b"already-closed-image"
@@ -183,10 +189,22 @@ fn restore_accepts_shared_profile_flags_and_rejects_duplicate_limits() {
 #[test]
 fn resume_is_explicit_unique_and_compatible_with_all_resource_flags() {
     assert!(!parse(&args()).unwrap().resume);
-    let mut input = args(); input.push("--resume".into());
+    let mut input = args();
+    input.push("--resume".into());
     assert!(parse(&input).unwrap().resume);
-    input.extend(["--max-archive-bytes".into(), "2147483648".into(), "--timeout-secs".into(), "900".into()]);
-    assert_eq!(input.len(), 13); assert!(parse(&input).unwrap().resume);
-    let mut duplicate = args(); duplicate.extend(["--resume".into(), "--resume".into()]);
-    assert!(parse(&duplicate).unwrap_err().contains("duplicate --resume"));
+    input.extend([
+        "--max-archive-bytes".into(),
+        "2147483648".into(),
+        "--timeout-secs".into(),
+        "900".into(),
+    ]);
+    assert_eq!(input.len(), 13);
+    assert!(parse(&input).unwrap().resume);
+    let mut duplicate = args();
+    duplicate.extend(["--resume".into(), "--resume".into()]);
+    assert!(
+        parse(&duplicate)
+            .unwrap_err()
+            .contains("duplicate --resume")
+    );
 }

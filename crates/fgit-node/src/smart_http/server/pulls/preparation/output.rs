@@ -179,7 +179,9 @@ pub(super) fn build(
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<Reply, ApiError> {
-    build_inner(node, head, subject, outcome, bundle, None, profile, maximum, live)
+    build_inner(
+        node, head, subject, outcome, bundle, None, profile, maximum, live,
+    )
 }
 
 pub(super) fn build_resolved(

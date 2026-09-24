@@ -51,7 +51,12 @@ fn refuses_http_request_line_and_header_injection() {
 #[test]
 fn query_only_urls_get_an_origin_form_request_target() {
     for (raw, host, port, target) in [
-        ("http://example.com?topic=push", "example.com", 80, "/?topic=push"),
+        (
+            "http://example.com?topic=push",
+            "example.com",
+            80,
+            "/?topic=push",
+        ),
         (
             "https://example.com:8443?recipient=a@b",
             "example.com",
@@ -60,7 +65,9 @@ fn query_only_urls_get_an_origin_form_request_target() {
         ),
         ("https://example.com?", "example.com", 443, "/?"),
     ] {
-        let url = SsrfPolicy::STRICT.validate_url(raw).expect("valid query URL");
+        let url = SsrfPolicy::STRICT
+            .validate_url(raw)
+            .expect("valid query URL");
         assert_eq!(url.host(), host);
         assert_eq!(url.port(), port);
         assert_eq!(url.path_and_query(), target);
@@ -76,9 +83,11 @@ fn query_only_ipv6_urls_preserve_the_authority() {
     assert_eq!(url.host(), "::1");
     assert_eq!(url.port(), 9000);
     assert_eq!(url.path_and_query(), "/?topic=push");
-    assert!(SsrfPolicy::STRICT
-        .validate_url("http://[::1]:9000?topic=push")
-        .is_err());
+    assert!(
+        SsrfPolicy::STRICT
+            .validate_url("http://[::1]:9000?topic=push")
+            .is_err()
+    );
 }
 
 #[test]

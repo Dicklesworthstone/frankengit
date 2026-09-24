@@ -5,8 +5,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use fgit_authority::StoreInstanceId;
 use super::super::super::{parent, publish_new, regular, require_absent, sync_directory};
+use fgit_authority::StoreInstanceId;
 
 const INTENT: &str = ".authority-restore-intent";
 const LOCK: &str = ".restore-lock";
@@ -25,7 +25,10 @@ pub(super) struct Custody {
     _lock: File,
 }
 impl Custody {
-    pub(super) fn acquire(root: &Path, pin: [u8; 32], instance: StoreInstanceId,
+    pub(super) fn acquire(
+        root: &Path,
+        pin: [u8; 32],
+        instance: StoreInstanceId,
         resume: bool,
     ) -> Result<Self, String> {
         if !resume {
@@ -39,15 +42,23 @@ impl Custody {
         }
         let mut options = OpenOptions::new();
         options.read(true).write(true);
-        if !resume { options.create_new(true); }
+        if !resume {
+            options.create_new(true);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let lock = options.open(&lock_path).map_err(|e| format!("restore lock open failed: {e}"))?;
-        lock.try_lock().map_err(|e| format!("restore already running or lock unavailable: {e}"))?;
-        let custody = Self { root: root.to_path_buf(), _lock: lock };
+        let lock = options
+            .open(&lock_path)
+            .map_err(|e| format!("restore lock open failed: {e}"))?;
+        lock.try_lock()
+            .map_err(|e| format!("restore already running or lock unavailable: {e}"))?;
+        let custody = Self {
+            root: root.to_path_buf(),
+            _lock: lock,
+        };
         let binding = binding(pin, instance);
         let marker = root.join(INTENT);
         if resume {
@@ -57,8 +68,11 @@ impl Custody {
                 return Err("all-heads resume refused: missing original intent (legacy directories cannot resume)".into());
             }
             let mut bytes = Vec::new();
-            File::open(&marker).map_err(|e| e.to_string())?.take(49)
-                .read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            File::open(&marker)
+                .map_err(|e| e.to_string())?
+                .take(49)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
             if bytes.as_slice() != binding.as_slice() {
                 return Err("all-heads resume intent disagrees with format, checksum or destination instance".into());
             }
@@ -100,8 +114,8 @@ impl Custody {
         if (public_wal || private_wal) && (!present || !database) {
             return Err("restore WAL lacks its quarantined database; no paths changed".into());
         }
-        if !database && (exists(&quarantine.join(JOURNAL), false)?
-            || exists(&quarantine.join(SHM), false)?)
+        if !database
+            && (exists(&quarantine.join(JOURNAL), false)? || exists(&quarantine.join(SHM), false)?)
         {
             return Err("restore sidecar lacks its database; no paths changed".into());
         }
@@ -118,11 +132,14 @@ impl Custody {
 
     /// Only a closed, completely verified image reaches this boundary. WAL
     /// moves first; the database's no-replace link is the visibility boundary.
-    pub(super) fn publish(&self, mut after_wal: impl FnMut() -> Result<(), String>)
-        -> Result<(), String>
-    {
+    pub(super) fn publish(
+        &self,
+        mut after_wal: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
         let quarantine = self.root.join(QUARANTINE);
-        if !exists(&quarantine, true)? { return Err("missing verified quarantine".into()); }
+        if !exists(&quarantine, true)? {
+            return Err("missing verified quarantine".into());
+        }
         let database = quarantine.join(DATABASE);
         regular(&database)?;
         require_absent(&self.root.join(DATABASE))?;
@@ -130,15 +147,20 @@ impl Custody {
         require_absent(&self.root.join(JOURNAL))?;
         require_absent(&self.root.join(SHM))?;
         let journal = quarantine.join(JOURNAL);
-        if exists(&journal, false)? && fs::metadata(&journal).map_err(|e| e.to_string())?.len() != 0 {
+        if exists(&journal, false)? && fs::metadata(&journal).map_err(|e| e.to_string())?.len() != 0
+        {
             return Err("closed restore retains a rollback journal; publication refused".into());
         }
         exists(&quarantine.join(SHM), false)?;
         let wal = quarantine.join(WAL);
         let has_wal = exists(&wal, false)?;
-        File::open(&database).and_then(|file| file.sync_all()).map_err(|e| e.to_string())?;
+        File::open(&database)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| e.to_string())?;
         if has_wal {
-            File::open(&wal).and_then(|file| file.sync_all()).map_err(|e| e.to_string())?;
+            File::open(&wal)
+                .and_then(|file| file.sync_all())
+                .map_err(|e| e.to_string())?;
             fs::rename(&wal, self.root.join(WAL)).map_err(|e| e.to_string())?;
         }
         sync_directory(&quarantine).map_err(|e| e.to_string())?;
@@ -156,7 +178,9 @@ impl Custody {
     /// and shutdown. Unknown files prevent directory removal, never get erased.
     /// The intent and lock remain for resolving a lost success response.
     pub(super) fn cleanup(&self) -> Result<(), String> {
-        if !self.published()? { return Err("cannot clean an unpublished all-heads restore".into()); }
+        if !self.published()? {
+            return Err("cannot clean an unpublished all-heads restore".into());
+        }
         let quarantine = self.root.join(QUARANTINE);
         if exists(&quarantine, true)? {
             for name in [DATABASE, WAL, JOURNAL, SHM] {
@@ -164,9 +188,12 @@ impl Custody {
             }
             for name in [DATABASE, WAL, JOURNAL, SHM] {
                 let path = quarantine.join(name);
-                if exists(&path, false)? { fs::remove_file(path).map_err(|e| e.to_string())?; }
+                if exists(&path, false)? {
+                    fs::remove_file(path).map_err(|e| e.to_string())?;
+                }
             }
-            fs::remove_dir(&quarantine).map_err(|e| format!("owned quarantine cleanup refused: {e}"))?;
+            fs::remove_dir(&quarantine)
+                .map_err(|e| format!("owned quarantine cleanup refused: {e}"))?;
         }
         sync_directory(&self.root).map_err(|e| e.to_string())
     }
@@ -174,8 +201,13 @@ impl Custody {
 fn create_private(path: &Path) -> Result<(), String> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    { use std::os::unix::fs::DirBuilderExt; builder.mode(0o700); }
-    builder.create(path).map_err(|e| format!("cannot reserve restore directory: {e}"))
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .map_err(|e| format!("cannot reserve restore directory: {e}"))
 }
 fn binding(pin: [u8; 32], instance: StoreInstanceId) -> [u8; 48] {
     let mut bytes = [0; 48];

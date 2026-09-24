@@ -187,8 +187,8 @@ pub(crate) fn receive_refusal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fgit_policy::{Decision, PolicyInstant, RefUpdateFact, RefUpdateKind};
     use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
+    use fgit_policy::{Decision, PolicyInstant, RefUpdateFact, RefUpdateKind};
     use fgit_types::GitOidSha1;
 
     fn allows(snapshot: &PolicySnapshot, name: &str, delete: bool) -> bool {
@@ -364,17 +364,19 @@ mod tests {
         let id = source.pin(branch_deletion("refs/heads/main").unwrap());
         // Establish that the planted failure actually reaches input validation,
         // rather than merely exercising an ordinary policy-denial result.
-        assert!(crate::policy_bridge::evaluate_receive_pack_protection(
-            &source,
-            &id,
-            &crate::policy_bridge::SubjectCodeMap::default(),
-            principal,
-            crate::policy_bridge::default_principal_snapshot_id(),
-            &refs,
-            &duplicate_commands,
-            PolicyInstant::from_seconds(0),
-        )
-        .is_err());
+        assert!(
+            crate::policy_bridge::evaluate_receive_pack_protection(
+                &source,
+                &id,
+                &crate::policy_bridge::SubjectCodeMap::default(),
+                principal,
+                crate::policy_bridge::default_principal_snapshot_id(),
+                &refs,
+                &duplicate_commands,
+                PolicyInstant::from_seconds(0),
+            )
+            .is_err()
+        );
         assert_eq!(
             receive_refusal(&target, principal, &refs, &duplicate_commands),
             Some(RefusalCode::ProtectedRefTransitionDenied)

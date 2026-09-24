@@ -42,7 +42,12 @@ impl OneNode {
         limits: PreparationLimits,
     ) -> Result<PreparedPullRequestBundle, NodeWorkspaceRefusal> {
         self.prepare_pull_request_bundle_with_profile_in(
-            request, subject, visibility, metadata, limits, MergeProfile::PathMergeV1,
+            request,
+            subject,
+            visibility,
+            metadata,
+            limits,
+            MergeProfile::PathMergeV1,
         )
         .await
     }

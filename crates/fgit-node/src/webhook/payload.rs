@@ -23,10 +23,7 @@ pub(super) fn encode(request: &DeliveryRequest<'_>) -> Result<String, RefusalCod
     encode_with_limit(request, MAX_PAYLOAD_BYTES)
 }
 
-fn encode_with_limit(
-    request: &DeliveryRequest<'_>,
-    limit: usize,
-) -> Result<String, RefusalCode> {
+fn encode_with_limit(request: &DeliveryRequest<'_>, limit: usize) -> Result<String, RefusalCode> {
     if request.events.events.len() > MAX_EVENTS {
         return Err(RefusalCode::ResourceBudgetExceeded);
     }
@@ -42,8 +39,8 @@ fn encode_with_limit(
     let mut payload = String::new();
     append(&mut payload, &header, limit)?;
     for (index, event) in request.events.events.iter().enumerate() {
-        let frame = fgit_codec::encode_body(event)
-            .map_err(|_| RefusalCode::CanonicalFramingInvalid)?;
+        let frame =
+            fgit_codec::encode_body(event).map_err(|_| RefusalCode::CanonicalFramingInvalid)?;
         if frame.len() > MAX_FRAME_BYTES {
             return Err(RefusalCode::ResourceBudgetExceeded);
         }
@@ -137,11 +134,9 @@ mod tests {
         let start = body.find(marker).unwrap() + marker.len();
         let encoded = body[start..].split('"').next().unwrap();
         let frame = super::super::hex_decode(encoded).unwrap();
-        let decoded = fgit_codec::decode_body::<ForgeEvent>(
-            &frame,
-            fgit_codec::DecodeLimits::DEFAULT,
-        )
-        .unwrap();
+        let decoded =
+            fgit_codec::decode_body::<ForgeEvent>(&frame, fgit_codec::DecodeLimits::DEFAULT)
+                .unwrap();
         assert_eq!(decoded, events.events[0]);
         assert!(body.contains("\"kind\":4,\"version\":2"));
         assert!(body.contains(&format!("\"payload_root\":\"{}\"", request.payload_root)));
@@ -162,10 +157,8 @@ mod tests {
     fn changing_an_event_changes_the_body_and_invalidates_its_signature() {
         let mut events = events();
         let first = encode(&request(&events)).unwrap();
-        let secret = fgit_forge::webhook::WebhookSecret::new(
-            b"0123456789abcdef0123456789abcdef",
-        )
-        .unwrap();
+        let secret =
+            fgit_forge::webhook::WebhookSecret::new(b"0123456789abcdef0123456789abcdef").unwrap();
         let tag = fgit_forge::webhook::WebhookSecretRotation::new(secret.clone())
             .sign_active(first.as_bytes());
         events.events[0].payload = ForgeEventPayload::PullRequestClosed { withdrawn: false };

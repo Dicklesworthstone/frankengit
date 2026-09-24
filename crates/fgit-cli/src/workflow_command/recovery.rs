@@ -1,7 +1,7 @@
 //! Offline saved-result recovery. Parsing never opens source or executes work.
-use super::unhex;
 #[cfg(target_os = "linux")]
 use super::quote;
+use super::unhex;
 use fgit_crypto::{Digest, DigestAlgorithm, DigestBytes};
 use fgit_types::{RepositoryId, TenantId};
 use std::collections::BTreeMap;
@@ -11,7 +11,8 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 mod publication;
 
-const USAGE: &str = "usage: fg workflow recover <absolute-run-directory> <tenant-id> <repository-id>
+const USAGE: &str =
+    "usage: fg workflow recover <absolute-run-directory> <tenant-id> <repository-id>
   --journal-id <64-lowercase-hex-original-attempt-marker-sha256>
   [--minimum-pin <bytes>:<tail-sha256>] [--timeout-ms <1..60000>]
 
@@ -50,8 +51,17 @@ operations; filesystem calls and stdout do not have hard latency guarantees.";
 
 #[derive(Debug)]
 enum Selection {
-    History { at: Option<(u64, Digest)>, after: Option<Digest>, count: usize, bytes: usize },
-    Export { batch: Digest, evidence: Option<Digest>, output: PathBuf },
+    History {
+        at: Option<(u64, Digest)>,
+        after: Option<Digest>,
+        count: usize,
+        bytes: usize,
+    },
+    Export {
+        batch: Digest,
+        evidence: Option<Digest>,
+        output: PathBuf,
+    },
 }
 #[derive(Debug)]
 struct Options {
@@ -73,7 +83,9 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     {
         let started = std::time::Instant::now();
         let budget = std::time::Duration::from_millis(options.timeout_ms);
-        execute(options, &mut std::io::stdout().lock(), &|| started.elapsed() < budget)
+        execute(options, &mut std::io::stdout().lock(), &|| {
+            started.elapsed() < budget
+        })
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -88,7 +100,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     if args.iter().any(|s| s.len() > 4096 || s.contains('\0'))
         || args.iter().map(String::len).sum::<usize>() > 32 * 1024
-    { return Err("recovery arguments exceed the bounded profile".into()); }
+    {
+        return Err("recovery arguments exceed the bounded profile".into());
+    }
     let directory = absolute_path(&args[1])?;
     if unhex(&args[2], 16)?.len() != 16 || unhex(&args[3], 16)?.len() != 16 {
         return Err("recovery scope IDs must have 32 lowercase hex digits".into());
@@ -98,26 +112,55 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut flags = BTreeMap::new();
     let mut cursor = 4;
     while cursor < args.len() {
-        let name = args[cursor].as_str(); cursor += 1;
-        if !matches!(name, "--journal-id" | "--minimum-pin" | "--timeout-ms"
-            | "--limit" | "--page-bytes" | "--at-pin" | "--after-batch"
-            | "--batch" | "--evidence" | "--output")
-        { return Err(format!("unknown recovery option {name:?}")); }
-        let value = args.get(cursor).ok_or_else(|| format!("missing value for {name}"))?;
+        let name = args[cursor].as_str();
         cursor += 1;
-        if flags.insert(name, value.as_str()).is_some() { return Err(format!("duplicate {name}")); }
+        if !matches!(
+            name,
+            "--journal-id"
+                | "--minimum-pin"
+                | "--timeout-ms"
+                | "--limit"
+                | "--page-bytes"
+                | "--at-pin"
+                | "--after-batch"
+                | "--batch"
+                | "--evidence"
+                | "--output"
+        ) {
+            return Err(format!("unknown recovery option {name:?}"));
+        }
+        let value = args
+            .get(cursor)
+            .ok_or_else(|| format!("missing value for {name}"))?;
+        cursor += 1;
+        if flags.insert(name, value.as_str()).is_some() {
+            return Err(format!("duplicate {name}"));
+        }
     }
-    let marker = digest(flags.get("--journal-id").ok_or("--journal-id is mandatory")?)?;
+    let marker = digest(
+        flags
+            .get("--journal-id")
+            .ok_or("--journal-id is mandatory")?,
+    )?;
     let minimum = flags.get("--minimum-pin").map(|s| pin(s)).transpose()?;
-    let timeout_ms = flags.get("--timeout-ms").map_or(Ok(30_000), |s| decimal(s, 1, 60_000))?;
+    let timeout_ms = flags
+        .get("--timeout-ms")
+        .map_or(Ok(30_000), |s| decimal(s, 1, 60_000))?;
     let selection = if let Some(batch) = flags.get("--batch") {
-        if ["--at-pin", "--after-batch", "--limit", "--page-bytes"].iter().any(|f| flags.contains_key(f)) {
+        if ["--at-pin", "--after-batch", "--limit", "--page-bytes"]
+            .iter()
+            .any(|f| flags.contains_key(f))
+        {
             return Err("history paging options cannot be combined with artifact export".into());
         }
         Selection::Export {
             batch: digest(batch)?,
             evidence: flags.get("--evidence").map(|s| digest(s)).transpose()?,
-            output: absolute_path(flags.get("--output").ok_or("artifact export requires --output")?)?,
+            output: absolute_path(
+                flags
+                    .get("--output")
+                    .ok_or("artifact export requires --output")?,
+            )?,
         }
     } else {
         if flags.contains_key("--output") || flags.contains_key("--evidence") {
@@ -125,56 +168,119 @@ fn parse(args: &[String]) -> Result<Options, String> {
         }
         let at = flags.get("--at-pin").map(|s| pin(s)).transpose()?;
         let after = flags.get("--after-batch").map(|s| digest(s)).transpose()?;
-        if after.is_some() && at.is_none() { return Err("--after-batch requires the exact --at-pin snapshot".into()); }
+        if after.is_some() && at.is_none() {
+            return Err("--after-batch requires the exact --at-pin snapshot".into());
+        }
         Selection::History {
-            at, after,
-            count: flags.get("--limit").map_or(Ok(32), |s| decimal(s, 1, 128))? as usize,
-            bytes: flags.get("--page-bytes").map_or(Ok(1024 * 1024), |s| decimal(s, 1, 8 * 1024 * 1024))? as usize,
+            at,
+            after,
+            count: flags
+                .get("--limit")
+                .map_or(Ok(32), |s| decimal(s, 1, 128))? as usize,
+            bytes: flags
+                .get("--page-bytes")
+                .map_or(Ok(1024 * 1024), |s| decimal(s, 1, 8 * 1024 * 1024))?
+                as usize,
         }
     };
-    Ok(Options { directory, tenant, repository, marker, minimum, timeout_ms, selection })
+    Ok(Options {
+        directory,
+        tenant,
+        repository,
+        marker,
+        minimum,
+        timeout_ms,
+        selection,
+    })
 }
 fn absolute_path(value: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(value);
-    if value.is_empty() || value.ends_with('/') || !path.is_absolute() || path.file_name().is_none()
-        || path.components().any(|p| matches!(p, std::path::Component::ParentDir))
-    { return Err("recovery paths must be absolute and cannot contain parent traversal".into()); }
+    if value.is_empty()
+        || value.ends_with('/')
+        || !path.is_absolute()
+        || path.file_name().is_none()
+        || path
+            .components()
+            .any(|p| matches!(p, std::path::Component::ParentDir))
+    {
+        return Err("recovery paths must be absolute and cannot contain parent traversal".into());
+    }
     Ok(path)
 }
 fn digest(value: &str) -> Result<Digest, String> {
     let bytes = unhex(value, 32)?;
-    if bytes.len() != 32 { return Err("recovery commitment must have 64 lowercase hex digits".into()); }
-    Ok(Digest::new(DigestAlgorithm::Sha256.id(), DigestBytes::try_new(&bytes).map_err(|_| "invalid recovery digest")?))
+    if bytes.len() != 32 {
+        return Err("recovery commitment must have 64 lowercase hex digits".into());
+    }
+    Ok(Digest::new(
+        DigestAlgorithm::Sha256.id(),
+        DigestBytes::try_new(&bytes).map_err(|_| "invalid recovery digest")?,
+    ))
 }
 fn pin(value: &str) -> Result<(u64, Digest), String> {
-    let (length, tail) = value.split_once(':').ok_or("pin must be <byte-length>:<sha256>")?;
+    let (length, tail) = value
+        .split_once(':')
+        .ok_or("pin must be <byte-length>:<sha256>")?;
     Ok((decimal(length, 72, 4 * 1024 * 1024 * 1024)?, digest(tail)?))
 }
 fn decimal(value: &str, minimum: u64, maximum: u64) -> Result<u64, String> {
-    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit())
+    if value.is_empty()
+        || !value.bytes().all(|b| b.is_ascii_digit())
         || (value.len() > 1 && value.starts_with('0'))
-    { return Err("recovery limit must be canonical unsigned decimal".into()); }
-    let parsed = value.parse::<u64>().map_err(|_| "recovery limit overflow")?;
-    if !(minimum..=maximum).contains(&parsed) { return Err("recovery limit is outside the bounded profile".into()); }
+    {
+        return Err("recovery limit must be canonical unsigned decimal".into());
+    }
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| "recovery limit overflow")?;
+    if !(minimum..=maximum).contains(&parsed) {
+        return Err("recovery limit is outside the bounded profile".into());
+    }
     Ok(parsed)
 }
 
 #[cfg(target_os = "linux")]
-fn execute(options: Options, output: &mut impl Write, live: &dyn Fn() -> bool) -> Result<u8, String> {
+fn execute(
+    options: Options,
+    output: &mut impl Write,
+    live: &dyn Fn() -> bool,
+) -> Result<u8, String> {
     let scope = (options.tenant, options.repository, options.marker);
     let reply = match options.selection {
-        Selection::History { at, after, count, bytes } => {
-            fgit_node::OneNode::trusted_workflow_history_json(
-                &options.directory, scope, options.minimum, at, after, (count, bytes), live,
-            ).map_err(|e| e.to_string())?
-        }
-        Selection::Export { batch, evidence, output: destination } => {
+        Selection::History {
+            at,
+            after,
+            count,
+            bytes,
+        } => fgit_node::OneNode::trusted_workflow_history_json(
+            &options.directory,
+            scope,
+            options.minimum,
+            at,
+            after,
+            (count, bytes),
+            live,
+        )
+        .map_err(|e| e.to_string())?,
+        Selection::Export {
+            batch,
+            evidence,
+            output: destination,
+        } => {
             let (bytes, metadata) = fgit_node::OneNode::trusted_workflow_artifact(
-                &options.directory, scope, options.minimum, batch, evidence, live,
-            ).map_err(|e| e.to_string())?;
+                &options.directory,
+                scope,
+                options.minimum,
+                batch,
+                evidence,
+                live,
+            )
+            .map_err(|e| e.to_string())?;
             publication::publish(&destination, &bytes, live)?;
-            let reply = format!("{{\"type\":\"workflow_recovery_export\",\"schema_version\":1,\"output\":{},\"artifact\":{metadata}}}",
-                quote(&destination.to_string_lossy()));
+            let reply = format!(
+                "{{\"type\":\"workflow_recovery_export\",\"schema_version\":1,\"output\":{},\"artifact\":{metadata}}}",
+                quote(&destination.to_string_lossy())
+            );
             return write_reply(output, &reply).map_err(|e| format!(
                 "{e}; exact recovered bytes remain at {}; inspect that file, do not replay the workflow", destination.display(),
             ));
@@ -183,7 +289,8 @@ fn execute(options: Options, output: &mut impl Write, live: &dyn Fn() -> bool) -
     write_reply(output, &reply)
 }
 fn write_reply(output: &mut impl Write, text: &str) -> Result<u8, String> {
-    writeln!(output, "{text}").and_then(|()| output.flush())
+    writeln!(output, "{text}")
+        .and_then(|()| output.flush())
         .map_err(|e| format!("workflow recovery output incomplete: {e}"))?;
     Ok(0)
 }

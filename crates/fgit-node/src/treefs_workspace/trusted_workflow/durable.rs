@@ -4,8 +4,8 @@
 //! runner owns scheduling, per-job evidence custody and the execution fence.
 //! Neither a local script's exit status nor a custody receipt grants a check.
 
-mod recovery;
 mod publication;
+mod recovery;
 
 use super::{TrustedWorkflowFailure, TrustedWorkflowRun, hex};
 use fgit_runner::coordinator::delivery::journal::attempt::{
@@ -49,7 +49,9 @@ impl Prepared {
             || report.execution.graph != plan.graph_commitment()
             || report.run_id == [0; 16]
         {
-            return Err(invalid("coordinator preflight requires the exact unexecuted plan"));
+            return Err(invalid(
+                "coordinator preflight requires the exact unexecuted plan",
+            ));
         }
         let head = report.source_head.as_internal_object_id();
         // The proposal codec has a fixed SHA-256 commitment representation.
@@ -59,17 +61,21 @@ impl Prepared {
         {
             return Err(invalid("unsupported workflow source-head commitment"));
         }
-        let head = Commitment::try_from_digest(fgit_crypto::Digest::new(
-            head.algorithm(), *head.digest(),
-        ))
-        .map_err(|_| invalid("unsupported workflow source-head commitment"))?;
+        let head =
+            Commitment::try_from_digest(fgit_crypto::Digest::new(head.algorithm(), *head.digest()))
+                .map_err(|_| invalid("unsupported workflow source-head commitment"))?;
         let wall_clock = u64::try_from(limits.run_timeout.as_nanos().div_ceil(1_000_000))
             .map_err(|_| invalid("workflow timeout exceeds coordinator representation"))?
             .max(1);
         // These are coordinator admission ceilings, NOT an OS resource sandbox.
         // Actual process/workspace controls remain the existing trusted profile.
         let ceilings = ResourceCeilings::new(
-            100_000, 512 * 1024 * 1024, 1024 * 1024 * 1024, 0, 16, wall_clock,
+            100_000,
+            512 * 1024 * 1024,
+            1024 * 1024 * 1024,
+            0,
+            16,
+            wall_clock,
         )
         .map_err(|_| invalid("workflow coordinator ceilings are invalid"))?;
         let mut coordinator = WorkflowCoordinator::new(
@@ -117,7 +123,12 @@ impl Prepared {
         let binding = coordinator
             .trusted_attempt_binding(&workflow, scope, LOGICAL_NOW)
             .map_err(|_| invalid("workflow attempt binding is unavailable"))?;
-        Ok(Self { coordinator, workflow, binding, scope })
+        Ok(Self {
+            coordinator,
+            workflow,
+            binding,
+            scope,
+        })
     }
 
     pub(super) fn execute<E: WorkflowExecutor>(
@@ -133,7 +144,9 @@ impl Prepared {
         // No adoption of an older or incomplete attempt. The node has already
         // synced its exclusive attempt directory and exact source marker.
         let mut journal = FileCheckJournal::create(
-            &directory.join(JOURNAL_FILE), self.scope, CheckJournalLimits::default(),
+            &directory.join(JOURNAL_FILE),
+            self.scope,
+            CheckJournalLimits::default(),
         )
         .map_err(|e| refused(format!("create workflow proposal journal: {e}")))?;
         let mut owner = FileWorkflowAttempt::create(&directory.join(OWNER_FILE), self.binding)
@@ -144,7 +157,9 @@ impl Prepared {
         .map_err(|e| refused(format!(
             "durable workflow driver failed: {e}; retain the attempt and proposal journal, do not replay"
         )))?;
-        let receipt = self.workflow.receipt()
+        let receipt = self
+            .workflow
+            .receipt()
             .ok_or_else(|| refused("new workflow has no typed completed observation".to_owned()))?;
         // The durable owner and returned report must describe the SAME exact
         // observation. Do not substitute a newly rendered or partial result.
@@ -152,7 +167,9 @@ impl Prepared {
             return Err(refused("durable workflow observation mismatch".to_owned()));
         }
         if self.coordinator.pending_check_fact_count() != 0 {
-            return Err(refused("workflow proposals have not all transferred custody".to_owned()));
+            return Err(refused(
+                "workflow proposals have not all transferred custody".to_owned(),
+            ));
         }
         Ok(receipt.report().clone())
     }

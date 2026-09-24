@@ -278,7 +278,10 @@ impl WebhookDeliveryDestination {
         _key: AsciiSlug,
         _attempt: u32,
     ) -> Result<(&'static str, Vec<u8>), String> {
-        Err("EvidenceMissing: webhook delivery requires an authority-selected DeliveryRequest".into())
+        Err(
+            "EvidenceMissing: webhook delivery requires an authority-selected DeliveryRequest"
+                .into(),
+        )
     }
 
     /// Deliver the exact payload selected and verified by the canonical outbox
@@ -610,9 +613,10 @@ fn final_response_head(mut response: &[u8]) -> Option<(u16, &[u8])> {
         if !matches!(status.get(..9)?, b"HTTP/1.0 " | b"HTTP/1.1 ")
             || status.get(12) != Some(&b' ')
             || !status.get(9..12)?.iter().all(u8::is_ascii_digit)
-            || status.get(13..)?.iter().any(|byte| {
-                byte.is_ascii_control() && *byte != b'\t'
-            })
+            || status
+                .get(13..)?
+                .iter()
+                .any(|byte| byte.is_ascii_control() && *byte != b'\t')
         {
             return None;
         }
@@ -626,13 +630,12 @@ fn final_response_head(mut response: &[u8]) -> Option<(u16, &[u8])> {
             let line = line.strip_suffix(b"\r\n")?;
             let colon = line.iter().position(|byte| *byte == b':')?;
             if colon == 0
-                || !line[..colon].iter().all(|byte| {
-                    byte.is_ascii_alphanumeric()
-                        || b"!#$%&'*+-.^_`|~".contains(byte)
-                })
-                || line[colon + 1..].iter().any(|byte| {
-                    byte.is_ascii_control() && *byte != b'\t'
-                })
+                || !line[..colon]
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(byte))
+                || line[colon + 1..]
+                    .iter()
+                    .any(|byte| byte.is_ascii_control() && *byte != b'\t')
             {
                 return None;
             }
@@ -660,7 +663,12 @@ fn extract_header(response: &[u8], header_name: &str) -> Option<String> {
             if found.is_some() {
                 return None;
             }
-            found = Some(std::str::from_utf8(&line[colon + 1..]).ok()?.trim().to_owned());
+            found = Some(
+                std::str::from_utf8(&line[colon + 1..])
+                    .ok()?
+                    .trim()
+                    .to_owned(),
+            );
         }
     }
     found

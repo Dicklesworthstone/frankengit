@@ -308,12 +308,14 @@ mod hex {
     }
 }
 
-
 #[test]
 fn webhook_https_is_refused_before_any_cleartext_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let url = format!("https://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let url = format!(
+        "https://127.0.0.1:{}/hook",
+        listener.local_addr().unwrap().port()
+    );
     let dest = WebhookDeliveryDestination::new(
         AsciiSlug::from_static("test-webhook"),
         test_registration(&url, SsrfPolicy::PERMISSIVE_FOR_TESTS),
@@ -327,8 +329,14 @@ fn webhook_https_is_refused_before_any_cleartext_connection() {
         payload_root: dummy_digest(),
         events: &events,
     };
-    assert_eq!(dest.dispatch_http(&request, 1).unwrap().0, DeliveryVerdict::PermanentRejection);
-    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(
+        dest.dispatch_http(&request, 1).unwrap().0,
+        DeliveryVerdict::PermanentRejection
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
     assert!(dest.acknowledged.lock().unwrap().is_empty());
     assert_eq!(dest.dead_letters.list().len(), 1);
 }
@@ -337,7 +345,10 @@ fn webhook_https_is_refused_before_any_cleartext_connection() {
 fn webhook_refuses_inactive_and_wrong_audience_before_contact() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let url = format!(
+        "http://127.0.0.1:{}/hook",
+        listener.local_addr().unwrap().port()
+    );
     let mut dest = WebhookDeliveryDestination::new(
         AsciiSlug::from_static("test-webhook"),
         test_registration(&url, SsrfPolicy::PERMISSIVE_FOR_TESTS),
@@ -351,18 +362,36 @@ fn webhook_refuses_inactive_and_wrong_audience_before_contact() {
         payload_root: dummy_digest(),
         events: &events,
     };
-    assert_eq!(dest.dispatch_http(&request, 1), Err(RefusalCode::PublicationPolicyRefused));
+    assert_eq!(
+        dest.dispatch_http(&request, 1),
+        Err(RefusalCode::PublicationPolicyRefused)
+    );
     request.destination = dest.destination_slug;
     dest.registration.active = false;
-    assert_eq!(dest.dispatch_http(&request, 1), Err(RefusalCode::PublicationPolicyRefused));
-    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(
+        dest.dispatch_http(&request, 1),
+        Err(RefusalCode::PublicationPolicyRefused)
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 #[test]
 fn webhook_http_status_needs_complete_valid_final_headers_not_utf8_body() {
-    assert_eq!(parse_http_status(b"HTTP/1.1 204 No Content\r\n\r\n"), Some(204));
-    assert_eq!(parse_http_status(b"HTTP/1.0 200 OK\r\n\r\n\xff\xfe"), Some(200));
-    assert_eq!(parse_http_status(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 202 Accepted\r\n\r\n"), Some(202));
+    assert_eq!(
+        parse_http_status(b"HTTP/1.1 204 No Content\r\n\r\n"),
+        Some(204)
+    );
+    assert_eq!(
+        parse_http_status(b"HTTP/1.0 200 OK\r\n\r\n\xff\xfe"),
+        Some(200)
+    );
+    assert_eq!(
+        parse_http_status(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 202 Accepted\r\n\r\n"),
+        Some(202)
+    );
     for response in [
         b"not-http 200 OK\r\n\r\n".as_slice(),
         b"HTTP/1.1 200 OK\r\n",
@@ -379,13 +408,21 @@ fn webhook_http_status_needs_complete_valid_final_headers_not_utf8_body() {
 
 #[test]
 fn webhook_redirect_headers_cannot_come_from_the_body_or_an_interim_response() {
-    assert_eq!(extract_header(b"HTTP/1.1 302 Found\r\n\r\nLocation: http://example.com/body", "location"), None);
+    assert_eq!(
+        extract_header(
+            b"HTTP/1.1 302 Found\r\n\r\nLocation: http://example.com/body",
+            "location"
+        ),
+        None
+    );
     assert_eq!(extract_header(b"HTTP/1.1 100 Continue\r\nLocation: http://example.com/interim\r\n\r\nHTTP/1.1 302 Found\r\nLocation: http://example.com/final\r\n\r\n", "location"), Some("http://example.com/final".to_owned()));
     assert_eq!(extract_header(b"HTTP/1.1 302 Found\r\nLocation: http://example.com/a\r\nlocation: http://example.com/b\r\n\r\n", "location"), None);
 }
 
 fn consume_webhook_request(stream: &mut TcpStream) {
-    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     let mut reader = BufReader::new(stream);
     let mut length = 0;
     loop {
@@ -405,7 +442,10 @@ fn consume_webhook_request(stream: &mut TcpStream) {
 #[test]
 fn webhook_lost_response_at_attempt_limit_stays_ambiguous_not_dead_lettered() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let url = format!(
+        "http://127.0.0.1:{}/hook",
+        listener.local_addr().unwrap().port()
+    );
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         consume_webhook_request(&mut stream);
@@ -434,12 +474,17 @@ fn webhook_lost_response_at_attempt_limit_stays_ambiguous_not_dead_lettered() {
 #[test]
 fn webhook_complete_ack_does_not_wait_for_connection_close() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let url = format!(
+        "http://127.0.0.1:{}/hook",
+        listener.local_addr().unwrap().port()
+    );
     let (release, wait) = std::sync::mpsc::channel();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         consume_webhook_request(&mut stream);
-        stream.write_all(b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n").unwrap();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n")
+            .unwrap();
         wait.recv_timeout(Duration::from_secs(2)).unwrap();
     });
     let mut dest = WebhookDeliveryDestination::new(
@@ -470,23 +515,34 @@ fn webhook_cache_does_not_claim_durable_receiver_idempotency() {
         SsrfPolicy::STRICT,
         DeadLetterQueue::new(),
     );
-    assert_eq!(<WebhookDeliveryDestination as OutboxDestination<Cx>>::idempotency(&dest), DownstreamIdempotency::Weak);
+    assert_eq!(
+        <WebhookDeliveryDestination as OutboxDestination<Cx>>::idempotency(&dest),
+        DownstreamIdempotency::Weak
+    );
 }
 
 #[test]
 fn webhook_key_only_entry_point_refuses_instead_of_fabricating_events() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let url = format!(
+        "http://127.0.0.1:{}/hook",
+        listener.local_addr().unwrap().port()
+    );
     let dest = WebhookDeliveryDestination::new(
         AsciiSlug::from_static("test-webhook"),
         test_registration(&url, SsrfPolicy::PERMISSIVE_FOR_TESTS),
         SsrfPolicy::PERMISSIVE_FOR_TESTS,
         DeadLetterQueue::new(),
     );
-    let error = dest.deliver_simple(AsciiSlug::from_static("missing-payload"), 1).unwrap_err();
+    let error = dest
+        .deliver_simple(AsciiSlug::from_static("missing-payload"), 1)
+        .unwrap_err();
     assert!(error.starts_with("EvidenceMissing:"));
-    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 #[test]
@@ -496,12 +552,17 @@ fn webhook_real_events_reach_http_receiver_unchanged_on_retry() {
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let url = format!(
+        "http://127.0.0.1:{}/hook",
+        listener.local_addr().unwrap().port()
+    );
     let receiver = thread::spawn(move || {
         let mut deliveries = Vec::new();
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
             let mut reader = BufReader::new(&mut stream);
             let mut length = 0;
             let mut signature = String::new();
@@ -525,7 +586,9 @@ fn webhook_real_events_reach_http_receiver_unchanged_on_retry() {
             let mut body = vec![0; length];
             reader.read_exact(&mut body).unwrap();
             deliveries.push((body, signature, attempt));
-            stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                .unwrap();
         }
         deliveries
     });
@@ -549,7 +612,10 @@ fn webhook_real_events_reach_http_receiver_unchanged_on_retry() {
         events: &events,
     };
     for attempt in 1..=2 {
-        assert_eq!(dest.deliver_request(&request, attempt).unwrap().0, "Accepted");
+        assert_eq!(
+            dest.deliver_request(&request, attempt).unwrap().0,
+            "Accepted"
+        );
     }
     let deliveries = receiver.join().unwrap();
     let expected = payload::encode(&request).unwrap();

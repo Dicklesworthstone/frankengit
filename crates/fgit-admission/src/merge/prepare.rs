@@ -142,12 +142,15 @@ pub(crate) fn prepare_event(
         ForgeEventPayload::WorkflowCheckObservedNative(change) => {
             // Bind the actual event, actor and inline evidence to this exact
             // original seal, not merely to a well-formed request of any kind.
-            let (expected, sealed) = super::native::workflow_checks::proposal(context, &change.record)
-                .map_err(|_| RefusalCode::EvidenceInvalid)?;
+            let (expected, sealed) =
+                super::native::workflow_checks::proposal(context, &change.record)
+                    .map_err(|_| RefusalCode::EvidenceInvalid)?;
             if expected != *event || sealed != *attempt {
                 return Err(RefusalCode::EvidenceInvalid);
             }
-            if resolved.refs.refs().get(&change.record.source_ref) != Some(&change.record.source_commit) {
+            if resolved.refs.refs().get(&change.record.source_ref)
+                != Some(&change.record.source_commit)
+            {
                 return Err(RefusalCode::TargetRefMoved);
             }
             (

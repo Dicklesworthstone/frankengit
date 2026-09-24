@@ -123,7 +123,11 @@ impl<'a> Request<'a> {
             Some(_) => return Err(ApiError::bad("unsupported_merge_profile")),
         };
         let (subject, metadata) = self.subject_and_metadata(fields, format)?;
-        Ok(PreparationCommand { subject, metadata, profile })
+        Ok(PreparationCommand {
+            subject,
+            metadata,
+            profile,
+        })
     }
 
     pub(super) fn resolved_command(
@@ -526,18 +530,34 @@ mod tests {
                 .unwrap();
             assert_eq!(default, explicit);
             let exact = request(false)
-                .command((base.clone() + "&profile=exact-renames-v1").as_bytes(), format)
+                .command(
+                    (base.clone() + "&profile=exact-renames-v1").as_bytes(),
+                    format,
+                )
                 .unwrap();
             assert_eq!(exact.profile, MergeProfile::ExactRenamesV1);
             assert_eq!(exact.subject, default.subject);
             assert_eq!(exact.metadata, default.metadata);
-            for value in ["", "PathMergeV1", "EXACT-RENAMES-V1", "exact-renames-v2", "ort",
-                "exact-renames-v1+", "exact-renames-v1%00", "exact-renames-v1%2Cpath-merge-v1"]
-            {
+            for value in [
+                "",
+                "PathMergeV1",
+                "EXACT-RENAMES-V1",
+                "exact-renames-v2",
+                "ort",
+                "exact-renames-v1+",
+                "exact-renames-v1%00",
+                "exact-renames-v1%2Cpath-merge-v1",
+            ] {
                 let invalid = base.clone() + "&profile=" + value;
-                let error = request(false).command(invalid.as_bytes(), format).unwrap_err();
+                let error = request(false)
+                    .command(invalid.as_bytes(), format)
+                    .unwrap_err();
                 assert!(!error.outcome_unknown);
-                assert!(matches!(error.code, "unsupported_merge_profile" | "nul_not_allowed"), "{}", error.code);
+                assert!(
+                    matches!(error.code, "unsupported_merge_profile" | "nul_not_allowed"),
+                    "{}",
+                    error.code
+                );
             }
         }
     }
@@ -549,14 +569,23 @@ mod tests {
         // field-count ceiling. Percent decoding still precedes uniqueness.
         for duplicate in ["profile", "pr%6ffile"] {
             let bytes = format!("profile=path-merge-v1&{duplicate}=exact-renames-v1");
-            assert_eq!(request(false).command(bytes.as_bytes(), format).unwrap_err().code,
-                "duplicate_field");
+            assert_eq!(
+                request(false)
+                    .command(bytes.as_bytes(), format)
+                    .unwrap_err()
+                    .code,
+                "duplicate_field"
+            );
         }
         for profile in ["path-merge-v1", "exact-renames-v1"] {
-            let bytes = form(format) + &format!(
-                "&merge_base={}&resolution=61:ours&profile={profile}", "c".repeat(40));
+            let bytes = form(format)
+                + &format!(
+                    "&merge_base={}&resolution=61:ours&profile={profile}",
+                    "c".repeat(40)
+                );
             let error = request(true)
-                .resolved_command(bytes.as_bytes(), BTreeMap::new(), format).unwrap_err();
+                .resolved_command(bytes.as_bytes(), BTreeMap::new(), format)
+                .unwrap_err();
             assert_eq!(error.code, "unknown_preparation_field");
             assert!(!error.outcome_unknown);
         }

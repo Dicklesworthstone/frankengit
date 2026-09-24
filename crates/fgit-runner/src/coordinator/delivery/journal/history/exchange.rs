@@ -26,7 +26,9 @@ impl FileCheckJournal {
         if maximum_evidence_bytes == 0 || maximum_evidence_bytes > MAX_OBSERVATION_BYTES {
             return Err(ObservationRefusal::InvalidLimits);
         }
-        if !live() { return Err(ObservationRefusal::Cancelled); }
+        if !live() {
+            return Err(ObservationRefusal::Cancelled);
+        }
         if self.scope.tenant != destination.scope.tenant
             || self.scope.repository != destination.scope.repository
             || self.scope.journal_id == destination.scope.journal_id
@@ -36,42 +38,75 @@ impl FileCheckJournal {
         // Check even the empty case: a stale in-memory index cannot declare
         // a truncated journal completely transferred.
         self.verify_checkpoint(self.pin())?;
-        let Some(id) = self.pending.front().copied() else { return Ok(None); };
+        let Some(id) = self.pending.front().copied() else {
+            return Ok(None);
+        };
         let batch = self.read_retained_batch(id)?.batch;
-        if !matches!(batch.execution_profile(), CoordinatorExecutionProfile::TrustedWorkflow { .. }) {
+        if !matches!(
+            batch.execution_profile(),
+            CoordinatorExecutionProfile::TrustedWorkflow { .. }
+        ) {
             return Err(ObservationRefusal::UnsupportedProfile);
         }
         let mut roots = BTreeSet::new();
         let mut total = 0usize;
         for fact in batch.facts() {
-            if !live() { return Err(ObservationRefusal::Cancelled); }
-            if fact.status != CheckRunStatus::Completed { continue; }
-            let root = fact.receipt_commitment.ok_or(ObservationRefusal::EvidenceMissing)?;
+            if !live() {
+                return Err(ObservationRefusal::Cancelled);
+            }
+            if fact.status != CheckRunStatus::Completed {
+                continue;
+            }
+            let root = fact
+                .receipt_commitment
+                .ok_or(ObservationRefusal::EvidenceMissing)?;
             if roots.insert(root) {
-                let frame = self.evidence.get(&root).ok_or(ObservationRefusal::EvidenceMissing)?;
-                let length = frame.length.checked_sub(33).ok_or(CheckDeliveryRefusal::CorruptJournal)?;
-                total = total.checked_add(length).ok_or(ObservationRefusal::RecordTooLarge)?;
-                if total > maximum_evidence_bytes { return Err(ObservationRefusal::RecordTooLarge); }
+                let frame = self
+                    .evidence
+                    .get(&root)
+                    .ok_or(ObservationRefusal::EvidenceMissing)?;
+                let length = frame
+                    .length
+                    .checked_sub(33)
+                    .ok_or(CheckDeliveryRefusal::CorruptJournal)?;
+                total = total
+                    .checked_add(length)
+                    .ok_or(ObservationRefusal::RecordTooLarge)?;
+                if total > maximum_evidence_bytes {
+                    return Err(ObservationRefusal::RecordTooLarge);
+                }
             }
         }
         let mut bodies = BTreeMap::new();
         for root in roots {
-            if !live() { return Err(ObservationRefusal::Cancelled); }
+            if !live() {
+                return Err(ObservationRefusal::Cancelled);
+            }
             bodies.insert(root, self.read_evidence(root)?);
         }
         for (index, fact) in batch.facts().iter().enumerate() {
-            if fact.status != CheckRunStatus::Completed { continue; }
-            let root = fact.receipt_commitment.ok_or(ObservationRefusal::EvidenceMissing)?;
-            let bytes = bodies.get(&root).ok_or(ObservationRefusal::EvidenceMissing)?;
+            if fact.status != CheckRunStatus::Completed {
+                continue;
+            }
+            let root = fact
+                .receipt_commitment
+                .ok_or(ObservationRefusal::EvidenceMissing)?;
+            let bytes = bodies
+                .get(&root)
+                .ok_or(ObservationRefusal::EvidenceMissing)?;
             // All semantic checks precede any destination write. A later bad
             // fact cannot smuggle an earlier part of an invalid batch across.
             verify_trusted_job(&batch, index, bytes, maximum_evidence_bytes, live)?;
         }
         for (root, bytes) in bodies {
-            if !live() { return Err(ObservationRefusal::Cancelled); }
+            if !live() {
+                return Err(ObservationRefusal::Cancelled);
+            }
             destination.store_evidence(root, &bytes)?;
         }
-        if !live() { return Err(ObservationRefusal::Cancelled); }
+        if !live() {
+            return Err(ObservationRefusal::Cancelled);
+        }
         let acknowledgement = destination.accept(&batch)?;
         // The accepting journal owns exact durable evidence now. Do not infer
         // non-acceptance from a late cancellation or drop this responsibility.

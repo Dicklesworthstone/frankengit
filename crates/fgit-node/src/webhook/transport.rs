@@ -10,9 +10,9 @@ use fgit_forge::webhook::ValidatedWebhookUrl;
 pub(super) fn require_plain_http(url: &ValidatedWebhookUrl) -> Result<(), &'static str> {
     match url.scheme() {
         "http" => Ok(()),
-        "https" => Err(
-            "HTTPS webhook delivery requires verified TLS; plaintext fallback is forbidden",
-        ),
+        "https" => {
+            Err("HTTPS webhook delivery requires verified TLS; plaintext fallback is forbidden")
+        }
         _ => Err("unsupported webhook transport scheme"),
     }
 }
@@ -29,7 +29,9 @@ mod tests {
             "https://example.com:80/hook",
             "https://example.com:8443/hook",
         ] {
-            let url = SsrfPolicy::STRICT.validate_url(raw).expect("valid HTTPS URL");
+            let url = SsrfPolicy::STRICT
+                .validate_url(raw)
+                .expect("valid HTTPS URL");
             assert!(require_plain_http(&url).is_err(), "{raw}");
         }
     }
@@ -37,7 +39,9 @@ mod tests {
     #[test]
     fn plain_http_remains_an_explicit_supported_transport() {
         for raw in ["http://example.com/hook", "http://example.com:8080/hook"] {
-            let url = SsrfPolicy::STRICT.validate_url(raw).expect("valid HTTP URL");
+            let url = SsrfPolicy::STRICT
+                .validate_url(raw)
+                .expect("valid HTTP URL");
             assert_eq!(require_plain_http(&url), Ok(()));
         }
     }

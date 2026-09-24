@@ -63,8 +63,8 @@ fn inflate_error(error: InflateRefusal) -> RpcError {
 impl GzipDecoder {
     pub(super) fn new(limits: HttpLimits) -> Result<Self, RpcError> {
         limits.validate()?;
-        let ceiling = usize::try_from(limits.max_body_bytes)
-            .map_err(|_| HttpError::InvalidLimits)?;
+        let ceiling =
+            usize::try_from(limits.max_body_bytes).map_err(|_| HttpError::InvalidLimits)?;
         if ceiling == 0 {
             return Err(HttpError::InvalidLimits.into());
         }
@@ -123,7 +123,9 @@ impl GzipDecoder {
         if input.len() > INPUT_CHUNK_BYTES {
             return Err(HttpError::InvalidLimits.into());
         }
-        self.input_bytes = self.input_bytes.checked_add(input.len() as u64)
+        self.input_bytes = self
+            .input_bytes
+            .checked_add(input.len() as u64)
             .ok_or(HttpError::BodyTooLarge)?;
         if self.input_bytes > self.input_limit {
             return Err(HttpError::BodyTooLarge.into());
@@ -145,8 +147,12 @@ impl GzipDecoder {
         if raw_count == 0 {
             return Ok(Vec::new());
         }
-        self.raw_bytes = self.raw_bytes.checked_add(raw_count).ok_or(HttpError::BodyTooLarge)?;
-        let progress = self.inflater
+        self.raw_bytes = self
+            .raw_bytes
+            .checked_add(raw_count)
+            .ok_or(HttpError::BodyTooLarge)?;
+        let progress = self
+            .inflater
             .push_with_control(&pending[..raw_count], &mut Probe(cancellation))
             .map_err(inflate_error)?;
         // The internally supplied Adler trailer has not been sent yet. A
@@ -155,7 +161,9 @@ impl GzipDecoder {
             return Err(HttpError::InvalidCompressedBody.into());
         }
         let output = self.inflater.take_output();
-        self.output_bytes = self.output_bytes.checked_add(output.len() as u64)
+        self.output_bytes = self
+            .output_bytes
+            .checked_add(output.len() as u64)
             .ok_or(HttpError::BodyTooLarge)?;
         for fragment in output.chunks(4096) {
             checkpoint(cancellation)?;
@@ -192,8 +200,10 @@ impl GzipDecoder {
         if !self.header.is_complete() || self.tail_len != TRAILER_BYTES {
             return Err(HttpError::TruncatedBody.into());
         }
-        let expected_crc = u32::from_le_bytes([self.tail[0], self.tail[1], self.tail[2], self.tail[3]]);
-        let expected_size = u32::from_le_bytes([self.tail[4], self.tail[5], self.tail[6], self.tail[7]]);
+        let expected_crc =
+            u32::from_le_bytes([self.tail[0], self.tail[1], self.tail[2], self.tail[3]]);
+        let expected_size =
+            u32::from_le_bytes([self.tail[4], self.tail[5], self.tail[6], self.tail[7]]);
         // RFC 1952 ISIZE is modulo 2^32, not a trusted allocation size.
         let size = u32::try_from(self.output_bytes % (u64::from(u32::MAX) + 1))
             .map_err(|_| HttpError::InvalidCompressedBody)?;
@@ -201,7 +211,9 @@ impl GzipDecoder {
             return Err(HttpError::InvalidCompressedBody.into());
         }
         let adler = ((self.adler_b << 16) | self.adler_a).to_be_bytes();
-        let progress = self.inflater.push_with_control(&adler, &mut Probe(cancellation))
+        let progress = self
+            .inflater
+            .push_with_control(&adler, &mut Probe(cancellation))
             .map_err(inflate_error)?;
         if progress != StreamProgress::Finished {
             return Err(HttpError::TruncatedBody.into());

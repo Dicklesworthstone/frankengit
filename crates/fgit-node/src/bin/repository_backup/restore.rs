@@ -22,7 +22,8 @@ use super::input::PinnedArchive;
 use super::profile::{Deadline, Profile, ProfileFlags};
 use super::{limits, with_node};
 
-pub(super) const USAGE: &str = "usage: fg-repository-backup restore <backup-file> <storage-root> --trusted-local
+pub(super) const USAGE: &str =
+    "usage: fg-repository-backup restore <backup-file> <storage-root> --trusted-local
          --expected-sha256 <64-lowercase-hex> --destination-instance <positive-integer>
          [--resume] [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
 
@@ -60,8 +61,12 @@ cleanup or receipt I/O failure. A failure after authority publication says so.";
 
 #[derive(Debug)]
 struct Options {
-    input: PathBuf, output: PathBuf, expected: [u8; 32], instance: StoreInstanceId,
-    profile: Profile, resume: bool,
+    input: PathBuf,
+    output: PathBuf,
+    expected: [u8; 32],
+    instance: StoreInstanceId,
+    profile: Profile,
+    resume: bool,
 }
 fn digest(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64
@@ -79,21 +84,34 @@ fn digest(value: &str) -> Result<[u8; 32], String> {
     Ok(result)
 }
 fn parse(args: &[String]) -> Result<Options, String> {
-    if !(8..=13).contains(&args.len()) || args[0] != "restore" || args.iter().any(|arg| arg.len() > 8192)
+    if !(8..=13).contains(&args.len())
+        || args[0] != "restore"
+        || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
-        || args[1].is_empty() || args[2].is_empty()
-    { return Err(USAGE.into()); }
+        || args[1].is_empty()
+        || args[2].is_empty()
+    {
+        return Err(USAGE.into());
+    }
     let (mut trusted, mut expected, mut instance, mut resume) = (false, None, None, false);
     let mut profile = ProfileFlags::default();
     let mut cursor = 3;
     while let Some(flag) = args.get(cursor) {
         cursor += 1;
-        if flag == "--trusted-local" && !trusted { trusted = true; continue; }
-        if flag == "--resume" {
-            if resume { return Err("duplicate --resume".into()); }
-            resume = true; continue;
+        if flag == "--trusted-local" && !trusted {
+            trusted = true;
+            continue;
         }
-        let value = args.get(cursor).ok_or_else(|| format!("missing value for {flag}"))?;
+        if flag == "--resume" {
+            if resume {
+                return Err("duplicate --resume".into());
+            }
+            resume = true;
+            continue;
+        }
+        let value = args
+            .get(cursor)
+            .ok_or_else(|| format!("missing value for {flag}"))?;
         cursor += 1;
         match flag.as_str() {
             "--expected-sha256" if expected.is_none() => expected = Some(digest(value)?),
@@ -101,7 +119,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 if value.starts_with('0') || !value.bytes().all(|b| b.is_ascii_digit()) {
                     return Err("destination instance must be canonical positive decimal".into());
                 }
-                let number = value.parse::<u64>().ok().filter(|n| *n > 0 && *n <= i64::MAX as u64)
+                let number = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| *n > 0 && *n <= i64::MAX as u64)
                     .ok_or("destination instance must fit a positive SQL integer")?;
                 instance = Some(StoreInstanceId::from_raw(number));
             }
@@ -109,12 +130,21 @@ fn parse(args: &[String]) -> Result<Options, String> {
             _ => return Err(format!("unknown or duplicate restore option: {flag}")),
         }
     }
-    if !trusted { return Err("restore requires --trusted-local and whole-repository authorization".into()); }
+    if !trusted {
+        return Err("restore requires --trusted-local and whole-repository authorization".into());
+    }
     let output = PathBuf::from(&args[2]);
-    if output.file_name().is_none() { return Err("restore requires a named storage root".into()); }
-    Ok(Options { input: args[1].clone().into(), output,
+    if output.file_name().is_none() {
+        return Err("restore requires a named storage root".into());
+    }
+    Ok(Options {
+        input: args[1].clone().into(),
+        output,
         expected: expected.ok_or("restore requires an independently trusted --expected-sha256")?,
-        instance: instance.ok_or("restore requires a --destination-instance")?, profile: profile.finish(), resume })
+        instance: instance.ok_or("restore requires a --destination-instance")?,
+        profile: profile.finish(),
+        resume,
+    })
 }
 fn create_private(path: &Path) -> Result<(), String> {
     let mut builder = fs::DirBuilder::new();
@@ -302,46 +332,81 @@ impl PreparedPublication {
     }
 }
 
-fn authority_image(root: &Path, source: &ExportBundle, options: &Options,
-    read_only: bool, deadline: Deadline,
+fn authority_image(
+    root: &Path,
+    source: &ExportBundle,
+    options: &Options,
+    read_only: bool,
+    deadline: Deadline,
 ) -> Result<HeadReadReceipt, String> {
     let database = root.join("authority.fsqlite");
-    if read_only { regular(&database)?; }
-    with_store(&database, options.instance, read_only, |runtime, store, cx| {
-        deadline.check()?;
-        if store.instance_id() != options.instance {
-            return Err("restore database instance disagrees with its intent".into());
-        }
-        let head = if read_only {
-            runtime.block_on(store.verify_portable_import(cx, source, Default::default()))
-        } else if options.resume {
-            runtime.block_on(store.resume_portable_import(cx, source, Default::default()))
-        } else {
-            runtime.block_on(store.import_portable(cx, source, Default::default()))
-        }.map_err(|e| e.to_string())?.ok_or("repository import returned no head")?;
-        runtime.block_on(store.authenticate_head_receipt(cx, &head)).map_err(|e| e.to_string())?;
-        let source = source.head.as_ref().ok_or("missing source head")?;
-        if head.key().as_bytes() != source.key.as_slice() || head.body() != source.body.as_slice()
-            || head.generation().get() != source.generation
-        { return Err("repository import changed canonical head bytes".into()); }
-        deadline.check()?;
-        Ok(head)
-    })
+    if read_only {
+        regular(&database)?;
+    }
+    with_store(
+        &database,
+        options.instance,
+        read_only,
+        |runtime, store, cx| {
+            deadline.check()?;
+            if store.instance_id() != options.instance {
+                return Err("restore database instance disagrees with its intent".into());
+            }
+            let head = if read_only {
+                runtime.block_on(store.verify_portable_import(cx, source, Default::default()))
+            } else if options.resume {
+                runtime.block_on(store.resume_portable_import(cx, source, Default::default()))
+            } else {
+                runtime.block_on(store.import_portable(cx, source, Default::default()))
+            }
+            .map_err(|e| e.to_string())?
+            .ok_or("repository import returned no head")?;
+            runtime
+                .block_on(store.authenticate_head_receipt(cx, &head))
+                .map_err(|e| e.to_string())?;
+            let source = source.head.as_ref().ok_or("missing source head")?;
+            if head.key().as_bytes() != source.key.as_slice()
+                || head.body() != source.body.as_slice()
+                || head.generation().get() != source.generation
+            {
+                return Err("repository import changed canonical head bytes".into());
+            }
+            deadline.check()?;
+            Ok(head)
+        },
+    )
 }
 
 /// Production boundaries exercised by deterministic interruption tests. The
 /// command supplies a no-op observer; no environment-controlled fault hook exists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Stage { Intent, Authority, Objects, QuarantineVerified, DataPrepared, Published, FinalVerified, Cleaned }
+enum Stage {
+    Intent,
+    Authority,
+    Objects,
+    QuarantineVerified,
+    DataPrepared,
+    Published,
+    FinalVerified,
+    Cleaned,
+}
 fn execute(options: &Options) -> Result<String, String> {
     execute_with_checkpoints(options, |_| Ok(()))
 }
-fn execute_with_checkpoints(options: &Options,
+fn execute_with_checkpoints(
+    options: &Options,
     mut checkpoint: impl FnMut(Stage) -> Result<(), String>,
 ) -> Result<String, String> {
     let deadline = options.profile.start();
-    if !options.resume { require_absent(&options.output)?; }
-    let mut archive = PinnedArchive::open(&options.input, options.expected, options.profile.transfer, deadline)?;
+    if !options.resume {
+        require_absent(&options.output)?;
+    }
+    let mut archive = PinnedArchive::open(
+        &options.input,
+        options.expected,
+        options.profile.transfer,
+        deadline,
+    )?;
     if archive.header().authority.instance == options.instance.raw() {
         return Err("destination instance must differ from source; no destination created".into());
     }
@@ -353,21 +418,53 @@ fn execute_with_checkpoints(options: &Options,
     };
     let already_published = intent.published()?;
     let (expected, prior_graph) = if already_published {
-        let expected = authority_image(&options.output, &archive.header().authority, options, true, deadline)
-            .map_err(|e| format!("destination authority is visible; resume verification refused: {e}"))?;
+        let expected = authority_image(
+            &options.output,
+            &archive.header().authority,
+            options,
+            true,
+            deadline,
+        )
+        .map_err(|e| {
+            format!("destination authority is visible; resume verification refused: {e}")
+        })?;
         (expected, None)
     } else {
         let prepared = (|| {
             checkpoint(Stage::Intent)?;
             let quarantine = intent.quarantine()?;
-            let expected = authority_image(&quarantine, &archive.header().authority, options, false, deadline)?;
+            let expected = authority_image(
+                &quarantine,
+                &archive.header().authority,
+                options,
+                false,
+                deadline,
+            )?;
             checkpoint(Stage::Authority)?;
-            let graph = with_node(config(&quarantine, archive.header()), |node|
-                graph_from_archive(node, &mut archive, &expected, true, options.profile, deadline))?;
+            let graph = with_node(config(&quarantine, archive.header()), |node| {
+                graph_from_archive(
+                    node,
+                    &mut archive,
+                    &expected,
+                    true,
+                    options.profile,
+                    deadline,
+                )
+            })?;
             checkpoint(Stage::Objects)?;
-            let reopened = with_node(config(&quarantine, archive.header()), |node|
-                graph_from_archive(node, &mut archive, &expected, false, options.profile, deadline))?;
-            if reopened != graph { return Err("restored graph changed across quarantine reopen".into()); }
+            let reopened = with_node(config(&quarantine, archive.header()), |node| {
+                graph_from_archive(
+                    node,
+                    &mut archive,
+                    &expected,
+                    false,
+                    options.profile,
+                    deadline,
+                )
+            })?;
+            if reopened != graph {
+                return Err("restored graph changed across quarantine reopen".into());
+            }
             checkpoint(Stage::QuarantineVerified)?;
             deadline.check()?;
             let publication = PreparedPublication::prepare(&quarantine, &options.output)?;
@@ -375,47 +472,77 @@ fn execute_with_checkpoints(options: &Options,
             deadline.check()?;
             Ok((publication, expected, graph))
         })();
-        let (publication, expected, graph) = prepared.map_err(|error: String| format!(
-            "{error}; destination authority not published; retained restore state at {}", options.output.display()))?;
+        let (publication, expected, graph) = prepared.map_err(|error: String| {
+            format!(
+                "{error}; destination authority not published; retained restore state at {}",
+                options.output.display()
+            )
+        })?;
         publication.publish()?;
         (expected, Some(graph))
     };
     checkpoint(Stage::Published).map_err(|e| format!("destination authority is visible; {e}"))?;
-    let graph = with_node(config(&options.output, archive.header()), |node|
-        graph_from_archive(node, &mut archive, &expected, false, options.profile, deadline))
-        .map_err(|error| format!("destination authority is visible; final reopen verification failed: {error}"))?;
+    let graph = with_node(config(&options.output, archive.header()), |node| {
+        graph_from_archive(
+            node,
+            &mut archive,
+            &expected,
+            false,
+            options.profile,
+            deadline,
+        )
+    })
+    .map_err(|error| {
+        format!("destination authority is visible; final reopen verification failed: {error}")
+    })?;
     if prior_graph.is_some_and(|prior| prior != graph) {
         return Err("destination authority is visible; final graph report mismatch".into());
     }
-    checkpoint(Stage::FinalVerified).map_err(|e| format!("destination authority is visible; {e}"))?;
+    checkpoint(Stage::FinalVerified)
+        .map_err(|e| format!("destination authority is visible; {e}"))?;
     intent.cleanup()?;
     checkpoint(Stage::Cleaned).map_err(|e| format!("destination authority is visible; {e}"))?;
     let header = archive.header();
-    Ok(format!(concat!("{{\"type\":\"repository_source_backup_restore\",\"schema_version\":1,",
-        "\"sha256\":{},\"tenant_id\":{},\"repository_id\":{},\"incarnation_id\":{},",
-        "\"object_format\":{},\"head_generation\":{},\"objects\":{},\"references\":{},",
-        "\"payload_bytes\":{},\"destination_instance\":{},\"complete\":true,",
-        "\"scope\":\"authority_and_selected_git_objects\",\"object_graph_verified\":true,",
-        "\"original_payload_commitments_verified\":true,\"source_tokens_preserved\":false,",
-        "\"reopened_and_verified\":true,\"node_closed\":true,\"routing_published\":false,",
-        "\"external_artifacts_restored\":false,\"signature_verified\":false,",
-        "\"archive_bytes\":{},\"streaming\":true,\"resume_requested\":{},\"already_published\":{}}}"),
-        quote(&hex(&options.expected)), quote(&header.identity.tenant.to_string()),
-        quote(&header.identity.repository.to_string()), quote(&header.identity.incarnation.to_string()),
-        quote(header.identity.format.as_str()), generation(&header.authority), graph.objects,
-        graph.references, graph.payload_bytes, options.instance.raw(), archive.seal().bytes,
-        options.resume, already_published))
+    Ok(format!(
+        concat!(
+            "{{\"type\":\"repository_source_backup_restore\",\"schema_version\":1,",
+            "\"sha256\":{},\"tenant_id\":{},\"repository_id\":{},\"incarnation_id\":{},",
+            "\"object_format\":{},\"head_generation\":{},\"objects\":{},\"references\":{},",
+            "\"payload_bytes\":{},\"destination_instance\":{},\"complete\":true,",
+            "\"scope\":\"authority_and_selected_git_objects\",\"object_graph_verified\":true,",
+            "\"original_payload_commitments_verified\":true,\"source_tokens_preserved\":false,",
+            "\"reopened_and_verified\":true,\"node_closed\":true,\"routing_published\":false,",
+            "\"external_artifacts_restored\":false,\"signature_verified\":false,",
+            "\"archive_bytes\":{},\"streaming\":true,\"resume_requested\":{},\"already_published\":{}}}"
+        ),
+        quote(&hex(&options.expected)),
+        quote(&header.identity.tenant.to_string()),
+        quote(&header.identity.repository.to_string()),
+        quote(&header.identity.incarnation.to_string()),
+        quote(header.identity.format.as_str()),
+        generation(&header.authority),
+        graph.objects,
+        graph.references,
+        graph.payload_bytes,
+        options.instance.raw(),
+        archive.seal().bytes,
+        options.resume,
+        already_published
+    ))
 }
 pub(super) fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
-    if args == ["restore", "--help"] { return emit(output, USAGE); }
+    if args == ["restore", "--help"] {
+        return emit(output, USAGE);
+    }
     let options = parse(args)?;
     let receipt = execute(&options)?;
-    emit(output, &receipt).map_err(|error| format!("repository restore completed; receipt output failed: {error}"))
+    emit(output, &receipt)
+        .map_err(|error| format!("repository restore completed; receipt output failed: {error}"))
 }
 
 #[cfg(test)]
-#[path = "restore_tests.rs"]
-mod tests;
-#[cfg(test)]
 #[path = "resume_engine_tests.rs"]
 mod resume_engine_tests;
+#[cfg(test)]
+#[path = "restore_tests.rs"]
+mod tests;

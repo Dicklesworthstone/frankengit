@@ -19,8 +19,9 @@ use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_o
 use fgit_crypto::git_object_id;
 use fgit_forge::event::NativeMerge;
 use fgit_forge::preparation::{
-    CommitInput, MergeEntry, MergeMetadata, MergeObjectSource, MergePreparation, MergeProfile, MergeSourceError,
-    PlannedMergeObject, PreparationError, PreparationLimits, PreparedMerge, prepare_merge, prepare_merge_with_profile,
+    CommitInput, MergeEntry, MergeMetadata, MergeObjectSource, MergePreparation, MergeProfile,
+    MergeSourceError, PlannedMergeObject, PreparationError, PreparationLimits, PreparedMerge,
+    prepare_merge, prepare_merge_with_profile,
 };
 use fgit_git_object::{
     AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body,
@@ -74,7 +75,13 @@ impl OneNode {
         limits: PreparationLimits,
     ) -> Result<PreparedMergeBundle, NodeWorkspaceRefusal> {
         self.prepare_merge_bundle_with_profile_in(
-            request, target, incoming, visibility, metadata, limits, MergeProfile::PathMergeV1,
+            request,
+            target,
+            incoming,
+            visibility,
+            metadata,
+            limits,
+            MergeProfile::PathMergeV1,
         )
         .await
     }
@@ -158,10 +165,21 @@ impl OneNode {
         };
         let outcome = match profile {
             MergeProfile::PathMergeV1 => prepare_merge(
-                &source, self.object_format, our_tip, their_tip, metadata, limits,
+                &source,
+                self.object_format,
+                our_tip,
+                their_tip,
+                metadata,
+                limits,
             ),
             MergeProfile::ExactRenamesV1 => prepare_merge_with_profile(
-                &source, self.object_format, our_tip, their_tip, metadata, limits, profile,
+                &source,
+                self.object_format,
+                our_tip,
+                their_tip,
+                metadata,
+                limits,
+                profile,
             ),
         }
         .map_err(NodeWorkspaceRefusal::MergePreparation)?;

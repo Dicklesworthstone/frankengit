@@ -287,7 +287,13 @@ pub fn prepare_merge<S: MergeObjectSource>(
     limits: PreparationLimits,
 ) -> Result<MergePreparation, PreparationError> {
     prepare_merge_with_profile(
-        source, format, target, incoming, metadata, limits, MergeProfile::PathMergeV1,
+        source,
+        format,
+        target,
+        incoming,
+        metadata,
+        limits,
+        MergeProfile::PathMergeV1,
     )
 }
 

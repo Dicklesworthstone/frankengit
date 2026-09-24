@@ -234,7 +234,9 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
         crate::aggregate::AGGREGATE_KIND_WORKFLOW_CHECK => {
             let mut bytes = [0_u8; 32];
             bytes.copy_from_slice(input.take("aggregate.workflow_check", 32)?);
-            Ok(AggregateId::WorkflowCheck(workflow_check::WorkflowCheckId::from_bytes(bytes)))
+            Ok(AggregateId::WorkflowCheck(
+                workflow_check::WorkflowCheckId::from_bytes(bytes),
+            ))
         }
         crate::aggregate::AGGREGATE_KIND_REVIEW_PROTECTION => Ok(AggregateId::ReviewProtection),
         AGGREGATE_KIND_ISSUE => Ok(AggregateId::Issue(counter(

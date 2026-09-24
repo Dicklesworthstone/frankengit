@@ -23,15 +23,21 @@ pub struct WorkflowCheckId([u8; 32]);
 
 impl WorkflowCheckId {
     #[must_use]
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self { Self(bytes) }
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] { &self.0 }
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 
     /// Decode exactly the spelling emitted by Display. Nonzero padding bits,
     /// uppercase, aliases, short IDs and trailing bytes never select a stream.
     pub fn from_label(label: &str) -> Option<Self> {
         let encoded = label.strip_prefix("check/")?.as_bytes();
-        if encoded.len() != 52 { return None; }
+        if encoded.len() != 52 {
+            return None;
+        }
         let mut result = [0_u8; 32];
         for (index, &byte) in encoded.iter().enumerate() {
             let value = ALPHABET.iter().position(|candidate| *candidate == byte)?;
@@ -39,7 +45,9 @@ impl WorkflowCheckId {
                 let bit_index = index * 5 + shift;
                 let bit = (value >> (4 - shift)) & 1;
                 if bit_index >= 256 {
-                    if bit != 0 { return None; }
+                    if bit != 0 {
+                        return None;
+                    }
                 } else {
                     result[bit_index / 8] |= u8::try_from(bit).ok()? << (7 - bit_index % 8);
                 }
@@ -119,7 +127,10 @@ impl WorkflowCheckRecord {
         if self.source_commit.algorithm() != format {
             return Err(RefusalCode::EvidenceInvalid);
         }
-        let change = NativeWorkflowCheck { actor, record: self.clone() };
+        let change = NativeWorkflowCheck {
+            actor,
+            record: self.clone(),
+        };
         Ok(ForgeEvent {
             aggregate: AggregateId::WorkflowCheck(change.id()),
             version: AggregateVersion::FIRST,
@@ -142,10 +153,13 @@ impl NativeWorkflowCheck {
         let mut out = [0_u8; ID_DOMAIN.len() + 16 + 32 + 32 + 32];
         let mut cursor = 0;
         let job = fgit_crypto::sha256_digest(self.record.job.as_bytes());
-        for part in [ID_DOMAIN, self.actor.as_bytes().as_slice(),
-            self.record.run_id.as_slice(), self.record.attempt_id.as_slice(),
-            job.as_slice()]
-        {
+        for part in [
+            ID_DOMAIN,
+            self.actor.as_bytes().as_slice(),
+            self.record.run_id.as_slice(),
+            self.record.attempt_id.as_slice(),
+            job.as_slice(),
+        ] {
             out[cursor..cursor + part.len()].copy_from_slice(part);
             cursor += part.len();
         }
@@ -155,7 +169,10 @@ impl NativeWorkflowCheck {
     pub(super) fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.record.validate()?;
         out.write_opaque_id(self.actor.as_bytes());
-        out.write_bytes("workflow_check.source_ref", self.record.source_ref.as_bytes())?;
+        out.write_bytes(
+            "workflow_check.source_ref",
+            self.record.source_ref.as_bytes(),
+        )?;
         out.write_git_oid(&self.record.source_commit);
         out.write_bytes("workflow_check.run", &self.record.run_id)?;
         out.write_bytes("workflow_check.attempt", &self.record.attempt_id)?;
@@ -182,8 +199,8 @@ impl NativeWorkflowCheck {
         if job.is_empty() || job.len() > MAX_CHECK_JOB_BYTES {
             return Err(super::invalid_native("workflow_check.job"));
         }
-        let job = std::str::from_utf8(job)
-            .map_err(|_| super::invalid_native("workflow_check.job"))?;
+        let job =
+            std::str::from_utf8(job).map_err(|_| super::invalid_native("workflow_check.job"))?;
         if job.chars().any(char::is_control) {
             return Err(super::invalid_native("workflow_check.job"));
         }
@@ -202,8 +219,14 @@ impl NativeWorkflowCheck {
         let value = Self {
             actor,
             record: WorkflowCheckRecord {
-                source_ref, source_commit, run_id, attempt_id, graph_root, job,
-                conclusion, evidence: evidence.to_vec(),
+                source_ref,
+                source_commit,
+                run_id,
+                attempt_id,
+                graph_root,
+                job,
+                conclusion,
+                evidence: evidence.to_vec(),
             },
         };
         value.record.validate()?;
@@ -211,12 +234,18 @@ impl NativeWorkflowCheck {
     }
 }
 fn array(input: &mut Decoder<'_>, field: &'static str) -> Result<[u8; 32], CodecRefusal> {
-    input.read_bytes(field)?.try_into().map_err(|_| super::invalid_native(field))
+    input
+        .read_bytes(field)?
+        .try_into()
+        .map_err(|_| super::invalid_native(field))
 }
 
 pub(super) fn validate_event(event: &ForgeEvent) -> Result<(), CodecRefusal> {
     if matches!(event.aggregate, AggregateId::WorkflowCheck(_))
-        != matches!(event.payload, ForgeEventPayload::WorkflowCheckObservedNative(_))
+        != matches!(
+            event.payload,
+            ForgeEventPayload::WorkflowCheckObservedNative(_)
+        )
     {
         return Err(super::invalid_native("workflow_check.aggregate_kind"));
     }

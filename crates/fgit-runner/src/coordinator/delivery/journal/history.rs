@@ -23,8 +23,12 @@ pub struct CheckHistoryEntry {
     delivered: Option<Commitment>,
 }
 impl CheckHistoryEntry {
-    pub const fn batch(&self) -> &CheckDeliveryBatch { &self.batch }
-    pub const fn delivery_receipt(&self) -> Option<Commitment> { self.delivered }
+    pub const fn batch(&self) -> &CheckDeliveryBatch {
+        &self.batch
+    }
+    pub const fn delivery_receipt(&self) -> Option<Commitment> {
+        self.delivered
+    }
 }
 
 /// Bounded page in physical acceptance order, pinned to the complete journal.
@@ -37,15 +41,23 @@ pub struct CheckHistoryPage {
     next_after: Option<Commitment>,
 }
 impl CheckHistoryPage {
-    pub const fn snapshot(&self) -> CheckJournalPin { self.snapshot }
-    pub fn entries(&self) -> &[CheckHistoryEntry] { &self.entries }
-    pub const fn next_after(&self) -> Option<Commitment> { self.next_after }
+    pub const fn snapshot(&self) -> CheckJournalPin {
+        self.snapshot
+    }
+    pub fn entries(&self) -> &[CheckHistoryEntry] {
+        &self.entries
+    }
+    pub const fn next_after(&self) -> Option<Commitment> {
+        self.next_after
+    }
 }
 
 impl FileCheckJournal {
     /// Number of accepted batches, including acknowledged history. No evidence
     /// or execution-completeness claim follows from this count.
-    pub fn retained_batches(&self) -> usize { self.batches.len() }
+    pub fn retained_batches(&self) -> usize {
+        self.batches.len()
+    }
 
     /// Read one exact accepted batch even after it was delivered. Recheck its
     /// proposal and acknowledgement records. Referenced evidence remains a
@@ -56,14 +68,20 @@ impl FileCheckJournal {
         id: Commitment,
     ) -> Result<CheckHistoryEntry, CheckDeliveryRefusal> {
         self.healthy()?;
-        let stored = self.batches.get(&id).ok_or(CheckDeliveryRefusal::StaleBatch)?;
+        let stored = self
+            .batches
+            .get(&id)
+            .ok_or(CheckDeliveryRefusal::StaleBatch)?;
         let frame = stored.frame;
         let delivered = stored.delivered;
         let payload = self.read_frame(frame)?;
-        let batch = payload.get(1..).filter(|_| payload.first() == Some(&1))
+        let batch = payload
+            .get(1..)
+            .filter(|_| payload.first() == Some(&1))
             .and_then(|bytes| CheckDeliveryBatch::decode(bytes).ok());
         let Some(batch) = batch.filter(|batch| {
-            batch.id() == id && batch.tenant == self.scope.tenant
+            batch.id() == id
+                && batch.tenant == self.scope.tenant
                 && batch.repository == self.scope.repository
                 && self.bindings.get(&batch.run) == Some(&Binding::of(batch))
         }) else {
@@ -80,7 +98,10 @@ impl FileCheckJournal {
                 return Err(CheckDeliveryRefusal::CorruptJournal);
             }
         }
-        Ok(CheckHistoryEntry { batch, delivered: delivered.map(|(receipt, _)| receipt) })
+        Ok(CheckHistoryEntry {
+            batch,
+            delivered: delivered.map(|(receipt, _)| receipt),
+        })
     }
 
     /// Decode one completed job's retained evidence at an exact journal snapshot.
@@ -100,22 +121,53 @@ impl FileCheckJournal {
         if maximum_evidence_bytes == 0 || maximum_evidence_bytes > MAX_OBSERVATION_BYTES {
             return Err(ObservationRefusal::InvalidLimits);
         }
-        if !live() { return Err(ObservationRefusal::Cancelled); }
-        if expected != self.pin { return Err(CheckDeliveryRefusal::StaleBatch.into()); }
+        if !live() {
+            return Err(ObservationRefusal::Cancelled);
+        }
+        if expected != self.pin {
+            return Err(CheckDeliveryRefusal::StaleBatch.into());
+        }
         self.verify_checkpoint(expected)?;
         let retained = self.read_retained_batch(batch_id)?;
-        if !matches!(retained.batch.execution_profile(), CoordinatorExecutionProfile::TrustedWorkflow { .. }) {
+        if !matches!(
+            retained.batch.execution_profile(),
+            CoordinatorExecutionProfile::TrustedWorkflow { .. }
+        ) {
             return Err(ObservationRefusal::UnsupportedProfile);
         }
-        let fact = retained.batch.facts().get(fact_index).ok_or(ObservationRefusal::FactNotCompleted)?;
-        if fact.status != CheckRunStatus::Completed { return Err(ObservationRefusal::FactNotCompleted); }
-        let id = fact.receipt_commitment.ok_or(ObservationRefusal::EvidenceMissing)?;
-        let stored = self.evidence.get(&id).ok_or(ObservationRefusal::EvidenceMissing)?;
-        let bytes = stored.length.checked_sub(33).ok_or(CheckDeliveryRefusal::CorruptJournal)?;
-        if bytes > maximum_evidence_bytes { return Err(ObservationRefusal::RecordTooLarge); }
-        if !live() { return Err(ObservationRefusal::Cancelled); }
+        let fact = retained
+            .batch
+            .facts()
+            .get(fact_index)
+            .ok_or(ObservationRefusal::FactNotCompleted)?;
+        if fact.status != CheckRunStatus::Completed {
+            return Err(ObservationRefusal::FactNotCompleted);
+        }
+        let id = fact
+            .receipt_commitment
+            .ok_or(ObservationRefusal::EvidenceMissing)?;
+        let stored = self
+            .evidence
+            .get(&id)
+            .ok_or(ObservationRefusal::EvidenceMissing)?;
+        let bytes = stored
+            .length
+            .checked_sub(33)
+            .ok_or(CheckDeliveryRefusal::CorruptJournal)?;
+        if bytes > maximum_evidence_bytes {
+            return Err(ObservationRefusal::RecordTooLarge);
+        }
+        if !live() {
+            return Err(ObservationRefusal::Cancelled);
+        }
         let evidence = self.read_evidence(id)?;
-        verify_trusted_job(&retained.batch, fact_index, &evidence, maximum_evidence_bytes, live)
+        verify_trusted_job(
+            &retained.batch,
+            fact_index,
+            &evidence,
+            maximum_evidence_bytes,
+            live,
+        )
     }
 
     /// Page all accepted batches, including delivered batches, without changing
@@ -136,47 +188,87 @@ impl FileCheckJournal {
         live: &dyn Fn() -> bool,
     ) -> Result<CheckHistoryPage, CheckDeliveryRefusal> {
         self.healthy()?;
-        if maximum_batches == 0 || maximum_batches > MAX_HISTORY_BATCHES
-            || maximum_bytes == 0 || maximum_bytes > MAX_HISTORY_BYTES
-        { return Err(CheckDeliveryRefusal::InvalidLimits); }
-        if !live() { return Err(CheckDeliveryRefusal::Cancelled); }
+        if maximum_batches == 0
+            || maximum_batches > MAX_HISTORY_BATCHES
+            || maximum_bytes == 0
+            || maximum_bytes > MAX_HISTORY_BYTES
+        {
+            return Err(CheckDeliveryRefusal::InvalidLimits);
+        }
+        if !live() {
+            return Err(CheckDeliveryRefusal::Cancelled);
+        }
         if expected.is_some_and(|pin| pin != self.pin) || (after.is_some() && expected.is_none()) {
             return Err(CheckDeliveryRefusal::StaleBatch);
         }
         // Also check an empty page. Cached indexes cannot make truncated files
         // look like a clean, empty journal, and the header stays scope-bound.
         self.verify_checkpoint(CheckJournalPin::new(
-            HEADER_BYTES, Commitment::of_bytes(&self.scope.bytes()),
+            HEADER_BYTES,
+            Commitment::of_bytes(&self.scope.bytes()),
         ))?;
         let start = match after {
-            Some(id) => self.batches.get(&id).ok_or(CheckDeliveryRefusal::StaleBatch)?.frame.offset,
+            Some(id) => {
+                self.batches
+                    .get(&id)
+                    .ok_or(CheckDeliveryRefusal::StaleBatch)?
+                    .frame
+                    .offset
+            }
             None => 0,
         };
         // Rebuilt with the other bounded indexes. Only max+1 IDs are copied;
         // paging does not collect/sort the entire history on each request.
-        let candidates = self.batch_order.range((Excluded(start), Unbounded))
-            .take(maximum_batches + 1).map(|(_, id)| *id).collect::<Vec<_>>();
+        let candidates = self
+            .batch_order
+            .range((Excluded(start), Unbounded))
+            .take(maximum_batches + 1)
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>();
         let mut entries = Vec::new();
         let mut bytes = 0usize;
         let mut more = false;
         for id in candidates {
-            if !live() { return Err(CheckDeliveryRefusal::Cancelled); }
-            if entries.len() == maximum_batches { more = true; break; }
-            let stored = self.batches.get(&id).ok_or(CheckDeliveryRefusal::CorruptJournal)?;
-            let size = stored.frame.length.checked_sub(1)
+            if !live() {
+                return Err(CheckDeliveryRefusal::Cancelled);
+            }
+            if entries.len() == maximum_batches {
+                more = true;
+                break;
+            }
+            let stored = self
+                .batches
+                .get(&id)
+                .ok_or(CheckDeliveryRefusal::CorruptJournal)?;
+            let size = stored
+                .frame
+                .length
+                .checked_sub(1)
                 .and_then(|n| n.checked_add(if stored.delivered.is_some() { 32 } else { 0 }))
                 .ok_or(CheckDeliveryRefusal::CorruptJournal)?;
             if size > maximum_bytes - bytes {
-                if entries.is_empty() { return Err(CheckDeliveryRefusal::BatchTooLarge); }
+                if entries.is_empty() {
+                    return Err(CheckDeliveryRefusal::BatchTooLarge);
+                }
                 more = true;
                 break;
             }
             entries.push(self.read_retained_batch(id)?);
             bytes += size;
         }
-        if !live() { return Err(CheckDeliveryRefusal::Cancelled); }
-        let next_after = if more { entries.last().map(|entry| entry.batch.id()) } else { None };
-        Ok(CheckHistoryPage { snapshot: self.pin, entries, next_after })
+        if !live() {
+            return Err(CheckDeliveryRefusal::Cancelled);
+        }
+        let next_after = if more {
+            entries.last().map(|entry| entry.batch.id())
+        } else {
+            None
+        };
+        Ok(CheckHistoryPage {
+            snapshot: self.pin,
+            entries,
+            next_after,
+        })
     }
 
     /// Read evidence only when the selected retained batch actually references
@@ -188,7 +280,12 @@ impl FileCheckJournal {
         evidence: Commitment,
     ) -> Result<Vec<u8>, CheckDeliveryRefusal> {
         let retained = self.read_retained_batch(batch)?;
-        if !retained.batch.facts.iter().any(|fact| fact.receipt_commitment == Some(evidence)) {
+        if !retained
+            .batch
+            .facts
+            .iter()
+            .any(|fact| fact.receipt_commitment == Some(evidence))
+        {
             return Err(CheckDeliveryRefusal::EvidenceMissing);
         }
         self.read_evidence(evidence)

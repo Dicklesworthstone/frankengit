@@ -5,20 +5,30 @@
 //! actual source and evidence; this module never trusts a journal as authority.
 use std::future::Future;
 
-use fgit_authority::{AsyncAuthorityStore, AuthenticatedHead, ScopedEntry, SealAttempt, SemanticRequest, TerminalOutcome};
+use fgit_authority::{
+    AsyncAuthorityStore, AuthenticatedHead, ScopedEntry, SealAttempt, SemanticRequest,
+    TerminalOutcome,
+};
 use fgit_chronicle::PublicationBasis;
+use fgit_forge::event::workflow_check::{
+    NativeWorkflowCheck, WorkflowCheckId, WorkflowCheckRecord,
+};
 use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent, ForgeEventBatch, ForgeEventPayload};
-use fgit_forge::event::workflow_check::{NativeWorkflowCheck, WorkflowCheckId, WorkflowCheckRecord};
 use fgit_types::{AsciiSlug, RefusalCode};
 
-use super::{NativeMergeProjection, PreparationFailure, delivery, metadata, storage, unavailable};
 use super::super::NativeMergeBasis;
-use crate::{AdmissionContext, AdmissionError, AdmissionLimits, AdmissionSnapshot, ProjectionFailure, ValidatedClosure};
+use super::{NativeMergeProjection, PreparationFailure, delivery, metadata, storage, unavailable};
+use crate::{
+    AdmissionContext, AdmissionError, AdmissionLimits, AdmissionSnapshot, ProjectionFailure,
+    ValidatedClosure,
+};
 
 /// The trusted boundary authenticates source objects and interprets the retained
 /// execution evidence. It may not turn an ActionRequired observation into a
 /// successful check. Unavailable evidence leaves the sealed request retryable.
-pub trait WorkflowCheckProjection<S: AsyncAuthorityStore + ?Sized>: NativeMergeProjection<S> {
+pub trait WorkflowCheckProjection<S: AsyncAuthorityStore + ?Sized>:
+    NativeMergeProjection<S>
+{
     fn validate_workflow_check_async<'a>(
         &'a self,
         store: &'a S,
@@ -35,7 +45,8 @@ pub fn proposal(
     context: &AdmissionContext,
     record: &WorkflowCheckRecord,
 ) -> Result<(ForgeEvent, SealAttempt), AdmissionError> {
-    let event = record.proposed_event(context.principal_id, context.object_format)
+    let event = record
+        .proposed_event(context.principal_id, context.object_format)
         .map_err(unavailable)?;
     let root = storage::root(&ForgeEventBatch::of_one(event.clone()))?;
     let request = SemanticRequest::build(
@@ -50,13 +61,16 @@ pub fn proposal(
             root.bytes().as_bytes(),
         )?],
     )?;
-    Ok((event, SealAttempt {
-        tenant_id: context.tenant_id,
-        repository_id: context.repository_id,
-        authenticated_principal_id: context.principal_id,
-        idempotency_key: context.idempotency_key.clone(),
-        request,
-    }))
+    Ok((
+        event,
+        SealAttempt {
+            tenant_id: context.tenant_id,
+            repository_id: context.repository_id,
+            authenticated_principal_id: context.principal_id,
+            idempotency_key: context.idempotency_key.clone(),
+            request,
+        },
+    ))
 }
 
 /// Record the authenticated publisher's exact observation plus its delivery
@@ -76,7 +90,17 @@ where
 {
     limits.validate()?;
     let (event, attempt) = proposal(context, record)?;
-    metadata::admit_metadata_async(store, cx, context, event, attempt, limits, projection, &Validation(record)).await
+    metadata::admit_metadata_async(
+        store,
+        cx,
+        context,
+        event,
+        attempt,
+        limits,
+        projection,
+        &Validation(record),
+    )
+    .await
 }
 
 struct Validation<'a>(&'a WorkflowCheckRecord);
@@ -87,7 +111,9 @@ where
 {
     fn precheck(&self, snapshot: &AdmissionSnapshot) -> Result<(), ProjectionFailure> {
         if snapshot.hidden_refs.hides(self.0.source_ref.as_bytes()) {
-            return Err(ProjectionFailure::Refuse(RefusalCode::HiddenRefUnauthorized));
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::HiddenRefUnauthorized,
+            ));
         }
         Ok(())
     }
@@ -111,8 +137,12 @@ where
         if resolved.forge.entry(label).is_some() {
             return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale).into());
         }
-        projection.merge_checkpoint(cx).map_err(ProjectionFailure::Unavailable)?;
-        Ok(projection.validate_workflow_check_async(store, cx, basis, authenticated, self.0).await?)
+        projection
+            .merge_checkpoint(cx)
+            .map_err(ProjectionFailure::Unavailable)?;
+        Ok(projection
+            .validate_workflow_check_async(store, cx, basis, authenticated, self.0)
+            .await?)
     }
 }
 
@@ -130,18 +160,35 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
-    if cancelled() { return Err(unavailable(RefusalCode::CancellationInProgress)); }
+    if cancelled() {
+        return Err(unavailable(RefusalCode::CancellationInProgress));
+    }
     let selected = delivery::read_in(store, cx, basis, cancelled).await?;
     let aggregate = AggregateId::WorkflowCheck(id);
     let label = storage::aggregate_label(aggregate)?;
-    let Some(frontier) = selected.forge.entry(label) else { return Ok(None); };
+    let Some(frontier) = selected.forge.entry(label) else {
+        return Ok(None);
+    };
     if frontier.successor_position() != 1 {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
-    let batch = storage::read_events(store, cx, basis.body().repository_id, frontier.event_batch_root()).await?;
-    if cancelled() { return Err(unavailable(RefusalCode::CancellationInProgress)); }
-    let mut matches = batch.events.into_iter().filter(|event| event.aggregate == aggregate);
-    let event = matches.next().ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
+    let batch = storage::read_events(
+        store,
+        cx,
+        basis.body().repository_id,
+        frontier.event_batch_root(),
+    )
+    .await?;
+    if cancelled() {
+        return Err(unavailable(RefusalCode::CancellationInProgress));
+    }
+    let mut matches = batch
+        .events
+        .into_iter()
+        .filter(|event| event.aggregate == aggregate);
+    let event = matches
+        .next()
+        .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))?;
     if matches.next().is_some() || event.version != AggregateVersion::FIRST {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }

@@ -524,4 +524,3 @@ impl ReceiveQuarantineHandoff for FullHandoff<'_> {
 
 #[cfg(test)]
 mod tests;
-

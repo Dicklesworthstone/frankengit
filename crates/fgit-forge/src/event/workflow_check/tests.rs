@@ -1,8 +1,8 @@
 use super::*;
-use fgit_codec::{DecodeLimits, CryptoBodyIdentity};
-use fgit_codec::wire::{canonical_body_bytes, decode_body, encode_body};
-use fgit_types::{AsciiSlug, GitOidSha1, GitOidSha256};
 use crate::{ForgeEventBatch, PullRequestNumber};
+use fgit_codec::wire::{canonical_body_bytes, decode_body, encode_body};
+use fgit_codec::{CryptoBodyIdentity, DecodeLimits};
+use fgit_types::{AsciiSlug, GitOidSha1, GitOidSha256};
 
 pub(super) fn record(format: GitHashAlgorithm) -> WorkflowCheckRecord {
     WorkflowCheckRecord {
@@ -20,9 +20,9 @@ pub(super) fn record(format: GitHashAlgorithm) -> WorkflowCheckRecord {
     }
 }
 fn event() -> ForgeEvent {
-    record(GitHashAlgorithm::Sha1).proposed_event(
-        PrincipalId::from_bytes([4; 16]), GitHashAlgorithm::Sha1,
-    ).unwrap()
+    record(GitHashAlgorithm::Sha1)
+        .proposed_event(PrincipalId::from_bytes([4; 16]), GitHashAlgorithm::Sha1)
+        .unwrap()
 }
 fn change(event: &ForgeEvent) -> &NativeWorkflowCheck {
     match &event.payload {
@@ -34,17 +34,28 @@ fn change(event: &ForgeEvent) -> &NativeWorkflowCheck {
 #[test]
 fn codec_roundtrips_both_native_domains_and_every_nongreen_conclusion() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
-        for conclusion in [WorkflowCheckConclusion::ActionRequired, WorkflowCheckConclusion::Failure,
-            WorkflowCheckConclusion::Cancelled, WorkflowCheckConclusion::TimedOut]
-        {
+        for conclusion in [
+            WorkflowCheckConclusion::ActionRequired,
+            WorkflowCheckConclusion::Failure,
+            WorkflowCheckConclusion::Cancelled,
+            WorkflowCheckConclusion::TimedOut,
+        ] {
             let mut input = record(format);
             input.conclusion = conclusion;
-            let event = input.proposed_event(PrincipalId::from_bytes([4;16]), format).unwrap();
+            let event = input
+                .proposed_event(PrincipalId::from_bytes([4; 16]), format)
+                .unwrap();
             let encoded = encode_body(&event).unwrap();
-            assert_eq!(decode_body::<ForgeEvent>(&encoded, DecodeLimits::DEFAULT).unwrap(), event);
+            assert_eq!(
+                decode_body::<ForgeEvent>(&encoded, DecodeLimits::DEFAULT).unwrap(),
+                event
+            );
             let batch = ForgeEventBatch::of_one(event.clone());
             let bytes = encode_body(&batch).unwrap();
-            assert_eq!(decode_body::<ForgeEventBatch>(&bytes, DecodeLimits::DEFAULT).unwrap(), batch);
+            assert_eq!(
+                decode_body::<ForgeEventBatch>(&bytes, DecodeLimits::DEFAULT).unwrap(),
+                batch
+            );
             assert_eq!(event.payload.kind(), 11);
             assert_eq!(event.version, AggregateVersion::FIRST);
             assert_eq!(change(&event).record, input);
@@ -54,10 +65,10 @@ fn codec_roundtrips_both_native_domains_and_every_nongreen_conclusion() {
 
 #[test]
 fn full_digest_labels_are_canonical_and_preserve_every_bit() {
-    let zero = WorkflowCheckId::from_bytes([0;32]);
+    let zero = WorkflowCheckId::from_bytes([0; 32]);
     assert_eq!(zero.to_string(), format!("check/{}", "0".repeat(52)));
     for bit in 0..256 {
-        let mut bytes = [0;32];
+        let mut bytes = [0; 32];
         bytes[bit / 8] = 1 << (bit % 8);
         let id = WorkflowCheckId::from_bytes(bytes);
         let label = id.to_string();
@@ -66,12 +77,15 @@ fn full_digest_labels_are_canonical_and_preserve_every_bit() {
         assert_eq!(WorkflowCheckId::from_label(&label), Some(id));
         assert_ne!(id, zero);
     }
-    let all = WorkflowCheckId::from_bytes([255;32]);
+    let all = WorkflowCheckId::from_bytes([255; 32]);
     assert_eq!(all.to_string(), format!("check/{}g", "v".repeat(51)));
-    for invalid in [all.to_string().to_uppercase(), format!("{}0", all),
-        format!("check/{}h", "v".repeat(51)), "check/a".to_owned(),
-        format!("other/{}", "0".repeat(52))]
-    {
+    for invalid in [
+        all.to_string().to_uppercase(),
+        format!("{}0", all),
+        format!("check/{}h", "v".repeat(51)),
+        "check/a".to_owned(),
+        format!("other/{}", "0".repeat(52)),
+    ] {
         assert!(WorkflowCheckId::from_label(&invalid).is_none(), "{invalid}");
     }
 }
@@ -83,7 +97,7 @@ fn publisher_run_attempt_and_exact_job_name_have_independent_identities() {
     for field in 0..4 {
         let mut other = initial.clone();
         match field {
-            0 => other.actor = PrincipalId::from_bytes([5;16]),
+            0 => other.actor = PrincipalId::from_bytes([5; 16]),
             1 => other.record.run_id[31] ^= 1,
             2 => other.record.attempt_id[0] ^= 1,
             _ => other.record.job.push('x'),
@@ -110,9 +124,14 @@ fn changed_evidence_or_subject_cannot_mint_a_second_job_stream() {
             2 => next.source_ref = RefName::try_new(b"refs/heads/other").unwrap(),
             _ => next.graph_root[31] ^= 1,
         }
-        let other = next.proposed_event(first.actor, GitHashAlgorithm::Sha1).unwrap();
+        let other = next
+            .proposed_event(first.actor, GitHashAlgorithm::Sha1)
+            .unwrap();
         assert_eq!(original.aggregate, other.aggregate);
-        assert_ne!(crate::event::event_id(&CryptoBodyIdentity, &other).unwrap(), root);
+        assert_ne!(
+            crate::event::event_id(&CryptoBodyIdentity, &other).unwrap(),
+            root
+        );
     }
 }
 
@@ -122,7 +141,9 @@ fn mismatched_aggregate_forged_identity_and_later_versions_refuse() {
         let mut invalid = event();
         match field {
             0 => invalid.aggregate = AggregateId::PullRequest(PullRequestNumber::FIRST),
-            1 => invalid.aggregate = AggregateId::WorkflowCheck(WorkflowCheckId::from_bytes([0;32])),
+            1 => {
+                invalid.aggregate = AggregateId::WorkflowCheck(WorkflowCheckId::from_bytes([0; 32]))
+            }
             _ => invalid.version = AggregateVersion::FIRST.next().unwrap(),
         }
         assert!(encode_body(&invalid).is_err());
@@ -144,10 +165,15 @@ fn mismatched_aggregate_forged_identity_and_later_versions_refuse() {
 fn exact_resource_bounds_succeed_and_the_next_byte_refuses() {
     let mut input = record(GitHashAlgorithm::Sha1);
     input.job = "x".repeat(MAX_CHECK_JOB_BYTES);
-    input.evidence = vec![0;MAX_CHECK_EVIDENCE_BYTES];
-    let good = input.proposed_event(PrincipalId::from_bytes([4;16]), GitHashAlgorithm::Sha1).unwrap();
+    input.evidence = vec![0; MAX_CHECK_EVIDENCE_BYTES];
+    let good = input
+        .proposed_event(PrincipalId::from_bytes([4; 16]), GitHashAlgorithm::Sha1)
+        .unwrap();
     let encoded = encode_body(&good).unwrap();
-    assert_eq!(decode_body::<ForgeEvent>(&encoded, DecodeLimits::DEFAULT).unwrap(), good);
+    assert_eq!(
+        decode_body::<ForgeEvent>(&encoded, DecodeLimits::DEFAULT).unwrap(),
+        good
+    );
     input.job.push('x');
     assert!(input.validate().is_err());
     input.job.pop();
@@ -164,9 +190,11 @@ fn exact_resource_bounds_succeed_and_the_next_byte_refuses() {
     invalid = record(GitHashAlgorithm::Sha1);
     invalid.source_ref = RefName::try_new(b"refs/tags/v1").unwrap();
     assert!(invalid.validate().is_err());
-    assert!(record(GitHashAlgorithm::Sha1).proposed_event(
-        PrincipalId::from_bytes([4;16]), GitHashAlgorithm::Sha256,
-    ).is_err());
+    assert!(
+        record(GitHashAlgorithm::Sha1)
+            .proposed_event(PrincipalId::from_bytes([4; 16]), GitHashAlgorithm::Sha256,)
+            .is_err()
+    );
 }
 
 #[test]
@@ -174,12 +202,15 @@ fn every_truncation_and_an_unknown_conclusion_refuses_decode() {
     let event = event();
     let bytes = canonical_body_bytes(&event).unwrap();
     for end in 0..bytes.len() {
-        assert!(super::super::read_event(&mut Decoder::new(&bytes[..end], DecodeLimits::DEFAULT)).is_err());
+        assert!(
+            super::super::read_event(&mut Decoder::new(&bytes[..end], DecodeLimits::DEFAULT))
+                .is_err()
+        );
     }
     let mut bad = bytes.clone();
     // The conclusion precedes the length-prefixed original evidence.
     let offset = bytes.len() - change(&event).record.evidence.len() - 4 - 4;
-    bad[offset..offset+4].copy_from_slice(&5_u32.to_be_bytes());
+    bad[offset..offset + 4].copy_from_slice(&5_u32.to_be_bytes());
     assert!(super::super::read_event(&mut Decoder::new(&bad, DecodeLimits::DEFAULT)).is_err());
     let mut framed = encode_body(&event).unwrap();
     framed.push(0);
@@ -188,9 +219,11 @@ fn every_truncation_and_an_unknown_conclusion_refuses_decode() {
 
 #[test]
 fn legacy_closed_event_bytes_and_pr_projection_stay_unchanged() {
-    let legacy = ForgeEvent { aggregate: AggregateId::PullRequest(PullRequestNumber::FIRST),
+    let legacy = ForgeEvent {
+        aggregate: AggregateId::PullRequest(PullRequestNumber::FIRST),
         version: AggregateVersion::FIRST,
-        payload: ForgeEventPayload::PullRequestClosed { withdrawn: true } };
+        payload: ForgeEventPayload::PullRequestClosed { withdrawn: true },
+    };
     let mut expected = Vec::new();
     expected.extend_from_slice(&1_u64.to_be_bytes());
     expected.extend_from_slice(&1_u64.to_be_bytes());

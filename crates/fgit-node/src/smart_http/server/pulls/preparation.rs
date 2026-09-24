@@ -297,20 +297,59 @@ mod tests {
         let oid = GitOid::from_hex(GitHashAlgorithm::Sha1, &"de".repeat(20)).unwrap();
         let private = b"private-path-do-not-reflect".to_vec();
         for (refusal, code) in [
-            (RenameRefusal::AmbiguousIdentity { side: RenameSide::Source, oid }, "rename_identity_ambiguous"),
-            (RenameRefusal::Divergent { from: private.clone(), target: private.clone(), source: private.clone() }, "rename_destinations_diverge"),
-            (RenameRefusal::RenameDelete { from: private.clone(), to: private.clone() }, "rename_delete_conflict"),
-            (RenameRefusal::DestinationOccupied { path: private.clone() }, "rename_destination_occupied"),
-            (RenameRefusal::UnsupportedEntry { path: private.clone() }, "rename_entry_unsupported"),
-            (RenameRefusal::AttributesRequireDriver { path: private }, "rename_attributes_require_driver"),
+            (
+                RenameRefusal::AmbiguousIdentity {
+                    side: RenameSide::Source,
+                    oid,
+                },
+                "rename_identity_ambiguous",
+            ),
+            (
+                RenameRefusal::Divergent {
+                    from: private.clone(),
+                    target: private.clone(),
+                    source: private.clone(),
+                },
+                "rename_destinations_diverge",
+            ),
+            (
+                RenameRefusal::RenameDelete {
+                    from: private.clone(),
+                    to: private.clone(),
+                },
+                "rename_delete_conflict",
+            ),
+            (
+                RenameRefusal::DestinationOccupied {
+                    path: private.clone(),
+                },
+                "rename_destination_occupied",
+            ),
+            (
+                RenameRefusal::UnsupportedEntry {
+                    path: private.clone(),
+                },
+                "rename_entry_unsupported",
+            ),
+            (
+                RenameRefusal::AttributesRequireDriver { path: private },
+                "rename_attributes_require_driver",
+            ),
         ] {
-            let error = preparation_error(&NodeWorkspaceRefusal::MergePreparation(PreparationError::Rename(refusal)));
+            let error = preparation_error(&NodeWorkspaceRefusal::MergePreparation(
+                PreparationError::Rename(refusal),
+            ));
             assert_eq!(error.status, Status::Conflict);
             assert_eq!(error.code, code);
             assert!(!error.outcome_unknown);
             let mut bytes = Vec::new();
-            error.send_named(&mut bytes, fgit_wire::smart_http::HttpVersion::Http11,
-                "pull_request_error").unwrap();
+            error
+                .send_named(
+                    &mut bytes,
+                    fgit_wire::smart_http::HttpVersion::Http11,
+                    "pull_request_error",
+                )
+                .unwrap();
             let text = String::from_utf8(bytes).unwrap();
             assert!(!text.contains("private-path-do-not-reflect"));
             assert!(!text.contains(&oid.to_string()));

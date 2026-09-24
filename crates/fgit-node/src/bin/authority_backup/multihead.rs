@@ -9,9 +9,7 @@ use fgit_authority_fsqlite::{
     MultiHeadLimits, decode_multi_head_snapshot, encode_multi_head_snapshot,
 };
 
-use super::{
-    MAX_BYTES, hex, publish_new, quote, regular, require_absent, sha256, with_store,
-};
+use super::{MAX_BYTES, hex, publish_new, quote, regular, require_absent, sha256, with_store};
 
 #[path = "multihead_restore.rs"]
 mod recovery;
@@ -34,13 +32,20 @@ pub(super) fn export(input: &Path, destination: &Path) -> Result<String, String>
                 return Err("serialized all-heads backup exceeds 64 MiB".into());
             }
             // Exercise the destination's actual envelope, not just our writer.
-            let decoded = decode_multi_head_snapshot(&bytes, limits, store.limits())
-                .map_err(|error| format!("all-heads export exceeds restore codec envelope: {error}"))?;
+            let decoded =
+                decode_multi_head_snapshot(&bytes, limits, store.limits()).map_err(|error| {
+                    format!("all-heads export exceeds restore codec envelope: {error}")
+                })?;
             if decoded != snapshot {
                 return Err("all-heads encoding changed the captured snapshot".into());
             }
-            Ok((bytes, snapshot.bodies.len(), snapshot.heads.len(),
-                snapshot.issuance.len(), snapshot.instance))
+            Ok((
+                bytes,
+                snapshot.bodies.len(),
+                snapshot.heads.len(),
+                snapshot.issuance.len(),
+                snapshot.instance,
+            ))
         },
     )?;
     let hash = hex(&sha256(&bytes));
@@ -54,18 +59,29 @@ pub(super) fn export(input: &Path, destination: &Path) -> Result<String, String>
             "\"complete\":true,\"store_closed\":true,\"runtime_drained\":true,",
             "\"git_objects_included\":false,\"signature_verified\":false,\"authority_changed\":false}}"
         ),
-        quote(&hash), bytes.len(), bodies, heads, issuance, instance
+        quote(&hash),
+        bytes.len(),
+        bodies,
+        heads,
+        issuance,
+        instance
     ))
 }
 
-pub(super) fn restore(input: &Path, destination: &Path, expected: [u8; 32],
+pub(super) fn restore(
+    input: &Path,
+    destination: &Path,
+    expected: [u8; 32],
     instance: StoreInstanceId,
 ) -> Result<String, String> {
     recovery::execute(input, destination, expected, instance, false)
 }
 
 /// Only the explicit all-heads resume command can adopt an owned restore root.
-pub(super) fn resume(input: &Path, destination: &Path, expected: [u8; 32],
+pub(super) fn resume(
+    input: &Path,
+    destination: &Path,
+    expected: [u8; 32],
     instance: StoreInstanceId,
 ) -> Result<String, String> {
     recovery::execute(input, destination, expected, instance, true)

@@ -7,15 +7,14 @@
 //! issues a CheckReceipt, resumes execution, or upgrades a local success.
 
 use super::super::{
-    ObservationBinding, TrustedWorkflowReceipt, OBSERVATION_DOMAIN,
-    CoordinatorExecutionProfile,
+    CoordinatorExecutionProfile, OBSERVATION_DOMAIN, ObservationBinding, TrustedWorkflowReceipt,
 };
 use crate::coordinator::delivery::{CheckDeliveryBatch, CheckDeliveryRefusal};
 // Imported from the defining module, not the crate-root re-export: the root
 // re-export carries only the type namespace, and this reader must rebuild the
 // identities from their decoded commitments with the tuple constructors.
 use crate::coordinator::{AttemptId, WorkflowRunId};
-use crate::workflow::{JobOutcome, WorkflowReport, MAX_JOBS, MAX_STEPS};
+use crate::workflow::{JobOutcome, MAX_JOBS, MAX_STEPS, WorkflowReport};
 use crate::{CheckRunConclusion, CheckRunStatus, Commitment, RunnerText, TrustDomain};
 use fgit_crypto::{Digest, DigestAlgorithm, DigestBytes};
 use fgit_types::{GitOid, GitOidSha1, GitOidSha256, RepositoryId, TenantId};
@@ -51,7 +50,9 @@ impl std::fmt::Display for ObservationRefusal {
 }
 impl std::error::Error for ObservationRefusal {}
 impl From<CheckDeliveryRefusal> for ObservationRefusal {
-    fn from(error: CheckDeliveryRefusal) -> Self { Self::Journal(error) }
+    fn from(error: CheckDeliveryRefusal) -> Self {
+        Self::Journal(error)
+    }
 }
 
 /// A commitment-checked local observation, NOT an authenticated check result.
@@ -63,25 +64,48 @@ pub struct VerifiedLocalObservation {
     receipt: TrustedWorkflowReceipt,
 }
 impl VerifiedLocalObservation {
-    pub const fn evidence(&self) -> Commitment { self.evidence }
-    pub const fn report(&self) -> &WorkflowReport { &self.receipt.report }
-    pub const fn run_id(&self) -> WorkflowRunId { self.receipt.binding.run }
-    pub const fn attempt_id(&self) -> AttemptId { self.receipt.binding.attempt }
-    pub const fn tenant(&self) -> TenantId { self.receipt.binding.tenant }
-    pub const fn repository(&self) -> RepositoryId { self.receipt.binding.repository }
-    pub const fn authority_head(&self) -> Commitment { self.receipt.binding.head }
-    pub const fn source_commit(&self) -> GitOid { self.receipt.binding.source }
-    pub const fn logical_now(&self) -> u64 { self.receipt.logical_now }
+    pub const fn evidence(&self) -> Commitment {
+        self.evidence
+    }
+    pub const fn report(&self) -> &WorkflowReport {
+        &self.receipt.report
+    }
+    pub const fn run_id(&self) -> WorkflowRunId {
+        self.receipt.binding.run
+    }
+    pub const fn attempt_id(&self) -> AttemptId {
+        self.receipt.binding.attempt
+    }
+    pub const fn tenant(&self) -> TenantId {
+        self.receipt.binding.tenant
+    }
+    pub const fn repository(&self) -> RepositoryId {
+        self.receipt.binding.repository
+    }
+    pub const fn authority_head(&self) -> Commitment {
+        self.receipt.binding.head
+    }
+    pub const fn source_commit(&self) -> GitOid {
+        self.receipt.binding.source
+    }
+    pub const fn logical_now(&self) -> u64 {
+        self.receipt.logical_now
+    }
     pub fn job_attempt(&self, job: &str) -> Option<u32> {
         self.receipt.attempts.get(job).copied()
     }
     pub fn requires_containment(&self) -> bool {
-        self.report().jobs.iter().any(|job| job.requires_containment())
+        self.report()
+            .jobs
+            .iter()
+            .any(|job| job.requires_containment())
     }
     /// Existing deterministic report JSON, including authoritative_check=false
     /// and byte-preserving hexadecimal stdout/stderr. No terminal control bytes
     /// from logs are interpreted by this rendering.
-    pub fn report_json(&self) -> String { self.report().to_json() }
+    pub fn report_json(&self) -> String {
+        self.report().to_json()
+    }
 }
 
 /// Decode the existing observation format, including exact nanosecond limits
@@ -103,7 +127,9 @@ pub fn decode_trusted_observation(
         return Err(ObservationRefusal::InvalidLimits);
     }
     checkpoint(live)?;
-    if bytes.len() > maximum_bytes { return Err(ObservationRefusal::RecordTooLarge); }
+    if bytes.len() > maximum_bytes {
+        return Err(ObservationRefusal::RecordTooLarge);
+    }
     if Commitment::of_bytes(bytes) != expected {
         return Err(ObservationRefusal::CommitmentMismatch);
     }
@@ -122,13 +148,17 @@ pub fn decode_trusted_observation(
         2 => GitOid::Sha256(GitOidSha256::from_bytes(input.array()?)),
         _ => return Err(ObservationRefusal::InvalidFrame),
     };
-    let trust = TrustDomain::new(RunnerText::parse("observation.trust", input.text(256)?)
-        .map_err(|_| ObservationRefusal::InvalidFrame)?);
+    let trust = TrustDomain::new(
+        RunnerText::parse("observation.trust", input.text(256)?)
+            .map_err(|_| ObservationRefusal::InvalidFrame)?,
+    );
     let step_timeout = input.duration()?;
     let run_timeout = input.duration()?;
     let logical_now = input.u64()?;
     let count = input.size()?;
-    if count == 0 || count > MAX_JOBS { return Err(ObservationRefusal::InvalidFrame); }
+    if count == 0 || count > MAX_JOBS {
+        return Err(ObservationRefusal::InvalidFrame);
+    }
     let mut attempts = BTreeMap::new();
     let mut previous: Option<String> = None;
     for _ in 0..count {
@@ -142,31 +172,60 @@ pub fn decode_trusted_observation(
         attempts.insert(name.to_owned(), attempt);
     }
     let encoded_report = input.field(maximum_bytes)?;
-    if !input.0.is_empty() { return Err(ObservationRefusal::InvalidFrame); }
+    if !input.0.is_empty() {
+        return Err(ObservationRefusal::InvalidFrame);
+    }
     let report = json::report(encoded_report, step_timeout, run_timeout, live)?;
-    if report.jobs.len() != attempts.len() { return Err(ObservationRefusal::InvalidReport); }
+    if report.jobs.len() != attempts.len() {
+        return Err(ObservationRefusal::InvalidReport);
+    }
     let mut seen = BTreeSet::new();
     let mut steps = 0usize;
     for job in &report.jobs {
         checkpoint(live)?;
-        let attempt = *attempts.get(&job.id).ok_or(ObservationRefusal::InvalidReport)?;
-        if !seen.insert(&job.id) || !valid_job(&job.id)
+        let attempt = *attempts
+            .get(&job.id)
+            .ok_or(ObservationRefusal::InvalidReport)?;
+        if !seen.insert(&job.id)
+            || !valid_job(&job.id)
             || (attempt == 0 && (!job.steps.is_empty() || job.outcome == JobOutcome::Succeeded))
-            || (job.outcome == JobOutcome::Skipped && (!job.steps.is_empty() || job.failure.is_some() || attempt != 0))
-        { return Err(ObservationRefusal::InvalidReport); }
-        steps = steps.checked_add(job.steps.len()).ok_or(ObservationRefusal::InvalidReport)?;
-        if steps > MAX_STEPS { return Err(ObservationRefusal::InvalidReport); }
+            || (job.outcome == JobOutcome::Skipped
+                && (!job.steps.is_empty() || job.failure.is_some() || attempt != 0))
+        {
+            return Err(ObservationRefusal::InvalidReport);
+        }
+        steps = steps
+            .checked_add(job.steps.len())
+            .ok_or(ObservationRefusal::InvalidReport)?;
+        if steps > MAX_STEPS {
+            return Err(ObservationRefusal::InvalidReport);
+        }
     }
     let receipt = TrustedWorkflowReceipt {
-        binding: ObservationBinding { run, attempt, tenant, repository, head, source, trust },
-        report, attempts, logical_now,
+        binding: ObservationBinding {
+            run,
+            attempt,
+            tenant,
+            repository,
+            head,
+            source,
+            trust,
+        },
+        report,
+        attempts,
+        logical_now,
     };
     // The emitter is the single source of canonical byte spelling. This also
     // rejects a false "succeeded" bit and millisecond/nanosecond disagreement.
     checkpoint(live)?;
-    if receipt.frame() != bytes { return Err(ObservationRefusal::InvalidFrame); }
+    if receipt.frame() != bytes {
+        return Err(ObservationRefusal::InvalidFrame);
+    }
     checkpoint(live)?;
-    Ok(VerifiedLocalObservation { evidence: expected, receipt })
+    Ok(VerifiedLocalObservation {
+        evidence: expected,
+        receipt,
+    })
 }
 
 /// Validate one completed proposal against one exact, single-job observation.
@@ -181,24 +240,41 @@ pub fn verify_trusted_job(
     live: &dyn Fn() -> bool,
 ) -> Result<VerifiedLocalObservation, ObservationRefusal> {
     checkpoint(live)?;
-    let CoordinatorExecutionProfile::TrustedWorkflow { source, limits } = batch.execution_profile() else {
+    let CoordinatorExecutionProfile::TrustedWorkflow { source, limits } = batch.execution_profile()
+    else {
         return Err(ObservationRefusal::UnsupportedProfile);
     };
-    let fact = batch.facts().get(fact_index).ok_or(ObservationRefusal::FactNotCompleted)?;
-    if fact.status != CheckRunStatus::Completed { return Err(ObservationRefusal::FactNotCompleted); }
-    let root = fact.receipt_commitment.ok_or(ObservationRefusal::EvidenceMissing)?;
+    let fact = batch
+        .facts()
+        .get(fact_index)
+        .ok_or(ObservationRefusal::FactNotCompleted)?;
+    if fact.status != CheckRunStatus::Completed {
+        return Err(ObservationRefusal::FactNotCompleted);
+    }
+    let root = fact
+        .receipt_commitment
+        .ok_or(ObservationRefusal::EvidenceMissing)?;
     let observed = decode_trusted_observation(evidence, root, maximum_bytes, live)?;
     let binding = &observed.receipt.binding;
     let report = observed.report();
-    if binding.run != batch.run_id() || binding.attempt != batch.attempt_id()
-        || binding.tenant != batch.tenant() || binding.repository != batch.repository()
-        || binding.head != batch.authority_head() || binding.source != batch.source_commit()
+    if binding.run != batch.run_id()
+        || binding.attempt != batch.attempt_id()
+        || binding.tenant != batch.tenant()
+        || binding.repository != batch.repository()
+        || binding.head != batch.authority_head()
+        || binding.source != batch.source_commit()
         || &binding.trust != batch.trust_domain()
-        || report.source != source || report.graph != batch.graph_commitment() || report.limits != limits
-        || observed.logical_now() != fact.timestamp_millis || report.jobs.len() != 1
-        || report.jobs[0].id != fact.job_id || fact.run_id != batch.run_id()
+        || report.source != source
+        || report.graph != batch.graph_commitment()
+        || report.limits != limits
+        || observed.logical_now() != fact.timestamp_millis
+        || report.jobs.len() != 1
+        || report.jobs[0].id != fact.job_id
+        || fact.run_id != batch.run_id()
         || fact.conclusion != Some(conclusion(report.jobs[0].outcome))
-    { return Err(ObservationRefusal::BindingMismatch); }
+    {
+        return Err(ObservationRefusal::BindingMismatch);
+    }
     Ok(observed)
 }
 
@@ -207,40 +283,62 @@ fn conclusion(outcome: JobOutcome) -> CheckRunConclusion {
     // the production producer rather than using this mapping to make fixtures.
     match outcome {
         JobOutcome::Succeeded | JobOutcome::Skipped => CheckRunConclusion::ActionRequired,
-        JobOutcome::Failed | JobOutcome::Refused | JobOutcome::OutputLimit => CheckRunConclusion::Failure,
+        JobOutcome::Failed | JobOutcome::Refused | JobOutcome::OutputLimit => {
+            CheckRunConclusion::Failure
+        }
         JobOutcome::Cancelled => CheckRunConclusion::Cancelled,
         JobOutcome::TimedOut => CheckRunConclusion::TimedOut,
     }
 }
 fn checkpoint(live: &dyn Fn() -> bool) -> Result<(), ObservationRefusal> {
-    if live() { Ok(()) } else { Err(ObservationRefusal::Cancelled) }
+    if live() {
+        Ok(())
+    } else {
+        Err(ObservationRefusal::Cancelled)
+    }
 }
 fn valid_job(name: &str) -> bool {
     !name.is_empty() && name.len() <= MAX_JOB_BYTES && !name.chars().any(char::is_control)
 }
 fn commitment(bytes: &[u8]) -> Result<Commitment, ObservationRefusal> {
-    let digest = Digest::new(DigestAlgorithm::Sha256.id(),
-        DigestBytes::try_new(bytes).map_err(|_| ObservationRefusal::InvalidFrame)?);
+    let digest = Digest::new(
+        DigestAlgorithm::Sha256.id(),
+        DigestBytes::try_new(bytes).map_err(|_| ObservationRefusal::InvalidFrame)?,
+    );
     Commitment::try_from_digest(digest).map_err(|_| ObservationRefusal::InvalidFrame)
 }
 struct FrameInput<'a>(&'a [u8]);
 impl<'a> FrameInput<'a> {
     fn take(&mut self, count: usize) -> Result<&'a [u8], ObservationRefusal> {
-        let result = self.0.get(..count).ok_or(ObservationRefusal::InvalidFrame)?;
-        self.0 = &self.0[count..]; Ok(result)
+        let result = self
+            .0
+            .get(..count)
+            .ok_or(ObservationRefusal::InvalidFrame)?;
+        self.0 = &self.0[count..];
+        Ok(result)
     }
     fn array<const N: usize>(&mut self) -> Result<[u8; N], ObservationRefusal> {
-        self.take(N)?.try_into().map_err(|_| ObservationRefusal::InvalidFrame)
+        self.take(N)?
+            .try_into()
+            .map_err(|_| ObservationRefusal::InvalidFrame)
     }
-    fn byte(&mut self) -> Result<u8, ObservationRefusal> { Ok(self.array::<1>()?[0]) }
-    fn u64(&mut self) -> Result<u64, ObservationRefusal> { Ok(u64::from_be_bytes(self.array()?)) }
+    fn byte(&mut self) -> Result<u8, ObservationRefusal> {
+        Ok(self.array::<1>()?[0])
+    }
+    fn u64(&mut self) -> Result<u64, ObservationRefusal> {
+        Ok(u64::from_be_bytes(self.array()?))
+    }
     fn size(&mut self) -> Result<usize, ObservationRefusal> {
         usize::try_from(self.u64()?).map_err(|_| ObservationRefusal::InvalidFrame)
     }
-    fn root(&mut self) -> Result<Commitment, ObservationRefusal> { commitment(self.take(32)?) }
+    fn root(&mut self) -> Result<Commitment, ObservationRefusal> {
+        commitment(self.take(32)?)
+    }
     fn field(&mut self, maximum: usize) -> Result<&'a [u8], ObservationRefusal> {
         let count = self.size()?;
-        if count > maximum { return Err(ObservationRefusal::RecordTooLarge); }
+        if count > maximum {
+            return Err(ObservationRefusal::RecordTooLarge);
+        }
         self.take(count)
     }
     fn text(&mut self, maximum: usize) -> Result<&'a str, ObservationRefusal> {
@@ -249,8 +347,12 @@ impl<'a> FrameInput<'a> {
     fn duration(&mut self) -> Result<Duration, ObservationRefusal> {
         let nanos = u128::from_be_bytes(self.array()?);
         // Reject out-of-profile durations before narrowing or constructing.
-        if nanos == 0 || nanos > 3_600_000_000_000 { return Err(ObservationRefusal::InvalidReport); }
-        Ok(Duration::from_nanos(u64::try_from(nanos).map_err(|_| ObservationRefusal::InvalidReport)?))
+        if nanos == 0 || nanos > 3_600_000_000_000 {
+            return Err(ObservationRefusal::InvalidReport);
+        }
+        Ok(Duration::from_nanos(
+            u64::try_from(nanos).map_err(|_| ObservationRefusal::InvalidReport)?,
+        ))
     }
 }
 

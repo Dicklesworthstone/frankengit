@@ -11,8 +11,8 @@ mod gzip;
 use std::fmt::{self, Display, Formatter};
 
 use super::{
-    BodyDecoder, BodyFraming, ContentEncoding, HttpError, HttpLimits, Operation,
-    ProtocolVersion, RequestHead, Service, discovery_prefix,
+    BodyDecoder, BodyFraming, ContentEncoding, HttpError, HttpLimits, Operation, ProtocolVersion,
+    RequestHead, Service, discovery_prefix,
 };
 use crate::receive::{
     ReceiveCancellation, ReceiveCompletion, ReceiveContext, ReceiveError, ReceivePack,

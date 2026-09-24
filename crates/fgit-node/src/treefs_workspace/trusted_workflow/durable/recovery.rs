@@ -28,7 +28,10 @@ impl TrustedWorkflowRun {
         live: &dyn Fn() -> bool,
     ) -> Result<FileCheckJournal, TrustedWorkflowFailure> {
         OneNode::open_trusted_workflow_journal(
-            &self.run_directory, self.check_journal_scope(), minimum, live,
+            &self.run_directory,
+            self.check_journal_scope(),
+            minimum,
+            live,
         )
     }
 }
@@ -57,49 +60,83 @@ impl OneNode {
         live: &dyn Fn() -> bool,
     ) -> Result<FileCheckJournal, TrustedWorkflowFailure> {
         let refused = |detail| TrustedWorkflowFailure::Journal {
-            directory: directory.to_path_buf(), detail,
+            directory: directory.to_path_buf(),
+            detail,
         };
-        if !live() { return Err(refused("workflow custody read cancelled".to_owned())); }
+        if !live() {
+            return Err(refused("workflow custody read cancelled".to_owned()));
+        }
         if !directory.is_absolute() {
-            return Err(refused("workflow custody requires an absolute private directory".to_owned()));
+            return Err(refused(
+                "workflow custody requires an absolute private directory".to_owned(),
+            ));
         }
         let metadata = fs::symlink_metadata(directory)
             .map_err(|e| refused(format!("inspect workflow custody directory: {e}")))?;
         if !metadata.is_dir() || metadata.mode() & 0o777 != 0o700 {
-            return Err(refused("workflow custody directory must be nonsymlink and 0700".to_owned()));
+            return Err(refused(
+                "workflow custody directory must be nonsymlink and 0700".to_owned(),
+            ));
         }
         let marker_path = directory.join("attempt.json");
         let selected = fs::symlink_metadata(&marker_path)
             .map_err(|e| refused(format!("inspect original workflow marker: {e}")))?;
-        if !selected.is_file() || selected.mode() & 0o777 != 0o600
-            || selected.nlink() != 1 || selected.len() == 0 || selected.len() > MAX_MARKER_BYTES
+        if !selected.is_file()
+            || selected.mode() & 0o777 != 0o600
+            || selected.nlink() != 1
+            || selected.len() == 0
+            || selected.len() > MAX_MARKER_BYTES
         {
-            return Err(refused("original workflow marker must be a bounded private regular file".to_owned()));
+            return Err(refused(
+                "original workflow marker must be a bounded private regular file".to_owned(),
+            ));
         }
-        if !live() { return Err(refused("workflow custody read cancelled".to_owned())); }
+        if !live() {
+            return Err(refused("workflow custody read cancelled".to_owned()));
+        }
         let mut file = File::open(&marker_path)
             .map_err(|e| refused(format!("open original workflow marker: {e}")))?;
-        let opened = file.metadata()
+        let opened = file
+            .metadata()
             .map_err(|e| refused(format!("inspect opened workflow marker: {e}")))?;
-        if opened.dev() != selected.dev() || opened.ino() != selected.ino()
-            || opened.len() != selected.len() || !opened.is_file()
-            || opened.mode() & 0o777 != 0o600 || opened.nlink() != 1
+        if opened.dev() != selected.dev()
+            || opened.ino() != selected.ino()
+            || opened.len() != selected.len()
+            || !opened.is_file()
+            || opened.mode() & 0o777 != 0o600
+            || opened.nlink() != 1
         {
-            return Err(refused("original workflow marker changed while opening".to_owned()));
+            return Err(refused(
+                "original workflow marker changed while opening".to_owned(),
+            ));
         }
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(MAX_MARKER_BYTES as usize + 1)
+        bytes
+            .try_reserve_exact(MAX_MARKER_BYTES as usize + 1)
             .map_err(|_| refused("workflow marker allocation refused".to_owned()))?;
-        file.by_ref().take(MAX_MARKER_BYTES + 1).read_to_end(&mut bytes)
+        file.by_ref()
+            .take(MAX_MARKER_BYTES + 1)
+            .read_to_end(&mut bytes)
             .map_err(|e| refused(format!("read original workflow marker: {e}")))?;
-        if bytes.len() as u64 != selected.len() || bytes.len() as u64 > MAX_MARKER_BYTES
+        if bytes.len() as u64 != selected.len()
+            || bytes.len() as u64 > MAX_MARKER_BYTES
             || Commitment::of_bytes(&bytes) != expected.journal_id
         {
-            return Err(refused("original workflow marker does not match the retained custody scope".to_owned()));
+            return Err(refused(
+                "original workflow marker does not match the retained custody scope".to_owned(),
+            ));
         }
-        if !live() { return Err(refused("workflow custody read cancelled".to_owned())); }
-        FileCheckJournal::open(&directory.join(JOURNAL_FILE), expected, Default::default(), minimum, live)
-            .map_err(|e| refused(format!("reopen workflow proposal custody: {e}")))
+        if !live() {
+            return Err(refused("workflow custody read cancelled".to_owned()));
+        }
+        FileCheckJournal::open(
+            &directory.join(JOURNAL_FILE),
+            expected,
+            Default::default(),
+            minimum,
+            live,
+        )
+        .map_err(|e| refused(format!("reopen workflow proposal custody: {e}")))
     }
 }
 

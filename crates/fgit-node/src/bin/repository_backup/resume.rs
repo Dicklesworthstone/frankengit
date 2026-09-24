@@ -5,8 +5,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use fgit_authority::StoreInstanceId;
 use super::{create_private, parent, require_absent, sync_directory};
+use fgit_authority::StoreInstanceId;
 
 const INTENT: &str = ".restore-intent";
 const LOCK: &str = ".restore-lock";
@@ -22,34 +22,76 @@ pub(super) struct Intent {
     _lock: File,
 }
 impl Intent {
-    pub(super) fn reserve(root: &Path, pin: [u8; 32], instance: StoreInstanceId) -> Result<Self, String> {
+    pub(super) fn reserve(
+        root: &Path,
+        pin: [u8; 32],
+        instance: StoreInstanceId,
+    ) -> Result<Self, String> {
         create_private(root)?;
-        let lock = private_options().create_new(true).open(root.join(LOCK)).map_err(|e| e.to_string())?;
-        lock.try_lock().map_err(|e| format!("restore lock unavailable: {e}"))?;
+        let lock = private_options()
+            .create_new(true)
+            .open(root.join(LOCK))
+            .map_err(|e| e.to_string())?;
+        lock.try_lock()
+            .map_err(|e| format!("restore lock unavailable: {e}"))?;
         lock.sync_all().map_err(|e| e.to_string())?;
-        let mut marker = private_options().create_new(true).open(root.join(INTENT)).map_err(|e| e.to_string())?;
-        marker.write_all(&binding(pin, instance)).and_then(|()| marker.sync_all()).map_err(|e| e.to_string())?;
+        let mut marker = private_options()
+            .create_new(true)
+            .open(root.join(INTENT))
+            .map_err(|e| e.to_string())?;
+        marker
+            .write_all(&binding(pin, instance))
+            .and_then(|()| marker.sync_all())
+            .map_err(|e| e.to_string())?;
         drop(marker);
         sync_directory(root).map_err(|e| e.to_string())?;
         sync_directory(parent(root)).map_err(|e| e.to_string())?;
-        Ok(Self { root: root.to_path_buf(), _lock: lock })
+        Ok(Self {
+            root: root.to_path_buf(),
+            _lock: lock,
+        })
     }
 
-    pub(super) fn open(root: &Path, pin: [u8; 32], instance: StoreInstanceId) -> Result<Self, String> {
-        if !has_kind(root, true)? { return Err("resume requires an existing restore root".into()); }
+    pub(super) fn open(
+        root: &Path,
+        pin: [u8; 32],
+        instance: StoreInstanceId,
+    ) -> Result<Self, String> {
+        if !has_kind(root, true)? {
+            return Err("resume requires an existing restore root".into());
+        }
         let marker = root.join(INTENT);
-        if !has_kind(&marker, false)? { return Err("resume refused: missing restore intent (legacy roots cannot be resumed)".into()); }
+        if !has_kind(&marker, false)? {
+            return Err(
+                "resume refused: missing restore intent (legacy roots cannot be resumed)".into(),
+            );
+        }
         let mut bytes = Vec::new();
-        File::open(&marker).map_err(|e| e.to_string())?.take((INTENT_BYTES + 1) as u64)
-            .read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        File::open(&marker)
+            .map_err(|e| e.to_string())?
+            .take((INTENT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
         if bytes.as_slice() != binding(pin, instance).as_slice() {
-            return Err("resume intent does not match archive checksum and destination instance".into());
+            return Err(
+                "resume intent does not match archive checksum and destination instance".into(),
+            );
         }
         let lock_path = root.join(LOCK);
-        if !has_kind(&lock_path, false)? { return Err("resume refused: missing restore lock file".into()); }
-        let lock = OpenOptions::new().read(true).write(true).open(lock_path).map_err(|e| e.to_string())?;
-        lock.try_lock().map_err(|e| format!("restore already running or lock unavailable: {e}"))?;
-        Ok(Self { root: root.to_path_buf(), _lock: lock })
+        if !has_kind(&lock_path, false)? {
+            return Err("resume refused: missing restore lock file".into());
+        }
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(|e| e.to_string())?;
+        lock.try_lock()
+            .map_err(|e| format!("restore already running or lock unavailable: {e}"))?;
+        Ok(Self {
+            root: root.to_path_buf(),
+            _lock: lock,
+        })
     }
 
     pub(super) fn published(&self) -> Result<bool, String> {
@@ -82,12 +124,18 @@ impl Intent {
         if (wal_at_root || wal_in_quarantine) && !database {
             return Err("resume found a WAL without its database; no paths changed".into());
         }
-        if !exists { create_private(&quarantine)?; }
+        if !exists {
+            create_private(&quarantine)?;
+        }
         // A new preparation moves rather than hard-links the WAL. Thus a crash
         // has exactly one location per path, and normalization is repeatable.
-        for (name, moved) in [("objects", objects_at_root), ("authority.fsqlite-wal", wal_at_root)] {
+        for (name, moved) in [
+            ("objects", objects_at_root),
+            ("authority.fsqlite-wal", wal_at_root),
+        ] {
             if moved {
-                fs::rename(self.root.join(name), quarantine.join(name)).map_err(|e| e.to_string())?;
+                fs::rename(self.root.join(name), quarantine.join(name))
+                    .map_err(|e| e.to_string())?;
             }
         }
         sync_directory(&quarantine).map_err(|e| e.to_string())?;
@@ -99,29 +147,42 @@ impl Intent {
     /// reverified and the node closed. The intent and lock files stay for a
     /// lost-response retry; they never claim that validation has completed.
     pub(super) fn cleanup(&self) -> Result<(), String> {
-        if !self.published()? { return Err("cannot clean unpublished restore quarantine".into()); }
+        if !self.published()? {
+            return Err("cannot clean unpublished restore quarantine".into());
+        }
         let quarantine = self.root.join(".restore-quarantine");
         if has_kind(&quarantine, true)? {
-            fs::remove_dir_all(&quarantine).map_err(|e| format!("restore is published; quarantine cleanup failed: {e}"))?;
+            fs::remove_dir_all(&quarantine)
+                .map_err(|e| format!("restore is published; quarantine cleanup failed: {e}"))?;
         }
-        sync_directory(&self.root).map_err(|e| format!("restore is published; cleanup sync failed: {e}"))
+        sync_directory(&self.root)
+            .map_err(|e| format!("restore is published; cleanup sync failed: {e}"))
     }
 }
 fn private_options() -> OpenOptions {
-    let mut options = OpenOptions::new(); options.read(true).write(true);
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
     #[cfg(unix)]
-    { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
     options
 }
 fn binding(pin: [u8; 32], instance: StoreInstanceId) -> [u8; INTENT_BYTES] {
-    let mut bytes = [0; INTENT_BYTES]; bytes[..8].copy_from_slice(MAGIC);
-    bytes[8..40].copy_from_slice(&pin); bytes[40..].copy_from_slice(&instance.raw().to_be_bytes()); bytes
+    let mut bytes = [0; INTENT_BYTES];
+    bytes[..8].copy_from_slice(MAGIC);
+    bytes[8..40].copy_from_slice(&pin);
+    bytes[40..].copy_from_slice(&instance.raw().to_be_bytes());
+    bytes
 }
 /// Existing symlinks/devices and unexpected path kinds are never treated as
 /// absence. Caller owns stable parent paths; this is not a hostile-host adapter.
 fn has_kind(path: &Path, directory: bool) -> Result<bool, String> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if (directory && metadata.is_dir()) || (!directory && metadata.is_file()) => Ok(true),
+        Ok(metadata) if (directory && metadata.is_dir()) || (!directory && metadata.is_file()) => {
+            Ok(true)
+        }
         Ok(_) => Err(format!("unexpected restore path kind: {}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.to_string()),

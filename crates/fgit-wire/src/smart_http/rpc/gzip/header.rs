@@ -27,7 +27,13 @@ pub(super) struct Header {
 
 impl Header {
     pub(super) const fn new(limit: usize) -> Self {
-        Self { phase: Phase::Fixed(0), pending_flags: 0, crc: u32::MAX, bytes: 0, limit }
+        Self {
+            phase: Phase::Fixed(0),
+            pending_flags: 0,
+            crc: u32::MAX,
+            bytes: 0,
+            limit,
+        }
     }
 
     pub(super) const fn is_complete(&self) -> bool {
@@ -37,8 +43,10 @@ impl Header {
     // RFC 1952 orders FHCRC last, despite its lower flag bit.
     fn next_optional(&mut self) -> Phase {
         for (flag, phase) in [
-            (4, Phase::ExtraLow), (8, Phase::Name),
-            (16, Phase::Comment), (2, Phase::CrcLow),
+            (4, Phase::ExtraLow),
+            (8, Phase::Name),
+            (16, Phase::Comment),
+            (2, Phase::CrcLow),
         ] {
             if self.pending_flags & flag != 0 {
                 self.pending_flags &= !flag;
@@ -74,12 +82,20 @@ impl Header {
                     if index == 3 {
                         self.pending_flags = byte & 0x1e; // FTEXT is advisory.
                     }
-                    if index == 9 { self.next_optional() } else { Phase::Fixed(index + 1) }
+                    if index == 9 {
+                        self.next_optional()
+                    } else {
+                        Phase::Fixed(index + 1)
+                    }
                 }
                 Phase::ExtraLow => Phase::ExtraHigh(byte),
                 Phase::ExtraHigh(low) => {
                     let count = u16::from_le_bytes([low, byte]);
-                    if count == 0 { self.next_optional() } else { Phase::Extra(count) }
+                    if count == 0 {
+                        self.next_optional()
+                    } else {
+                        Phase::Extra(count)
+                    }
                 }
                 Phase::Extra(1) => self.next_optional(),
                 Phase::Extra(remaining) => Phase::Extra(remaining - 1),
