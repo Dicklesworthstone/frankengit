@@ -273,7 +273,18 @@ impl SsrfPolicy {
     }
 
     /// Parse and validate a URL against SSRF rules.
+    ///
+    /// The request target is copied into HTTP/1.1 framing without decoding.
+    /// Require an ASCII URI (percent-encode other bytes), reject controls and
+    /// fragments, and normalize query-only URLs to origin-form targets.
     pub fn validate_url(&self, raw: &str) -> Result<ValidatedWebhookUrl, WebhookRefusal> {
+        // Check before trimming so CR/LF and tabs cannot be laundered into
+        // an apparently valid URL at this trust boundary.
+        if raw.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(WebhookRefusal::InvalidUrl(
+                "control characters are not permitted in webhook URLs".into(),
+            ));
+        }
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Err(WebhookRefusal::InvalidUrl("empty URL".into()));
@@ -281,6 +292,17 @@ impl SsrfPolicy {
         if trimmed.len() > 4096 {
             return Err(WebhookRefusal::InvalidUrl(
                 "URL exceeds maximum length of 4096 bytes".into(),
+            ));
+        }
+
+        if !trimmed.is_ascii() || trimmed.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            return Err(WebhookRefusal::InvalidUrl(
+                "webhook URLs must be ASCII URIs without whitespace; use percent-encoding".into(),
+            ));
+        }
+        if trimmed.contains('#') || trimmed.contains('\\') {
+            return Err(WebhookRefusal::InvalidUrl(
+                "fragments and backslashes are not permitted in webhook URLs".into(),
             ));
         }
 
@@ -294,20 +316,21 @@ impl SsrfPolicy {
             return Err(WebhookRefusal::UnsupportedScheme(s.to_string()));
         };
 
-        // Reject embedded credentials (user:pass@host)
-        if let Some(at_idx) = rest.find('@') {
-            let slash_idx = rest.find('/').unwrap_or(rest.len());
-            if at_idx < slash_idx {
-                return Err(WebhookRefusal::InvalidUrl(
-                    "embedded credentials (@) not permitted in webhook URLs".into(),
-                ));
-            }
-        }
-
-        // Split authority from path_and_query
-        let (authority, path_and_query) = match rest.find('/') {
+        // A query can follow the authority without a slash. Interpret '@'
+        // only in the authority, never in a path or query value.
+        let (authority, target) = match rest.find(['/', '?']) {
             Some(idx) => (&rest[..idx], &rest[idx..]),
             None => (rest, "/"),
+        };
+        if authority.contains('@') {
+            return Err(WebhookRefusal::InvalidUrl(
+                "embedded credentials (@) not permitted in webhook URLs".into(),
+            ));
+        }
+        let path_and_query = if target.starts_with('?') {
+            format!("/{target}")
+        } else {
+            target.to_string()
         };
 
         if authority.is_empty() {
@@ -426,7 +449,7 @@ impl SsrfPolicy {
             scheme: scheme.to_string(),
             host: host_str.to_ascii_lowercase(),
             port,
-            path_and_query: path_and_query.to_string(),
+            path_and_query,
             ip_literal,
         })
     }
