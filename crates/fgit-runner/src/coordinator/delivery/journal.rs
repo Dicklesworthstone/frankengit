@@ -453,6 +453,29 @@ fn check_parent(path: &Path) -> Result<(), CheckDeliveryRefusal> {
     if !metadata.is_dir() || metadata.mode() & 0o077 != 0 { return Err(CheckDeliveryRefusal::StorageUnavailable); }
     Ok(())
 }
+/// Takes the exclusive custody lock, waiting at most `LOCK_GRACE`.
+///
+/// flock(2) locks belong to the open file description, and a child forked by
+/// this multithreaded process (a workflow step being spawned) shares every
+/// description until it execs and closes its CLOEXEC copies. A lock released
+/// by `drop` can therefore stay held for that brief window. Retrying for a
+/// bounded moment absorbs the window; a genuinely live owner keeps the lock
+/// past it and is still refused as `LockUnavailable`.
+fn lock_exclusive_bounded(file: &File) -> Result<(), CheckDeliveryRefusal> {
+    const LOCK_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+    const LOCK_STEP: std::time::Duration = std::time::Duration::from_millis(5);
+    let started = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < LOCK_GRACE => {
+                std::thread::sleep(LOCK_STEP);
+            }
+            Err(_) => return Err(CheckDeliveryRefusal::LockUnavailable),
+        }
+    }
+}
+
 fn private_file(path: &Path, create: bool) -> Result<File, CheckDeliveryRefusal> {
     if !create {
         let metadata = fs::symlink_metadata(path).map_err(storage)?;
@@ -461,7 +484,7 @@ fn private_file(path: &Path, create: bool) -> Result<File, CheckDeliveryRefusal>
         }
     }
     let file = OpenOptions::new().read(true).write(true).create_new(create).mode(0o600).open(path).map_err(storage)?;
-    file.try_lock().map_err(|_| CheckDeliveryRefusal::LockUnavailable)?;
+    lock_exclusive_bounded(&file)?;
     let actual = file.metadata().map_err(storage)?;
     let named = fs::symlink_metadata(path).map_err(storage)?;
     if !actual.is_file() || !named.is_file() || actual.mode() & 0o077 != 0 || actual.nlink() != 1
