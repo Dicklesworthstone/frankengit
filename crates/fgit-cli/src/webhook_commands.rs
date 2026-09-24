@@ -5,8 +5,8 @@ use fgit_forge::webhook::{
     SsrfPolicy, WebhookEventFilter, WebhookId, WebhookRegistration, WebhookRetrySchedule,
     WebhookSecret, WebhookSecretRotation,
 };
-use fgit_node::webhook::{WebhookDeliveryDestination, WebhookStore};
-use fgit_types::{AsciiSlug, RepositoryId, TenantId};
+use fgit_node::webhook::WebhookStore;
+use fgit_types::{RepositoryId, TenantId};
 
 use crate::publication_support::quote;
 
@@ -21,16 +21,24 @@ usage: fg webhook rotate <storage-root> <tenant-id> <repository-id> --trusted-lo
          --id <id> --new-secret <hex-secret> [--window-secs <seconds>]
 usage: fg webhook dead-letter list <storage-root> <tenant-id> <repository-id> --trusted-local
 usage: fg webhook dead-letter replay <storage-root> <tenant-id> <repository-id> --trusted-local
-         --delivery-id <delivery-id>
-usage: fg webhook deliver <storage-root> <tenant-id> <repository-id> --trusted-local
-         --id <id> --delivery-id <delivery-id> [--attempt <num>]
+         --id <id> --delivery-id <delivery-id> --destination <canonical-destination>
+         --at-least-once [--object-format sha1|sha256] [--expected-head <snapshot-token>]
          [--permissive-for-tests]
+usage: fg webhook deliver <storage-root> <tenant-id> <repository-id> --trusted-local
+         --id <id> --delivery-id <delivery-id> --destination <canonical-destination>
+         --at-least-once [--attempt <1..16>] [--object-format sha1|sha256]
+         [--expected-head <snapshot-token>] [--permissive-for-tests]
 usage: fg webhook outbox <storage-root> <tenant-id> <repository-id> --trusted-local
          [--object-format sha1|sha256] [--limit <1..100>] [--after <delivery-id>]
          [--expected-head <snapshot-token>]
 usage: fg webhook inspect <storage-root> <tenant-id> <repository-id> --trusted-local
          --delivery-id <delivery-id> --destination <canonical-destination>
-         [--object-format sha1|sha256] [--expected-head <snapshot-token>]";
+         [--object-format sha1|sha256] [--expected-head <snapshot-token>]
+
+Manual deliver/replay can duplicate an effect and never settle its canonical
+obligation. Replay contacts the receiver; diagnostic dead letters are retained.
+Exit 0: acceptance observed; 1: transient failure; 2: refusal; 3: outcome unknown.
+See docs/WEBHOOK_OPERATOR_DELIVERY.md for the supported operator profile.";
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
     if args.is_empty() || args == ["--help"] {
@@ -43,8 +51,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
         "list" => run_list(&args[1..]),
         "rotate" => run_rotate(&args[1..]),
         "dead-letter" => run_dead_letter(&args[1..]),
-        "deliver" => run_deliver(&args[1..]),
-        "outbox" | "inspect" => delivery::run(args[0].as_str(), &args[1..]),
+        "outbox" | "inspect" | "deliver" => delivery::run(args[0].as_str(), &args[1..]),
         _ => Err(format!("unknown webhook subcommand: {}", args[0])),
     }
 }
@@ -264,114 +271,7 @@ fn run_dead_letter(args: &[String]) -> Result<u8, String> {
             );
             Ok(0)
         }
-        "replay" => {
-            let (storage, _tenant, _repo, mut idx) = parse_base(&args[1..])?;
-            let mut delivery_id = None;
-            while idx < args.len() - 1 {
-                if args[idx] == "--delivery-id" {
-                    idx += 1;
-                    delivery_id = Some(
-                        args.get(idx)
-                            .ok_or("missing argument for --delivery-id")?
-                            .clone(),
-                    );
-                }
-                idx += 1;
-            }
-            let id_str = delivery_id.ok_or("missing mandatory --delivery-id")?;
-            let slug =
-                AsciiSlug::try_new("delivery_id", id_str.as_bytes()).map_err(|e| e.to_string())?;
-
-            let store = WebhookStore::open(storage.join("webhooks"))?;
-            let replayed = store.replay_dead_letter(slug);
-
-            if let Some(entry) = replayed {
-                println!(
-                    "{{\"type\":\"webhook_dead_letter_replayed\",\"schema_version\":1,\"delivery_id\":{},\"status\":\"replayed\"}}",
-                    quote(entry.delivery_id.as_str())
-                );
-                Ok(0)
-            } else {
-                Err(format!(
-                    "delivery id {id_str} not found in dead-letter queue"
-                ))
-            }
-        }
+        "replay" => delivery::run("replay", &args[1..]),
         unknown => Err(format!("unknown dead-letter action: {unknown}")),
-    }
-}
-
-fn run_deliver(args: &[String]) -> Result<u8, String> {
-    let (storage, _tenant, _repo, mut idx) = parse_base(args)?;
-
-    let mut id = None;
-    let mut delivery_id_str = None;
-    let mut attempt = 1u32;
-    let mut permissive = false;
-
-    while idx < args.len() {
-        match args[idx].as_str() {
-            "--id" => {
-                idx += 1;
-                let val = args.get(idx).ok_or("missing argument for --id")?;
-                id = Some(val.parse::<u64>().map_err(|_| "invalid webhook id")?);
-            }
-            "--delivery-id" => {
-                idx += 1;
-                delivery_id_str = Some(
-                    args.get(idx)
-                        .ok_or("missing argument for --delivery-id")?
-                        .clone(),
-                );
-            }
-            "--attempt" => {
-                idx += 1;
-                let val = args.get(idx).ok_or("missing argument for --attempt")?;
-                attempt = val.parse::<u32>().map_err(|_| "invalid attempt number")?;
-            }
-            "--permissive-for-tests" => {
-                permissive = true;
-            }
-            unknown => return Err(format!("unknown argument: {unknown}")),
-        }
-        idx += 1;
-    }
-
-    let webhook_id = id.ok_or("missing mandatory --id")?;
-    let del_str = delivery_id_str.ok_or("missing mandatory --delivery-id")?;
-    let delivery_slug =
-        AsciiSlug::try_new("delivery_id", del_str.as_bytes()).map_err(|e| e.to_string())?;
-
-    let store = WebhookStore::open(storage.join("webhooks"))?;
-    let reg = store
-        .get(WebhookId(webhook_id))
-        .ok_or_else(|| format!("webhook id {webhook_id} not registered"))?;
-
-    let ssrf_policy = if permissive {
-        SsrfPolicy::PERMISSIVE_FOR_TESTS
-    } else {
-        SsrfPolicy::STRICT
-    };
-
-    let dest =
-        WebhookDeliveryDestination::new(delivery_slug, reg, ssrf_policy, store.dead_letters());
-
-    // Execute HTTP dispatch
-    let (verdict_str, response_body) = dest.deliver_simple(delivery_slug, attempt)?;
-
-    let response_text = String::from_utf8_lossy(&response_body);
-
-    println!(
-        "{{\"type\":\"webhook_delivered\",\"schema_version\":1,\"delivery_id\":{},\"attempt\":{},\"verdict\":{},\"response_summary\":{}}}",
-        quote(&del_str),
-        attempt,
-        quote(verdict_str),
-        quote(&response_text)
-    );
-
-    match verdict_str {
-        "Accepted" | "DuplicateSuppressed" => Ok(0),
-        "TransientFailure" => Ok(1),
-        _ => Ok(2),
     }
 }

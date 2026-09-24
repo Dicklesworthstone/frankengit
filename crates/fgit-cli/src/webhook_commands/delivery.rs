@@ -10,6 +10,8 @@ use fgit_types::{
 
 use crate::publication_support::quote;
 
+mod manual;
+
 struct Options {
     storage: PathBuf,
     tenant: TenantId,
@@ -20,18 +22,29 @@ struct Options {
     limit: u16,
     key: Option<AsciiSlug>,
     destination: Option<AsciiSlug>,
+    webhook_id: Option<u64>,
+    attempt: Option<u32>,
+    at_least_once: bool,
+    permissive: bool,
 }
 
 pub(super) fn run(action: &str, args: &[String]) -> Result<u8, String> {
     let options = parse(action, args)?;
-    let output = match action {
-        "outbox" => list(&options)?,
-        "inspect" => inspect(&options)?,
+    let (exit_code, output) = match action {
+        "outbox" => (0, list(&options)?),
+        "inspect" => (0, inspect(&options)?),
+        "deliver" | "replay" => manual::execute(&options, action == "replay")?,
         _ => return Err("unsupported canonical webhook action".into()),
     };
     writeln!(std::io::stdout().lock(), "{output}")
-        .map_err(|error| format!("cannot write canonical webhook result: {error}"))?;
-    Ok(0)
+        .map_err(|error| {
+            if matches!(action, "deliver" | "replay") {
+                format!("webhook result output failed; the receiver may already have accepted this delivery: {error}")
+            } else {
+                format!("cannot write canonical webhook result: {error}")
+            }
+        })?;
+    Ok(exit_code)
 }
 
 fn with_node<T>(
@@ -180,8 +193,8 @@ fn check_head(options: &Options, head: RepositoryAuthorityHeadId) -> Result<(), 
 }
 
 fn parse(action: &str, args: &[String]) -> Result<Options, String> {
-    if !matches!(action, "outbox" | "inspect")
-        || args.len() > 18
+    if !matches!(action, "outbox" | "inspect" | "deliver" | "replay")
+        || args.len() > 26
         || args.iter().any(|value| value.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 32768
     {
@@ -196,11 +209,20 @@ fn parse(action: &str, args: &[String]) -> Result<Options, String> {
         let flag = args[index].as_str();
         let permitted = matches!(flag, "--object-format" | "--expected-head")
             || (action == "outbox" && matches!(flag, "--after" | "--limit"))
-            || (action == "inspect" && matches!(flag, "--delivery-id" | "--destination"));
+            || (matches!(action, "inspect" | "deliver" | "replay")
+                && matches!(flag, "--delivery-id" | "--destination"))
+            || (matches!(action, "deliver" | "replay")
+                && matches!(flag, "--id" | "--attempt" | "--at-least-once" | "--permissive-for-tests"));
         if !permitted {
             return Err(format!("unknown {action} option {flag}"));
         }
         index += 1;
+        if matches!(flag, "--at-least-once" | "--permissive-for-tests") {
+            if flags.insert(flag, "").is_some() {
+                return Err(format!("duplicate {action} option {flag}"));
+            }
+            continue;
+        }
         let value = args
             .get(index)
             .ok_or_else(|| format!("missing value for {flag}"))?;
@@ -228,10 +250,24 @@ fn parse(action: &str, args: &[String]) -> Result<Options, String> {
     };
     let key = slug("--delivery-id")?;
     let destination = slug("--destination")?;
-    if action == "inspect" && (key.is_none() || destination.is_none()) {
+    if action != "outbox" && (key.is_none() || destination.is_none()) {
         return Err(
-            "inspect requires --delivery-id and --destination from fg webhook outbox".into(),
+            "canonical delivery requires --delivery-id and --destination from fg webhook outbox".into(),
         );
+    }
+    let webhook_id = flags.get("--id").map(|value| {
+        value.parse::<u64>().map_err(|_| "invalid webhook id")
+    }).transpose()?;
+    let attempt = flags.get("--attempt").map(|value| {
+        value.parse::<u32>().map_err(|_| "manual attempt must be 1..16")
+    }).transpose()?;
+    if attempt.is_some_and(|attempt| !(1..=16).contains(&attempt)) {
+        return Err("manual attempt must be 1..16".into());
+    }
+    if matches!(action, "deliver" | "replay")
+        && (webhook_id.is_none() || !flags.contains_key("--at-least-once"))
+    {
+        return Err("manual delivery requires --id and explicit --at-least-once; automatic settlement is not supported".into());
     }
     let limit = flags.get("--limit").copied().unwrap_or("50");
     if !limit.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -255,6 +291,10 @@ fn parse(action: &str, args: &[String]) -> Result<Options, String> {
         limit,
         key,
         destination,
+        webhook_id,
+        attempt,
+        at_least_once: flags.contains_key("--at-least-once"),
+        permissive: flags.contains_key("--permissive-for-tests"),
     })
 }
 
@@ -321,5 +361,28 @@ mod tests {
         assert!(reserve_inspection(&mut output, usize::MAX).is_err());
         assert!(reserve_inspection(&mut output, 64 * 1024 * 1024).is_err());
         assert_eq!(output, "{}");
+    }
+
+    #[test]
+    fn manual_delivery_requires_explicit_duplicate_risk_and_rejects_duplicate_flags() {
+        let base = ["--id", "7", "--delivery-id", "delivery-1", "--destination", "forge-projection"];
+        assert!(parse("deliver", &args(&base)).is_err());
+        let mut explicit = base.to_vec();
+        explicit.push("--at-least-once");
+        assert!(parse("deliver", &args(&explicit)).is_ok());
+        assert!(parse("replay", &args(&explicit)).is_ok());
+        explicit.push("--at-least-once");
+        assert!(parse("deliver", &args(&explicit)).is_err());
+        assert!(parse("inspect", &args(&["--at-least-once"])).is_err());
+    }
+
+    #[test]
+    fn manual_attempts_are_bounded_before_opening_storage() {
+        for attempt in ["0", "17", "-1", "4294967296"] {
+            assert!(parse("deliver", &args(&[
+                "--id", "7", "--delivery-id", "delivery-1", "--destination", "forge-projection",
+                "--at-least-once", "--attempt", attempt,
+            ])).is_err());
+        }
     }
 }
