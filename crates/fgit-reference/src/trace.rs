@@ -349,6 +349,11 @@ fn write_forge_event(out: &mut Encoder, event: &ForgeEventKind) -> Result<(), Co
             write_slug(out, "ForgeEntityId", review.label())?;
             out.write_ref_name(target)?;
         }
+        ForgeEventKind::WorkflowCheckObserved { check, source } => {
+            out.write_raw_byte(8);
+            write_slug(out, "ForgeEntityId", check.label())?;
+            out.write_ref_name(source)?;
+        }
     }
     Ok(())
 }
@@ -393,6 +398,10 @@ fn read_forge_event(input: &mut Decoder<'_>) -> Result<ForgeEventKind, CodecRefu
         }),
         6 => Ok(ForgeEventKind::IssueChanged {
             issue: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
+        }),
+        8 => Ok(ForgeEventKind::WorkflowCheckObserved {
+            check: ForgeEntityId::new(read_slug(input, "ForgeEntityId")?),
+            source: input.read_ref_name()?,
         }),
         other => malformed("ForgeEventKind", u64::from(other)),
     }
@@ -1437,7 +1446,7 @@ pub struct TraceStep {
     pub observed: ObservedOutcome,
     /// The canonical encoding of the roots after the step.
     pub roots: Vec<u8>,
-    /// The head positions after the step.
+    /// The head the trace recorded.
     pub head: HeadObservation,
 }
 
@@ -2168,5 +2177,25 @@ mod tests {
         // The scenario policy supports no schema at all, so the request is
         // rejected pre-seal. The recorder writes the rejection, not a success.
         assert!(matches!(step.observed, ObservedOutcome::SealRejected(_)));
+    }
+
+    #[test]
+    fn workflow_observation_trace_has_a_distinct_bounded_tag_and_source() {
+        let event = ForgeEventKind::WorkflowCheckObserved {
+            check: ForgeEntityId::new(crate::harness::label("check/one")),
+            source: RefName::try_new(b"refs/heads/main").unwrap(),
+        };
+        let literal = b"\x08\0\0\0\x09check/one\0\0\0\x0frefs/heads/main";
+        let mut out = Encoder::new();
+        write_forge_event(&mut out, &event).unwrap();
+        assert_eq!(out.as_bytes(), literal);
+        let mut input = Decoder::new(literal, DecodeLimits::DEFAULT);
+        assert_eq!(read_forge_event(&mut input).unwrap(), event);
+        input.finish().unwrap();
+        for end in 0..literal.len() {
+            let mut truncated = Decoder::new(&literal[..end], DecodeLimits::DEFAULT);
+            assert!(read_forge_event(&mut truncated).is_err());
+        }
+        assert_eq!(event.required_ref_effect(), None);
     }
 }

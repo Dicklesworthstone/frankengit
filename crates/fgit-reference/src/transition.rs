@@ -537,6 +537,7 @@ const fn named_ref(intent: &Intent) -> Option<&RefName> {
             | ForgeEventKind::PullRequestMerged { target, .. }
             | ForgeEventKind::PullRequestUpdated { target, .. }
             | ForgeEventKind::PullRequestReviewed { target, .. } => Some(target),
+            ForgeEventKind::WorkflowCheckObserved { source, .. } => Some(source),
             ForgeEventKind::PullRequestClosed { .. }
             | ForgeEventKind::IssueChanged { .. }
             | ForgeEventKind::ReviewProtectionChanged { .. } => None,
@@ -632,7 +633,13 @@ fn build_witness(
                     .copied()
                     .unwrap_or(ForgeStreamPosition::GENESIS);
                 forge_positions.insert(forge.stream, observed);
-                if let Some(target) = forge.event.required_ref_effect() {
+                // Workflow observations read their subject branch but never
+                // request a ref effect. Retain that read in refined witnesses.
+                let subject = match &forge.event {
+                    ForgeEventKind::WorkflowCheckObserved { source, .. } => Some(source),
+                    _ => forge.event.required_ref_effect(),
+                };
+                if let Some(target) = subject {
                     let observed_ref = roots.refs.get(target).copied();
                     refs.insert(target.clone(), observed_ref);
                 }
@@ -1460,3 +1467,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod workflow_check_tests;

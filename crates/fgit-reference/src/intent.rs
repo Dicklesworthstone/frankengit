@@ -190,6 +190,13 @@ pub enum ForgeEventKind {
     ReviewProtectionChanged {
         policy: ForgeEntityId,
     },
+    /// An authenticated publisher recorded an immutable workflow observation.
+    /// The subject branch is a read precondition, never a requested ref move.
+    /// No execution conclusion here grants a protected-check capability.
+    WorkflowCheckObserved {
+        check: ForgeEntityId,
+        source: RefName,
+    },
 }
 
 impl ForgeEventKind {
@@ -203,7 +210,8 @@ impl ForgeEventKind {
             | Self::PullRequestUpdated { .. }
             | Self::PullRequestReviewed { .. }
             | Self::IssueChanged { .. }
-            | Self::ReviewProtectionChanged { .. } => None,
+            | Self::ReviewProtectionChanged { .. }
+            | Self::WorkflowCheckObserved { .. } => None,
         }
     }
 
@@ -218,6 +226,7 @@ impl ForgeEventKind {
             Self::PullRequestReviewed { review, .. } => *review,
             Self::IssueChanged { issue } => *issue,
             Self::ReviewProtectionChanged { policy } => *policy,
+            Self::WorkflowCheckObserved { check, .. } => *check,
         }
     }
 }
