@@ -9,7 +9,7 @@ use fgit_authority::{
     ExpectedOld, IdempotencyKey, MAX_IDEMPOTENCY_KEY_BYTES, ProposedNew, RefCommand,
     TerminalOutcome,
 };
-use fgit_node::{LoopbackReceiveSession, NodeConfig, OneNode};
+use fgit_node::{LoopbackReceiveSession, NodeConfig, NodeWorkspaceRefusal, OneNode};
 use fgit_types::{
     DecisionOutcome, GitOid, HeadGeneration, RefName, RepositoryAuthorityHeadId, TxId,
 };
@@ -86,7 +86,16 @@ pub fn run(args: &[String]) -> Result<u8, String> {
                         commands,
                         Default::default(),
                     ))
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| match error {
+                        // Local validation between the outcome lookup and the
+                        // seal: this attempt provably sealed and changed nothing.
+                        NodeWorkspaceRefusal::BranchOperation(_)
+                        | NodeWorkspaceRefusal::CommitRequired
+                        | NodeWorkspaceRefusal::RefUnavailable => {
+                            format!("{PRE_ADMISSION_REFUSAL}{error}")
+                        }
+                        other => other.to_string(),
+                    })?;
                 let Some(first) = result.commands.first() else {
                     return Err("admission returned no terminal command".into());
                 };
@@ -143,9 +152,16 @@ pub fn run(args: &[String]) -> Result<u8, String> {
                 format!("; node shutdown also failed: {error}")
             });
             match options.operation {
-                Operation::Mutate { .. } => Err(format!(
-                    "no terminal branch outcome returned: {error}{cleanup}; this is not evidence of non-commit. Use fg outcome with the original scoped key or retry the identical command; do not change the key, branch names or expected tips"
-                )),
+                Operation::Mutate { .. } => {
+                    if let Some(reason) = error.strip_prefix(PRE_ADMISSION_REFUSAL) {
+                        return Err(format!(
+                            "branch request refused before admission: {reason}{cleanup}; this attempt sealed nothing and changed no refs. Correct the request; an earlier attempt with the same key, if any, is resolved with fg outcome"
+                        ));
+                    }
+                    Err(format!(
+                        "no terminal branch outcome returned: {error}{cleanup}; this is not evidence of non-commit. Use fg outcome with the original scoped key or retry the identical command; do not change the key, branch names or expected tips"
+                    ))
+                }
                 Operation::List { .. } => Err(format!(
                     "branch read failed: {error}{cleanup}; no complete result was returned"
                 )),
@@ -153,6 +169,10 @@ pub fn run(args: &[String]) -> Result<u8, String> {
         }
     }
 }
+/// Marks a node refusal raised by local validation before the seal, so the
+/// reply can say exactly what did not happen instead of claiming ambiguity.
+const PRE_ADMISSION_REFUSAL: &str = "pre-admission refusal: ";
+
 enum Completed {
     Mutation(TxId, TerminalOutcome),
     Read(

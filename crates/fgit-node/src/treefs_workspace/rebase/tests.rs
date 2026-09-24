@@ -97,6 +97,10 @@ struct Fixture {
     target: GitOid,
     source: GitOid,
     picked: GitOid,
+    /// A fast-forward child of `source`, published at `refs/heads/advanced`, so
+    /// a test can move the topic branch under a prepared rebase (branch updates
+    /// are fast-forward only since 0ea24bc6).
+    advanced: GitOid,
     base: GitOid,
     target_tree: GitOid,
     borrowed: GitOid,
@@ -176,8 +180,14 @@ fn fixture(scratch: &Scratch, format: GitHashAlgorithm, conflict: bool) -> (OneN
         "commit",
         &commit(source_tree, Some(picked), "later"),
     );
+    let advanced = put(
+        GitObjectKind::Commit,
+        "commit",
+        &commit(source_tree, Some(source), "advanced"),
+    );
     fs::write(path.join("refs/heads/main"), format!("{target}\n")).unwrap();
     fs::write(path.join("refs/heads/topic"), format!("{source}\n")).unwrap();
+    fs::write(path.join("refs/heads/advanced"), format!("{advanced}\n")).unwrap();
     let (mut node, _) = OneNode::init(scratch.config(format)).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
     let request = node.request_context();
@@ -202,6 +212,7 @@ fn fixture(scratch: &Scratch, format: GitHashAlgorithm, conflict: bool) -> (OneN
             target,
             source,
             picked,
+            advanced,
             base,
             target_tree,
             borrowed,

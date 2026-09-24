@@ -158,7 +158,7 @@ fn changed_source_has_one_recoverable_refusal_and_cannot_overwrite_the_branch() 
         let command = fgit_authority::RefCommand {
             name: topic_ref(),
             expected_old: fgit_authority::ExpectedOld::Exactly(f.source),
-            proposed_new: fgit_authority::ProposedNew::Update(f.picked),
+            proposed_new: fgit_authority::ProposedNew::Update(f.advanced),
             force: false,
         };
         let session = crate::LoopbackReceiveSession::authenticated(
@@ -174,7 +174,7 @@ fn changed_source_has_one_recoverable_refusal_and_cannot_overwrite_the_branch() 
             ))
             .unwrap();
         let before = snapshot(&node);
-        assert_eq!(before.snapshot().refs[&topic_ref()], f.picked);
+        assert_eq!(before.snapshot().refs[&topic_ref()], f.advanced);
         let refused = apply(&node, &f, candidate, &bundle, b"stale-rebase").unwrap();
         assert!(matches!(
             refused.commands[0].terminal.outcome,

@@ -5,12 +5,22 @@ import json
 import pathlib
 import subprocess
 import tempfile
-from pull_request_smoke import fixture as make_fixture
+import zlib
+from pull_request_smoke import commit as commit_body, fixture as make_fixture, identity
 
 
 def run_case(fg, root, fmt):
     source = root / 'source'
     fixture = make_fixture(source, fmt)
+    # A fast-forward of main, so the protected-update refusal is decided by
+    # protection at admission rather than by the local non-fast-forward guard
+    # (0ea24bc6), which refuses before any seal.
+    advance_body = commit_body(fixture['tree'], [fixture['target']], 'fast-forward advance')
+    advance = identity(fmt, 'commit', advance_body)
+    advance_path = source / 'objects' / advance[:2] / advance[2:]
+    advance_path.parent.mkdir(parents=True, exist_ok=True)
+    advance_path.write_bytes(zlib.compress(f'commit {len(advance_body)}\0'.encode() + advance_body))
+    (source / 'refs/heads/advance').write_text(advance + '\n', encoding='ascii')
     storage = root / 'node'
     tenant, repository = '11' * 16, '22' * 16
     admin, successor, stranger, reviewer = ['%02x' % n * 16 for n in (1, 2, 9, 3)]
@@ -74,7 +84,13 @@ def run_case(fg, root, fmt):
     same_decision(installed, configure(admin, 0, 1, 'first-policy-key', [admin]))
     assert show()['source_head'] == state['source_head']
     branch('create', 'refs/heads/protected', 'blocked-creation', ['--target', fixture['source']], 3)
-    branch('update', 'refs/heads/main', 'blocked-update', ['--expected-tip', fixture['target'], '--target', fixture['source']], 3)
+    branch('update', 'refs/heads/main', 'blocked-update', ['--expected-tip', fixture['target'], '--target', advance], 3)
+    # Twin: the non-fast-forward form never reaches admission or protection,
+    # and says so exactly instead of claiming an unknown outcome.
+    non_ff = invoke(['branch', 'update', *common, '--ref', 'refs/heads/main', '--trusted-local', '--object-format', fmt,
+        '--principal', admin, '--idempotency-key', 'non-fast-forward', '--expected-tip', fixture['target'],
+        '--target', fixture['source']], 2, False)
+    assert non_ff.stdout == b'' and b'refused before admission' in non_ff.stderr and b'sealed nothing' in non_ff.stderr
     branch('create', 'refs/heads/unprotected', 'permitted-create', ['--target', fixture['source']])
     rejected = configure(stranger, 1, 2, 'takeover-key', [stranger], expected=3)
     assert rejected['refusal_code'] == 'ProtectedRefTransitionDenied'

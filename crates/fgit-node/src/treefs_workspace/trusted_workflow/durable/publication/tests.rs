@@ -415,8 +415,13 @@ fn historical_retry_is_not_rewritten_when_the_current_branch_moves() {
         "commit",
         body.as_bytes(),
     );
-    fs::write(root.join("refs/heads/main"), format!("{next}\n")).unwrap();
-    let update = node
+    // Loose import only creates refs (every old value is zero), so the new
+    // commit arrives under a fresh ref and main then moves by a fast-forward
+    // branch update, the production path for advancing an existing branch.
+    fs::remove_file(root.join("refs/heads/main")).unwrap();
+    fs::write(root.join("refs/heads/advance"), format!("{next}\n")).unwrap();
+    fs::write(root.join("HEAD"), "ref: refs/heads/advance\n").unwrap();
+    let staged = node
         .runtime()
         .block_on(node.import_loose_git_directory_durable_in(
             &node.request_context(),
@@ -426,10 +431,34 @@ fn historical_retry_is_not_rewritten_when_the_current_branch_moves() {
         ))
         .unwrap();
     assert!(
+        staged
+            .commands
+            .iter()
+            .all(|c| matches!(c.terminal.outcome, DecisionOutcome::Committed { .. })),
+        "importing the new commit under a fresh ref must commit: {:?}",
+        staged.commands
+    );
+    let update = node
+        .runtime()
+        .block_on(node.admit_branch_updates_durable_in(
+            &node.request_context(),
+            &session(b"advance-main"),
+            &[fgit_authority::RefCommand {
+                name: source_ref(),
+                expected_old: fgit_authority::ExpectedOld::Exactly(run.source_commit),
+                proposed_new: fgit_authority::ProposedNew::Update(next),
+                force: false,
+            }],
+            Default::default(),
+        ))
+        .unwrap();
+    assert!(
         update
             .commands
             .iter()
-            .all(|c| matches!(c.terminal.outcome, DecisionOutcome::Committed { .. }))
+            .all(|c| matches!(c.terminal.outcome, DecisionOutcome::Committed { .. })),
+        "the fast-forward of main must commit: {:?}",
+        update.commands
     );
     let moved = materialize(&node).basis().id();
     assert_eq!(publish(&node, &record, b"old-observation"), first);
