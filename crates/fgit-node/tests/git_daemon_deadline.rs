@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_node::{
     GitDaemonReceiveProcessingTimeout, GitDaemonReceiveProcessingTimeoutRefusal,
     GitDaemonServeError, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
@@ -17,8 +18,8 @@ use fgit_node::{
 };
 use fgit_node::{NodeConfig, NodeGitDaemonServeRefusal, NodePackMaterializationRefusal, OneNode};
 use fgit_runtime::{BudgetClass, BudgetPolicy, ClassLimits, Exhaustion};
-use fgit_types::GitHashAlgorithm;
 use fgit_types::numeric::HeadGeneration;
+use fgit_types::{GitHashAlgorithm, GitOid};
 use fgit_types::{PrincipalId, RepositoryId, TenantId};
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, Packet,
@@ -190,29 +191,51 @@ fn decode_hex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-fn write_loose_blob_repository(root: &Path) -> AnyGitOid {
+/// Write one zlib-framed loose object as a single stored deflate block.
+fn write_loose_object(root: &Path, kind: GitObjectKind, label: &str, body: &[u8]) -> GitOid {
+    let id = git_object_id(GitHashAlgorithm::Sha1, kind, body);
+    let framed = [format!("{label} {}\0", body.len()).as_bytes(), body].concat();
+    let length = u16::try_from(framed.len()).expect("fixture object fits one stored block");
+    let mut encoded = vec![0x78, 0x01, 0x01];
+    encoded.extend(length.to_le_bytes());
+    encoded.extend((!length).to_le_bytes());
+    encoded.extend(&framed);
+    let (low, high) = framed.iter().fold((1_u32, 0_u32), |(low, high), byte| {
+        let low = (low + u32::from(*byte)) % 65521;
+        (low, (high + low) % 65521)
+    });
+    encoded.extend(((high << 16) | low).to_be_bytes());
+    let hex = id.to_string();
+    let directory = root.join("objects").join(&hex[..2]);
+    fs::create_dir_all(&directory).expect("object directory creates");
+    fs::write(directory.join(&hex[2..]), encoded).expect("fixture loose object writes");
+    id
+}
+
+/// A branch whose tip is a real commit: `refs/heads/*` admits commits only
+/// (FG-019, ef9a090e), so the fixture commits blob `hello` in a one-entry tree.
+fn write_loose_commit_repository(root: &Path) -> AnyGitOid {
     fs::create_dir_all(root).expect("fixture source directory creates");
     fs::write(root.join("HEAD"), "ref: refs/heads/main\n").expect("fixture symbolic HEAD writes");
-    let oid = AnyGitOid::from_hex(
-        GitObjectFormat::Sha1,
-        "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0",
-    )
-    .expect("fixed blob identity parses");
-    let object_path = root.join("objects/b6/fc4c620b67d95f953a5c1c1230aaab5db5a1b0");
-    fs::create_dir_all(object_path.parent().expect("object parent exists"))
-        .expect("object directory creates");
-    fs::write(
-        object_path,
-        decode_hex(include_str!(
-            "../../fgit-git-object/tests/corpus/blob-hello.zlib.hex"
-        )),
-    )
-    .expect("fixture loose object writes");
+    let blob = write_loose_object(root, GitObjectKind::Blob, "blob", b"hello");
+    let mut tree = b"100644 hello.txt\0".to_vec();
+    tree.extend(decode_hex(&blob.to_string()));
+    let tree = write_loose_object(root, GitObjectKind::Tree, "tree", &tree);
+    let commit = write_loose_object(
+        root,
+        GitObjectKind::Commit,
+        "commit",
+        format!(
+            "tree {tree}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nfixture\n"
+        )
+        .as_bytes(),
+    );
     let ref_path = root.join("refs/heads/main");
     fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
         .expect("ref directory creates");
-    fs::write(ref_path, format!("{oid}\n")).expect("fixture ref writes");
-    oid
+    fs::write(ref_path, format!("{commit}\n")).expect("fixture ref writes");
+    AnyGitOid::from_hex(GitObjectFormat::Sha1, &commit.to_string())
+        .expect("fixture commit identity parses")
 }
 
 fn one_node_budget_policy() -> BudgetPolicy {
@@ -268,7 +291,7 @@ fn run_one_node_after_advertisement_delay(
     let scratch = ScratchDirectory::new();
     let node_root = scratch.path().join("node");
     let source_root = scratch.path().join("source");
-    let wanted = write_loose_blob_repository(&source_root);
+    let wanted = write_loose_commit_repository(&source_root);
     let session_timeout = GitDaemonSessionTimeout::try_new(ONE_NODE_SESSION_TIMEOUT)
         .expect("the one-node test session deadline is finite and non-zero");
     let (mut node, _) = OneNode::init(

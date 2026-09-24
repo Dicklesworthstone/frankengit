@@ -113,9 +113,12 @@ fn wal_move_interruption_normalizes_before_database_open_and_can_repeat() {
     custody.quarantine().unwrap();
     custody.publish(|| Ok(())).unwrap();
     assert!(custody.published().unwrap());
-    assert!(
-        quarantine.join(DATABASE).exists(),
-        "publication must retain evidence"
+    // fsqlite >= 0.4 refuses a multiply-linked database path, so publication
+    // ends by dropping the quarantine alias; the verified image is the final file.
+    assert!(!quarantine.join(DATABASE).exists());
+    assert_eq!(
+        fs::read(scratch.root().join(DATABASE)).unwrap(),
+        b"closed-database-fixture"
     );
     custody.cleanup().unwrap();
     assert!(!quarantine.exists());
@@ -228,4 +231,112 @@ fn symlinks_are_refusals_not_missing_marker_or_sidecar() {
     assert!(custody.quarantine().is_err());
     assert!(custody.publish(|| Ok(())).is_err());
     assert!(!custody.published().unwrap());
+}
+
+/// fsqlite >= 0.4 writes WAL recovery companions and engine-local records next
+/// to the database. The WAL set must reach the final location intact through
+/// an interrupted publish and a resume; engine-local records are removed.
+#[test]
+fn wal_recovery_companions_travel_with_the_wal_and_local_records_are_removed() {
+    let scratch = Scratch::new();
+    let custody = scratch.reserve();
+    let quarantine = opaque_image(&custody, true);
+    for name in WAL_SET.into_iter().skip(1) {
+        fs::write(quarantine.join(name), name.as_bytes()).unwrap();
+    }
+    for name in LOCAL_STATE {
+        fs::write(quarantine.join(name), b"engine-local").unwrap();
+    }
+    let error = custody
+        .publish(|| Err("stop after WAL set".into()))
+        .unwrap_err();
+    assert_eq!(error, "stop after WAL set");
+    assert!(!custody.published().unwrap());
+    for name in WAL_SET {
+        assert!(scratch.root().join(name).exists(), "{name} moved first");
+        assert!(!quarantine.join(name).exists());
+    }
+    drop(custody);
+    let custody = resume(&scratch.root()).unwrap();
+    assert_eq!(custody.quarantine().unwrap(), quarantine);
+    for name in WAL_SET {
+        assert!(quarantine.join(name).exists(), "{name} normalized back");
+        assert!(!scratch.root().join(name).exists());
+    }
+    custody.publish(|| Ok(())).unwrap();
+    custody.cleanup().unwrap();
+    assert!(!quarantine.exists());
+    assert_eq!(
+        fs::read(scratch.root().join(WAL)).unwrap(),
+        b"closed-WAL-fixture"
+    );
+    for name in WAL_SET.into_iter().skip(1) {
+        assert_eq!(
+            fs::read(scratch.root().join(name)).unwrap(),
+            name.as_bytes()
+        );
+    }
+    for name in LOCAL_STATE {
+        assert!(!scratch.root().join(name).exists(), "{name} is never moved");
+    }
+}
+
+#[test]
+fn a_duplicated_or_orphaned_wal_companion_refuses_before_moving_any_path() {
+    let scratch = Scratch::new();
+    let custody = scratch.reserve();
+    let quarantine = opaque_image(&custody, true);
+    let repair = WAL_SET[1];
+    fs::write(quarantine.join(repair), b"private").unwrap();
+    fs::write(scratch.root().join(repair), b"public").unwrap();
+    fs::rename(quarantine.join(WAL), scratch.root().join(WAL)).unwrap();
+    assert!(custody.quarantine().unwrap_err().contains("conflicting"));
+    // The refusal came before any rename: the public WAL was not moved back.
+    assert!(scratch.root().join(WAL).exists());
+    assert_eq!(fs::read(quarantine.join(repair)).unwrap(), b"private");
+    assert_eq!(fs::read(scratch.root().join(repair)).unwrap(), b"public");
+    fs::remove_file(scratch.root().join(repair)).unwrap();
+    fs::remove_file(quarantine.join(DATABASE)).unwrap();
+    assert!(
+        custody
+            .quarantine()
+            .unwrap_err()
+            .contains("lacks its quarantined database")
+    );
+    assert!(scratch.root().join(WAL).exists());
+}
+
+/// A crash between the no-replace link and the alias removal leaves two links
+/// to one file. Settling removes only an alias proven to be that file.
+#[cfg(unix)]
+#[test]
+fn a_surviving_quarantine_alias_is_settled_only_when_it_is_the_published_file() {
+    let scratch = Scratch::new();
+    let custody = scratch.reserve();
+    let quarantine = opaque_image(&custody, false);
+    fs::hard_link(quarantine.join(DATABASE), scratch.root().join(DATABASE)).unwrap();
+    assert!(custody.published().unwrap());
+    custody.settle_publication().unwrap();
+    assert!(!quarantine.join(DATABASE).exists());
+    assert_eq!(
+        fs::read(scratch.root().join(DATABASE)).unwrap(),
+        b"closed-database-fixture"
+    );
+    custody.settle_publication().unwrap();
+
+    fs::write(quarantine.join(DATABASE), b"a different image").unwrap();
+    assert!(
+        custody
+            .settle_publication()
+            .unwrap_err()
+            .contains("differs from the published authority")
+    );
+    assert_eq!(
+        fs::read(quarantine.join(DATABASE)).unwrap(),
+        b"a different image"
+    );
+    assert_eq!(
+        fs::read(scratch.root().join(DATABASE)).unwrap(),
+        b"closed-database-fixture"
+    );
 }

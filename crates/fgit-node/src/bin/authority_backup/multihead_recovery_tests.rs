@@ -123,7 +123,8 @@ fn every_restore_phase_resumes_from_archive_alone_without_minting_again() {
             was_published,
             "{stopped:?}"
         );
-        let receipt = execute(&archive, &root, pin, target(), true).unwrap();
+        let receipt = execute(&archive, &root, pin, target(), true)
+            .unwrap_or_else(|error| panic!("resume after {stopped:?}: {error}"));
         assert!(receipt.contains("\"resume_requested\":true"));
         assert!(receipt.contains(&format!("\"already_published\":{was_published},")));
         let first = observed(&root);

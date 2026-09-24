@@ -107,7 +107,9 @@ fn execute_with(
     let already_published = custody.published()?;
     let outcome = (|| {
         let expected = if already_published {
-            // Never reimport/repair an existing public image, even on --resume.
+            // Never reimport/repair an existing public image, even on --resume;
+            // only drop a surviving quarantine alias so the engine can open it.
+            custody.settle_publication()?;
             image(root, &source, instance, false, false)?
         } else {
             checkpoint(Stage::Intent)?;
