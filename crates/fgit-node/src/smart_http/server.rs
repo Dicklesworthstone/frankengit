@@ -19,8 +19,8 @@ mod stock_receive;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use fgit_authority::IdempotencyKey;
@@ -69,6 +69,71 @@ struct Profile {
     quota: Arc<PushQuota>,
     outcome_quota: Arc<PushQuota>,
     source_quota: Arc<PushQuota>,
+    writers: Arc<WriterGate>,
+}
+
+/// Concurrent write admissions one server lets run against its repository.
+///
+/// Every connection opens its own node and database connection, so
+/// `--max-in-flight` alone let up to 16 writers contend on one database. The
+/// integration profile (section 3.5) does not admit ten or more concurrent
+/// writers and requires FrankenGit to admission-control its writer topology
+/// to a proven envelope; beyond it, store retries were exhausted and losers
+/// became undecided (HTTP 503) instead of receiving their typed refusals
+/// (x2mv.4.27). Reads are not gated.
+const MAX_CONCURRENT_WRITERS: usize = 4;
+
+/// A bounded, deadline-aware count of in-flight write admissions.
+struct WriterGate {
+    active: Mutex<usize>,
+    released: Condvar,
+    limit: usize,
+}
+
+/// One held write admission; dropping it admits the next waiting writer.
+struct WriterPermit<'gate>(&'gate WriterGate);
+
+impl WriterGate {
+    fn new(limit: usize) -> Self {
+        Self {
+            active: Mutex::new(0),
+            released: Condvar::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    /// Waits for a slot within `deadline`. `None` means the deadline passed
+    /// first: nothing of the request was admitted, so the caller answers with
+    /// a definite retry-later status, never an unknown outcome.
+    fn acquire(&self, deadline: &GitDaemonSessionDeadline) -> Option<WriterPermit<'_>> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *active >= self.limit {
+            let remaining = deadline.remaining().ok()?;
+            active = self
+                .released
+                .wait_timeout(active, remaining.min(Duration::from_secs(1)))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        *active += 1;
+        Some(WriterPermit(self))
+    }
+}
+
+impl Drop for WriterPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active -= 1;
+        drop(active);
+        self.0.released.notify_one();
+    }
 }
 
 struct PendingSession {
@@ -437,6 +502,7 @@ impl OneNode {
             quota: Arc::new(PushQuota::default()),
             outcome_quota: Arc::new(PushQuota::default()),
             source_quota: Arc::new(PushQuota::default()),
+            writers: Arc::new(WriterGate::new(MAX_CONCURRENT_WRITERS)),
         });
         listener
             .set_nonblocking(true)
@@ -822,6 +888,7 @@ fn serve_connection(
     let Ok(mut output) = stream.try_clone() else {
         return false;
     };
+    let admission_deadline = deadline.clone();
     let mut reader = DeadlineTcpStream::new(&mut stream, deadline.clone());
     let mut writer = ResponseWriter {
         inner: DeadlineTcpStream::new(&mut output, deadline),
@@ -977,6 +1044,23 @@ fn serve_connection(
         if envelope.expect_continue && envelope.version == HttpVersion::Http10 {
             return Err(Status::Expectation);
         }
+        // Held until this connection's response is complete. A writer that
+        // cannot be admitted within its own deadline was admitted to nothing,
+        // so it is told to retry later rather than that its outcome is unknown.
+        let _writer = if mutation
+            || pull_request
+                .as_ref()
+                .is_some_and(|request| request.accepts_body())
+        {
+            Some(
+                profile
+                    .writers
+                    .acquire(&admission_deadline)
+                    .ok_or(Status::RateLimited)?,
+            )
+        } else {
+            None
+        };
         let initial = &bytes[envelope.consumed..];
         let body_not_allowed = pull_request
             .as_ref()
@@ -1187,6 +1271,41 @@ mod tests {
     use fgit_wire::smart_http::rpc::RpcProgress;
     use std::io::Cursor;
 
+    #[test]
+    fn the_writer_gate_admits_to_its_limit_and_times_out_without_a_permit() {
+        let gate = WriterGate::new(2);
+        let session = |seconds| {
+            GitDaemonSessionDeadline::new(
+                GitDaemonSessionTimeout::try_new(Duration::from_secs(seconds)).unwrap(),
+                crate::GitDaemonSessionWorkScaling::FLAT,
+            )
+        };
+        let live = session(60);
+        let first = gate.acquire(&live).expect("first writer");
+        let second = gate.acquire(&live).expect("second writer");
+        // A third writer whose own deadline passes while it waits was
+        // admitted to nothing: no permit, and the count is unchanged.
+        let short = session(1);
+        let started = Instant::now();
+        assert!(gate.acquire(&short).is_none());
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        assert_eq!(*gate.active.lock().unwrap(), 2);
+        // Its permitted twin: a slot released while it waits admits it.
+        let waiter = std::thread::scope(|scope| {
+            let handle = scope.spawn(|| gate.acquire(&live));
+            std::thread::sleep(Duration::from_millis(100));
+            drop(first);
+            handle.join().unwrap()
+        });
+        assert!(waiter.is_some());
+        assert_eq!(
+            *gate.active.lock().unwrap(),
+            2,
+            "second plus the admitted waiter"
+        );
+        drop((second, waiter));
+        assert_eq!(*gate.active.lock().unwrap(), 0);
+    }
     fn profile() -> Profile {
         Profile {
             config: NodeConfig::new(
@@ -1210,6 +1329,7 @@ mod tests {
             quota: Arc::new(PushQuota::default()),
             outcome_quota: Arc::new(PushQuota::default()),
             source_quota: Arc::new(PushQuota::default()),
+            writers: Arc::new(WriterGate::new(MAX_CONCURRENT_WRITERS)),
         }
     }
     fn head(extra: &str) -> Vec<u8> {

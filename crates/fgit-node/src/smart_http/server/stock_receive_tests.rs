@@ -28,6 +28,9 @@ fn profile() -> Profile {
         quota: Arc::new(PushQuota::default()),
         outcome_quota: Arc::new(PushQuota::default()),
         source_quota: Arc::new(PushQuota::default()),
+        writers: Arc::new(super::super::WriterGate::new(
+            super::super::MAX_CONCURRENT_WRITERS,
+        )),
     }
 }
 
