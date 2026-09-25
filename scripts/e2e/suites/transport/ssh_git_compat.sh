@@ -131,8 +131,22 @@ INITIAL_RC=0
 GIT_SSH_COMMAND="$SSH_CMD" timeout 900 git -C "$SRC" push -q fg main 2>"$WORK/initial.err" || INITIAL_RC=$?
 fge_assert_eq SSH-COMPAT-005 0 "$INITIAL_RC" 'initial push of the full history into an empty node succeeds'
 
-# 2. Clones over protocol v0 and v2 are exact.
+# 2. Clones over protocol v0 and v2 are exact. A packet trace first proves
+#    which protocol the server actually speaks: git silently falls back to
+#    v0 when a server ignores GIT_PROTOCOL, so a v2 clone succeeding alone
+#    proves nothing about v2.
 for version in 0 2; do
+  NEGOTIATE_RC=0
+  GIT_TRACE_PACKET="$WORK/trace-v$version" GIT_SSH_COMMAND="$SSH_CMD" timeout 300 \
+    git -c protocol.version="$version" ls-remote "$REMOTE" >/dev/null 2>"$WORK/ls-remote-v$version.err" || NEGOTIATE_RC=$?
+  fge_assert_eq "SSH-COMPAT-11$version" 0 "$NEGOTIATE_RC" "protocol v$version ls-remote succeeds"
+  if [ "$version" = 2 ]; then
+    fge_assert_cmd SSH-COMPAT-122 'the server answers a v2 client with a protocol v2 capability advertisement' \
+      grep -Eq '< version 2$' "$WORK/trace-v2"
+  else
+    fge_assert_cmd SSH-COMPAT-120 'the server answers a v0 client with a v0 ref advertisement, not v2' \
+      bash -c '! grep -Eq "< version 2$" "$1"' _ "$WORK/trace-v0"
+  fi
   CLONE_RC=0
   GIT_SSH_COMMAND="$SSH_CMD" timeout 900 git -c protocol.version="$version" clone -q "$REMOTE" "$WORK/clone-v$version" 2>"$WORK/clone-v$version.err" || CLONE_RC=$?
   fge_assert_eq "SSH-COMPAT-01$version" 0 "$CLONE_RC" "protocol v$version clone succeeds"
