@@ -655,5 +655,7 @@ fn rotating_issue_credentials_preserves_the_principals_canonical_retry() {
     node.shutdown().unwrap();
 }
 
+#[path = "issue_http/rendering.rs"]
+mod rendering;
 #[path = "issue_http/snapshots.rs"]
 mod snapshots;

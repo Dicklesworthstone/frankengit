@@ -55,16 +55,24 @@ fn labels(values: &[String]) -> String {
             .join(",")
     )
 }
-fn action(value: &IssueAction) -> String {
+fn action(value: &IssueAction, render: bool) -> String {
+    let rendered = |body: &str| {
+        if render {
+            format!(",\"body_rendered\":{}", super::rendered::body(body))
+        } else {
+            String::new()
+        }
+    };
     match value {
         IssueAction::Open {
             title,
             body,
             labels: values,
         } => format!(
-            "{{\"name\":\"open\",\"title\":{},\"body\":{},\"labels\":{}}}",
+            "{{\"name\":\"open\",\"title\":{},\"body\":{}{},\"labels\":{}}}",
             quote(title),
             quote(body),
+            rendered(body),
             labels(values)
         ),
         IssueAction::Edit(edit) => {
@@ -73,7 +81,7 @@ fn action(value: &IssueAction) -> String {
                 fields.push(format!("\"title\":{}", quote(title)));
             }
             if let Some(body) = &edit.body {
-                fields.push(format!("\"body\":{}", quote(body)));
+                fields.push(format!("\"body\":{}{}", quote(body), rendered(body)));
             }
             if let Some(values) = &edit.labels {
                 fields.push(format!("\"labels\":{}", labels(values)));
@@ -81,7 +89,11 @@ fn action(value: &IssueAction) -> String {
             format!("{{{}}}", fields.join(","))
         }
         IssueAction::Comment { body } => {
-            format!("{{\"name\":\"comment\",\"body\":{}}}", quote(body))
+            format!(
+                "{{\"name\":\"comment\",\"body\":{}{}}}",
+                quote(body),
+                rendered(body)
+            )
         }
         IssueAction::Close => "{\"name\":\"close\"}".to_owned(),
         IssueAction::Reopen => "{\"name\":\"reopen\"}".to_owned(),
@@ -140,7 +152,7 @@ pub(super) fn mutation(
     )
 }
 
-fn snapshot(value: &IssueSnapshot) -> Result<String, ApiError> {
+fn snapshot(value: &IssueSnapshot, render: bool) -> Result<String, ApiError> {
     IssueAction::Open {
         title: value.title.clone(),
         body: value.body.clone(),
@@ -153,13 +165,18 @@ fn snapshot(value: &IssueSnapshot) -> Result<String, ApiError> {
     }
     Ok(format!(
         concat!(
-            "{{\"number\":{},\"version\":{},\"title\":{},\"body\":{},\"labels\":{},",
+            "{{\"number\":{},\"version\":{},\"title\":{},\"body\":{}{},\"labels\":{},",
             "\"state\":{},\"opened_by\":{},\"last_actor\":{},\"comments\":{}}}"
         ),
         value.number.get(),
         value.version.get(),
         quote(&value.title),
         quote(&value.body),
+        if render {
+            format!(",\"body_rendered\":{}", super::rendered::body(&value.body))
+        } else {
+            String::new()
+        },
         labels(&value.labels),
         quote(match value.state {
             IssueState::Open => "open",
@@ -246,7 +263,7 @@ pub(super) fn list(
         if index != 0 {
             append(&mut out, ",", maximum)?;
         }
-        append(&mut out, &snapshot(row)?, maximum)?;
+        append(&mut out, &snapshot(row, page.render)?, maximum)?;
     }
     append(&mut out, "]}", maximum)?;
     Ok(out)
@@ -290,7 +307,7 @@ pub(super) fn history(
             result
                 .issue
                 .as_ref()
-                .map(snapshot)
+                .map(|issue| snapshot(issue, page.render))
                 .transpose()?
                 .unwrap_or_else(|| "null".to_owned()),
             page.after,
@@ -325,7 +342,7 @@ pub(super) fn history(
                 "{{\"version\":{},\"actor\":{},\"action\":{}}}",
                 event.version.get(),
                 quote(&change.actor.to_string()),
-                action(&change.action)
+                action(&change.action, page.render)
             ),
             maximum,
         )?;
@@ -367,6 +384,7 @@ pub(super) fn search(
         after: request.after,
         limit: request.limit,
         expected_head: request.expected_head,
+        render: false,
     };
     let header = header(node, page, result.source_head)?;
     search_body(&header, request, query, result, maximum, live)
@@ -473,7 +491,7 @@ fn search_body(
         if index != 0 {
             append(&mut out, ",", maximum)?;
         }
-        append(&mut out, &snapshot(row)?, maximum)?;
+        append(&mut out, &snapshot(row, false)?, maximum)?;
     }
     if !live() {
         return Err(ApiError::from_status(super::Status::Timeout, false));

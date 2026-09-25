@@ -205,6 +205,7 @@ pub(super) fn show(
             after: number.get() - 1,
             limit: 1,
             expected_head: expected,
+            render: false,
         },
         result,
     )?;

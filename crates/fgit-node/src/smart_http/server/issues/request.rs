@@ -16,6 +16,8 @@ pub struct Page {
     pub after: u64,
     pub limit: u16,
     pub expected_head: Option<RepositoryAuthorityHeadId>,
+    /// `render=html_safe`: add a derived `body_rendered` beside each body.
+    pub render: bool,
 }
 
 #[derive(Debug)]
@@ -217,14 +219,19 @@ pub(super) fn decimal(text: &str) -> Result<u64, ApiError> {
     text.parse().map_err(|_| ApiError::bad("integer_overflow"))
 }
 pub(super) fn page(query: Option<&str>, cursor: &str) -> Result<Page, ApiError> {
-    let (mut after, mut limit, mut expected) = (None, None, None);
-    for (name, value) in form(query.unwrap_or("").as_bytes(), 3)? {
+    let (mut after, mut limit, mut expected, mut render) = (None, None, None, None);
+    for (name, value) in form(query.unwrap_or("").as_bytes(), 4)? {
         if name == cursor {
             set_once(&mut after, decimal(&value)?)?;
         } else if name == "limit" {
             set_once(&mut limit, decimal(&value)?)?;
         } else if name == "expected_head" {
             set_once(&mut expected, parse_head_token(&value)?)?;
+        } else if name == "render" {
+            if value != "html_safe" {
+                return Err(ApiError::bad("unsupported_rendering"));
+            }
+            set_once(&mut render, true)?;
         } else {
             return Err(ApiError::bad("unknown_query_field"));
         }
@@ -240,6 +247,7 @@ pub(super) fn page(query: Option<&str>, cursor: &str) -> Result<Page, ApiError> 
         after,
         limit: limit as u16,
         expected_head: expected,
+        render: render.unwrap_or(false),
     })
 }
 

@@ -214,6 +214,35 @@ Issue text is JSON data. Control and bidi-formatting characters are escaped
 without changing their decoded content. No returned text is executable HTML,
 an authorization instruction, or a principal override.
 
+### Derived Markdown rendering
+
+Issue reads (`GET /api/v1/issues` and `GET /api/v1/issues/<number>`) accept
+`render=html_safe`. The response is unchanged except that every
+Markdown-bearing body (the issue snapshot's `body`, and each `open`, `edit`
+and `comment` action's `body`) gains a sibling `body_rendered` object:
+
+```json
+{"renderer":"fgit-doc","profile":"html_safe",
+ "parse_profile_sha256":"<64 hex>","source_sha256":"<64 hex>","html":"..."}
+```
+
+- The raw `body` stays canonical and is returned byte-for-byte; the rendering
+  is a derived artifact keyed by `(source_sha256, parse_profile_sha256)`, so a
+  renderer profile bump changes the key.
+- `fgit-doc`'s `html_safe` profile escapes raw markup instead of passing it
+  through and neutralises disallowed link schemes (`javascript:`, `data:` and
+  similar). Neutralised parts stay visible, marked with
+  `data-fgit-doc-rejected`. Links carry `rel="nofollow noopener noreferrer"`.
+- Rendering is a pure function of the source bytes and the profile, so the
+  same body renders byte-identically on every request.
+- A renderer ceiling returns `"html":null` with a typed `refusal` tag. It never
+  fails the canonical read.
+- Any other `render` value is refused with HTTP 400 `unsupported_rendering`.
+  Search responses are not rendered.
+
+The rendering inherits the read's snapshot pin, authorization and paging.
+It is not yet exposed through MCP or the browser shell.
+
 ## Bounds and verification entry points
 
 Headers use the shared Git HTTP envelope parser. Forms have a separate 256 KiB

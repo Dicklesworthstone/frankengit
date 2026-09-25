@@ -15,6 +15,7 @@ fgit-authority-fsqlite.workspace = true
 fgit-chronicle.workspace = true
 fgit-codec.workspace = true
 fgit-crypto.workspace = true
+fgit-doc.workspace = true
 fgit-forge.workspace = true
 fgit-git-object.workspace = true
 fgit-graph.workspace = true

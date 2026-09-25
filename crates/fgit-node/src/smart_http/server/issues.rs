@@ -3,6 +3,7 @@
 //! exact-version decisions and retry recovery. No HTTP-local issue state exists.
 
 mod output;
+mod rendered;
 mod request;
 mod search;
 
