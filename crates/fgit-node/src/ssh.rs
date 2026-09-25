@@ -6,13 +6,13 @@
 //! - Deploy-key authentication and repository-scoped authorization
 //! - SANS-I/O session state machine mapped to Asupersync blocking threads
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fgit_identity::deploy_key::DeployKeyBinding;
 use fgit_ssh::SigningKey;
@@ -143,6 +143,15 @@ struct SshConnectionState {
 }
 
 impl SshConnectionState {
+    /// Whether the client's TCP connection is still open, without consuming
+    /// or waiting for anything. A non-blocking peek sees an orderly close as a
+    /// zero-length read and a reset as an error; pending bytes and "would
+    /// block" both mean the peer is still there. OpenSSH signals EOF inside
+    /// the channel, so a closed socket means the client itself is gone.
+    fn peer_connected(&self) -> bool {
+        tcp_peer_connected(&self.stream)
+    }
+
     fn flush_outgoing(&mut self) -> io::Result<()> {
         let out = self.session.take_outgoing_bytes();
         if !out.is_empty() {
@@ -254,7 +263,58 @@ impl SshConnectionState {
     }
 }
 
+/// See [`SshConnectionState::peer_connected`].
+fn tcp_peer_connected(stream: &TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return true;
+    }
+    let mut probe = [0_u8; 1];
+    let connected = match stream.peek(&mut probe) {
+        Ok(0) => false,
+        Ok(_) => true,
+        Err(error) => matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ),
+    };
+    // If blocking mode cannot be restored, the next read reports WouldBlock,
+    // which already ends the session as idle.
+    let _ = stream.set_nonblocking(false);
+    connected
+}
+
 struct SshReader<'a>(&'a RefCell<SshConnectionState>);
+
+/// Rate-limited peer liveness for work that reads nothing from the client,
+/// such as selected-pack planning: a client that disconnects mid-clone stops
+/// that work instead of pinning a worker until the session deadline.
+struct PeerProbe<'a> {
+    state: &'a RefCell<SshConnectionState>,
+    checked: Cell<Instant>,
+    gone: Cell<bool>,
+}
+
+impl PeerProbe<'_> {
+    const INTERVAL: Duration = Duration::from_millis(100);
+
+    fn alive(&self) -> bool {
+        if self.gone.get() {
+            return false;
+        }
+        if self.checked.get().elapsed() < Self::INTERVAL {
+            return true;
+        }
+        self.checked.set(Instant::now());
+        // A read or write already holding the state detects a disconnect
+        // itself; the probe never waits for it.
+        if let Ok(state) = self.state.try_borrow()
+            && !state.peer_connected()
+        {
+            self.gone.set(true);
+        }
+        !self.gone.get()
+    }
+}
 struct SshWriter<'a>(&'a RefCell<SshConnectionState>);
 
 impl Read for SshReader<'_> {
@@ -515,8 +575,15 @@ impl OneNode {
             SshGitService::UploadPack => {
                 let mut reader = SshReader(&state_cell);
                 let mut writer = SshWriter(&state_cell);
+                let probe = PeerProbe {
+                    state: &state_cell,
+                    checked: Cell::new(Instant::now()),
+                    gone: Cell::new(false),
+                };
                 child_node
-                    .serve_ssh_upload_pack(&mut reader, &mut writer, &git_protocol)
+                    .serve_ssh_upload_pack(&mut reader, &mut writer, &git_protocol, &|| {
+                        probe.alive()
+                    })
                     .is_ok()
             }
             SshGitService::ReceivePack => {
@@ -549,6 +616,7 @@ impl OneNode {
         reader: &mut R,
         writer: &mut W,
         git_protocol: &[u8],
+        peer_alive: &dyn Fn() -> bool,
     ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal> {
         let service =
             ssh_git_service(true, git_protocol).map_err(NodeGitDaemonServeRefusal::from)?;
@@ -625,7 +693,7 @@ impl OneNode {
                         if stopped {
                             return false;
                         }
-                        if !session_is_live() {
+                        if !session_is_live() || !peer_alive() {
                             stopped = true;
                             return false;
                         }
@@ -759,6 +827,42 @@ mod tests {
                 GitDaemonService::ReceivePack
             );
         }
+    }
+
+    #[test]
+    fn the_peer_probe_sees_a_closed_client_and_consumes_nothing_from_a_live_one() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        assert!(tcp_peer_connected(&server), "an idle live client");
+        client.write_all(b"x").unwrap();
+        // Pending bytes are a live client, and the probe leaves them unread.
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            let mut byte = [0_u8; 1];
+            server.set_nonblocking(true).unwrap();
+            let pending = server.peek(&mut byte).is_ok();
+            server.set_nonblocking(false).unwrap();
+            if pending {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(tcp_peer_connected(&server));
+        let mut byte = [0_u8; 1];
+        server.read_exact(&mut byte).unwrap();
+        assert_eq!(&byte, b"x", "the probe consumed client data");
+        // An orderly close is seen as gone, and blocking mode is restored.
+        drop(client);
+        let started = Instant::now();
+        while tcp_peer_connected(&server) && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!tcp_peer_connected(&server), "a closed client");
+        server
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        assert_eq!(server.read(&mut byte).unwrap(), 0, "blocking read sees EOF");
     }
 
     #[test]

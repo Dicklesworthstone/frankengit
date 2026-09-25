@@ -209,7 +209,11 @@ fge_context cancelled_clone_rc "$CANCEL_RC"
 sleep 2
 fge_assert_cmd SSH-COMPAT-080 'the server is still running after a cancelled clone' kill -0 "$FGE_LAST_PID"
 RESUME_RC=0
+RESUME_START=$(date +%s)
 GIT_SSH_COMMAND="$SSH_PATIENT" timeout "$TRANSFER_SECS" git clone -q "$REMOTE" "$WORK/after-cancel" 2>"$WORK/after-cancel.err" || RESUME_RC=$?
+# With one worker, this includes any time the server kept working for the
+# killed client; a disconnect should stop pack planning promptly.
+fge_context after_cancel_clone_s "$(( $(date +%s) - RESUME_START ))"
 fge_assert_eq SSH-COMPAT-081 0 "$RESUME_RC" 'a clone after the cancelled one succeeds'
 fge_assert_cmd SSH-COMPAT-082 'the post-cancellation clone content is byte-identical' diff -rq -x .git "$WORK/after-cancel" "$SRC"
 
