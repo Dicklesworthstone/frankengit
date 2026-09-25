@@ -11,13 +11,19 @@
 #    report-status and publishes nothing;
 # 4. a silent client holding the only worker is released by the session read
 #    timeout, after which a real clone succeeds;
-# 5. a clone killed mid-transfer leaves the server serving the next clone.
+# 5. a clone killed mid-transfer leaves the server serving the next clone;
+# 6. the same node served over `fg serve-http` returns the identical refs and
+#    the identical object set (HTTP-vs-SSH differential).
 # The pinned OpenSSH and git client versions are recorded in the NDJSON.
 #
-# FG_E2E_SSH_DELTA_BASE_BYTES sizes the incompressible base file (default
-# 4 MB); each of FG_E2E_SSH_DELTA_VERSIONS further commits (default 4)
-# rewrites a small slice of it, so the history is delta-friendly. For the
-# acceptance envelope run with a RELEASE FG_BIN and >= 209715200 bytes.
+# FG_E2E_SSH_DELTA_BASE_BYTES sizes the incompressible base content (default
+# 4 MB), split into files of at most 8 MB so no blob reaches the default
+# 32 MiB object ceiling; each of FG_E2E_SSH_DELTA_VERSIONS further commits
+# (default 4) rewrites 4 KiB of one file, so the history is delta-friendly.
+# When the history outgrows the default receive envelope, serve-ssh and
+# serve-http get an explicit envelope sized from it, through the same flags
+# `fg serve` takes. For the acceptance envelope use a RELEASE FG_BIN and
+# >= 209715200 bytes.
 set -euo pipefail
 
 E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -30,7 +36,7 @@ fge_context crate fgit-ssh
 fge_context evidence_class e2e_binary_stock_client
 fge_context openssh_version "$(ssh -V 2>&1 | head -1)"
 fge_context git_version "$(git --version)"
-fge_context non_claim 'Stock OpenSSH and git against one local fg serve-ssh with one worker; not a throughput, multi-client, hostile-network or HTTP-vs-SSH differential claim.'
+fge_context non_claim 'Stock OpenSSH and git against one local fg serve-ssh with one worker, then fg serve-http on the same node; not a throughput, multi-client or hostile-network claim.'
 
 TENANT="11111111111111111111111111111111"
 REPOID="22222222222222222222222222222222"
@@ -39,6 +45,16 @@ BASE_BYTES="${FG_E2E_SSH_DELTA_BASE_BYTES:-4000000}"
 VERSIONS="${FG_E2E_SSH_DELTA_VERSIONS:-4}"
 fge_context base_bytes "$BASE_BYTES"
 fge_context versions "$VERSIONS"
+# The receive envelope: twice the history plus headroom, in MiB. Explicit
+# flags only when the defaults (64 MiB input, 128 MiB expanded) cannot hold
+# it, so the default-sized run still exercises the default limits.
+ENVELOPE_MIB=$(( BASE_BYTES * 2 / 1048576 + 64 ))
+ENVELOPE=()
+if [ $(( BASE_BYTES * 2 )) -gt $(( 64 * 1048576 )) ]; then
+  ENVELOPE=(--receive-max-input-mib "$ENVELOPE_MIB" --receive-max-expanded-mib "$ENVELOPE_MIB"
+    --pack-max-expanded-mib "$ENVELOPE_MIB" --session-timeout-secs 1800)
+fi
+fge_context receive_envelope "${ENVELOPE[*]:-default}"
 
 fge_phase setup
 FG_BIN="${FG_BIN:-}"
@@ -52,12 +68,18 @@ SRC="$WORK/src"
 git init -q -b main "$SRC"
 git -C "$SRC" config user.email ssh-compat@invalid.example
 git -C "$SRC" config user.name 'SSH compat fixture'
-head -c "$BASE_BYTES" /dev/urandom > "$SRC/data.bin"
+FILE_BYTES=$(( BASE_BYTES < 8000000 ? BASE_BYTES : 8000000 ))
+FILES=$(( (BASE_BYTES + FILE_BYTES - 1) / FILE_BYTES ))
+fge_context base_files "$FILES"
+for file in $(seq 1 "$FILES"); do
+  head -c "$FILE_BYTES" /dev/urandom > "$SRC/data-$file.bin"
+done
 git -C "$SRC" add -A
 git -C "$SRC" commit -qm 'base'
 for version in $(seq 1 "$VERSIONS"); do
-  # Rewrite 4 KiB in place: each version deltas cheaply against the last.
-  head -c 4096 /dev/urandom | dd of="$SRC/data.bin" bs=4096 seek="$version" conv=notrunc status=none
+  # Rewrite 4 KiB of one file in place: it deltas cheaply against the last.
+  target=$(( (version - 1) % FILES + 1 ))
+  head -c 4096 /dev/urandom | dd of="$SRC/data-$target.bin" bs=4096 seek="$version" conv=notrunc status=none
   printf 'version %s\n' "$version" > "$SRC/VERSION"
   git -C "$SRC" add -A
   git -C "$SRC" commit -qm "version $version"
@@ -83,8 +105,9 @@ SSH_PORT=''
 SSH_NAME=''
 for attempt in 0 1 2 3 4 5 6 7; do
   port=$(( 24000 + (($$ + attempt * 131) % 20000) ))
-  fge_spawn "serve-ssh-$port" bash -c 'exec "$1" serve-ssh "$2" "$3" "$4" "127.0.0.1:$5" --host-key-file "$6" --deploy-keys-file "$7" --allow-receive --max-sessions 64 --max-in-flight 1 >"$8/serve.out" 2>"$8/serve.err"' \
-    _ "$FG_BIN" "$STORAGE" "$TENANT" "$REPOID" "$port" "$WORK/host_key.hex" "$WORK/deploy_keys.txt" "$WORK"
+  fge_spawn "serve-ssh-$port" bash -c 'bin=$1 store=$2 tenant=$3 repo=$4 port=$5 key=$6 keys=$7 out=$8; shift 8
+    exec "$bin" serve-ssh "$store" "$tenant" "$repo" "127.0.0.1:$port" --host-key-file "$key" --deploy-keys-file "$keys" --allow-receive --max-sessions 64 --max-in-flight 1 "$@" >"$out/serve.out" 2>"$out/serve.err"' \
+    _ "$FG_BIN" "$STORAGE" "$TENANT" "$REPOID" "$port" "$WORK/host_key.hex" "$WORK/deploy_keys.txt" "$WORK" "${ENVELOPE[@]}"
   sleep 1
   if kill -0 "$FGE_LAST_PID" 2>/dev/null; then
     SSH_PORT=$port
@@ -118,7 +141,7 @@ for version in 0 2; do
   FSCK_RC=0
   git -C "$WORK/clone-v$version" fsck --strict >/dev/null 2>&1 || FSCK_RC=$?
   fge_assert_eq "SSH-COMPAT-03$version" 0 "$FSCK_RC" "protocol v$version clone passes strict fsck"
-  fge_assert_cmd "SSH-COMPAT-04$version" "protocol v$version clone content is byte-identical" cmp -s "$WORK/clone-v$version/data.bin" "$SRC/data.bin"
+  fge_assert_cmd "SSH-COMPAT-04$version" "protocol v$version clone content is byte-identical" diff -rq -x .git "$WORK/clone-v$version" "$SRC"
 done
 
 # 3. Incremental push, then a v2 fetch into the earlier clone sees it exactly.
@@ -169,7 +192,48 @@ fge_assert_cmd SSH-COMPAT-080 'the server is still running after a cancelled clo
 RESUME_RC=0
 GIT_SSH_COMMAND="$SSH_PATIENT" timeout 600 git clone -q "$REMOTE" "$WORK/after-cancel" 2>"$WORK/after-cancel.err" || RESUME_RC=$?
 fge_assert_eq SSH-COMPAT-081 0 "$RESUME_RC" 'a clone after the cancelled one succeeds'
-fge_assert_cmd SSH-COMPAT-082 'the post-cancellation clone content is byte-identical' cmp -s "$WORK/after-cancel/data.bin" "$SRC/data.bin"
+fge_assert_cmd SSH-COMPAT-082 'the post-cancellation clone content is byte-identical' diff -rq -x .git "$WORK/after-cancel" "$SRC"
+
+# 7. HTTP-vs-SSH differential: the refs and the complete object set a mirror
+#    clone receives over SSH equal those `fg serve-http` returns from the same
+#    node. The SSH listener is reaped first, so one process owns the node.
+objects() { git -C "$1" cat-file --batch-all-objects --batch-check='%(objectname) %(objecttype) %(objectsize)' | sort; }
+SSH_REFS_RC=0
+GIT_SSH_COMMAND="$SSH_CMD" timeout 300 git ls-remote "$REMOTE" >"$WORK/ssh.refs" 2>"$WORK/ssh-refs.err" || SSH_REFS_RC=$?
+SSH_MIRROR_RC=0
+GIT_SSH_COMMAND="$SSH_PATIENT" timeout 900 git clone -q --mirror "$REMOTE" "$WORK/ssh-mirror" 2>"$WORK/ssh-mirror.err" || SSH_MIRROR_RC=$?
+fge_assert_eq SSH-COMPAT-090 0 "$((SSH_REFS_RC + SSH_MIRROR_RC))" 'ls-remote and a mirror clone over SSH succeed'
+fge_reap "$SSH_NAME"
+
+head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$WORK/http.token"
+chmod 600 "$WORK/http.token"
+fge_spawn serve-http bash -c 'bin=$1 store=$2 tenant=$3 repo=$4 token=$5 principal=$6 out=$7; shift 7
+  exec "$bin" serve-http "$store" "$tenant" "$repo" 127.0.0.1:0 --trusted-local --token-file "$token" --principal "$principal" --max-sessions 64 --max-in-flight 1 --idle-timeout-secs 120 "$@" >"$out/http.out" 2>"$out/http.err"' \
+  _ "$FG_BIN" "$STORAGE" "$TENANT" "$REPOID" "$WORK/http.token" "$PRINCIPAL" "$WORK" "${ENVELOPE[@]}"
+HTTP_NAME=serve-http
+HTTP_URL=''
+for _ in $(seq 1 300); do
+  HTTP_URL=$(sed -n 's/.*"type":"smart_http_listening".*"url":"\([^"]*\)".*/\1/p' "$WORK/http.out" 2>/dev/null | head -1)
+  [ -n "$HTTP_URL" ] && break
+  kill -0 "$FGE_LAST_PID" 2>/dev/null || break
+  sleep 0.1
+done
+fge_assert_cmd SSH-COMPAT-091 'fg serve-http serves the same node on loopback' test -n "$HTTP_URL"
+HTTP_AUTH="Authorization: Bearer $(cat "$WORK/http.token")"
+HTTP_REFS_RC=0
+timeout 300 git -c http.extraHeader="$HTTP_AUTH" ls-remote "$HTTP_URL" >"$WORK/http.refs" 2>"$WORK/http-refs.err" || HTTP_REFS_RC=$?
+HTTP_MIRROR_RC=0
+timeout 900 git -c http.extraHeader="$HTTP_AUTH" clone -q --mirror "$HTTP_URL" "$WORK/http-mirror" 2>"$WORK/http-mirror.err" || HTTP_MIRROR_RC=$?
+fge_assert_eq SSH-COMPAT-092 0 "$((HTTP_REFS_RC + HTTP_MIRROR_RC))" 'ls-remote and a mirror clone over HTTP succeed'
+fge_assert_cmd SSH-COMPAT-093 'the SSH ref advertisement names main at the pushed tip' \
+  grep -q "^$(git -C "$SRC" rev-parse main)[[:space:]]refs/heads/main\$" "$WORK/ssh.refs"
+fge_assert_cmd SSH-COMPAT-094 'HTTP and SSH advertise identical refs' diff -q "$WORK/ssh.refs" "$WORK/http.refs"
+objects "$WORK/ssh-mirror" >"$WORK/ssh.objects"
+objects "$WORK/http-mirror" >"$WORK/http.objects"
+fge_context differential_objects "$(wc -l <"$WORK/ssh.objects" | tr -d ' ')"
+fge_assert_cmd SSH-COMPAT-095 'the SSH mirror holds the whole pushed history' \
+  test "$(wc -l <"$WORK/ssh.objects")" -ge "$(git -C "$SRC" rev-list --objects --all | wc -l)"
+fge_assert_cmd SSH-COMPAT-096 'HTTP and SSH mirror clones hold the identical object set' diff -q "$WORK/ssh.objects" "$WORK/http.objects"
 
 fge_phase teardown
-fge_reap "$SSH_NAME"
+fge_reap "$HTTP_NAME"
