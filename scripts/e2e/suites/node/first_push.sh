@@ -76,7 +76,7 @@ SERVE_STATE=''
 START_SERVE() { # NAME PORT EXTRA...
   local name=$1 port=$2
   shift 2
-  fge_spawn "$name" bash -c 'port=$1; bin=$2; store=$3; tenant=$4; repo=$5; shift 5; exec "$bin" serve "$store" "$tenant" "$repo" "127.0.0.1:$port" "$@" 2>"/tmp/first-push-serve-$port.err"' _ "$port" "$FG_BIN" "$STORAGE" "$TENANT" "$REPOID" "$@"
+  fge_spawn "$name" bash -c 'port=$1; bin=$2; store=$3; tenant=$4; repo=$5; out=$6; shift 6; exec "$bin" serve "$store" "$tenant" "$repo" "127.0.0.1:$port" "$@" >"$out/serve-$port.out" 2>"/tmp/first-push-serve-$port.err"' _ "$port" "$FG_BIN" "$STORAGE" "$TENANT" "$REPOID" "$WORK" "$@"
   sleep 1
   if kill -0 "$FGE_LAST_PID" 2>/dev/null; then
     SERVE_STATE=ok
@@ -108,14 +108,24 @@ fge_reap "$FOUND_NAME"
 fge_assert_cmd FG-HH37-PUSH-005 'a push without a configured receive principal fails' \
   test "$CLOSED_RC" -ne 0
 
-# --- The first real push into the empty repository.
-FIND_PORT_AND_SERVE open --receive-principal "$PRINCIPAL"
+# --- The first real push into the empty repository. One bounded session, so
+# the serve process drains after the push and prints its own report, which
+# names the receive path that actually served it (x2mv.4.5).
+FIND_PORT_AND_SERVE open --receive-principal "$PRINCIPAL" --max-sessions 1 --max-in-flight 1
 fge_assert_cmd FG-HH37-PUSH-006 'a receive-enabled serve session is listening' test -n "$FOUND_PORT"
 PUSH_RC=0
 GIT_TERMINAL_PROMPT=0 git -C "$SRC" -c protocol.version=1 push \
   "git://127.0.0.1:$FOUND_PORT/$REPOID.git" main >"$WORK/push.out" 2>&1 || PUSH_RC=$?
+for _ in $(seq 1 50); do kill -0 "$FGE_LAST_PID" 2>/dev/null || break; sleep 0.2; done
 fge_reap "$FOUND_NAME"
 fge_assert_eq FG-HH37-PUSH-007 0 "$PUSH_RC" 'a real git push exits zero'
+RECEIVE_PATH=$(sed -n 's/.*receive_path=\([a-z-]*\).*/\1/p' "$WORK/serve-$FOUND_PORT.out")
+NETWORK_PUSH=$(sed -n 's/.*unauthenticated_network_push=\([a-z]*\).*/\1/p' "$WORK/serve-$FOUND_PORT.out")
+fge_context receive_path "${RECEIVE_PATH:-unreported}"
+fge_assert_eq FG-HH37-PUSH-050 guarded-git-daemon-admission "$RECEIVE_PATH" \
+  'the push was served by the guarded raw-Git admission path, per the serve report'
+fge_assert_eq FG-HH37-PUSH-051 false "$NETWORK_PUSH" \
+  'a loopback receive session reports no unauthenticated network push override'
 NEW_BRANCH_RC=0
 grep -q 'new branch' "$WORK/push.out" || NEW_BRANCH_RC=$?
 fge_assert_eq FG-HH37-PUSH-008 0 "$NEW_BRANCH_RC" 'the client reports the new branch from report-status'

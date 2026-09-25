@@ -307,6 +307,8 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
             Ok(CliOutcome::Served {
                 listen_address,
                 service: receipt,
+                receive_path: "ssh",
+                unauthenticated_network_push: false,
             })
         }
         (Err(error), Ok(())) => Err(error),

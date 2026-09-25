@@ -207,6 +207,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
             prepared.listen
         );
     }
+    let prepared_unauthenticated_network_push = prepared.unauthenticated_network_push;
     let listener = TcpListener::bind(&prepared.listen).map_err(|e| e.to_string())?;
     let listen_address = listener.local_addr().map_err(|e| e.to_string())?;
     let mut node = OneNode::open_existing(prepared.configuration).map_err(|e| e.to_string())?;
@@ -225,6 +226,8 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
         (Ok(service), Ok(())) => Ok(CliOutcome::Served {
             listen_address,
             service,
+            receive_path: "guarded-git-daemon-admission",
+            unauthenticated_network_push: prepared_unauthenticated_network_push,
         }),
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(format!(

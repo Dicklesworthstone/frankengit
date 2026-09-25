@@ -390,6 +390,12 @@ pub enum CliOutcome {
         /// The exact accepted/completed/refused counts after all admitted
         /// session children drained.
         service: GitDaemonServerReceipt,
+        /// Which receive path served pushes in this run, as reported to the
+        /// operator (the guarded raw-Git admission since 58a6cc64).
+        receive_path: &'static str,
+        /// The operator explicitly opened unauthenticated network push
+        /// (`--allow-unauthenticated-network-push` on a non-loopback listener).
+        unauthenticated_network_push: bool,
     },
     /// `fg export` made a completed authority-selected Git pack visible at a
     /// previously absent local path.
@@ -711,6 +717,8 @@ fn run_serve(
                 (Ok(service), Ok(())) => Ok(CliOutcome::Served {
                     listen_address,
                     service,
+                    receive_path: "git-daemon",
+                    unauthenticated_network_push: false,
                 }),
                 (Err(serving), Ok(())) => Err(CliRefusal::ServeServer(serving)),
                 (Ok(_), Err(cleanup)) => Err(CliRefusal::Node(cleanup)),

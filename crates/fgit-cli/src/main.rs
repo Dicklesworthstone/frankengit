@@ -422,9 +422,11 @@ fn main() -> ExitCode {
         Ok(fgit_cli::CliOutcome::Served {
             listen_address,
             service,
+            receive_path,
+            unauthenticated_network_push,
         }) => {
             println!(
-                "served bounded git-daemon run on {listen_address}: accepted={}, completed={}, refused={}",
+                "served bounded git-daemon run on {listen_address}: accepted={}, completed={}, refused={}, receive_path={receive_path}, unauthenticated_network_push={unauthenticated_network_push}",
                 service.accepted_sessions(),
                 service.completed_sessions(),
                 service.refused_sessions(),
