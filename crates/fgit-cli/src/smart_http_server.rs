@@ -16,13 +16,24 @@ use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
 use crate::publication_support::quote;
 
+mod stop_file;
+
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
   [--allow-receive] [--allow-issues] [--allow-outcomes] [--allow-pulls] [--allow-source]
   [--expected-incarnation <id>] [--max-sessions <1..1000000>] [--max-in-flight <1..16>]
   [--idle-timeout-secs <1..86400>] [--session-timeout-secs <1..3600>]
+  [--continuous --stop-file <path>]
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
   [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..1024>]
+
+Continuous mode has no lifetime request cap or idle retirement. It requires an
+initially absent stop file in an existing operator-owned directory. Create that
+regular file to stop accepting and drain every accepted request before shutdown.
+The file is never removed automatically. Inaccessible or non-regular control
+entries cause a draining error, not silent continued service. Do not combine
+--continuous with --max-sessions or --idle-timeout-secs; all per-request deadlines,
+connection limits, credentials and quotas remain enforced.
 
 Provisioning (reads/authenticates the repository, opens no listener):
   fg serve-http <storage-root> <tenant-id> <repository-id> 127.0.0.1:0
@@ -49,8 +60,9 @@ regular files on Unix (0600 or stricter), not symlinks. Atomically replace the
 table to rotate/revoke credentials without restarting. Already authenticated
 in-flight requests retain their bounded grant.
 
-Every request carries Authorization: Bearer <token>. Each mutation RPC needs a
-client-selected Idempotency-Key; reuse it only for the identical command.
+Every request authenticates with a Bearer token or Basic token-as-password.
+Stock Git pushes obtain a discovery-scoped retry URL. Native metadata mutations
+need a client-selected Idempotency-Key; reuse it only for the identical command.
 Rotation to a new token for the same principal preserves its retry identity.
 The opt-in issue API is at <repository-url>/api/v1/issues:
   GET /api/v1/issues[?limit=50&after=N&expected_head=TOKEN]
@@ -128,6 +140,7 @@ struct Options {
     allow_source: bool,
     limits: GitDaemonServerLimits,
     idle_timeout: Duration,
+    stop_file: Option<PathBuf>,
 }
 
 fn number(
@@ -158,7 +171,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     if arguments.len() < 4 {
         return Err(USAGE.into());
     }
-    if arguments.len() > 41
+    if arguments.len() > 44
         || arguments.iter().any(|arg| arg.len() > 4096)
         || arguments.iter().map(String::len).sum::<usize>() > 32768
     {
@@ -189,6 +202,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 | "--allow-pulls"
                 | "--allow-source"
                 | "--print-credentials-header"
+                | "--continuous"
         );
         if !boolean
             && !matches!(
@@ -197,6 +211,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--principal"
                     | "--credentials-file"
                     | "--expected-incarnation"
+                    | "--stop-file"
                     | "--max-sessions"
                     | "--max-in-flight"
                     | "--idle-timeout-secs"
@@ -230,6 +245,19 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "--trusted-local is required for this operator-owned capability profile".into(),
         );
     }
+    let stop_file = match (flags.contains_key("--continuous"), flags.get("--stop-file")) {
+        (false, None) => None,
+        (true, Some(path)) => {
+            if flags.contains_key("--max-sessions") || flags.contains_key("--idle-timeout-secs") {
+                return Err(
+                    "--continuous cannot be combined with --max-sessions or --idle-timeout-secs"
+                        .into(),
+                );
+            }
+            Some(PathBuf::from(*path))
+        }
+        _ => return Err("--continuous and --stop-file must be supplied together".into()),
+    };
     let credentials = if flags.contains_key("--print-credentials-header") {
         if flags.keys().any(|name| {
             !matches!(
@@ -328,6 +356,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         allow_source,
         limits,
         idle_timeout,
+        stop_file,
     })
 }
 
@@ -386,6 +415,12 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
         return Ok(0);
     }
     let options = parse(arguments)?;
+    let stop = options
+        .stop_file
+        .as_ref()
+        .map(|path| stop_file::StopFile::arm(path))
+        .transpose()
+        .map_err(|error| format!("cannot arm HTTP stop control: {error}"))?;
     let credential = match &options.credentials {
         CredentialInput::Static { token_file, .. } => Some(read_token(token_file)?),
         _ => None,
@@ -433,11 +468,38 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             _ => "static",
         };
         let mut output = io::stdout().lock();
-        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{}}}",
+        writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
-            options.allow_source, quote(&node.repository_incarnation_id().to_string()), quote(mode))
+            options.allow_source, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
             .and_then(|()| output.flush()).map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
         drop(output);
+        if let Some(control) = &stop {
+            // One continuous service, not repeated bounded windows: quotas and
+            // accepted-child accounting remain live until the requested stop.
+            return match &options.credentials {
+                CredentialInput::Static { principal, .. } => node.serve_smart_http_until_stopped(
+                    &listener,
+                    options.limits.max_in_flight(),
+                    credential.ok_or("static credential missing")?,
+                    *principal,
+                    options.allow_receive,
+                    &|| control.should_stop(),
+                ),
+                CredentialInput::Reloadable(path) => node.serve_repository_http_until_stopped(
+                    &listener,
+                    options.limits.max_in_flight(),
+                    path,
+                    options.allow_receive,
+                    options.allow_issues,
+                    options.allow_outcomes,
+                    options.allow_pulls,
+                    options.allow_source,
+                    &|| control.should_stop(),
+                ),
+                CredentialInput::HeaderOnly => return Err("header-only operation cannot serve".into()),
+            }
+            .map_err(|error| error.to_string());
+        }
         match &options.credentials {
             CredentialInput::Static { principal, .. } => node.serve_smart_http_bounded(
                 &listener,
