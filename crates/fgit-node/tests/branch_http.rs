@@ -355,19 +355,25 @@ fn conflicting_and_competing_renames_never_publish_half_a_move() {
             .into_iter()
             .map(|worker| worker.join().unwrap())
             .collect();
+        let statuses: Vec<_> = results
+            .iter()
+            .map(|(destination, _, reply)| (*destination, reply.status, reply.body.clone()))
+            .collect();
         assert_eq!(
             results
                 .iter()
                 .filter(|(_, _, reply)| reply.status == 200)
                 .count(),
-            1
+            1,
+            "{statuses:?}"
         );
         assert_eq!(
             results
                 .iter()
                 .filter(|(_, _, reply)| reply.status == 409)
                 .count(),
-            1
+            1,
+            "{statuses:?}"
         );
         let winner = results
             .iter()
