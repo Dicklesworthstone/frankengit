@@ -10,6 +10,7 @@
 mod browser;
 mod credentials;
 mod issues;
+mod lifetime;
 mod outcomes;
 mod pulls;
 mod source;
@@ -354,6 +355,34 @@ impl OneNode {
         allow_source: bool,
         idle_timeout: Duration,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        self.serve_smart_http_with_source_lifetime(
+            listener,
+            server_limits.max_in_flight(),
+            credentials,
+            allow_receive,
+            allow_issues,
+            allow_outcomes,
+            allow_pulls,
+            allow_source,
+            lifetime::Acceptance::Bounded {
+                max_sessions: server_limits.max_sessions(),
+                idle_timeout,
+            },
+        )
+    }
+
+    fn serve_smart_http_with_source_lifetime(
+        &self,
+        listener: &TcpListener,
+        max_in_flight: usize,
+        credentials: CredentialSource,
+        allow_receive: bool,
+        allow_issues: bool,
+        allow_outcomes: bool,
+        allow_pulls: bool,
+        allow_source: bool,
+        acceptance: lifetime::Acceptance<'_>,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         let address = listener
             .local_addr()
             .map_err(|source| io_error("inspect HTTP listener", source))?;
@@ -367,10 +396,7 @@ impl OneNode {
                 "bring the HTTP node into service before listening",
             ));
         }
-        if !(1..=MAX_SESSIONS).contains(&server_limits.max_sessions())
-            || !(1..=MAX_IN_FLIGHT).contains(&server_limits.max_in_flight())
-            || idle_timeout.is_zero()
-        {
+        if !(1..=MAX_IN_FLIGHT).contains(&max_in_flight) || !acceptance.valid() {
             return Err(invalid_configuration(
                 "invalid bounded Smart HTTP service limits",
             ));
@@ -421,7 +447,7 @@ impl OneNode {
         let mut accepted = 0;
         let mut last_activity = Instant::now();
         let mut failure = None;
-        while accepted < server_limits.max_sessions() {
+        loop {
             let mut index = 0;
             while index < pending.len() {
                 if pending[index].finished.load(Ordering::Acquire) {
@@ -431,13 +457,18 @@ impl OneNode {
                     index += 1;
                 }
             }
-            // Active work has its own deadlines; it is not listener idleness.
-            // Otherwise a long push could retire acceptance before its client's
-            // immediately-following fetch, despite completing successfully.
-            if pending.is_empty() && last_activity.elapsed() >= idle_timeout {
-                break;
+            // Check lifetime control even while all connection slots are full.
+            // Stop/error retires acceptance, not the responsibility for any
+            // accepted request. The common epilogue joins every child.
+            match acceptance.keep_accepting(accepted, pending.len(), last_activity.elapsed()) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => {
+                    failure = Some(io_error("poll HTTP service stop", error));
+                    break;
+                }
             }
-            if pending.len() >= server_limits.max_in_flight() {
+            if pending.len() >= max_in_flight {
                 self.runtime.wait_for(Duration::from_millis(1));
                 continue;
             }
