@@ -94,7 +94,12 @@ for attempt in 0 1 2 3 4 5 6 7; do
 done
 fge_assert_cmd SSH-COMPAT-004 'fg serve-ssh listens on loopback with one worker' test -n "$SSH_PORT"
 
-SSH_CMD="ssh -p $SSH_PORT -i $WORK/client_rw -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -o LogLevel=ERROR"
+# OpenSSH keeps the FIRST value of a repeated -o option, so the connect (and
+# banner) timeout leads each variant: ordinary calls fail fast, while a client
+# queued behind the single busy worker may wait for its release.
+SSH_REST="-p $SSH_PORT -i $WORK/client_rw -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+SSH_CMD="ssh -o ConnectTimeout=5 $SSH_REST"
+SSH_PATIENT="ssh -o ConnectTimeout=150 $SSH_REST"
 REMOTE="ssh://git@127.0.0.1:$SSH_PORT/$REPOID.git"
 git -C "$SRC" remote add fg "$REMOTE"
 
@@ -148,7 +153,7 @@ exec 7<>"/dev/tcp/127.0.0.1/$SSH_PORT"
 sleep 1
 SILENT_START=$(date +%s)
 SILENT_RC=0
-GIT_SSH_COMMAND="$SSH_CMD -o ConnectTimeout=120" timeout 300 git clone -q "$REMOTE" "$WORK/after-silent" 2>"$WORK/after-silent.err" || SILENT_RC=$?
+GIT_SSH_COMMAND="$SSH_PATIENT" timeout 300 git clone -q "$REMOTE" "$WORK/after-silent" 2>"$WORK/after-silent.err" || SILENT_RC=$?
 SILENT_WAIT=$(( $(date +%s) - SILENT_START ))
 exec 7<&- 7>&- || true
 fge_context silent_client_wait_s "$SILENT_WAIT"
@@ -162,7 +167,7 @@ fge_context cancelled_clone_rc "$CANCEL_RC"
 sleep 2
 fge_assert_cmd SSH-COMPAT-080 'the server is still running after a cancelled clone' kill -0 "$FGE_LAST_PID"
 RESUME_RC=0
-GIT_SSH_COMMAND="$SSH_CMD -o ConnectTimeout=120" timeout 600 git clone -q "$REMOTE" "$WORK/after-cancel" 2>"$WORK/after-cancel.err" || RESUME_RC=$?
+GIT_SSH_COMMAND="$SSH_PATIENT" timeout 600 git clone -q "$REMOTE" "$WORK/after-cancel" 2>"$WORK/after-cancel.err" || RESUME_RC=$?
 fge_assert_eq SSH-COMPAT-081 0 "$RESUME_RC" 'a clone after the cancelled one succeeds'
 fge_assert_cmd SSH-COMPAT-082 'the post-cancellation clone content is byte-identical' cmp -s "$WORK/after-cancel/data.bin" "$SRC/data.bin"
 
