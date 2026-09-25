@@ -6,8 +6,12 @@
 //! rekey are explicitly refused; neither may replace a running Git command.
 
 mod guard;
+mod ingress;
+mod negotiation;
 #[cfg(test)]
 mod protocol_tests;
+#[cfg(test)]
+mod ingress_tests;
 
 use core::fmt::{self, Display, Formatter};
 use std::sync::Arc;
@@ -157,6 +161,8 @@ pub struct SshServerSession {
     entropy: Arc<dyn EntropySource>,
     /// Whether both sides negotiated OpenSSH strict key exchange.
     strict_kex: bool,
+    /// Discard exactly one incorrectly guessed first KEX packet (RFC 4253).
+    discard_next_kex_packet: bool,
     server_signing_key: SigningKey,
     deploy_keys: Vec<DeployKeyBinding>,
     server_ident: String,
@@ -214,6 +220,7 @@ impl SshServerSession {
             phase: SessionPhase::Identification,
             entropy,
             strict_kex: false,
+            discard_next_kex_packet: false,
             server_signing_key,
             deploy_keys,
             server_ident: SERVER_IDENTIFICATION.to_owned(),
@@ -364,71 +371,9 @@ impl SshServerSession {
             self.channel_input_data.clear();
             self.ephemeral_kex = None;
             self.pending_inbound_key = None;
+            self.discard_next_kex_packet = false;
         }
         result
-    }
-
-    fn process_incoming_bytes(&mut self, input: &[u8]) -> Result<(), SshSessionError> {
-        self.incoming_buffer.extend_from_slice(input);
-
-        if self.phase == SessionPhase::Identification {
-            let line_end = self.incoming_buffer.iter().position(|&b| b == b'\n');
-            if line_end.map_or(self.incoming_buffer.len(), |end| end + 1) > MAX_IDENTIFICATION_BYTES
-            {
-                return Err(SshSessionError::ProtocolViolation {
-                    reason: format!(
-                        "client identification exceeds {MAX_IDENTIFICATION_BYTES} bytes"
-                    ),
-                });
-            }
-            // Find line break for client identification
-            if let Some(pos) = self.incoming_buffer.windows(2).position(|w| w == b"\r\n") {
-                let ident_bytes = self.incoming_buffer[..pos].to_vec();
-                let ident = core::str::from_utf8(&ident_bytes)
-                    .map_err(|_| SshSessionError::ProtocolViolation {
-                        reason: "client identification is not valid UTF-8".to_owned(),
-                    })?
-                    .to_owned();
-                self.client_ident = Some(ident);
-                self.incoming_buffer.drain(..pos + 2);
-                self.phase = SessionPhase::KeyExchange;
-                self.send_kexinit();
-            } else if let Some(pos) = self.incoming_buffer.iter().position(|&b| b == b'\n') {
-                let ident_bytes = self.incoming_buffer[..pos].to_vec();
-                let ident = core::str::from_utf8(&ident_bytes)
-                    .map_err(|_| SshSessionError::ProtocolViolation {
-                        reason: "client identification is not valid UTF-8".to_owned(),
-                    })?
-                    .to_owned();
-                self.client_ident = Some(ident);
-                self.incoming_buffer.drain(..=pos);
-                self.phase = SessionPhase::KeyExchange;
-                self.send_kexinit();
-            } else {
-                // Incomplete line
-                return Ok(());
-            }
-        }
-
-        // Process packets from incoming_buffer
-        loop {
-            if self.incoming_buffer.is_empty() {
-                break;
-            }
-            match Self::decode_packet(&mut self.inbound_cipher, &self.incoming_buffer) {
-                Ok((payload, consumed)) => {
-                    self.incoming_buffer.drain(..consumed);
-                    self.inbound_packet_count = self.inbound_packet_count.wrapping_add(1);
-                    self.handle_packet(&payload)?;
-                }
-                Err(SshSessionError::Wire(WireError::UnexpectedEof { .. })) => {
-                    break;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(())
     }
 
     /// Decodes a packet from incoming slice, returning payload and bytes consumed.
@@ -550,6 +495,13 @@ impl SshServerSession {
 
     /// Handles a decrypted packet payload.
     fn handle_packet(&mut self, payload: &[u8]) -> Result<(), SshSessionError> {
+        // The guessed packet is consumed at the transport layer only: it
+        // cannot authenticate, open a channel, or execute application work.
+        if core::mem::take(&mut self.discard_next_kex_packet)
+            && payload.first() != Some(&msg::DISCONNECT)
+        {
+            return Ok(());
+        }
         self.validate_packet(payload)?;
         let mut reader = WireReader::new(payload);
         let msg_type = reader.read_u8()?;
@@ -579,23 +531,7 @@ impl SshServerSession {
                 });
             }
             msg::IGNORE => {}
-            msg::KEXINIT => {
-                // cookie (16 bytes), then the client's kex algorithm list
-                let _cookie = reader.read_exact(16)?;
-                let client_kex = reader.read_name_list()?;
-                if self.session_id.is_none() && client_kex.contains(&KEX_STRICT_CLIENT) {
-                    // The client's KEXINIT must be its first packet under strict KEX.
-                    if self.inbound_packet_count != 1 {
-                        return Err(SshSessionError::ProtocolViolation {
-                            reason: "strict KEX requires KEXINIT to be the first packet".to_owned(),
-                        });
-                    }
-                    self.strict_kex = true;
-                }
-                self.client_kexinit_payload = Some(payload.to_vec());
-                // A fresh ephemeral Curve25519 secret for every key exchange.
-                self.ephemeral_kex = Some(Curve25519Kex::from_private_bytes(self.random_bytes()));
-            }
+            msg::KEXINIT => self.accept_kexinit(payload)?,
             msg::KEX_ECDH_INIT => {
                 let client_pub = reader.read_string()?;
                 if client_pub.len() != 32 {
