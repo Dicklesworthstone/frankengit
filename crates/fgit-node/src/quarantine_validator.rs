@@ -14,7 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_admission::{
     AdmissionError, BasisBoundValidatedReceive, PermittedObjectClosure, QuarantineValidator,
-    ValidatedClosure, permitted_object_closure_root, validate_receive_at_basis,
+    ReceiveValidationAuthority, ValidatedClosure, permitted_object_closure_root,
+    validate_receive_at_basis,
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
@@ -163,6 +164,34 @@ pub struct ProductionQuarantineValidator<'node> {
     visible_roots: BTreeSet<GitOid>,
     pack_limits: PackLimits,
     parse_limits: ParseLimits,
+    /// Commitment to `selected_closure` and `visible_roots`; `None` only for
+    /// the unit-fixture constructor, which is not bound to a basis.
+    authority: Option<ReceiveValidationAuthority>,
+}
+
+/// The visible ref roots of one materialized basis: every canonical ref the
+/// basis's hidden-ref policy does not hide, including the all-hidden case.
+fn visible_roots(materialized: &MaterializedAdmission) -> BTreeSet<GitOid> {
+    materialized
+        .snapshot()
+        .refs
+        .iter()
+        .filter(|(name, _)| !materialized.snapshot().hidden_refs.hides(name.as_bytes()))
+        .map(|(_, id)| *id)
+        .collect()
+}
+
+/// The receive-validation authority of one materialized basis. The validator
+/// factory and the admission projection both use this, so a basis prepared
+/// for publication commits to exactly what a validator built from it would.
+pub(crate) fn receive_validation_authority(
+    materialized: &MaterializedAdmission,
+) -> ReceiveValidationAuthority {
+    ReceiveValidationAuthority::new(
+        materialized.basis(),
+        &materialized.selected_closure().root(),
+        &visible_roots(materialized),
+    )
 }
 
 /// One native object verified from the transaction-local pack before the
@@ -195,6 +224,7 @@ impl<'node> ProductionQuarantineValidator<'node> {
             selected_closure,
             pack_limits,
             parse_limits,
+            authority: None,
         }
     }
 }
@@ -554,19 +584,13 @@ impl OneNode {
         // This production path never substitutes cumulative membership for
         // visibility, including the all-hidden/no-visible-ref case. The fixture
         // constructor is not compiled into the production library.
-        let visible_roots = materialized
-            .snapshot()
-            .refs
-            .iter()
-            .filter(|(name, _)| !materialized.snapshot().hidden_refs.hides(name.as_bytes()))
-            .map(|(_, id)| *id)
-            .collect();
         Ok(ProductionQuarantineValidator {
             node: self,
             selected_closure,
-            visible_roots,
+            visible_roots: visible_roots(materialized),
             pack_limits,
             parse_limits,
+            authority: Some(receive_validation_authority(materialized)),
         })
     }
 }
@@ -589,6 +613,10 @@ const fn set_pack_object_id(object: &mut PackObject, id: GitOid) {
 }
 
 impl QuarantineValidator for ProductionQuarantineValidator<'_> {
+    fn validation_authority(&self) -> Option<ReceiveValidationAuthority> {
+        self.authority
+    }
+
     fn validate(
         &self,
         request: &ReceiveRequest,

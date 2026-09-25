@@ -169,6 +169,12 @@ where
         self.inner
             .materialize_refusal_async(store, cx, basis, tx_id, code)
     }
+    fn validation_authority(
+        &self,
+        basis: &PublicationBasis,
+    ) -> Option<crate::ReceiveValidationAuthority> {
+        self.inner.validation_authority(basis)
+    }
 }
 impl<S, P> NativeMergeProjection<S> for GuardedProjection<'_, P>
 where

@@ -1113,6 +1113,12 @@ fn serve_connection(
                             command.tx_id
                         );
                     }
+                } else if let Err(error) = &git_result
+                    && request.operation == Operation::Rpc(Service::ReceivePack)
+                {
+                    // The client sees only a status; the operator gets the
+                    // typed cause, which separates contention from a fault.
+                    eprintln!("Smart HTTP receive ended without a reported outcome: {error}");
                 }
                 git_result.map_err(Status::from)?;
             }

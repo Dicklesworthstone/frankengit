@@ -169,7 +169,12 @@ where
                 cx,
                 context,
                 input.closure,
-                Some(permitted),
+                // The original validator's commitment stays sound at any later
+                // head: equal authority means identical validator inputs.
+                Some(crate::ValidationBasis {
+                    head: permitted,
+                    authority: validated.validation_authority(),
+                }),
                 lowered,
                 projection,
                 limits,

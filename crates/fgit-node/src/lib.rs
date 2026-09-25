@@ -2263,6 +2263,8 @@ struct AsyncMaterializedBasis {
     basis: PublicationBasis,
     ref_state: CanonicalRefState,
     root_layout: RootLayoutVersion,
+    /// What a receive validator built from this basis would commit to.
+    validation_authority: fgit_admission::ReceiveValidationAuthority,
 }
 
 /// Asynchronous durable projection for an embedded `Fsqlite` authority node.
@@ -2300,6 +2302,18 @@ impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
 }
 
 impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionProjection<'_> {
+    fn validation_authority(
+        &self,
+        basis: &PublicationBasis,
+    ) -> Option<fgit_admission::ReceiveValidationAuthority> {
+        self.prepared
+            .lock()
+            .ok()?
+            .as_ref()
+            .filter(|prepared| prepared.basis == *basis)
+            .map(|prepared| prepared.validation_authority)
+    }
+
     #[expect(
         clippy::manual_async_fn,
         reason = "the explicit + Send future is the cross-thread async projection contract"
@@ -2337,6 +2351,9 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
                     None => CanonicalRefState::new(materialized.snapshot().refs.clone()),
                 },
                 root_layout: materialized.root_layout(),
+                validation_authority: quarantine_validator::receive_validation_authority(
+                    &materialized,
+                ),
             };
             *self.prepared.lock().map_err(|_| {
                 AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach)

@@ -242,6 +242,7 @@ impl ProductionQuarantineValidator<'_> {
                 visible_roots: complete,
                 pack_limits: self.pack_limits.clone(),
                 parse_limits: self.parse_limits.clone(),
+                authority: self.authority,
             });
         }
         let validator = restricted.as_ref().unwrap_or(self);

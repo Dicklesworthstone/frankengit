@@ -152,6 +152,86 @@ pub trait QuarantineValidator {
         receipt: &QuarantineReceipt,
         deadline: &mut impl Deadline,
     ) -> Result<ValidatedClosure, RefusalCode>;
+
+    /// The commitment to the external-object authority this validator was
+    /// built from, when it was built from one authenticated basis.
+    ///
+    /// A validator that reports none keeps the conservative rule: a receive
+    /// validated at one basis never publishes after another basis replaces
+    /// it. The commitment is recorded by [`validate_receive_at_basis`] itself,
+    /// so the holder of a proof can never attach one.
+    fn validation_authority(&self) -> Option<ReceiveValidationAuthority> {
+        None
+    }
+}
+
+/// A commitment to everything a receive validator derived from one authority
+/// basis: the permitted object-closure root that authorizes external delta
+/// bases, and the visible ref roots that authorize reused dependencies.
+///
+/// The validator's decision is a function of the request, the quarantined
+/// pack and exactly these inputs (object bodies are content-addressed, and
+/// every object inside a basis's permitted closure is retained). Two bases
+/// with equal commitments therefore validate a receive identically, which is
+/// what lets a CAS loser whose head was replaced by an unrelated transaction
+/// revalidate instead of being refused (normative contract section 5.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ReceiveValidationAuthority([u8; 32]);
+
+impl ReceiveValidationAuthority {
+    const DOMAIN: &'static [u8] = b"frankengit.receive-validation-authority/v1\0";
+
+    /// Commits to one basis's permitted closure root and visible ref roots,
+    /// together with every head field that interprets them or could change
+    /// admission policy: the configuration and retention roots, the policy
+    /// and format-registry epochs, and the latest checkpoint. These are the
+    /// fields a receive continuation already requires to be unchanged before
+    /// it treats a successor head as its own.
+    #[must_use]
+    pub fn new(
+        basis: &PublicationBasis,
+        closure_root: &Digest,
+        visible_roots: &BTreeSet<fgit_types::GitOid>,
+    ) -> Self {
+        fn digest(preimage: &mut Vec<u8>, value: &Digest) {
+            preimage.extend_from_slice(&value.algorithm().code_point().to_be_bytes());
+            let bytes = value.bytes().as_bytes();
+            preimage.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+            preimage.extend_from_slice(bytes);
+        }
+        let head = basis.body();
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(Self::DOMAIN);
+        digest(&mut preimage, closure_root);
+        digest(&mut preimage, &head.configuration_root);
+        digest(&mut preimage, &head.retention_root);
+        preimage.extend_from_slice(&head.policy_epoch.get().to_be_bytes());
+        preimage.extend_from_slice(&head.format_registry_epoch.get().to_be_bytes());
+        match &head.last_checkpoint_id {
+            None => preimage.push(0),
+            Some(checkpoint) => {
+                preimage.push(1);
+                let id = checkpoint.as_internal_object_id().digest().as_bytes();
+                preimage.extend_from_slice(&(id.len() as u64).to_be_bytes());
+                preimage.extend_from_slice(id);
+            }
+        }
+        preimage.extend_from_slice(&(visible_roots.len() as u64).to_be_bytes());
+        for id in visible_roots {
+            preimage.push(match id.algorithm() {
+                GitHashAlgorithm::Sha1 => 1,
+                GitHashAlgorithm::Sha256 => 2,
+            });
+            preimage.extend_from_slice(id.as_bytes());
+        }
+        Self(fgit_crypto::sha256_digest(&preimage))
+    }
+
+    /// The commitment bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 /// Receive-pack input after a pack-aware validator produced the closure witness.
@@ -194,6 +274,7 @@ impl ValidatedReceive {
 pub struct BasisBoundValidatedReceive {
     validated: ValidatedReceive,
     validation_basis: RepositoryAuthorityHeadId,
+    validation_authority: Option<ReceiveValidationAuthority>,
 }
 
 impl BasisBoundValidatedReceive {
@@ -208,6 +289,13 @@ impl BasisBoundValidatedReceive {
     #[must_use]
     pub const fn validation_basis(&self) -> RepositoryAuthorityHeadId {
         self.validation_basis
+    }
+
+    /// The validator's commitment to the authority it derived from
+    /// [`Self::validation_basis`], if it reported one.
+    #[must_use]
+    pub const fn validation_authority(&self) -> Option<ReceiveValidationAuthority> {
+        self.validation_authority
     }
 }
 
@@ -268,6 +356,7 @@ where
     Ok(BasisBoundValidatedReceive {
         validated: validate_receive(request, pack, receipt, validator, deadline)?,
         validation_basis: basis.id(),
+        validation_authority: validator.validation_authority(),
     })
 }
 
@@ -453,7 +542,15 @@ struct AdmissionInput<'a> {
     /// validator's external bases. Source imports and legacy generic receive
     /// validation have no such witness; production raw receive uses the bound
     /// input below and must match this on every CAS plan.
-    validation_basis: Option<RepositoryAuthorityHeadId>,
+    validation_basis: Option<ValidationBasis>,
+}
+
+/// The head a receive was validated at, with its validator's authority
+/// commitment when one was reported.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ValidationBasis {
+    pub(crate) head: RepositoryAuthorityHeadId,
+    pub(crate) authority: Option<ReceiveValidationAuthority>,
 }
 
 /// View a validated receive-pack session as an admission input.
@@ -484,7 +581,10 @@ fn receive_input(validated: &ValidatedReceive) -> AdmissionInput<'_> {
 /// View a basis-bound production receive as an admission input.
 fn basis_bound_receive_input(validated: &BasisBoundValidatedReceive) -> AdmissionInput<'_> {
     let mut input = receive_input(&validated.validated);
-    input.validation_basis = Some(validated.validation_basis);
+    input.validation_basis = Some(ValidationBasis {
+        head: validated.validation_basis,
+        authority: validated.validation_authority,
+    });
     input
 }
 
@@ -1168,6 +1268,16 @@ where
         tx_id: TxId,
         code: RefusalCode,
     ) -> impl Future<Output = Result<RefusalMaterialization, ProjectionFailure>> + Send + 'a;
+
+    /// The receive-validation authority commitment of `basis`, when this
+    /// projection's latest snapshot prepared exactly that basis.
+    ///
+    /// The async driver asks only after [`Self::snapshot_async`] for the same
+    /// basis. `None` (the default) keeps a stale receive validation refused.
+    fn validation_authority(&self, basis: &PublicationBasis) -> Option<ReceiveValidationAuthority> {
+        let _ = basis;
+        None
+    }
 }
 
 /// The outcome of a projection operation before a terminal decision is
@@ -2407,13 +2517,13 @@ fn prepare_publication<Projection>(
     authenticated: &AuthenticatedHead,
     lowered: &LoweredRequest,
     closure: &ValidatedClosure,
-    validation_basis: Option<RepositoryAuthorityHeadId>,
+    validation_basis: Option<ValidationBasis>,
     tx_id: TxId,
 ) -> Result<PublicationPreparation, AdmissionError>
 where
     Projection: AdmissionSnapshotProjection + ?Sized,
 {
-    if validation_basis.is_some_and(|id| id != basis.id()) {
+    if validation_basis.is_some_and(|validation| validation.head != basis.id()) {
         return Ok(PublicationPreparation::Refuse(
             RefusalCode::AuthorityReceiptStale,
         ));
@@ -2495,14 +2605,21 @@ async fn prepare_publication_async<S, Projection>(
     authenticated: &AuthenticatedHead,
     lowered: &LoweredRequest,
     closure: &ValidatedClosure,
-    validation_basis: Option<RepositoryAuthorityHeadId>,
+    validation_basis: Option<ValidationBasis>,
     tx_id: TxId,
 ) -> Result<PublicationPreparation, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
     Projection: AsyncAdmissionProjection<S> + ?Sized,
 {
-    if validation_basis.is_some_and(|id| id != basis.id()) {
+    // A receive validated at another head is refused unless its validator
+    // committed to its authority and this head commits to the same one: then
+    // the validator would decide identically here, so the CAS loser
+    // revalidates instead of being refused (section 5.2, x2mv.4.27). Without
+    // a commitment the rule stays the conservative refusal, before any
+    // snapshot work.
+    let stale = validation_basis.filter(|validation| validation.head != basis.id());
+    if stale.is_some_and(|validation| validation.authority.is_none()) {
         return Ok(PublicationPreparation::Refuse(
             RefusalCode::AuthorityReceiptStale,
         ));
@@ -2519,6 +2636,13 @@ where
             return Err(AdmissionError::AsyncProjectionUnavailable(code));
         }
     };
+    if let Some(validation) = stale
+        && validation.authority != projection.validation_authority(basis)
+    {
+        return Ok(PublicationPreparation::Refuse(
+            RefusalCode::AuthorityReceiptStale,
+        ));
+    }
     prepare_publication_from_snapshot(context, lowered, closure, tx_id, snapshot)
 }
 
@@ -2569,7 +2693,7 @@ fn plan_publication<Projection>(
     authenticated: &AuthenticatedHead,
     lowered: &LoweredRequest,
     closure: &ValidatedClosure,
-    validation_basis: Option<RepositoryAuthorityHeadId>,
+    validation_basis: Option<ValidationBasis>,
     tx_id: TxId,
 ) -> Result<PlannedPublication, AdmissionError>
 where
@@ -2992,7 +3116,7 @@ fn admit_one<S, Projection>(
     store: &S,
     context: &AdmissionContext,
     closure: &ValidatedClosure,
-    validation_basis: Option<RepositoryAuthorityHeadId>,
+    validation_basis: Option<ValidationBasis>,
     lowered: &LoweredRequest,
     projection: &Projection,
     limits: AdmissionLimits,
@@ -3861,7 +3985,7 @@ async fn admit_one_async<S, Projection>(
     cx: &S::Context,
     context: &AdmissionContext,
     closure: &ValidatedClosure,
-    validation_basis: Option<RepositoryAuthorityHeadId>,
+    validation_basis: Option<ValidationBasis>,
     lowered: &LoweredRequest,
     projection: &Projection,
     limits: AdmissionLimits,

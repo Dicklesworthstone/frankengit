@@ -195,6 +195,7 @@ fn fixture_validator<'a>(
             tree_reference_bytes: node.object_format.digest_len(),
             ..ParseLimits::default()
         },
+        authority: None,
     }
 }
 fn put(node: &OneNode, objects: &[Raw]) {

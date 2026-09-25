@@ -501,14 +501,33 @@ fn recovering_an_old_commit_does_not_unlock_an_unrelated_head_for_later_refs() {
                 ))
                 .unwrap();
             assert_eq!(result.commands[0], interrupted.completed_commands()[0]);
-            assert!(matches!(
-                result.commands[1].terminal.outcome,
-                DecisionOutcome::Refused {
-                    code: RefusalCode::AuthorityReceiptStale,
-                    ..
-                }
-            ));
-            assert_only_first(&node);
+            if refresh_validation {
+                // Validated at the head the first command produced. The
+                // foreign decision since then changed nothing a receive
+                // validator derives from a basis (permitted closure, visible
+                // roots, configuration, retention, epochs, checkpoint), so
+                // the witness's authority commitment equals the new head's:
+                // the command revalidates and commits instead of being
+                // refused as stale (section 5.2, x2mv.4.27).
+                assert!(matches!(
+                    result.commands[1].terminal.outcome,
+                    DecisionOutcome::Committed { .. }
+                ));
+                let selected = node.runtime.block_on(node.materialize_admission()).unwrap();
+                assert_eq!(selected.snapshot().refs.len(), 2);
+            } else {
+                // Validated before the first command moved a ref: the new
+                // head's visible roots differ from the witness's, so its
+                // commitment differs and the old evidence stays refused.
+                assert!(matches!(
+                    result.commands[1].terminal.outcome,
+                    DecisionOutcome::Refused {
+                        code: RefusalCode::AuthorityReceiptStale,
+                        ..
+                    }
+                ));
+                assert_only_first(&node);
+            }
             drop(projection);
             node.shutdown().unwrap();
         }
