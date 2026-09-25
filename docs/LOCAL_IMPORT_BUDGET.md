@@ -11,7 +11,7 @@ new allowance inside the operation.
 ```text
 fg import <storage-root> <tenant-id> <repository-id> <principal-id> <key> <source>
   [--expected-incarnation <incarnation-id>]
-  [--timeout-secs <positive-integer>]
+  [--timeout-secs <positive-integer>] [--json]
 ```
 
 Without an explicit timeout, the node reserves its existing bounded import
@@ -56,7 +56,65 @@ and option/refusal twins. These tests must be executed at the candidate revision
 
 ```sh
 cargo test -p fgit-node --lib loose_import::control::budget::tests
-cargo test -p fgit-cli --bin fg import_command::tests
+cargo test -p fgit-cli --bin fg import_command::
 ```
 
 No test execution or bead-closure claim is made by this document.
+
+## Machine-readable, recoverable outcomes
+
+Add `--json` after the six positional arguments, in any order with the timeout
+and incarnation options. A completed admission prints one
+`source_import_outcome` JSON object with schema version 1. It binds the tenant,
+repository, observed incarnation and principal to the exact transaction ID,
+decision sequence and either Repository Commit Record ID or refusal record/code.
+`atomic: true` and `command_count` describe the complete native command mapping;
+empty or inconsistent mappings cannot be rendered as successful imports.
+
+`state: "committed"` means that logical import has an authenticated terminal
+commit, not that its original refs remain the latest state. A retry after a later
+branch update returns the same old decision and must not rewind the branch.
+`node_closed` and `cleanup_error` report shutdown separately; a known commit is
+not turned into a rollback by cleanup or stdout failure. Retry keys and the
+mutable source path are not copied into the receipt. Error text may still name
+the local operation or filesystem path that failed.
+
+JSON-mode exit codes are 0 for committed, 3 for canonical refusal, and 2 for
+input, infrastructure, output or cleanup errors. Errors without a terminal
+observation remain stderr errors, not invented terminal JSON records. Plain
+mode retains the original successful text and exit behavior. No timeout, JSON
+flag or source pathname participates in transaction identity.
+
+Recover without re-reading or re-importing the source:
+
+```sh
+fg outcome <storage-root> <tenant-id> <repository-id> --trusted-local \
+  --principal <original-principal-id> --idempotency-key <original-key> \
+  --object-format sha1
+```
+
+Use `--object-format sha256` for SHA-256 repositories. This is the existing
+read-only recovery path, not a second journal or retry engine.
+
+The repository-owned binary campaign is:
+
+```sh
+FG_BIN=/absolute/path/to/fg bash scripts/e2e/suites/admission/import_recovery.sh
+```
+
+It constructs isolated deterministic Git fixtures, runs fresh native `fg`
+processes for both object formats, and checks: complete atomic publication;
+exact replay with a different timeout; changed-semantics key rejection; a later
+import followed by a real fast-forward branch update; old-import replay without
+rewinding the branch; canonical all-or-nothing refusal including a new ref;
+legacy text output; and read-only recovery of both terminal decisions after the
+source directory is made unavailable. Different-principal key lookup must not
+disclose the original decision. The shared harness retains command outputs,
+input identities and failure artifacts, bounds native command duration, and
+records the executable digest. Missing `FG_BIN` is a non-pass.
+
+The campaign does not claim process-death injection or multi-hundred-MiB
+acceptance. Fixture validation with stock Git is not execution of FrankenGit.
+The receipt renderer has focused mapping, identity, escaping, and output-failure
+tests under `import_command::receipt::tests`; run them with the CLI test command
+above. Neither those tests nor the binary campaign are claimed passed here.

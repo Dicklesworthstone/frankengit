@@ -61,3 +61,26 @@ fn malformed_principal_key_and_path_are_rejected_before_effects() {
     assert!(parse(&args).is_err());
     assert!(parse(&arguments(&[])).is_ok());
 }
+
+#[test]
+fn json_is_an_independent_flag_in_every_option_position() {
+    let incarnation = "44444444444444444444444444444444";
+    for extras in [
+        vec!["--json"],
+        vec!["--json", "--timeout-secs", "600", "--expected-incarnation", incarnation],
+        vec!["--timeout-secs", "600", "--json", "--expected-incarnation", incarnation],
+        vec!["--timeout-secs", "600", "--expected-incarnation", incarnation, "--json"],
+    ] {
+        let options = parse(&arguments(&extras)).unwrap();
+        assert!(options.json);
+        assert_eq!(options.key, b"literal-retry-key");
+    }
+    assert!(!parse(&arguments(&[])).unwrap().json);
+    for extras in [
+        vec!["--json", "--json"], vec!["--json", "false"],
+        vec!["--timeout-secs", "--json"], vec!["--json", "--timeout-secs"],
+        vec!["--expected-incarnation", "--json"],
+    ] {
+        assert!(parse(&arguments(&extras)).is_err(), "{extras:?}");
+    }
+}
