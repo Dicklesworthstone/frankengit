@@ -15,6 +15,9 @@ pub enum PullRequestAction {
     Open,
     Update,
     Close,
+    /// Explicitly resume a closed, unmerged native PR at its exact version.
+    /// Ordinary updates cannot reopen it, and a merged PR is terminal.
+    Reopen,
 }
 
 /// Desired PR content. Updates cannot change branch identities. Tip changes
@@ -74,6 +77,7 @@ impl NativePullRequestEvent {
             PullRequestAction::Open => 1_u32,
             PullRequestAction::Update => 2,
             PullRequestAction::Close => 3,
+            PullRequestAction::Reopen => 4,
         });
         out.write_bytes("actor", self.actor.as_bytes())?;
         out.write_bytes("source_ref", self.data.source_ref.as_bytes())?;
@@ -90,6 +94,7 @@ impl NativePullRequestEvent {
             1 => PullRequestAction::Open,
             2 => PullRequestAction::Update,
             3 => PullRequestAction::Close,
+            4 => PullRequestAction::Reopen,
             observed => {
                 return Err(CodecRefusal::VariantUnknown {
                     field: "pull_request.action",
@@ -179,7 +184,11 @@ impl PullRequestCommand {
 }
 
 /// Evaluate against the exact prior event selected by authority. Updates
-/// cannot retarget, resurrect a terminal stream, or erase data during closure.
+/// cannot retarget, implicitly reopen a closed stream, or erase data during
+/// closure. Only Reopen can resume a closed native metadata stream. It may
+/// explicitly refresh the submitted metadata and tips on the SAME branches;
+/// admission must independently verify those live tips. Merged/legacy streams
+/// never reopen, and the original opening event remains the opener authority.
 pub fn validate_transition(
     previous: Option<&ForgeEvent>,
     next: &ForgeEvent,
@@ -211,7 +220,10 @@ pub fn validate_transition(
     let ForgeEventPayload::PullRequestChangedNative(old) = &previous.payload else {
         return Err(RefusalCode::ProtectedRefTransitionDenied);
     };
-    if old.action == PullRequestAction::Close || change.action == PullRequestAction::Open {
+    if change.action == PullRequestAction::Open
+        || (old.action == PullRequestAction::Close)
+            != (change.action == PullRequestAction::Reopen)
+    {
         return Err(RefusalCode::ProtectedRefTransitionDenied);
     }
     if old.data.source_ref != change.data.source_ref
@@ -382,3 +394,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod reopen_tests;

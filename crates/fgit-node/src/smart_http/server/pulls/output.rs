@@ -17,6 +17,7 @@ pub(super) const fn action(value: PullRequestAction) -> &'static str {
         PullRequestAction::Open => "open",
         PullRequestAction::Update => "update",
         PullRequestAction::Close => "close",
+        PullRequestAction::Reopen => "reopen",
     }
 }
 fn data(value: &PullRequestData) -> Result<String, ApiError> {

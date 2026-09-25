@@ -26,6 +26,7 @@ pub(super) const fn action_name(action: PullRequestAction) -> &'static str {
         PullRequestAction::Open => "open",
         PullRequestAction::Update => "update",
         PullRequestAction::Close => "close",
+        PullRequestAction::Reopen => "reopen",
     }
 }
 fn data_json(data: &PullRequestData) -> String {
