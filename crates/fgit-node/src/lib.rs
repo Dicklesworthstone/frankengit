@@ -762,7 +762,7 @@ impl AdmissionEvidence for DurableAdmissionEvidence {
         }
         let derived = DecisionEvidenceBodies::derive(&self.context, basis, request, fold)?;
         if derived != self.bodies {
-            return Err(RefusalCode::EvidenceMissing);
+            return Err({ eprintln!("DEBUG-ICYIBIS EvidenceMissing lib.rs:765"); RefusalCode::EvidenceMissing });
         }
         Ok(self.evidence)
     }
@@ -2049,7 +2049,7 @@ impl DurableAdmissionMaterializer {
             .write()
             .map_err(|_| RefusalCode::InternalInvariantBreach)?;
         let Some(materialized) = guard.as_ref() else {
-            return Err(RefusalCode::EvidenceMissing);
+            return Err({ eprintln!("DEBUG-ICYIBIS EvidenceMissing lib.rs:2052"); RefusalCode::EvidenceMissing });
         };
         let mismatched = materialized.authenticated != *authenticated
             || materialized.basis != *basis
@@ -2116,7 +2116,7 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
             .write()
             .map_err(|_| RefusalCode::InternalInvariantBreach)?;
         let Some(materialized) = guard.as_ref() else {
-            return Err(RefusalCode::EvidenceMissing);
+            return Err({ eprintln!("DEBUG-ICYIBIS EvidenceMissing lib.rs:2119"); RefusalCode::EvidenceMissing });
         };
         let binding = CacheBinding::new(
             materialized.basis.body().repository_id,
@@ -2126,7 +2126,7 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
         );
         if CachePermit::require_matching(Some(&materialized.cache_permit), binding).is_err() {
             *guard = None;
-            return Err(RefusalCode::EvidenceMissing);
+            return Err({ eprintln!("DEBUG-ICYIBIS EvidenceMissing lib.rs:2129"); RefusalCode::EvidenceMissing });
         }
         if materialized.basis.body().ref_root != root {
             return Err(RefusalCode::AuthorityReceiptStale);
@@ -2149,7 +2149,7 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
             .write()
             .map_err(|_| RefusalCode::InternalInvariantBreach)?;
         let Some(materialized) = guard.as_ref() else {
-            return Err(RefusalCode::EvidenceMissing);
+            return Err({ eprintln!("DEBUG-ICYIBIS EvidenceMissing lib.rs:2152"); RefusalCode::EvidenceMissing });
         };
         let binding = CacheBinding::new(
             materialized.basis.body().repository_id,
@@ -2159,7 +2159,7 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
         );
         if CachePermit::require_matching(Some(&materialized.cache_permit), binding).is_err() {
             *guard = None;
-            return Err(RefusalCode::EvidenceMissing);
+            return Err({ eprintln!("DEBUG-ICYIBIS EvidenceMissing lib.rs:2162"); RefusalCode::EvidenceMissing });
         }
         if materialized.selected_closure.root != root {
             return Err(RefusalCode::AuthorityReceiptStale);
@@ -2192,7 +2192,7 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
             .write()
             .map_err(|_| RefusalCode::InternalInvariantBreach)?;
         let Some(materialized) = guard.as_ref() else {
-            return Err(RefusalCode::EvidenceMissing);
+            return Err({ eprintln!("DEBUG-ICYIBIS EvidenceMissing lib.rs:2195"); RefusalCode::EvidenceMissing });
         };
         let binding = CacheBinding::new(
             materialized.basis.body().repository_id,
@@ -2202,7 +2202,7 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
         );
         if CachePermit::require_matching(Some(&materialized.cache_permit), binding).is_err() {
             *guard = None;
-            return Err(RefusalCode::EvidenceMissing);
+            return Err({ eprintln!("DEBUG-ICYIBIS EvidenceMissing lib.rs:2205"); RefusalCode::EvidenceMissing });
         }
         if materialized.basis.body().configuration_root != configuration_root {
             return Err(RefusalCode::AuthorityReceiptStale);
@@ -2368,7 +2368,7 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
                 })?
                 .take()
                 .ok_or(AsyncProjectionFailure::Unavailable(
-                    RefusalCode::EvidenceMissing,
+                    { eprintln!("DEBUG-ICYIBIS EvidenceMissing lib.rs:2371"); RefusalCode::EvidenceMissing },
                 ))?;
             if prepared_basis.basis != *basis {
                 return Err(AsyncProjectionFailure::Unavailable(
@@ -2505,7 +2505,7 @@ fn async_projection_unavailable(
         | AdmissionMaterializationRefusal::ImmutableAbsent(_)
         | AdmissionMaterializationRefusal::Key(_)
         | AdmissionMaterializationRefusal::ImmutableConflict
-        | AdmissionMaterializationRefusal::CachePoisoned => RefusalCode::EvidenceMissing,
+        | AdmissionMaterializationRefusal::CachePoisoned => { eprintln!("DEBUG-ICYIBIS EvidenceMissing lib.rs:2508"); RefusalCode::EvidenceMissing },
     };
     AsyncProjectionFailure::Unavailable(code)
 }
@@ -2535,7 +2535,7 @@ impl fgit_admission::merge::AsyncMergeMaterializer<FsqliteAuthorityStore>
             .map_err(|_| AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach))?
             .take()
             .ok_or(AsyncProjectionFailure::Unavailable(
-                RefusalCode::EvidenceMissing,
+                { eprintln!("DEBUG-ICYIBIS EvidenceMissing lib.rs:2538"); RefusalCode::EvidenceMissing },
             ))?;
         if prepared_basis.basis != *basis {
             return Err(AsyncProjectionFailure::Unavailable(
