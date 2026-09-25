@@ -142,6 +142,32 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
             PrincipalId::from_hex(value).map_err(|e| e.to_string())?,
         );
     }
+    let configuration = apply_session_and_envelope_flags(configuration, &flags)?;
+    Ok(Prepared {
+        unauthenticated_network_push,
+        configuration,
+        listen: (*listen).to_owned(),
+        limits,
+    })
+}
+
+/// Session-deadline and receive/pack byte-envelope flags shared by every raw
+/// Git transport (`fg serve` and `fg serve-ssh`), so the operator bounds each
+/// transport identically.
+pub(crate) const SESSION_AND_ENVELOPE_FLAGS: [&str; 6] = [
+    "--session-timeout-secs",
+    "--session-secs-per-mib",
+    "--session-max-extension-secs",
+    "--receive-max-input-mib",
+    "--receive-max-expanded-mib",
+    "--pack-max-expanded-mib",
+];
+
+/// Apply [`SESSION_AND_ENVELOPE_FLAGS`] to a node configuration.
+pub(crate) fn apply_session_and_envelope_flags(
+    mut configuration: NodeConfig,
+    flags: &BTreeMap<&str, &str>,
+) -> Result<NodeConfig, String> {
     if let Some(value) = flags.get("--session-timeout-secs") {
         let seconds = integer(value, "--session-timeout-secs", false)?;
         configuration = configuration.with_git_daemon_session_timeout(
@@ -190,12 +216,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
         configuration =
             configuration.with_selected_pack_byte_envelope(mib(value, "--pack-max-expanded-mib")?);
     }
-    Ok(Prepared {
-        unauthenticated_network_push,
-        configuration,
-        listen: (*listen).to_owned(),
-        limits,
-    })
+    Ok(configuration)
 }
 
 pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {

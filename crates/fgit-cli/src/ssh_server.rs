@@ -25,7 +25,9 @@ const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-
   [--allow-receive]
   [--expected-incarnation <id>]
   [--max-sessions <1..1000000>]
-  [--max-in-flight <1..16>]";
+  [--max-in-flight <1..16>]
+  [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>]
+  [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]";
 
 struct Prepared {
     configuration: NodeConfig,
@@ -161,7 +163,8 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
                     | "--expected-incarnation"
                     | "--max-sessions"
                     | "--max-in-flight"
-            ) {
+            ) && !crate::guarded_git_server::SESSION_AND_ENVELOPE_FLAGS.contains(&argument)
+            {
                 return Err(USAGE.into());
             }
             let value = arguments
@@ -249,6 +252,8 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
                 RepositoryIncarnationId::from_hex(value).map_err(|e| e.to_string())?,
             ));
     }
+    let configuration =
+        crate::guarded_git_server::apply_session_and_envelope_flags(configuration, &flags)?;
 
     Ok(Prepared {
         configuration,
@@ -334,5 +339,71 @@ mod tests {
             vec![DeployKeyScope::Read, DeployKeyScope::Write]
         );
         assert!(parse_scopes("admin").is_err());
+    }
+
+    struct HostKey(PathBuf);
+    impl Drop for HostKey {
+        fn drop(&mut self) {
+            fs::remove_file(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn serve_ssh_takes_the_same_receive_envelope_and_session_flags_as_serve() {
+        let key = HostKey(std::env::temp_dir().join(format!(
+            "fg-serve-ssh-envelope-{}.key",
+            std::process::id()
+        )));
+        fs::write(&key.0, "11".repeat(32)).unwrap();
+        let arguments = |extra: &[&str]| -> Vec<String> {
+            [
+                "serve-ssh",
+                "not-opened",
+                &"11".repeat(16),
+                &"22".repeat(16),
+                "127.0.0.1:0",
+                "--host-key-file",
+                key.0.to_str().unwrap(),
+                "--deploy-key",
+                &"33".repeat(32),
+                "--principal",
+                &"44".repeat(16),
+                "--scopes",
+                "read,write",
+            ]
+            .into_iter()
+            .chain(extra.iter().copied())
+            .map(str::to_owned)
+            .collect()
+        };
+        let default = format!("{:?}", parse(&arguments(&[])).unwrap().configuration);
+        let widened = format!(
+            "{:?}",
+            parse(&arguments(&[
+                "--receive-max-input-mib",
+                "300",
+                "--receive-max-expanded-mib",
+                "500",
+                "--pack-max-expanded-mib",
+                "500",
+                "--session-timeout-secs",
+                "1800",
+            ]))
+            .unwrap()
+            .configuration
+        );
+        // 300 MiB input and 500 MiB expanded reach the node configuration.
+        for bytes in ["314572800", "524288000"] {
+            assert!(widened.contains(bytes), "{bytes} missing from {widened}");
+            assert!(!default.contains(bytes), "{bytes} already in {default}");
+        }
+        // The refused twins: a zero envelope, a zero timeout, a duplicate.
+        for flags in [
+            vec!["--receive-max-input-mib", "0"],
+            vec!["--session-timeout-secs", "0"],
+            vec!["--pack-max-expanded-mib", "1", "--pack-max-expanded-mib", "2"],
+        ] {
+            assert!(parse(&arguments(&flags)).is_err(), "{flags:?}");
+        }
     }
 }
