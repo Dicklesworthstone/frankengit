@@ -2003,9 +2003,11 @@ mod tests {
         }
     }
 
-    /// Deterministic pseudo-random bytes (xorshift), so corpora replay.
+    /// Deterministic pseudo-random bytes (xorshift), so corpora replay. The
+    /// seed is mixed first: `seed | 1` alone made every even seed replay the
+    /// next odd one.
     fn noise(seed: u64, length: usize) -> Vec<u8> {
-        let mut state = seed | 1;
+        let mut state = seed.wrapping_add(1).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
         (0..length)
             .map(|_| {
                 state ^= state << 13;
@@ -2117,6 +2119,59 @@ mod tests {
         // would be vacuous.
         assert_eq!(compared, 72);
         assert!(deltas > 200, "only {deltas} deltas selected");
+    }
+
+    /// Planner throughput, reference versus bounded, on a corpus shaped like
+    /// the x2mv.4.4 large-repository fixture: same-size unrelated random blobs
+    /// plus in-place versions, all inside one delta window. Run explicitly:
+    /// `cargo test --release -p fgit-pack --lib -- --ignored --nocapture
+    /// delta_search_throughput`. The reference runs twice as an A-A control.
+    /// Prints timings; asserts only plan equality, never a duration.
+    #[test]
+    #[ignore = "measurement; run explicitly in release"]
+    fn delta_search_throughput_against_the_reference() {
+        const BLOB: usize = 1 << 20;
+        let mut bodies: Vec<Vec<u8>> = (0..24_u64).map(|seed| noise(1_000 + seed, BLOB)).collect();
+        for version in 0..4_usize {
+            let mut edited = bodies[version].clone();
+            edited[4_096 * (version + 1)] ^= 1;
+            bodies.push(edited);
+        }
+        let objects: Vec<_> = bodies
+            .iter()
+            .enumerate()
+            .map(|(at, body)| object(ObjectType::Blob, body, 0, at as u64))
+            .collect();
+        let limits = PackLimits {
+            max_object_bytes: 1 << 24,
+            max_index_entries: 1_000_000,
+            ..wide_limits()
+        };
+        let profile = PackWriteProfile::COMPRESSED_V2;
+        for round in 1..=3 {
+            let started = std::time::Instant::now();
+            let reference_a =
+                reference::select_deltas(&objects, profile, &limits, &mut always).expect("ref");
+            let reference_a_time = started.elapsed();
+            let started = std::time::Instant::now();
+            let reference_b =
+                reference::select_deltas(&objects, profile, &limits, &mut always).expect("ref");
+            let reference_b_time = started.elapsed();
+            let started = std::time::Instant::now();
+            let bounded = select_deltas(&objects, profile, &limits, &mut always).expect("bounded");
+            let bounded_time = started.elapsed();
+            assert_eq!(reference_a, reference_b);
+            assert_eq!(reference_a, bounded);
+            let deltas = bounded.iter().filter(|entry| entry.delta.is_some()).count();
+            println!(
+                "round={round} objects={} blob_bytes={BLOB} deltas={deltas} \
+                 reference_a_ms={} reference_b_ms={} bounded_ms={}",
+                objects.len(),
+                reference_a_time.as_millis(),
+                reference_b_time.as_millis(),
+                bounded_time.as_millis()
+            );
+        }
     }
 
     #[test]

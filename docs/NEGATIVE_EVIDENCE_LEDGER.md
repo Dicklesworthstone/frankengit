@@ -568,3 +568,39 @@ counterexample to reach for.
 reviewed AND a replacement checker passes the same offline identity and
 planted-false-theorem controls — at which point `proofs/fg041/toolchain.json` and the
 row are updated together, never separately.
+
+### NEG-033 — exact delta-search bounds do not remove the cost of unrelated large blobs (x2mv.4.4)
+
+**Hypothesis.** Serving a large pack spends its time in the interior-block
+delta search (`perf` of `fg serve` producing the 200 MB x2mv.4.4 clone at
+f839fa0c: 48% `BaseDeltaIndex::best_match`, 42% `make_indexed_delta_program`).
+Two optimizations that cannot change the emitted plan should remove most of it:
+a per-entry fingerprint pre-check (a candidate whose block fingerprint differs
+can never match, so its random read of the base is skipped) and a bounded scan
+(stop once `program + insert cost of the pending literal run` reaches
+`min(target, best program so far, prefix/suffix program)`).
+
+**What the measurement showed.** Both landed in 80e3e08b behind an oracle test
+that compares every plan with the pre-change planner. An in-binary A/B
+(`writer::tests::delta_search_throughput_against_the_reference`, release, three
+rounds, the reference run twice as an A-A control) on 24 unrelated random
+1 MiB blobs plus 4 in-place versions in one 32-entry window measured the
+reference at 9.78–10.04 s and the bounded planner at 8.54–8.62 s: about 13%.
+A first corpus whose seeding produced duplicate blobs showed 2.25×, only because
+a perfect delta lets every later candidate stop at once; that number describes
+duplicate-heavy data, not this fixture.
+
+**Why the rest cannot be bounded exactly.** For a target that shares no block
+with any candidate, no program ever beats the target, so the bound is the
+target length and the scan must visit every position to prove it. The remaining
+cost is per-position rolling hashing and bucket walks, not base reads.
+
+**Consequence.** Serving large repositories of unrelated binary content stays
+slow under COMPRESSED_V2 (the 200 MB clone took ~500 s at 4f465b79). The next
+lever changes output: skip a candidate pair when a sampled probe of target
+windows finds no indexed block, as upstream Git's size and window heuristics
+effectively do. That must be a new, separately identified profile, measured
+against COMPRESSED_V2 for pack size as well as time, never a silent revision.
+
+**Revisit conditions:** a proposed sampled-probe profile, or a planner that
+reuses stored deltas, measured on real repositories as well as this fixture.
