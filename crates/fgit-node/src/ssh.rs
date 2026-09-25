@@ -611,7 +611,7 @@ impl OneNode {
             limits,
             Some(&deadline),
             |_request, pack_request| {
-                let pack_context = self.pack_materialization_context();
+                let pack_context = self.session_pack_materialization_context(&deadline);
                 let database_exhaustion = std::cell::Cell::new(None);
                 let mut stopped = false;
                 let session_deadline_expired = std::cell::Cell::new(false);

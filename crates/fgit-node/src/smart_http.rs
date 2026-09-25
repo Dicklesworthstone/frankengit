@@ -485,7 +485,7 @@ impl OneNode {
         // current pack writer has its own explicit memory envelope; this HTTP
         // adapter does not introduce another pack-sized buffer.
         let mut pack = if let Some(pack_request) = reply.pack_request() {
-            let pack_context = self.pack_materialization_context();
+            let pack_context = self.session_pack_materialization_context(&deadline);
             let database_exhaustion = Cell::new(None);
             let mut stopped = false;
             let session_deadline_expired = Cell::new(false);

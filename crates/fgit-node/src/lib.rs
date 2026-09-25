@@ -6720,6 +6720,33 @@ impl OneNode {
         context
     }
 
+    /// The Transfer context for one serving session's selected pack.
+    ///
+    /// The class poll and cost floors stay as the liveness backstop, but the
+    /// wall clock is what remains of the session's own budget: an operator who
+    /// sets `--session-timeout-secs` for large repositories must not have every
+    /// clone cut at the Transfer class's fixed 300 s regardless (a 200 MB SSH
+    /// clone failed exactly there, x2mv.4.4). The default session timeout
+    /// equals the class default, so default deployments are unchanged.
+    fn session_pack_materialization_context(
+        &self,
+        deadline: &GitDaemonSessionDeadline,
+    ) -> FsqliteCx {
+        let limits = ClassLimits {
+            timeout: Some(deadline.remaining().unwrap_or_default()),
+            ..self
+                .service_config
+                .runtime_budgets
+                .limits_for(SELECTED_PACK_BUDGET_CLASS)
+        };
+        let context = FsqliteCx::new();
+        context.set_native_cx(
+            self.runtime
+                .request_cx_with_budget(limits.at(self.runtime.now())),
+        );
+        context
+    }
+
     /// Reads the current authority-selected head in `request`.
     ///
     /// The authority call is made through the production async contract. The
@@ -7723,7 +7750,7 @@ impl OneNode {
             limits,
             Some(&deadline),
             |_request, pack_request| {
-                let pack_context = self.pack_materialization_context();
+                let pack_context = self.session_pack_materialization_context(&deadline);
                 let database_exhaustion = Cell::new(None);
                 let mut stopped = false;
                 let session_deadline_expired = Cell::new(false);
@@ -9552,6 +9579,61 @@ mod tests {
             }
         ));
         drop(pack_context);
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn a_serving_sessions_pack_runs_on_the_session_clock_with_transfer_floors() {
+        let scratch = ScratchDirectory::new();
+        // A Transfer class whose own deadline is already spent: the class
+        // context stops at once, as the test above shows.
+        let budgets = BudgetPolicy::finite_defaults()
+            .with_class_limits(
+                BudgetClass::Transfer,
+                ClassLimits::finite(Duration::ZERO, 1_000, 1_000),
+            )
+            .expect("an already-empty transfer deadline remains a valid bounded policy");
+        let (node, _) =
+            OneNode::init(test_config(scratch.path().to_path_buf()).with_runtime_budgets(budgets))
+                .expect("node initialization does not consume the transfer budget");
+        let session = |seconds| {
+            super::GitDaemonSessionDeadline::new(
+                GitDaemonSessionTimeout::try_new(Duration::from_secs(seconds)).unwrap(),
+                super::GitDaemonSessionWorkScaling::FLAT,
+            )
+        };
+
+        // A live session's pack is bounded by the session, not the class.
+        let long = node.session_pack_materialization_context(&session(1800));
+        assert!(matches!(
+            checkpoint_pack_context(&long),
+            PackContextCheckpoint::Live
+        ));
+        let remaining = long
+            .attached_native_cx()
+            .expect("native context")
+            .budget()
+            .remaining(node.runtime.now());
+        assert!(
+            remaining
+                .deadline
+                .is_some_and(|left| left > Duration::from_secs(1700)),
+            "{remaining:?}"
+        );
+        // The class poll quota still bounds it.
+        assert!(remaining.polls.is_some_and(|polls| polls <= 1_000));
+
+        // Its twin: a session that is already spent stops the pack at once.
+        let spent = session(1);
+        std::thread::sleep(Duration::from_millis(1_100));
+        let expired = node.session_pack_materialization_context(&spent);
+        assert!(matches!(
+            checkpoint_pack_context(&expired),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: Some(Exhaustion::Deadline)
+            }
+        ));
+        drop((long, expired));
         node.shutdown().expect("node closes cleanly");
     }
 
