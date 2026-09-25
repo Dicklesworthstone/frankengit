@@ -1,8 +1,13 @@
 //! SSH-2.0 protocol session state machine and channel management.
 //!
 //! Provides a pure-Rust, SANS-I/O SSH server state machine that executes
-//! identification exchange, KEX negotiation, user authentication, channel multiplexing,
-//! and typed Git command dispatch.
+//! identification exchange, initial key exchange, user authentication, and one
+//! session channel with typed Git command dispatch. Additional channels and
+//! rekey are explicitly refused; neither may replace a running Git command.
+
+mod guard;
+#[cfg(test)]
+mod protocol_tests;
 
 use core::fmt::{self, Display, Formatter};
 use std::sync::Arc;
@@ -166,6 +171,7 @@ pub struct SshServerSession {
     inbound_packet_count: u64,
     outbound_packet_count: u64,
     incoming_buffer: Vec<u8>,
+    userauth_service_accepted: bool,
     authenticated_key: Option<[u8; 32]>,
     authenticated_principal: Option<PrincipalId>,
     client_channel_id: Option<u32>,
@@ -222,6 +228,7 @@ impl SshServerSession {
             inbound_packet_count: 0,
             outbound_packet_count: 0,
             incoming_buffer: Vec::new(),
+            userauth_service_accepted: false,
             authenticated_key: None,
             authenticated_principal: None,
             client_channel_id: None,
@@ -342,6 +349,26 @@ impl SshServerSession {
     /// Returns [`SshSessionError`] if a wire error, cryptographic failure,
     /// or protocol violation occurs.
     pub fn handle_incoming_bytes(&mut self, input: &[u8]) -> Result<(), SshSessionError> {
+        if self.phase == SessionPhase::Closed {
+            return Err(SshSessionError::Disconnected {
+                reason: "session is closed".to_owned(),
+            });
+        }
+        let result = self.process_incoming_bytes(input);
+        if result.is_err() {
+            // A malformed authenticated packet must not leave a resumable
+            // half-transition. This says nothing about a Git publication's
+            // outcome; that remains the admission/outcome protocol's job.
+            self.phase = SessionPhase::Closed;
+            self.incoming_buffer.clear();
+            self.channel_input_data.clear();
+            self.ephemeral_kex = None;
+            self.pending_inbound_key = None;
+        }
+        result
+    }
+
+    fn process_incoming_bytes(&mut self, input: &[u8]) -> Result<(), SshSessionError> {
         self.incoming_buffer.extend_from_slice(input);
 
         if self.phase == SessionPhase::Identification {
@@ -523,8 +550,12 @@ impl SshServerSession {
 
     /// Handles a decrypted packet payload.
     fn handle_packet(&mut self, payload: &[u8]) -> Result<(), SshSessionError> {
+        self.validate_packet(payload)?;
         let mut reader = WireReader::new(payload);
         let msg_type = reader.read_u8()?;
+        if (50..80).contains(&msg_type) && self.authenticated_key.is_some() {
+            return Ok(());
+        }
 
         // Strict KEX: until the client's first NEWKEYS, only key-exchange
         // messages are legal. A stray IGNORE/DEBUG injected there is exactly
@@ -673,6 +704,7 @@ impl SshServerSession {
             msg::SERVICE_REQUEST => {
                 let service = reader.read_utf8()?;
                 if service == "ssh-userauth" {
+                    self.userauth_service_accepted = true;
                     let mut accept = WireWriter::new();
                     accept.write_u8(msg::SERVICE_ACCEPT);
                     accept.write_utf8("ssh-userauth");
@@ -745,6 +777,18 @@ impl SshServerSession {
                 let initial_window = reader.read_u32()?;
                 let max_packet = reader.read_u32()?;
 
+                if self.client_channel_id.is_some()
+                    || (channel_type == "session" && max_packet <= CHANNEL_DATA_OVERHEAD)
+                {
+                    let mut fail = WireWriter::new();
+                    fail.write_u8(msg::CHANNEL_OPEN_FAILURE);
+                    fail.write_u32(sender_channel);
+                    fail.write_u32(1); // SSH_OPEN_ADMINISTRATIVELY_PROHIBITED
+                    fail.write_utf8("one session channel with a usable packet size is required");
+                    fail.write_utf8("");
+                    self.send_packet(&fail.into_bytes());
+                    return Ok(());
+                }
                 if channel_type == "session" {
                     self.client_channel_id = Some(sender_channel);
                     self.client_window_size = initial_window;
@@ -767,11 +811,25 @@ impl SshServerSession {
                 }
             }
             msg::CHANNEL_REQUEST => {
-                let recipient_channel = reader.read_u32()?;
+                let _local_channel = reader.read_u32()?; // validated before dispatch
+                let recipient_channel = self.client_channel_id.ok_or_else(|| {
+                    SshSessionError::ProtocolViolation {
+                        reason: "channel request without an open channel".to_owned(),
+                    }
+                })?;
                 let request_type = reader.read_utf8()?;
                 let want_reply = reader.read_bool()?;
 
                 if request_type == "exec" {
+                    // RFC 4254 section 6.5: at most one program per channel.
+                    // A second request cannot change a worker's command or
+                    // authenticated principal, even when it is otherwise valid.
+                    if self.active_command.is_some() || self.phase != SessionPhase::ChannelReady {
+                        if want_reply {
+                            self.send_channel_failure(recipient_channel);
+                        }
+                        return Ok(());
+                    }
                     let command_str = reader.read_utf8()?;
                     let parsed_command = match SshGitCommand::parse(command_str) {
                         Ok(cmd) => cmd,
@@ -957,7 +1015,12 @@ impl SshServerSession {
     /// Zero means the window is exhausted: the caller must feed incoming
     /// bytes (a CHANNEL_WINDOW_ADJUST) before offering the rest again.
     pub fn send_channel_data(&mut self, data: &[u8]) -> usize {
-        let channel = self.client_channel_id.unwrap_or(0);
+        if self.phase == SessionPhase::Closed || self.channel_teardown.close_sent {
+            return 0;
+        }
+        let Some(channel) = self.client_channel_id else {
+            return 0;
+        };
         let chunk_limit = self
             .client_max_packet
             .min(DEFAULT_MAX_PACKET_SIZE)
@@ -997,6 +1060,12 @@ impl SshServerSession {
 
     /// Closes the channel with an exit status code.
     pub fn send_channel_close(&mut self, recipient_channel: u32, exit_status: u32) {
+        if self.phase == SessionPhase::Closed
+            || self.channel_teardown.close_sent
+            || self.client_channel_id != Some(recipient_channel)
+        {
+            return;
+        }
         // 1. Send exit-status
         let mut status = WireWriter::new();
         status.write_u8(msg::CHANNEL_REQUEST);
