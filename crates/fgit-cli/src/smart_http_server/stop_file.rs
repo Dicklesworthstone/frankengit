@@ -25,7 +25,10 @@ impl StopFile {
     /// Reusing a previous stop request must never accidentally report readiness.
     pub(super) fn arm(path: &Path) -> io::Result<Self> {
         let name = path.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "HTTP stop path needs a file name")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP stop path needs a file name",
+            )
         })?;
         let parent = path
             .parent()
@@ -34,7 +37,10 @@ impl StopFile {
         let parent = fs::canonicalize(parent)?;
         let parent_metadata = fs::symlink_metadata(&parent)?;
         if !parent_metadata.is_dir() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "HTTP stop parent is not a directory"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP stop parent is not a directory",
+            ));
         }
         let control = Self {
             path: parent.join(name),
@@ -44,7 +50,10 @@ impl StopFile {
             stopped: Cell::new(false),
         };
         if control.inspect()? {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "HTTP stop file already exists"));
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "HTTP stop file already exists",
+            ));
         }
         Ok(control)
     }
@@ -74,7 +83,11 @@ impl StopFile {
         if self.stopped.get() {
             return Ok(true);
         }
-        if self.last_poll.get().is_some_and(|last| now.saturating_duration_since(last) < POLL_INTERVAL) {
+        if self
+            .last_poll
+            .get()
+            .is_some_and(|last| now.saturating_duration_since(last) < POLL_INTERVAL)
+        {
             return Ok(false);
         }
         self.last_poll.set(Some(now));
@@ -136,7 +149,10 @@ mod tests {
         assert!(!control.poll_at(now).unwrap());
         fs::write(&path, b"operator request, not repository data\xff").unwrap();
         assert!(control.poll_at(now + POLL_INTERVAL).unwrap());
-        assert_eq!(fs::read(&path).unwrap(), b"operator request, not repository data\xff");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"operator request, not repository data\xff"
+        );
         fs::remove_file(&path).unwrap();
         assert!(control.poll_at(now + POLL_INTERVAL).unwrap());
     }
@@ -146,7 +162,10 @@ mod tests {
         let dir = Directory::new();
         let path = dir.0.join("stop");
         fs::write(&path, b"previous stop").unwrap();
-        assert_eq!(StopFile::arm(&path).err().unwrap().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            StopFile::arm(&path).err().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
         assert_eq!(fs::read(&path).unwrap(), b"previous stop");
         fs::remove_file(&path).unwrap();
         assert!(StopFile::arm(&path).is_ok());
@@ -170,7 +189,11 @@ mod tests {
         assert!(!control.poll_at(now).unwrap());
         fs::write(&path, b"").unwrap();
         for millis in 1..50 {
-            assert!(!control.poll_at(now + Duration::from_millis(millis)).unwrap());
+            assert!(
+                !control
+                    .poll_at(now + Duration::from_millis(millis))
+                    .unwrap()
+            );
         }
         assert!(control.poll_at(now + POLL_INTERVAL).unwrap());
     }
@@ -183,7 +206,10 @@ mod tests {
         let control = StopFile::arm(&parent.join("stop")).unwrap();
         assert!(!control.inspect().unwrap());
         fs::remove_dir(&parent).unwrap();
-        assert_eq!(control.inspect().unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            control.inspect().unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
         assert!(StopFile::arm(&parent.join("stop")).is_err());
     }
 
@@ -193,7 +219,10 @@ mod tests {
         let path = dir.0.join("stop");
         let control = StopFile::arm(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        assert_eq!(control.inspect().unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            control.inspect().unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
         assert!(StopFile::arm(&path).is_err());
         fs::remove_dir(&path).unwrap();
         fs::write(&path, b"").unwrap();
@@ -210,7 +239,9 @@ mod tests {
         let target = dir.0.join("target");
         let control = StopFile::arm(&path).unwrap();
         for dangling in [true, false] {
-            if !dangling { fs::write(&target, b"untouched").unwrap(); }
+            if !dangling {
+                fs::write(&target, b"untouched").unwrap();
+            }
             symlink(&target, &path).unwrap();
             assert!(control.inspect().is_err());
             assert!(StopFile::arm(&path).is_err());
@@ -228,9 +259,15 @@ mod tests {
 
     fn arguments() -> Vec<String> {
         vec![
-            "state".into(), "11".repeat(16), "22".repeat(16), "127.0.0.1:0".into(),
-            "--trusted-local".into(), "--token-file".into(), "token".into(),
-            "--principal".into(), "33".repeat(16),
+            "state".into(),
+            "11".repeat(16),
+            "22".repeat(16),
+            "127.0.0.1:0".into(),
+            "--trusted-local".into(),
+            "--token-file".into(),
+            "token".into(),
+            "--principal".into(),
+            "33".repeat(16),
         ]
     }
 
@@ -275,7 +312,6 @@ mod tests {
         assert!(super::super::parse(&args).is_err());
     }
 
-
     #[cfg(unix)]
     #[test]
     fn replaced_control_directory_cannot_hide_a_stop_request() {
@@ -288,7 +324,10 @@ mod tests {
         fs::rename(&parent, &moved).unwrap();
         fs::create_dir(&parent).unwrap();
         // A different empty directory must not be observed as continued service.
-        assert_eq!(control.inspect().unwrap_err().to_string(), "HTTP stop directory changed");
+        assert_eq!(
+            control.inspect().unwrap_err().to_string(),
+            "HTTP stop directory changed"
+        );
         fs::remove_dir(&parent).unwrap();
         fs::rename(&moved, &parent).unwrap();
         assert!(!control.inspect().unwrap());
@@ -300,14 +339,28 @@ mod tests {
     fn continuous_reloadable_mode_preserves_all_independent_endpoint_ceilings() {
         let mut args = arguments()[..5].to_vec();
         args.extend([
-            "--credentials-file".into(), "grants".into(),
-            "--continuous".into(), "--stop-file".into(), "stop".into(),
+            "--credentials-file".into(),
+            "grants".into(),
+            "--continuous".into(),
+            "--stop-file".into(),
+            "stop".into(),
         ]);
         let options = super::super::parse(&args).unwrap();
         assert!(options.stop_file.is_some());
-        assert!(!options.allow_receive && !options.allow_issues && !options.allow_outcomes
-            && !options.allow_pulls && !options.allow_source);
-        for flag in ["--allow-receive", "--allow-issues", "--allow-outcomes", "--allow-pulls", "--allow-source"] {
+        assert!(
+            !options.allow_receive
+                && !options.allow_issues
+                && !options.allow_outcomes
+                && !options.allow_pulls
+                && !options.allow_source
+        );
+        for flag in [
+            "--allow-receive",
+            "--allow-issues",
+            "--allow-outcomes",
+            "--allow-pulls",
+            "--allow-source",
+        ] {
             let mut selected = args.clone();
             selected.push(flag.into());
             let options = super::super::parse(&selected).unwrap();

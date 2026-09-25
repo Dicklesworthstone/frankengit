@@ -496,7 +496,9 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                     options.allow_source,
                     &|| control.should_stop(),
                 ),
-                CredentialInput::HeaderOnly => return Err("header-only operation cannot serve".into()),
+                CredentialInput::HeaderOnly => {
+                    return Err("header-only operation cannot serve".into());
+                }
             }
             .map_err(|error| error.to_string());
         }
