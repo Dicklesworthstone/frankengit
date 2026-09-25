@@ -139,6 +139,7 @@ fn render(
                 PullRequestAction::Open => ("open", "open", Value::Null),
                 PullRequestAction::Update => ("open", "update", Value::Null),
                 PullRequestAction::Close => ("closed", "close", Value::Null),
+                PullRequestAction::Reopen => ("open", "reopen", Value::Null),
             }
         }
         ForgeEventPayload::MergeCommittedNative(merge) => {

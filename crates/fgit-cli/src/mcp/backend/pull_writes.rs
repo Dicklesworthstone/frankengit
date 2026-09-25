@@ -205,6 +205,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
             PullRequestAction::Open => "open",
             PullRequestAction::Update => "update",
             PullRequestAction::Close => "close",
+            PullRequestAction::Reopen => "reopen",
         }),
     );
     result.insert("complete".into(), Value::Bool(true));

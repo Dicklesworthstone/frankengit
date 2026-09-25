@@ -248,10 +248,15 @@ pub fn prepare_event(
                     pull_request: entity,
                     target: change.data.target_ref.clone(),
                 },
-                PullRequestAction::Update => ForgeEventKind::PullRequestUpdated {
-                    pull_request: entity,
-                    target: change.data.target_ref.clone(),
-                },
+                // A reopen changes lifecycle state on the SAME branches without
+                // moving a ref; the sealed batch carries the exact action, and
+                // `validate_transition` admits it only from a closed stream.
+                PullRequestAction::Update | PullRequestAction::Reopen => {
+                    ForgeEventKind::PullRequestUpdated {
+                        pull_request: entity,
+                        target: change.data.target_ref.clone(),
+                    }
+                }
                 PullRequestAction::Close => ForgeEventKind::PullRequestClosed {
                     pull_request: entity,
                 },
