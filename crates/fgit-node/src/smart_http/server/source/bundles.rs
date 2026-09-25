@@ -152,11 +152,11 @@ pub(super) fn execute(
             // Resolve format and the snapshot precondition before object work.
             // Complete framing precedes even this read-only native operation.
             let expected = export_command(&read_form(reader, framing, http)?, node.object_format)?;
-            let context = node.request_context();
             let deadline = GitDaemonSessionDeadline::new(
                 node.git_daemon_session_timeout,
                 GitDaemonSessionWorkScaling::FLAT,
             );
+            let context = node.session_request_context(&deadline);
             let mut live = || !deadline.expired();
             let (head, bundle) = drive_request_while(
                 node,

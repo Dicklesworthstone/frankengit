@@ -167,11 +167,11 @@ pub(super) fn execute(
     // Reuse the only source-upload HTTP/MIME parser, including exact terminal
     // framing, suffix refusal, field limits and bounded binary preservation.
     let bytes = read_source_upload(reader, framing, http, SourceUploadKind::Bundle)?;
-    let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
+    let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
     let (form, payload) = source_upload(&bytes, boundary, SourceUploadKind::Bundle, &mut live)?;
     let mappings = command(

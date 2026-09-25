@@ -40,11 +40,11 @@ pub(super) fn execute(
     // Finish HTTP framing before parsing provisional MIME parts or entering an
     // engine. Socket ingress has its own deadline; this is the server-work phase.
     let bytes = read_source_upload(reader, framing, limits, request.kind())?;
-    let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
+    let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
     let (form, payload) = source_upload(&bytes, request.boundary, request.kind(), &mut live)?;
     let command = request.command(form, node.object_format)?;

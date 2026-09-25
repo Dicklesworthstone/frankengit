@@ -393,11 +393,11 @@ pub(super) fn execute(
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
     let command = request.command(&read_form(reader, framing, http)?, node.object_format)?;
-    let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
+    let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)

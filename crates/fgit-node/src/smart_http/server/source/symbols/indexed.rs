@@ -98,11 +98,11 @@ pub(super) fn execute(
     }
     let (command, minimum) =
         indexed_command(&read_form(reader, framing, http)?, node.object_format)?;
-    let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
+    let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
     let report = drive_request_while(
         node,

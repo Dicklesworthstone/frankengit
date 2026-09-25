@@ -21,11 +21,11 @@ pub(super) fn execute(
         .authenticated_session()
         .ok_or_else(|| ApiError::new(Status::Unauthorized, "unauthorized"))?
         .principal_id();
-    let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
+    let context = node.session_request_context(&deadline);
     let report = drive_request_while(
         node,
         &context,

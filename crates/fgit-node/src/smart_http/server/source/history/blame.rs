@@ -108,11 +108,11 @@ pub(super) fn execute(
     maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     let command = Command::parse(bytes, node.object_format)?;
-    let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
+    let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
     let (head, result) = drive_request_while(
         node,

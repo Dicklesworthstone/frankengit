@@ -69,11 +69,11 @@ pub(super) fn execute(
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
     let bytes = read_upload_bounded(reader, framing, limits, CANDIDATE_UPLOAD_BYTES)?;
-    let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
+    let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
     let (command, bundle) = inspection_upload(&bytes, request.boundary, &mut live)?;
     let (subject, candidate) = request.command(command, node.object_format)?;

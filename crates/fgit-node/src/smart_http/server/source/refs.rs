@@ -52,11 +52,11 @@ pub(super) fn execute(
     let command = request
         .0
         .command(&read_form(reader, framing, limits)?, node.object_format)?;
-    let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
+    let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
     let maximum = usize::try_from(maximum_response)
         .unwrap_or(usize::MAX)

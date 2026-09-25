@@ -258,11 +258,11 @@ pub(super) fn execute(
         return blame::execute(node, &bytes, maximum_response);
     }
     let command = Command::parse(&bytes, node.object_format)?;
-    let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
+    let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
     let result = if let Some(path) = &command.path {
         let options = PathLogOptions {

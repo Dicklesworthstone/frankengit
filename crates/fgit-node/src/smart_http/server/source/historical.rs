@@ -237,11 +237,11 @@ pub(super) fn execute(
     let source_maximum = maximum
         .checked_sub(prefix.len() + 1)
         .ok_or_else(ApiError::too_large)?;
-    let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
+    let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
     let report = drive_request_while(
         node,

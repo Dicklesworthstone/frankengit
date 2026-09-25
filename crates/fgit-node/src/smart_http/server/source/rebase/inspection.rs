@@ -146,11 +146,11 @@ pub(super) fn execute(
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
     let bytes = read_source_upload(reader, framing, http, SourceUploadKind::Bundle)?;
-    let context = node.request_context();
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
         GitDaemonSessionWorkScaling::FLAT,
     );
+    let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
     let (form, bundle) = source_upload(&bytes, boundary, SourceUploadKind::Bundle, &mut live)?;
     let command = Command::parse(form, node.object_format)?;
