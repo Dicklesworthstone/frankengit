@@ -126,6 +126,29 @@ fge_assert_cmd FG-047B-SEC-005 'ssh server is listening on local port' test -n "
 
 SSH_COMMON_OPTS="-p $SSH_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -o LogLevel=ERROR"
 
+# 0. Host key authentication (ATK-017 host key forgery). A client pinned to
+#    the server's real host key connects; the same strict client pinned to a
+#    different key for the same address refuses, so a server that cannot
+#    sign the exchange hash with the pinned key cannot impersonate it.
+SCAN_RC=0
+ssh-keyscan -T 5 -t ed25519 -p "$SSH_PORT" 127.0.0.1 >"$WORK/known_hosts_pinned" 2>"$WORK/keyscan.err" || SCAN_RC=$?
+fge_assert_cmd FG-047B-SEC-030 'ssh-keyscan obtains the server ed25519 host key' \
+  grep -q 'ssh-ed25519 ' "$WORK/known_hosts_pinned"
+ssh-keygen -t ed25519 -N "" -f "$WORK/forged_host" -C forged-host -q
+printf '[127.0.0.1]:%s %s\n' "$SSH_PORT" "$(cut -d' ' -f1,2 "$WORK/forged_host.pub")" >"$WORK/known_hosts_forged"
+STRICT_BASE="-p $SSH_PORT -i $WORK/client_rw -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=5 -o LogLevel=ERROR"
+PINNED_RC=0
+GIT_SSH_COMMAND="ssh $STRICT_BASE -o UserKnownHostsFile=$WORK/known_hosts_pinned" timeout 120 \
+  git ls-remote "ssh://git@127.0.0.1:$SSH_PORT/$REPOID.git" >"$WORK/pinned.refs" 2>"$WORK/pinned.err" || PINNED_RC=$?
+fge_assert_eq FG-047B-SEC-031 0 "$PINNED_RC" 'a strict client pinned to the real host key connects'
+FORGED_RC=0
+GIT_SSH_COMMAND="ssh $STRICT_BASE -o UserKnownHostsFile=$WORK/known_hosts_forged" timeout 120 \
+  git ls-remote "ssh://git@127.0.0.1:$SSH_PORT/$REPOID.git" >"$WORK/forged.refs" 2>"$WORK/forged.err" || FORGED_RC=$?
+fge_assert_cmd FG-047B-SEC-032 'a strict client pinned to a different host key refuses the server' test "$FORGED_RC" -ne 0
+fge_assert_cmd FG-047B-SEC-033 'the refusal is host key verification, not another failure' \
+  grep -Eq 'Host key verification failed|IDENTIFICATION HAS CHANGED' "$WORK/forged.err"
+fge_context keyscan_rc "$SCAN_RC"
+
 # 1. Public-key auth bypass attempt (no key presented)
 bypass_rc=0
 ssh $SSH_COMMON_OPTS -o PubkeyAuthentication=no user@127.0.0.1 "git-upload-pack '/$REPOID.git'" 2>"$WORK/bypass.err" || bypass_rc=$?
