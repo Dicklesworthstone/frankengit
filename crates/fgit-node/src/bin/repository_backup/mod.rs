@@ -298,7 +298,11 @@ fn receipt(archive: &StreamHeader, graph: GraphReport, seal: Seal) -> String {
 pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
     if args == ["--help"] {
         emit(output, USAGE)?;
-        return emit(output, restore::USAGE);
+        emit(output, restore::USAGE)?;
+        return emit(output, restore::verify::USAGE);
+    }
+    if args.first().is_some_and(|arg| arg == "verify") {
+        return restore::verify::run(args, output);
     }
     if args.first().is_some_and(|arg| arg == "restore") {
         return restore::run(args, output);

@@ -2,6 +2,8 @@
 //! Public authority stays absent until metadata AND every selected object verify.
 #[path = "resume.rs"]
 mod resume;
+#[path = "verify.rs"]
+pub(super) mod verify;
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -184,11 +186,19 @@ fn verify_stored(node: &OneNode, record: &Record<'_>) -> Result<(), String> {
     }
     Ok(())
 }
+/// All three operations use the same authority selection and graph verifier.
+/// Preflight neither places payloads nor requires an existing restored fabric.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArchiveGraphMode {
+    Preflight,
+    Install,
+    ReadBack,
+}
 fn graph_from_archive(
     node: &OneNode,
     archive: &mut PinnedArchive,
     expected: &HeadReadReceipt,
-    install: bool,
+    mode: ArchiveGraphMode,
     profile: Profile,
     deadline: Deadline,
 ) -> Result<GraphReport, String> {
@@ -221,7 +231,7 @@ fn graph_from_archive(
         graph
             .observe(record.oid, record.kind, record.payload, &mut checkpoint)
             .map_err(|e| e.to_string())?;
-        if !install {
+        if mode == ArchiveGraphMode::ReadBack {
             verify_stored(node, &record)?;
         }
         deadline.in_request(&request)
@@ -229,7 +239,7 @@ fn graph_from_archive(
     let report = graph
         .finish(&selected.snapshot().refs, &mut checkpoint)
         .map_err(|e| e.to_string())?;
-    if install {
+    if mode == ArchiveGraphMode::Install {
         archive.scan(deadline, |record| {
             deadline.in_request(&request)?;
             // Even a changed file cannot cause an out-of-selection placement
@@ -462,7 +472,7 @@ fn execute_with_checkpoints(
                         node,
                         &mut archive,
                         &expected,
-                        true,
+                        ArchiveGraphMode::Install,
                         options.profile,
                         deadline,
                     )
@@ -476,7 +486,7 @@ fn execute_with_checkpoints(
                         node,
                         &mut archive,
                         &expected,
-                        false,
+                        ArchiveGraphMode::ReadBack,
                         options.profile,
                         deadline,
                     )
@@ -509,7 +519,7 @@ fn execute_with_checkpoints(
                 node,
                 &mut archive,
                 &expected,
-                false,
+                ArchiveGraphMode::ReadBack,
                 options.profile,
                 deadline,
             )
