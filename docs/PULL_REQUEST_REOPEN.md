@@ -68,3 +68,34 @@ target `pull_request_reopen`. The implementation environment has no Rust
 toolchain: tests are checked in but not executed; no compilation, rustfmt,
 Clippy, batch gate or bead closure is claimed. MCP/browser controls, PR comments,
 merge strategies and the rest of the bridge work are outside this slice.
+
+## Native CLI/HTTP review-and-retry campaign
+
+```bash
+FG_BIN=/absolute/path/to/fg scripts/e2e/suites/node/pull_request_reopen.sh
+```
+
+This additional campaign requires an already-built native `fg`. It uses fresh
+CLI processes and the real HTTP listener in both SHA-1 and SHA-256 repositories,
+not a substitute forge. It takes one PR through close/reopen cycles, checks the
+original opener and exact metadata, refuses unauthorized/read-only requests,
+and recovers original CLI and HTTP outcomes after a later closure and listener
+restart. Two synchronized HTTP writers compete for the same closed version;
+only one may reopen it, and both outcomes must remain stable on exact retry.
+
+A candidate is approved before closing. After reopening, that old approval must
+be reported stale and a review-protected merge must refuse without moving refs.
+A fresh candidate review at the newer PR version must permit the reviewed merge;
+reopening the resulting merged PR must still refuse. The campaign also checks
+stale-version, retargeting and moved-tip refusals, explicit stop/drain accounting,
+and unchanged Git refs throughout every metadata-only operation. Failure
+artifacts are retained and the selected `fg` binary is fingerprinted.
+
+The introducing session passed Python compilation/help and shell syntax checks,
+verified that a missing binary cannot report a native pass, and checked generated
+objects/bundles in isolated directories with installed Git 2.47.3 (`fsck --strict`,
+bundle verification/import, exact candidate identity and pack checksum in both
+hash domains). Those checks validate fixtures, **not** FrankenGit execution.
+The native campaign, Rust compilation, parser tests, rustfmt and Clippy were not
+run because no Rust toolchain or built `fg` was available. No gate or bead closure
+is claimed.
