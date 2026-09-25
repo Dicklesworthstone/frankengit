@@ -1,6 +1,6 @@
 //! Caller-selected limits, not automatic budget increases based on input size.
 use super::archive::stream::TransferLimits;
-use fgit_node::NodeRequestContext;
+use crate::NodeRequestContext;
 use fgit_runtime::{BudgetClass, BudgetPolicy, ClassLimits};
 use std::time::{Duration, Instant};
 

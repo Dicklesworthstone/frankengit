@@ -14,6 +14,7 @@ use fgit_resource::settlement::{DeliveryVerdict, DownstreamIdempotency, ProbeVer
 use fgit_types::{AsciiSlug, RefusalCode};
 use fsqlite_types::cx::Cx;
 
+mod acknowledgements;
 mod request_io;
 mod transport;
 
@@ -38,7 +39,10 @@ pub struct WebhookDeliveryDestination {
     /// One attempt deadline, not a renewed per-read/write idle timeout.
     pub timeout: Duration,
     pub dead_letters: DeadLetterQueue,
+    /// Bounded best-effort diagnostics, not evidence used by `probe`.
+    /// Mutating this legacy view cannot fabricate a delivery acknowledgement.
     pub acknowledged: Arc<Mutex<Vec<(AsciiSlug, u32)>>>,
+    receipts: Mutex<acknowledgements::Acknowledgements>,
 }
 
 impl WebhookDeliveryDestination {
@@ -55,6 +59,7 @@ impl WebhookDeliveryDestination {
             timeout: Duration::from_secs(5),
             dead_letters,
             acknowledged: Arc::new(Mutex::new(Vec::new())),
+            receipts: Mutex::new(acknowledgements::Acknowledgements::default()),
         }
     }
 
@@ -126,7 +131,10 @@ impl WebhookDeliveryDestination {
         if !self.registration.active || request.destination != self.destination_slug {
             return Err(RefusalCode::PublicationPolicyRefused);
         }
-        if attempt == 0 || self.timeout.is_zero() {
+        if attempt == 0
+            || attempt > self.registration.retry_schedule.max_attempts
+            || self.timeout.is_zero()
+        {
             return Err(RefusalCode::ResourceBudgetExceeded);
         }
         let budget = request_io::Attempt::new(self.timeout, checkpoint)?;
@@ -241,10 +249,7 @@ impl WebhookDeliveryDestination {
 
         match status_code {
             200..=299 => {
-                self.acknowledged
-                    .lock()
-                    .unwrap()
-                    .push((request.key, attempt));
+                self.remember_acknowledgement(request, attempt);
                 // A retry ordinal is not evidence of receiver-side deduplication.
                 Ok((DeliveryVerdict::Accepted, response))
             }
@@ -253,8 +258,18 @@ impl WebhookDeliveryDestination {
                 if let Some(location) = extract_header(&response, "location") {
                     match self.ssrf_policy.validate_redirect(&validated, &location) {
                         Ok(_) => {
-                            // Valid redirect target, retriable
-                            Ok((DeliveryVerdict::TransientFailure, response))
+                            // This adapter does not follow redirects. Even a
+                            // policy-approved Location cannot extend its retry
+                            // budget indefinitely by redirecting every attempt.
+                            if attempt < self.registration.retry_schedule.max_attempts {
+                                Ok((DeliveryVerdict::TransientFailure, response))
+                            } else {
+                                let reason = format!(
+                                    "receiver returned HTTP {status_code}; redirect retry budget exhausted"
+                                );
+                                self.record_terminal_failure(request, attempt, &reason, now_secs)?;
+                                Ok((DeliveryVerdict::PermanentRejection, response))
+                            }
                         }
                         Err(WebhookRefusal::SsrfBlocked { reason, .. }) => {
                             self.record_terminal_failure(request, attempt, reason, now_secs)?;
@@ -270,19 +285,26 @@ impl WebhookDeliveryDestination {
                         }
                     }
                 } else {
-                    Ok((
-                        DeliveryVerdict::PermanentRejection,
-                        b"missing location header on redirect".to_vec(),
-                    ))
+                    let reason = "missing or ambiguous Location header on redirect";
+                    self.record_terminal_failure(request, attempt, reason, now_secs)?;
+                    Ok((DeliveryVerdict::PermanentRejection, reason.as_bytes().to_vec()))
                 }
             }
-            400..=499 if status_code != 429 => {
+            300..=399 => {
+                let reason = format!("unsupported webhook redirect response HTTP {status_code}");
+                self.record_terminal_failure(request, attempt, &reason, now_secs)?;
+                Ok((DeliveryVerdict::PermanentRejection, response))
+            }
+            400..=499 if !matches!(status_code, 408 | 429) => {
                 let reason = format!("receiver returned HTTP {status_code}");
                 self.record_terminal_failure(request, attempt, &reason, now_secs)?;
                 Ok((DeliveryVerdict::PermanentRejection, response))
             }
             _ => {
-                // 429 or 5xx
+                // An explicit 408 means the request was not received in full
+                // (RFC 9110 section 15.5.9). Like 429 and 5xx, retry it only
+                // within the configured budget. This is not a local timeout:
+                // a lost/incomplete response above must remain ambiguous.
                 let reason = format!("receiver returned HTTP {status_code}");
                 if attempt < self.registration.retry_schedule.max_attempts {
                     Ok((DeliveryVerdict::TransientFailure, response))
@@ -292,6 +314,43 @@ impl WebhookDeliveryDestination {
                 }
             }
         }
+    }
+
+    fn remember_acknowledgement(&self, request: &DeliveryRequest<'_>, attempt: u32) {
+        // These caches are optional. Poisoning or allocation failure cannot
+        // negate a final ACK that has already arrived from the receiver.
+        if let Ok(mut receipts) = self.receipts.lock() {
+            receipts.remember(request, &self.registration);
+        }
+        if let Ok(mut diagnostics) = self.acknowledged.lock() {
+            diagnostics.retain(|(key, _)| *key != request.key);
+            let remove = diagnostics
+                .len()
+                .saturating_sub(acknowledgements::MAX_ACKNOWLEDGEMENTS - 1);
+            drop(diagnostics.drain(..remove));
+            if diagnostics.try_reserve(1).is_ok() {
+                diagnostics.push((request.key, attempt));
+            }
+        }
+    }
+
+    fn probe_acknowledgement(
+        &self,
+        request: &DeliveryRequest<'_>,
+    ) -> Result<ProbeVerdict, RefusalCode> {
+        if request.destination != self.destination_slug {
+            return Err(RefusalCode::PublicationPolicyRefused);
+        }
+        let known = self
+            .receipts
+            .lock()
+            .is_ok_and(|receipts| receipts.contains(request, &self.registration));
+        Ok(if known {
+            ProbeVerdict::Delivered
+        } else {
+            // Losing local evidence is not evidence of remote non-delivery.
+            ProbeVerdict::Unknown
+        })
     }
 
     fn resolve_safe_socket_addr(&self, url: &ValidatedWebhookUrl) -> Result<SocketAddr, String> {
@@ -370,12 +429,7 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
     {
         async move {
             request_checkpoint(cx)?;
-            let acks = self.acknowledged.lock().unwrap();
-            if acks.iter().any(|(k, _)| *k == request.key) {
-                Ok((ProbeVerdict::Delivered, Vec::new()))
-            } else {
-                Ok((ProbeVerdict::Unknown, Vec::new()))
-            }
+            Ok((self.probe_acknowledgement(request)?, Vec::new()))
         }
     }
 
@@ -486,3 +540,6 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod retry_tests;

@@ -470,3 +470,6 @@ mod tests;
 
 /// Complete authority-selected native graph inspection under a node request.
 pub mod integrity;
+
+/// Trusted-local source archive export, preflight and root-last recovery.
+pub mod backup;

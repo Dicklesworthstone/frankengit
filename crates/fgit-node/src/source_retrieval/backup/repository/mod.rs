@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use fgit_authority::{HeadReadReceipt, StoreInstanceId};
 use fgit_authority_fsqlite::{ExportBundle, PortableStoreLimits, export_bundle};
 use fgit_crypto::GitObjectKind;
-use fgit_node::{NodeConfig, OneNode};
+use crate::{NodeConfig, OneNode};
 use fgit_object_fabric::ObjectKind as FabricKind;
 use fgit_treefs::integrity::{GraphLimits, GraphReport, ObjectGraphAudit};
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
@@ -22,7 +22,7 @@ use archive::stream::{Seal, StreamDecoder, StreamEncoder, StreamHeader, Transfer
 use archive::{Identity, MAX_OBJECT_BYTES, MAX_OBJECTS};
 use profile::{Profile, ProfileFlags};
 
-pub const USAGE: &str = "usage: fg-repository-backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
+pub const USAGE: &str = "usage: fg backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
          --trusted-local [--object-format sha1|sha256]
          [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
 
@@ -298,7 +298,11 @@ fn receipt(archive: &StreamHeader, graph: GraphReport, seal: Seal) -> String {
 pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
     if args == ["--help"] {
         emit(output, USAGE)?;
-        return emit(output, restore::USAGE);
+        emit(output, restore::USAGE)?;
+        return emit(output, restore::verify::USAGE);
+    }
+    if args.first().is_some_and(|arg| arg == "verify") {
+        return restore::verify::run(args, output);
     }
     if args.first().is_some_and(|arg| arg == "restore") {
         return restore::run(args, output);

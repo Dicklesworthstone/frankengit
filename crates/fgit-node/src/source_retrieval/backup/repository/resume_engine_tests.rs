@@ -3,7 +3,7 @@
 use super::*;
 use fgit_authority::{ExpectedOld, IdempotencyKey, ProposedNew, RefCommand};
 use fgit_crypto::git_object_id;
-use fgit_node::LoopbackReceiveSession;
+use crate::LoopbackReceiveSession;
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId, RefName, RepositoryId,
     TenantId,
