@@ -14,6 +14,7 @@ use fgit_resource::settlement::{DeliveryVerdict, DownstreamIdempotency, ProbeVer
 use fgit_types::{AsciiSlug, RefusalCode};
 use fsqlite_types::cx::Cx;
 
+mod acknowledgements;
 mod request_io;
 mod transport;
 
@@ -38,7 +39,10 @@ pub struct WebhookDeliveryDestination {
     /// One attempt deadline, not a renewed per-read/write idle timeout.
     pub timeout: Duration,
     pub dead_letters: DeadLetterQueue,
+    /// Bounded best-effort diagnostics, not evidence used by `probe`.
+    /// Mutating this legacy view cannot fabricate a delivery acknowledgement.
     pub acknowledged: Arc<Mutex<Vec<(AsciiSlug, u32)>>>,
+    receipts: Mutex<acknowledgements::Acknowledgements>,
 }
 
 impl WebhookDeliveryDestination {
@@ -55,6 +59,7 @@ impl WebhookDeliveryDestination {
             timeout: Duration::from_secs(5),
             dead_letters,
             acknowledged: Arc::new(Mutex::new(Vec::new())),
+            receipts: Mutex::new(acknowledgements::Acknowledgements::default()),
         }
     }
 
@@ -241,10 +246,7 @@ impl WebhookDeliveryDestination {
 
         match status_code {
             200..=299 => {
-                self.acknowledged
-                    .lock()
-                    .unwrap()
-                    .push((request.key, attempt));
+                self.remember_acknowledgement(request, attempt);
                 // A retry ordinal is not evidence of receiver-side deduplication.
                 Ok((DeliveryVerdict::Accepted, response))
             }
@@ -292,6 +294,43 @@ impl WebhookDeliveryDestination {
                 }
             }
         }
+    }
+
+    fn remember_acknowledgement(&self, request: &DeliveryRequest<'_>, attempt: u32) {
+        // These caches are optional. Poisoning or allocation failure cannot
+        // negate a final ACK that has already arrived from the receiver.
+        if let Ok(mut receipts) = self.receipts.lock() {
+            receipts.remember(request, &self.registration);
+        }
+        if let Ok(mut diagnostics) = self.acknowledged.lock() {
+            diagnostics.retain(|(key, _)| *key != request.key);
+            let remove = diagnostics
+                .len()
+                .saturating_sub(acknowledgements::MAX_ACKNOWLEDGEMENTS - 1);
+            diagnostics.drain(..remove);
+            if diagnostics.try_reserve(1).is_ok() {
+                diagnostics.push((request.key, attempt));
+            }
+        }
+    }
+
+    fn probe_acknowledgement(
+        &self,
+        request: &DeliveryRequest<'_>,
+    ) -> Result<ProbeVerdict, RefusalCode> {
+        if request.destination != self.destination_slug {
+            return Err(RefusalCode::PublicationPolicyRefused);
+        }
+        let known = self
+            .receipts
+            .lock()
+            .is_ok_and(|receipts| receipts.contains(request, &self.registration));
+        Ok(if known {
+            ProbeVerdict::Delivered
+        } else {
+            // Losing local evidence is not evidence of remote non-delivery.
+            ProbeVerdict::Unknown
+        })
     }
 
     fn resolve_safe_socket_addr(&self, url: &ValidatedWebhookUrl) -> Result<SocketAddr, String> {
@@ -370,12 +409,7 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
     {
         async move {
             request_checkpoint(cx)?;
-            let acks = self.acknowledged.lock().unwrap();
-            if acks.iter().any(|(k, _)| *k == request.key) {
-                Ok((ProbeVerdict::Delivered, Vec::new()))
-            } else {
-                Ok((ProbeVerdict::Unknown, Vec::new()))
-            }
+            Ok((self.probe_acknowledgement(request)?, Vec::new()))
         }
     }
 
