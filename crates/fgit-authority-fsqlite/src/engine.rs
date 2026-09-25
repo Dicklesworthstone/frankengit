@@ -1192,11 +1192,17 @@ where
 /// Production retry profile for one store operation, in millisecond ticks.
 ///
 /// Every trait operation below is one whole SQL transaction, so this is the
-/// §3.4 whole-transaction retry, never a statement replay. Seven backoffs from
-/// 2 ms doubling to a 256 ms ceiling fit well inside the 2 s budget.
-const OPERATION_RETRY_BUDGET: RetryBudget = RetryBudget::new(2_000, MAX_TRANSIENT_ATTEMPTS);
+/// §3.4 whole-transaction retry, never a statement replay. The time bound is
+/// the caller's own remaining deadline (§3.4: "subject to ... the remaining
+/// budget", backoff "stops before the parent deadline"); a fixed 2 s window
+/// under a 15 s or longer request deadline let a contended loser give up while
+/// its request still had most of its budget, and HTTP then had to report
+/// `outcome_unknown` for a deterministic refusal (x2mv.4.27). Backoff doubles
+/// from 2 ms to a 512 ms ceiling; the attempt bound still caps the loop.
 const OPERATION_BACKOFF_BASE_MS: u64 = 2;
-const OPERATION_BACKOFF_CEILING_MS: u64 = 256;
+const OPERATION_BACKOFF_CEILING_MS: u64 = 512;
+/// The retry window when the caller's context carries no deadline.
+const OPERATION_RETRY_FALLBACK_MS: u64 = 2_000;
 
 /// Per-call jitter seeds, so concurrent contenders on one store separate
 /// instead of re-colliding on identical delays. Deterministic in call order.
@@ -1206,6 +1212,14 @@ static OPERATION_RETRY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// runtime (§3.3): without a runtime clock the operation is not retried.
 fn runtime_timer() -> Option<asupersync::time::TimerDriverHandle> {
     asupersync::Cx::current().and_then(|cx| cx.timer_driver())
+}
+
+/// The caller's remaining deadline in milliseconds, read against the clock
+/// its budget was minted on, or `None` when its context has no deadline.
+fn parent_remaining_ms(cx: &Cx) -> Option<u64> {
+    let native = cx.attached_native_cx().or_else(asupersync::Cx::current)?;
+    let remaining = native.budget().remaining(native.now()).deadline?;
+    Some(u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Retry state for one production store operation.
@@ -1225,9 +1239,12 @@ struct OperationRetry {
 }
 
 impl OperationRetry {
-    fn new(instance: StoreInstanceId) -> Self {
+    fn new(instance: StoreInstanceId, cx: &Cx) -> Self {
         let budget = if runtime_timer().is_some() {
-            OPERATION_RETRY_BUDGET
+            RetryBudget::new(
+                parent_remaining_ms(cx).unwrap_or(OPERATION_RETRY_FALLBACK_MS),
+                MAX_TRANSIENT_ATTEMPTS,
+            )
         } else {
             RetryBudget::new(0, 1)
         };
@@ -1282,8 +1299,8 @@ impl OperationRetry {
 /// A macro rather than a generic driver keeps each trait future a plain state
 /// machine over the operation's own future, so proving it `Send` stays local.
 macro_rules! with_transient_retry {
-    ($instance:expr, $operation:expr) => {{
-        let mut retry = OperationRetry::new($instance);
+    ($instance:expr, $cx:expr, $operation:expr) => {{
+        let mut retry = OperationRetry::new($instance, $cx);
         loop {
             match $operation.await {
                 Ok(value) => break Ok(value),
@@ -1327,7 +1344,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         key: &ImmutableKey,
         body: &[u8],
     ) -> Result<PutOutcome, AuthorityFailure> {
-        with_transient_retry!(self.instance, Self::put_if_absent(self, cx, key, body))
+        with_transient_retry!(self.instance, cx, Self::put_if_absent(self, cx, key, body))
     }
 
     async fn read_immutable(
@@ -1335,7 +1352,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         cx: &Self::Context,
         key: &ImmutableKey,
     ) -> Result<ImmutableRead, AuthorityFailure> {
-        with_transient_retry!(self.instance, Self::read_immutable(self, cx, key))
+        with_transient_retry!(self.instance, cx, Self::read_immutable(self, cx, key))
     }
 
     async fn initialize_head(
@@ -1347,6 +1364,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
     ) -> Result<HeadInit, AuthorityFailure> {
         with_transient_retry!(
             self.instance,
+            cx,
             Self::initialize_head(self, cx, key, generation, body)
         )
     }
@@ -1356,7 +1374,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         cx: &Self::Context,
         key: &HeadKey,
     ) -> Result<HeadRead, AuthorityFailure> {
-        with_transient_retry!(self.instance, Self::read_head(self, cx, key))
+        with_transient_retry!(self.instance, cx, Self::read_head(self, cx, key))
     }
 
     async fn compare_exchange_head(
@@ -1369,6 +1387,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
     ) -> Result<CasOutcome, AuthorityFailure> {
         with_transient_retry!(
             self.instance,
+            cx,
             Self::compare_exchange_head(self, cx, key, expected, new_generation, new_body)
         )
     }
@@ -1385,6 +1404,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
     ) -> Result<CasOutcome, AuthorityFailure> {
         with_transient_retry!(
             self.instance,
+            cx,
             Self::publish_head_with_outcomes(
                 self,
                 cx,
@@ -1405,6 +1425,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
     ) -> Result<AuthenticatedHead, AuthorityFailure> {
         with_transient_retry!(
             self.instance,
+            cx,
             Self::authenticate_head_receipt(self, cx, receipt)
         )
     }
@@ -1418,15 +1439,40 @@ mod tests {
         head_generation_from_unsigned,
     };
     use fgit_authority::AmbiguityReason;
-    use fgit_runtime::boot::RuntimeProfile;
+    use fgit_runtime::boot::{NodeRuntime, RuntimeProfile};
+    use fgit_runtime::meter::ClassLimits;
+    use fsqlite_types::cx::Cx;
+    use std::time::Duration;
 
     const INSTANCE: StoreInstanceId = StoreInstanceId::from_raw(7);
+
+    /// A request context whose budget has exactly `deadline` left.
+    fn request_cx(runtime: &NodeRuntime, deadline: Duration) -> Cx {
+        let budget = ClassLimits::finite(deadline, 50_000, 1_000_000).at(runtime.now());
+        let cx = Cx::new();
+        cx.set_native_cx(runtime.request_cx_with_budget(budget));
+        cx
+    }
+
+    /// How many whole-transaction attempts a busy store gets under `cx`.
+    fn attempts_before_refusal(cx: &Cx) -> u32 {
+        let mut retry = OperationRetry::new(INSTANCE, cx);
+        let mut attempts = 1;
+        while retry
+            .after_failure(EngineError::Engine(TransientClass::Busy))
+            .is_ok()
+        {
+            attempts += 1;
+        }
+        attempts
+    }
 
     #[test]
     fn production_contention_is_retried_to_the_bound_and_then_still_proves_no_effect() {
         let runtime = RuntimeProfile::production(1).build().unwrap();
+        let cx = request_cx(&runtime, Duration::from_secs(600));
         runtime.block_on(async {
-            let mut retry = OperationRetry::new(INSTANCE);
+            let mut retry = OperationRetry::new(INSTANCE, &cx);
             for attempt in 1..MAX_TRANSIENT_ATTEMPTS {
                 assert!(
                     retry
@@ -1446,8 +1492,51 @@ mod tests {
     }
 
     #[test]
+    fn the_retry_window_is_the_callers_remaining_deadline_not_a_fixed_constant() {
+        let runtime = RuntimeProfile::production(1).build().unwrap();
+        let short = request_cx(&runtime, Duration::from_millis(40));
+        let request = request_cx(&runtime, Duration::from_secs(15));
+        runtime.block_on(async {
+            // A nearly spent parent stops the loop well before the attempt
+            // bound: backoff never sleeps past the caller's deadline.
+            let spent = attempts_before_refusal(&short);
+            assert!(spent < 8, "a 40 ms parent allowed {spent} attempts");
+            // Its permitted twin, an ordinary 15 s request, keeps retrying a
+            // contended store to the attempt bound, far past the old fixed
+            // 2 s window (x2mv.4.27), and still ends in a no-effect refusal.
+            assert_eq!(attempts_before_refusal(&request), MAX_TRANSIENT_ATTEMPTS);
+            let mut retry = OperationRetry::new(INSTANCE, &short);
+            while retry
+                .after_failure(EngineError::Engine(TransientClass::Busy))
+                .is_ok()
+            {}
+            assert_eq!(
+                retry
+                    .after_failure(EngineError::Engine(TransientClass::Busy))
+                    .unwrap_err(),
+                AuthorityFailure::Refused(AuthorityRefusal::Throttled)
+            );
+        });
+    }
+
+    #[test]
+    fn a_context_without_a_deadline_falls_back_to_the_bounded_window() {
+        let runtime = RuntimeProfile::production(1).build().unwrap();
+        runtime.block_on(async {
+            // No attached request budget: the planned backoff stays inside
+            // the finite fallback window, so the loop ends before the bound.
+            let unbounded = attempts_before_refusal(&Cx::new());
+            assert!(
+                (2..MAX_TRANSIENT_ATTEMPTS).contains(&unbounded),
+                "fallback window allowed {unbounded} attempts"
+            );
+        });
+    }
+
+    #[test]
     fn cancellation_indeterminacy_and_permanent_errors_are_never_retried() {
         let runtime = RuntimeProfile::production(1).build().unwrap();
+        let cx = request_cx(&runtime, Duration::from_secs(600));
         runtime.block_on(async {
             for (error, expected) in [
                 (
@@ -1463,7 +1552,7 @@ mod tests {
                     AuthorityFailure::Refused(AuthorityRefusal::Unavailable),
                 ),
             ] {
-                let mut retry = OperationRetry::new(INSTANCE);
+                let mut retry = OperationRetry::new(INSTANCE, &cx);
                 assert_eq!(retry.after_failure(error).unwrap_err(), expected);
             }
         });
@@ -1472,7 +1561,7 @@ mod tests {
     #[test]
     fn without_a_runtime_clock_contention_is_not_retried() {
         // Time belongs to the runtime: outside one there is no way to back off.
-        let mut retry = OperationRetry::new(INSTANCE);
+        let mut retry = OperationRetry::new(INSTANCE, &Cx::new());
         assert_eq!(
             retry
                 .after_failure(EngineError::Engine(TransientClass::Busy))
