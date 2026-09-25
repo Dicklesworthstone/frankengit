@@ -152,7 +152,11 @@ mod tests {
         assert!(policy.keep_accepting(1, 0, Duration::ZERO).unwrap());
         assert!(!policy.keep_accepting(2, 0, Duration::ZERO).unwrap());
         assert!(!policy.keep_accepting(2, 1, Duration::ZERO).unwrap());
-        assert!(policy.keep_accepting(1, 1, Duration::from_secs(60)).unwrap());
+        assert!(
+            policy
+                .keep_accepting(1, 1, Duration::from_secs(60))
+                .unwrap()
+        );
         assert!(!policy.keep_accepting(1, 0, Duration::from_secs(1)).unwrap());
     }
 
@@ -164,7 +168,11 @@ mod tests {
         assert!(policy.valid());
         for accepted in [0, 1024, MAX_SESSIONS, MAX_SESSIONS + 1] {
             for active in [0, 16] {
-                assert!(policy.keep_accepting(accepted, active, Duration::MAX).unwrap());
+                assert!(
+                    policy
+                        .keep_accepting(accepted, active, Duration::MAX)
+                        .unwrap()
+                );
             }
         }
         stop.set(true);
@@ -175,15 +183,22 @@ mod tests {
 
     #[test]
     fn control_failure_is_an_error_not_successful_retirement() {
-        let control = || Err(io::Error::new(io::ErrorKind::PermissionDenied, "stop unavailable"));
+        let control = || {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "stop unavailable",
+            ))
+        };
         let error = Acceptance::UntilStopped(&control)
             .keep_accepting(1, 16, Duration::ZERO)
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         let permitted = || Ok(true);
-        assert!(!Acceptance::UntilStopped(&permitted)
-            .keep_accepting(1, 16, Duration::ZERO)
-            .unwrap());
+        assert!(
+            !Acceptance::UntilStopped(&permitted)
+                .keep_accepting(1, 16, Duration::ZERO)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -194,21 +209,33 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.to_string(), "HTTP stop control panicked");
         let permitted = || Ok(false);
-        assert!(Acceptance::UntilStopped(&permitted)
-            .keep_accepting(1, 1, Duration::ZERO)
-            .unwrap());
+        assert!(
+            Acceptance::UntilStopped(&permitted)
+                .keep_accepting(1, 1, Duration::ZERO)
+                .unwrap()
+        );
     }
 
     #[test]
     fn receipt_counter_never_wraps_but_stop_at_the_boundary_is_allowed() {
         let keep_running = || Ok(false);
         let policy = Acceptance::UntilStopped(&keep_running);
-        assert!(policy.keep_accepting(usize::MAX - 1, 0, Duration::ZERO).unwrap());
-        assert!(policy.keep_accepting(usize::MAX, 0, Duration::ZERO).is_err());
+        assert!(
+            policy
+                .keep_accepting(usize::MAX - 1, 0, Duration::ZERO)
+                .unwrap()
+        );
+        assert!(
+            policy
+                .keep_accepting(usize::MAX, 0, Duration::ZERO)
+                .is_err()
+        );
         let stop = || Ok(true);
-        assert!(!Acceptance::UntilStopped(&stop)
-            .keep_accepting(usize::MAX, 0, Duration::ZERO)
-            .unwrap());
+        assert!(
+            !Acceptance::UntilStopped(&stop)
+                .keep_accepting(usize::MAX, 0, Duration::ZERO)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -218,11 +245,20 @@ mod tests {
             (MAX_SESSIONS + 1, Duration::from_secs(1)),
             (1, Duration::ZERO),
         ] {
-            assert!(!Acceptance::Bounded { max_sessions, idle_timeout }.valid());
+            assert!(
+                !Acceptance::Bounded {
+                    max_sessions,
+                    idle_timeout
+                }
+                .valid()
+            );
         }
-        assert!(Acceptance::Bounded {
-            max_sessions: MAX_SESSIONS,
-            idle_timeout: Duration::from_secs(1),
-        }.valid());
+        assert!(
+            Acceptance::Bounded {
+                max_sessions: MAX_SESSIONS,
+                idle_timeout: Duration::from_secs(1),
+            }
+            .valid()
+        );
     }
 }

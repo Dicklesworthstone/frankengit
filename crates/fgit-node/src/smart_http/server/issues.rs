@@ -231,6 +231,11 @@ pub(super) fn admission_error(error: NodeReceiveTransportRefusal) -> ApiError {
     {
         return ApiError::new(Status::Conflict, "idempotency_key_reuse");
     }
+    // The client only learns that the outcome is unknown; the operator gets
+    // the typed cause, which is what separates contention from a fault.
+    eprintln!(
+        "Forge HTTP outcome unknown: {error}; retry the identical command and Idempotency-Key"
+    );
     ApiError::unknown()
 }
 
