@@ -107,6 +107,7 @@ impl<'a> Request<'a> {
                     "open" => PullRequestAction::Open,
                     "update" => PullRequestAction::Update,
                     "close" => PullRequestAction::Close,
+                    "reopen" => PullRequestAction::Reopen,
                     _ => return Err(ApiError::not_found()),
                 };
                 Operation::Mutate {
@@ -338,6 +339,67 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(Request::parse(&head).is_err());
+        }
+    }
+
+    #[test]
+    fn reopen_keeps_the_explicit_version_and_full_native_metadata() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let body = fields(format).replace("expected_version=0", "expected_version=2");
+            let reopened = command("reopen", &body, format).unwrap();
+            let updated = command("update", &body, format).unwrap();
+            assert_eq!(reopened.action, PullRequestAction::Reopen);
+            assert_eq!(reopened.number, PullRequestNumber::try_new(7).unwrap());
+            assert_eq!(reopened.expected_version,
+                ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap()));
+            assert_eq!(reopened.data, updated.data);
+            assert_eq!(reopened.data.body, "%2f\n\"");
+            let actor = fgit_types::PrincipalId::from_bytes([7; 16]);
+            assert_ne!(reopened.proposed_event(actor, format).unwrap(),
+                updated.proposed_event(actor, format).unwrap());
+            assert_eq!(super::super::output::action(reopened.action), "reopen");
+        }
+    }
+
+    #[test]
+    fn reopen_cannot_reset_version_omit_content_or_supply_its_own_actor() {
+        let format = GitHashAlgorithm::Sha1;
+        let body = fields(format).replace("expected_version=0", "expected_version=2");
+        for field in ["expected_version", "object_format", "source_ref", "target_ref",
+            "source_tip", "target_tip", "title", "body"] {
+            let missing = body.split('&')
+                .filter(|part| !part.starts_with(&format!("{field}=")))
+                .collect::<Vec<_>>().join("&");
+            assert!(command("reopen", &missing, format).is_err(), "missing {field}");
+        }
+        for invalid in [
+            body.replace("expected_version=2", "expected_version=0"),
+            body.replace("expected_version=2", "expected_version=02"),
+            body.replace("expected_version=2", "expected_version=18446744073709551615"),
+            body.clone() + "&principal_id=administrator",
+            body.clone() + "&expected_version=3",
+            body.replace("object_format=sha1", "object_format=sha256"),
+        ] {
+            assert!(command("reopen", &invalid, format).is_err());
+        }
+        assert!(command("reopen", &body, format).is_ok());
+    }
+
+    #[test]
+    fn reopen_route_is_a_body_bearing_mutation_not_a_read_or_merge_shortcut() {
+        let bytes = b"POST /repo.git/api/v1/pulls/7/reopen HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n";
+        let envelope = head::parse(bytes, HttpLimits::default()).unwrap().unwrap();
+        // Exercise the full PR route selector, including collaboration routers.
+        let routed = super::super::Request::parse(&envelope).unwrap().unwrap();
+        assert!(routed.is_mutation());
+        assert!(routed.accepts_body());
+        for text in [
+            "GET /repo.git/api/v1/pulls/7/reopen HTTP/1.1\r\nHost: local\r\n\r\n",
+            "POST /repo.git/api/v1/pulls/7/reopen HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n",
+            "POST /repo.git/api/v1/pulls/7/reopen?force=true HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n",
+        ] {
+            let envelope = head::parse(text.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+            assert!(Request::parse(&envelope).is_err());
         }
     }
 }
