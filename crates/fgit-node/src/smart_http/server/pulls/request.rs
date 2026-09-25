@@ -350,13 +350,17 @@ mod tests {
             let updated = command("update", &body, format).unwrap();
             assert_eq!(reopened.action, PullRequestAction::Reopen);
             assert_eq!(reopened.number, PullRequestNumber::try_new(7).unwrap());
-            assert_eq!(reopened.expected_version,
-                ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap()));
+            assert_eq!(
+                reopened.expected_version,
+                ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap())
+            );
             assert_eq!(reopened.data, updated.data);
             assert_eq!(reopened.data.body, "%2f\n\"");
             let actor = fgit_types::PrincipalId::from_bytes([7; 16]);
-            assert_ne!(reopened.proposed_event(actor, format).unwrap(),
-                updated.proposed_event(actor, format).unwrap());
+            assert_ne!(
+                reopened.proposed_event(actor, format).unwrap(),
+                updated.proposed_event(actor, format).unwrap()
+            );
             assert_eq!(super::super::output::action(reopened.action), "reopen");
         }
     }
@@ -365,17 +369,33 @@ mod tests {
     fn reopen_cannot_reset_version_omit_content_or_supply_its_own_actor() {
         let format = GitHashAlgorithm::Sha1;
         let body = fields(format).replace("expected_version=0", "expected_version=2");
-        for field in ["expected_version", "object_format", "source_ref", "target_ref",
-            "source_tip", "target_tip", "title", "body"] {
-            let missing = body.split('&')
+        for field in [
+            "expected_version",
+            "object_format",
+            "source_ref",
+            "target_ref",
+            "source_tip",
+            "target_tip",
+            "title",
+            "body",
+        ] {
+            let missing = body
+                .split('&')
                 .filter(|part| !part.starts_with(&format!("{field}=")))
-                .collect::<Vec<_>>().join("&");
-            assert!(command("reopen", &missing, format).is_err(), "missing {field}");
+                .collect::<Vec<_>>()
+                .join("&");
+            assert!(
+                command("reopen", &missing, format).is_err(),
+                "missing {field}"
+            );
         }
         for invalid in [
             body.replace("expected_version=2", "expected_version=0"),
             body.replace("expected_version=2", "expected_version=02"),
-            body.replace("expected_version=2", "expected_version=18446744073709551615"),
+            body.replace(
+                "expected_version=2",
+                "expected_version=18446744073709551615",
+            ),
             body.clone() + "&principal_id=administrator",
             body.clone() + "&expected_version=3",
             body.replace("object_format=sha1", "object_format=sha256"),
@@ -398,7 +418,9 @@ mod tests {
             "POST /repo.git/api/v1/pulls/7/reopen HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n",
             "POST /repo.git/api/v1/pulls/7/reopen?force=true HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 1\r\n\r\n",
         ] {
-            let envelope = head::parse(text.as_bytes(), HttpLimits::default()).unwrap().unwrap();
+            let envelope = head::parse(text.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
             assert!(Request::parse(&envelope).is_err());
         }
     }
