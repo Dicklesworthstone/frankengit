@@ -6041,14 +6041,21 @@ impl NodeConfig {
     /// Selects the selected-pack write envelope in bytes: the total expanded
     /// content one emitted pack may carry. The writer's delta-base cache
     /// bound tracks the same value, exactly as the pack-crate default profile
-    /// couples them (frankengit-e6jj). The bound exists because the current
-    /// writer buffers the finished pack in memory before streaming it; a
-    /// deployment serving repositories larger than the documented 128 MiB
-    /// default widens it explicitly.
+    /// couples them (frankengit-e6jj), and so does the writer's output cap,
+    /// which bounds the finished pack the writer buffers in memory before
+    /// streaming it. A deployment serving repositories larger than the
+    /// documented 128 MiB default widens it explicitly.
+    ///
+    /// The output cap is `PackLimits::max_input_bytes`, a receive-side name
+    /// the writer reuses; it stayed at its 64 MiB default when only the two
+    /// expanded bounds were widened, so no pack over 64 MiB could be served
+    /// under any operator setting (a 200 MB clone was refused at 67,137,621
+    /// bytes after 287 s, x2mv.4.4).
     #[must_use]
     pub const fn with_selected_pack_byte_envelope(mut self, max_expanded_bytes: usize) -> Self {
         self.selected_pack_limits.max_total_expanded_bytes = max_expanded_bytes;
         self.selected_pack_limits.max_cached_bytes = max_expanded_bytes;
+        self.selected_pack_limits.max_input_bytes = max_expanded_bytes;
         self
     }
 }
@@ -12783,6 +12790,11 @@ mod selected_pack_envelope_tests {
             config.selected_pack_limits.max_cached_bytes,
             512 * 1024 * 1024,
             "the delta-base cache tracks the expanded ceiling as the default profile couples them"
+        );
+        assert_eq!(
+            config.selected_pack_limits.max_input_bytes,
+            512 * 1024 * 1024,
+            "the writer's output cap widens with the envelope, or packs over 64 MiB never serve"
         );
         // The untouched profile keeps the documented 128 MiB default.
         let plain = NodeConfig::new(
