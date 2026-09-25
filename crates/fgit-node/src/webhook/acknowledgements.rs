@@ -86,7 +86,7 @@ impl<const N: usize> Acknowledgements<N> {
                 return false;
             }
         } else {
-            self.entries.pop_front();
+            let _ = self.entries.pop_front();
         }
         self.entries.push_back(Acknowledgement {
             key: request.key,

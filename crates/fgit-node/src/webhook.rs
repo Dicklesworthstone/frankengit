@@ -131,7 +131,10 @@ impl WebhookDeliveryDestination {
         if !self.registration.active || request.destination != self.destination_slug {
             return Err(RefusalCode::PublicationPolicyRefused);
         }
-        if attempt == 0 || self.timeout.is_zero() {
+        if attempt == 0
+            || attempt > self.registration.retry_schedule.max_attempts
+            || self.timeout.is_zero()
+        {
             return Err(RefusalCode::ResourceBudgetExceeded);
         }
         let budget = request_io::Attempt::new(self.timeout, checkpoint)?;
@@ -255,8 +258,18 @@ impl WebhookDeliveryDestination {
                 if let Some(location) = extract_header(&response, "location") {
                     match self.ssrf_policy.validate_redirect(&validated, &location) {
                         Ok(_) => {
-                            // Valid redirect target, retriable
-                            Ok((DeliveryVerdict::TransientFailure, response))
+                            // This adapter does not follow redirects. Even a
+                            // policy-approved Location cannot extend its retry
+                            // budget indefinitely by redirecting every attempt.
+                            if attempt < self.registration.retry_schedule.max_attempts {
+                                Ok((DeliveryVerdict::TransientFailure, response))
+                            } else {
+                                let reason = format!(
+                                    "receiver returned HTTP {status_code}; redirect retry budget exhausted"
+                                );
+                                self.record_terminal_failure(request, attempt, &reason, now_secs)?;
+                                Ok((DeliveryVerdict::PermanentRejection, response))
+                            }
                         }
                         Err(WebhookRefusal::SsrfBlocked { reason, .. }) => {
                             self.record_terminal_failure(request, attempt, reason, now_secs)?;
@@ -272,19 +285,26 @@ impl WebhookDeliveryDestination {
                         }
                     }
                 } else {
-                    Ok((
-                        DeliveryVerdict::PermanentRejection,
-                        b"missing location header on redirect".to_vec(),
-                    ))
+                    let reason = "missing or ambiguous Location header on redirect";
+                    self.record_terminal_failure(request, attempt, reason, now_secs)?;
+                    Ok((DeliveryVerdict::PermanentRejection, reason.as_bytes().to_vec()))
                 }
             }
-            400..=499 if status_code != 429 => {
+            300..=399 => {
+                let reason = format!("unsupported webhook redirect response HTTP {status_code}");
+                self.record_terminal_failure(request, attempt, &reason, now_secs)?;
+                Ok((DeliveryVerdict::PermanentRejection, response))
+            }
+            400..=499 if !matches!(status_code, 408 | 429) => {
                 let reason = format!("receiver returned HTTP {status_code}");
                 self.record_terminal_failure(request, attempt, &reason, now_secs)?;
                 Ok((DeliveryVerdict::PermanentRejection, response))
             }
             _ => {
-                // 429 or 5xx
+                // An explicit 408 means the request was not received in full
+                // (RFC 9110 section 15.5.9). Like 429 and 5xx, retry it only
+                // within the configured budget. This is not a local timeout:
+                // a lost/incomplete response above must remain ambiguous.
                 let reason = format!("receiver returned HTTP {status_code}");
                 if attempt < self.registration.retry_schedule.max_attempts {
                     Ok((DeliveryVerdict::TransientFailure, response))
@@ -307,7 +327,7 @@ impl WebhookDeliveryDestination {
             let remove = diagnostics
                 .len()
                 .saturating_sub(acknowledgements::MAX_ACKNOWLEDGEMENTS - 1);
-            diagnostics.drain(..remove);
+            drop(diagnostics.drain(..remove));
             if diagnostics.try_reserve(1).is_ok() {
                 diagnostics.push((request.key, attempt));
             }
@@ -520,3 +540,6 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod retry_tests;
