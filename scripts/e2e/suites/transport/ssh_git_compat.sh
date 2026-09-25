@@ -7,8 +7,8 @@
 #    incremental push, both over SSH;
 # 2. protocol v0 and v2 clones and a v2 fetch return the pushed refs and
 #    objects byte-identically (strict fsck);
-# 3. a push the node must refuse (deleting the default branch) is refused
-#    through report-status and publishes nothing;
+# 3. a push to a review-protected ref is refused by admission through
+#    report-status and publishes nothing;
 # 4. a silent client holding the only worker is released by the session read
 #    timeout, after which a real clone succeeds;
 # 5. a clone killed mid-transfer leaves the server serving the next clone.
@@ -66,6 +66,12 @@ done
 INIT_RC=0
 "$FG_BIN" init "$STORAGE" "$TENANT" "$REPOID" >/dev/null 2>&1 || INIT_RC=$?
 fge_assert_eq SSH-COMPAT-003 0 "$INIT_RC" 'an empty node initializes'
+REVIEWER="55555555555555555555555555555555"
+PROTECT_RC=0
+"$FG_BIN" protection set "$STORAGE" "$TENANT" "$REPOID" --trusted-local --object-format sha1 \
+  --principal "$PRINCIPAL" --idempotency-key ssh-compat-protect --expected-version 0 --expected-epoch 1 \
+  --admin "$PRINCIPAL" --require-reviewer "refs/heads/protected:$REVIEWER" >"$WORK/protect.json" 2>"$WORK/protect.err" || PROTECT_RC=$?
+fge_assert_eq SSH-COMPAT-006 0 "$PROTECT_RC" 'refs/heads/protected requires a review before any direct write'
 
 printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' > "$WORK/host_key.hex"
 ssh-keygen -t ed25519 -N "" -f "$WORK/client_rw" -C rw -q
@@ -123,16 +129,18 @@ fge_assert_eq SSH-COMPAT-051 0 "$FETCH_RC" 'protocol v2 fetch after the incremen
 fge_assert_eq SSH-COMPAT-052 "$(git -C "$SRC" rev-parse main)" \
   "$(git -C "$WORK/clone-v2" rev-parse origin/main 2>/dev/null || echo missing)" 'the v2 fetch observes the incremental tip'
 
-# 4. A push the node refuses is reported through report-status and changes nothing.
-BEFORE_TIP="$(git -C "$SRC" rev-parse main)"
+# 4. A direct push to the review-protected ref is refused by admission and
+#    reported through report-status; the ref is not created.
 REFUSED_RC=0
-GIT_SSH_COMMAND="$SSH_CMD" timeout 300 git -C "$SRC" push fg :main >"$WORK/refused.out" 2>"$WORK/refused.err" || REFUSED_RC=$?
-fge_assert_cmd SSH-COMPAT-060 'deleting the default branch over SSH is refused' test "$REFUSED_RC" -ne 0
-fge_assert_cmd SSH-COMPAT-061 'the refusal arrives through report-status' grep -Eq 'remote rejected|\[rejected\]|! ' "$WORK/refused.err"
+GIT_SSH_COMMAND="$SSH_CMD" timeout 300 git -C "$SRC" push fg main:refs/heads/protected >"$WORK/refused.out" 2>"$WORK/refused.err" || REFUSED_RC=$?
+fge_assert_cmd SSH-COMPAT-060 'a direct push to a review-protected ref is refused' test "$REFUSED_RC" -ne 0
+fge_assert_cmd SSH-COMPAT-061 'the refusal arrives through report-status' grep -Eq 'remote rejected|\[rejected\]' "$WORK/refused.err"
 AFTER_RC=0
-GIT_SSH_COMMAND="$SSH_CMD" timeout 300 git ls-remote "$REMOTE" refs/heads/main >"$WORK/after.refs" 2>"$WORK/after.err" || AFTER_RC=$?
+GIT_SSH_COMMAND="$SSH_CMD" timeout 300 git ls-remote "$REMOTE" >"$WORK/after.refs" 2>"$WORK/after.err" || AFTER_RC=$?
 fge_assert_eq SSH-COMPAT-062 0 "$AFTER_RC" 'ls-remote after the refusal succeeds'
-fge_assert_eq SSH-COMPAT-063 "$BEFORE_TIP" "$(cut -f1 "$WORK/after.refs")" 'the refused delete left main unchanged'
+fge_assert_cmd SSH-COMPAT-063 'the refused ref was not created' bash -c '! grep -q "refs/heads/protected" "$1"' _ "$WORK/after.refs"
+fge_assert_eq SSH-COMPAT-064 "$(git -C "$SRC" rev-parse main)" \
+  "$(awk '$2 == "refs/heads/main" {print $1}' "$WORK/after.refs")" 'main is unchanged by the refused push'
 
 # 5. A silent client holds the only worker until the session read timeout
 #    (60 s) releases it; a real clone queued behind it then succeeds.
