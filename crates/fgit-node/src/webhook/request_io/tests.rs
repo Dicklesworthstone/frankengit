@@ -1,15 +1,15 @@
 use super::*;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use fgit_admission::merge::native::settlement::DeliveryRequest;
-use fgit_forge::webhook::{
-    SsrfPolicy, WebhookEventFilter, WebhookId, WebhookRegistration,
-    WebhookRetrySchedule, WebhookSecret, WebhookSecretRotation,
-};
 use fgit_forge::ForgeEventBatch;
+use fgit_forge::webhook::{
+    SsrfPolicy, WebhookEventFilter, WebhookId, WebhookRegistration, WebhookRetrySchedule,
+    WebhookSecret, WebhookSecretRotation,
+};
 use fgit_types::{AsciiSlug, Digest, DigestAlgorithmId, DigestBytes};
 
 use crate::webhook::{DeadLetterQueue, WebhookDeliveryDestination};
@@ -169,22 +169,32 @@ fn chunked_body_is_byte_identical_and_ack_does_not_wait_for_peer_eof() {
     let (mut client, mut server) = pair();
     let body = vec![0x81; WRITE_CHUNK_BYTES * 8 + 1];
     let expected = body.clone();
-    let header = format!("POST /hook HTTP/1.1\r\nContent-Length: {}\r\n\r\n", body.len());
+    let header = format!(
+        "POST /hook HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
     let expected_header = header.clone();
     let peer = thread::spawn(move || {
         read_exact_request(&mut server, expected_header.as_bytes(), &expected);
-        server.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap();
+        server
+            .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+            .unwrap();
         // The peer will not send EOF first. The client must finish on the ACK
         // and close its socket rather than waiting for a response body.
         assert_eq!(server.read(&mut [0; 1]).unwrap(), 0);
     });
     let checkpoint = || Ok(());
-    let response = Attempt::new(TEST_TIMEOUT, &checkpoint)
-        .unwrap()
-        .exchange(&mut client, header.as_bytes(), &body);
+    let response = Attempt::new(TEST_TIMEOUT, &checkpoint).unwrap().exchange(
+        &mut client,
+        header.as_bytes(),
+        &body,
+    );
     drop(client);
     peer.join().unwrap();
-    assert_eq!(super::super::parse_http_status(&response.unwrap()), Some(204));
+    assert_eq!(
+        super::super::parse_http_status(&response.unwrap()),
+        Some(204)
+    );
 }
 
 #[test]
@@ -282,9 +292,10 @@ fn response_header_limit_is_enforced_before_growing_the_buffer() {
         let _ = server.write_all(&vec![b'x'; MAX_RESPONSE_BYTES + 4096]);
     });
     let checkpoint = || Ok(());
-    let result = Attempt::new(TEST_TIMEOUT, &checkpoint)
-        .unwrap()
-        .exchange(&mut client, HEADER, BODY);
+    let result =
+        Attempt::new(TEST_TIMEOUT, &checkpoint)
+            .unwrap()
+            .exchange(&mut client, HEADER, BODY);
     drop(client);
     peer.join().unwrap();
     assert!(matches!(
@@ -299,15 +310,21 @@ fn informational_response_and_binary_body_do_not_hide_a_final_ack() {
     let peer = thread::spawn(move || {
         read_exact_request(&mut server, HEADER, BODY);
         server.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
-        server.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n\xff\x80").unwrap();
+        server
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n\xff\x80")
+            .unwrap();
     });
     let checkpoint = || Ok(());
-    let response = Attempt::new(TEST_TIMEOUT, &checkpoint)
-        .unwrap()
-        .exchange(&mut client, HEADER, BODY);
+    let response =
+        Attempt::new(TEST_TIMEOUT, &checkpoint)
+            .unwrap()
+            .exchange(&mut client, HEADER, BODY);
     drop(client);
     peer.join().unwrap();
-    assert_eq!(super::super::parse_http_status(&response.unwrap()), Some(200));
+    assert_eq!(
+        super::super::parse_http_status(&response.unwrap()),
+        Some(200)
+    );
 }
 
 #[test]
@@ -319,7 +336,10 @@ fn stopping_before_and_after_a_write_have_distinct_outcomes() {
         assert!(matches!(
             Failure::stopped(code, false), Failure::Refused(observed) if observed == code
         ));
-        assert!(matches!(Failure::stopped(code, true), Failure::Ambiguous(_)));
+        assert!(matches!(
+            Failure::stopped(code, true),
+            Failure::Ambiguous(_)
+        ));
     }
     assert!(matches!(
         Failure::io(io::Error::new(io::ErrorKind::TimedOut, "setup"), false),

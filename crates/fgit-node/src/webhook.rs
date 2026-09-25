@@ -386,9 +386,7 @@ impl OutboxDestination<Cx> for WebhookDeliveryDestination {
         attempt: u32,
     ) -> impl std::future::Future<Output = Result<(DeliveryVerdict, Vec<u8>), RefusalCode>> + Send + 'a
     {
-        async move {
-            self.dispatch_http_with_checkpoint(request, attempt, &|| request_checkpoint(cx))
-        }
+        async move { self.dispatch_http_with_checkpoint(request, attempt, &|| request_checkpoint(cx)) }
     }
 }
 

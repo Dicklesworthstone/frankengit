@@ -39,9 +39,9 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 fn regular_slot(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => Ok(Some(metadata)),
-        Ok(_) => Err(
-            "webhook store slot must be a regular file, not a link or special file".into(),
-        ),
+        Ok(_) => {
+            Err("webhook store slot must be a regular file, not a link or special file".into())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("cannot inspect webhook store slot: {error}")),
     }
@@ -145,7 +145,11 @@ fn lock_writer(path: &Path) -> Result<File, String> {
     let file = options
         .open(&lock_path)
         .map_err(|error| format!("cannot open webhook writer lock: {error}"))?;
-    if !file.metadata().map_err(|error| error.to_string())?.is_file() {
+    if !file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
         return Err("webhook writer lock is not a regular file".into());
     }
     file.try_lock()
