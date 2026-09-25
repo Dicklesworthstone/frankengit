@@ -1074,15 +1074,23 @@ fn serve_connection(
         if body_not_allowed && !initial.is_empty() {
             return Err(Status::BadRequest);
         }
-        let mut node =
-            OneNode::open_existing(profile.config.clone()).map_err(|_| Status::Unavailable)?;
+        let mut node = OneNode::open_existing(profile.config.clone()).map_err(|error| {
+            eprintln!("Smart HTTP could not open the repository node: {error}");
+            Status::Unavailable
+        })?;
         let result = (|| -> Result<(), Status> {
             let authenticated = node
                 .runtime()
                 .block_on(node.authenticate_authority_head())
-                .map_err(|_| Status::Unavailable)?;
+                .map_err(|error| {
+                    eprintln!("Smart HTTP could not authenticate the authority head: {error}");
+                    Status::Unavailable
+                })?;
             node.bring_into_service(authenticated.receipt().generation())
-                .map_err(|_| Status::Unavailable)?;
+                .map_err(|error| {
+                    eprintln!("Smart HTTP could not bring the node into service: {error}");
+                    Status::Unavailable
+                })?;
             if envelope.expect_continue {
                 // No interim success before credentials, scopes, incarnation,
                 // endpoint envelope policy and node intake have all passed.
