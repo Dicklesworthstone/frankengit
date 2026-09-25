@@ -55,6 +55,11 @@ if [ $(( BASE_BYTES * 2 )) -gt $(( 64 * 1048576 )) ]; then
     --pack-max-expanded-mib "$ENVELOPE_MIB" --session-timeout-secs 1800)
 fi
 fge_context receive_envelope "${ENVELOPE[*]:-default}"
+# Transfer commands (pushes, fetches, clones) get a budget sized from the
+# fixture: 900 s plus 1 s per 150 kB. A 200 MB clone took ~500 s on a loaded
+# host at 4f465b79; refs-only calls keep their fixed 300 s.
+TRANSFER_SECS=$(( 900 + BASE_BYTES / 150000 ))
+fge_context transfer_timeout_s "$TRANSFER_SECS"
 
 fge_phase setup
 FG_BIN="${FG_BIN:-}"
@@ -128,7 +133,7 @@ git -C "$SRC" remote add fg "$REMOTE"
 
 # 1. Initial push of the whole delta-bearing history into the empty node.
 INITIAL_RC=0
-GIT_SSH_COMMAND="$SSH_CMD" timeout 900 git -C "$SRC" push -q fg main 2>"$WORK/initial.err" || INITIAL_RC=$?
+GIT_SSH_COMMAND="$SSH_CMD" timeout "$TRANSFER_SECS" git -C "$SRC" push -q fg main 2>"$WORK/initial.err" || INITIAL_RC=$?
 fge_assert_eq SSH-COMPAT-005 0 "$INITIAL_RC" 'initial push of the full history into an empty node succeeds'
 
 # 2. Clones over protocol v0 and v2 are exact. A packet trace first proves
@@ -148,7 +153,7 @@ for version in 0 2; do
       bash -c '! grep -Eq "< version 2$" "$1"' _ "$WORK/trace-v0"
   fi
   CLONE_RC=0
-  GIT_SSH_COMMAND="$SSH_CMD" timeout 900 git -c protocol.version="$version" clone -q "$REMOTE" "$WORK/clone-v$version" 2>"$WORK/clone-v$version.err" || CLONE_RC=$?
+  GIT_SSH_COMMAND="$SSH_CMD" timeout "$TRANSFER_SECS" git -c protocol.version="$version" clone -q "$REMOTE" "$WORK/clone-v$version" 2>"$WORK/clone-v$version.err" || CLONE_RC=$?
   fge_assert_eq "SSH-COMPAT-01$version" 0 "$CLONE_RC" "protocol v$version clone succeeds"
   fge_assert_eq "SSH-COMPAT-02$version" "$(git -C "$SRC" rev-parse main)" \
     "$(git -C "$WORK/clone-v$version" rev-parse HEAD 2>/dev/null || echo missing)" "protocol v$version clone observes the pushed tip"
@@ -163,10 +168,10 @@ printf 'incremental\n' > "$SRC/INCREMENTAL"
 git -C "$SRC" add -A
 git -C "$SRC" commit -qm 'incremental'
 INCR_RC=0
-GIT_SSH_COMMAND="$SSH_CMD" timeout 600 git -C "$SRC" push -q fg main 2>"$WORK/incremental.err" || INCR_RC=$?
+GIT_SSH_COMMAND="$SSH_CMD" timeout "$TRANSFER_SECS" git -C "$SRC" push -q fg main 2>"$WORK/incremental.err" || INCR_RC=$?
 fge_assert_eq SSH-COMPAT-050 0 "$INCR_RC" 'incremental push succeeds'
 FETCH_RC=0
-GIT_SSH_COMMAND="$SSH_CMD" timeout 600 git -C "$WORK/clone-v2" -c protocol.version=2 fetch -q origin 2>"$WORK/fetch-v2.err" || FETCH_RC=$?
+GIT_SSH_COMMAND="$SSH_CMD" timeout "$TRANSFER_SECS" git -C "$WORK/clone-v2" -c protocol.version=2 fetch -q origin 2>"$WORK/fetch-v2.err" || FETCH_RC=$?
 fge_assert_eq SSH-COMPAT-051 0 "$FETCH_RC" 'protocol v2 fetch after the incremental push succeeds'
 fge_assert_eq SSH-COMPAT-052 "$(git -C "$SRC" rev-parse main)" \
   "$(git -C "$WORK/clone-v2" rev-parse origin/main 2>/dev/null || echo missing)" 'the v2 fetch observes the incremental tip'
@@ -190,7 +195,7 @@ exec 7<>"/dev/tcp/127.0.0.1/$SSH_PORT"
 sleep 1
 SILENT_START=$(date +%s)
 SILENT_RC=0
-GIT_SSH_COMMAND="$SSH_PATIENT" timeout 300 git clone -q "$REMOTE" "$WORK/after-silent" 2>"$WORK/after-silent.err" || SILENT_RC=$?
+GIT_SSH_COMMAND="$SSH_PATIENT" timeout "$TRANSFER_SECS" git clone -q "$REMOTE" "$WORK/after-silent" 2>"$WORK/after-silent.err" || SILENT_RC=$?
 SILENT_WAIT=$(( $(date +%s) - SILENT_START ))
 exec 7<&- 7>&- || true
 fge_context silent_client_wait_s "$SILENT_WAIT"
@@ -204,7 +209,7 @@ fge_context cancelled_clone_rc "$CANCEL_RC"
 sleep 2
 fge_assert_cmd SSH-COMPAT-080 'the server is still running after a cancelled clone' kill -0 "$FGE_LAST_PID"
 RESUME_RC=0
-GIT_SSH_COMMAND="$SSH_PATIENT" timeout 600 git clone -q "$REMOTE" "$WORK/after-cancel" 2>"$WORK/after-cancel.err" || RESUME_RC=$?
+GIT_SSH_COMMAND="$SSH_PATIENT" timeout "$TRANSFER_SECS" git clone -q "$REMOTE" "$WORK/after-cancel" 2>"$WORK/after-cancel.err" || RESUME_RC=$?
 fge_assert_eq SSH-COMPAT-081 0 "$RESUME_RC" 'a clone after the cancelled one succeeds'
 fge_assert_cmd SSH-COMPAT-082 'the post-cancellation clone content is byte-identical' diff -rq -x .git "$WORK/after-cancel" "$SRC"
 
@@ -215,7 +220,7 @@ objects() { git -C "$1" cat-file --batch-all-objects --batch-check='%(objectname
 SSH_REFS_RC=0
 GIT_SSH_COMMAND="$SSH_CMD" timeout 300 git ls-remote "$REMOTE" >"$WORK/ssh.refs" 2>"$WORK/ssh-refs.err" || SSH_REFS_RC=$?
 SSH_MIRROR_RC=0
-GIT_SSH_COMMAND="$SSH_PATIENT" timeout 900 git clone -q --mirror "$REMOTE" "$WORK/ssh-mirror" 2>"$WORK/ssh-mirror.err" || SSH_MIRROR_RC=$?
+GIT_SSH_COMMAND="$SSH_PATIENT" timeout "$TRANSFER_SECS" git clone -q --mirror "$REMOTE" "$WORK/ssh-mirror" 2>"$WORK/ssh-mirror.err" || SSH_MIRROR_RC=$?
 fge_assert_eq SSH-COMPAT-090 0 "$((SSH_REFS_RC + SSH_MIRROR_RC))" 'ls-remote and a mirror clone over SSH succeed'
 fge_reap "$SSH_NAME"
 
@@ -237,7 +242,7 @@ HTTP_AUTH="Authorization: Bearer $(cat "$WORK/http.token")"
 HTTP_REFS_RC=0
 timeout 300 git -c http.extraHeader="$HTTP_AUTH" ls-remote "$HTTP_URL" >"$WORK/http.refs" 2>"$WORK/http-refs.err" || HTTP_REFS_RC=$?
 HTTP_MIRROR_RC=0
-timeout 900 git -c http.extraHeader="$HTTP_AUTH" clone -q --mirror "$HTTP_URL" "$WORK/http-mirror" 2>"$WORK/http-mirror.err" || HTTP_MIRROR_RC=$?
+timeout "$TRANSFER_SECS" git -c http.extraHeader="$HTTP_AUTH" clone -q --mirror "$HTTP_URL" "$WORK/http-mirror" 2>"$WORK/http-mirror.err" || HTTP_MIRROR_RC=$?
 fge_assert_eq SSH-COMPAT-092 0 "$((HTTP_REFS_RC + HTTP_MIRROR_RC))" 'ls-remote and a mirror clone over HTTP succeed'
 fge_assert_cmd SSH-COMPAT-093 'the SSH ref advertisement names main at the pushed tip' \
   grep -q "^$(git -C "$SRC" rev-parse main)[[:space:]]refs/heads/main\$" "$WORK/ssh.refs"
