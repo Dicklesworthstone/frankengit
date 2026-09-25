@@ -24,6 +24,34 @@ use fsqlite::FrankenError;
 
 use crate::TransientClass;
 
+/// The immutable-body key as the engine names it in a unique-index error.
+///
+/// This store writes that table only through `INSERT ... ON CONFLICT
+/// (body_key) DO NOTHING`, so a transaction never violates the key it can
+/// see. A violation therefore means one thing: a concurrent writer committed
+/// the same key after this transaction's snapshot, where `DO NOTHING` could
+/// not apply. That is a write conflict on one key, not a constraint the data
+/// broke, and a whole-transaction retry from a fresh snapshot decides it
+/// exactly (identical body: present; different body: conflict). Observed on
+/// the x2mv.4.27 16-writer campaign, where it reached HTTP as a 503. Every
+/// other constraint, including this column under any other name, stays
+/// permanent (section 3.4).
+const IMMUTABLE_BODY_KEY_COLUMNS: &[u8] = b"fgit_immutable_body.body_key";
+
+const fn same_bytes(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 /// Classify one engine error against the closed transient family.
 ///
 /// Deliberately exhaustive-by-default rather than exhaustive-by-match:
@@ -41,6 +69,11 @@ pub const fn classify_franken_error(error: &FrankenError) -> TransientClass {
         FrankenError::BusySnapshot { .. } => TransientClass::BusySnapshot,
         FrankenError::DatabaseLocked { .. } => TransientClass::DatabaseLocked,
         FrankenError::WriteConflict { .. } => TransientClass::WriteConflict,
+        FrankenError::UniqueViolation { columns }
+            if same_bytes(columns.as_bytes(), IMMUTABLE_BODY_KEY_COLUMNS) =>
+        {
+            TransientClass::WriteConflict
+        }
         FrankenError::SerializationFailure { .. } => TransientClass::SerializationFailure,
         FrankenError::PageBufferCapacityExhausted { .. } => {
             TransientClass::PageBufferCapacityExhausted

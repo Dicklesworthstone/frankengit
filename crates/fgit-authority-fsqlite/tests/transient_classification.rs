@@ -129,6 +129,43 @@ fn nothing_outside_the_family_is_ever_converted_into_busy() {
 }
 
 #[test]
+fn a_concurrent_immutable_body_insert_is_a_write_conflict_and_no_other_constraint_is() {
+    // The store writes this key only through ON CONFLICT DO NOTHING, so its
+    // unique index fires only when a concurrent writer committed the same key
+    // after this snapshot: a write conflict a fresh transaction decides.
+    let collision = FrankenError::UniqueViolation {
+        columns: "fgit_immutable_body.body_key".to_owned(),
+    };
+    assert_eq!(
+        classify_franken_error(&collision),
+        TransientClass::WriteConflict
+    );
+    assert!(is_retryable_engine_error(&collision));
+    // Near-identical twins stay permanent: another table's key, the bare
+    // column name, and a different constraint on the same table.
+    for permanent in [
+        FrankenError::UniqueViolation {
+            columns: "fgit_head.head_key".to_owned(),
+        },
+        FrankenError::UniqueViolation {
+            columns: "body_key".to_owned(),
+        },
+        FrankenError::UniqueViolation {
+            columns: "fgit_immutable_body.body_key, body_bytes".to_owned(),
+        },
+        FrankenError::NotNullViolation {
+            column: "fgit_immutable_body.body_bytes".to_owned(),
+        },
+    ] {
+        assert_eq!(
+            classify_franken_error(&permanent),
+            TransientClass::Permanent,
+            "{permanent:?}"
+        );
+    }
+}
+
+#[test]
 fn an_unrecognised_error_defaults_to_permanent_rather_than_retryable() {
     // The direction of the default is the whole safety property: a variant this
     // build has never seen must stop the operation, not spin on it. Corrupt
