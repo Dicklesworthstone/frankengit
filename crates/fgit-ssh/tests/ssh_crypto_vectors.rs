@@ -12,7 +12,7 @@ use fgit_types::{PrincipalId, RepositoryId};
 
 #[test]
 fn test_rfc7748_curve25519_test_vectors() {
-    // RFC 7748 Section 5.2 Test Vectors
+    // RFC 7748 Section 6.1 Diffie-Hellman test vectors
     let alice_priv = [
         0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66,
         0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9,
@@ -192,4 +192,85 @@ fn test_deploy_key_authorization_seam() {
         err,
         AuthRefusal::DeployKey(DeployKeyRefusal::NoBindingForKey)
     );
+}
+
+fn hex32(text: &str) -> [u8; 32] {
+    let mut out = [0_u8; 32];
+    for (at, pair) in text.as_bytes().chunks(2).enumerate() {
+        out[at] = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+    }
+    out
+}
+
+#[test]
+fn rfc7748_section_5_2_scalar_multiplication_vectors() {
+    use fgit_ssh::x25519::x25519;
+    // The two single-shot vectors of RFC 7748 section 5.2. The second input
+    // u-coordinate has its top bit set, which X25519 must mask.
+    for (scalar, u, expected) in [
+        (
+            "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4",
+            "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c",
+            "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552",
+        ),
+        (
+            "4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d",
+            "e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493",
+            "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957",
+        ),
+    ] {
+        assert_eq!(x25519(&hex32(scalar), &hex32(u)), hex32(expected));
+    }
+}
+
+#[test]
+fn rfc7748_section_5_2_iterated_vectors_after_one_and_one_thousand_rounds() {
+    use fgit_ssh::x25519::x25519;
+    // k = u = 9; each round computes k' = X25519(k, u) and sets u = k, k = k'.
+    let mut k = hex32("0900000000000000000000000000000000000000000000000000000000000000");
+    let mut u = k;
+    for round in 1..=1_000 {
+        let next = x25519(&k, &u);
+        u = k;
+        k = next;
+        if round == 1 {
+            assert_eq!(
+                k,
+                hex32("422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079")
+            );
+        }
+    }
+    assert_eq!(
+        k,
+        hex32("684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51")
+    );
+}
+
+#[test]
+fn x25519_matches_the_admitted_dalek_curve_on_derived_keys() {
+    use fgit_ssh::x25519::{x25519, x25519_base};
+    // Differential against the admitted curve implementation reached through
+    // ed25519-dalek (DEP-051, curve25519-dalek transitively, DEP-044): an
+    // Ed25519 key's Montgomery form is the X25519 public key of its clamped
+    // scalar, and dalek's clamped Montgomery multiplication is the reference
+    // for arbitrary points.
+    let keys: Vec<_> = (0_u8..=127)
+        .map(|seed| {
+            let mut bytes = [seed; 32];
+            bytes[0] = seed.wrapping_mul(37).wrapping_add(11);
+            bytes[31] = !seed;
+            ed25519_dalek::SigningKey::from_bytes(&bytes)
+        })
+        .collect();
+    for pair in keys.windows(2) {
+        let (ours, theirs) = (&pair[0], &pair[1]);
+        let scalar = ours.to_scalar_bytes();
+        let own_public = ours.verifying_key().to_montgomery();
+        assert_eq!(x25519_base(&scalar), own_public.to_bytes());
+        let peer = theirs.verifying_key().to_montgomery();
+        assert_eq!(
+            x25519(&scalar, &peer.to_bytes()),
+            peer.mul_clamped(scalar).to_bytes()
+        );
+    }
 }
