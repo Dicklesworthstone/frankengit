@@ -23,6 +23,8 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fge_init ssh-large-transfer
 fge_context bead frankengit-root-doctrine-x2mv.4.4
 fge_context crate fgit-ssh
+fge_context openssh_version "$(ssh -V 2>&1 | head -1)"
+fge_context git_version "$(git --version)"
 fge_context evidence_class e2e_binary_stock_client
 fge_context non_claim 'Stock OpenSSH and git clients against one local fg serve-ssh; not a throughput, multi-client or hostile-network claim.'
 

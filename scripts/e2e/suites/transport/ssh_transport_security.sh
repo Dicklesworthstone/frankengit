@@ -17,6 +17,8 @@ REPO_ROOT="$(cd "$E2E_ROOT/.." && pwd)"
 fge_init fg047b-ssh-transport-security
 fge_context bead frankengit-fg047b-ssh-security-m9rr
 fge_context crate fgit-ssh
+fge_context openssh_version "$(ssh -V 2>&1 | head -1)"
+fge_context git_version "$(git --version)"
 fge_context evidence_class security_adversarial_campaign
 fge_context non_claim 'This tests SSH protocol security and authentication boundaries; it does not claim multi-tenant cluster isolation or network-layer DDoS mitigation.'
 
