@@ -1,7 +1,7 @@
 # Page-scoped forge replay
 
 Owning bridge work: `frankengit-root-doctrine-x2mv.4.7` (the repository-wide
-4,096-event read cliff). Consumers are the existing node, HTTP and CLI issue
+4,096-event read cliff). Consumers are the existing node, HTTP and CLI issue/PR
 read surfaces and issue-command admission. This documents an implementation
 slice, not a persisted projection service or completion of the bridge bead.
 
@@ -34,6 +34,30 @@ page beyond its envelope refuses, and a missing stream is not invented from
 unpublished objects. Independent full-history consistency auditing is not the
 same operation as reading one selected page.
 
+## Pull-request pages
+
+PR selection still checks both branch names against the caller's visibility
+predicate before admitting a row. Numeric order, lookahead cursors and the
+snapshot identity are unchanged. The replay pass deduplicates canonical payload
+roots before reading them, so several destinations for one batch do not multiply
+its event scan or metadata work. It charges all scanned events against the
+65,536-event / 128 MiB scan envelope, including events outside the selected page.
+
+Within the page, replay retains one latest full metadata event per PR, plus the
+original opener and bounded per-version identity witnesses. Replacing an older
+full state releases its byte charge; it does not repeatedly spend the live-page
+32 MiB event-frame allowance on superseded descriptions. The selected frontier
+and retained latest metadata are charged separately. The version-witness map is
+bounded by the scan-event ceiling; this is not an allocator-wide memory meter.
+
+Repeated identical event versions are ignored after commitment comparison;
+conflicting versions still refuse. A merge must still match the immediately
+preceding metadata's tips and branches, and the original opening actor must be
+present in canonical payload history. Merely staging an opening body cannot
+supply missing provenance. The existing explicitly merge-only receipt profile
+remains distinct and does not invent metadata. Cancellation is checked within
+batch replay as well as at the existing read boundaries.
+
 ## Verification boundary
 
 `cargo test -p fgit-admission merge::native::issues::replay_tests` exercises the
@@ -42,6 +66,11 @@ include a 4,101-event issue, exact paged comments and current state, numeric
 pagination, write-validation replay, an unrelated history larger than 32 MiB,
 missing/conflicting history, cancellation, invalid limits and a frontier larger
 than 4,096 entries. These are not filesystem durability or live HTTP tests.
+
+`cargo test -p fgit-admission merge::native::pull_request::replay_tests` covers
+long SHA-1/SHA-256 PR histories, superseded and unrelated large descriptions,
+shared-payload fan-out, merge metadata, numeric/visibility paging, unselected
+opening objects, conflicting versions, cancellation and invalid limits.
 
 The implementation session has no Rust toolchain: these tests were added, not
 executed. Source/blob identity and patch whitespace checks do not establish a

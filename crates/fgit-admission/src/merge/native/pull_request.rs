@@ -208,7 +208,10 @@ pub struct PullRequestPage {
 }
 
 const MAX_PAGE: u16 = 100;
-const MAX_READ_EVENTS: usize = 4096;
+// Bound work independently of live page metadata. A long history must not
+// spend the memory allowance again for every superseded full-state event.
+const MAX_READ_EVENTS: usize = 65_536;
+const MAX_SCAN_BYTES: usize = 128 * 1024 * 1024;
 const MAX_READ_BYTES: usize = 32 * 1024 * 1024;
 
 /// Read native PRs in numeric order at one exact caller-authenticated basis.
@@ -236,13 +239,9 @@ where
     }
     checkpoint(cancelled)?;
     let state = delivery::read_in(store, cx, basis, cancelled).await?;
-    if state.forge.entries().len() > MAX_READ_EVENTS
-        || state.outbox.entries().len() > MAX_READ_EVENTS
-    {
-        return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
-    }
     let mut numbers = BTreeSet::new();
     for entry in state.forge.entries() {
+        checkpoint(cancelled)?;
         let label = entry.stream();
         let Some(text) = label.as_str().strip_prefix("pull-request/") else {
             continue;
@@ -304,14 +303,24 @@ where
         .iter()
         .map(|view| (view.number, view.event.version))
         .collect();
-    let mut metadata: BTreeMap<PullRequestNumber, (AggregateVersion, NativePullRequestEvent)> =
-        BTreeMap::new();
+    let mut metadata: BTreeMap<
+        PullRequestNumber,
+        (AggregateVersion, NativePullRequestEvent, usize),
+    > = BTreeMap::new();
     let mut openers = BTreeMap::new();
     let mut seen = BTreeMap::new();
     let mut events_read = 0usize;
+    let mut scanned_bytes = 0usize;
+    let mut batches = BTreeSet::new();
     if !selected.is_empty() {
         for obligation in state.outbox.entries() {
             checkpoint(cancelled)?;
+            // Canonical fan-out may name one payload from several deliveries.
+            // Replaying it once preserves its identity without counting it as
+            // multiple histories or exhausting the scan on duplicate roots.
+            if !batches.insert(obligation.payload_root()) {
+                continue;
+            }
             let batch = storage::read_events(
                 store,
                 cx,
@@ -324,7 +333,12 @@ where
                 .filter(|count| *count <= MAX_READ_EVENTS)
                 .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
             for event in batch.events {
-                charge_event(&event, &mut bytes)?;
+                checkpoint(cancelled)?;
+                let size = event_size(&event)?;
+                scanned_bytes = scanned_bytes
+                    .checked_add(size)
+                    .filter(|total| *total <= MAX_SCAN_BYTES)
+                    .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
                 let AggregateId::PullRequest(number) = event.aggregate else {
                     continue;
                 };
@@ -335,10 +349,11 @@ where
                     return Err(unavailable(RefusalCode::EvidenceInvalid));
                 }
                 let digest = storage::root(&event)?;
-                if let Some(previous) = seen.insert((number, event.version), digest)
-                    && previous != digest
-                {
-                    return Err(unavailable(RefusalCode::EvidenceInvalid));
+                if let Some(previous) = seen.insert((number, event.version), digest) {
+                    if previous != digest {
+                        return Err(unavailable(RefusalCode::EvidenceInvalid));
+                    }
+                    continue;
                 }
                 let ForgeEventPayload::PullRequestChangedNative(change) = event.payload else {
                     continue;
@@ -351,15 +366,25 @@ where
                 }
                 if metadata
                     .get(&number)
-                    .is_none_or(|(held, _)| *held < event.version)
+                    .is_none_or(|(held, _, _)| *held < event.version)
                 {
-                    metadata.insert(number, (event.version, change));
+                    // Only the latest full state is retained. Replacing it
+                    // releases the prior event's charge; scan accounting above
+                    // still bounds every superseded or unrelated event visited.
+                    let replaced = metadata.get(&number).map_or(0, |(_, _, size)| *size);
+                    bytes = bytes
+                        .checked_sub(replaced)
+                        .and_then(|total| total.checked_add(size))
+                        .filter(|total| *total <= MAX_READ_BYTES)
+                        .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
+                    metadata.insert(number, (event.version, change, size));
                 }
             }
         }
     }
     for view in &mut selected {
-        if let Some((version, change)) = metadata.remove(&view.number) {
+        checkpoint(cancelled)?;
+        if let Some((version, change, _)) = metadata.remove(&view.number) {
             match &view.event.payload {
                 ForgeEventPayload::PullRequestChangedNative(latest) => {
                     if version != view.event.version || change != *latest {
@@ -403,15 +428,19 @@ where
 }
 
 fn charge_event(event: &ForgeEvent, bytes: &mut usize) -> Result<(), AdmissionError> {
-    let size = fgit_codec::encode_body(event)
-        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
-        .len();
+    let size = event_size(event)?;
     *bytes = bytes
         .checked_add(size)
         .filter(|total| *total <= MAX_READ_BYTES)
         .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
     Ok(())
 }
+fn event_size(event: &ForgeEvent) -> Result<usize, AdmissionError> {
+    fgit_codec::encode_body(event)
+        .map(|frame| frame.len())
+        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))
+}
+
 fn checkpoint<C: Fn() -> bool + Sync>(cancelled: &C) -> Result<(), AdmissionError> {
     if cancelled() {
         Err(unavailable(RefusalCode::CancellationInProgress))
@@ -483,3 +512,7 @@ mod tests {
         assert!(proposal(&context, &command).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "pull_request/replay_tests.rs"]
+mod replay_tests;
