@@ -70,7 +70,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
         return Err("PR arguments exceed the bounded local profile".to_owned());
     }
     let action = arguments[0].as_str();
-    let mutation = matches!(action, "open" | "update" | "close");
+    let mutation = matches!(action, "open" | "update" | "close" | "reopen");
     if !mutation && !matches!(action, "list" | "show") {
         return Err(super::USAGE.to_owned());
     }
@@ -165,7 +165,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
         let version = decimal(required(&flags, "--expected-version")?)?;
         if (action == "open") != (version == 0) {
             return Err(
-                "open requires version 0; update and close require a positive exact version"
+                "open requires version 0; update, close and reopen require a positive exact version"
                     .to_owned(),
             );
         }
@@ -190,6 +190,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<Options, String> {
             action: match action {
                 "open" => PullRequestAction::Open,
                 "update" => PullRequestAction::Update,
+                "reopen" => PullRequestAction::Reopen,
                 _ => PullRequestAction::Close,
             },
             data: PullRequestData {
@@ -488,6 +489,87 @@ mod saved_patch_tests {
             "latest".to_owned(),
         ] {
             assert!(parse_head(&token).is_err(), "must refuse {token}");
+        }
+    }
+
+    #[test]
+    fn reopen_is_a_distinct_complete_mutation_in_both_hash_formats() {
+        for width in [40, 64] {
+            let mut args = arguments("reopen", width);
+            let version = args.iter().position(|arg| arg == "--expected-version").unwrap() + 1;
+            args[version] = "2".into();
+            let parsed = parse(&args).unwrap();
+            let Operation::Mutate(reopened) = parsed.operation else {
+                panic!("reopening is a mutation");
+            };
+            assert_eq!(reopened.command.action, PullRequestAction::Reopen);
+            assert_eq!(reopened.command.expected_version,
+                ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap()));
+            assert_eq!(reopened.principal, PrincipalId::from_bytes([0x33; 16]));
+            assert_eq!(reopened.key, b"same-logical-command");
+            assert_eq!(reopened.command.data.title, "Reviewed title");
+            assert_eq!(reopened.command.data.body, "Exact body\né");
+            args[0] = "update".into();
+            let Operation::Mutate(updated) = parse(&args).unwrap().operation else {
+                panic!("update is a mutation");
+            };
+            assert_eq!(reopened.command.data, updated.command.data);
+            assert_ne!(reopened.command.proposed_event(reopened.principal, parsed.format).unwrap(),
+                updated.command.proposed_event(updated.principal, parsed.format).unwrap());
+        }
+    }
+
+    #[test]
+    fn reopen_requires_every_precondition_and_never_infers_missing_metadata() {
+        let good = arguments("reopen", 40);
+        for flag in ["--principal", "--idempotency-key", "--expected-version", "--source-ref",
+            "--target-ref", "--expected-source", "--expected-target", "--title", "--body"] {
+            let mut missing = good.clone();
+            let at = missing.iter().position(|arg| arg == flag).unwrap();
+            missing.drain(at..at + 2);
+            assert!(parse(&missing).is_err(), "missing {flag}");
+        }
+        for version in ["0", "02", "18446744073709551615"] {
+            let mut args = good.clone();
+            let at = args.iter().position(|arg| arg == "--expected-version").unwrap();
+            args[at + 1] = version.into();
+            assert!(parse(&args).is_err());
+        }
+        let mut untrusted = good.clone();
+        untrusted.retain(|arg| arg != "--trusted-local");
+        assert!(parse(&untrusted).is_err());
+        assert!(parse(&good).is_ok());
+    }
+
+    #[test]
+    fn reopen_retains_explicit_file_body_and_exact_ref_alias_semantics() {
+        for width in [40, 64] {
+            let original = arguments("reopen", width);
+            let Operation::Mutate(expected) = parse(&original).unwrap().operation else {
+                panic!("mutation expected");
+            };
+            let mut aliases = original.clone();
+            for arg in &mut aliases {
+                if arg == "--expected-source" { *arg = "--source-tip".into(); }
+                if arg == "--expected-target" { *arg = "--target-tip".into(); }
+            }
+            let Operation::Mutate(actual) = parse(&aliases).unwrap().operation else {
+                panic!("mutation expected");
+            };
+            assert_eq!(actual.command, expected.command);
+            let mut duplicate = aliases;
+            duplicate.extend(["--expected-source".into(), "a".repeat(width)]);
+            assert!(parse(&duplicate).is_err());
+            let mut file = original;
+            let at = file.iter().position(|arg| arg == "--body").unwrap();
+            file[at] = "--body-file".into();
+            file[at + 1] = "not-opened-during-parse.md".into();
+            let Operation::Mutate(actual) = parse(&file).unwrap().operation else {
+                panic!("mutation expected");
+            };
+            assert_eq!(actual.command.action, PullRequestAction::Reopen);
+            assert_eq!(actual.body_file, Some(PathBuf::from("not-opened-during-parse.md")));
+            assert!(actual.command.data.body.is_empty());
         }
     }
 }
