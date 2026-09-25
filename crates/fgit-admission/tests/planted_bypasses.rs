@@ -9,9 +9,10 @@ use std::collections::BTreeMap;
 
 use fgit_admission::CanonicalRefState;
 use fgit_admission::policy_bridge::{
-    InMemoryPolicySnapshots, SubjectCodeMap, compile_branch_protection_policy,
+    InMemoryPolicySnapshots, MissingAdmissionFact, PolicySourceRefusal, SubjectCodeMap,
+    compile_branch_protection_policy,
     compile_protected_branch_rules, default_principal_snapshot_id, evaluate_effects_protection,
-    evaluate_receive_pack_protection,
+    evaluate_protection, evaluate_receive_pack_protection,
 };
 use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
 use fgit_reference::effect::RefEffect;
@@ -92,31 +93,77 @@ fn planted_bypass_receive_pack_non_fast_forward_on_protected_ref_is_caught() {
     let mut refs = BTreeMap::new();
     refs.insert(main_ref.clone(), oid(10));
 
-    let non_ff_cmd = RefCommand {
-        name: main_ref,
-        expected_old: ExpectedOld::Exactly(oid(10)),
-        proposed_new: ProposedNew::Update(oid(20)),
-        force: true,
-    };
+    // A force request is not an ancestry witness. Either force value must
+    // fail closed in the reference-only adapter, not synthesize a graph fact.
+    for force in [false, true] {
+        let command = RefCommand {
+            name: main_ref.clone(),
+            expected_old: ExpectedOld::Exactly(oid(10)),
+            proposed_new: ProposedNew::Update(oid(20)),
+            force,
+        };
+        assert_eq!(
+            evaluate_receive_pack_protection(
+                &source,
+                &id,
+                &SubjectCodeMap::default(),
+                sample_principal_id(),
+                default_principal_snapshot_id(),
+                &refs,
+                &[command],
+                fgit_policy::PolicyInstant::from_seconds(100),
+            )
+            .unwrap_err(),
+            PolicySourceRefusal::MissingAdmissionFacts {
+                id: id.to_string(),
+                fact: MissingAdmissionFact::VerifiedAncestry,
+            }
+        );
+    }
 
-    let verdict = evaluate_receive_pack_protection(
-        &source,
-        &id,
-        &SubjectCodeMap::default(),
-        sample_principal_id(),
-        default_principal_snapshot_id(),
-        &refs,
-        &[non_ff_cmd],
-        fgit_policy::PolicyInstant::from_seconds(0),
-    )
-    .expect("receive pack evaluation succeeds");
-
-    assert_eq!(
-        verdict.refusal,
-        Some(RefusalCode::NonFastForwardRefused),
-        "planted bypass defect: non-fast-forward update to protected ref was not caught!"
-    );
-    assert_eq!(verdict.snapshot_id, id);
+    // Model explicit ancestry facts, independently of the force flag. This is
+    // evaluator coverage, not a graph-validation or live receive campaign.
+    for kind in [
+        fgit_policy::RefUpdateKind::FastForward,
+        fgit_policy::RefUpdateKind::NonFastForward,
+    ] {
+        let update = fgit_policy::RefUpdateFact::try_new(
+            main_ref.clone(),
+            Some(oid(10)),
+            Some(oid(20)),
+            kind,
+            false,
+        )
+        .unwrap();
+        let principal = fgit_policy::PrincipalFacts::try_new(
+            sample_principal_id(),
+            default_principal_snapshot_id(),
+            fgit_policy::PrincipalKind::Machine,
+            fgit_policy::AuthenticationStrength::SingleFactor,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let input = fgit_policy::PolicyInputRoot::try_new(
+            principal,
+            vec![update],
+            &[],
+            &[],
+            fgit_policy::PolicyInstant::from_seconds(100),
+        )
+        .unwrap();
+        let verdict = evaluate_protection(&source, &id, &SubjectCodeMap::default(), &input)
+            .expect("complete-input evaluation succeeds");
+        assert_eq!(
+            verdict.refusal,
+            if kind == fgit_policy::RefUpdateKind::NonFastForward {
+                Some(RefusalCode::NonFastForwardRefused)
+            } else {
+                None
+            }
+        );
+        assert_eq!(verdict.snapshot_id, id);
+    }
 }
 
 #[test]

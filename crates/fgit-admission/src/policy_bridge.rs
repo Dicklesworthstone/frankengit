@@ -24,6 +24,8 @@ pub mod persisted;
 pub mod receive_session;
 
 mod compiled_protection;
+mod input_facts;
+pub use input_facts::MissingAdmissionFact;
 pub(crate) use compiled_protection::receive_refusal;
 
 use crate::RefusalCode;
@@ -50,6 +52,11 @@ pub enum PolicySourceRefusal {
     UnknownSnapshot { id: String },
     /// The stored body failed to decode.
     Undecodable { id: String },
+    /// This adapter cannot establish a fact consulted by the pinned policy.
+    MissingAdmissionFacts {
+        id: String,
+        fact: MissingAdmissionFact,
+    },
     /// A valid snapshot was returned under the wrong requested identity.
     IdentityMismatch {
         requested: Box<PolicySnapshotId>,
@@ -65,6 +72,9 @@ impl std::fmt::Display for PolicySourceRefusal {
             }
             Self::Undecodable { id } => {
                 write!(formatter, "policy snapshot {id} does not decode")
+            }
+            Self::MissingAdmissionFacts { id, fact } => {
+                write!(formatter, "policy snapshot {id} requires {fact}")
             }
             Self::IdentityMismatch {
                 requested,
@@ -145,7 +155,12 @@ pub struct ProtectionVerdict {
     pub trace: String,
 }
 
-/// Evaluates protection for one input root against one pinned snapshot.
+/// Evaluates protection for one complete input root against one pinned snapshot.
+///
+/// The caller must bind principal attributes, validated ancestry, accepted
+/// evidence, aggregates and evaluation time to this exact admission attempt.
+/// Use this entry point for policies beyond the reference-only adapters below;
+/// neither a claimed principal ID nor a requested force flag proves those facts.
 pub fn evaluate_protection(
     source: &dyn PolicySnapshotSource,
     id: &PolicySnapshotId,
@@ -256,7 +271,10 @@ impl<S: fgit_authority::AuthorityStore + ?Sized> PolicySnapshotSource
     }
 }
 
-/// Provides a canonical default principal snapshot ID for baseline evaluation.
+/// Provides the inert placeholder identity used by reference-only evaluation.
+///
+/// This is not an authenticated principal snapshot or a persisted object.
+/// Policies consulting actor attributes must use a complete input root instead.
 #[must_use]
 pub fn default_principal_snapshot_id() -> fgit_types::PrincipalSnapshotId {
     let digest_bytes = fgit_types::DigestBytes::try_new(&[0u8; 32]).expect("valid digest bytes");
@@ -270,7 +288,13 @@ pub fn default_principal_snapshot_id() -> fgit_types::PrincipalSnapshotId {
     .expect("valid default principal snapshot id")
 }
 
-/// Builds a [`fgit_policy::PolicyInputRoot`] from admission facts.
+/// Builds the compatibility input for reference-only policy adapters.
+///
+/// The principal kind and snapshot are placeholders, NOT authenticated facts.
+/// The adapters check the entire compiled predicate tree before allowing this
+/// input to reach the evaluator. Never use this helper as an authentication
+/// source: construct a complete [`fgit_policy::PolicyInputRoot`] with real
+/// [`fgit_policy::PrincipalFacts`] for [`evaluate_protection`] instead.
 pub fn build_input_root(
     principal_id: fgit_types::PrincipalId,
     snapshot_id: fgit_types::PrincipalSnapshotId,
@@ -281,7 +305,7 @@ pub fn build_input_root(
         principal_id,
         snapshot_id,
         fgit_policy::PrincipalKind::Human,
-        fgit_policy::AuthenticationStrength::MultiFactor,
+        fgit_policy::AuthenticationStrength::None,
         &[],
         &[],
     )?;
@@ -373,7 +397,12 @@ where
     compiled_protection::named_branches(branches)
 }
 
-/// Evaluates receive-pack ref protection against a pinned snapshot.
+/// Evaluates reference-only receive-pack protection against a pinned snapshot.
+///
+/// Actor, evidence, aggregate and ancestry-dependent policies return
+/// [`PolicySourceRefusal::MissingAdmissionFacts`]. A wire force request is an
+/// intent, not proof of a non-fast-forward update. Use [`evaluate_protection`]
+/// with an independently validated input root for these policy families.
 pub fn evaluate_receive_pack_protection(
     source: &dyn PolicySnapshotSource,
     id: &PolicySnapshotId,
@@ -384,14 +413,20 @@ pub fn evaluate_receive_pack_protection(
     commands: &[fgit_authority::RefCommand],
     instant: fgit_policy::PolicyInstant,
 ) -> Result<ProtectionVerdict, PolicySourceRefusal> {
+    let snapshot = checked_snapshot(source, id)?;
+    input_facts::require_available(&snapshot, true)?;
     let updates = ref_updates_from_commands(refs_before, commands)
         .map_err(|_| PolicySourceRefusal::Undecodable { id: id.to_string() })?;
     let input = build_input_root(principal_id, principal_snapshot_id, updates, instant)
         .map_err(|_| PolicySourceRefusal::Undecodable { id: id.to_string() })?;
-    evaluate_protection(source, id, codes, &input)
+    evaluate_snapshot(&snapshot, codes, &input)
 }
 
-/// Evaluates ref effects protection against a pinned snapshot.
+/// Evaluates reference-only ref-effects protection against a pinned snapshot.
+///
+/// Net effects carry neither authenticated actor attributes nor the original
+/// force intent. Policies reading unavailable facts fail closed; complete-fact
+/// callers use [`evaluate_protection`] instead.
 pub fn evaluate_effects_protection(
     source: &dyn PolicySnapshotSource,
     id: &PolicySnapshotId,
@@ -402,11 +437,13 @@ pub fn evaluate_effects_protection(
     effects: &BTreeMap<fgit_types::RefName, fgit_reference::effect::RefEffect>,
     instant: fgit_policy::PolicyInstant,
 ) -> Result<ProtectionVerdict, PolicySourceRefusal> {
+    let snapshot = checked_snapshot(source, id)?;
+    input_facts::require_available(&snapshot, false)?;
     let updates = ref_updates_from_effects(refs_before, effects)
         .map_err(|_| PolicySourceRefusal::Undecodable { id: id.to_string() })?;
     let input = build_input_root(principal_id, principal_snapshot_id, updates, instant)
         .map_err(|_| PolicySourceRefusal::Undecodable { id: id.to_string() })?;
-    evaluate_protection(source, id, codes, &input)
+    evaluate_snapshot(&snapshot, codes, &input)
 }
 
 #[cfg(test)]
