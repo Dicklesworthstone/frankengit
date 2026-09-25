@@ -7,7 +7,7 @@ use fgit_ssh::command::SshGitService;
 use fgit_ssh::crypto::{
     Curve25519Kex, OpenSshChaCha20Poly1305, derive_key, encode_ed25519_public_key, sign_ed25519,
 };
-use fgit_ssh::session::{SessionPhase, SshServerSession, msg};
+use fgit_ssh::session::{MAX_GIT_PROTOCOL_BYTES, SessionPhase, SshServerSession, msg};
 use fgit_ssh::wire::{WireReader, WireWriter, decode_cleartext_packet, encode_cleartext_packet};
 use fgit_types::{PrincipalId, RepositoryId};
 
@@ -228,6 +228,40 @@ fn test_end_to_end_ssh_session_flow() {
         .expect("decrypt chan open confirm failed");
     assert_eq!(server_chan_payload[0], msg::CHANNEL_OPEN_CONFIRMATION);
 
+    // 8b. `env` requests before exec: only a bounded GIT_PROTOCOL is kept.
+    assert_eq!(
+        channel_env(
+            &mut session,
+            &mut client_out_cipher,
+            &mut client_in_cipher,
+            "LD_PRELOAD",
+            b"/tmp/x.so"
+        ),
+        msg::CHANNEL_FAILURE
+    );
+    assert_eq!(
+        channel_env(
+            &mut session,
+            &mut client_out_cipher,
+            &mut client_in_cipher,
+            "GIT_PROTOCOL",
+            &[b'v'; MAX_GIT_PROTOCOL_BYTES + 1]
+        ),
+        msg::CHANNEL_FAILURE
+    );
+    assert_eq!(session.git_protocol(), None);
+    assert_eq!(
+        channel_env(
+            &mut session,
+            &mut client_out_cipher,
+            &mut client_in_cipher,
+            "GIT_PROTOCOL",
+            b"version=2"
+        ),
+        msg::CHANNEL_SUCCESS
+    );
+    assert_eq!(session.git_protocol(), Some(&b"version=2"[..]));
+
     // 9. Client sends exec request: git-upload-pack 'my-repo.git'
     let mut exec_req = WireWriter::new();
     exec_req.write_u8(msg::CHANNEL_REQUEST);
@@ -256,6 +290,18 @@ fn test_end_to_end_ssh_session_flow() {
         session.active_command().unwrap().repository_path(),
         "my-repo.git"
     );
+    // After exec the protocol version is fixed: a late env is refused.
+    assert_eq!(
+        channel_env(
+            &mut session,
+            &mut client_out_cipher,
+            &mut client_in_cipher,
+            "GIT_PROTOCOL",
+            b"version=1"
+        ),
+        msg::CHANNEL_FAILURE
+    );
+    assert_eq!(session.git_protocol(), Some(&b"version=2"[..]));
 
     // 10. Data exchange over channel
     let git_client_data = b"0014command=ls-refs\n0000";
@@ -306,4 +352,28 @@ fn test_end_to_end_ssh_session_flow() {
         .expect("handle close failed");
     assert!(session.is_channel_closed());
     assert_eq!(*session.phase(), SessionPhase::Closed);
+}
+
+/// Send one `env` channel request with want-reply and return the reply type.
+fn channel_env(
+    session: &mut SshServerSession,
+    client_out: &mut OpenSshChaCha20Poly1305,
+    client_in: &mut OpenSshChaCha20Poly1305,
+    name: &str,
+    value: &[u8],
+) -> u8 {
+    let mut env = WireWriter::new();
+    env.write_u8(msg::CHANNEL_REQUEST);
+    env.write_u32(0);
+    env.write_utf8("env");
+    env.write_bool(true);
+    env.write_utf8(name);
+    env.write_string(value);
+    let wire = client_out.encrypt_packet(&env.into_bytes(), &[0; 16]);
+    session
+        .handle_incoming_bytes(&wire)
+        .expect("handle env request");
+    client_in
+        .decrypt_packet(&session.take_outgoing_bytes())
+        .expect("decrypt env reply")[0]
 }

@@ -36,6 +36,9 @@ pub const DEFAULT_MAX_PACKET_SIZE: u32 = 32 * 1024;
 /// RFC 4253 section 4.2: the identification line, including CR LF, is at most
 /// 255 bytes. Anything longer is refused before it can grow the input buffer.
 pub const MAX_IDENTIFICATION_BYTES: usize = 255;
+/// Bound on a client's `GIT_PROTOCOL` environment value. Git sends a few
+/// bytes (`version=2`); a longer value is refused, never stored.
+pub const MAX_GIT_PROTOCOL_BYTES: usize = 256;
 /// OpenSSH strict key exchange markers (Terrapin mitigation, CVE-2023-48795).
 pub const KEX_STRICT_SERVER: &str = "kex-strict-s-v00@openssh.com";
 /// The client-side strict key exchange marker.
@@ -172,6 +175,8 @@ pub struct SshServerSession {
     client_max_packet: u32,
     server_window_size: u32,
     active_command: Option<SshGitCommand>,
+    /// The `GIT_PROTOCOL` value from an `env` request before exec.
+    git_protocol: Option<Vec<u8>>,
     outgoing_bytes: Vec<u8>,
     channel_input_data: Vec<u8>,
     channel_teardown: ChannelTeardown,
@@ -225,6 +230,7 @@ impl SshServerSession {
             client_max_packet: DEFAULT_MAX_PACKET_SIZE,
             server_window_size: DEFAULT_WINDOW_SIZE,
             active_command: None,
+            git_protocol: None,
             outgoing_bytes: Vec::new(),
             channel_input_data: Vec::new(),
             channel_teardown: ChannelTeardown::default(),
@@ -268,6 +274,13 @@ impl SshServerSession {
     #[must_use]
     pub const fn active_command(&self) -> Option<&SshGitCommand> {
         self.active_command.as_ref()
+    }
+
+    /// The client's `GIT_PROTOCOL` value, sent by an `env` request before
+    /// exec, if any. It is untrusted data for the Git service to interpret.
+    #[must_use]
+    pub fn git_protocol(&self) -> Option<&[u8]> {
+        self.git_protocol.as_deref()
     }
 
     /// The client channel ID, if a channel has been opened.
@@ -836,6 +849,30 @@ impl SshServerSession {
                                 format!("ERR: {refusal}\n").as_bytes(),
                             );
                             self.send_channel_close(recipient_channel, 1);
+                        }
+                    }
+                } else if request_type == "env" {
+                    // RFC 4254 section 6.4. Only `GIT_PROTOCOL` is accepted,
+                    // as sshd's `AcceptEnv GIT_PROTOCOL` does, and only on an
+                    // open channel before exec: it selects the Git wire
+                    // version and never names a command, path or credential.
+                    let name = reader.read_utf8()?;
+                    let value = reader.read_string()?;
+                    let accepted = name == "GIT_PROTOCOL"
+                        && self.phase == SessionPhase::ChannelReady
+                        && self.client_channel_id.is_some()
+                        && value.len() <= MAX_GIT_PROTOCOL_BYTES;
+                    if accepted {
+                        self.git_protocol = Some(value.to_vec());
+                    }
+                    if want_reply {
+                        if accepted {
+                            let mut success = WireWriter::new();
+                            success.write_u8(msg::CHANNEL_SUCCESS);
+                            success.write_u32(recipient_channel);
+                            self.send_packet(&success.into_bytes());
+                        } else {
+                            self.send_channel_failure(recipient_channel);
                         }
                     }
                 } else if want_reply {

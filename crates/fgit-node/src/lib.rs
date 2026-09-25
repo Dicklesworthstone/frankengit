@@ -5387,9 +5387,23 @@ fn parse_git_daemon_request_payload(
         });
     }
     let repository_path = GitDaemonRepositoryPath::parse(&service_and_path[separator + 1..])?;
+    let service = git_protocol_service(is_upload, parameters.split(|byte| *byte == 0))?;
+    Ok(GitDaemonRequest {
+        repository_path,
+        service,
+    })
+}
 
+/// The Git service one protocol-parameter list selects: NUL-separated
+/// git-daemon greeting parameters, or the `:`-separated `GIT_PROTOCOL` value
+/// an SSH client sends. Exactly one rule for both transports: at most one
+/// `version=` entry, versions 0 (absent), 1 and 2, other entries ignored.
+pub(crate) fn git_protocol_service<'a>(
+    is_upload: bool,
+    parameters: impl IntoIterator<Item = &'a [u8]>,
+) -> Result<GitDaemonService, GitDaemonTransportRefusal> {
     let mut requested_version = None;
-    for parameter in parameters.split(|byte| *byte == 0) {
+    for parameter in parameters {
         if parameter.is_empty() {
             continue;
         }
@@ -5401,7 +5415,7 @@ fn parse_git_daemon_request_payload(
         }
         requested_version = Some(version);
     }
-    let service = if is_upload {
+    Ok(if is_upload {
         GitDaemonService::UploadPack(match requested_version {
             None => UploadPackVersion::V0,
             Some(b"1") => UploadPackVersion::V1,
@@ -5424,10 +5438,6 @@ fn parse_git_daemon_request_payload(
                 });
             }
         }
-    };
-    Ok(GitDaemonRequest {
-        repository_path,
-        service,
     })
 }
 

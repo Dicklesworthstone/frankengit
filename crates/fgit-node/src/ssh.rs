@@ -24,7 +24,7 @@ use fgit_wire::{UploadPackRepository, WireLimits};
 use crate::{
     GitDaemonRequest, GitDaemonServerReceipt, GitDaemonService, GitDaemonSessionOutcome,
     GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal, NodeRefusal, OneNode,
-    ReceivePackSessionInputs, ReceiveResponseWriter, UploadPackVersion,
+    ReceivePackSessionInputs, ReceiveResponseWriter,
 };
 
 /// Bounded concurrency and session limits for the SSH server.
@@ -498,6 +498,12 @@ impl OneNode {
             return false;
         }
 
+        // `GIT_PROTOCOL` from the client's `env` request selects the wire
+        // version under the same rule as a git-daemon greeting.
+        let git_protocol = session
+            .git_protocol()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
         let state_cell = RefCell::new(SshConnectionState {
             session,
             stream,
@@ -509,12 +515,17 @@ impl OneNode {
             SshGitService::UploadPack => {
                 let mut reader = SshReader(&state_cell);
                 let mut writer = SshWriter(&state_cell);
-                child_node.serve_ssh_upload_pack(&mut reader, &mut writer)
+                child_node.serve_ssh_upload_pack(&mut reader, &mut writer, &git_protocol)
             }
             SshGitService::ReceivePack => {
                 let mut reader = SshReader(&state_cell);
                 let mut writer = SshWriter(&state_cell);
-                child_node.serve_ssh_receive_pack(&mut reader, &mut writer, principal)
+                child_node.serve_ssh_receive_pack(
+                    &mut reader,
+                    &mut writer,
+                    principal,
+                    &git_protocol,
+                )
             }
         };
 
@@ -541,7 +552,10 @@ impl OneNode {
         &self,
         reader: &mut R,
         writer: &mut W,
+        git_protocol: &[u8],
     ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal> {
+        let service =
+            ssh_git_service(true, git_protocol).map_err(NodeGitDaemonServeRefusal::from)?;
         let limits = WireLimits::default();
         let deadline = crate::GitDaemonSessionDeadline::new(
             self.git_daemon_session_timeout,
@@ -576,7 +590,7 @@ impl OneNode {
 
         let greeting = GitDaemonRequest {
             repository_path: self.git_daemon_repository_path.clone(),
-            service: GitDaemonService::UploadPack(UploadPackVersion::V0),
+            service,
         };
 
         let disclosure =
@@ -682,7 +696,10 @@ impl OneNode {
         reader: &mut R,
         writer: &mut W,
         principal: Option<PrincipalId>,
+        git_protocol: &[u8],
     ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal> {
+        let service =
+            ssh_git_service(false, git_protocol).map_err(NodeGitDaemonServeRefusal::from)?;
         let limits = WireLimits::default();
         let deadline = crate::GitDaemonSessionDeadline::new(
             self.git_daemon_session_timeout,
@@ -717,7 +734,7 @@ impl OneNode {
 
         let greeting = GitDaemonRequest {
             repository_path: self.git_daemon_repository_path.clone(),
-            service: GitDaemonService::ReceivePack,
+            service,
         };
 
         let Some(principal) = principal.or(self.git_daemon_receive_principal) else {
@@ -737,5 +754,63 @@ impl OneNode {
             },
             &limits,
         )
+    }
+}
+
+/// The Git service an SSH client's `GIT_PROTOCOL` value selects. The value is
+/// `:`-separated, as Git's `GIT_PROTOCOL` environment variable is, and follows
+/// exactly the git-daemon greeting rule: one `version=` entry at most,
+/// versions 0 (absent), 1 and 2, and receive-pack ignoring `version=2`.
+fn ssh_git_service(
+    is_upload: bool,
+    git_protocol: &[u8],
+) -> Result<GitDaemonService, GitDaemonTransportRefusal> {
+    crate::git_protocol_service(is_upload, git_protocol.split(|byte| *byte == b':'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fgit_wire::UploadPackVersion;
+
+    #[test]
+    fn git_protocol_selects_the_upload_pack_version_like_a_daemon_greeting() {
+        for (value, version) in [
+            (&b""[..], UploadPackVersion::V0),
+            (b"version=1", UploadPackVersion::V1),
+            (b"version=2", UploadPackVersion::V2),
+            (b"object-format=sha1:version=2", UploadPackVersion::V2),
+            (b"version=2:", UploadPackVersion::V2),
+        ] {
+            assert_eq!(
+                ssh_git_service(true, value).unwrap(),
+                GitDaemonService::UploadPack(version),
+                "{value:?}"
+            );
+        }
+        // receive-pack speaks v0/v1 and ignores a version=2 request.
+        for value in [&b""[..], b"version=1", b"version=2"] {
+            assert_eq!(
+                ssh_git_service(false, value).unwrap(),
+                GitDaemonService::ReceivePack
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_or_unknown_protocol_versions_are_typed_refusals() {
+        for is_upload in [true, false] {
+            assert!(matches!(
+                ssh_git_service(is_upload, b"version=2:version=2"),
+                Err(GitDaemonTransportRefusal::DuplicateProtocolVersion)
+            ));
+            assert!(matches!(
+                ssh_git_service(is_upload, b"version=3"),
+                Err(GitDaemonTransportRefusal::UnsupportedProtocolVersion { version_bytes: 1 })
+            ));
+        }
+        // The permitted twins: one known version, and an unrelated key.
+        assert!(ssh_git_service(true, b"version=2:agent=git/2").is_ok());
+        assert!(ssh_git_service(false, b"version=1").is_ok());
     }
 }

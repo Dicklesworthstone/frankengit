@@ -2,7 +2,7 @@
 //! The immutable binding permits a retry; only whole-image verification proves
 //! what was imported. No mutable progress file decides that verification ran.
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::super::super::{parent, publish_new, regular, require_absent, sync_directory};
