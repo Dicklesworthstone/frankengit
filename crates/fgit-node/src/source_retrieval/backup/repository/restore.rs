@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use fgit_authority::{HeadReadReceipt, StoreInstanceId};
 use fgit_authority_fsqlite::ExportBundle;
 use fgit_crypto::GitObjectKind;
-use fgit_node::{NodeConfig, OneNode};
+use crate::{NodeConfig, OneNode};
 use fgit_object_fabric::ObjectKind as FabricKind;
 use fgit_treefs::integrity::{GraphReport, ObjectGraphAudit};
 
@@ -25,7 +25,7 @@ use super::profile::{Deadline, Profile, ProfileFlags};
 use super::{limits, with_node};
 
 pub(super) const USAGE: &str =
-    "usage: fg-repository-backup restore <backup-file> <storage-root> --trusted-local
+    "usage: fg backup restore <backup-file> <storage-root> --trusted-local
          --expected-sha256 <64-lowercase-hex> --destination-instance <positive-integer>
          [--resume] [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
 

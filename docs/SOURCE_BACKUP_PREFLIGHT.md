@@ -1,12 +1,12 @@
 # Source backup preflight
 
-`fg-repository-backup verify` checks a source recovery archive before committing
+`fg backup verify` checks a source recovery archive before committing
 storage and time to payload restoration. It uses the existing source archive
 reader, FrankenSQLite portable-import verifier, authority materializer and native
 object graph audit. It does not substitute a second parser or a mock store.
 
 ```sh
-fg-repository-backup verify source.fg /trusted/parent/new-verification-scratch \
+fg backup verify source.fg /trusted/parent/new-verification-scratch \
   --trusted-local \
   --expected-sha256 <independently-saved-64-character-lowercase-checksum> \
   --verification-instance 991 \
@@ -63,3 +63,42 @@ This is a bounded implementation slice related to
 `frankengit-root-doctrine-x2mv.4.11`; it does not close that bead or establish a
 release gate. The normative authority/root-last rules remain in
 [NORMATIVE_PROTOCOL_CONTRACTS.md](NORMATIVE_PROTOCOL_CONTRACTS.md).
+
+
+## One recovery implementation in the main executable
+
+`fg backup export`, `fg backup verify` and `fg backup restore` call the shared
+`fgit_node::source_retrieval::backup::run` host adapter directly. Installing `fg`
+is sufficient; no backup helper executable or foreign Git engine is launched.
+`fg-repository-backup` remains a compatible alternate executable with the same
+arguments, JSON receipts, refusal rules and root-last publication behavior.
+
+The adapter owns its runtime lifecycle and must not be called inside an existing
+node request. Source archive transport, canonical schemas, checksums, token
+reminting, original object commitments and resume-intent bytes are unchanged.
+Only explicit `restore` can publish a new destination. `verify` has no resume
+mode, and no successful preflight grants permission to skip restore validation.
+
+The implementation and its tests live under
+`crates/fgit-node/src/source_retrieval/backup/`. The legacy binary test target
+retains its original `repository::` test paths by compiling those same sources;
+this is compatibility coverage, not an independent second oracle. Run either:
+
+```sh
+cargo test -p fgit-node --lib source_retrieval::backup::
+cargo test -p fgit-node --bin fg-repository-backup
+```
+
+The native primary-command campaign uses a prebuilt `fg` only (stock Git builds
+its deterministic fixture, never implements recovery). It removes the original
+source, verifies/restores the archive, recovers the original transaction, admits
+new branch work, and requires an old resume to refuse without rewinding it:
+
+```sh
+FG_BIN=/absolute/path/to/fg bash scripts/e2e/suites/recovery/source_backup_preflight.sh
+```
+
+The campaign requires both SHA-1 and SHA-256, explicit refusal/permitted twins,
+no-overwrite export, pre-publication checksum/budget refusals and cleanup. Its
+source is not an execution certificate; record the binary/source revision and
+actual result when running it.

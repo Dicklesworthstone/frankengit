@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub(in super::super) const USAGE: &str =
-    "usage: fg-repository-backup verify <backup-file> <new-scratch-root> --trusted-local
+    "usage: fg backup verify <backup-file> <new-scratch-root> --trusted-local
          --expected-sha256 <64-lowercase-hex> --verification-instance <positive-integer>
          [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
 

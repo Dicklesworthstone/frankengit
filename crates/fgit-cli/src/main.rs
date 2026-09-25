@@ -36,6 +36,16 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "backup") {
+        use fgit_node::source_retrieval::backup;
+        return match backup::run(&arguments[1..], &mut std::io::stdout().lock()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{}", backup::error_json(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     if arguments.first().is_some_and(|argument| argument == "import") {
         return match import_command::run(&arguments[1..]) {
             Ok(code) => ExitCode::from(code),

@@ -57,7 +57,7 @@ fn sample(format: GitHashAlgorithm, payload: &[u8]) -> Vec<u8> {
 fn repeated_passes_pin_both_native_domains_without_retaining_payloads() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let bytes = sample(format, b"exact\0bytes\xff");
-        let pin = crate::sha256(&bytes);
+        let pin = super::super::super::sha256(&bytes);
         let deadline = Profile::default().start();
         let mut archive = PinnedArchive::new(
             Cursor::new(bytes.clone()),
@@ -94,7 +94,7 @@ fn an_individually_valid_changed_record_cannot_reuse_a_previous_pass_pin() {
     let deadline = Profile::default().start();
     let mut archive = PinnedArchive::new(
         Cursor::new(original.clone()),
-        crate::sha256(&original),
+        super::super::super::sha256(&original),
         Default::default(),
         deadline,
     )
@@ -119,7 +119,7 @@ fn an_individually_valid_changed_record_cannot_reuse_a_previous_pass_pin() {
 #[test]
 fn metadata_changes_truncation_and_byte_budgets_never_yield_a_complete_pass() {
     let bytes = sample(GitHashAlgorithm::Sha256, b"bounded");
-    let pin = crate::sha256(&bytes);
+    let pin = super::super::super::sha256(&bytes);
     let deadline = Profile::default().start();
     assert!(
         PinnedArchive::new(
@@ -183,7 +183,7 @@ fn replacing_the_path_does_not_switch_an_already_opened_input() {
     std::fs::write(&new, sample(GitHashAlgorithm::Sha1, b"modified")).unwrap();
     let deadline = Profile::default().start();
     let mut archive =
-        PinnedArchive::open(&path, crate::sha256(&bytes), Default::default(), deadline).unwrap();
+        PinnedArchive::open(&path, super::super::super::sha256(&bytes), Default::default(), deadline).unwrap();
     std::fs::rename(&new, &path).unwrap();
     archive
         .scan(deadline, |record| {
