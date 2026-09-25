@@ -167,18 +167,7 @@ impl OneNode {
             ingress,
             shared_quota,
             |request, session, validated, live| {
-                let mut checkpoint = || live();
-                drive_request_while(
-                    self,
-                    request,
-                    self.admit_receive_session_durable_in(
-                        request,
-                        session,
-                        validated,
-                        AdmissionLimits::default(),
-                    ),
-                    &mut checkpoint,
-                )
+                self.admit_guarded_receive(request, session, validated, live)
             },
         )
     }
@@ -213,19 +202,85 @@ impl OneNode {
             .map_err(|e| io_error("clone receive socket", e))?;
         let mut reader = DeadlineTcpStream::new(&mut stream, ingress.clone());
         let mut writer = DeadlineTcpStream::new(&mut output, ingress.clone());
+        let result = self.serve_guarded_receive_session(
+            &mut reader,
+            &mut writer,
+            self.git_daemon_receive_principal,
+            &ingress,
+            shared_quota,
+            &limits,
+            |reader| {
+                let greeting = read_git_daemon_request(reader, &limits)
+                    .map_err(NodeGitDaemonServeRefusal::from)?;
+                Ok(greeting.repository_path().as_bytes().to_vec())
+            },
+            admit,
+        );
+        drop(writer);
+        drop(reader);
+        let _ = output.shutdown(Shutdown::Write);
+        // Bound cleanup by both bytes AND elapsed time, including a peer that
+        // keeps sending after the response. Closing cannot infer a rollback.
+        let start = Instant::now();
+        let mut remaining = 64 * 1024;
+        let mut scratch = [0_u8; 1024];
+        while remaining > 0 {
+            let budget = Duration::from_secs(1).saturating_sub(start.elapsed());
+            if budget.is_zero() || stream.set_read_timeout(Some(budget)).is_err() {
+                break;
+            }
+            match stream.read(&mut scratch[..remaining.min(1024)]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => remaining -= n,
+            }
+        }
+        result
+    }
+
+    /// The guarded receive session over any byte transport.
+    ///
+    /// Everything between the transport's own framing and its teardown:
+    /// principal, quota and cell-state checks, the authenticated
+    /// advertisement, native command and PACK framing, quarantine against a
+    /// fresh basis selected after ingress, `admit`, the report, and the fatal
+    /// UNKNOWN response that never invents per-ref rejections. `route`
+    /// supplies the repository route bound into the retry key: the raw TCP
+    /// binding reads it from the git-daemon greeting, SSH takes it from the
+    /// authorized exec request. `principal` is the authenticated writer;
+    /// `None` is refused before any byte of the request is read.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn serve_guarded_receive_session<R, W, G, F>(
+        &self,
+        reader: &mut R,
+        writer: &mut W,
+        principal: Option<fgit_types::PrincipalId>,
+        ingress: &GitDaemonSessionDeadline,
+        shared_quota: Option<&crate::PushQuota>,
+        limits: &WireLimits,
+        route: G,
+        admit: F,
+    ) -> Result<Option<AdmissionResult>, NodeSmartHttpRefusal>
+    where
+        R: Read,
+        W: crate::ReceiveResponseWriter,
+        G: FnOnce(&mut R) -> Result<Vec<u8>, NodeSmartHttpRefusal>,
+        F: FnOnce(
+            &NodeRequestContext,
+            &LoopbackReceiveSession,
+            &BasisBoundValidatedReceive,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<AdmissionResult, NodeSmartHttpRefusal>,
+    {
         let mut admission_started = false;
         let mut final_attempted = false;
         let result = (|| {
-            let principal = self
-                .git_daemon_receive_principal
-                .ok_or(NodeSmartHttpRefusal::UnauthenticatedReceive)?;
+            let principal = principal.ok_or(NodeSmartHttpRefusal::UnauthenticatedReceive)?;
             shared_quota
                 .unwrap_or(&self.push_quota)
                 .evaluate(&principal)?;
             admits_staging_intake(self.cell_state())
                 .map_err(NodeReceiveTransportRefusal::CellState)?;
-            let greeting = read_git_daemon_request(&mut reader, &limits)
-                .map_err(NodeGitDaemonServeRefusal::from)?;
+            let route = route(reader)?;
             let mut context = self.smart_http_receive_context(limits.clone())?;
             context.limits.max_commands = context
                 .limits
@@ -246,11 +301,11 @@ impl OneNode {
                 snapshot,
                 &snapshot.hidden_refs,
                 self.object_format,
-                &limits,
+                limits,
             )
             .map_err(NodeAdmissionViewRefusal::from)?;
             let advertised = advertise_receive_pack(refs.advertised_refs().to_vec(), &context)?;
-            let bytes = encode_packets(&advertised, &limits)?;
+            let bytes = encode_packets(&advertised, limits)?;
             writer
                 .write_all(&bytes)
                 .map_err(|e| io_error("write receive advertisement", e))?;
@@ -261,9 +316,9 @@ impl OneNode {
             let mut machine = ReceivePack::new(context)?;
             let mut prefix = Vec::new();
             let ready = 'commands: loop {
-                checkpoint(&ingress)?;
-                let (raw, packet) = read_receive_frame(&mut reader, &limits)
-                    .map_err(NodeGitDaemonServeRefusal::from)?;
+                checkpoint(ingress)?;
+                let (raw, packet) =
+                    read_receive_frame(reader, limits).map_err(NodeGitDaemonServeRefusal::from)?;
                 if raw.len() > COMMAND_BYTES.saturating_sub(prefix.len()) {
                     return Err(invalid("receive command envelope exceeded"));
                 }
@@ -277,10 +332,8 @@ impl OneNode {
                     }
                 }
             };
-            let session = LoopbackReceiveSession::authenticated(
-                principal,
-                retry_key(greeting.repository_path().as_bytes(), &prefix)?,
-            );
+            let session =
+                LoopbackReceiveSession::authenticated(principal, retry_key(&route, &prefix)?);
             let mut input_bytes = prefix.len() as u64;
             drop(prefix);
             if ready.requires_pack() {
@@ -288,7 +341,7 @@ impl OneNode {
                     PackBoundaryScanner::new(self.object_format, receive_limits.pack.clone());
                 let mut chunk = [0_u8; CHUNK];
                 loop {
-                    checkpoint(&ingress)?;
+                    checkpoint(ingress)?;
                     let count = match reader.read(&mut chunk) {
                         Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                         result => result.map_err(|e| io_error("read receive PACK", e))?,
@@ -387,29 +440,33 @@ impl OneNode {
             ));
             // Keep the exact admission error/prefix even if this best-effort
             // diagnostic is also lost. Never replace it with a transport verdict.
-            if let Err(error) = fatal(&mut writer, admission_started, &limits) {
+            if let Err(error) = fatal(writer, admission_started, limits) {
                 eprintln!("guarded receive fatal response delivery failed: {error}");
             }
         }
-        drop(writer);
-        drop(reader);
-        let _ = output.shutdown(Shutdown::Write);
-        // Bound cleanup by both bytes AND elapsed time, including a peer that
-        // keeps sending after the response. Closing cannot infer a rollback.
-        let start = Instant::now();
-        let mut remaining = 64 * 1024;
-        let mut scratch = [0_u8; 1024];
-        while remaining > 0 {
-            let budget = Duration::from_secs(1).saturating_sub(start.elapsed());
-            if budget.is_zero() || stream.set_read_timeout(Some(budget)).is_err() {
-                break;
-            }
-            match stream.read(&mut scratch[..remaining.min(1024)]) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => remaining -= n,
-            }
-        }
         result
+    }
+
+    /// The production admission step every guarded receive transport uses.
+    pub(crate) fn admit_guarded_receive(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        validated: &BasisBoundValidatedReceive,
+        live: &mut dyn FnMut() -> bool,
+    ) -> Result<AdmissionResult, NodeSmartHttpRefusal> {
+        let mut checkpoint = || live();
+        drive_request_while(
+            self,
+            request,
+            self.admit_receive_session_durable_in(
+                request,
+                session,
+                validated,
+                AdmissionLimits::default(),
+            ),
+            &mut checkpoint,
+        )
     }
 }
 

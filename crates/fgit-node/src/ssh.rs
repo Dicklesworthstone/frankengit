@@ -24,7 +24,7 @@ use fgit_wire::{UploadPackRepository, WireLimits};
 use crate::{
     GitDaemonRequest, GitDaemonServerReceipt, GitDaemonService, GitDaemonSessionOutcome,
     GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal, NodeRefusal, OneNode,
-    ReceivePackSessionInputs, ReceiveResponseWriter,
+    ReceiveResponseWriter,
 };
 
 /// Bounded concurrency and session limits for the SSH server.
@@ -511,28 +511,24 @@ impl OneNode {
             read_pos: 0,
         });
 
-        let outcome = match command.service() {
+        let served = match command.service() {
             SshGitService::UploadPack => {
                 let mut reader = SshReader(&state_cell);
                 let mut writer = SshWriter(&state_cell);
-                child_node.serve_ssh_upload_pack(&mut reader, &mut writer, &git_protocol)
+                child_node
+                    .serve_ssh_upload_pack(&mut reader, &mut writer, &git_protocol)
+                    .is_ok()
             }
             SshGitService::ReceivePack => {
                 let mut reader = SshReader(&state_cell);
                 let mut writer = SshWriter(&state_cell);
-                child_node.serve_ssh_receive_pack(
-                    &mut reader,
-                    &mut writer,
-                    principal,
-                    &git_protocol,
-                )
+                child_node
+                    .serve_ssh_receive_pack(&mut reader, &mut writer, principal, &git_protocol)
+                    .is_ok()
             }
         };
 
-        let (exit_code, success) = match outcome {
-            Ok(_) => (0, true),
-            Err(_) => (1, false),
-        };
+        let (exit_code, success) = if served { (0, true) } else { (1, false) };
 
         let mut final_state = state_cell.into_inner();
         final_state.session.send_channel_eof();
@@ -691,68 +687,36 @@ impl OneNode {
         })
     }
 
+    /// Serves `git-receive-pack` over an authorized SSH channel through the
+    /// same guarded receive coordinator as raw TCP and smart HTTP: fresh-basis
+    /// quarantine after ingress, the complete-session retry key, and a fatal
+    /// UNKNOWN response (never invented `ng` rows) when admission may already
+    /// have committed. The writer is the deploy key's principal, falling back
+    /// to the operator's receive principal as before.
     fn serve_ssh_receive_pack<R: Read, W: ReceiveResponseWriter>(
         &self,
         reader: &mut R,
         writer: &mut W,
         principal: Option<PrincipalId>,
         git_protocol: &[u8],
-    ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal> {
-        let service =
-            ssh_git_service(false, git_protocol).map_err(NodeGitDaemonServeRefusal::from)?;
-        let limits = WireLimits::default();
-        let deadline = crate::GitDaemonSessionDeadline::new(
+    ) -> Result<Option<fgit_admission::AdmissionResult>, crate::NodeSmartHttpRefusal> {
+        ssh_git_service(false, git_protocol).map_err(NodeGitDaemonServeRefusal::from)?;
+        let ingress = crate::GitDaemonSessionDeadline::new(
             self.git_daemon_session_timeout,
             self.git_daemon_session_work_scaling,
         );
-        let request = self.request_context();
-        deadline
-            .check("materialize authenticated admission")
-            .map_err(NodeGitDaemonServeRefusal::from)?;
-
-        let admission_deadline_expired = std::sync::atomic::AtomicBool::new(false);
-        let admission_is_live = || {
-            if deadline.expired() {
-                admission_deadline_expired.store(true, Ordering::Relaxed);
-                return false;
-            }
-            true
-        };
-        let admission = self
-            .runtime
-            .block_on(self.materialize_admission_while_in(&request, &admission_is_live));
-        if admission_deadline_expired.load(Ordering::Relaxed) || deadline.expired() {
-            return Err(NodeGitDaemonServeRefusal::from(
-                GitDaemonTransportRefusal::SessionDeadlineExceeded {
-                    operation: "materialize authenticated admission",
-                },
-            ));
-        }
-        let materialized = admission.map_err(|error| {
-            NodeGitDaemonServeRefusal::from(crate::NodeAdmissionViewRefusal::from(error))
-        })?;
-
-        let greeting = GitDaemonRequest {
-            repository_path: self.git_daemon_repository_path.clone(),
-            service,
-        };
-
-        let Some(principal) = principal.or(self.git_daemon_receive_principal) else {
-            return Err(NodeGitDaemonServeRefusal::from(
-                GitDaemonTransportRefusal::UnsupportedService { service_bytes: 16 },
-            ));
-        };
-
-        self.serve_git_daemon_receive_pack_session(
+        let route = self.git_daemon_repository_path.as_bytes().to_vec();
+        self.serve_guarded_receive_session(
             reader,
             writer,
-            ReceivePackSessionInputs {
-                deadline: deadline.clone(),
-                principal,
-                materialized: &materialized,
-                greeting,
+            principal.or(self.git_daemon_receive_principal),
+            &ingress,
+            None,
+            &WireLimits::default(),
+            |_| Ok(route),
+            |request, session, validated, live| {
+                self.admit_guarded_receive(request, session, validated, live)
             },
-            &limits,
         )
     }
 }
