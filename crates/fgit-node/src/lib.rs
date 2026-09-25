@@ -6684,6 +6684,36 @@ impl OneNode {
         }
     }
 
+    /// Mints the authority context for one request that runs under `deadline`.
+    ///
+    /// The Database class keeps its poll and cost floors as the liveness
+    /// backstop, but its wall-clock bound is the session's own budget, so a
+    /// request has one time policy (the operator's session timeout) rather
+    /// than the class default racing underneath it. Under contention a CAS
+    /// loser waits for the winner and then re-evaluates; with the 15 s class
+    /// default it could be cancelled mid-resolution and reported as
+    /// `outcome_unknown` although its terminal refusal was deterministic
+    /// (frankengit-root-doctrine-x2mv.4.27). The receive path applies the
+    /// same rule to its admission context (frankengit-asb8).
+    pub(crate) fn session_request_context(
+        &self,
+        deadline: &GitDaemonSessionDeadline,
+    ) -> NodeRequestContext {
+        let limits = ClassLimits {
+            timeout: Some(deadline.budget()),
+            ..self
+                .service_config
+                .runtime_budgets
+                .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS)
+        };
+        let authority = FsqliteCx::new();
+        authority.set_native_cx(
+            self.runtime
+                .request_cx_with_budget(limits.at(self.runtime.now())),
+        );
+        NodeRequestContext { authority }
+    }
+
     fn pack_materialization_context(&self) -> FsqliteCx {
         let context = FsqliteCx::new();
         context.set_native_cx(self.runtime.request_cx(SELECTED_PACK_BUDGET_CLASS));
