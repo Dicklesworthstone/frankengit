@@ -382,7 +382,22 @@ impl FsqliteAuthorityStore {
     {
         let mut lease = self.operations.acquire(cx).await?;
         if lease.needs_recovery() {
-            let _ = self.query(cx, "identity.read", &[]).await?;
+            // The barrier drains whatever a dropped caller left queued on the
+            // worker, and any engine answer proves that drain; only a
+            // cancelled barrier may never have reached the worker. A
+            // transaction whose concurrent session the engine already aborted
+            // answers every statement, the barrier included, with "rollback
+            // required": clearing exactly that state is what recovery is for,
+            // so the rollback below still runs. Before this, the barrier's
+            // error ended recovery and the store reported itself
+            // permanently unavailable (x2mv.4.27).
+            match self.query(cx, "identity.read", &[]).await {
+                Err(cancelled @ EngineError::Engine(TransientClass::Cancelled)) => {
+                    return Err(cancelled);
+                }
+                Err(error) if !self.connection.in_transaction() => return Err(error),
+                Ok(_) | Err(_) => {}
+            }
             if self.connection.in_transaction() {
                 self.connection
                     .rollback_transaction(cx)
@@ -577,7 +592,14 @@ impl FsqliteAuthorityStore {
         self.begin(cx, &mut lease).await?;
         match self.put_body(cx, key, body).await {
             Ok(outcome) => {
-                self.commit(cx, &mut lease).await?;
+                // A failed COMMIT leaves the connection in its transaction
+                // (the engine has already aborted the concurrent session), so
+                // it is rolled back here like every other failure, keeping
+                // the original error. Propagating it bare left the lease
+                // unfinalized for the next caller to recover (x2mv.4.27).
+                if let Err(cause) = self.commit(cx, &mut lease).await {
+                    return Err(self.rollback_after(cx, &mut lease, cause).await);
+                }
                 Ok(outcome)
             }
             Err(cause) => Err(self.rollback_after(cx, &mut lease, cause).await),
@@ -704,7 +726,14 @@ impl FsqliteAuthorityStore {
         self.begin(cx, &mut lease).await?;
         match self.create_head(cx, key, generation, body).await {
             Ok(outcome) => {
-                self.commit(cx, &mut lease).await?;
+                // A failed COMMIT leaves the connection in its transaction
+                // (the engine has already aborted the concurrent session), so
+                // it is rolled back here like every other failure, keeping
+                // the original error. Propagating it bare left the lease
+                // unfinalized for the next caller to recover (x2mv.4.27).
+                if let Err(cause) = self.commit(cx, &mut lease).await {
+                    return Err(self.rollback_after(cx, &mut lease, cause).await);
+                }
                 Ok(outcome)
             }
             Err(cause) => Err(self.rollback_after(cx, &mut lease, cause).await),
@@ -833,7 +862,14 @@ impl FsqliteAuthorityStore {
             .await
         {
             Ok(outcome) => {
-                self.commit(cx, &mut lease).await?;
+                // A failed COMMIT leaves the connection in its transaction
+                // (the engine has already aborted the concurrent session), so
+                // it is rolled back here like every other failure, keeping
+                // the original error. Propagating it bare left the lease
+                // unfinalized for the next caller to recover (x2mv.4.27).
+                if let Err(cause) = self.commit(cx, &mut lease).await {
+                    return Err(self.rollback_after(cx, &mut lease, cause).await);
+                }
                 Ok(outcome)
             }
             Err(cause) => Err(self.rollback_after(cx, &mut lease, cause).await),
@@ -989,7 +1025,14 @@ impl FsqliteAuthorityStore {
             .await
         {
             Ok(outcome @ CasOutcome::Committed(_)) => {
-                self.commit(cx, &mut lease).await?;
+                // A failed COMMIT leaves the connection in its transaction
+                // (the engine has already aborted the concurrent session), so
+                // it is rolled back here like every other failure, keeping
+                // the original error. Propagating it bare left the lease
+                // unfinalized for the next caller to recover (x2mv.4.27).
+                if let Err(cause) = self.commit(cx, &mut lease).await {
+                    return Err(self.rollback_after(cx, &mut lease, cause).await);
+                }
                 Ok(outcome)
             }
             Ok(CasOutcome::PredecessorMismatch) => {
