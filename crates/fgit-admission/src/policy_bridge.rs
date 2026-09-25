@@ -25,8 +25,8 @@ pub mod receive_session;
 
 mod compiled_protection;
 mod input_facts;
-pub use input_facts::MissingAdmissionFact;
 pub(crate) use compiled_protection::receive_refusal;
+pub use input_facts::MissingAdmissionFact;
 
 use crate::RefusalCode;
 use fgit_policy::content::PolicySnapshotId;

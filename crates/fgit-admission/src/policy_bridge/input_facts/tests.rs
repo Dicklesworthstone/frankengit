@@ -106,7 +106,10 @@ fn short_circuit_and_negation_cannot_turn_missing_facts_into_permission() {
         check(&aggregate, true),
         missing(MissingAdmissionFact::Aggregates)
     );
-    assert_eq!(check(&Predicate::Not(Box::new(Predicate::Never)), true), Ok(()));
+    assert_eq!(
+        check(&Predicate::Not(Box::new(Predicate::Never)), true),
+        Ok(())
+    );
 }
 
 #[test]
@@ -270,9 +273,8 @@ fn existing_reference_only_policies_keep_allow_and_deny_results() {
     let topic = RefName::try_new(b"refs/heads/topic").unwrap();
     let refs = BTreeMap::from([(protected.clone(), old), (topic.clone(), old)]);
     let mut source = InMemoryPolicySnapshots::new();
-    let id = source.pin(
-        crate::policy_bridge::compile_branch_protection_policy("refs/heads/main").unwrap(),
-    );
+    let id = source
+        .pin(crate::policy_bridge::compile_branch_protection_policy("refs/heads/main").unwrap());
     for name in [&protected, &topic] {
         let command = RefCommand {
             name: name.clone(),

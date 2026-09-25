@@ -51,9 +51,9 @@ pub(super) async fn publish_owned<S: AsyncAuthorityStore + ?Sized>(
     )
     .await?;
     match outcome {
-        OutcomeLookup::Decided(terminal) => {
-            ownership(published_here, terminal).map(Some).map_err(unavailable)
-        }
+        OutcomeLookup::Decided(terminal) => ownership(published_here, terminal)
+            .map(Some)
+            .map_err(unavailable),
         OutcomeLookup::Undecided if published_here => {
             Err(unavailable(RefusalCode::EvidenceMissing))
         }
@@ -61,10 +61,7 @@ pub(super) async fn publish_owned<S: AsyncAuthorityStore + ?Sized>(
     }
 }
 
-const fn ownership(
-    published_here: bool,
-    terminal: TerminalOutcome,
-) -> Result<bool, RefusalCode> {
+const fn ownership(published_here: bool, terminal: TerminalOutcome) -> Result<bool, RefusalCode> {
     match terminal.outcome {
         DecisionOutcome::Committed { .. } => Ok(published_here),
         DecisionOutcome::Refused { code, .. } => Err(code),
