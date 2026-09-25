@@ -19,7 +19,12 @@ use fgit_types::{AsciiSlug, RefusalCode, RepositoryAuthorityHeadId, RepositoryId
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_PAGE: u16 = 100;
-const MAX_EVENTS: usize = 4096;
+// Scan work and retained query state are different budgets. Unrelated streams
+// must not consume the selected issue/page's replay-memory allowance. These are
+// finite read-profile limits, not changes to either canonical map schema.
+const MAX_EVENTS: usize = 65_536;
+const MAX_SCAN_EVENTS: usize = 65_536;
+const MAX_SCAN_BYTES: usize = 128 * 1024 * 1024;
 const MAX_BYTES: usize = 32 * 1024 * 1024;
 
 /// The seal contains only the submitted versioned command and authenticated
@@ -110,7 +115,8 @@ where
             basis.body().repository_id,
             &resolved.forge,
             &resolved.outbox,
-            Some(number),
+            &BTreeSet::from([number]),
+            None,
             &|| projection.merge_checkpoint(cx).is_err(),
         )
         .await?;
@@ -146,6 +152,7 @@ pub struct IssueHistoryPage {
 struct Timeline {
     issue: IssueSnapshot,
     events: Vec<ForgeEvent>,
+    latest_event: ForgeEvent,
 }
 fn checkpoint(cancelled: &impl Fn() -> bool) -> Result<(), AdmissionError> {
     if cancelled() {
@@ -177,29 +184,21 @@ where
 {
     limit(page_limit)?;
     let state = delivery::read_in(store, cx, basis, cancelled).await?;
+    // Select numeric page keys before retaining or folding any issue history.
+    // The lookahead key determines the cursor but does not consume replay state.
+    let (wanted, more) = page_numbers(&state.forge, after, page_limit, cancelled)?;
     let all = replay_selected(
         store,
         cx,
         basis.body().repository_id,
         &state.forge,
         &state.outbox,
+        &wanted,
         None,
         cancelled,
     )
     .await?;
-    let mut issues = Vec::new();
-    let mut more = false;
-    for (number, timeline) in all {
-        checkpoint(cancelled)?;
-        if number.get() <= after {
-            continue;
-        }
-        if issues.len() == usize::from(page_limit) {
-            more = true;
-            break;
-        }
-        issues.push(timeline.issue);
-    }
+    let issues: Vec<_> = all.into_values().map(|timeline| timeline.issue).collect();
     let next_after = if more {
         issues.last().map(|issue| issue.number.get())
     } else {
@@ -236,7 +235,8 @@ where
         basis.body().repository_id,
         &state.forge,
         &state.outbox,
-        Some(number),
+        &BTreeSet::from([number]),
+        Some((after, page_limit)),
         cancelled,
     )
     .await?;
@@ -281,7 +281,8 @@ async fn replay_selected<S, C>(
     repository: RepositoryId,
     forge: &CanonicalForgePositionState,
     outbox: &CanonicalOutboxState,
-    only: Option<IssueNumber>,
+    wanted: &BTreeSet<IssueNumber>,
+    history_window: Option<(u64, u16)>,
     cancelled: &C,
 ) -> Result<BTreeMap<IssueNumber, Timeline>, AdmissionError>
 where
@@ -292,29 +293,17 @@ where
     if forge.repository_id() != repository || outbox.repository_id() != repository {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
-    if forge.entries().len() > MAX_EVENTS || outbox.entries().len() > MAX_EVENTS {
-        return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
-    }
-    let mut frontiers = BTreeMap::new();
-    for entry in forge.entries() {
+    let frontiers = issue_frontiers(forge, cancelled)?;
+    if wanted.iter().all(|number| !frontiers.contains_key(number)) {
+        // Callers already authenticated the delivery state. A new or missing
+        // aggregate has no prior timeline to replay; object presence alone is
+        // never used to invent one.
         checkpoint(cancelled)?;
-        let label = entry.stream();
-        let Some(text) = label.as_str().strip_prefix("issue/") else {
-            continue;
-        };
-        let number = text
-            .parse::<u64>()
-            .ok()
-            .and_then(IssueNumber::try_new)
-            .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-        if storage::aggregate_label(AggregateId::Issue(number))? != entry.stream() {
-            return Err(unavailable(RefusalCode::EvidenceInvalid));
-        }
-        frontiers.insert(number, entry);
+        return Ok(BTreeMap::new());
     }
     let mut events = BTreeMap::<(IssueNumber, AggregateVersion), ForgeEvent>::new();
     let mut batches = BTreeSet::new();
-    let (mut count, mut bytes) = (0usize, 0usize);
+    let (mut count, mut scanned_bytes, mut retained_bytes) = (0usize, 0usize, 0usize);
     for entry in outbox.entries() {
         checkpoint(cancelled)?;
         if !batches.insert(entry.payload_root()) {
@@ -324,16 +313,16 @@ where
         checkpoint(cancelled)?;
         count = count
             .checked_add(batch.events.len())
-            .filter(|n| *n <= MAX_EVENTS)
+            .filter(|n| *n <= MAX_SCAN_EVENTS)
             .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
         for event in batch.events {
             checkpoint(cancelled)?;
             let size = fgit_codec::encode_body(&event)
                 .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
                 .len();
-            bytes = bytes
+            scanned_bytes = scanned_bytes
                 .checked_add(size)
-                .filter(|n| *n <= MAX_BYTES)
+                .filter(|n| *n <= MAX_SCAN_BYTES)
                 .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
             let AggregateId::Issue(number) = event.aggregate else {
                 continue;
@@ -344,7 +333,7 @@ where
             if event.version.get() > frontier.successor_position() {
                 return Err(unavailable(RefusalCode::EvidenceInvalid));
             }
-            if only.is_some_and(|wanted| wanted != number) {
+            if !wanted.contains(&number) {
                 continue;
             }
             let key = (number, event.version);
@@ -353,6 +342,15 @@ where
                     return Err(unavailable(RefusalCode::EvidenceInvalid));
                 }
             } else {
+                // Duplicate references do not consume memory twice, but a
+                // conflicting event at the same version still fails closed.
+                if events.len() >= MAX_EVENTS {
+                    return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
+                }
+                retained_bytes = retained_bytes
+                    .checked_add(size)
+                    .filter(|total| *total <= MAX_BYTES)
+                    .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
                 events.insert(key, event);
             }
         }
@@ -368,13 +366,19 @@ where
         let timeline = timelines.entry(number).or_insert_with(|| Timeline {
             issue: state.clone(),
             events: Vec::new(),
+            latest_event: event.clone(),
         });
         timeline.issue = state;
-        timeline.events.push(event);
+        if history_window.is_some_and(|(after, limit)| {
+            event.version.get() > after && timeline.events.len() <= usize::from(limit)
+        }) {
+            timeline.events.push(event.clone());
+        }
+        timeline.latest_event = event;
     }
     for (number, frontier) in frontiers {
         checkpoint(cancelled)?;
-        if only.is_some_and(|wanted| wanted != number) {
+        if !wanted.contains(&number) {
             continue;
         }
         let timeline = timelines
@@ -390,10 +394,61 @@ where
             .iter()
             .rev()
             .find(|event| event.aggregate == AggregateId::Issue(number));
-        if selected != timeline.events.last() {
+        if selected != Some(&timeline.latest_event) {
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
     }
     checkpoint(cancelled)?;
     Ok(timelines)
 }
+
+/// Parse the canonical labels once, retaining numeric (not lexical) order.
+fn issue_frontiers<C: Fn() -> bool + Sync>(
+    forge: &CanonicalForgePositionState,
+    cancelled: &C,
+) -> Result<BTreeMap<IssueNumber, fgit_codec::ForgePositionStateEntry>, AdmissionError> {
+    let mut frontiers = BTreeMap::new();
+    for entry in forge.entries() {
+        checkpoint(cancelled)?;
+        let label = entry.stream();
+        let Some(text) = label.as_str().strip_prefix("issue/") else {
+            continue;
+        };
+        let number = text
+            .parse::<u64>()
+            .ok()
+            .and_then(IssueNumber::try_new)
+            .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
+        if storage::aggregate_label(AggregateId::Issue(number))? != label {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
+        }
+        frontiers.insert(number, *entry);
+    }
+    Ok(frontiers)
+}
+
+fn page_numbers<C: Fn() -> bool + Sync>(
+    forge: &CanonicalForgePositionState,
+    after: u64,
+    limit: u16,
+    cancelled: &C,
+) -> Result<(BTreeSet<IssueNumber>, bool), AdmissionError> {
+    let mut numbers = BTreeSet::new();
+    let mut more = false;
+    for number in issue_frontiers(forge, cancelled)?.into_keys() {
+        checkpoint(cancelled)?;
+        if number.get() <= after {
+            continue;
+        }
+        if numbers.len() == usize::from(limit) {
+            more = true;
+            break;
+        }
+        numbers.insert(number);
+    }
+    Ok((numbers, more))
+}
+
+#[cfg(test)]
+#[path = "issues/replay_tests.rs"]
+mod replay_tests;
