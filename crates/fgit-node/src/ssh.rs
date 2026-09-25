@@ -6,13 +6,13 @@
 //! - Deploy-key authentication and repository-scoped authorization
 //! - SANS-I/O session state machine mapped to Asupersync blocking threads
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fgit_identity::deploy_key::DeployKeyBinding;
 use fgit_ssh::SigningKey;
@@ -149,7 +149,7 @@ impl SshConnectionState {
     /// block" both mean the peer is still there. OpenSSH signals EOF inside
     /// the channel, so a closed socket means the client itself is gone.
     fn peer_connected(&self) -> bool {
-        tcp_peer_connected(&self.stream)
+        crate::tcp_peer_connected(&self.stream)
     }
 
     fn flush_outgoing(&mut self) -> io::Result<()> {
@@ -263,58 +263,8 @@ impl SshConnectionState {
     }
 }
 
-/// See [`SshConnectionState::peer_connected`].
-fn tcp_peer_connected(stream: &TcpStream) -> bool {
-    if stream.set_nonblocking(true).is_err() {
-        return true;
-    }
-    let mut probe = [0_u8; 1];
-    let connected = match stream.peek(&mut probe) {
-        Ok(0) => false,
-        Ok(_) => true,
-        Err(error) => matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-        ),
-    };
-    // If blocking mode cannot be restored, the next read reports WouldBlock,
-    // which already ends the session as idle.
-    let _ = stream.set_nonblocking(false);
-    connected
-}
-
 struct SshReader<'a>(&'a RefCell<SshConnectionState>);
 
-/// Rate-limited peer liveness for work that reads nothing from the client,
-/// such as selected-pack planning: a client that disconnects mid-clone stops
-/// that work instead of pinning a worker until the session deadline.
-struct PeerProbe<'a> {
-    state: &'a RefCell<SshConnectionState>,
-    checked: Cell<Instant>,
-    gone: Cell<bool>,
-}
-
-impl PeerProbe<'_> {
-    const INTERVAL: Duration = Duration::from_millis(100);
-
-    fn alive(&self) -> bool {
-        if self.gone.get() {
-            return false;
-        }
-        if self.checked.get().elapsed() < Self::INTERVAL {
-            return true;
-        }
-        self.checked.set(Instant::now());
-        // A read or write already holding the state detects a disconnect
-        // itself; the probe never waits for it.
-        if let Ok(state) = self.state.try_borrow()
-            && !state.peer_connected()
-        {
-            self.gone.set(true);
-        }
-        !self.gone.get()
-    }
-}
 struct SshWriter<'a>(&'a RefCell<SshConnectionState>);
 
 impl Read for SshReader<'_> {
@@ -575,14 +525,15 @@ impl OneNode {
             SshGitService::UploadPack => {
                 let mut reader = SshReader(&state_cell);
                 let mut writer = SshWriter(&state_cell);
-                let probe = PeerProbe {
-                    state: &state_cell,
-                    checked: Cell::new(Instant::now()),
-                    gone: Cell::new(false),
-                };
+                let client = crate::ClientLiveness::new(|| {
+                    state_cell
+                        .try_borrow()
+                        .ok()
+                        .map(|state| state.peer_connected())
+                });
                 child_node
                     .serve_ssh_upload_pack(&mut reader, &mut writer, &git_protocol, &|| {
-                        probe.alive()
+                        client.alive()
                     })
                     .is_ok()
             }
@@ -803,7 +754,9 @@ fn ssh_git_service(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tcp_peer_connected;
     use fgit_wire::UploadPackVersion;
+    use std::time::Instant;
 
     #[test]
     fn git_protocol_selects_the_upload_pack_version_like_a_daemon_greeting() {

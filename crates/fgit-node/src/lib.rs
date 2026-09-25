@@ -4500,6 +4500,67 @@ impl GitDaemonReceiveProcessingDeadline {
 }
 
 /// A socket half whose every operation observes the shared session deadline.
+/// Whether the client behind `stream` is still connected, without consuming
+/// or waiting for anything. A non-blocking peek sees an orderly close as a
+/// zero-length read and a reset as an error; pending bytes and "would block"
+/// both mean the peer is still there. Blocking mode is restored afterwards
+/// (it is shared by every clone of the socket); if that fails, the next read
+/// reports WouldBlock, which already ends a session.
+pub(crate) fn tcp_peer_connected(stream: &TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return true;
+    }
+    let mut probe = [0_u8; 1];
+    let connected = match stream.peek(&mut probe) {
+        Ok(0) => false,
+        Ok(_) => true,
+        Err(error) => matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ),
+    };
+    let _ = stream.set_nonblocking(false);
+    connected
+}
+
+/// Rate-limited liveness of the client behind one serving connection, for
+/// work that reads nothing from it, such as selected-pack planning: a client
+/// that disconnects mid-clone stops that work instead of holding a worker
+/// until the session deadline. `probe` answers `Some(connected)`, or `None`
+/// when the connection cannot be probed right now (the transport is mid read
+/// or write, which detects a disconnect itself).
+pub(crate) struct ClientLiveness<F: Fn() -> Option<bool>> {
+    probe: F,
+    checked: Cell<Instant>,
+    gone: Cell<bool>,
+}
+
+impl<F: Fn() -> Option<bool>> ClientLiveness<F> {
+    const INTERVAL: Duration = Duration::from_millis(100);
+
+    pub(crate) fn new(probe: F) -> Self {
+        Self {
+            probe,
+            checked: Cell::new(Instant::now()),
+            gone: Cell::new(false),
+        }
+    }
+
+    pub(crate) fn alive(&self) -> bool {
+        if self.gone.get() {
+            return false;
+        }
+        if self.checked.get().elapsed() < Self::INTERVAL {
+            return true;
+        }
+        self.checked.set(Instant::now());
+        if (self.probe)() == Some(false) {
+            self.gone.set(true);
+        }
+        !self.gone.get()
+    }
+}
+
 struct DeadlineTcpStream<'stream> {
     stream: &'stream mut TcpStream,
     deadline: GitDaemonSessionDeadline,
@@ -7668,6 +7729,10 @@ impl OneNode {
                 source,
             })
         })?;
+        // A third handle to the same socket, used only to notice a client
+        // that disconnected while the pack is planned (see ClientLiveness).
+        let probe_stream = stream.try_clone().ok();
+        let client = ClientLiveness::new(|| probe_stream.as_ref().map(tcp_peer_connected));
         let deadline = GitDaemonSessionDeadline::new(
             self.git_daemon_session_timeout,
             self.git_daemon_session_work_scaling,
@@ -7775,7 +7840,7 @@ impl OneNode {
                         if stopped {
                             return false;
                         }
-                        if !session_is_live() {
+                        if !session_is_live() || !client.alive() {
                             stopped = true;
                             return false;
                         }
