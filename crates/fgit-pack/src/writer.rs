@@ -1021,11 +1021,20 @@ fn select_deltas(
                         .and_then(|(_, built)| built.as_ref())
                 }
             };
+            // A candidate replaces the current choice only when strictly
+            // shorter (candidates are visited nearest-first, so an equal
+            // length never wins the tie-break below), and a program is only
+            // ever emitted when shorter than its target. Anything at or over
+            // this bound is irrelevant, so the search may stop proving it.
+            let bound = selected.as_ref().map_or(object.body.len(), |current| {
+                current.program.len().min(object.body.len())
+            });
             let Some(program) = make_delta_program(
                 &base.object.body,
                 &object.body,
                 profile.delta_search,
                 index,
+                bound,
                 deadline,
             )?
             else {
@@ -1065,35 +1074,37 @@ fn select_deltas(
 
 /// Builds the profile's delta program for one base/target pair.
 ///
-/// Under [`DeltaSearch::IndexedBlocks`] both encodings are built and the
+/// Under [`DeltaSearch::IndexedBlocks`] both encodings are considered and the
 /// shorter one is emitted; an exact tie keeps the prefix/suffix encoding, so a
 /// pair that prefix/suffix search already encoded well emits the same bytes it
-/// emitted before.  The pair is rejected -- the target is written as a full
-/// base entry -- when even the shorter program is no smaller than the target.
+/// emitted before.  The pair is rejected -- `None` -- unless the chosen
+/// program is shorter than `bound`, which the caller sets to the target length
+/// or the shorter program it already holds.  Rejecting at the bound is the
+/// same decision the caller's strict comparison would make, so the indexed
+/// scan may stop as soon as it can no longer come in under it.
 fn make_delta_program(
     base: &[u8],
     target: &[u8],
     search: DeltaSearch,
     index: Option<&BaseDeltaIndex>,
+    bound: usize,
     deadline: &mut impl Deadline,
 ) -> Result<Option<Vec<u8>>, PackWriteError> {
     let prefix_suffix = make_prefix_suffix_delta_program(base, target)?;
     let chosen = match (search, index) {
-        (DeltaSearch::IndexedBlocks, Some(index)) => {
-            let indexed = make_indexed_delta_program(index, base, target, deadline)?;
-            if indexed.len() < prefix_suffix.len() {
-                indexed
-            } else {
-                prefix_suffix
-            }
-        }
+        // The indexed program is emitted only when strictly shorter than the
+        // prefix/suffix one, and only matters under `bound`.
+        (DeltaSearch::IndexedBlocks, Some(index)) => make_indexed_delta_program(
+            index,
+            base,
+            target,
+            bound.min(prefix_suffix.len()),
+            deadline,
+        )?
+        .unwrap_or(prefix_suffix),
         _ => prefix_suffix,
     };
-    if chosen.len() < target.len() {
-        Ok(Some(chosen))
-    } else {
-        Ok(None)
-    }
+    Ok((chosen.len() < bound).then_some(chosen))
 }
 
 /// Encodes the target as copy-prefix, insert-middle, copy-suffix.
@@ -1143,6 +1154,13 @@ struct BaseDeltaIndex {
     chain: Vec<u32>,
     /// Indexed base offsets, ascending.
     offsets: Vec<u32>,
+    /// Each indexed block's full fingerprint, parallel to `offsets`.
+    ///
+    /// A match of [`DELTA_INDEX_BLOCK_BYTES`] or more means the two blocks are
+    /// byte-identical, so their fingerprints are equal. A candidate whose
+    /// fingerprint differs can therefore never qualify, and skipping its byte
+    /// comparison changes no result while sparing a random read of the base.
+    fingerprints: Vec<u32>,
     /// `heads.len() - 1`; `heads.len()` is always a power of two.
     mask: u32,
 }
@@ -1195,6 +1213,10 @@ impl BaseDeltaIndex {
         offsets
             .try_reserve_exact(entries)
             .map_err(|_| PackError::AllocationFailed { requested: entries })?;
+        let mut fingerprints = Vec::new();
+        fingerprints
+            .try_reserve_exact(entries)
+            .map_err(|_| PackError::AllocationFailed { requested: entries })?;
 
         let mut offset = 0_usize;
         while offset <= span {
@@ -1202,8 +1224,9 @@ impl BaseDeltaIndex {
             let slot = u32::try_from(offsets.len()).map_err(|_| PackError::IntegerOverflow {
                 context: "delta base index slot",
             })?;
-            let bucket = (block_fingerprint(&base[offset..offset + DELTA_INDEX_BLOCK_BYTES]) & mask)
-                as usize;
+            let fingerprint = block_fingerprint(&base[offset..offset + DELTA_INDEX_BLOCK_BYTES]);
+            let bucket = (fingerprint & mask) as usize;
+            fingerprints.push(fingerprint);
             chain.push(heads[bucket]);
             heads[bucket] = slot;
             offsets.push(
@@ -1222,6 +1245,7 @@ impl BaseDeltaIndex {
             heads,
             chain,
             offsets,
+            fingerprints,
             mask,
         }))
     }
@@ -1242,8 +1266,14 @@ impl BaseDeltaIndex {
         let mut examined = 0_usize;
         let mut best: Option<(usize, usize)> = None;
         while candidate != Self::NONE && examined < DELTA_MAX_MATCH_CHAIN {
+            // Every walked candidate counts toward the chain bound, compared
+            // or not, so the set examined is exactly the unfiltered walk's.
             examined += 1;
             let slot = candidate as usize;
+            if self.fingerprints[slot] != fingerprint {
+                candidate = self.chain[slot];
+                continue;
+            }
             let offset = self.offsets[slot] as usize;
             let length = common_prefix(&base[offset..], &target[position..]);
             if length >= DELTA_INDEX_BLOCK_BYTES
@@ -1277,18 +1307,24 @@ fn block_fingerprint(window: &[u8]) -> u32 {
 /// indexed match and continues past it, accumulating unmatched bytes into one
 /// insert run.  This is the shape that reaches a shifted base, which the
 /// prefix/suffix encoding cannot express at all.
+///
+/// Returns `None` once the program provably reaches `limit` bytes: the program
+/// only grows, and the pending unmatched bytes will be emitted as inserts
+/// whatever follows, so `program + insert_cost(pending)` is a lower bound on
+/// its final length.  A `Some` program is exactly the one the unbounded scan
+/// would build.
 fn make_indexed_delta_program(
     index: &BaseDeltaIndex,
     base: &[u8],
     target: &[u8],
+    limit: usize,
     deadline: &mut impl Deadline,
-) -> Result<Vec<u8>, PackWriteError> {
+) -> Result<Option<Vec<u8>>, PackWriteError> {
     let mut program = Vec::new();
+    let reserve = limit.min(target.len()).saturating_add(16);
     program
-        .try_reserve(target.len().saturating_add(16))
-        .map_err(|_| PackError::AllocationFailed {
-            requested: target.len().saturating_add(16),
-        })?;
+        .try_reserve(reserve)
+        .map_err(|_| PackError::AllocationFailed { requested: reserve })?;
     encode_delta_varint(base.len(), &mut program)?;
     encode_delta_varint(target.len(), &mut program)?;
 
@@ -1308,6 +1344,9 @@ fn make_indexed_delta_program(
             checkpoint(deadline)?;
         }
         since_checkpoint = (since_checkpoint + 1) % DELTA_SCAN_CHECKPOINT_STRIDE;
+        if program.len() + insert_run_cost(position - literal_start) >= limit {
+            return Ok(None);
+        }
 
         fingerprint = if rolling {
             fingerprint
@@ -1335,7 +1374,13 @@ fn make_indexed_delta_program(
     }
 
     emit_insert_run(&target[literal_start..], &mut program)?;
-    Ok(program)
+    Ok((program.len() < limit).then_some(program))
+}
+
+/// Encoded bytes [`emit_insert_run`] spends on `length` literal bytes: one
+/// opcode per chunk of at most 127, plus the bytes themselves.
+const fn insert_run_cost(length: usize) -> usize {
+    length + length.div_ceil(127)
 }
 
 fn common_prefix(left: &[u8], right: &[u8]) -> usize {
@@ -1730,6 +1775,381 @@ mod tests {
         true
     }
 
+    /// The delta planner exactly as it was before the bounded scan and the
+    /// fingerprint pre-check (76dd133f): the oracle both optimizations must
+    /// match byte for byte.
+    mod reference {
+        use super::super::*;
+
+        pub(super) fn select_deltas(
+            objects: &[CanonicalPackObject],
+            profile: PackWriteProfile,
+            limits: &PackLimits,
+            deadline: &mut impl Deadline,
+        ) -> Result<Vec<PackPlanEntry>, PackWriteError> {
+            let max_delta_fanout = limits.max_delta_fanout;
+            // One index per candidate base, built on first use and retained only while
+            // that base is still inside the window. Every target in the window would
+            // otherwise rebuild the same index, which is the whole cost of the search.
+            let mut indexes: VecDeque<(usize, Option<BaseDeltaIndex>)> = VecDeque::new();
+            let mut entries: Vec<PackPlanEntry> = Vec::new();
+            entries
+                .try_reserve(objects.len())
+                .map_err(|_| PackError::AllocationFailed {
+                    requested: objects.len(),
+                })?;
+            let mut fanout = Vec::new();
+            fanout
+                .try_reserve(objects.len())
+                .map_err(|_| PackError::AllocationFailed {
+                    requested: objects.len(),
+                })?;
+            for object in objects {
+                checkpoint(deadline)?;
+                let window_start = entries.len().saturating_sub(profile.delta_window);
+                let mut selected: Option<PlannedDelta> = None;
+                for base_index in (window_start..entries.len()).rev() {
+                    checkpoint(deadline)?;
+                    let base = &entries[base_index];
+                    if base.object.object_type != object.object_type {
+                        continue;
+                    }
+                    if fanout[base_index] >= max_delta_fanout {
+                        continue;
+                    }
+                    let base_depth = base.delta.as_ref().map_or(0, PlannedDelta::depth);
+                    let depth = base_depth
+                        .checked_add(1)
+                        .ok_or(PackError::IntegerOverflow {
+                            context: "planned delta depth",
+                        })?;
+                    if depth > profile.max_delta_depth {
+                        continue;
+                    }
+                    let index = match profile.delta_search {
+                        DeltaSearch::PrefixSuffix => None,
+                        DeltaSearch::IndexedBlocks => {
+                            if !indexes.iter().any(|(cached, _)| *cached == base_index) {
+                                let built =
+                                    BaseDeltaIndex::build(&base.object.body, limits, deadline)?;
+                                while indexes.len() >= profile.delta_window.max(1) {
+                                    indexes.pop_front();
+                                }
+                                indexes.push_back((base_index, built));
+                            }
+                            indexes
+                                .iter()
+                                .find(|(cached, _)| *cached == base_index)
+                                .and_then(|(_, built)| built.as_ref())
+                        }
+                    };
+                    let Some(program) = make_delta_program(
+                        &base.object.body,
+                        &object.body,
+                        profile.delta_search,
+                        index,
+                        deadline,
+                    )?
+                    else {
+                        continue;
+                    };
+                    let candidate = PlannedDelta {
+                        base_index,
+                        depth,
+                        program,
+                    };
+                    if selected.as_ref().is_none_or(|current| {
+                        candidate.program.len() < current.program.len()
+                            || (candidate.program.len() == current.program.len()
+                                && (candidate.base_index > current.base_index
+                                    || (candidate.base_index == current.base_index
+                                        && base.object.id < entries[current.base_index].object.id)))
+                    }) {
+                        selected = Some(candidate);
+                    }
+                }
+                entries.push(PackPlanEntry {
+                    object: object.clone(),
+                    delta: selected,
+                });
+                fanout.push(0);
+                if let Some(delta) = entries.last().and_then(PackPlanEntry::delta) {
+                    fanout[delta.base_index] = fanout[delta.base_index].checked_add(1).ok_or(
+                        PackError::IntegerOverflow {
+                            context: "planned delta fanout",
+                        },
+                    )?;
+                }
+            }
+            Ok(entries)
+        }
+
+        fn make_delta_program(
+            base: &[u8],
+            target: &[u8],
+            search: DeltaSearch,
+            index: Option<&BaseDeltaIndex>,
+            deadline: &mut impl Deadline,
+        ) -> Result<Option<Vec<u8>>, PackWriteError> {
+            let prefix_suffix = make_prefix_suffix_delta_program(base, target)?;
+            let chosen = match (search, index) {
+                (DeltaSearch::IndexedBlocks, Some(index)) => {
+                    let indexed = make_indexed_delta_program(index, base, target, deadline)?;
+                    if indexed.len() < prefix_suffix.len() {
+                        indexed
+                    } else {
+                        prefix_suffix
+                    }
+                }
+                _ => prefix_suffix,
+            };
+            if chosen.len() < target.len() {
+                Ok(Some(chosen))
+            } else {
+                Ok(None)
+            }
+        }
+
+        impl BaseDeltaIndex {
+            fn reference_best_match(
+                &self,
+                base: &[u8],
+                target: &[u8],
+                position: usize,
+                fingerprint: u32,
+            ) -> Option<(usize, usize)> {
+                let mut candidate = self.heads[(fingerprint & self.mask) as usize];
+                let mut examined = 0_usize;
+                let mut best: Option<(usize, usize)> = None;
+                while candidate != Self::NONE && examined < DELTA_MAX_MATCH_CHAIN {
+                    examined += 1;
+                    let slot = candidate as usize;
+                    let offset = self.offsets[slot] as usize;
+                    let length = common_prefix(&base[offset..], &target[position..]);
+                    if length >= DELTA_INDEX_BLOCK_BYTES
+                        && best.is_none_or(|(best_offset, best_length)| {
+                            length > best_length || (length == best_length && offset < best_offset)
+                        })
+                    {
+                        best = Some((offset, length));
+                    }
+                    candidate = self.chain[slot];
+                }
+                best
+            }
+        }
+
+        fn make_indexed_delta_program(
+            index: &BaseDeltaIndex,
+            base: &[u8],
+            target: &[u8],
+            deadline: &mut impl Deadline,
+        ) -> Result<Vec<u8>, PackWriteError> {
+            let mut program = Vec::new();
+            program
+                .try_reserve(target.len().saturating_add(16))
+                .map_err(|_| PackError::AllocationFailed {
+                    requested: target.len().saturating_add(16),
+                })?;
+            encode_delta_varint(base.len(), &mut program)?;
+            encode_delta_varint(target.len(), &mut program)?;
+
+            let high_power = (1..DELTA_INDEX_BLOCK_BYTES)
+                .fold(1_u32, |power, _| power.wrapping_mul(DELTA_HASH_MULTIPLIER));
+            let mut literal_start = 0_usize;
+            let mut position = 0_usize;
+            let mut fingerprint = 0_u32;
+            let mut rolling = false;
+            let mut since_checkpoint = 0_usize;
+
+            while let Some(window_end) = position
+                .checked_add(DELTA_INDEX_BLOCK_BYTES)
+                .filter(|end| *end <= target.len())
+            {
+                if since_checkpoint == 0 {
+                    checkpoint(deadline)?;
+                }
+                since_checkpoint = (since_checkpoint + 1) % DELTA_SCAN_CHECKPOINT_STRIDE;
+
+                fingerprint = if rolling {
+                    fingerprint
+                        .wrapping_sub(u32::from(target[position - 1]).wrapping_mul(high_power))
+                        .wrapping_mul(DELTA_HASH_MULTIPLIER)
+                        .wrapping_add(u32::from(target[window_end - 1]))
+                } else {
+                    block_fingerprint(&target[position..window_end])
+                };
+                rolling = true;
+
+                if let Some((offset, length)) =
+                    index.reference_best_match(base, target, position, fingerprint)
+                {
+                    emit_insert_run(&target[literal_start..position], &mut program)?;
+                    emit_copy_run(offset, length, &mut program)?;
+                    position = position
+                        .checked_add(length)
+                        .ok_or(PackError::IntegerOverflow {
+                            context: "delta scan match advance",
+                        })?;
+                    literal_start = position;
+                    rolling = false;
+                } else {
+                    position += 1;
+                }
+            }
+
+            emit_insert_run(&target[literal_start..], &mut program)?;
+            Ok(program)
+        }
+    }
+
+    /// Deterministic pseudo-random bytes (xorshift), so corpora replay.
+    fn noise(seed: u64, length: usize) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..length)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    fn delta_corpora() -> Vec<Vec<CanonicalPackObject>> {
+        let mut corpora = Vec::new();
+        for seed in 1..=12_u64 {
+            let base = noise(seed, 3_000 + (seed as usize) * 97);
+            let mut blobs = vec![base.clone()];
+            // Versions: in-place edits, a shifted copy, an append, a truncation.
+            let mut edited = base.clone();
+            for (at, byte) in noise(seed + 100, 8).iter().enumerate() {
+                let position = (usize::from(*byte) * 11 + at * 257) % edited.len();
+                edited[position] ^= 0x5a;
+            }
+            blobs.push(edited.clone());
+            let mut shifted = noise(seed + 200, (seed as usize) % 7 + 1);
+            shifted.extend_from_slice(&base);
+            blobs.push(shifted);
+            let mut appended = edited.clone();
+            appended.extend_from_slice(&noise(seed + 300, 211));
+            blobs.push(appended);
+            blobs.push(base[..base.len() / 2].to_vec());
+            // Unrelated blobs of the same size (no useful delta at all),
+            // repeated-block bodies, and tiny bodies below the index block.
+            blobs.push(noise(seed + 400, base.len()));
+            blobs.push(noise(seed + 500, base.len()));
+            blobs.push(base.iter().copied().cycle().take(base.len() * 2).collect());
+            blobs.push(noise(seed + 600, 9));
+            blobs.push(b"0123456789abcdef0123456789abcdef".to_vec());
+            blobs.push(b"0123456789abcdef0123456789abcdeX".to_vec());
+            // Exact duplicates of an earlier body under a different path.
+            blobs.push(format!("{seed}").into_bytes());
+            corpora.push(
+                blobs
+                    .iter()
+                    .enumerate()
+                    .map(|(at, body)| {
+                        object(
+                            ObjectType::Blob,
+                            body,
+                            (at as u64) % 3,
+                            seed + (at as u64) % 2,
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        corpora
+    }
+
+    fn wide_limits() -> PackLimits {
+        PackLimits {
+            max_input_bytes: 1 << 24,
+            max_entries: 1024,
+            max_object_bytes: 1 << 22,
+            max_delta_depth: 16,
+            max_delta_fanout: 64,
+            max_total_expanded_bytes: 1 << 24,
+            max_expansion_ratio: 1024,
+            max_delta_work: 1 << 26,
+            max_inflate_work: 1 << 26,
+            max_cached_bytes: 1 << 24,
+            max_index_entries: 4096,
+        }
+    }
+
+    #[test]
+    fn bounded_fingerprinted_delta_search_matches_the_reference_planner_exactly() {
+        let mut compared = 0;
+        let mut deltas = 0;
+        for objects in delta_corpora() {
+            for profile in [
+                PackWriteProfile::COMPRESSED_V2,
+                PackWriteProfile::COMPRESSED_V1,
+                PackWriteProfile {
+                    id: "narrow-window-test",
+                    delta_window: 3,
+                    max_delta_depth: 2,
+                    ..PackWriteProfile::COMPRESSED_V2
+                },
+            ] {
+                for index_entries in [4096, 7] {
+                    let limits = PackLimits {
+                        max_index_entries: index_entries,
+                        ..wide_limits()
+                    };
+                    let optimized = select_deltas(&objects, profile, &limits, &mut always)
+                        .expect("optimized plan");
+                    let reference =
+                        reference::select_deltas(&objects, profile, &limits, &mut always)
+                            .expect("reference plan");
+                    assert_eq!(optimized, reference, "{} / {index_entries}", profile.id);
+                    compared += 1;
+                    deltas += optimized
+                        .iter()
+                        .filter(|entry| entry.delta.is_some())
+                        .count();
+                }
+            }
+        }
+        // The corpora must actually exercise delta selection, or equality
+        // would be vacuous.
+        assert_eq!(compared, 72);
+        assert!(deltas > 200, "only {deltas} deltas selected");
+    }
+
+    #[test]
+    fn the_indexed_scan_stops_at_its_limit_and_is_exact_below_it() {
+        let base = noise(7, 4_000);
+        let mut target = base.clone();
+        target[1_000] ^= 1;
+        let index = BaseDeltaIndex::build(&base, &wide_limits(), &mut always)
+            .expect("index")
+            .expect("indexed");
+        let full = make_indexed_delta_program(&index, &base, &target, usize::MAX, &mut always)
+            .expect("scan")
+            .expect("unbounded program");
+        // At exactly its own length the program is not under the limit.
+        assert_eq!(
+            make_indexed_delta_program(&index, &base, &target, full.len(), &mut always)
+                .expect("scan"),
+            None
+        );
+        // One byte more and it is emitted unchanged.
+        assert_eq!(
+            make_indexed_delta_program(&index, &base, &target, full.len() + 1, &mut always)
+                .expect("scan"),
+            Some(full)
+        );
+        // An unrelated target under a tight limit stops early.
+        let unrelated = noise(8, 4_000);
+        assert_eq!(
+            make_indexed_delta_program(&index, &base, &unrelated, 64, &mut always).expect("scan"),
+            None
+        );
+    }
+
     fn object(kind: ObjectType, body: &[u8], recency: u64, path_hash: u64) -> CanonicalPackObject {
         let id = fgit_crypto::git_object_id(ObjectFormat::Sha1, kind, body);
         CanonicalPackObject::new(id, kind, body.to_vec(), Vec::new(), recency, path_hash)
@@ -1902,6 +2322,7 @@ mod tests {
                 &target_body,
                 DeltaSearch::PrefixSuffix,
                 None,
+                target_body.len(),
                 &mut always,
             )
             .expect("prefix/suffix search completes"),
@@ -1918,6 +2339,7 @@ mod tests {
             &target_body,
             DeltaSearch::IndexedBlocks,
             Some(&index),
+            target_body.len(),
             &mut always,
         )
         .expect("interior search completes")
@@ -1969,15 +2391,18 @@ mod tests {
                 index.as_ref().expect("fixtures are long enough to index"),
                 &base_body,
                 &target_body,
+                usize::MAX,
                 &mut always,
             )
-            .expect("interior program builds");
+            .expect("interior program builds")
+            .expect("an unbounded scan always emits its program");
 
             let emitted = make_delta_program(
                 &base_body,
                 &target_body,
                 DeltaSearch::IndexedBlocks,
                 index.as_ref(),
+                target_body.len(),
                 &mut always,
             )
             .expect("interior search completes");
@@ -2023,6 +2448,7 @@ mod tests {
             target_body,
             DeltaSearch::IndexedBlocks,
             None,
+            target_body.len(),
             &mut always,
         )
         .expect("interior search completes with no index");
@@ -2031,6 +2457,7 @@ mod tests {
             target_body,
             DeltaSearch::PrefixSuffix,
             None,
+            target_body.len(),
             &mut always,
         )
         .expect("prefix/suffix search completes");
