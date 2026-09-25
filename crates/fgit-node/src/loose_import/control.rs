@@ -3,6 +3,8 @@
 //! The control is borrowed, stack-scoped and sticky. Adapters share it instead
 //! of manufacturing a fresh deadline for I/O, decoding, graph walks or staging.
 //! An in-progress OS call cannot be preempted; its result is checked before use.
+mod budget;
+
 use std::cell::{Cell, RefCell};
 use std::io::{self, Read};
 
