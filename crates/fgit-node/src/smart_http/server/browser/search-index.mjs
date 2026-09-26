@@ -234,3 +234,137 @@ export function symbolReply(reply, selected, q, scope = null, pin = null, minimu
   if (blobs.size > stats.tables) fail('Declaration matches exceed the tables read.');
   return { ...source, query: copy(q), index, stats, hits, complete: reply.complete };
 }
+
+// One native Initial invocation owns the source and generation join. Never
+// approximate it with parallel single-channel HTTP requests in the browser.
+export function initialQuery(input) {
+  keys(input, ['mode', 'termsHex', 'prefixesHex', 'symbol', 'maxMatches', 'maxWork', 'maxPayloadBytes', 'maxResultBytes', 'maxFileBytes']);
+  if (input.mode !== 'initial') fail('Select combined indexed search.');
+  const lexical = indexQuery({ mode: 'indexed', channel: 'content', termsHex: input.termsHex,
+    prefixesHex: input.prefixesHex, maxMatches: input.maxMatches, maxWork: input.maxWork,
+    maxPayloadBytes: input.maxPayloadBytes, maxFileBytes: input.maxFileBytes });
+  let symbol = null;
+  if (input.symbol !== undefined && input.symbol !== null) {
+    keys(input.symbol, ['nameHex', 'match', 'kinds', 'policy']);
+    const query = symbolQuery({ mode: 'symbols', nameHex: input.symbol.nameHex,
+      match: input.symbol.match, kinds: input.symbol.kinds, prefixesHex: lexical.prefixesHex });
+    const policy = input.symbol.policy === undefined ? 'optional' : input.symbol.policy;
+    if (!['optional', 'required'].includes(policy)) fail('Select optional or required declarations.');
+    symbol = { nameHex: query.nameHex, match: query.match, kinds: query.kinds, policy };
+  }
+  const channels = symbol ? 3 : 2;
+  if (lexical.maxWork < channels || lexical.maxPayloadBytes < channels) fail('Each combined channel needs a nonzero work and payload share.');
+  return { mode: 'initial', termsHex: lexical.termsHex, prefixesHex: lexical.prefixesHex, symbol,
+    maxMatches: lexical.maxMatches, maxWork: lexical.maxWork, maxPayloadBytes: lexical.maxPayloadBytes,
+    maxResultBytes: integer(input.maxResultBytes ?? 2 * 1024 * 1024, 'combined result bytes', 1, 2 * 1024 * 1024),
+    maxFileBytes: lexical.maxFileBytes };
+}
+export function initialCommand(selected, pin, q, minimum = {}) {
+  const values = { ...fields(selected, pin), term_hex: q.termsHex, path_prefix_hex: q.prefixesHex,
+    max_results_per_channel: q.maxMatches, max_work: q.maxWork,
+    max_payload_bytes: q.maxPayloadBytes, max_result_bytes: q.maxResultBytes };
+  if (q.symbol) Object.assign(values, { symbol_name_hex: q.symbol.nameHex, symbol_match: q.symbol.match,
+    symbol_kind: q.symbol.kinds, symbol_policy: q.symbol.policy });
+  for (const [name, floor] of [['lexical', minimum.lexical], ['symbol', q.symbol ? minimum.symbols : null]]) {
+    if (!floor) continue;
+    activation(floor.token, floor.number, typeof floor.number === 'string' ? 'revalidated' : 'exact');
+    values[`minimum_${name}_token`] = floor.token; values[`minimum_${name}_number`] = floor.number;
+  }
+  // An unrequested symbol floor is retained by the controller, never sent as
+  // an inapplicable option or erased to make a later optional read succeed.
+  return form(values);
+}
+function initialQueries(q) {
+  const count = q.symbol ? 3 : 2;
+  const share = (total, ordinal) => Math.floor(total / count) + Number(ordinal < total % count);
+  const lexical = channel => indexQuery({ mode: 'indexed', channel, termsHex: q.termsHex,
+    prefixesHex: q.prefixesHex, maxMatches: q.maxMatches, maxWork: share(q.maxWork, channel === 'content' ? 0 : 1),
+    maxPayloadBytes: share(q.maxPayloadBytes, channel === 'content' ? 0 : 1), maxFileBytes: q.maxFileBytes });
+  return { content: lexical('content'), path: lexical('path'),
+    symbols: q.symbol ? symbolQuery({ mode: 'symbols', nameHex: q.symbol.nameHex, match: q.symbol.match,
+      kinds: q.symbol.kinds, prefixesHex: q.prefixesHex, maxMatches: q.maxMatches, maxWork: share(q.maxWork, 2) }) : null,
+    symbolPayload: q.symbol ? share(q.maxPayloadBytes, 2) : 0 };
+}
+function vectorEntry(value) {
+  keys(value, ['index_token', 'index_number']);
+  return activation(value.index_token, value.index_number, 'exact');
+}
+const sameActivation = (a, b) => a.token === b.token && a.number === b.number;
+export function initialReply(reply, selected, q, scope = null, pin = null, minimum = {}) {
+  record(reply);
+  if (reply.type !== 'source_search_initial' || reply.schema_version !== 1 || reply.profile !== 'source-initial-retrieval-v1' ||
+      reply.phase !== 'Initial' || reply.streaming !== false || reply.semantic_refinement !== false ||
+      reply.read_only !== true || reply.transaction_created !== false || reply.source_blobs_read !== 0 || reply.source_bytes_read !== 0 ||
+      reply.max_results_per_channel !== q.maxMatches || reply.max_work !== q.maxWork ||
+      reply.max_payload_bytes !== q.maxPayloadBytes || reply.max_result_bytes !== q.maxResultBytes || typeof reply.complete !== 'boolean') {
+    fail('Invalid combined retrieval profile or shared limits.');
+  }
+  const queries = initialQueries(q);
+  const content = indexReply(reply.content, selected, queries.content, scope, pin, null, minimum.lexical);
+  const path = indexReply(reply.path, selected, queries.path, content.scope, content.pin, null, minimum.lexical);
+  // The native outer receipt deliberately has no source_head or published
+  // field. Bind its actual fields to the validated child; do not invent them.
+  for (const field of ['tenant_id', 'repository_id', 'repository_incarnation', 'object_format', 'ref', 'ref_hex',
+    'snapshot_token', 'source_rcr', 'source_commit', 'root_tree']) {
+    if (reply[field] !== reply.content[field]) fail('Combined source envelope differs from its channels.');
+  }
+  keys(reply.generation_vector, ['lexical', 'symbols']);
+  const lexical = vectorEntry(reply.generation_vector.lexical);
+  if (!sameActivation(content.index, path.index) || !sameActivation(lexical, content.index) ||
+      ['documents', 'sourceBytes', 'nonRegular'].some(key => content.stats[key] !== path.stats[key])) {
+    fail('Combined lexical channels changed generation or corpus.');
+  }
+  // Maintenance may advance the observed head between reads, not the queried
+  // generation. Retain the newest observed checkpoint without rewriting it.
+  const order = compareCounters(content.selectedIndex.number, path.selectedIndex.number);
+  if (order === 0 && content.selectedIndex.token !== path.selectedIndex.token) fail('Contradictory observed lexical checkpoints.');
+  const lexicalCheckpoint = order >= 0 ? content.selectedIndex : path.selectedIndex;
+  record(reply.symbols);
+  let symbols, symbolGeneration = null;
+  if (!q.symbol) {
+    keys(reply.symbols, ['state']);
+    if (reply.symbols.state !== 'not_requested' || reply.generation_vector.symbols !== null) fail('Unrequested symbol channel disclosed data.');
+    symbols = { state: 'not_requested' };
+  } else if (reply.symbols.state === 'unavailable') {
+    keys(reply.symbols, ['state', 'reason', 'result']);
+    if (q.symbol.policy !== 'optional' || minimum.symbols || !['uninitialized', 'stale'].includes(reply.symbols.reason) ||
+        reply.symbols.result !== null || reply.generation_vector.symbols !== null) fail('Required or checkpointed symbol channel is unavailable.');
+    symbols = { state: 'unavailable', reason: reply.symbols.reason, result: null };
+  } else {
+    keys(reply.symbols, ['state', 'result']);
+    if (reply.symbols.state !== 'available') fail('Requested symbol channel has no result.');
+    const result = symbolReply(reply.symbols.result, selected, queries.symbols, content.scope, content.pin, minimum.symbols);
+    symbolGeneration = vectorEntry(reply.generation_vector.symbols);
+    if (!sameActivation(result.index, symbolGeneration) || result.stats.payloadBytes > queries.symbolPayload) fail('Combined symbol generation or payload share changed.');
+    symbols = { state: 'available', result };
+  }
+  let retained = 0, payload = content.stats.payloadBytes + path.stats.payloadBytes, work = content.stats.work + path.stats.work;
+  const documents = new Map(), identities = new Map();
+  for (const channel of [content, path]) for (const hit of channel.hits) {
+    const previous = documents.get(hit.pathHex), previousPath = identities.get(hit.documentId);
+    if ((previous && (previous.documentId !== hit.documentId || previous.blob !== hit.blob || previous.contentBytes !== hit.contentBytes)) ||
+        (previousPath !== undefined && previousPath !== hit.pathHex)) fail('Combined channels disagree on a document identity.');
+    documents.set(hit.pathHex, hit); identities.set(hit.documentId, hit.pathHex);
+    retained += hit.pathHex.length / 2 + hit.spans.length * 24 + 64;
+  }
+  if (symbols.state === 'available') {
+    payload += symbols.result.stats.payloadBytes; work += symbols.result.stats.work;
+    for (const hit of symbols.result.hits) {
+      const doc = documents.get(hit.pathHex);
+      if (doc && (doc.blob !== hit.blob || hit.offset + hit.length > doc.contentBytes ||
+          hit.excerptOffset + hit.excerptHex.length / 2 > doc.contentBytes)) fail('Combined declaration disagrees with the indexed file.');
+      retained += (hit.pathHex.length + hit.nameHex.length + hit.excerptHex.length) / 2 + 96;
+    }
+  }
+  const complete = content.complete && path.complete && (symbols.state === 'not_requested' ||
+    (symbols.state === 'available' && symbols.result.complete));
+  if (integer(reply.retained_result_bytes, 'combined retained bytes', 0, q.maxResultBytes) !== retained ||
+      integer(reply.completed_payload_bytes_read, 'successful channel payload bytes', 0, q.maxPayloadBytes) !== payload ||
+      integer(reply.completed_work_units, 'successful channel work', 0, q.maxWork) !== work || reply.complete !== complete) {
+    fail('Combined completion or aggregate accounting disagrees with its channels.');
+  }
+  return { scope: content.scope, pin: content.pin, query: copy(q), content, path, symbols,
+    vector: { lexical, symbols: symbolGeneration }, lexicalCheckpoint: copy(lexicalCheckpoint), complete,
+    stats: { retainedBytes: retained, payloadBytes: payload, work },
+    totalHits: content.hits.length + path.hits.length + (symbols.state === 'available' ? symbols.result.hits.length : 0) };
+}

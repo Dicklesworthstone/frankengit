@@ -283,7 +283,7 @@ export class Transport {
       : this.#transfers
       ? /^(?:source\/(?:refs|bundle\/(?:export|import|fetch))|outcomes)$/.test(path)
       : this.#search
-      ? /^source\/(?:search|search-batch|search-regex|search-index|search-symbols-index|blob)$/.test(path)
+      ? /^source\/(?:search|search-batch|search-regex|search-index|search-symbols-index|search-initial|blob)$/.test(path)
       : this.#branches
       ? /^(?:source\/(?:refs|branches\/(?:create|update|delete|rename))|outcomes)$/.test(path)
       : this.#initial
@@ -308,12 +308,14 @@ export class Transport {
         const error = apiError(response.status);
         // Only this closed read endpoint exposes a small diagnostic code. Never
         // render server prose, accept an error as a result, or broaden statuses.
-        if (this.#search && ['source/search-index', 'source/search-symbols-index'].includes(path) && response.status === 409
+        if (this.#search && ['source/search-index', 'source/search-symbols-index', 'source/search-initial'].includes(path) && response.status === 409
             && /^application\/json(?:\s*;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
           const bytes = await readBytes(response, controller.signal, 4096);
           if (epoch !== this.#epoch) fail('Connection superseded.');
           let detail; try { detail = json(bytes); } catch { /* Keep the HTTP refusal. */ }
-          const codes = path === 'source/search-symbols-index'
+          const codes = path === 'source/search-initial'
+            ? ['source_index_uninitialized', 'source_index_stale', 'symbol_index_uninitialized', 'symbol_index_stale', 'index_checkpoint_unavailable', 'source_snapshot_mismatch', 'index_generation_mismatch']
+            : path === 'source/search-symbols-index'
             ? ['symbol_index_uninitialized', 'symbol_index_stale', 'index_checkpoint_unavailable']
             : ['source_index_uninitialized', 'source_index_stale', 'index_checkpoint_unavailable'];
           if (codes.includes(detail?.error)) error.code = detail.error;
