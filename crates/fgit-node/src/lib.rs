@@ -5496,6 +5496,13 @@ where
                 WireEvent::Common(_) => {}
             }
         }
+        if machine.has_ended() {
+            // The client ended the session with a flush-pkt where a command
+            // belongs, as git does after an ls-refs that needs no fetch.
+            return Ok(GitDaemonSessionOutcome::EmptyRepository(
+                GitDaemonAdvertisementReceipt { request },
+            ));
+        }
     }
 }
 

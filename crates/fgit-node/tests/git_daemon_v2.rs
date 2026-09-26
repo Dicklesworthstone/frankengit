@@ -277,3 +277,32 @@ fn ls_refs_lists_the_advertised_tip_for_each_command() {
         "each of the two ls-refs commands answers once with the advertised tip"
     );
 }
+
+#[test]
+fn a_terminating_flush_after_ls_refs_ends_the_session_cleanly() {
+    // git ends a stateful v2 session with a flush-pkt where a command belongs
+    // (upstream serve.c reads it as an empty request), e.g. `git ls-remote`
+    // or a fetch that is already up to date.
+    let mut wire = greeting(Some(b"2"));
+    wire.extend_from_slice(&pkt_line(b"command=ls-refs"));
+    wire.extend_from_slice(DELIMITER);
+    wire.extend_from_slice(FLUSH);
+    wire.extend_from_slice(FLUSH);
+    let (outcome, output) = serve(wire.clone(), &OneRefRepository);
+    assert!(
+        matches!(outcome, Ok(GitDaemonSessionOutcome::EmptyRepository(_))),
+        "{outcome:?}"
+    );
+    assert!(
+        output
+            .windows(TIP.len())
+            .any(|window| window == TIP.as_bytes())
+    );
+
+    // Twin: nothing is served after the session ended.
+    wire.extend_from_slice(&pkt_line(b"command=ls-refs"));
+    wire.extend_from_slice(DELIMITER);
+    wire.extend_from_slice(FLUSH);
+    let (outcome, _) = serve(wire, &OneRefRepository);
+    assert!(outcome.is_err(), "a command after the terminating flush");
+}

@@ -2481,6 +2481,9 @@ enum V2State {
     AwaitCapabilities(V2Command),
     AwaitArguments(V2Command),
     Complete,
+    /// The client sent a flush-pkt where a command belongs: it ended the
+    /// session, as upstream `serve.c` reads an empty request.
+    Ended,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2582,6 +2585,13 @@ impl V2UploadPack {
         self.state == V2State::AwaitCommand
     }
 
+    /// Whether the client ended a connection session with a flush-pkt at a
+    /// command boundary. Nothing further is accepted after it.
+    #[must_use]
+    pub fn has_ended(&self) -> bool {
+        self.state == V2State::Ended
+    }
+
     /// Feeds arbitrary pkt-line fragments and produces pure outputs/events.
     pub fn push_bytes(
         &mut self,
@@ -2615,15 +2625,28 @@ impl V2UploadPack {
                 state: "completed v2 upload-pack request",
                 packet: packet_name(packet),
             }),
+            V2State::Ended => Err(WireError::IllegalTransition {
+                state: "ended v2 session",
+                packet: packet_name(packet),
+            }),
         }
     }
 
     fn accept_command(&mut self, packet: &Packet) -> Result<Transition, WireError> {
-        let Packet::Data(line) = packet else {
-            return Err(WireError::IllegalTransition {
-                state: "v2 command phase",
-                packet: packet_name(packet),
-            });
+        let line = match packet {
+            Packet::Data(line) => line,
+            // A stateful client ends its session this way (git sends it on
+            // disconnect, e.g. after an ls-refs that needed no fetch).
+            Packet::Flush if self.framing == RequestFraming::Connection => {
+                self.state = V2State::Ended;
+                return Ok(Transition::empty());
+            }
+            _ => {
+                return Err(WireError::IllegalTransition {
+                    state: "v2 command phase",
+                    packet: packet_name(packet),
+                });
+            }
         };
         let line = request_line(line)?;
         let Some(command) = line.strip_prefix(b"command=") else {

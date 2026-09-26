@@ -433,3 +433,35 @@ fn the_two_unsupported_command_sites_differ_only_in_the_name_they_echo() {
         other => panic!("both sites must report UnsupportedCommand today, got {other:?}"),
     }
 }
+
+/// git ends a stateful v2 session with a flush-pkt where a command belongs
+/// (upstream serve.c reads it as an empty request). The machine ends cleanly
+/// and refuses anything after it. A stateless HTTP round has no session to
+/// end, so there a bare flush stays a refusal.
+#[test]
+fn a_flush_at_a_command_boundary_ends_only_a_connection_session() {
+    let repository = FetchRepository::new();
+    let mut machine =
+        V2UploadPack::new(full_capabilities(), WireLimits::default()).expect("a v2 upload-pack");
+    let mut transcript = frame(b"command=ls-refs\n");
+    transcript.extend_from_slice(b"00010000");
+    machine
+        .push_bytes(&transcript, &repository)
+        .expect("an ls-refs round");
+    assert!(machine.is_awaiting_command() && !machine.has_ended());
+    machine
+        .push_bytes(b"0000", &repository)
+        .expect("the terminating flush");
+    assert!(machine.has_ended() && !machine.is_awaiting_command());
+    assert!(
+        machine
+            .push_bytes(&frame(b"command=ls-refs\n"), &repository)
+            .is_err()
+    );
+
+    let mut stateless = V2UploadPack::new(full_capabilities(), WireLimits::default())
+        .expect("a v2 upload-pack")
+        .with_stateless_http_rounds();
+    assert!(stateless.push_bytes(b"0000", &repository).is_err());
+    assert!(!stateless.has_ended());
+}
