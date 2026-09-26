@@ -134,3 +134,103 @@ export async function verifyIndexedFile(bytes, hit, q, algorithm, crypto, checkp
   verifyWordSpans(q.channel === 'path' ? unhex(hit.pathHex, 4096) : bytes, q, hit.spans, checkpoint);
   return { blobVerified: true, wordSpansVerified: true, coverageVerified: false, channel: q.channel };
 }
+
+// Persisted Rust declaration tables remain a distinct native profile. In
+// particular, neither lexical case folding nor lexical generation checkpoints
+// apply to these case-sensitive names. No query falls back to a source scan.
+export const SYMBOL_KINDS = Object.freeze(['enum', 'function', 'macro', 'module', 'struct', 'trait', 'type', 'union']);
+function symbolName(value) {
+  const bytes = unhex(value, 128);
+  if (!bytes.length || !((bytes[0] >= 65 && bytes[0] <= 90) || (bytes[0] >= 97 && bytes[0] <= 122) || bytes[0] === 95) ||
+      !bytes.every(word)) fail('Use a case-sensitive ASCII declaration name without the r# prefix.');
+  return bytes;
+}
+export function symbolQuery(input) {
+  keys(input, ['mode', 'nameHex', 'match', 'kinds', 'prefixesHex', 'maxMatches', 'maxBytes', 'maxFileBytes', 'maxWork']);
+  if (input.mode !== 'symbols') fail('Select persisted Rust declarations.');
+  symbolName(input.nameHex);
+  const match = input.match ?? 'exact', kinds = input.kinds ?? [], prefixes = input.prefixesHex ?? [];
+  if (!['exact', 'prefix'].includes(match) || !Array.isArray(kinds) || kinds.length > 8 ||
+      kinds.some(kind => !SYMBOL_KINDS.includes(kind))) fail('Unsupported declaration match or kind.');
+  if (!Array.isArray(prefixes) || prefixes.length > 128) fail('Too many declaration path prefixes.');
+  let size = 0;
+  for (const prefix of prefixes) {
+    pathHex(prefix); const bytes = unhex(prefix, 4096);
+    if (bytes.filter(b => b === 47).length >= 64 || (size += bytes.length) > 32 * 1024) fail('Declaration path scope exceeds its bounds.');
+  }
+  return { mode: 'symbols', nameHex: input.nameHex, match, kinds: [...new Set(kinds)].sort(), prefixesHex: [...new Set(prefixes)].sort(),
+    maxMatches: integer(input.maxMatches ?? INDEX_PAGE, 'declaration result limit', 1, INDEX_PAGE),
+    maxBytes: integer(input.maxBytes ?? 64 * 1024 * 1024, 'referenced declaration source bytes', 1, 64 * 1024 * 1024),
+    maxFileBytes: integer(input.maxFileBytes ?? FILE_LIMIT, 'declaration file bytes', 1, FILE_LIMIT),
+    maxWork: integer(input.maxWork ?? INDEX_WORK, 'declaration query work', 1, INDEX_WORK) };
+}
+export function symbolCommand(selected, pin, q, minimum = null) {
+  const values = { ...fields(selected, pin), name_hex: q.nameHex, match: q.match, kind: q.kinds,
+    path_prefix_hex: q.prefixesHex, max_matches: q.maxMatches, max_bytes: q.maxBytes,
+    max_file_bytes: q.maxFileBytes, max_work: q.maxWork };
+  if (minimum) Object.assign(values, { minimum_index_token: minimum.token, minimum_index_number: minimum.number });
+  return form(values);
+}
+export function symbolReply(reply, selected, q, scope = null, pin = null, minimum = null) {
+  const source = coordinates(reply, selected, scope, pin);
+  if (reply.type !== 'source_search_symbols_index' || reply.profile !== 'rust-declaration-heads-v1' ||
+      reply.index_profile !== 'rust-declaration-tables-v1' || reply.authority_class !== 'deterministic-derived' ||
+      reply.compiler_resolved !== false || reply.macro_expansion !== false || reply.cfg_evaluated !== false ||
+      reply.source_blobs_read !== 0 || reply.source_bytes_read !== 0 ||
+      reply.name_hex !== q.nameHex || reply.match !== q.match || reply.max_work !== q.maxWork || reply.max_matches !== q.maxMatches ||
+      !Array.isArray(reply.kinds) || !same(reply.kinds, q.kinds) ||
+      !Array.isArray(reply.path_prefix_hex) || !same(reply.path_prefix_hex, q.prefixesHex) ||
+      !Array.isArray(reply.matches) || reply.matches.length > q.maxMatches || reply.returned_matches !== reply.matches.length ||
+      !['complete', 'match_limit'].includes(reply.completion) || reply.complete !== (reply.completion === 'complete')) {
+    fail('Invalid declaration profile, completion or query echo.');
+  }
+  // This native endpoint uses numeric JSON generations. Refuse unsafe numbers
+  // rather than treating a rounded wire value as an exact checkpoint.
+  const index = activation(reply.index_token, reply.index_number, 'exact');
+  atLeast(index, minimum);
+  const stats = { files: integer(reply.indexed_files, 'indexed Rust files', 0, 20_000),
+    declarations: integer(reply.indexed_declarations, 'indexed declarations', 0, 20_000),
+    sourceBytes: integer(reply.indexed_source_bytes, 'indexed Rust bytes', 0, 64 * 1024 * 1024),
+    unsupported: integer(reply.unsupported_language_files, 'unsupported language files', 0, 20_000),
+    nonRegular: integer(reply.non_regular_entries, 'non-regular entries', 0, 50_000),
+    tables: integer(reply.tables_read, 'declaration tables read', 0, 20_000),
+    payloadBytes: integer(reply.payload_bytes_read, 'declaration payload bytes', 0, INDEX_PAYLOAD),
+    work: integer(reply.work_units, 'declaration work', 0, q.maxWork) };
+  if (stats.files + stats.unsupported > 20_000 || stats.tables > stats.files || stats.declarations < reply.matches.length ||
+      (!stats.files && (stats.declarations || stats.sourceBytes)) ||
+      (reply.matches.length && (!stats.tables || !stats.payloadBytes)) ||
+      (!reply.complete && (reply.matches.length !== q.maxMatches || reply.matches.length >= stats.declarations))) {
+    fail('Inconsistent declaration corpus or truncation.');
+  }
+  let previous = null, retained = 0;
+  const blobs = new Map();
+  const hits = reply.matches.map(raw => {
+    record(raw); const name = symbolName(raw.name_hex); pathHex(raw.path_hex);
+    const path = unhex(raw.path_hex, 4096), blob = oid(raw.blob, selected.format);
+    if (!raw.path_hex.endsWith('2e7273') || path.filter(b => b === 47).length >= 64 ||
+        !SYMBOL_KINDS.includes(raw.kind) || (q.kinds.length && !q.kinds.includes(raw.kind)) ||
+        (q.match === 'exact' ? raw.name_hex !== q.nameHex : !raw.name_hex.startsWith(q.nameHex)) ||
+        (q.prefixesHex.length && !q.prefixesHex.some(p => raw.path_hex === p || raw.path_hex.startsWith(`${p}2f`))) ||
+        typeof raw.raw_identifier !== 'boolean' || raw.match_truncated_in_excerpt !== false) fail('Declaration escaped its name, kind or path scope.');
+    const offset = integer(raw.byte_offset, 'declaration offset', 0, q.maxFileBytes);
+    const length = integer(raw.match_length, 'declaration length', 1, 128);
+    const line = integer(raw.line, 'declaration line', 1, q.maxFileBytes + 1);
+    const column = integer(raw.byte_column, 'declaration byte column', 1, offset + 1);
+    const lineStart = offset - column + 1, excerptOffset = integer(raw.excerpt_offset, 'declaration excerpt offset', lineStart, offset);
+    const excerpt = unhex(raw.excerpt_hex, 416), relative = offset - excerptOffset;
+    if (length !== name.length || offset + length > q.maxFileBytes || offset + length > stats.sourceBytes ||
+        line > lineStart + 1 || excerpt.includes(10) || excerptOffset + excerpt.length > q.maxFileBytes ||
+        !same(excerpt.subarray(relative, relative + length), name) ||
+        (raw.raw_identifier && (relative < 2 || excerpt[relative - 2] !== 114 || excerpt[relative - 1] !== 35)) ||
+        (previous && (raw.path_hex < previous.pathHex || (raw.path_hex === previous.pathHex && offset <= previous.offset))) ||
+        (blobs.has(raw.path_hex) && blobs.get(raw.path_hex) !== blob)) fail('Inconsistent declaration coordinates or native identity.');
+    retained += path.length + name.length + excerpt.length + 96;
+    if (retained > 2 * 1024 * 1024) fail('Declaration result byte budget exceeded.');
+    blobs.set(raw.path_hex, blob);
+    previous = { nameHex: raw.name_hex, kind: raw.kind, rawIdentifier: raw.raw_identifier,
+      pathHex: raw.path_hex, blob, offset, length, line, column, excerptHex: raw.excerpt_hex, excerptOffset, truncated: false };
+    return previous;
+  });
+  if (blobs.size > stats.tables) fail('Declaration matches exceed the tables read.');
+  return { ...source, query: copy(q), index, stats, hits, complete: reply.complete };
+}

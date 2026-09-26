@@ -3,16 +3,16 @@
 import { Transport, copy, fail, form, integer } from './pulls-core.mjs';
 import { PAGE_BYTES, fields, filePage, query, searchCommand, searchReply, selection, verifyFile } from './search-data.mjs';
 
-import { indexCommand, indexQuery, indexReply, verifyIndexedFile } from './search-index.mjs';
+import { indexCommand, indexQuery, indexReply, verifyIndexedFile, symbolCommand, symbolQuery, symbolReply } from './search-index.mjs';
 
 export class CodeSearch {
-  #transport; #selection = null; #scope = null; #pin = null; #result = null; #generation = 0; #timeout; #indexMinimum = null;
+  #transport; #selection = null; #scope = null; #pin = null; #result = null; #generation = 0; #timeout; #indexMinimum = null; #symbolMinimum = null;
   constructor(options) {
     this.#timeout = integer(options.timeoutMs ?? 30_000, 'operation timeout', 1, 300_000);
     this.#transport = new Transport({ ...options, pageSuffix: '/ui/search/' });
   }
   get connected() { return this.#transport.connected; }
-  get state() { return copy({ connected: this.connected, selection: this.#selection, scope: this.#scope, pin: this.#pin, result: this.#result, indexMinimum: this.#indexMinimum }); }
+  get state() { return copy({ connected: this.connected, selection: this.#selection, scope: this.#scope, pin: this.#pin, result: this.#result, indexMinimum: this.#indexMinimum, symbolMinimum: this.#symbolMinimum }); }
   async connect(token, reference, algorithm) {
     this.disconnect();
     const selected = selection(reference, algorithm), generation = this.#generation;
@@ -22,7 +22,7 @@ export class CodeSearch {
   }
   disconnect() {
     this.#generation += 1; this.#transport.disconnect();
-    this.#selection = null; this.#scope = null; this.#pin = null; this.#result = null; this.#indexMinimum = null;
+    this.#selection = null; this.#scope = null; this.#pin = null; this.#result = null; this.#indexMinimum = null; this.#symbolMinimum = null;
   }
   cancel() { this.#generation += 1; this.#transport.cancelReads(); }
   discardResults() { this.cancel(); this.#result = null; }
@@ -47,9 +47,10 @@ export class CodeSearch {
   }
   async search(input) {
     this.discardResults();
-    const q = input?.mode === 'indexed' ? indexQuery(input) : query(input); // Copies caller arrays before the first await.
+    const q = input?.mode === 'indexed' ? indexQuery(input) : input?.mode === 'symbols' ? symbolQuery(input) : query(input); // Copies caller arrays before the first await.
     return this.#run(async check => {
       if (q.mode === 'indexed') return this.#indexed(q, null, check);
+      if (q.mode === 'symbols') return this.#symbols(q, check);
       const selected = this.#selection, command = searchCommand(selected, this.#pin, q);
       const response = await this.#transport.request(command.path, { method: 'POST', body: command.body });
       check();
@@ -68,6 +69,28 @@ export class CodeSearch {
     check();
     this.#scope = result.scope; this.#pin = result.pin; this.#indexMinimum = result.selectedIndex; this.#result = result;
     return copy(result);
+  }
+  async #symbols(q, check) {
+    const selected = this.#selection, minimum = this.#symbolMinimum;
+    const body = symbolCommand(selected, this.#pin, q, minimum);
+    const response = await this.#transport.request('source/search-symbols-index', { method: 'POST', body });
+    check();
+    const result = symbolReply(response.value, selected, q, this.#scope, this.#pin, minimum);
+    check();
+    this.#scope = result.scope; this.#pin = result.pin; this.#symbolMinimum = result.index; this.#result = result;
+    return copy(result);
+  }
+  async openSymbol(hitIndex) {
+    const result = this.#result;
+    if (!result || result.query.mode !== 'symbols') fail('Run a successful declaration search first.');
+    integer(hitIndex, 'declaration hit', 0, result.hits.length - 1);
+    const hit = result.hits[hitIndex];
+    return this.#run(async check => {
+      const file = await this.#readFile(this.#selection, result, hit, check);
+      const verified = await verifyFile(file.bytes, hit, result.query, 0, this.#selection.format, this.#transport.crypto, check);
+      check();
+      return { hit: copy(hit), query: copy(result.query), scope: copy(result.scope), pin: copy(result.pin), ...file, ...verified };
+    });
   }
   async nextIndexed() {
     const previous = this.#result;
@@ -108,7 +131,7 @@ export class CodeSearch {
   }
   async openMatch(groupIndex, matchIndex) {
     const result = this.#result;
-    if (!result || result.query.mode === 'indexed') fail('Run a successful literal or regex search first.');
+    if (!result || !['literal', 'batch', 'regex'].includes(result.query.mode)) fail('Run a successful literal or regex search first.');
     integer(groupIndex, 'query index', 0, result.groups.length - 1);
     const group = result.groups[groupIndex];
     integer(matchIndex, 'match index', 0, group.matches.length - 1);

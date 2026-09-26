@@ -202,6 +202,21 @@ export async function verifyFile(bytes, hit, q, groupIndex, algorithm, cryptoImp
   }
   if (line !== hit.line || hit.offset - start + 1 !== hit.column || bytes.subarray(hit.offset, end).includes(10) ||
       (hit.offset === bytes.length && (!bytes.length || bytes.at(-1) === 10))) fail('Match line or byte coordinates differ from the verified file.');
+  if (q.mode === 'symbols') {
+    // Verify bytes and coordinates, NOT Rust syntax, macro expansion, name
+    // resolution or completeness. Prefix queries still verify the FULL name.
+    const name = unhex(hit.nameHex, 128);
+    const asciiWord = b => (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b === 95;
+    const raw = hit.offset >= 2 && bytes[hit.offset - 2] === 114 && bytes[hit.offset - 1] === 35;
+    const start = hit.offset - (raw ? 2 : 0);
+    if (!name.length || !same(bytes.subarray(hit.offset, end), name) || hit.length !== name.length ||
+        raw !== hit.rawIdentifier || asciiWord(bytes[end]) || (start > 0 && asciiWord(bytes[start - 1]))) {
+      fail('Declaration name bytes or raw-identifier boundaries differ from the verified file.');
+    }
+    checkpoint();
+    return { blobVerified: true, coordinatesVerified: true, symbolNameVerified: true,
+      declarationEvaluatedBy: 'native-server', coverageVerified: false };
+  }
   if (q.mode !== 'regex' && !literalEquals(bytes.subarray(hit.offset, end), unhex(q.needlesHex[groupIndex], 256), q.case)) fail('Verified source does not contain the literal.');
   checkpoint();
   return { blobVerified: true, coordinatesVerified: true, literalVerified: q.mode !== 'regex', regexEvaluatedBy: q.mode === 'regex' ? 'native-server' : null };
