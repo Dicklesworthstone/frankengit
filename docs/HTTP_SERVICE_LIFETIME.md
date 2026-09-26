@@ -36,6 +36,15 @@ The service joins their workers before returning its transport receipt. The CLI
 then shuts down the node and emits `smart_http_drained` only after success.
 A mutation's lost response or shutdown is never treated as proof of non-commit.
 
+In continuous mode, SIGTERM (what a service manager sends to stop a service)
+and SIGINT (Ctrl-C) request the same drain as the stop file, and stderr says
+so once. The handlers are installed through the runtime's signal support only
+when continuous serving starts, so a bounded run keeps the default behaviour.
+A signal is latched like a stop file; a second signal during the drain does
+not cut it short. A platform that cannot install the handlers keeps the default
+behaviour and prints why, leaving the stop file as the drain control
+(`scripts/e2e/suites/node/http_signal_drain.sh`).
+
 An unreadable stop-control directory, directory replacement detected on Unix,
 symlink, socket or other non-regular control entry causes a draining error, not
 silent continued service and not a fabricated successful drain. A detected stop
@@ -97,8 +106,9 @@ verified serving claim or bead closure follows from those checks.
 ## Boundaries
 
 This change does not replace the existing per-connection node opening strategy,
-add TLS, organization IAM, hostile-filesystem confinement, OS-signal handlers,
-instant cancellation of admitted work, or a hosted supervisor. The stop-file
+add TLS, organization IAM, hostile-filesystem confinement, handlers for signals
+other than SIGTERM and SIGINT, instant cancellation of admitted work, or a
+hosted supervisor. The stop-file
 parent is operator-owned. Unix checks parent identity; portable std does not
 expose comparable directory identity on every other platform. A killed or aborted
 process is not a successfully drained service.

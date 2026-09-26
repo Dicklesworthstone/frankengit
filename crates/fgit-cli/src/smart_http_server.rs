@@ -10,7 +10,7 @@ use std::time::Duration;
 use fgit_crypto::sha256_digest;
 use fgit_node::{
     GitDaemonReceiveProcessingTimeout, GitDaemonServerLimits, GitDaemonServerReceipt,
-    GitDaemonSessionTimeout, NodeConfig, OneNode,
+    GitDaemonSessionTimeout, NodeConfig, OneNode, TerminationSignals,
 };
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
@@ -474,6 +474,24 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             .and_then(|()| output.flush()).map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
         drop(output);
         if let Some(control) = &stop {
+            // SIGTERM and SIGINT request the same drain as the stop file.
+            // Installed only here, where this process owns its lifetime; a
+            // platform that cannot deliver them keeps its default behaviour.
+            let signals = TerminationSignals::install()
+                .inspect_err(|error| {
+                    eprintln!("fg: termination signals not installed ({error}); use the stop file");
+                })
+                .ok();
+            let announced = std::cell::Cell::new(false);
+            let should_stop = || -> io::Result<bool> {
+                if signals.as_ref().is_some_and(TerminationSignals::requested) {
+                    if !announced.replace(true) {
+                        eprintln!("fg: termination signal received; draining accepted connections");
+                    }
+                    return Ok(true);
+                }
+                control.should_stop()
+            };
             // One continuous service, not repeated bounded windows: quotas and
             // accepted-child accounting remain live until the requested stop.
             return match &options.credentials {
@@ -483,7 +501,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                     credential.ok_or("static credential missing")?,
                     *principal,
                     options.allow_receive,
-                    &|| control.should_stop(),
+                    &should_stop,
                 ),
                 CredentialInput::Reloadable(path) => node.serve_repository_http_until_stopped(
                     &listener,
@@ -494,7 +512,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
                     options.allow_outcomes,
                     options.allow_pulls,
                     options.allow_source,
-                    &|| control.should_stop(),
+                    &should_stop,
                 ),
                 CredentialInput::HeaderOnly => {
                     return Err("header-only operation cannot serve".into());
