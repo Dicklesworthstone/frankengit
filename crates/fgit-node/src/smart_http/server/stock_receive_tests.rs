@@ -38,6 +38,7 @@ fn profile() -> Profile {
                 RepositoryId::from_bytes([2; 16]),
             ),
             1,
+            "Smart HTTP",
         )),
     }
 }

@@ -23,7 +23,7 @@ use fgit_wire::{UploadPackRepository, WireLimits};
 
 use crate::{
     GitDaemonRequest, GitDaemonServerReceipt, GitDaemonService, GitDaemonSessionOutcome,
-    GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal, NodeRefusal, OneNode,
+    GitDaemonTransportRefusal, NodeGitDaemonServeRefusal, NodeRefusal, OneNode,
     ReceiveResponseWriter,
 };
 
@@ -304,6 +304,13 @@ impl OneNode {
 
         let active = Arc::new(AtomicUsize::new(0));
         let writers = Arc::new(crate::WriterGate::new(crate::MAX_CONCURRENT_WRITERS));
+        // Sessions lease already-opened nodes (profile section 3.3) instead of
+        // opening and closing one each.
+        let nodes = Arc::new(crate::node_lanes::NodeLanes::new(
+            self.service_config.clone(),
+            limits.max_in_flight,
+            "SSH",
+        ));
         let completed = Arc::new(AtomicUsize::new(0));
         let refused = Arc::new(AtomicUsize::new(0));
         let mut child_tasks = Vec::with_capacity(limits.max_sessions);
@@ -335,7 +342,7 @@ impl OneNode {
 
             accepted = accepted.saturating_add(1);
             active.fetch_add(1, Ordering::AcqRel);
-            let child_config = self.service_config.clone();
+            let child_nodes = Arc::clone(&nodes);
             let child_active = Arc::clone(&active);
             let child_completed = Arc::clone(&completed);
             let child_refused = Arc::clone(&refused);
@@ -348,7 +355,7 @@ impl OneNode {
                     stream,
                     host_key,
                     keys,
-                    child_config,
+                    &child_nodes,
                     allow_receive,
                     &child_writers,
                 );
@@ -374,6 +381,11 @@ impl OneNode {
         for task in &child_tasks {
             task.wait();
         }
+        if let Err(error) = nodes.close()
+            && terminal_refusal.is_none()
+        {
+            terminal_refusal = Some(NodeSshRefusal::Node(error));
+        }
 
         let accepted_sessions = accepted;
         let completed_sessions = completed.load(Ordering::Acquire);
@@ -394,7 +406,7 @@ impl OneNode {
         mut stream: TcpStream,
         host_key: SigningKey,
         deploy_keys: Vec<DeployKeyBinding>,
-        config: NodeConfig,
+        nodes: &crate::node_lanes::NodeLanes,
         allow_receive: bool,
         writers: &crate::WriterGate,
     ) -> bool {
@@ -461,43 +473,9 @@ impl OneNode {
 
         let principal = session.authenticated_principal();
 
-        let mut child_node = match Self::open_existing(config) {
-            Ok(node) => node,
-            Err(_) => {
-                session.send_channel_exit_and_close(1);
-                let out = session.take_outgoing_bytes();
-                let _ = stream.write_all(&out);
-                let _ = stream.flush();
-                close_gracefully(&mut session, &mut stream);
-                return false;
-            }
-        };
-
-        let head = match child_node
-            .runtime()
-            .block_on(child_node.authenticate_authority_head())
-        {
-            Ok(head) => head,
-            Err(_) => {
-                let recipient = session.client_channel_id().unwrap_or(0);
-                session.send_channel_extended_data(
-                    recipient,
-                    b"ERR: Could not authenticate repository authority head\n",
-                );
-                session.send_channel_exit_and_close(1);
-                let out = session.take_outgoing_bytes();
-                let _ = stream.write_all(&out);
-                let _ = stream.flush();
-                close_gracefully(&mut session, &mut stream);
-                let _ = child_node.shutdown();
-                return false;
-            }
-        };
-
-        if child_node
-            .bring_into_service(head.receipt().generation())
-            .is_err()
-        {
+        // A leased node is already authenticated and in service; the pool
+        // logs why when it cannot supply one.
+        let Some(child_node) = nodes.lease() else {
             let recipient = session.client_channel_id().unwrap_or(0);
             session.send_channel_extended_data(
                 recipient,
@@ -508,9 +486,8 @@ impl OneNode {
             let _ = stream.write_all(&out);
             let _ = stream.flush();
             close_gracefully(&mut session, &mut stream);
-            let _ = child_node.shutdown();
             return false;
-        }
+        };
 
         // `GIT_PROTOCOL` from the client's `env` request selects the wire
         // version under the same rule as a git-daemon greeting.
@@ -568,7 +545,12 @@ impl OneNode {
         }
         close_gracefully(&mut final_state.session, &mut final_state.stream);
 
-        let cleanup = child_node.shutdown();
+        // Only a node whose session succeeded goes back to the pool.
+        let cleanup = if success {
+            nodes.restore(child_node)
+        } else {
+            child_node.shutdown()
+        };
         success && cleanup.is_ok()
     }
 

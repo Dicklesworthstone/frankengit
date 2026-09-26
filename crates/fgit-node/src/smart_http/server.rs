@@ -430,7 +430,7 @@ impl OneNode {
             .clone()
             .with_expected_repository_incarnation(self.repository_incarnation_id());
         let profile = Arc::new(Profile {
-            nodes: Arc::new(NodeLanes::new(config.clone(), max_in_flight)),
+            nodes: Arc::new(NodeLanes::new(config.clone(), max_in_flight, "Smart HTTP")),
             config,
             route: self.git_daemon_repository_path().as_bytes().to_vec(),
             credentials,
@@ -1298,6 +1298,7 @@ mod tests {
                     RepositoryId::from_bytes([2; 16]),
                 ),
                 1,
+                "Smart HTTP",
             )),
         }
     }

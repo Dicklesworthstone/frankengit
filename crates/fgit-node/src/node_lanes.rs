@@ -1,4 +1,5 @@
-//! Opened repository nodes that one serving process reuses across connections.
+//! Opened repository nodes that one serving process reuses across connections:
+//! smart HTTP, guarded raw Git (`fg serve`) and SSH each keep one pool.
 //!
 //! The integration profile (section 3.3) pools an `AsyncConnection` "per
 //! declared service/lane, not opened without bound per request". Every smart
@@ -27,16 +28,19 @@ pub(crate) struct NodeLanes {
     config: NodeConfig,
     idle: Mutex<Vec<OneNode>>,
     capacity: usize,
+    /// The serving transport, named in operator diagnostics.
+    label: &'static str,
     #[cfg(test)]
     opened: std::sync::atomic::AtomicUsize,
 }
 
 impl NodeLanes {
-    pub(crate) fn new(config: NodeConfig, capacity: usize) -> Self {
+    pub(crate) fn new(config: NodeConfig, capacity: usize, label: &'static str) -> Self {
         Self {
             config,
             idle: Mutex::new(Vec::new()),
             capacity,
+            label,
             #[cfg(test)]
             opened: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -61,8 +65,8 @@ impl NodeLanes {
                     return Some(node);
                 }
                 Err(error) => {
-                    eprintln!("Smart HTTP retired a pooled repository node: {error}");
-                    close(node);
+                    eprintln!("{} retired a pooled repository node: {error}", self.label);
+                    self.close_one(node);
                 }
             }
         }
@@ -107,13 +111,25 @@ impl NodeLanes {
         for node in nodes {
             if let Err(error) = node.shutdown() {
                 if first.is_some() {
-                    eprintln!("Smart HTTP could not close a pooled repository node: {error}");
+                    eprintln!(
+                        "{} could not close a pooled repository node: {error}",
+                        self.label
+                    );
                 } else {
                     first = Some(error);
                 }
             }
         }
         first.map_or(Ok(()), Err)
+    }
+
+    fn close_one(&self, node: OneNode) {
+        if let Err(cleanup) = node.shutdown() {
+            eprintln!(
+                "{} could not close the repository node: {cleanup}",
+                self.label
+            );
+        }
     }
 
     fn take_idle(&self) -> Option<OneNode> {
@@ -126,7 +142,7 @@ impl NodeLanes {
     fn open(&self) -> Option<OneNode> {
         let mut node = OneNode::open_existing(self.config.clone())
             .inspect_err(|error| {
-                eprintln!("Smart HTTP could not open the repository node: {error}");
+                eprintln!("{} could not open the repository node: {error}", self.label);
             })
             .ok()?;
         #[cfg(test)]
@@ -135,14 +151,20 @@ impl NodeLanes {
         let generation = match node.runtime().block_on(node.authenticate_authority_head()) {
             Ok(authenticated) => authenticated.receipt().generation(),
             Err(error) => {
-                eprintln!("Smart HTTP could not authenticate the authority head: {error}");
-                close(node);
+                eprintln!(
+                    "{} could not authenticate the authority head: {error}",
+                    self.label
+                );
+                self.close_one(node);
                 return None;
             }
         };
         if let Err(error) = node.bring_into_service(generation) {
-            eprintln!("Smart HTTP could not bring the node into service: {error}");
-            close(node);
+            eprintln!(
+                "{} could not bring the node into service: {error}",
+                self.label
+            );
+            self.close_one(node);
             return None;
         }
         Some(node)
@@ -177,12 +199,6 @@ fn revalidate(node: &OneNode) -> Result<(), NodeRefusal> {
         }
         Ok(())
     })
-}
-
-fn close(node: OneNode) {
-    if let Err(cleanup) = node.shutdown() {
-        eprintln!("Smart HTTP could not close the repository node: {cleanup}");
-    }
 }
 
 #[cfg(test)]
@@ -235,7 +251,7 @@ mod tests {
     #[test]
     fn sequential_connections_reuse_one_opened_node() {
         let (_scratch, config) = repository();
-        let lanes = NodeLanes::new(config, 4);
+        let lanes = NodeLanes::new(config, 4, "test");
         for _ in 0..8 {
             let node = lanes.lease().unwrap();
             assert_eq!(node.cell_state(), CellState::Serving);
@@ -253,7 +269,7 @@ mod tests {
     #[test]
     fn concurrent_connections_each_own_a_node_and_the_pool_keeps_its_capacity() {
         let (_scratch, config) = repository();
-        let lanes = NodeLanes::new(config, 1);
+        let lanes = NodeLanes::new(config, 1, "test");
         let first = lanes.lease().unwrap();
         let second = lanes.lease().unwrap();
         assert_eq!(opened(&lanes), 2);
@@ -270,7 +286,7 @@ mod tests {
     #[test]
     fn a_node_that_left_service_is_closed_not_pooled() {
         let (_scratch, config) = repository();
-        let lanes = NodeLanes::new(config, 4);
+        let lanes = NodeLanes::new(config, 4, "test");
         let mut draining = lanes.lease().unwrap();
         draining
             .transition_cell_state(
@@ -292,7 +308,7 @@ mod tests {
     #[test]
     fn a_pooled_node_whose_repository_changed_is_retired_before_it_serves() {
         let (_scratch, config) = repository();
-        let lanes = NodeLanes::new(config, 4);
+        let lanes = NodeLanes::new(config, 4, "test");
         let mut stale = lanes.lease().unwrap();
         let current = stale.repository_incarnation_id;
         // As if the repository were re-created while this node sat idle.
@@ -312,7 +328,7 @@ mod tests {
     #[test]
     fn every_lease_starts_with_a_fresh_node_local_push_quota() {
         let (_scratch, config) = repository();
-        let lanes = NodeLanes::new(config, 4);
+        let lanes = NodeLanes::new(config, 4, "test");
         let principal = PrincipalId::from_bytes([0x73; 16]);
         let mut node = lanes.lease().unwrap();
         node.push_quota = PushQuota {

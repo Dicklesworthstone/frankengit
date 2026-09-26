@@ -40,8 +40,10 @@ impl OneNode {
     /// or accept failure. This transport authenticates NO remote user: enabling
     /// its operator principal grants that identity to every connecting writer.
     ///
-    /// Each child opens this exact repository incarnation, authenticates current
-    /// authority, and explicitly enters service. Quotas are shared across children.
+    /// Each child leases a node opened for this exact repository incarnation,
+    /// re-authenticated and in service (profile section 3.3 pools connections
+    /// per service rather than opening one per connection); a failed session's
+    /// node is closed, not reused. Quotas are shared across children.
     /// Connection refusal/cleanup counts never establish whether a push committed.
     pub fn serve_guarded_git_daemon_bounded(
         &self,
@@ -62,6 +64,11 @@ impl OneNode {
             .with_expected_repository_incarnation(self.repository_incarnation_id());
         let quota = Arc::new(PushQuota::default());
         let writers = Arc::new(crate::WriterGate::new(crate::MAX_CONCURRENT_WRITERS));
+        let nodes = Arc::new(crate::node_lanes::NodeLanes::new(
+            config,
+            limits.max_in_flight(),
+            "guarded daemon",
+        ));
         let completed = Arc::new(AtomicUsize::new(0));
         let refused = Arc::new(AtomicUsize::new(0));
         let mut pending: Vec<Pending> = Vec::new();
@@ -103,7 +110,7 @@ impl OneNode {
                 refused: Arc::clone(&refused),
                 success: false,
             };
-            let config = config.clone();
+            let nodes = Arc::clone(&nodes);
             let quota = Arc::clone(&quota);
             let writers = Arc::clone(&writers);
             // Queue delay counts against the same ingress deadline as socket work.
@@ -113,41 +120,26 @@ impl OneNode {
             );
             let task = self.runtime.submit_blocking(move || {
                 let mut completion = completion;
-                let mut node = match Self::open_existing(config) {
-                    Ok(node) => node,
-                    Err(error) => {
-                        eprintln!("guarded daemon child open failed: {error}");
-                        return;
-                    }
+                // The pool logs why when it cannot supply a node.
+                let Some(node) = nodes.lease() else {
+                    return;
                 };
-                let served: Result<(), NodeSmartHttpRefusal> = (|| {
-                    let selected = node
-                        .runtime()
-                        .block_on(node.authenticate_authority_head())
-                        .map_err(|e| {
-                            io_error(
-                                "authenticate guarded daemon child",
-                                std::io::Error::other(e.to_string()),
-                            )
-                        })?;
-                    node.bring_into_service(selected.receipt().generation())
-                        .map_err(|e| {
-                            io_error(
-                                "bring guarded daemon child into service",
-                                std::io::Error::other(e.to_string()),
-                            )
-                        })?;
-                    node.serve_guarded_git_daemon_stream_in(
+                let served: Result<(), NodeSmartHttpRefusal> = node
+                    .serve_guarded_git_daemon_stream_in(
                         stream,
                         deadline,
                         Some(quota.as_ref()),
                         Some(writers.as_ref()),
-                    )?;
-                    Ok(())
-                })();
+                    )
+                    .map(|_| ());
                 // Keep service and cleanup observations separate. Neither can
                 // undo an outcome already published by the connection's session.
-                let cleanup = node.shutdown();
+                // Only a node whose session succeeded goes back to the pool.
+                let cleanup = if served.is_ok() {
+                    nodes.restore(node)
+                } else {
+                    node.shutdown()
+                };
                 completion.success = served.is_ok() && cleanup.is_ok();
                 if let Err(error) = served {
                     eprintln!("guarded daemon connection failed: {error}");
@@ -174,6 +166,15 @@ impl OneNode {
         }
         for child in pending {
             (child.join)();
+        }
+        if let Err(error) = nodes.close() {
+            eprintln!("guarded daemon could not close its pooled nodes: {error}");
+            failure.get_or_insert_with(|| {
+                io_error(
+                    "close pooled guarded daemon nodes",
+                    std::io::Error::other(error.to_string()),
+                )
+            });
         }
         let restored = listener
             .set_nonblocking(false)
