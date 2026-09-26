@@ -4,17 +4,21 @@
 #[path = "source_http/support.rs"]
 mod support;
 use support::*;
-use fgit_crypto::{GitObjectKind, git_object_id};
+use fgit_admission::AdmissionLimits;
+use fgit_authority::IdempotencyKey;
+use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest, sha256_digest};
 use fgit_forge::source_browse::SourceBrowseError;
 use fgit_forge::source_search::SearchLimits;
+use fgit_git_object::ParseLimits;
 use fgit_graph::GenerationActivation;
 use fgit_graph::lexical::{IndexError, LexicalChannel, LexicalError, LexicalQuery};
 use fgit_node::source_retrieval::current_index::{
     RevalidatedIndexReport, RevalidatedIndexRequest,
 };
-use fgit_node::{NodeWorkspaceRefusal, OneNode};
+use fgit_node::{LoopbackReceiveSession, NodeWorkspaceRefusal, OneNode};
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, RefName};
-use std::fs;
+use fgit_wire::receive::{ReceiveContext, ReceiveLimits, SignedPushProfile};
+use fgit_wire::{Capabilities, GitObjectFormat, Packet, WireLimits, encode_packets};
 
 fn reference() -> RefName {
     RefName::try_new(b"refs/heads/main").unwrap()
@@ -159,35 +163,94 @@ fn stale_continuation_head_is_not_silently_rebased_after_metadata_change() {
     node.shutdown().unwrap();
 }
 
-// Test-only native loose-object writer. The imported child is a real Git
-// object, not a mutable ref map or an external Git subprocess.
-fn advance_commit(root: &Scratch, node: &OneNode, parent: GitOid, tree: GitOid) -> GitOid {
+// Publishes a real child commit of `parent` with the same `tree` to
+// refs/heads/main through the node's native receive path. (Loose import only
+// creates refs, so it refuses to move an existing branch.)
+fn advance_commit(_root: &Scratch, node: &OneNode, parent: GitOid, tree: GitOid) -> GitOid {
     let body = format!(
         "tree {tree}\nparent {parent}\nauthor Fixture <fixture@example.invalid> 2 +0000\ncommitter Fixture <fixture@example.invalid> 2 +0000\n\nchild\n"
     );
     let format = parent.algorithm();
     let child = git_object_id(format, GitObjectKind::Commit, body.as_bytes());
-    let raw = [format!("commit {}\0", body.len()).as_bytes(), body.as_bytes()].concat();
-    let size = u16::try_from(raw.len()).unwrap();
-    let mut encoded = vec![0x78, 0x01, 0x01];
-    encoded.extend(size.to_le_bytes());
-    encoded.extend((!size).to_le_bytes());
-    encoded.extend(&raw);
-    let (a, b) = raw.iter().fold((1_u32, 0_u32), |(a, b), byte| {
-        let next = (a + u32::from(*byte)) % 65_521;
+    let size = u16::try_from(body.len()).unwrap();
+    let mut pack = b"PACK\0\0\0\x02\0\0\0\x01".to_vec();
+    // Commit object header: type 1, then the size in 4 + 7-bit groups.
+    let mut header = vec![(1 << 4) | (size & 0x0f) as u8];
+    let mut remaining = size >> 4;
+    while remaining != 0 {
+        *header.last_mut().unwrap() |= 0x80;
+        header.push((remaining & 0x7f) as u8);
+        remaining >>= 7;
+    }
+    pack.extend(header);
+    pack.extend([0x78, 0x01, 0x01]);
+    pack.extend(size.to_le_bytes());
+    pack.extend((!size).to_le_bytes());
+    pack.extend(body.as_bytes());
+    let (a, b) = body.bytes().fold((1_u32, 0_u32), |(a, b), byte| {
+        let next = (a + u32::from(byte)) % 65_521;
         (next, (b + next) % 65_521)
     });
-    encoded.extend(((b << 16) | a).to_be_bytes());
-    let git = root.0.join("git-source");
-    let text = child.to_string();
-    let directory = git.join("objects").join(&text[..2]);
-    fs::create_dir_all(&directory).unwrap();
-    fs::write(directory.join(&text[2..]), encoded).unwrap();
-    fs::write(git.join("refs/heads/main"), format!("{child}\n")).unwrap();
-    let result = node.runtime().block_on(node.import_loose_git_directory_durable_in(
-        &node.request_context(), &git, OWNER, b"revalidated-index-child",
-    )).unwrap();
-    assert!(result.commands.iter().all(|c| matches!(c.terminal.outcome, DecisionOutcome::Committed { .. })));
+    pack.extend(((b << 16) | a).to_be_bytes());
+    let (wire_format, name) = match format {
+        GitHashAlgorithm::Sha1 => (GitObjectFormat::Sha1, "sha1"),
+        GitHashAlgorithm::Sha256 => (GitObjectFormat::Sha256, "sha256"),
+    };
+    let trailer = match format {
+        GitHashAlgorithm::Sha1 => sha1_digest(&pack).to_vec(),
+        GitHashAlgorithm::Sha256 => sha256_digest(&pack).to_vec(),
+    };
+    pack.extend(trailer);
+    let command = format!("{parent} {child} refs/heads/main\0report-status object-format={name}");
+    let mut input = encode_packets(
+        &[Packet::Data(command.into_bytes()), Packet::Flush],
+        &WireLimits::default(),
+    )
+    .unwrap();
+    input.extend(pack);
+    let limits = ReceiveLimits::default();
+    let context = ReceiveContext::new(
+        wire_format,
+        Capabilities::parse_v1(
+            format!("report-status delete-refs object-format={name}").as_bytes(),
+            &limits.wire,
+        )
+        .unwrap(),
+        limits,
+        SignedPushProfile::Refuse,
+    )
+    .unwrap();
+    let request = node.request_context();
+    let materialized = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&request))
+        .unwrap();
+    let session = LoopbackReceiveSession::authenticated(
+        OWNER,
+        IdempotencyKey::new(b"revalidated-index-child".to_vec()).unwrap(),
+    );
+    let result = node
+        .runtime()
+        .block_on(node.receive_loopback_pack_durable_in(
+            &request,
+            &session,
+            &materialized,
+            context,
+            &input,
+            ParseLimits {
+                tree_reference_bytes: format.digest_len(),
+                ..ParseLimits::default()
+            },
+            AdmissionLimits::default(),
+            &mut || true,
+        ))
+        .unwrap();
+    assert!(
+        result
+            .commands
+            .iter()
+            .all(|c| matches!(c.terminal.outcome, DecisionOutcome::Committed { .. }))
+    );
     child
 }
 
