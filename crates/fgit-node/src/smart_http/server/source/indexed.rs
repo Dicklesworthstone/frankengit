@@ -1,5 +1,8 @@
 //! Read-only persisted lexical search. Builds are a trusted-local operation;
 //! an HTTP query cannot stage a payload or acquire generation-write authority.
+mod current;
+use current::SourceMode;
+
 use super::super::issues::{
     ApiError, MAX_FORM_BYTES, parse_decimal, parse_form, parse_snapshot, quote, ref_fields,
 };
@@ -12,7 +15,7 @@ use crate::{
 };
 use fgit_graph::lexical::{
     IndexError, IndexedLexicalReport, LexicalChannel, LexicalError, LexicalQuery,
-    LexicalQueryLimits, LexicalReadLimits, MAX_WORK, PROFILE,
+    LexicalQueryLimits, LexicalReadLimits, LexicalSource, MAX_WORK, PROFILE,
 };
 use fgit_graph::{GenerationActivation, GenerationAuthorityError, GraphGenerationId};
 use fgit_treefs::TreePath;
@@ -85,6 +88,7 @@ pub(super) fn read_route<'a>(
 
 #[derive(Debug)]
 struct Command {
+    source_mode: SourceMode,
     selection: Selection,
     generation: Option<GenerationActivation>,
     minimum: Option<GenerationActivation>,
@@ -192,6 +196,7 @@ fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> 
             }
             "ref"
             | "object_format"
+            | "source_mode"
             | "expected_head"
             | "expected_commit"
             | "channel"
@@ -212,6 +217,7 @@ fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> 
     if take(&mut fields, "object_format")? != format.as_str() {
         return Err(ApiError::bad("object_format_mismatch"));
     }
+    let source_mode = SourceMode::parse(fields.remove("source_mode").as_deref())?;
     let reference = RefName::try_new(take(&mut fields, "ref")?.as_bytes())
         .map_err(|_| ApiError::bad("invalid_ref"))?;
     let expected_head = fields
@@ -270,6 +276,7 @@ fn command(bytes: &[u8], format: GitHashAlgorithm) -> Result<Command, ApiError> 
         ..defaults
     };
     Ok(Command {
+        source_mode,
         selection: Selection {
             reference,
             expected_head,
@@ -332,6 +339,11 @@ pub(super) fn execute(
     );
     let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
+    // Explicit selection, never a fallback after a failed strict read. Both
+    // modes use the same authenticated gateway, deadline and request budget.
+    if command.source_mode == SourceMode::Revalidated {
+        return current::execute(node, &context, &command, maximum, &mut live);
+    }
     let report = drive_request_while(
         node,
         &context,
@@ -393,9 +405,6 @@ pub(super) fn append(out: &mut String, value: &str, maximum: usize) -> Result<()
     out.push_str(value);
     Ok(())
 }
-fn optional(value: Option<u64>) -> String {
-    value.map_or_else(|| "null".to_owned(), |n| n.to_string())
-}
 fn rows(
     command: &Command,
     report: &IndexedLexicalReport,
@@ -447,7 +456,7 @@ fn rows(
             &format!(
                 "{}{{\"document_id\":{},\"path_hex\":{},\"blob\":{},\"content_bytes\":{},\"spans\":[",
                 if index == 0 { "" } else { "," },
-                hit.document_id,
+                command.source_mode.counter(hit.document_id),
                 quote(&hex(&hit.path)),
                 quote(&hit.blob.to_string()),
                 hit.content_bytes
@@ -495,6 +504,7 @@ pub(super) fn render_initial(
     live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
     let command = Command {
+        source_mode: SourceMode::Exact,
         selection: Selection {
             reference: report.source.reference.clone(),
             expected_head: Some(report.source.source_head),
@@ -517,8 +527,22 @@ fn render(
     maximum: usize,
     live: &mut impl FnMut() -> bool,
 ) -> Result<String, ApiError> {
+    render_at(node, command, report, &report.source, maximum, live)
+}
+
+// All response coordinates, rows and bounds share one validator. The default
+// exact-source format remains byte-for-byte unchanged. Only explicit revalidation
+// may attach a distinct current source; original index provenance is not edited.
+fn render_at(
+    node: &OneNode,
+    command: &Command,
+    report: &IndexedLexicalReport,
+    source: &LexicalSource,
+    maximum: usize,
+    live: &mut impl FnMut() -> bool,
+) -> Result<String, ApiError> {
     check(live)?;
-    let source = &report.source;
+    current::validate_sources(command.source_mode, &report.source, source)?;
     if source.namespace.tenant != node.tenant_id
         || source.namespace.repository != node.repository_id
         || source.namespace.incarnation != node.repository_incarnation_id()
@@ -553,16 +577,23 @@ fn render(
         &mut out,
         &format!(
             concat!(
-                "{{\"type\":\"source_search_index\",\"schema_version\":1,\"profile\":{},",
+                "{{\"type\":{},\"schema_version\":1,\"profile\":{},",
                 "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation\":{},\"object_format\":{},{},",
                 "\"source_head\":{},\"snapshot_token\":{},\"source_rcr\":{},\"source_commit\":{},\"root_tree\":{},",
                 "\"index_token\":{},\"index_number\":{},\"selected_index_token\":{},\"selected_index_number\":{},",
                 "\"read_only\":true,\"transaction_created\":false,\"published\":false,\"channel\":{},",
                 "\"after\":{},\"limit\":{},\"returned_hits\":{},\"complete\":{},\"next_after\":{},",
                 "\"indexed_documents\":{},\"indexed_source_bytes\":{},\"non_regular_entries\":{},",
-                "\"segments_read\":{},\"payload_bytes_read\":{},\"generation_bytes_read\":{},\"work_units\":{},\"terms_hex\":["
+                "\"segments_read\":{},\"payload_bytes_read\":{},\"generation_bytes_read\":{},\"work_units\":{},"
             ),
-            quote(PROFILE),
+            quote(match command.source_mode {
+                SourceMode::Exact => "source_search_index",
+                SourceMode::Revalidated => "source_search_index_current",
+            }),
+            quote(match command.source_mode {
+                SourceMode::Exact => PROFILE,
+                SourceMode::Revalidated => crate::source_retrieval::current_index::PROFILE,
+            }),
             quote(&node.tenant_id.to_string()),
             quote(&node.repository_id.to_string()),
             quote(&node.repository_incarnation_id().to_string()),
@@ -576,23 +607,25 @@ fn render(
             quote(&token(
                 report.generation.generation_id.as_internal_object_id()
             )),
-            report.generation.authority_generation.get(),
+            command.source_mode.counter(report.generation.authority_generation.get()),
             quote(&token(
                 report
                     .selected_generation_head
                     .generation_id
                     .as_internal_object_id()
             )),
-            report.selected_generation_head.authority_generation.get(),
+            command.source_mode.counter(
+                report.selected_generation_head.authority_generation.get(),
+            ),
             quote(match command.query.channel() {
                 LexicalChannel::Content => "content",
                 LexicalChannel::Path => "path",
             }),
-            optional(command.after),
+            command.source_mode.optional(command.after),
             command.limits.max_results,
             report.results.hits.len(),
             report.results.complete,
-            optional(report.results.next_after),
+            command.source_mode.optional(report.results.next_after),
             report.indexed_documents,
             report.indexed_source_bytes,
             report.non_regular_entries,
@@ -603,6 +636,10 @@ fn render(
         ),
         maximum,
     )?;
+    if command.source_mode == SourceMode::Revalidated {
+        current::append_sources(&mut out, &report.source, source, maximum, live)?;
+    }
+    append(&mut out, "\"terms_hex\":[", maximum)?;
     for (i, term) in command.query.terms().iter().enumerate() {
         append(
             &mut out,
