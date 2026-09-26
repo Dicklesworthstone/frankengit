@@ -303,16 +303,16 @@ fn incomplete_reuse_requests_wrong_blob_paths_order_and_bad_fresh_input_refuse()
     ] {
         assert!(reuse.prepare(src.clone(), &rows, 2, &mut || true).is_err());
     }
-    let bad = vec![b'x'; 129];
+    // A fresh word longer than MAX_TERM_BYTES is retained, not refused
+    // (c7679132): the refresh prepares exactly what a fresh build would.
+    let long = vec![b'x'; 129];
     let rows = [RefreshDocument {
         path: b"a",
-        blob: blob(src.namespace.object_format, &bad),
-        content: Some(&bad),
+        blob: blob(src.namespace.object_format, &long),
+        content: Some(&long),
     }];
-    assert!(matches!(
-        reuse.prepare(src.clone(), &rows, 2, &mut || true),
-        Err(IndexError::Lexical(LexicalError::Limit("token bytes")))
-    ));
+    let (prepared, _) = reuse.prepare(src.clone(), &rows, 2, &mut || true).unwrap();
+    assert_same(&prepared, &fresh(src.clone(), &corpus(&[(b"a", &long)])));
     assert!(reuse.prepare(src, &[known], 2, &mut || true).is_ok());
     assert_eq!(
         index
