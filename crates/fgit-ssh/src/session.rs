@@ -329,6 +329,10 @@ impl SshServerSession {
     pub fn take_channel_input(&mut self) -> Vec<u8> {
         let taken = core::mem::take(&mut self.channel_input_data);
         if !taken.is_empty()
+            && self.phase != SessionPhase::Closed
+            && !self.channel_teardown.eof_received
+            && !self.channel_teardown.close_received
+            && !self.channel_teardown.close_sent
             && self.server_window_size <= DEFAULT_WINDOW_SIZE / 2
             && let Some(channel) = self.client_channel_id
         {
@@ -372,6 +376,10 @@ impl SshServerSession {
             self.ephemeral_kex = None;
             self.pending_inbound_key = None;
             self.discard_next_kex_packet = false;
+            self.userauth_service_accepted = false;
+            self.authenticated_key = None;
+            self.authenticated_principal = None;
+            self.active_command = None;
         }
         result
     }
@@ -514,7 +522,10 @@ impl SshServerSession {
         // how the Terrapin prefix truncation shifts sequence numbers.
         if self.strict_kex
             && self.inbound_cipher.is_none()
-            && !matches!(msg_type, msg::KEXINIT | msg::KEX_ECDH_INIT | msg::NEWKEYS)
+            && !matches!(
+                msg_type,
+                msg::KEXINIT | msg::KEX_ECDH_INIT | msg::NEWKEYS | msg::DISCONNECT
+            )
         {
             return Err(SshSessionError::ProtocolViolation {
                 reason: format!("message {msg_type} is not allowed during strict key exchange"),
@@ -936,6 +947,12 @@ impl SshServerSession {
 
     /// Sends channel extended data (stderr).
     pub fn send_channel_extended_data(&mut self, recipient_channel: u32, data: &[u8]) {
+        if self.phase == SessionPhase::Closed
+            || self.channel_teardown.close_sent
+            || self.client_channel_id != Some(recipient_channel)
+        {
+            return;
+        }
         let mut ext = WireWriter::new();
         ext.write_u8(msg::CHANNEL_EXTENDED_DATA);
         ext.write_u32(recipient_channel);
@@ -987,7 +1004,12 @@ impl SshServerSession {
 
     /// Sends channel EOF.
     pub fn send_channel_eof(&mut self) {
-        let channel = self.client_channel_id.unwrap_or(0);
+        if self.phase == SessionPhase::Closed || self.channel_teardown.close_sent {
+            return;
+        }
+        let Some(channel) = self.client_channel_id else {
+            return;
+        };
         let mut msg = WireWriter::new();
         msg.write_u8(msg::CHANNEL_EOF);
         msg.write_u32(channel);
