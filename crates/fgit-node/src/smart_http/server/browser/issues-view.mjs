@@ -1,4 +1,5 @@
 import { IssueClient, MAX_RECEIPT_BYTES, decimal, issueSearchQuery } from './issues.mjs';
+import { markdownBody } from './markdown.mjs';
 
 function visible(value) {
   return String(value).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu,
@@ -60,10 +61,16 @@ export function mountIssues(document, location, options = {}) {
     const currentSession = session, currentView = ++view;
     client.cancelReads(); clearView(); status('Reading one issue snapshot…');
     try {
-      const result = await client.read(number, { after, limit: 20, head });
+      // List rows do not display bodies; request presentations only when
+      // reading an issue and its exact versioned action/comment history.
+      const result = await client.read(number, { after, limit: 20, head, render: number !== null });
       if (session !== currentSession || view !== currentView) return;
       const reply = result.reply;
       const content = node('div');
+      const body = value => markdownBody(document, value.body, value.body_rendered, {
+        cryptoImpl: options.cryptoImpl ?? globalThis.crypto,
+        current: () => client.connected && session === currentSession && view === currentView,
+      }).element;
       if (number === null) {
         content.append(issueTable(reply.issues, result.head));
         if (!reply.issues.length) content.append(node('p', 'No issues on this snapshot page.'));
@@ -76,7 +83,7 @@ export function mountIssues(document, location, options = {}) {
         content.append(node('h2', `#${number} ${issue.title}`),
           node('p', `${issue.state} · version ${issue.version} · ${issue.comments} comments`),
           node('p', `Opened by ${issue.opened_by} · last changed by ${issue.last_actor}`),
-          node('p', `Labels: ${issue.labels.join(', ') || '(none)'}`), node('pre', issue.body));
+          node('p', `Labels: ${issue.labels.join(', ') || '(none)'}`), body(issue));
         const actions = node('div'); actions.className = 'issue-actions';
         for (const [label, action] of [['Comment', 'comment'], ['Edit issue', 'edit'],
           [issue.state === 'open' ? 'Close issue' : 'Reopen issue', issue.state === 'open' ? 'close' : 'reopen']]) {
@@ -87,7 +94,7 @@ export function mountIssues(document, location, options = {}) {
           const entry = node('article');
           entry.append(node('h4', `Version ${event.version} · ${event.action.name} · ${event.actor}`));
           if (Object.hasOwn(event.action, 'title')) entry.append(node('p', event.action.title));
-          if (Object.hasOwn(event.action, 'body')) entry.append(node('pre', event.action.body));
+          if (Object.hasOwn(event.action, 'body')) entry.append(body(event.action));
           if (Object.hasOwn(event.action, 'labels')) entry.append(node('p', `Labels: ${event.action.labels.join(', ') || '(none)'}`));
           content.append(entry);
         }

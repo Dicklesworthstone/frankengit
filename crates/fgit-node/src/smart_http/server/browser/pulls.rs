@@ -29,6 +29,16 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+// The renderer module contains no repository data. Issues and PRs share it,
+// but enabling issues must not turn on any PR shell, action or API route.
+fn asset_enabled(route: &[u8], target: &str, pulls: bool, issues: bool) -> bool {
+    pulls
+        || (issues
+            && target.split('?').next().is_some_and(|path| {
+                path.as_bytes().strip_prefix(route) == Some(b"/ui/markdown.mjs".as_slice())
+            }))
+}
+
 fn checked_asset(
     route: &[u8],
     enabled: bool,
@@ -70,7 +80,7 @@ pub(super) fn serve(
 ) -> Result<bool, Status> {
     let Some((media, body)) = checked_asset(
         &profile.route,
-        profile.allow_pulls,
+        asset_enabled(&profile.route, request.target, profile.allow_pulls, profile.allow_issues),
         profile.maximum_response_bytes,
         request,
         !trailing.is_empty(),
@@ -224,4 +234,54 @@ mod tests {
             assert!(!script.contains("sessionStorage"));
         }
     }
+
+    #[test]
+    fn the_shared_renderer_does_not_enable_pr_assets_or_other_repository_routes() {
+        for pulls in [false, true] {
+            for issues in [false, true] {
+                for suffix in ["/ui/markdown.mjs", "/ui/pulls/", "/ui/pulls.mjs"] {
+                    let target = format!("/r.git{suffix}");
+                    let text = format!("GET {target} HTTP/1.1\r\nHost: local\r\n\r\n");
+                    let request = head::parse(text.as_bytes(), HttpLimits::default())
+                        .unwrap().unwrap();
+                    let expected = pulls || (issues && suffix == "/ui/markdown.mjs");
+                    assert_eq!(
+                        checked_asset(
+                            b"/r.git", asset_enabled(b"/r.git", &target, pulls, issues),
+                            u64::MAX, &request, false,
+                        ).is_ok(),
+                        expected,
+                    );
+                }
+            }
+        }
+        for target in [
+            "/r.git-other/ui/markdown.mjs", "/other.git/ui/markdown.mjs",
+            "/r.git/ui/%6darkdown.mjs", "/r.git/ui/../markdown.mjs",
+        ] {
+            assert!(!asset_enabled(b"/r.git", target, false, true));
+            assert!(asset(b"/r.git", target).is_none());
+        }
+    }
+
+    #[test]
+    fn the_issue_enabled_renderer_keeps_the_existing_framing_and_size_refusals() {
+        for (method, suffix, headers, trailing, maximum) in [
+            ("POST", "/ui/markdown.mjs", "", false, u64::MAX),
+            ("GET", "/ui/markdown.mjs?token=x", "", false, u64::MAX),
+            ("GET", "/ui/markdown.mjs", "Content-Length: 1\r\n", false, u64::MAX),
+            ("GET", "/ui/markdown.mjs", "", true, u64::MAX),
+            ("GET", "/ui/markdown.mjs", "", false, 1),
+        ] {
+            let target = format!("/r.git{suffix}");
+            let text = format!("{method} {target} HTTP/1.1\r\nHost: local\r\n{headers}\r\n");
+            let request = head::parse(text.as_bytes(), HttpLimits::default())
+                .unwrap().unwrap();
+            assert!(checked_asset(
+                b"/r.git", asset_enabled(b"/r.git", &target, false, true),
+                maximum, &request, trailing,
+            ).is_err());
+        }
+    }
+
 }

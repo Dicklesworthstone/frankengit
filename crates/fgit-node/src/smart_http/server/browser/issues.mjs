@@ -139,6 +139,13 @@ export function issueHistory(reply, number, { after = 0, limit = 20, head = null
       if (event.version !== after + i + 1) fail('History contains a version gap.');
       opaque(event.actor, 'event principal');
       const { name, ...fields } = event.action;
+      // This one derived read field is not part of the canonical action.
+      // Preserve it on the reply for the presentation consumer, but never
+      // weaken issueAction: mutation forms and recovery records stay strict.
+      if (own(fields, 'body_rendered')) {
+        if (!own(fields, 'body')) fail('Rendered action has no canonical body.');
+        delete fields.body_rendered;
+      }
       issueAction(name, fields);
       if ((event.version === 1) !== (name === 'open')) fail('Invalid opening event position.');
     });
@@ -389,13 +396,15 @@ export class IssueClient {
       if (response?.body && !response.body.locked) await response.body.cancel().catch(() => {});
     }
   }
-  async read(number = null, { after = 0, limit = 20, head = null } = {}) {
+  async read(number = null, { after = 0, limit = 20, head = null, render = false } = {}) {
+    if (typeof render !== 'boolean') fail('Rendering must be explicitly enabled or disabled.');
     natural(after, 'page cursor'); natural(limit, 'page limit', 1, 100);
     if (number !== null) natural(number, 'issue number', 1);
     if (head !== null) snapshotToken(head);
     if (after && !head) fail('Continuation requires its original snapshot.');
     const query = new URLSearchParams({ [number === null ? 'after' : 'after_version']: String(after), limit: String(limit) });
     if (head) query.set('expected_head', head);
+    if (render) query.set('render', 'html_safe');
     const raw = await this.#request(`issues${number === null ? '' : `/${number}`}?${query}`, { view: true });
     const options = { after, limit, head, binding: this.#binding };
     const checked = number === null ? issuePage(raw, options) : issueHistory(raw, number, options);
