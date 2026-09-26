@@ -11,7 +11,7 @@ use fgit_chronicle::{PublicationBasis, PublicationPlan};
 use fgit_codec::CryptoBodyIdentity;
 use fgit_forge::aggregate::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::{ForgeEvent, ForgeEventBatch, ForgeEventPayload, NativeMerge};
-use fgit_types::{AsciiSlug, RefusalCode};
+use fgit_types::{AsciiSlug, GitOid, RefName, RefusalCode};
 
 use super::{NativeMergeBasis, SealedMerge, prepare::prepare_event, staging::stage_prepared};
 use crate::{
@@ -42,6 +42,15 @@ pub use storage::{legacy_genesis_root, load_forge_positions};
 mod workspace;
 pub use workspace::{admit_workspace_sealed_native_merge_async, workspace_seal_attempt_for};
 
+/// Publication semantics are sealed, never inferred from a failed merge attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeMergeMethod {
+    /// Independently reviewed commit with target and source as ordered parents.
+    MergeCommit,
+    /// Move to the already admitted source tip only after proving target ancestry.
+    FastForwardOnly,
+}
+
 /// A reviewed native merge. A new stream records a merge receipt, not invented
 /// PR opening or approval events. The caller's expected version is immutable.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,6 +58,7 @@ pub struct NativeMergeIntent {
     expected_version: ExpectedVersion,
     event: ForgeEvent,
     workspace_snapshot_digest: Option<[u8; 32]>,
+    method: NativeMergeMethod,
 }
 
 impl NativeMergeIntent {
@@ -74,7 +84,42 @@ impl NativeMergeIntent {
                 payload: ForgeEventPayload::MergeCommittedNative(merge),
             },
             workspace_snapshot_digest: None,
+            method: NativeMergeMethod::MergeCommit,
         })
+    }
+
+    /// Request an exact-version fast-forward of an EXISTING pull request.
+    /// These are observed branch coordinates, not a caller-supplied ancestry
+    /// proof. The resulting commit is the source tip and the only possible
+    /// merge base is target-before; admission verifies both from native bytes.
+    /// No new object, metadata refresh, force update, or fallback merge exists.
+    pub fn fast_forward_only(
+        pull_request: PullRequestNumber,
+        expected_version: AggregateVersion,
+        source_ref: RefName,
+        source_tip: GitOid,
+        target_ref: RefName,
+        target_tip_before: GitOid,
+    ) -> Result<Self, AdmissionError> {
+        let mut intent = Self::new(
+            pull_request,
+            ExpectedVersion::Exactly(expected_version),
+            NativeMerge {
+                source_ref,
+                source_tip,
+                base_tip: target_tip_before,
+                target_ref,
+                target_tip_before,
+                merge_commit: source_tip,
+            },
+        )?;
+        intent.method = NativeMergeMethod::FastForwardOnly;
+        Ok(intent)
+    }
+
+    #[must_use]
+    pub const fn method(&self) -> NativeMergeMethod {
+        self.method
     }
 
     /// Require the exact immutable workspace snapshot as an additional semantic
@@ -118,6 +163,20 @@ impl NativeMergeIntent {
             return Err(AdmissionError::ObjectFormatMismatch);
         }
         let event_root = root(&ForgeEventBatch::of_one(self.event.clone()))?;
+        let mut scoped = vec![ScopedEntry::new(
+            AsciiSlug::from_static("forge"),
+            AsciiSlug::from_static("merge.event-batch-root"),
+            event_root.bytes().as_bytes(),
+        )?];
+        if self.method == NativeMergeMethod::FastForwardOnly {
+            // Old two-parent seals remain byte-identical. Even the same event
+            // coordinates under the legacy method cannot alias this request.
+            scoped.push(ScopedEntry::new(
+                AsciiSlug::from_static("forge"),
+                AsciiSlug::from_static("merge.method"),
+                b"fast-forward-only/v1",
+            )?);
+        }
         let request = SemanticRequest::build(
             fgit_authority::RECEIVE_ADMISSION_SCHEMA,
             context.object_format,
@@ -129,11 +188,7 @@ impl NativeMergeIntent {
                 force: false,
             }],
             Vec::new(),
-            vec![ScopedEntry::new(
-                AsciiSlug::from_static("forge"),
-                AsciiSlug::from_static("merge.event-batch-root"),
-                event_root.bytes().as_bytes(),
-            )?],
+            scoped,
         )?;
         let attempt = SealAttempt {
             tenant_id: context.tenant_id,
@@ -199,6 +254,23 @@ where
         authenticated: &'a AuthenticatedHead,
         intent: &'a NativeMergeIntent,
     ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a;
+
+    /// Explicit opt-in for the no-new-commit method. Existing projections fail
+    /// closed rather than accidentally treating a fast-forward as an already
+    /// validated two-parent merge. Implementations must verify parent ancestry,
+    /// the entire admitted source closure, and the same current merge policy.
+    fn validate_fast_forward_async<'a>(
+        &'a self,
+        _authority: &'a S,
+        _cx: &'a S::Context,
+        _basis: &'a PublicationBasis,
+        _authenticated: &'a AuthenticatedHead,
+        _intent: &'a NativeMergeIntent,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        std::future::ready(Err(ProjectionFailure::Refuse(
+            RefusalCode::PublicationPolicyRefused,
+        )))
+    }
 }
 
 async fn resolve_default_basis<S, P>(
@@ -447,9 +519,14 @@ where
             if let Some(code) = storage::aggregate_refusal(store, cx, &positions, intent).await? {
                 return Err(ProjectionFailure::Refuse(code).into());
             }
-            let closure = projection
-                .validate_merge_async(store, cx, &basis, &authenticated, intent)
-                .await?;
+            let closure = match intent.method() {
+                NativeMergeMethod::MergeCommit => projection
+                    .validate_merge_async(store, cx, &basis, &authenticated, intent)
+                    .await?,
+                NativeMergeMethod::FastForwardOnly => projection
+                    .validate_fast_forward_async(store, cx, &basis, &authenticated, intent)
+                    .await?,
+            };
             // A self-consistent caller-supplied set is not native-object
             // evidence. Require the exact independently verified closure and
             // retain explicit containment of every package-declared object.

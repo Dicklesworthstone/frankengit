@@ -53,6 +53,34 @@ pub fn validate_merge_objects(
         merge.merge_commit,
         Some(&[merge.target_tip_before, merge.source_tip]),
         Some(merge.base_tip),
+        None,
+        limits,
+        deadline,
+    )
+}
+
+/// Verify a no-new-commit fast-forward using the SAME bounded, independently
+/// hashed object walk. The target must occur in the source's actual commit
+/// parent graph, not merely in a claimed edge list, tree, gitlink or local store.
+/// The caller separately proves current branch selection and authorization.
+/// Divergence is a deterministic refusal; missing/corrupt input and interruption
+/// never return a partial or successful closure. The two-parent API is unchanged.
+pub fn validate_fast_forward_objects(
+    source: &impl CanonicalObjectSource,
+    merge: &NativeMerge,
+    limits: MergeObjectLimits,
+    deadline: &mut impl Deadline,
+) -> Result<ValidatedClosure, ProjectionFailure> {
+    merge.validate().map_err(|_| invalid())?;
+    if merge.merge_commit != merge.source_tip || merge.base_tip != merge.target_tip_before {
+        return Err(invalid());
+    }
+    validate_candidate_objects(
+        source,
+        merge.source_tip,
+        None,
+        None,
+        Some(merge.target_tip_before),
         limits,
         deadline,
     )
@@ -75,6 +103,7 @@ pub fn validate_workspace_objects(
         candidate,
         Some(&[expected_parent]),
         None,
+        None,
         limits,
         deadline,
     )
@@ -90,7 +119,7 @@ pub fn validate_commit_closure(
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
-    validate_candidate_objects(source, commit, None, None, limits, deadline)
+    validate_candidate_objects(source, commit, None, None, None, limits, deadline)
 }
 
 fn validate_candidate_objects(
@@ -98,11 +127,19 @@ fn validate_candidate_objects(
     candidate: GitOid,
     expected_parents: Option<&[GitOid]>,
     merge_base: Option<GitOid>,
+    fast_forward_base: Option<GitOid>,
     limits: MergeObjectLimits,
     deadline: &mut impl Deadline,
 ) -> Result<ValidatedClosure, ProjectionFailure> {
     let format = candidate.algorithm();
     if candidate.is_zero()
+        || fast_forward_base.is_some_and(|id| {
+            id.is_zero()
+                || id.algorithm() != format
+                || id == candidate
+                || expected_parents.is_some()
+                || merge_base.is_some()
+        })
         || expected_parents.is_some_and(|parents| {
             parents.is_empty()
                 || parents.len() > 2
@@ -265,6 +302,11 @@ fn validate_candidate_objects(
             || !is_ancestor(base, expected_parents[0], &parents, deadline)?
         {
             return Err(invalid());
+        }
+    }
+    if let Some(base) = fast_forward_base {
+        if !is_ancestor(base, candidate, &parents, deadline)? {
+            return Err(ProjectionFailure::Refuse(RefusalCode::NonFastForwardRefused));
         }
     }
     checkpoint(deadline)?;

@@ -5,9 +5,11 @@
 use std::cell::Cell;
 use std::future::Future;
 
-use fgit_admission::merge::native::objects::{MergeObjectLimits, validate_merge_objects};
+use fgit_admission::merge::native::objects::{
+    MergeObjectLimits, validate_fast_forward_objects, validate_merge_objects,
+};
 use fgit_admission::merge::native::{
-    NativeMergeIntent, NativeMergeProjection, admit_native_merge_async,
+    NativeMergeIntent, NativeMergeMethod, NativeMergeProjection, admit_native_merge_async,
     admit_sealed_native_merge_async,
 };
 use fgit_admission::merge::{NativeMergeBasis, SealedMerge};
@@ -194,13 +196,17 @@ impl OneNode {
         Ok((tx_id, terminal))
     }
 
-    /// Publish a reviewed two-parent merge, its forge transition and pending
-    /// delivery obligation in one RCR/head CAS on the embedded authority.
+    /// Publish a reviewed two-parent or explicitly requested fast-forward merge,
+    /// its forge transition and pending delivery in one RCR/head CAS.
+    /// Fast-forward-only intents use existing admitted source objects, prove
+    /// actual target ancestry, and enforce the same mandatory review protection.
+    /// They never synthesize a commit or fall back to a different merge method.
     ///
     /// Candidate objects are re-read, hashed and traversed before publication.
-    /// Source, target and base must be authority-selected; ordered parents must
-    /// be target-before and source. All preparation and staging uses the
-    /// caller's request context. No Git process or alternative database is used.
+    /// Source, target and base must be authority-selected; for MergeCommit,
+    /// ordered parents must be target-before and source. All preparation and
+    /// staging uses the caller's request context. No Git process or alternative
+    /// database is used.
     ///
     /// Authentication remains the caller's responsibility at this local
     /// composition boundary. An enqueued delivery is not a delivery receipt,
@@ -355,6 +361,19 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for NodeNativeMergeProjecti
 }
 
 impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<'_> {
+    fn validate_fast_forward_async<'a>(
+        &'a self,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a Cx,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+        intent: &'a NativeMergeIntent,
+    ) -> impl Future<Output = Result<ValidatedClosure, ProjectionFailure>> + Send + 'a {
+        // Reuse the exact-basis materializer, request budget and mandatory
+        // policy check; only the independently verified object shape differs.
+        self.validate_merge_async(authority, cx, basis, authenticated, intent)
+    }
+
     fn workspace_snapshot_digest(&self) -> Result<[u8; 32], ProjectionFailure> {
         self.workspace_live().map_err(ProjectionFailure::Refuse)?;
         self.workspace
@@ -499,13 +518,26 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                         false
                     }
                 };
-                let result = validate_merge_objects(&source, merge, self.object_limits, &mut live);
+                let result = match intent.method() {
+                    NativeMergeMethod::MergeCommit => {
+                        validate_merge_objects(&source, merge, self.object_limits, &mut live)
+                    }
+                    NativeMergeMethod::FastForwardOnly => {
+                        validate_fast_forward_objects(&source, merge, self.object_limits, &mut live)
+                    }
+                };
                 if exhaustion.get().is_some() {
                     return Err(ProjectionFailure::Unavailable(
                         RefusalCode::ResourceBudgetExceeded,
                     ));
                 }
                 let closure = result?;
+                if intent.method() == NativeMergeMethod::FastForwardOnly
+                    && !closure.objects.is_subset(selected.selected_closure().closure().objects())
+                {
+                    // A fast-forward cannot admit merely staged dependencies.
+                    return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete));
+                }
                 if let Some((_, expected_tree, expected_base)) = self.workspace {
                     if merge.target_tip_before != expected_base {
                         return Err(ProjectionFailure::Refuse(RefusalCode::EvidenceStale));
