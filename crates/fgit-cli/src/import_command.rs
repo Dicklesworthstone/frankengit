@@ -53,6 +53,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
         json: false,
     };
     // Reject a bad retry identity before opening storage or reading a source.
+    // An empty key would give every such import the same identity.
+    if options.key.is_empty() {
+        return Err("the idempotency key must not be empty".into());
+    }
     IdempotencyKey::new(options.key.clone()).map_err(|e| e.to_string())?;
     let mut index = 6;
     while index < args.len() {
