@@ -2,21 +2,31 @@
 use super::*;
 use crate::publication_support::{describe, write_terminal_receipt};
 use fgit_codec::harness::{commit_id, refusal_record_id, tx_id};
-use fgit_types::numeric::DecisionSequence;
 use fgit_types::RefusalCode;
+use fgit_types::numeric::DecisionSequence;
 use std::io::{self, Write};
 
 fn options() -> Options {
-    super::super::parse(&[
-        "private-node", "11111111111111111111111111111111",
-        "22222222222222222222222222222222", "33333333333333333333333333333333",
-        "DO-NOT-PRINT-RETRY-KEY", "private-source", "--json",
-    ].map(str::to_owned)).unwrap()
+    super::super::parse(
+        &[
+            "private-node",
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+            "33333333333333333333333333333333",
+            "DO-NOT-PRINT-RETRY-KEY",
+            "private-source",
+            "--json",
+        ]
+        .map(str::to_owned),
+    )
+    .unwrap()
 }
 fn committed() -> TerminalOutcome {
     TerminalOutcome {
         decision_sequence: DecisionSequence::try_new(7).unwrap(),
-        outcome: DecisionOutcome::Committed { repository_commit_id: commit_id() },
+        outcome: DecisionOutcome::Committed {
+            repository_commit_id: commit_id(),
+        },
     }
 }
 fn refused() -> TerminalOutcome {
@@ -43,13 +53,28 @@ fn atomic_mapping_requires_nonempty_and_identical_terminal_results() {
     assert!(checked_atomic(true, &[], &commands).is_err());
     assert!(checked_atomic(true, &[tx_id(), tx_id()], &commands).is_err());
     assert!(checked_atomic(true, &[tx_id()], &[]).is_err());
-    assert!(checked_atomic(true, &[tx_id()], &[(tx_id(), committed()), (tx_id(), refused())]).is_err());
+    assert!(
+        checked_atomic(
+            true,
+            &[tx_id()],
+            &[(tx_id(), committed()), (tx_id(), refused())]
+        )
+        .is_err()
+    );
     let mut different_sequence = committed();
     different_sequence.decision_sequence = DecisionSequence::try_new(9).unwrap();
-    assert!(checked_atomic(true, &[tx_id()], &[(tx_id(), committed()), (tx_id(), different_sequence)]).is_err());
+    assert!(
+        checked_atomic(
+            true,
+            &[tx_id()],
+            &[(tx_id(), committed()), (tx_id(), different_sequence)]
+        )
+        .is_err()
+    );
     // Distinct typed fixture identity, without pretending a real seal was made.
     let internal = fgit_types::InternalObjectId::new(
-        fgit_codec::harness::algorithm(), TxId::DOMAIN_TAG,
+        fgit_codec::harness::algorithm(),
+        TxId::DOMAIN_TAG,
         fgit_types::CANONICAL_CODEC_VERSION,
         *fgit_codec::harness::digest_of(0x91).bytes(),
     );
@@ -74,7 +99,9 @@ fn committed_receipt_has_exact_identity_and_no_private_arguments() {
             "\"repository_commit_id\":{},\"refusal_record_id\":null,",
             "\"refusal_code\":null,\"refusal_code_point\":null,",
             "\"node_closed\":true,\"cleanup_error\":null}}"
-        ), quote(&tx_id().to_string()), quote(&commit_id().to_string()),
+        ),
+        quote(&tx_id().to_string()),
+        quote(&commit_id().to_string()),
     );
     assert_eq!(rendered, expected);
     for _ in 0..8 {
@@ -88,24 +115,42 @@ fn committed_receipt_has_exact_identity_and_no_private_arguments() {
 #[test]
 fn refusal_and_cleanup_are_separate_from_the_immutable_decision() {
     let decision = checked_atomic(true, &[tx_id()], &[(tx_id(), refused())]).unwrap();
-    let report = render(&options(), incarnation(), &decision, Some("disk\n\"error\"\u{202e}"));
+    let report = render(
+        &options(),
+        incarnation(),
+        &decision,
+        Some("disk\n\"error\"\u{202e}"),
+    );
     assert!(report.contains("\"state\":\"refused\",\"terminal\":true,\"decision_sequence\":8"));
     assert!(report.contains("\"repository_commit_id\":null"));
-    assert!(report.contains(&format!("\"refusal_record_id\":{}", quote(&refusal_record_id().to_string()))));
+    assert!(report.contains(&format!(
+        "\"refusal_record_id\":{}",
+        quote(&refusal_record_id().to_string())
+    )));
     assert!(report.contains("\"refusal_code\":\"ExpectedOldRefMismatch\""));
     assert!(report.contains("\"node_closed\":false"));
     assert!(report.contains("disk\\u000a\\\"error\\\"\\u202e"));
     let committed = checked_atomic(true, &[tx_id()], &[(tx_id(), committed())]).unwrap();
-    let report = render(&options(), incarnation(), &committed, Some("shutdown failed"));
+    let report = render(
+        &options(),
+        incarnation(),
+        &committed,
+        Some("shutdown failed"),
+    );
     assert!(report.contains("\"state\":\"committed\""));
     assert!(report.contains("\"node_closed\":false"));
 }
 
-struct BrokenOutput { fail_flush: bool }
+struct BrokenOutput {
+    fail_flush: bool,
+}
 impl Write for BrokenOutput {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.fail_flush { Ok(bytes.len()) }
-        else { Err(io::Error::new(io::ErrorKind::BrokenPipe, "lost output")) }
+        if self.fail_flush {
+            Ok(bytes.len())
+        } else {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "lost output"))
+        }
     }
     fn flush(&mut self) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::BrokenPipe, "lost flush"))
@@ -119,8 +164,12 @@ fn write_and_flush_failure_preserve_the_exact_terminal_knowledge() {
         let report = render(&options(), incarnation(), &decision, None);
         for fail_flush in [false, true] {
             let error = write_terminal_receipt(
-                &mut BrokenOutput { fail_flush }, &report, tx_id(), &terminal,
-            ).unwrap_err();
+                &mut BrokenOutput { fail_flush },
+                &report,
+                tx_id(),
+                &terminal,
+            )
+            .unwrap_err();
             assert!(error.contains(&describe(tx_id(), &terminal)));
             assert!(error.contains("receipt output failed"));
         }

@@ -25,8 +25,11 @@ pub(super) fn checked_atomic(
     let Some((first_tx, terminal)) = commands.first() else {
         return Err("import result contains no terminal command outcomes");
     };
-    if !atomic || first_tx != tx_id
-        || commands.iter().any(|(id, outcome)| id != tx_id || outcome != terminal)
+    if !atomic
+        || first_tx != tx_id
+        || commands
+            .iter()
+            .any(|(id, outcome)| id != tx_id || outcome != terminal)
     {
         return Err("import result disagrees with its atomic transaction mapping");
     }
@@ -44,13 +47,24 @@ pub(super) fn render(
     cleanup: Option<&str>,
 ) -> String {
     let (state, record, refusal, code, code_point) = match decision.terminal.outcome {
-        DecisionOutcome::Committed { repository_commit_id } => (
-            "committed", quote(&repository_commit_id.to_string()), "null".into(),
-            "null".into(), "null".into(),
+        DecisionOutcome::Committed {
+            repository_commit_id,
+        } => (
+            "committed",
+            quote(&repository_commit_id.to_string()),
+            "null".into(),
+            "null".into(),
+            "null".into(),
         ),
-        DecisionOutcome::Refused { code, refusal_record_id } => (
-            "refused", "null".into(), quote(&refusal_record_id.to_string()),
-            quote(&format!("{code:?}")), code.code_point().to_string(),
+        DecisionOutcome::Refused {
+            code,
+            refusal_record_id,
+        } => (
+            "refused",
+            "null".into(),
+            quote(&refusal_record_id.to_string()),
+            quote(&format!("{code:?}")),
+            code.code_point().to_string(),
         ),
     };
     // No retry key, source path, mutable HEAD, guessed ref names or inferred
@@ -74,7 +88,10 @@ pub(super) fn render(
         quote(&decision.tx_id.to_string()),
         quote(state),
         decision.terminal.decision_sequence.get(),
-        record, refusal, code, code_point,
+        record,
+        refusal,
+        code,
+        code_point,
         cleanup.is_none(),
         cleanup.map(quote).unwrap_or_else(|| "null".into()),
     )

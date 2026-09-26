@@ -71,9 +71,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
         index += 1;
         match flag {
             "--expected-incarnation" if options.incarnation.is_none() => {
-                options.incarnation = Some(
-                    RepositoryIncarnationId::from_hex(value).map_err(|e| e.to_string())?,
-                );
+                options.incarnation =
+                    Some(RepositoryIncarnationId::from_hex(value).map_err(|e| e.to_string())?);
             }
             "--timeout-secs" if options.timeout.is_none() => {
                 if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
@@ -102,8 +101,8 @@ pub fn run(args: &[String]) -> Result<u8, String> {
     let options = parse(args)?;
     let mut config = NodeConfig::new(options.storage.clone(), options.tenant, options.repository);
     if let Some(incarnation) = options.incarnation {
-        config = config
-            .with_resolution_input(RepositoryResolutionInput::CapabilityToken(incarnation));
+        config =
+            config.with_resolution_input(RepositoryResolutionInput::CapabilityToken(incarnation));
     }
     // No object-format default here: an existing repository's authenticated
     // incarnation selects SHA-1 or SHA-256 exactly as the legacy import did.
