@@ -12,10 +12,12 @@ use crate::{
     PackContextCheckpoint, checkpoint_pack_context,
 };
 use fgit_forge::source_browse::{SourceBrowseAction, SourceBrowseError, SourceBrowseQuery};
-use fgit_graph::GenerationActivation;
-use fgit_graph::lexical::{
-    IndexError, IndexedLexicalReport, LexicalError, LexicalIndexStore, LexicalNamespace,
-    LexicalQuery, LexicalQueryLimits, LexicalReadLimits, LexicalSource,
+pub use fgit_graph::GenerationActivation;
+use fgit_graph::lexical::{IndexError, LexicalError, LexicalIndexStore, LexicalNamespace};
+// Re-export the owned graph types used by this public node boundary.
+pub use fgit_graph::lexical::{
+    IndexedLexicalReport, LexicalChannel, LexicalQuery, LexicalQueryLimits, LexicalReadLimits,
+    LexicalSource,
 };
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_types::{GitOid, RefName, RepositoryAuthorityHeadId};
