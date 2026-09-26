@@ -69,7 +69,7 @@ for offset in 0 1 2 3 4 5 6 7; do
   candidate=$((PORT_BASE + offset))
   candidate_name="fg097-serve-${candidate}"
   fge_spawn "${candidate_name}" bash -c \
-    'exec "$1" serve "$2" "$3" "$4" "127.0.0.1:$5" 2>"$6"' _ \
+    'exec "$1" serve "$2" "$3" "$4" "127.0.0.1:$5" --max-sessions 4 --max-in-flight 1 2>"$6"' _ \
     "${FG_BIN}" "${STORAGE}" "${TENANT}" "${REPOSITORY}" "${candidate}" \
     "${WORK}/serve-${candidate}.err"
   sleep 1
@@ -90,13 +90,13 @@ fge_assert_exit FG-097-TAGS-006 0 "${ls_remote_exit}" \
 
 ls_remote="$(<"${WORK}/ls-remote.out")"
 fge_assert_contains FG-097-TAGS-007 "${ls_remote}" \
-  "${ANNOTATED_OID}\trefs/tags/annotated" \
+  "${ANNOTATED_OID}"$'\t'"refs/tags/annotated" \
   'annotated tag object is advertised at its native object OID'
 fge_assert_contains FG-097-TAGS-008 "${ls_remote}" \
-  "${ANNOTATED_PEELED_OID}\trefs/tags/annotated^{}" \
+  "${ANNOTATED_PEELED_OID}"$'\t'"refs/tags/annotated^{}" \
   'annotated tag has exactly Git-form peeled-ref evidence'
 fge_assert_contains FG-097-TAGS-009 "${ls_remote}" \
-  "${LIGHT_OID}\trefs/tags/light" \
+  "${LIGHT_OID}"$'\t'"refs/tags/light" \
   'lightweight tag is advertised at the directly named object OID'
 fge_assert_not_contains FG-097-TAGS-010 "${ls_remote}" 'refs/tags/light^{}' \
   'lightweight tags never synthesize an annotated-tag peeled line'
