@@ -14,21 +14,67 @@ use fgit_doc::{Limits, ParseProfile, RenderProfile, parse_with, render};
 
 use super::output::quote;
 
-/// The `body_rendered` JSON object for one canonical Markdown body.
+impl crate::OneNode {
+    /// Render already-selected Markdown with the same source-bound document
+    /// presentation used by native HTTP reads. This pure adapter performs no
+    /// repository lookup and grants no read, execution, review or merge right.
+    /// A caller must authorize and select the raw source before calling it.
+    ///
+    /// Supported profiles are `html_safe`, `plain_text`, `compact_machine` and
+    /// `api_json`. HTML retains the native `html` field; the other profiles use
+    /// `content` (the API tree is JSON text with byte/codepoint spans). All
+    /// profiles bind the original source and the same parse-profile SHA-256.
+    /// The returned JSON is a presentation, not a canonical event or proof of
+    /// authorization. Rendered text remains untrusted repository content.
+    ///
+    /// The output ceiling bounds unescaped renderer bytes, not JSON framing;
+    /// the caller must additionally enforce its complete response envelope.
+    /// Parser/output refusals are returned inside the presentation, allowing
+    /// the caller to retain its unchanged canonical body. Unknown profiles and
+    /// input beyond the parser's source envelope are rejected before parsing.
+    pub fn render_markdown_presentation(
+        source: &str,
+        profile: &str,
+        maximum_output_bytes: u32,
+    ) -> Result<String, &'static str> {
+        let profile = match profile {
+            "html_safe" => RenderProfile::HtmlSafe,
+            "plain_text" => RenderProfile::PlainText,
+            "compact_machine" => RenderProfile::CompactMachine,
+            "api_json" => RenderProfile::ApiJson,
+            _ => return Err("unsupported_rendering"),
+        };
+        if source.len() > Limits::DEFAULT.max_input_bytes as usize {
+            return Err("document_source_limit");
+        }
+        Ok(presentation(source, profile, maximum_output_bytes))
+    }
+}
+
+/// The historical HTTP shape and default output envelope remain unchanged.
 pub(super) fn body(source: &str) -> String {
+    presentation(source, RenderProfile::HtmlSafe, Limits::DEFAULT.max_output_bytes)
+}
+
+fn presentation(source: &str, surface: RenderProfile, maximum_output_bytes: u32) -> String {
     let profile = ParseProfile::DEFAULT;
+    let field = if surface == RenderProfile::HtmlSafe { "html" } else { "content" };
     let key = format!(
         "\"renderer\":\"fgit-doc\",\"profile\":{},\"parse_profile_sha256\":{},\"source_sha256\":{}",
-        quote(RenderProfile::HtmlSafe.tag()),
+        quote(surface.tag()),
         quote(&hex(&sha256_digest(&profile.id().canonical_bytes()))),
         quote(&hex(&sha256_digest(source.as_bytes())))
     );
+    let limits = Limits {
+        max_output_bytes: maximum_output_bytes.min(Limits::DEFAULT.max_output_bytes),
+        ..Limits::DEFAULT
+    };
     match parse_with(source, profile)
-        .and_then(|parsed| render(parsed.document(), RenderProfile::HtmlSafe, Limits::DEFAULT))
+        .and_then(|parsed| render(parsed.document(), surface, limits))
     {
-        Ok(html) => format!("{{{key},\"html\":{}}}", quote(html.as_str())),
+        Ok(output) => format!("{{{key},\"{field}\":{}}}", quote(output.as_str())),
         Err(refusal) => format!(
-            "{{{key},\"html\":null,\"refusal\":{}}}",
+            "{{{key},\"{field}\":null,\"refusal\":{}}}",
             quote(refusal.kind().tag())
         ),
     }
@@ -177,5 +223,48 @@ mod tests {
         let rendered = body(&deep);
         assert!(rendered.contains("\"html\":null"), "{rendered}");
         assert!(rendered.contains("\"refusal\":"), "{rendered}");
+    }
+}
+
+#[cfg(test)]
+mod shared_profile_tests {
+    use super::*;
+    use crate::OneNode;
+
+    #[test]
+    fn the_public_html_profile_preserves_the_existing_http_representation() {
+        for source in ["", "# Header\n\n**Body**", "<script>x</script>", "é 🦀\n", "[x](javascript:x)"] {
+            assert_eq!(OneNode::render_markdown_presentation(source, "html_safe", Limits::DEFAULT.max_output_bytes).unwrap(), body(source));
+        }
+    }
+
+    #[test]
+    fn every_surface_is_the_real_document_renderer_with_the_same_source_binding() {
+        let source = "# Unicode 🦀\n\nSome **text**.\n";
+        let parsed = parse_with(source, ParseProfile::DEFAULT).unwrap();
+        for profile in RenderProfile::all() {
+            let expected = render(parsed.document(), profile, Limits::DEFAULT).unwrap();
+            let result = OneNode::render_markdown_presentation(source, profile.tag(), Limits::DEFAULT.max_output_bytes).unwrap();
+            let field = if profile == RenderProfile::HtmlSafe { "html" } else { "content" };
+            assert!(result.contains(&format!("\"{field}\":{}", quote(expected.as_str()))));
+            assert!(result.contains(&format!("\"source_sha256\":\"{}\"", hex(&sha256_digest(source.as_bytes())))));
+        }
+    }
+
+    #[test]
+    fn unsupported_profiles_and_output_exhaustion_do_not_fabricate_a_document() {
+        assert_eq!(OneNode::render_markdown_presentation("text", "shell", 1024), Err("unsupported_rendering"));
+        for profile in RenderProfile::all() {
+            let refused = OneNode::render_markdown_presentation("some text", profile.tag(), 0).unwrap();
+            assert!(refused.contains("\"refusal\":"));
+            let permitted = OneNode::render_markdown_presentation("some text", profile.tag(), 4096).unwrap();
+            assert!(!permitted.contains("\"refusal\":"));
+        }
+    }
+
+    #[test]
+    fn the_public_source_envelope_is_enforced_before_parsing() {
+        let oversized = "x".repeat(Limits::DEFAULT.max_input_bytes as usize + 1);
+        assert_eq!(OneNode::render_markdown_presentation(&oversized, "plain_text", 1024), Err("document_source_limit"));
     }
 }
