@@ -324,6 +324,13 @@ impl OneNode {
                 checkpoint(ingress)?;
                 let (raw, packet) =
                     read_receive_frame(reader, limits).map_err(NodeGitDaemonServeRefusal::from)?;
+                // A flush before any command is an empty request. git sends it
+                // for an up-to-date or dry-run push, and upstream receive-pack
+                // ends that session successfully, admitting and reporting
+                // nothing.
+                if prefix.is_empty() && matches!(packet, Packet::Flush) {
+                    return Ok(None);
+                }
                 if raw.len() > COMMAND_BYTES.saturating_sub(prefix.len()) {
                     return Err(invalid("receive command envelope exceeded"));
                 }

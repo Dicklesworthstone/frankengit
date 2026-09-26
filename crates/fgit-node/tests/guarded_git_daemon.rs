@@ -591,3 +591,39 @@ fn a_stalled_upload_holds_no_writer_admission_while_another_push_commits() {
         node.shutdown().unwrap();
     }
 }
+
+#[test]
+fn an_empty_command_list_ends_the_session_successfully_and_publishes_nothing() {
+    // git sends a bare flush for an up-to-date or dry-run push. Upstream
+    // receive-pack ends that session successfully without a report; over
+    // SSH a failure here made `git push` report "failed to push some refs".
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format, true);
+        let node = start(config.clone(), false);
+        let before = state(&node);
+        let (address, path, worker) = launch(node);
+        let mut socket = connect(address, &path);
+        assert!(!records(&mut socket)[0].starts_with(b"ERR "));
+        socket.write_all(b"0000").unwrap();
+        let mut rest = Vec::new();
+        socket.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty(), "nothing follows an empty request");
+        let (node, result) = worker.join().unwrap();
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(state(&node), before);
+
+        // Twin: a delimiter where the first command belongs is still refused.
+        let (address, path, worker) = launch(node);
+        let mut socket = connect(address, &path);
+        assert!(!records(&mut socket)[0].starts_with(b"ERR "));
+        socket.write_all(b"0001").unwrap();
+        let _ = socket.shutdown(Shutdown::Write);
+        let mut rest = Vec::new();
+        let _ = socket.read_to_end(&mut rest);
+        let (node, result) = worker.join().unwrap();
+        assert!(result.is_err());
+        assert_eq!(state(&node), before);
+        node.shutdown().unwrap();
+    }
+}
