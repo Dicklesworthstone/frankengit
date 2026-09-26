@@ -33,6 +33,7 @@ use fgit_wire::smart_http::{
 };
 
 use super::NodeSmartHttpRefusal;
+use crate::node_lanes::NodeLanes;
 use crate::{
     DeadlineTcpStream, GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionDeadline,
     GitDaemonSessionTimeout, GitDaemonSessionWorkScaling, LoopbackReceiveSession,
@@ -71,6 +72,8 @@ struct Profile {
     outcome_quota: Arc<PushQuota>,
     source_quota: Arc<PushQuota>,
     writers: Arc<WriterGate>,
+    /// Opened nodes reused across this service's connections.
+    nodes: Arc<NodeLanes>,
 }
 
 struct PendingSession {
@@ -79,7 +82,8 @@ struct PendingSession {
 }
 
 // A panicking or never-submitted worker still settles its accepted connection.
-// The flag is published only after node shutdown and bounded socket cleanup.
+// The flag is published only after the node is pooled or shut down and after
+// bounded socket cleanup.
 struct Completion {
     finished: Arc<AtomicBool>,
     completed: Arc<AtomicUsize>,
@@ -421,11 +425,13 @@ impl OneNode {
             ..HttpLimits::default()
         };
         http.validate()?;
+        let config = self
+            .service_config
+            .clone()
+            .with_expected_repository_incarnation(self.repository_incarnation_id());
         let profile = Arc::new(Profile {
-            config: self
-                .service_config
-                .clone()
-                .with_expected_repository_incarnation(self.repository_incarnation_id()),
+            nodes: Arc::new(NodeLanes::new(config.clone(), max_in_flight)),
+            config,
             route: self.git_daemon_repository_path().as_bytes().to_vec(),
             credentials,
             allow_receive,
@@ -522,6 +528,15 @@ impl OneNode {
         }
         for child in pending {
             (child.join)();
+        }
+        if let Err(error) = profile.nodes.close() {
+            log_cleanup(&error);
+            failure.get_or_insert_with(|| {
+                io_error(
+                    "close pooled Smart HTTP repository nodes",
+                    io::Error::other(error.to_string()),
+                )
+            });
         }
         let restored = listener
             .set_nonblocking(false)
@@ -1020,23 +1035,8 @@ fn serve_connection(
         if body_not_allowed && !initial.is_empty() {
             return Err(Status::BadRequest);
         }
-        let mut node = OneNode::open_existing(profile.config.clone()).map_err(|error| {
-            eprintln!("Smart HTTP could not open the repository node: {error}");
-            Status::Unavailable
-        })?;
+        let node = profile.nodes.lease().ok_or(Status::Unavailable)?;
         let result = (|| -> Result<(), Status> {
-            let authenticated = node
-                .runtime()
-                .block_on(node.authenticate_authority_head())
-                .map_err(|error| {
-                    eprintln!("Smart HTTP could not authenticate the authority head: {error}");
-                    Status::Unavailable
-                })?;
-            node.bring_into_service(authenticated.receipt().generation())
-                .map_err(|error| {
-                    eprintln!("Smart HTTP could not bring the node into service: {error}");
-                    Status::Unavailable
-                })?;
             if envelope.expect_continue {
                 // No interim success before credentials, scopes, incarnation,
                 // endpoint envelope policy and node intake have all passed.
@@ -1163,7 +1163,13 @@ fn serve_connection(
             }
             writer.flush().map_err(|_| Status::Unavailable)
         })();
-        let cleanup = node.shutdown();
+        // Only a node whose response completed goes back to the pool; any
+        // failure closes it, as every node was closed before pooling.
+        let cleanup = if result.is_ok() {
+            profile.nodes.restore(node)
+        } else {
+            node.shutdown()
+        };
         if let Err(error) = cleanup {
             log_cleanup(&error);
             return Err(Status::Unavailable);
@@ -1285,6 +1291,14 @@ mod tests {
             outcome_quota: Arc::new(PushQuota::default()),
             source_quota: Arc::new(PushQuota::default()),
             writers: Arc::new(WriterGate::new(MAX_CONCURRENT_WRITERS)),
+            nodes: Arc::new(NodeLanes::new(
+                NodeConfig::new(
+                    "unused".into(),
+                    TenantId::from_bytes([1; 16]),
+                    RepositoryId::from_bytes([2; 16]),
+                ),
+                1,
+            )),
         }
     }
     fn head(extra: &str) -> Vec<u8> {

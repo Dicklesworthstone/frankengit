@@ -31,6 +31,14 @@ fn profile() -> Profile {
         writers: Arc::new(super::super::WriterGate::new(
             super::super::MAX_CONCURRENT_WRITERS,
         )),
+        nodes: Arc::new(crate::node_lanes::NodeLanes::new(
+            NodeConfig::new(
+                "unused".into(),
+                TenantId::from_bytes([1; 16]),
+                RepositoryId::from_bytes([2; 16]),
+            ),
+            1,
+        )),
     }
 }
 

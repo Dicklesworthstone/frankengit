@@ -126,6 +126,7 @@ use fsqlite_types::cx::Cx as FsqliteCx;
 
 mod loose_import;
 mod merge_delivery;
+mod node_lanes;
 mod smart_http;
 pub use smart_http::{NodeSmartHttpDiscovery, NodeSmartHttpRefusal, NodeSmartHttpUploadReceipt};
 mod quarantine_validator;
