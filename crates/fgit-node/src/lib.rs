@@ -5330,6 +5330,13 @@ where
         write_packet_group(writer, &transition.output, &limits)
             .map_err(GitDaemonServeError::Transport)?;
 
+        if machine.has_ended() {
+            // The client ended the session with a flush before any want, as
+            // `git ls-remote` does once it has the advertisement.
+            return Ok(GitDaemonSessionOutcome::EmptyRepository(
+                GitDaemonAdvertisementReceipt { request },
+            ));
+        }
         for event in transition.events {
             let WireEvent::PackRequested(pack_request) = event else {
                 continue;

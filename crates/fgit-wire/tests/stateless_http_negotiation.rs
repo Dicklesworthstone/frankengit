@@ -256,3 +256,29 @@ fn http_packet_fragmentation_does_not_change_negotiation_outputs() {
         assert_eq!(packs, 1);
     }
 }
+
+/// `git ls-remote` over a connection sends a flush before any want once it
+/// has the advertisement; upstream upload-pack ends the session there. A
+/// stateless HTTP round has no session to end, so there it stays a refusal.
+#[test]
+fn a_flush_before_any_want_ends_only_a_connection_session() {
+    let repo = Repository::new(GitObjectFormat::Sha1);
+    let limits = WireLimits::default();
+    let caps = Capabilities::parse_v1(b"multi_ack", &limits).unwrap();
+    for version in [UploadPackVersion::V0, UploadPackVersion::V1] {
+        let mut connection = LegacyUploadPack::new(version, caps.clone(), limits.clone()).unwrap();
+        let transition = connection
+            .push_packet(&Packet::Flush, &repo)
+            .expect("a terminating flush");
+        assert!(transition.output.is_empty() && transition.events.is_empty());
+        assert!(connection.has_ended());
+        let want = data(format!("want {}\n", repo.text("11")));
+        assert!(connection.push_packet(&want, &repo).is_err());
+
+        let mut stateless = LegacyUploadPack::new(version, caps.clone(), limits.clone())
+            .unwrap()
+            .with_stateless_http_rounds();
+        assert!(stateless.push_packet(&Packet::Flush, &repo).is_err());
+        assert!(!stateless.has_ended());
+    }
+}

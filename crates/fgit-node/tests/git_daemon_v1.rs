@@ -130,3 +130,69 @@ fn unknown_greeting_generations_remain_typed_refusals() {
         );
     }
 }
+
+struct OneRefRepository(Vec<AdvertisedRef>);
+
+impl OneRefRepository {
+    fn new() -> Self {
+        let tip = AnyGitOid::from_hex(GitObjectFormat::Sha1, &"ab".repeat(20)).unwrap();
+        Self(vec![
+            AdvertisedRef::new(tip, b"refs/heads/main", &WireLimits::default()).unwrap(),
+        ])
+    }
+}
+
+impl UploadPackRepository for OneRefRepository {
+    fn object_format(&self) -> GitObjectFormat {
+        GitObjectFormat::Sha1
+    }
+
+    fn advertised_refs(&self) -> &[AdvertisedRef] {
+        &self.0
+    }
+
+    fn contains_want(&self, oid: AnyGitOid) -> bool {
+        self.0.iter().any(|reference| reference.oid == oid)
+    }
+
+    fn is_common(&self, _oid: AnyGitOid) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_flush_before_any_want_ends_the_session_cleanly() {
+    // `git ls-remote` over git:// sends a flush instead of wants once it has
+    // the advertisement; upstream upload-pack ends the session there.
+    for parameters in [&[][..], &[b"version=1".as_slice()][..]] {
+        let mut wire = greeting(parameters);
+        wire.extend_from_slice(b"0000");
+        let mut output = Vec::new();
+        let outcome = serve_git_daemon_upload_pack(
+            &mut Cursor::new(wire.clone()),
+            &mut output,
+            &OneRefRepository::new(),
+            capabilities(),
+            WireLimits::default(),
+            |_request, _pack_request| -> Result<EmptyPayload, Infallible> { Ok(EmptyPayload) },
+        );
+        assert!(outcome.is_ok(), "{parameters:?}");
+        assert!(
+            output
+                .windows(b"refs/heads/main".len())
+                .any(|window| window == b"refs/heads/main")
+        );
+
+        // Twin: a want after the terminating flush is refused, not served.
+        wire.extend_from_slice(format!("0032want {}\n", "ab".repeat(20)).as_bytes());
+        let outcome = serve_git_daemon_upload_pack(
+            &mut Cursor::new(wire),
+            &mut Vec::new(),
+            &OneRefRepository::new(),
+            capabilities(),
+            WireLimits::default(),
+            |_request, _pack_request| -> Result<EmptyPayload, Infallible> { Ok(EmptyPayload) },
+        );
+        assert!(outcome.is_err(), "{parameters:?}");
+    }
+}

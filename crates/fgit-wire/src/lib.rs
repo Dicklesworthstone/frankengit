@@ -1810,6 +1810,10 @@ enum LegacyState {
     AwaitWant,
     AwaitHave,
     Complete,
+    /// The client sent a flush before any want: it only needed the
+    /// advertisement (`git ls-remote`), and upstream upload-pack ends the
+    /// session there.
+    Ended,
 }
 
 /// SANS-I/O v0/v1 upload-pack fetch request machine.
@@ -1945,6 +1949,13 @@ impl LegacyUploadPack {
         self.framing.round_complete()
     }
 
+    /// Whether the client of a connection session ended it with a flush
+    /// before any want. Nothing further is accepted after it.
+    #[must_use]
+    pub fn has_ended(&self) -> bool {
+        self.state == LegacyState::Ended
+    }
+
     /// Validate HTTP EOF against protocol state as well as packet framing.
     /// An initial shallow exchange can end after its want-section flush;
     /// arbitrary wants-only or unterminated have streams cannot.
@@ -2056,6 +2067,10 @@ impl LegacyUploadPack {
                 state: "completed legacy upload-pack request",
                 packet: packet_name(packet),
             }),
+            LegacyState::Ended => Err(WireError::IllegalTransition {
+                state: "ended legacy upload-pack session",
+                packet: packet_name(packet),
+            }),
         }
     }
 
@@ -2067,7 +2082,12 @@ impl LegacyUploadPack {
         match packet {
             Packet::Flush => {
                 if self.wants.is_empty() {
-                    return Err(WireError::MissingWant);
+                    // A stateless HTTP round has no session to end.
+                    if self.framing.is_stateless_http() {
+                        return Err(WireError::MissingWant);
+                    }
+                    self.state = LegacyState::Ended;
+                    return Ok(Transition::empty());
                 }
                 let request = self.pack_request();
                 shallow_response::validate_relative_depth(&request)?;
