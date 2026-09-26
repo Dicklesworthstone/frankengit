@@ -36,7 +36,8 @@ use super::NodeSmartHttpRefusal;
 use crate::{
     DeadlineTcpStream, GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionDeadline,
     GitDaemonSessionTimeout, GitDaemonSessionWorkScaling, LoopbackReceiveSession,
-    MAX_CONCURRENT_WRITERS, NodeConfig, NodeRefusal, OneNode, PushQuota, WriterGate,
+    MAX_CONCURRENT_WRITERS, NodeConfig, NodeReceiveTransportRefusal, NodeRefusal, OneNode,
+    PushQuota, WriterGate,
 };
 use credentials::{Binding, CredentialFailure, CredentialSource};
 
@@ -644,6 +645,13 @@ impl From<NodeSmartHttpRefusal> for Status {
             NodeSmartHttpRefusal::TrailingRequestBytes { .. } => Self::BadRequest,
             NodeSmartHttpRefusal::UnauthenticatedReceive => Self::Unauthorized,
             NodeSmartHttpRefusal::RepositoryRouteMismatch => Self::NotFound,
+            // Quota and writer containment precede admission: nothing of the
+            // request was admitted, so the client is told to retry later.
+            NodeSmartHttpRefusal::ReceiveTransport(error)
+                if matches!(*error, NodeReceiveTransportRefusal::QuotaContained { .. }) =>
+            {
+                Self::RateLimited
+            }
             NodeSmartHttpRefusal::Rpc(error) => match *error {
                 RpcError::Http(error) => Self::from(error),
                 RpcError::Cancelled => Self::Timeout,
@@ -983,7 +991,9 @@ fn serve_connection(
         // Held until this connection's response is complete. A writer that
         // cannot be admitted within its own deadline was admitted to nothing,
         // so it is told to retry later rather than that its outcome is unknown.
-        let _writer = if mutation
+        // A Git receive takes its admission inside the node instead, once its
+        // upload is complete, so a slow pack upload holds no writer slot.
+        let _writer = if native_mutation
             || pull_request
                 .as_ref()
                 .is_some_and(|request| request.accepts_body())
@@ -1121,12 +1131,13 @@ fn serve_connection(
                             )?;
                         }
                         Operation::Rpc(Service::ReceivePack) => {
-                            let _outcome = node.smart_http_receive_stream_in(
+                            let _outcome = node.smart_http_receive_stream_gated_in(
                                 request,
                                 &session,
                                 &mut body,
                                 profile.http,
                                 fgit_admission::AdmissionLimits::default(),
+                                Some(&profile.writers),
                                 &mut live,
                                 &mut writer,
                             )?;

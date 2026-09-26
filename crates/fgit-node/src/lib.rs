@@ -4516,18 +4516,23 @@ impl GitDaemonReceiveProcessingDeadline {
     }
 }
 
-/// A socket half whose every operation observes the shared session deadline.
 /// Concurrent write admissions one serving process lets run against its
 /// repository, across smart HTTP, guarded raw Git and SSH.
 ///
-/// Every connection opens its own node and database connection, so
+/// Each concurrent connection owns its own node and database connection, so
 /// `--max-in-flight` alone let up to 16 writers contend on one database. The
 /// integration profile (section 3.5) does not admit ten or more concurrent
 /// writers and requires FrankenGit to admission-control its writer topology
 /// to a proven envelope; beyond it, store retries were exhausted and losers
 /// became undecided (HTTP 503) instead of receiving their typed refusals
-/// (x2mv.4.27). Reads are not gated.
-pub(crate) const MAX_CONCURRENT_WRITERS: usize = 4;
+/// (x2mv.4.27). Reads are not gated, and neither is a receive's upload: a
+/// receive takes its admission only after ingress completes.
+///
+/// One is the profile's first supported topology ("one connection and one
+/// writer"), and the store serializes commits anyway. With four admissions a
+/// long projection transaction could still starve behind steady commits
+/// until the store's retry bound (128 attempts, 46 s) left it undecided.
+pub(crate) const MAX_CONCURRENT_WRITERS: usize = 1;
 
 /// A bounded, deadline-aware count of in-flight write admissions.
 pub(crate) struct WriterGate {
@@ -4567,6 +4572,25 @@ impl WriterGate {
         *active += 1;
         Some(WriterPermit(self))
     }
+}
+
+/// Takes one of `writers`' admissions for a receive whose ingress is
+/// complete, waiting on its server-work clock. A receive not admitted before
+/// that clock ends was admitted to nothing, so it is contained reversibly
+/// (`writer_capacity`, retry after a second) rather than left undecided.
+pub(crate) fn admit_writer<'gate>(
+    writers: Option<&'gate WriterGate>,
+    deadline: &GitDaemonSessionDeadline,
+) -> Result<Option<WriterPermit<'gate>>, NodeReceiveTransportRefusal> {
+    writers
+        .map(|gate| {
+            gate.acquire(deadline)
+                .ok_or(NodeReceiveTransportRefusal::QuotaContained {
+                    code: "writer_capacity",
+                    expires_secs: 1,
+                })
+        })
+        .transpose()
 }
 
 impl Drop for WriterPermit<'_> {
@@ -4643,6 +4667,7 @@ impl<F: Fn() -> Option<bool>> ClientLiveness<F> {
     }
 }
 
+/// A socket half whose every operation observes the shared session deadline.
 struct DeadlineTcpStream<'stream> {
     stream: &'stream mut TcpStream,
     deadline: GitDaemonSessionDeadline,

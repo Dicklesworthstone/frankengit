@@ -522,3 +522,72 @@ fn receive_disabled_refuses_before_advertisement_and_client_lost_receipt_is_reco
         node.shutdown().unwrap();
     }
 }
+
+#[test]
+fn a_stalled_upload_holds_no_writer_admission_while_another_push_commits() {
+    // One writer admission per serving process (x2mv.4.27) covers only the
+    // validation and publication after ingress. Client A stops halfway
+    // through its pack; client B's complete push must still be decided
+    // promptly, and A is then admitted normally once its upload completes.
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format, true);
+        let node = start(config.clone(), false);
+        let path = route(&node);
+        let before = state(&node).0;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let result = node.serve_guarded_git_daemon_bounded(
+                &listener,
+                GitDaemonServerLimits::try_new(2, 2).unwrap(),
+            );
+            node.shutdown().unwrap();
+            result.unwrap()
+        });
+        let (oid, zero, pack) = pack(format);
+        let (half, rest) = pack.split_at(pack.len() / 2);
+
+        let mut stalled = connect(address, &path);
+        assert!(!records(&mut stalled)[0].starts_with(b"ERR "));
+        stalled
+            .write_all(&prefix(format, &[(zero, oid, "refs/tags/stalled")], false))
+            .unwrap();
+        stalled.write_all(half).unwrap();
+
+        let started = std::time::Instant::now();
+        let mut prompt = connect(address, &path);
+        assert!(!records(&mut prompt)[0].starts_with(b"ERR "));
+        prompt
+            .write_all(&prefix(format, &[(zero, oid, "refs/tags/prompt")], false))
+            .unwrap();
+        prompt.write_all(&pack).unwrap();
+        assert_eq!(
+            records(&mut prompt),
+            [b"unpack ok\n".to_vec(), b"ok refs/tags/prompt\n".to_vec()]
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "a stalled upload delayed an unrelated push by {:?}",
+            started.elapsed()
+        );
+        prompt.shutdown(Shutdown::Write).unwrap();
+
+        // Twin: the stalled client finishes its upload and is admitted too.
+        stalled.write_all(rest).unwrap();
+        assert_eq!(
+            records(&mut stalled),
+            [b"unpack ok\n".to_vec(), b"ok refs/tags/stalled\n".to_vec()]
+        );
+        stalled.shutdown(Shutdown::Write).unwrap();
+
+        let receipt = server.join().unwrap();
+        assert_eq!(receipt.completed_sessions(), 2);
+        assert_eq!(receipt.refused_sessions(), 0);
+        let node = start(config, true);
+        let (generation, refs) = state(&node);
+        assert_eq!(generation, before + 2);
+        assert_eq!(refs.len(), 2);
+        node.shutdown().unwrap();
+    }
+}

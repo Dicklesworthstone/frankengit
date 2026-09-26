@@ -680,6 +680,7 @@ impl OneNode {
             ingress::BodyInput::Slice(body_wire),
             http_limits,
             admission_limits,
+            None,
             cancellation,
             writer,
         )
@@ -714,17 +715,53 @@ impl OneNode {
         W: Write,
         C: ReceiveCancellation,
     {
+        self.smart_http_receive_stream_gated_in(
+            request,
+            session,
+            reader,
+            http_limits,
+            admission_limits,
+            None,
+            cancellation,
+            writer,
+        )
+    }
+
+    /// [`Self::smart_http_receive_stream_in`] for a serving process that
+    /// bounds its concurrent writers: the upload is not gated, and once
+    /// ingress completes this receive waits, on its server-work clock, for
+    /// one of `writers`' admissions before it materializes, validates and
+    /// admits.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn smart_http_receive_stream_gated_in<R, W, C>(
+        &self,
+        request: &RequestHead<'_>,
+        session: &LoopbackReceiveSession,
+        reader: &mut R,
+        http_limits: HttpLimits,
+        admission_limits: AdmissionLimits,
+        writers: Option<&crate::WriterGate>,
+        cancellation: &mut C,
+        writer: &mut W,
+    ) -> Result<AdmissionResult, NodeSmartHttpRefusal>
+    where
+        R: Read,
+        W: Write,
+        C: ReceiveCancellation,
+    {
         self.smart_http_receive_body_in(
             request,
             session,
             ingress::BodyInput::Reader(reader),
             http_limits,
             admission_limits,
+            writers,
             cancellation,
             writer,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn smart_http_receive_body_in<W, C>(
         &self,
         request: &RequestHead<'_>,
@@ -732,6 +769,7 @@ impl OneNode {
         body: ingress::BodyInput<'_>,
         http_limits: HttpLimits,
         admission_limits: AdmissionLimits,
+        writers: Option<&crate::WriterGate>,
         cancellation: &mut C,
         writer: &mut W,
     ) -> Result<AdmissionResult, NodeSmartHttpRefusal>
@@ -774,6 +812,7 @@ impl OneNode {
         let processing = super::GitDaemonReceiveProcessingDeadline::new(
             self.git_daemon_receive_processing_timeout,
         );
+        let _writer = super::admit_writer(writers, &deadline)?;
         let mut live = || cancellation.checkpoint() && !deadline.expired() && !processing.expired();
         let node_request = super::NodeRequestContext {
             authority: self.receive_admission_authority_context(decoded_body_bytes, &deadline),

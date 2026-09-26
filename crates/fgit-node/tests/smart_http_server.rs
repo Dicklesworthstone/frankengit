@@ -600,3 +600,78 @@ fn a_partial_header_expires_and_releases_the_only_worker_slot() {
     let receipt = server.finish();
     assert_eq!(receipt.refused_sessions(), 2);
 }
+
+#[test]
+fn a_stalled_push_upload_holds_no_writer_admission_while_another_push_commits() {
+    // The server admits one writer at a time (x2mv.4.27), but a receive
+    // takes that admission only after its upload completes. Client A stops
+    // halfway through its body; client B's complete push must still be
+    // decided promptly, and A is then admitted once its upload completes.
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let scratch = Scratch::new();
+        let config = config(&scratch, format);
+        let server = Server::start(initialized(config.clone()), 2, true, 2);
+        let (commit, pack, _) = commit_pack(format);
+        let zero = "0".repeat(commit.as_bytes().len() * 2);
+        let body = |name: &str| {
+            packets(
+                format!(
+                    "{zero} {commit} {name}\0report-status object-format={}",
+                    format.as_str()
+                )
+                .into_bytes(),
+                &pack,
+            )
+        };
+        let has = |reply: &[u8], line: &[u8]| reply.windows(line.len()).any(|b| b == line);
+
+        let stalled_body = body("refs/heads/stalled");
+        let (half, rest) = stalled_body.split_at(stalled_body.len() / 2);
+        let mut stalled = client(server.address);
+        stalled
+            .write_all(&request(
+                &server,
+                "POST",
+                "/git-receive-pack",
+                &post_headers(
+                    "receive-pack",
+                    stalled_body.len(),
+                    "Idempotency-Key: http-stalled\r\n",
+                ),
+                half,
+            ))
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let prompt_body = body("refs/heads/main");
+        let prompt = request(
+            &server,
+            "POST",
+            "/git-receive-pack",
+            &post_headers(
+                "receive-pack",
+                prompt_body.len(),
+                "Idempotency-Key: http-prompt\r\n",
+            ),
+            &prompt_body,
+        );
+        let reply = response_body(&exchange(&server, &prompt, 4096));
+        assert!(has(&reply, b"ok refs/heads/main"));
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "a stalled upload delayed an unrelated push by {:?}",
+            started.elapsed()
+        );
+
+        // Twin: the stalled client finishes its upload and is admitted too.
+        stalled.write_all(rest).unwrap();
+        let mut response = Vec::new();
+        stalled.read_to_end(&mut response).unwrap();
+        assert!(has(&response_body(&response), b"ok refs/heads/stalled"));
+
+        let receipt = server.finish();
+        assert_eq!(receipt.completed_sessions(), 2);
+        assert_eq!(receipt.refused_sessions(), 0);
+        generation(&config, Some(commit));
+    }
+}

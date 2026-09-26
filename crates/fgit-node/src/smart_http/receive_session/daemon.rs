@@ -283,19 +283,6 @@ impl OneNode {
             shared_quota
                 .unwrap_or(&self.push_quota)
                 .evaluate(&principal)?;
-            // At most MAX_CONCURRENT_WRITERS receives of one serving process
-            // admit at once (profile section 3.5, x2mv.4.27). A writer not
-            // admitted within its own deadline was admitted to nothing, so
-            // it is contained reversibly rather than left undecided.
-            let _writer = match writers {
-                Some(gate) => Some(gate.acquire(ingress).ok_or(
-                    NodeReceiveTransportRefusal::QuotaContained {
-                        code: "writer_capacity",
-                        expires_secs: 1,
-                    },
-                )?),
-                None => None,
-            };
             admits_staging_intake(self.cell_state())
                 .map_err(NodeReceiveTransportRefusal::CellState)?;
             let route = route(reader)?;
@@ -399,6 +386,7 @@ impl OneNode {
             let processing = crate::GitDaemonReceiveProcessingDeadline::new(
                 self.git_daemon_receive_processing_timeout,
             );
+            let _writer = crate::admit_writer(writers, &work)?;
             let request = NodeRequestContext {
                 authority: self.receive_admission_authority_context(input_bytes, &work),
             };
