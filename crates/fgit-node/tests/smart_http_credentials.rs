@@ -145,8 +145,12 @@ fn status(response: &[u8], expected: u16) {
         String::from_utf8_lossy(response)
     );
 }
+/// Discovery as a stock client performs it. An authenticated,
+/// receive-permitted receive discovery is redirected once to its scoped
+/// attempt URL (03d42b79), which must then answer by itself; every refusal
+/// happens before any redirect.
 fn discovery(server: &Server, token: char, receive: bool) -> Vec<u8> {
-    exchange(
+    let first = exchange(
         server,
         "GET",
         if receive {
@@ -157,7 +161,21 @@ fn discovery(server: &Server, token: char, receive: bool) -> Vec<u8> {
         token,
         "",
         &[],
-    )
+    );
+    if !(receive && first.starts_with(b"HTTP/1.1 307 ")) {
+        return first;
+    }
+    let text = String::from_utf8_lossy(&first);
+    let location = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Location: "))
+        .expect("a redirect names its scoped attempt URL")
+        .trim();
+    let suffix = location
+        .strip_prefix(server.route.as_str())
+        .expect("the attempt URL stays on this repository route");
+    assert!(suffix.starts_with("/.fgit-receive/"), "{location}");
+    exchange(server, "GET", suffix, token, "", &[])
 }
 fn push_body(format: GitHashAlgorithm, name: &str) -> Vec<u8> {
     let oid = git_object_id(format, GitObjectKind::Blob, b"x");
@@ -232,7 +250,9 @@ fn scoped_principals_rotate_and_revoke_without_restarting_or_republishing() {
             + &row('c', 3, "read,receive");
         replace_file(&path, &original);
         node.validate_smart_http_credentials_file(&path).unwrap();
-        let server = Server::start(node, path.clone(), 13, true);
+        // Thirteen requests; the two permitted receive discoveries (9, 13)
+        // each follow one redirect, so fifteen connections.
+        let server = Server::start(node, path.clone(), 15, true);
         status(&discovery(&server, 'a', false), 200); // 1
         let denied = withheld_push(&server, 'a'); // 2
         status(&denied, 403);
@@ -283,8 +303,8 @@ fn scoped_principals_rotate_and_revoke_without_restarting_or_republishing() {
         replace_file(&path, &rotated);
         status(&discovery(&server, 'c', true), 200); // 13
         let receipt = server.finish();
-        assert_eq!(receipt.accepted_sessions(), 13);
-        assert_eq!(receipt.completed_sessions(), 6);
+        assert_eq!(receipt.accepted_sessions(), 15);
+        assert_eq!(receipt.completed_sessions(), 8);
         assert_eq!(receipt.refused_sessions(), 7);
         let node = OneNode::open_existing(config).unwrap();
         let state = node
