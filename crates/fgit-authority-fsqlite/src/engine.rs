@@ -1545,9 +1545,17 @@ mod tests {
             let spent = attempts_before_refusal(&short);
             assert!(spent < 8, "a 40 ms parent allowed {spent} attempts");
             // Its permitted twin, an ordinary 15 s request, keeps retrying a
-            // contended store to the attempt bound, far past the old fixed
-            // 2 s window (x2mv.4.27), and still ends in a no-effect refusal.
-            assert_eq!(attempts_before_refusal(&request), MAX_TRANSIENT_ATTEMPTS);
+            // contended store far past the old fixed 2 s window (about 11
+            // attempts, x2mv.4.27) until its own deadline ends the loop, and
+            // a long request reaches the attempt bound; both still end in a
+            // no-effect refusal.
+            let ordinary = attempts_before_refusal(&request);
+            assert!(
+                (20..MAX_TRANSIENT_ATTEMPTS).contains(&ordinary),
+                "a 15 s request allowed {ordinary} attempts"
+            );
+            let long = request_cx(&runtime, Duration::from_secs(600));
+            assert_eq!(attempts_before_refusal(&long), MAX_TRANSIENT_ATTEMPTS);
             let mut retry = OperationRetry::new(INSTANCE, &short);
             while retry
                 .after_failure(EngineError::Engine(TransientClass::Busy))

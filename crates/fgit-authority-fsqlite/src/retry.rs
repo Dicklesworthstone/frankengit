@@ -160,12 +160,16 @@ pub const fn classify_is_retryable(class: TransientClass) -> bool {
 
 /// The largest number of whole-transaction attempts one operation may make.
 ///
-/// §3.4 bounds a retry by the remaining parent budget; this caps the loop
-/// independently of time, so even a very long deadline cannot turn contention
-/// into an unbounded spin. It was 8, which with millisecond backoff let a
-/// contended writer give up after about half a second of waiting while its
-/// request still had most of its deadline (x2mv.4.27).
-pub const MAX_TRANSIENT_ATTEMPTS: u32 = 32;
+/// Section 3.4 bounds a retry by the remaining parent budget; this caps the
+/// loop independently of time, so even a very long deadline cannot turn
+/// contention into an unbounded spin. It was 8 (about half a second of
+/// backoff), then 32 (about 9 s): inside the admitted four-writer envelope,
+/// a projection operation still exhausted 32 attempts on repeated
+/// WriteConflict while its request had minutes left, and its loser was
+/// reported undecided (x2mv.4.27). At 128, with the 512 ms backoff ceiling,
+/// the loop can wait about a minute, and the request deadline still ends it
+/// first when it is shorter.
+pub const MAX_TRANSIENT_ATTEMPTS: u32 = 128;
 
 /// Bounded, cancellation-aware, deterministic backoff.
 ///
