@@ -4607,26 +4607,53 @@ impl Drop for WriterPermit<'_> {
 }
 
 /// Whether the client behind `stream` is still connected, without consuming
-/// or waiting for anything. A non-blocking peek sees an orderly close as a
-/// zero-length read and a reset as an error; pending bytes and "would block"
-/// both mean the peer is still there. Blocking mode is restored afterwards
-/// (it is shared by every clone of the socket); if that fails, the next read
-/// reports WouldBlock, which already ends a session.
+/// or waiting for anything, for a transport whose client never half-closes
+/// its socket (SSH: OpenSSH signals EOF inside the channel), so an orderly
+/// close means the client itself is gone.
 pub(crate) fn tcp_peer_connected(stream: &TcpStream) -> bool {
+    matches!(peek_peer(stream), PeerSocket::Open)
+}
+
+/// Whether a raw git:// client can still receive its response. Such a client
+/// may half-close its side once its request is sent and keep reading, as
+/// upstream git-daemon allows, so an orderly close proves nothing; only a
+/// reset or another socket error does. (Linux reports a reset once and then
+/// end-of-stream, so the caller must latch the first `false`.)
+pub(crate) fn tcp_peer_reachable(stream: &TcpStream) -> bool {
+    !matches!(peek_peer(stream), PeerSocket::Failed)
+}
+
+enum PeerSocket {
+    Open,
+    EndOfStream,
+    Failed,
+}
+
+/// A non-blocking peek sees an orderly close as a zero-length read and a
+/// reset as an error; pending bytes and "would block" both mean the peer is
+/// still there. Blocking mode is restored afterwards (it is shared by every
+/// clone of the socket); if that fails, the next read reports WouldBlock,
+/// which already ends a session.
+fn peek_peer(stream: &TcpStream) -> PeerSocket {
     if stream.set_nonblocking(true).is_err() {
-        return true;
+        return PeerSocket::Open;
     }
     let mut probe = [0_u8; 1];
-    let connected = match stream.peek(&mut probe) {
-        Ok(0) => false,
-        Ok(_) => true,
-        Err(error) => matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-        ),
+    let state = match stream.peek(&mut probe) {
+        Ok(0) => PeerSocket::EndOfStream,
+        Ok(_) => PeerSocket::Open,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            PeerSocket::Open
+        }
+        Err(_) => PeerSocket::Failed,
     };
     let _ = stream.set_nonblocking(false);
-    connected
+    state
 }
 
 /// Rate-limited liveness of the client behind one serving connection, for
@@ -7838,8 +7865,10 @@ impl OneNode {
         })?;
         // A third handle to the same socket, used only to notice a client
         // that disconnected while the pack is planned (see ClientLiveness).
+        // A git:// client may half-close after its request, so only a reset
+        // counts as gone.
         let probe_stream = stream.try_clone().ok();
-        let client = ClientLiveness::new(|| probe_stream.as_ref().map(tcp_peer_connected));
+        let client = ClientLiveness::new(|| probe_stream.as_ref().map(tcp_peer_reachable));
         let deadline = GitDaemonSessionDeadline::new(
             self.git_daemon_session_timeout,
             self.git_daemon_session_work_scaling,
@@ -12836,6 +12865,52 @@ mod push_quota_tests {
         ));
         // The bystander's window is independent: reversibility is per key.
         assert!(quota.evaluate(&bystander).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod peer_probe_tests {
+    use super::*;
+
+    fn pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    /// Polls `probe` until it answers `expected`, for at most five seconds.
+    fn answers(probe: impl Fn() -> bool, expected: bool) -> bool {
+        let started = Instant::now();
+        loop {
+            if probe() == expected {
+                return true;
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_half_closed_git_client_is_still_reachable_but_a_reset_one_is_not() {
+        let (client, server) = pair();
+        assert!(tcp_peer_reachable(&server) && tcp_peer_connected(&server));
+        client.shutdown(Shutdown::Write).unwrap();
+        // SSH treats the orderly close as a departed client; git:// may not.
+        assert!(answers(|| tcp_peer_connected(&server), false));
+        assert!(tcp_peer_reachable(&server), "a half-closed git:// client");
+
+        let (client, mut server) = pair();
+        // Unread bytes turn the client's close into a reset rather than a FIN.
+        server.write_all(b"unread").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        drop(client);
+        assert!(
+            answers(|| tcp_peer_reachable(&server), false),
+            "a reset git:// client"
+        );
     }
 }
 
