@@ -38,7 +38,7 @@ export function dom() {
     el.value = match[0].match(/\bvalue="([^"]*)"/)?.[1] ?? '';
     el.disabled = /\bdisabled\b/.test(match[0]); el.hidden = /\bhidden\b/.test(match[0]);
   }
-  for (const [id, value] of Object.entries({ mode: 'literal', encoding: 'utf8', format: 'sha1', case: 'exact', 'prefix-encoding': 'utf8', 'index-source-mode': 'exact' })) document.getElementById(id).value = value;
+  for (const [id, value] of Object.entries({ mode: 'literal', encoding: 'utf8', format: 'sha1', case: 'exact', 'prefix-encoding': 'utf8', 'index-source-mode': 'exact', 'symbol-match': 'exact', 'symbol-kind': 'all' })) document.getElementById(id).value = value;
   const urls = new Map(), revoked = [];
   const urlApi = { createObjectURL(blob) { const url = `blob:fixture-${urls.size + revoked.length}`; urls.set(url, blob); return url; },
     revokeObjectURL(url) { revoked.push(url); urls.delete(url); } };
