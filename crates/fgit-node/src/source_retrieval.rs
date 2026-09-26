@@ -473,3 +473,6 @@ pub mod integrity;
 
 /// Trusted-local source archive export, preflight and root-last recovery.
 pub mod backup;
+
+/// Read-only lexical reuse with separately retained current-source evidence.
+pub mod current_index;
