@@ -34,7 +34,7 @@ export function fixture({ format = 'sha1', limit = 2, symbols = 'available', pol
     name_hex: hex('Needle'), match: 'exact', complete, completion: complete ? 'complete' : 'match_limit', max_matches: limit,
     returned_matches: rows.length, indexed_files: files.length, indexed_declarations: files.length, indexed_source_bytes: sourceBytes,
     unsupported_language_files: 0, non_regular_entries: 1, tables_read: files.length, payload_bytes_read: 250,
-    max_work: Math.floor(maxWork / 3), work_units: 40, kinds: [], path_prefix_hex: [hex('src')],
+    max_work: 16 * 1024 * 1024, work_units: 40, kinds: [], path_prefix_hex: [hex('src')],
     matches: rows.map(file => ({ name_hex: hex('Needle'), kind: file.kind, raw_identifier: false, path_hex: file.pathHex,
       blob: file.blob, byte_offset: file.at, line: 1, byte_column: file.at + 1, match_length: 6,
       excerpt_hex: hex(file.bytes.subarray(0, file.bytes.length - 1)), excerpt_offset: 0, match_truncated_in_excerpt: false })) };

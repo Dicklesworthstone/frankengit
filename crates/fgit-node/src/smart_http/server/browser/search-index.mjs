@@ -282,7 +282,8 @@ function initialQueries(q) {
     maxPayloadBytes: share(q.maxPayloadBytes, channel === 'content' ? 0 : 1), maxFileBytes: q.maxFileBytes });
   return { content: lexical('content'), path: lexical('path'),
     symbols: q.symbol ? symbolQuery({ mode: 'symbols', nameHex: q.symbol.nameHex, match: q.symbol.match,
-      kinds: q.symbol.kinds, prefixesHex: q.prefixesHex, maxMatches: q.maxMatches, maxWork: share(q.maxWork, 2) }) : null,
+      kinds: q.symbol.kinds, prefixesHex: q.prefixesHex, maxMatches: q.maxMatches, maxWork: INDEX_WORK }) : null,
+    symbolWork: q.symbol ? share(q.maxWork, 2) : 0,
     symbolPayload: q.symbol ? share(q.maxPayloadBytes, 2) : 0 };
 }
 function vectorEntry(value) {
@@ -335,7 +336,10 @@ export function initialReply(reply, selected, q, scope = null, pin = null, minim
     if (reply.symbols.state !== 'available') fail('Requested symbol channel has no result.');
     const result = symbolReply(reply.symbols.result, selected, queries.symbols, content.scope, content.pin, minimum.symbols);
     symbolGeneration = vectorEntry(reply.generation_vector.symbols);
-    if (!sameActivation(result.index, symbolGeneration) || result.stats.payloadBytes > queries.symbolPayload) fail('Combined symbol generation or payload share changed.');
+    // The native child renderer echoes the original symbol-query ceiling.
+    // Independently enforce the smaller fixed allowance used by its lookup.
+    if (!sameActivation(result.index, symbolGeneration) || result.stats.payloadBytes > queries.symbolPayload ||
+        result.stats.work > queries.symbolWork) fail('Combined symbol generation or resource share changed.');
     symbols = { state: 'available', result };
   }
   let retained = 0, payload = content.stats.payloadBytes + path.stats.payloadBytes, work = content.stats.work + path.stats.work;

@@ -11,7 +11,7 @@
   <header><strong>FrankenGit</strong><span>Code search</span><span class="badge">Read only</span><nav aria-label="Repository navigation"><a href="../">Source browser</a><a href="../history/">History and blame</a></nav></header>
   <main>
     <h1>Search source. Inspect exact bytes.</h1>
-    <p>Search one repository snapshot using literals, a shared batch of terms, bounded native byte regexes, persisted whole-word indexes, or indexed Rust declarations. Open a result to verify its complete file against the returned native blob identity.</p>
+    <p>Search one repository snapshot using literals, a shared batch of terms, bounded native byte regexes, persisted whole-word indexes, indexed Rust declarations, or a combined content/path/declaration view. Open a result to verify its complete file against the returned native blob identity.</p>
     <form id="connection" autocomplete="off">
       <label>Read token<input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64" required></label>
       <label>Reference<input id="reference" value="refs/heads/main" autocomplete="off" spellcheck="false" maxlength="1024" required></label>
@@ -21,10 +21,14 @@
     <p class="hint">The token stays in page memory, is cleared from its input on Connect, and is discarded on disconnect or page exit. HTTPS is required outside loopback. No writes or automatic retries are available here.</p>
     <form id="search-form" role="search" autocomplete="off">
       <div class="controls">
-        <label>Search mode<select id="mode"><option value="literal">Single literal</option><option value="batch">Batch of literals</option><option value="regex">Native byte regex</option><option value="indexed-content">Indexed content words (AND)</option><option value="indexed-path">Indexed path words (AND)</option><option value="symbols">Rust declarations (indexed)</option></select></label>
+        <label>Search mode<select id="mode"><option value="literal">Single literal</option><option value="batch">Batch of literals</option><option value="regex">Native byte regex</option><option value="indexed-content">Indexed content words (AND)</option><option value="indexed-path">Indexed path words (AND)</option><option value="symbols">Rust declarations (indexed)</option><option value="initial">Combined indexed search</option></select></label>
         <label>Query encoding<select id="encoding"><option value="utf8">UTF-8 text</option><option value="hex">Lowercase hex bytes</option></select></label>
         <label>Indexed source<select id="index-source-mode" disabled aria-describedby="index-help"><option value="exact">Exact index source (strict)</option><option value="revalidated">Revalidate unchanged Git source</option></select></label>
         <label>Case<select id="case"><option value="exact">Exact bytes</option><option value="ascii-insensitive">Ignore ASCII case</option></select></label>
+      </div>
+      <div class="controls" id="initial-controls" hidden>
+        <label>Combined declaration name (optional; uses Query encoding)<input id="initial-symbol-name" maxlength="256" autocomplete="off" spellcheck="false" disabled aria-describedby="initial-help"></label>
+        <label>Combined declaration policy<select id="initial-symbol-policy" disabled><option value="optional">Optional (report missing/stale)</option><option value="required">Required (refuse when unavailable)</option></select></label>
       </div>
       <div class="controls" id="symbol-controls" hidden>
         <label>Declaration match<select id="symbol-match" disabled><option value="exact">Exact name (case sensitive)</option><option value="prefix">Name prefix (case sensitive)</option></select></label>
@@ -35,6 +39,7 @@
       <p id="regex-help" class="hint" hidden>Examples: \b(struct|enum)\b or ^pub\s+fn\s+\w+. Regexes do not cross LF; CR remains a byte. Lookaround, backreferences, Unicode properties and lazy quantifiers are not supported.</p>
       <p id="index-help" class="hint" hidden>Indexed words are case-folded ASCII tokens, not substrings, phrases, regexes or symbols. An operator must build an index first. Strict mode requires its exact source snapshot. Explicit revalidation permits changed repository metadata only for the same native commit and tree, and displays both source snapshots. No query builds, refreshes or falls back to scanning. Continued pages and file navigation pin the current validated source and original index; release a moved snapshot explicitly.</p>
       <p id="symbol-help" class="hint" hidden>Queries read existing native Rust declaration tables, not a compiler-resolved symbol graph. Macro expansion and cfg evaluation are not performed. An operator must build a symbol index at the exact source snapshot; lexical revalidation does not apply. No query builds, refreshes or falls back to scanning. Results are a bounded prefix without server pagination: narrow a truncated query. Source-byte limits bound the referenced tables; the native index payload ceiling is 32 MiB.</p>
+      <p id="initial-help" class="hint" hidden>Combined search reads existing content and path indexes, plus declarations when a separate name is supplied, in one native Initial request. All contributing channels must match one exact source snapshot; lexical revalidation is not used. Work and payload limits are shared, not renewed per channel. Optional missing/stale declarations are explicitly unavailable, never empty success; a retained symbol checkpoint still requires a resolvable index. No query builds, scans, ranks or retries. There is no combined continuation. Bytes per file limits navigation only in this mode.</p>
       <div class="controls">
         <label>Path prefixes (optional, one per line)<textarea id="prefixes" rows="2" maxlength="66048" spellcheck="false" placeholder="crates/fgit-node"></textarea></label>
         <label>Prefix encoding<select id="prefix-encoding"><option value="utf8">UTF-8 text</option><option value="hex">Lowercase hex bytes</option></select></label>
@@ -46,6 +51,7 @@
         <label>Regex VM steps<input id="max-steps" type="number" min="1" max="67108864" value="67108864" required disabled></label>
         <label>Indexed query work<input id="index-work" type="number" min="1" max="16777216" value="16777216" required disabled></label>
         <label>Indexed payload bytes<input id="index-payload" type="number" min="1" max="33554432" value="33554432" required disabled></label>
+        <label>Combined retained result bytes<input id="initial-result-bytes" type="number" min="1" max="2097152" value="2097152" required disabled></label>
       </div></details>
       <div class="actions"><button id="submit-search" type="submit" disabled>Search snapshot</button><button id="cancel" type="button" disabled>Cancel read</button><button id="refresh" type="button" disabled>Release snapshot</button></div>
     </form>

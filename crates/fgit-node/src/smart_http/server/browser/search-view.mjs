@@ -38,6 +38,19 @@ export function readQuery(document) {
   const value = id => document.getElementById(id).value;
   const mode = value('mode'), encoding = value('encoding');
   const raw = value('query'), prefixes = value('prefixes');
+  if (mode === 'initial') return {
+    mode, termsHex: lines(raw, 32).map(line => byteInput(line, encoding, 128)),
+    prefixesHex: prefixes === '' ? [] : lines(prefixes, 128).map(line => byteInput(line, value('prefix-encoding'), 4096)),
+    symbol: value('initial-symbol-name') === '' ? null : {
+      nameHex: byteInput(value('initial-symbol-name'), encoding, 128), match: value('symbol-match'),
+      kinds: value('symbol-kind') === 'all' ? [] : [value('symbol-kind')], policy: value('initial-symbol-policy'),
+    },
+    maxMatches: decimal(value('max-matches'), 'combined per-channel limit', 1),
+    maxFileBytes: decimal(value('max-file-bytes'), 'navigation file bytes', 1),
+    maxWork: decimal(value('index-work'), 'combined query work', 1),
+    maxPayloadBytes: decimal(value('index-payload'), 'combined payload bytes', 1),
+    maxResultBytes: decimal(value('initial-result-bytes'), 'combined retained result bytes', 1),
+  };
   if (mode === 'symbols') return {
     mode, nameHex: byteInput(raw, encoding, 128), match: value('symbol-match'),
     kinds: value('symbol-kind') === 'all' ? [] : [value('symbol-kind')],
@@ -87,16 +100,23 @@ export function mount(document, location, options = {}) {
     get('refresh').disabled = !client.connected || busy;
     get('cancel').disabled = !busy;
     for (const b of resultButtons) b.disabled = !client.connected || busy;
-    const regex = get('mode').value === 'regex', indexed = indexedMode(get('mode').value), symbols = get('mode').value === 'symbols';
-    get('case').disabled = indexed || symbols; get('max-bytes').disabled = indexed;
-    get('index-work').disabled = !(indexed || symbols);
-    get('symbol-controls').hidden = !symbols; get('symbol-help').hidden = !symbols;
-    get('symbol-match').disabled = !symbols; get('symbol-kind').disabled = !symbols; get('index-payload').disabled = !indexed;
+    const mode = get('mode').value, regex = mode === 'regex', indexed = indexedMode(mode), symbols = mode === 'symbols', combined = mode === 'initial';
+    const symbolEnabled = symbols || (combined && get('initial-symbol-name').value !== '');
+    get('case').disabled = indexed || symbols || combined; get('max-bytes').disabled = indexed || combined;
+    get('index-work').disabled = !(indexed || symbols || combined);
+    get('symbol-controls').hidden = !(symbols || combined); get('symbol-help').hidden = !symbols;
+    get('symbol-match').disabled = !symbolEnabled; get('symbol-kind').disabled = !symbolEnabled;
+    get('index-payload').disabled = !(indexed || combined);
+    get('initial-controls').hidden = !combined; get('initial-help').hidden = !combined;
+    get('initial-symbol-name').disabled = !combined; get('initial-symbol-policy').disabled = !(combined && symbolEnabled);
+    get('initial-result-bytes').disabled = !combined;
     if (get('index-source-mode')) get('index-source-mode').disabled = !indexed;
-    get('index-help').hidden = !indexed; get('max-matches').max = indexed || symbols ? '100' : '4096';
+    get('index-help').hidden = !indexed; get('max-matches').max = indexed || symbols || combined ? '100' : '4096';
     get('max-steps').disabled = !regex;
     get('regex-help').hidden = !regex;
-    get('query-help').textContent = symbols
+    get('query-help').textContent = combined
+      ? 'One whole ASCII word per line (AND), searched separately in content and paths by one native request. Add a separate case-sensitive declaration name below. Query encoding applies to both inputs; up to 100 results per channel.'
+      : symbols
       ? 'One case-sensitive ASCII declaration name, up to 128 bytes. Query type to find r#type. Exact or prefix matching and an optional declaration-kind filter; not regex or references/call sites.'
       : indexed
       ? 'One whole ASCII alphanumeric/underscore word per line, up to 32. All words must occur in the selected channel. ASCII case is folded; terms are sorted and deduplicated. Up to 100 documents per page.'
@@ -115,7 +135,7 @@ export function mount(document, location, options = {}) {
   }
   function disconnect(message = 'Disconnected. Token, queries, results and source bytes discarded.') {
     work++; busy = false; client.disconnect(); clearResults();
-    get('token').value = ''; get('query').value = ''; get('prefixes').value = ''; showPin(); sync(); status(message);
+    get('token').value = ''; get('query').value = ''; get('prefixes').value = ''; get('initial-symbol-name').value = ''; showPin(); sync(); status(message);
   }
   function invalidate() {
     work++; busy = false; client.discardResults(); clearResults(); sync();
@@ -131,8 +151,10 @@ export function mount(document, location, options = {}) {
     if (!client.connected) { disconnect(`Disconnected: ${safe(error.message)}`); return; }
     busy = false; clearFile();
     if (error.status === 409) { client.discardResults(); clearResults(); }
-    const indexed = indexedMode(get('mode').value) || get('mode').value === 'symbols';
+    const indexed = indexedMode(get('mode').value) || ['symbols', 'initial'].includes(get('mode').value);
     const indexDiagnostic = indexed && error.status === 409 ? {
+      source_snapshot_mismatch: 'Combined channels did not select one source snapshot. No joined result was accepted. Release the snapshot explicitly before a new read.',
+      index_generation_mismatch: 'Combined channels did not select one coherent generation vector. No partial result or automatic retry was accepted.',
       symbol_index_uninitialized: 'No persisted Rust declaration index exists. Ask the trusted local operator to build it. No scan or build was attempted.',
       symbol_index_stale: 'The Rust declaration index does not match this exact source snapshot. An operator must refresh it; lexical revalidation does not apply. No fallback was attempted.',
       source_index_uninitialized: 'No persisted source index is initialized. Ask the trusted local operator to build it. No scan or build was attempted by this page.',
@@ -193,6 +215,7 @@ export function mount(document, location, options = {}) {
   }
   function renderSearch(value) {
     const stats = value.stats, region = get('results'), version = resultVersion;
+    if (value.query.mode === 'initial') { renderInitial(value, region, version); return; }
     if (value.query.mode === 'symbols') { renderSymbols(value, region, version); return; }
     if (value.query.mode === 'indexed') { renderIndexed(value, region, version); return; }
     region.append(element('h2', `${value.totalMatches} returned matches`),
@@ -201,7 +224,29 @@ export function mount(document, location, options = {}) {
     if (value.query.mode === 'regex') region.append(element('p', `${stats.steps} native VM steps · ${stats.states} program states · ${stats.lines} lines searched.`));
     for (const [index, group] of value.groups.entries()) region.append(renderGroup(group, index, version));
   }
-  function renderSymbols(value, region, version) {
+  function renderInitial(value, region, version) {
+    region.append(element('h2', `${value.totalHits} results across combined channels`),
+      element('p', 'One native request selected one source snapshot and an exact generation vector. Channels remain separate; duplicate files across channels are not deduplicated or ranked.'),
+      element('pre', `Lexical generation ${value.vector.lexical.number}: ${value.vector.lexical.token}\nSymbol generation ${value.vector.symbols ? `${value.vector.symbols.number}: ${value.vector.symbols.token}` : 'not contributed'}`),
+      element('p', `${value.stats.retainedBytes}/${value.query.maxResultBytes} retained result bytes · ${value.stats.payloadBytes}/${value.query.maxPayloadBytes} successful-channel payload bytes · ${value.stats.work}/${value.query.maxWork} successful-channel work units. These counters exclude partial work from an unavailable channel.`),
+      element('p', value.complete ? 'Native server reports all requested channels available and complete.'
+        : 'Combined answer is incomplete: at least one channel is unavailable or truncated. See each channel below.'),
+      element('p', 'This Initial response has no combined continuation. Narrow the query or increase its bounded per-channel limit. No scans, rebuilds, ranking, semantic refinement or automatic retries occur.'));
+    for (const channel of ['content', 'path']) {
+      const section = element('section'); section.setAttribute('aria-label', `Combined ${channel} results`);
+      section.append(element('h2', channel === 'content' ? 'Content words' : 'Path words'));
+      renderIndexed(value[channel], section, version, index => openInitial(channel, index), false);
+      region.append(section);
+    }
+    const section = element('section'); section.setAttribute('aria-label', 'Combined declaration results');
+    section.append(element('h2', 'Rust declarations'));
+    if (value.symbols.state === 'available') renderSymbols(value.symbols.result, section, version, index => openInitial('symbols', index));
+    else section.append(element('p', value.symbols.state === 'not_requested'
+      ? 'Declaration channel not requested. Its retained checkpoint, if any, is unchanged.'
+      : `Declaration channel unavailable: ${value.symbols.reason}. This is not an empty successful result. Lexical results remain useful; no fallback or symbol checkpoint reset occurred.`));
+    region.append(section);
+  }
+  function renderSymbols(value, region, version, openHit = openSymbol) {
     const stats = value.stats;
     region.append(element('h2', `${value.hits.length} Rust declarations`),
       element('p', `${value.query.match === 'prefix' ? 'Name prefix' : 'Exact name'}: ${display(unhex(value.query.nameHex))} (case sensitive)`),
@@ -214,7 +259,7 @@ export function mount(document, location, options = {}) {
     for (const [index, hit] of value.hits.entries()) {
       const article = element('article'); article.className = 'match';
       const open = button(`${hit.kind} ${hit.rawIdentifier ? 'r#' : ''}${display(unhex(hit.nameHex))} · ${display(unhex(hit.pathHex))} : ${hit.line}:${hit.column}`, () => {
-        if (version === resultVersion && !busy) void openSymbol(index);
+        if (version === resultVersion && !busy) void openHit(index);
       });
       resultButtons.add(open);
       article.append(open, element('p', `Name bytes [${hit.offset}, ${hit.offset + hit.length}) · ${hit.blob}`),
@@ -222,7 +267,7 @@ export function mount(document, location, options = {}) {
       region.append(article);
     }
   }
-  function renderIndexed(value, region, version) {
+  function renderIndexed(value, region, version, openHit = openIndexed, allowNext = true) {
     const stats = value.stats;
     region.append(element('h2', `${value.hits.length} indexed documents in this page`),
       element('p', `AND in ${value.query.channel}: ${value.query.termsHex.map(t => display(unhex(t))).join(' AND ')}`),
@@ -230,7 +275,8 @@ export function mount(document, location, options = {}) {
       element('p', `${stats.documents} indexed regular files · ${stats.sourceBytes} indexed source bytes · ${stats.nonRegular} non-regular entries excluded.`),
       element('p', `This page read ${stats.segments} segments / ${stats.payloadBytes} payload bytes / ${stats.generationBytes} generation bytes and used ${stats.work} native work units. This is not a live source scan.`),
       element('p', value.complete ? `Native server reports the query complete; ${value.seen} matching documents visited.`
-        : `${value.seen} matching documents visited; more remain in this exact index. Fetch the next page explicitly.`));
+        : allowNext ? `${value.seen} matching documents visited; more remain in this exact index. Fetch the next page explicitly.`
+          : `${value.seen} matching documents shown; this combined channel is truncated. Narrow the query or increase its per-channel limit.`));
     if (value.sources) {
       const { current, indexed, distinct } = value.sources;
       region.append(element('p', distinct
@@ -242,7 +288,7 @@ export function mount(document, location, options = {}) {
     for (const [index, hit] of value.hits.entries()) {
       const article = element('article'); article.className = 'match';
       const open = button(display(unhex(hit.pathHex)), () => {
-        if (version === resultVersion && !busy) void openIndexed(index);
+        if (version === resultVersion && !busy) void openHit(index);
       });
       resultButtons.add(open);
       article.append(open, element('p', `Document ${hit.documentId} · ${hit.contentBytes} bytes · ${hit.blob}`),
@@ -250,7 +296,7 @@ export function mount(document, location, options = {}) {
           `${display(unhex(value.query.termsHex[span.queryIndex]))} [${span.offset}, ${span.offset + span.length})`).join('; ')));
       region.append(article);
     }
-    if (value.nextAfter !== null) {
+    if (allowNext && value.nextAfter !== null) {
       const next = button('Next indexed page', () => { if (version === resultVersion && !busy) void nextIndexed(); });
       resultButtons.add(next); region.append(next);
     }
@@ -271,11 +317,12 @@ export function mount(document, location, options = {}) {
       const value = await client.search(readQuery(document));
       if (id !== work) return;
       busy = false; result = value; renderSearch(value); showPin(); sync();
-      status(value.query.mode === 'symbols' ? (value.complete ? 'Declaration query complete according to the native server. Open a result to verify its full name and file bytes.' : 'Declaration results are truncated. Narrow the query; no automatic continuation or scan was attempted.') : value.query.mode === 'indexed' ? (value.complete ? 'Indexed query complete according to the native server. Open a document to verify its bytes and word positions.' : 'More indexed documents remain; use Next indexed page.') : value.groups.every(g => g.complete) ? 'Server scan complete. Open a result to verify its file bytes.' : 'Search returned limited results. See each query’s completion status.');
+      status(value.query.mode === 'initial' ? (value.complete ? 'Combined query complete according to the native server. Open any channel result to verify file bytes.' : 'Combined answer is incomplete. Unavailable and truncated channels are labeled separately; no fallback or retry was attempted.') : value.query.mode === 'symbols' ? (value.complete ? 'Declaration query complete according to the native server. Open a result to verify its full name and file bytes.' : 'Declaration results are truncated. Narrow the query; no automatic continuation or scan was attempted.') : value.query.mode === 'indexed' ? (value.complete ? 'Indexed query complete according to the native server. Open a document to verify its bytes and word positions.' : 'More indexed documents remain; use Next indexed page.') : value.groups.every(g => g.complete) ? 'Server scan complete. Open a result to verify its file bytes.' : 'Search returned limited results. See each query’s completion status.');
     } catch (error) { errorAt(error, id); }
   }
   function renderFile(value) {
     const hit = value.hit, region = get('file');
+    if (value.initialChannel) region.append(element('p', `Opened the ${value.initialChannel} channel from the combined generation vector. File-byte verification does not authenticate the vector or prove search coverage.`));
     if (value.query?.mode === 'indexed') { renderIndexedFile(value, region); downloadControl(value, region); return; }
     const part = preview(value.bytes, hit);
     region.append(element('h2', display(unhex(hit.pathHex))), element('p', `Native blob verified (${value.scope.format}): ${hit.blob}`),
@@ -325,6 +372,16 @@ export function mount(document, location, options = {}) {
         element('pre', display(value.bytes.subarray(0, PREVIEW_BYTES), true)));
     }
   }
+  async function openInitial(channel, index) {
+    if (!result || result.query.mode !== 'initial' || busy) return;
+    work++; const id = work; busy = true; clearFile(); sync(); status('Reading the combined result at its pinned source and verifying file bytes…');
+    try {
+      const value = await client.openInitial(channel, index);
+      if (id !== work) return;
+      busy = false; verified = value; renderFile(value); sync();
+      status('Native blob and returned match bytes verified. Combined coverage, declaration classification and authority remain server claims.');
+    } catch (error) { errorAt(error, id); }
+  }
   async function openSymbol(index) {
     if (!result || result.query.mode !== 'symbols' || busy) return;
     work++; const id = work; busy = true; clearFile(); sync(); status('Reading the pinned complete file and verifying declaration-name bytes…');
@@ -355,7 +412,7 @@ export function mount(document, location, options = {}) {
   for (const [id, action] of [['connection', connect], ['search-form', search]]) get(id).addEventListener('submit', event => { event.preventDefault(); void action(); });
   get('disconnect').addEventListener('click', () => disconnect());
   get('cancel').addEventListener('click', cancel); get('refresh').addEventListener('click', refresh);
-  for (const id of ['mode', 'encoding', 'case', 'query', 'prefixes', 'prefix-encoding', 'max-matches', 'max-file-bytes', 'max-bytes', 'max-steps', 'index-work', 'index-payload', 'symbol-match', 'symbol-kind']) {
+  for (const id of ['mode', 'encoding', 'case', 'query', 'prefixes', 'prefix-encoding', 'max-matches', 'max-file-bytes', 'max-bytes', 'max-steps', 'index-work', 'index-payload', 'symbol-match', 'symbol-kind', 'initial-symbol-name', 'initial-symbol-policy', 'initial-result-bytes']) {
     get(id).addEventListener('input', invalidate); get(id).addEventListener('change', invalidate);
   }
   for (const event of ['input', 'change']) get('index-source-mode')?.addEventListener(event, invalidate);
@@ -367,6 +424,6 @@ export function mount(document, location, options = {}) {
   }
   document.defaultView?.addEventListener('pagehide', () => disconnect());
   sync();
-  return { connect, search, openMatch, openSymbol, openIndexed, nextIndexed, cancel, refresh, disconnect };
+  return { connect, search, openMatch, openSymbol, openIndexed, openInitial, nextIndexed, cancel, refresh, disconnect };
 }
 if (typeof document !== 'undefined') mount(document, globalThis.location);

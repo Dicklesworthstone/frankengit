@@ -120,6 +120,7 @@ test('per-channel work and payload partitions cannot borrow spare allowance', ()
     const x = clone(f); x.reply[channel][field] = value; assert.throws(() => accepted(x));
   }
   const x = clone(f); x.reply.symbols.result.payload_bytes_read = 1001; assert.throws(() => accepted(x));
+  const work = clone(f); work.reply.symbols.result.work_units = 333; assert.throws(() => accepted(work));
 });
 
 test('aggregate accounting is recomputed exactly including duplicate paths in separate channels', () => {
@@ -247,4 +248,12 @@ test('existing standalone lexical and symbol query grammars stay separate', () =
   assert.equal(indexQuery({ mode: 'indexed', channel: 'content', termsHex: [hex('NEEDLE')] }).termsHex[0], hex('needle'));
   assert.equal(symbolQuery({ mode: 'symbols', nameHex: hex('Needle') }).nameHex, hex('Needle'));
   assert.throws(() => symbolQuery({ mode: 'symbols', nameHex: hex('Needle'), symbol: {} }));
+});
+
+test('native symbol echo retains the parser ceiling while lookup work uses its fixed share', () => {
+  const f = fixture();
+  assert.equal(f.reply.symbols.result.max_work, 16777216);
+  assert.equal(accepted(f).symbols.result.stats.work, 40);
+  f.reply.symbols.result.max_work = Math.floor(f.input.maxWork / 3);
+  assert.throws(() => accepted(f), /query echo/);
 });
