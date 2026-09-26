@@ -2,6 +2,7 @@
 // Generation tokens are opaque native claims, not authenticated roots here.
 import { copy, fail, form, hex, integer, keys, oid, record, snapshot, unhex, utf8 } from './pulls-core.mjs';
 import { coordinates, fields, FILE_LIMIT, pathHex, same } from './search-data.mjs';
+import { compareCounters, currentSources, sourceMode, wireCounter } from './search-current.mjs';
 export const INDEX_WORK = 16 * 1024 * 1024, INDEX_PAYLOAD = 32 * 1024 * 1024;
 export const INDEX_PAGE = 100;
 const word = b => (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b === 95;
@@ -9,7 +10,8 @@ const fold = b => b >= 65 && b <= 90 ? b + 32 : b;
 const string = bytes => Array.from(bytes, b => String.fromCharCode(fold(b))).join('');
 
 export function indexQuery(input) {
-  keys(input, ['mode', 'channel', 'termsHex', 'prefixesHex', 'maxMatches', 'maxWork', 'maxPayloadBytes', 'maxFileBytes']);
+  keys(input, ['mode', 'sourceMode', 'channel', 'termsHex', 'prefixesHex', 'maxMatches', 'maxWork', 'maxPayloadBytes', 'maxFileBytes']);
+  const mode = sourceMode(input.sourceMode);
   if (input.mode !== 'indexed' || !['content', 'path'].includes(input.channel)) fail('Select an indexed content or path channel.');
   if (!Array.isArray(input.termsHex) || !input.termsHex.length || input.termsHex.length > 32) fail('Supply 1–32 whole ASCII words.');
   const terms = input.termsHex.map(value => {
@@ -24,24 +26,28 @@ export function indexQuery(input) {
     pathHex(prefix); const bytes = unhex(prefix, 4096);
     if (bytes.filter(b => b === 47).length >= 64 || (size += bytes.length) > 32 * 1024) fail('Indexed path scope exceeds its bounds.');
   }
-  return { mode: 'indexed', channel: input.channel, termsHex: [...new Set(terms)].sort(), prefixesHex: [...new Set(prefixes)].sort(),
+  return { mode: 'indexed', ...(mode === 'revalidated' ? { sourceMode: mode } : {}), channel: input.channel, termsHex: [...new Set(terms)].sort(), prefixesHex: [...new Set(prefixes)].sort(),
     maxMatches: integer(input.maxMatches ?? INDEX_PAGE, 'indexed page limit', 1, INDEX_PAGE),
     maxWork: integer(input.maxWork ?? INDEX_WORK, 'index work', 1, INDEX_WORK),
     maxPayloadBytes: integer(input.maxPayloadBytes ?? INDEX_PAYLOAD, 'index payload bytes', 1, INDEX_PAYLOAD),
     maxFileBytes: integer(input.maxFileBytes ?? FILE_LIMIT, 'file byte limit', 1, FILE_LIMIT) };
 }
-function activation(token, number) {
+function activation(token, number, mode) {
   snapshot(token);
   if (!/:[0-9a-f]{64}$/.test(token) || /^0+$/.test(token.split(':')[2])) fail('Invalid index identity.');
-  return { token, number: integer(number, 'index generation number', 1) };
+  return { token, number: mode === 'revalidated' ? wireCounter(number, mode) : integer(number, 'index generation number', 1) };
 }
 function atLeast(observed, floor) {
-  if (floor && (observed.number < floor.number || (observed.number === floor.number && observed.token !== floor.token))) fail('Index checkpoint regressed or changed identity.');
+  if (!floor) return;
+  const order = compareCounters(observed.number, floor.number);
+  if (order < 0 || (order === 0 && observed.token !== floor.token)) fail('Index checkpoint regressed or changed identity.');
 }
 export function indexCommand(selected, pin, q, previous = null, minimum = null) {
   const values = { ...fields(selected, pin), channel: q.channel, term_hex: q.termsHex,
     path_prefix_hex: q.prefixesHex, limit: q.maxMatches, max_work: q.maxWork, max_payload_bytes: q.maxPayloadBytes };
+  if (sourceMode(q.sourceMode) === 'revalidated') values.source_mode = 'revalidated';
   if (previous) {
+    if (sourceMode(previous.query.sourceMode) !== sourceMode(q.sourceMode)) fail('Indexed continuation changed source mode.');
     if (!pin || previous.nextAfter === null) fail('No pinned indexed continuation remains.');
     Object.assign(values, { index_token: previous.index.token, index_number: previous.index.number, after: previous.nextAfter });
   }
@@ -68,13 +74,18 @@ export function verifyWordSpans(bytes, q, spans, checkpoint = () => {}) {
 }
 export function indexReply(reply, selected, q, scope = null, pin = null, previous = null, minimum = null) {
   const source = coordinates(reply, selected, scope, pin);
-  if (reply.type !== 'source_search_index' || reply.profile !== 'ascii-word-postings-v1' || reply.channel !== q.channel ||
+  const mode = sourceMode(q.sourceMode), revalidated = mode === 'revalidated';
+  if (previous && sourceMode(previous.query.sourceMode) !== mode) fail('Indexed continuation changed source mode.');
+  const sources = revalidated ? currentSources(reply, source, previous) : null;
+  if (reply.type !== (revalidated ? 'source_search_index_current' : 'source_search_index') ||
+      reply.profile !== (revalidated ? 'source-lexical-revalidated-v1' : 'ascii-word-postings-v1') || reply.channel !== q.channel ||
       !Array.isArray(reply.terms_hex) || !same(reply.terms_hex, q.termsHex) ||
       !Array.isArray(reply.path_prefix_hex) || !same(reply.path_prefix_hex, q.prefixesHex) ||
       reply.after !== (previous?.nextAfter ?? null) || reply.limit !== q.maxMatches ||
       !Array.isArray(reply.hits) || reply.hits.length > q.maxMatches || reply.returned_hits !== reply.hits.length ||
       typeof reply.complete !== 'boolean') fail('Invalid indexed result or normalized query echo.');
-  const index = activation(reply.index_token, reply.index_number), selectedIndex = activation(reply.selected_index_token, reply.selected_index_number);
+  if (reply.next_after !== null) wireCounter(reply.next_after, mode);
+  const index = activation(reply.index_token, reply.index_number, mode), selectedIndex = activation(reply.selected_index_token, reply.selected_index_number, mode);
   atLeast(selectedIndex, index); atLeast(selectedIndex, minimum);
   if (previous && (index.token !== previous.index.token || index.number !== previous.index.number)) fail('Indexed continuation switched generations.');
   const stats = { documents: integer(reply.indexed_documents, 'indexed documents', 0, 20_000),
@@ -90,8 +101,9 @@ export function indexReply(reply, selected, q, scope = null, pin = null, previou
   let lastId = previous?.nextAfter ?? 0, lastPath = previous?.hits.at(-1)?.pathHex ?? '', retained = 0;
   const hits = reply.hits.map(raw => {
     record(raw); pathHex(raw.path_hex);
-    const id = integer(raw.document_id, 'absolute document ID', 1), path = unhex(raw.path_hex, 4096);
-    if (id <= lastId || raw.path_hex <= lastPath || path.filter(b => b === 47).length >= 64 ||
+    const id = revalidated ? wireCounter(raw.document_id, mode) : integer(raw.document_id, 'absolute document ID', 1);
+    const path = unhex(raw.path_hex, 4096);
+    if (compareCounters(id, lastId) <= 0 || raw.path_hex <= lastPath || path.filter(b => b === 47).length >= 64 ||
         (q.prefixesHex.length && !q.prefixesHex.some(p => raw.path_hex === p || raw.path_hex.startsWith(`${p}2f`)))) fail('Indexed path order, cursor or scope changed.');
     lastId = id; lastPath = raw.path_hex;
     const contentBytes = integer(raw.content_bytes, 'indexed file bytes', 0, FILE_LIMIT), blob = oid(raw.blob, selected.format);
@@ -110,7 +122,7 @@ export function indexReply(reply, selected, q, scope = null, pin = null, previou
   if ((previous && !hits.length) || (reply.complete ? reply.next_after !== null : (!hits.length || hits.length !== q.maxMatches || reply.next_after !== lastId))) fail('Invalid indexed completion or continuation.');
   const seen = (previous?.seen ?? 0) + hits.length;
   if (seen > stats.documents || (!reply.complete && seen >= stats.documents)) fail('Indexed page exceeds the corpus.');
-  return { ...source, query: copy(q), index, selectedIndex, stats, hits, complete: reply.complete, nextAfter: reply.next_after, seen };
+  return { ...source, ...(sources ? { sources } : {}), query: copy(q), index, selectedIndex, stats, hits, complete: reply.complete, nextAfter: reply.next_after, seen };
 }
 export async function verifyIndexedFile(bytes, hit, q, algorithm, crypto, checkpoint) {
   checkpoint();

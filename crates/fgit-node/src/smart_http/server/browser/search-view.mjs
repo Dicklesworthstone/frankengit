@@ -1,6 +1,7 @@
 // DOM-only read interface. Repository bytes never become markup or navigation URLs.
 import { CodeSearch } from './search.mjs';
 import { byteInput } from './search-data.mjs';
+import { sourceMode } from './search-current.mjs';
 import { decimal, fail, unhex } from './pulls-core.mjs';
 
 const indexedMode = mode => ['indexed-content', 'indexed-path'].includes(mode);
@@ -37,7 +38,9 @@ export function readQuery(document) {
   const value = id => document.getElementById(id).value;
   const mode = value('mode'), encoding = value('encoding');
   const raw = value('query'), prefixes = value('prefixes');
+  const indexMode = indexedMode(mode) ? sourceMode(document.getElementById('index-source-mode')?.value) : 'exact';
   if (indexedMode(mode)) return {
+    ...(indexMode === 'revalidated' ? { sourceMode: indexMode } : {}),
     mode: 'indexed', channel: mode === 'indexed-path' ? 'path' : 'content',
     termsHex: lines(raw, 32).map(line => byteInput(line, encoding, 128)),
     prefixesHex: prefixes === '' ? [] : lines(prefixes, 128).map(line => byteInput(line, value('prefix-encoding'), 4096)),
@@ -78,6 +81,7 @@ export function mount(document, location, options = {}) {
     const regex = get('mode').value === 'regex', indexed = indexedMode(get('mode').value);
     get('case').disabled = indexed; get('max-bytes').disabled = indexed;
     get('index-work').disabled = !indexed; get('index-payload').disabled = !indexed;
+    if (get('index-source-mode')) get('index-source-mode').disabled = !indexed;
     get('index-help').hidden = !indexed; get('max-matches').max = indexed ? '100' : '4096';
     get('max-steps').disabled = !regex;
     get('regex-help').hidden = !regex;
@@ -189,6 +193,14 @@ export function mount(document, location, options = {}) {
       element('p', `This page read ${stats.segments} segments / ${stats.payloadBytes} payload bytes / ${stats.generationBytes} generation bytes and used ${stats.work} native work units. This is not a live source scan.`),
       element('p', value.complete ? `Native server reports the query complete; ${value.seen} matching documents visited.`
         : `${value.seen} matching documents visited; more remain in this exact index. Fetch the next page explicitly.`));
+    if (value.sources) {
+      const { current, indexed, distinct } = value.sources;
+      region.append(element('p', distinct
+        ? 'Native server revalidated the same commit and tree across changed repository metadata. Original index provenance is retained below.'
+        : 'Native server revalidated this index at its original source snapshot.'),
+        element('pre', `Current source snapshot ${safe(current.snapshot_token)}\nCurrent RCR ${safe(current.source_rcr)}\nCurrent forge root ${safe(current.forge_position_root)}\nOriginal indexed snapshot ${safe(indexed.snapshot_token)}\nOriginal indexed RCR ${safe(indexed.source_rcr)}\nOriginal indexed forge root ${safe(indexed.forge_position_root)}`),
+        element('p', 'File navigation uses the current pinned source. Revalidation is a server claim, not a locally verified authority proof.'));
+    }
     for (const [index, hit] of value.hits.entries()) {
       const article = element('article'); article.className = 'match';
       const open = button(display(unhex(hit.pathHex)), () => {
@@ -299,6 +311,7 @@ export function mount(document, location, options = {}) {
   for (const id of ['mode', 'encoding', 'case', 'query', 'prefixes', 'prefix-encoding', 'max-matches', 'max-file-bytes', 'max-bytes', 'max-steps', 'index-work', 'index-payload']) {
     get(id).addEventListener('input', invalidate); get(id).addEventListener('change', invalidate);
   }
+  for (const event of ['input', 'change']) get('index-source-mode')?.addEventListener(event, invalidate);
   const connectionChanged = () => {
     work++; busy = false; client.disconnect(); clearResults(); showPin(); sync(); status('Connection settings changed. Connect explicitly before searching.');
   };

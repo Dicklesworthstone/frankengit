@@ -23,12 +23,13 @@
       <div class="controls">
         <label>Search mode<select id="mode"><option value="literal">Single literal</option><option value="batch">Batch of literals</option><option value="regex">Native byte regex</option><option value="indexed-content">Indexed content words (AND)</option><option value="indexed-path">Indexed path words (AND)</option></select></label>
         <label>Query encoding<select id="encoding"><option value="utf8">UTF-8 text</option><option value="hex">Lowercase hex bytes</option></select></label>
+        <label>Indexed source<select id="index-source-mode" disabled aria-describedby="index-help"><option value="exact">Exact index source (strict)</option><option value="revalidated">Revalidate unchanged Git source</option></select></label>
         <label>Case<select id="case"><option value="exact">Exact bytes</option><option value="ascii-insensitive">Ignore ASCII case</option></select></label>
       </div>
       <label>Query<textarea id="query" rows="3" maxlength="16416" spellcheck="false" required aria-describedby="query-help"></textarea></label>
       <p id="query-help" class="hint"></p>
       <p id="regex-help" class="hint" hidden>Examples: \b(struct|enum)\b or ^pub\s+fn\s+\w+. Regexes do not cross LF; CR remains a byte. Lookaround, backreferences, Unicode properties and lazy quantifiers are not supported.</p>
-      <p id="index-help" class="hint" hidden>Indexed words are case-folded ASCII tokens, not substrings, phrases, regexes or symbols. An operator must build a current index first. No query builds, refreshes or falls back to scanning. Each continued page pins the original source and index; file navigation verifies bytes independently.</p>
+      <p id="index-help" class="hint" hidden>Indexed words are case-folded ASCII tokens, not substrings, phrases, regexes or symbols. An operator must build an index first. Strict mode requires its exact source snapshot. Explicit revalidation permits changed repository metadata only for the same native commit and tree, and displays both source snapshots. No query builds, refreshes or falls back to scanning. Continued pages and file navigation pin the current validated source and original index; release a moved snapshot explicitly.</p>
       <div class="controls">
         <label>Path prefixes (optional, one per line)<textarea id="prefixes" rows="2" maxlength="66048" spellcheck="false" placeholder="crates/fgit-node"></textarea></label>
         <label>Prefix encoding<select id="prefix-encoding"><option value="utf8">UTF-8 text</option><option value="hex">Lowercase hex bytes</option></select></label>
