@@ -271,6 +271,7 @@ fn execute_metadata(
         Operation::Show {
             number,
             expected_head,
+            render,
         } => {
             let result = drive_request_while(
                 node,
@@ -291,7 +292,8 @@ fn execute_metadata(
                     ApiError::unavailable()
                 }
             })?;
-            let (found, body) = output::show(node, *number, *expected_head, &result, maximum)?;
+            let (found, body) =
+                output::show(node, *number, *expected_head, *render, &result, maximum)?;
             Ok(JsonReply {
                 status: if found {
                     Status::Success

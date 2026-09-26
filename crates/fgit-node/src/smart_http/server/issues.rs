@@ -50,6 +50,12 @@ pub(super) fn parse_snapshot(
 pub(super) fn quote(text: &str) -> String {
     output::quote(text)
 }
+/// Derive a safe presentation only after the caller has selected and authorized
+/// the canonical text. Issue and PR responses share the same parser, profile,
+/// source commitment and typed rendering refusals; HTML never grants authority.
+pub(super) fn render_body(source: &str) -> String {
+    rendered::body(source)
+}
 pub(super) fn ref_fields(name: &'static str, reference: &fgit_types::RefName) -> String {
     output::ref_fields(name, reference)
 }

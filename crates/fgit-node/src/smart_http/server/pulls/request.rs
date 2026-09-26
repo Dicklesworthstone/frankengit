@@ -18,6 +18,7 @@ pub(super) enum Operation {
     Show {
         number: PullRequestNumber,
         expected_head: Option<RepositoryAuthorityHeadId>,
+        render: bool,
     },
     Mutate {
         number: PullRequestNumber,
@@ -70,16 +71,31 @@ impl<'a> Request<'a> {
                     Operation::List(parse_page(query, "after")?)
                 } else {
                     let number = number(suffix.strip_prefix('/').ok_or_else(ApiError::not_found)?)?;
-                    let mut expected_head = None;
-                    for (key, value) in parse_form(query.unwrap_or("").as_bytes(), 1)? {
-                        if key != "expected_head" {
-                            return Err(ApiError::bad("unknown_query_field"));
+                    let (mut expected_head, mut render) = (None, None);
+                    for (key, value) in parse_form(query.unwrap_or("").as_bytes(), 2)? {
+                        match key.as_str() {
+                            "expected_head" => {
+                                if expected_head.is_some() {
+                                    return Err(ApiError::bad("duplicate_field"));
+                                }
+                                expected_head = Some(parse_snapshot(&value)?);
+                            }
+                            "render" => {
+                                if render.is_some() {
+                                    return Err(ApiError::bad("duplicate_field"));
+                                }
+                                if value != "html_safe" {
+                                    return Err(ApiError::bad("unsupported_rendering"));
+                                }
+                                render = Some(true);
+                            }
+                            _ => return Err(ApiError::bad("unknown_query_field")),
                         }
-                        expected_head = Some(parse_snapshot(&value)?);
                     }
                     Operation::Show {
                         number,
                         expected_head,
+                        render: render.unwrap_or(false),
                     }
                 }
             }
@@ -423,5 +439,88 @@ mod tests {
                 .unwrap();
             assert!(Request::parse(&envelope).is_err());
         }
+    }
+
+    #[test]
+    fn rendering_is_explicit_and_consistent_on_list_and_detail_routes() {
+        for suffix in ["", "/7"] {
+            for (query, requested) in [("", false), ("?render=html_safe", true)] {
+                let bytes = format!(
+                    "GET /repo.git/api/v1/pulls{suffix}{query} HTTP/1.1\r\nHost: local\r\n\r\n"
+                );
+                let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                    .unwrap()
+                    .unwrap();
+                let routed = super::super::Request::parse(&envelope).unwrap().unwrap();
+                assert!(!routed.is_mutation());
+                assert!(!routed.accepts_body());
+                let super::super::Request::Metadata(request) = routed else {
+                    panic!("rendering must stay on the authorized metadata route");
+                };
+                match request.operation {
+                    Operation::List(page) => assert_eq!(page.render, requested),
+                    Operation::Show { render, .. } => assert_eq!(render, requested),
+                    Operation::Mutate { .. } => panic!("rendering is not publication"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detail_rendering_preserves_exact_snapshot_pins_in_either_query_order() {
+        let token = format!("alg:2:{}", "ab".repeat(32));
+        for query in [
+            format!("expected_head={token}&render=html_safe"),
+            format!("render=html_safe&expected_head={token}"),
+        ] {
+            let bytes = format!(
+                "GET /repo.git/api/v1/pulls/7?{query} HTTP/1.1\r\nHost: local\r\n\r\n"
+            );
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            let request = Request::parse(&envelope).unwrap().unwrap();
+            let Operation::Show { number, expected_head, render } = request.operation else {
+                panic!("single PR read");
+            };
+            assert_eq!(number.get(), 7);
+            assert!(render);
+            assert_eq!(expected_head, Some(parse_snapshot(&token).unwrap()));
+        }
+    }
+
+    #[test]
+    fn rendering_refuses_duplicate_unknown_and_inapplicable_query_fields() {
+        let token = format!("alg:2:{}", "ab".repeat(32));
+        for query in [
+            "render=html".to_owned(),
+            "render=raw".to_owned(),
+            "render=html_safe&render=html_safe".to_owned(),
+            "render=html_safe&principal=admin".to_owned(),
+            "render=html_safe&expected_head=invalid".to_owned(),
+            format!("expected_head={token}&expected_head={token}"),
+        ] {
+            for suffix in ["", "/7"] {
+                let bytes = format!(
+                    "GET /repo.git/api/v1/pulls{suffix}?{query} HTTP/1.1\r\nHost: local\r\n\r\n"
+                );
+                let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                    .unwrap()
+                    .unwrap();
+                assert!(Request::parse(&envelope).is_err(), "{suffix}?{query}");
+            }
+        }
+        // A detail presentation must not silently become a list or history read.
+        for query in ["render=html_safe&after=1", "render=html_safe&limit=1"] {
+            let bytes = format!(
+                "GET /repo.git/api/v1/pulls/7?{query} HTTP/1.1\r\nHost: local\r\n\r\n"
+            );
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            assert!(Request::parse(&envelope).is_err(), "{query}");
+        }
+        let body = fields(GitHashAlgorithm::Sha1) + "&render=html_safe";
+        assert!(command("open", &body, GitHashAlgorithm::Sha1).is_err());
     }
 }
