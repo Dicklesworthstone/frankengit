@@ -303,6 +303,7 @@ impl OneNode {
             .map_err(NodeSshRefusal::Accept)?;
 
         let active = Arc::new(AtomicUsize::new(0));
+        let writers = Arc::new(crate::WriterGate::new(crate::MAX_CONCURRENT_WRITERS));
         let completed = Arc::new(AtomicUsize::new(0));
         let refused = Arc::new(AtomicUsize::new(0));
         let mut child_tasks = Vec::with_capacity(limits.max_sessions);
@@ -340,6 +341,7 @@ impl OneNode {
             let child_refused = Arc::clone(&refused);
             let host_key = server_signing_key.clone();
             let keys = deploy_keys.clone();
+            let child_writers = Arc::clone(&writers);
 
             let task = match self.runtime.submit_blocking(move || {
                 let success = Self::serve_one_ssh_session(
@@ -348,6 +350,7 @@ impl OneNode {
                     keys,
                     child_config,
                     allow_receive,
+                    &child_writers,
                 );
                 if success {
                     child_completed.fetch_add(1, Ordering::AcqRel);
@@ -393,6 +396,7 @@ impl OneNode {
         deploy_keys: Vec<DeployKeyBinding>,
         config: NodeConfig,
         allow_receive: bool,
+        writers: &crate::WriterGate,
     ) -> bool {
         // Per-session secrets come from the runtime's OS entropy source.
         let mut session =
@@ -541,7 +545,13 @@ impl OneNode {
                 let mut reader = SshReader(&state_cell);
                 let mut writer = SshWriter(&state_cell);
                 child_node
-                    .serve_ssh_receive_pack(&mut reader, &mut writer, principal, &git_protocol)
+                    .serve_ssh_receive_pack(
+                        &mut reader,
+                        &mut writer,
+                        principal,
+                        &git_protocol,
+                        writers,
+                    )
                     .is_ok()
             }
         };
@@ -718,6 +728,7 @@ impl OneNode {
         writer: &mut W,
         principal: Option<PrincipalId>,
         git_protocol: &[u8],
+        writers: &crate::WriterGate,
     ) -> Result<Option<fgit_admission::AdmissionResult>, crate::NodeSmartHttpRefusal> {
         ssh_git_service(false, git_protocol).map_err(NodeGitDaemonServeRefusal::from)?;
         let ingress = crate::GitDaemonSessionDeadline::new(
@@ -731,6 +742,7 @@ impl OneNode {
             principal.or(self.git_daemon_receive_principal),
             &ingress,
             None,
+            Some(writers),
             &WireLimits::default(),
             |_| Ok(route),
             |request, session, validated, live| {

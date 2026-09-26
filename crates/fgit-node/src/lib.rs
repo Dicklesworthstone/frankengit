@@ -24,7 +24,7 @@ use std::mem::size_of;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use fgit_admission::evidence::{
@@ -4517,6 +4517,71 @@ impl GitDaemonReceiveProcessingDeadline {
 }
 
 /// A socket half whose every operation observes the shared session deadline.
+/// Concurrent write admissions one serving process lets run against its
+/// repository, across smart HTTP, guarded raw Git and SSH.
+///
+/// Every connection opens its own node and database connection, so
+/// `--max-in-flight` alone let up to 16 writers contend on one database. The
+/// integration profile (section 3.5) does not admit ten or more concurrent
+/// writers and requires FrankenGit to admission-control its writer topology
+/// to a proven envelope; beyond it, store retries were exhausted and losers
+/// became undecided (HTTP 503) instead of receiving their typed refusals
+/// (x2mv.4.27). Reads are not gated.
+pub(crate) const MAX_CONCURRENT_WRITERS: usize = 4;
+
+/// A bounded, deadline-aware count of in-flight write admissions.
+pub(crate) struct WriterGate {
+    active: Mutex<usize>,
+    released: Condvar,
+    limit: usize,
+}
+
+/// One held write admission; dropping it admits the next waiting writer.
+pub(crate) struct WriterPermit<'gate>(&'gate WriterGate);
+
+impl WriterGate {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            active: Mutex::new(0),
+            released: Condvar::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    /// Waits for a slot within `deadline`. `None` means the deadline passed
+    /// first: nothing of the request was admitted, so the caller answers with
+    /// a definite retry-later status, never an unknown outcome.
+    pub(crate) fn acquire(&self, deadline: &GitDaemonSessionDeadline) -> Option<WriterPermit<'_>> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *active >= self.limit {
+            let remaining = deadline.remaining().ok()?;
+            active = self
+                .released
+                .wait_timeout(active, remaining.min(Duration::from_secs(1)))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        *active += 1;
+        Some(WriterPermit(self))
+    }
+}
+
+impl Drop for WriterPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active -= 1;
+        drop(active);
+        self.0.released.notify_one();
+    }
+}
+
 /// Whether the client behind `stream` is still connected, without consuming
 /// or waiting for anything. A non-blocking peek sees an orderly close as a
 /// zero-length read and a reset as an error; pending bytes and "would block"

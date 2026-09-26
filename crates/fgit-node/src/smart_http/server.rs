@@ -19,8 +19,8 @@ mod stock_receive;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use fgit_authority::IdempotencyKey;
@@ -35,8 +35,8 @@ use fgit_wire::smart_http::{
 use super::NodeSmartHttpRefusal;
 use crate::{
     DeadlineTcpStream, GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionDeadline,
-    GitDaemonSessionTimeout, GitDaemonSessionWorkScaling, LoopbackReceiveSession, NodeConfig,
-    NodeRefusal, OneNode, PushQuota,
+    GitDaemonSessionTimeout, GitDaemonSessionWorkScaling, LoopbackReceiveSession,
+    MAX_CONCURRENT_WRITERS, NodeConfig, NodeRefusal, OneNode, PushQuota, WriterGate,
 };
 use credentials::{Binding, CredentialFailure, CredentialSource};
 
@@ -70,70 +70,6 @@ struct Profile {
     outcome_quota: Arc<PushQuota>,
     source_quota: Arc<PushQuota>,
     writers: Arc<WriterGate>,
-}
-
-/// Concurrent write admissions one server lets run against its repository.
-///
-/// Every connection opens its own node and database connection, so
-/// `--max-in-flight` alone let up to 16 writers contend on one database. The
-/// integration profile (section 3.5) does not admit ten or more concurrent
-/// writers and requires FrankenGit to admission-control its writer topology
-/// to a proven envelope; beyond it, store retries were exhausted and losers
-/// became undecided (HTTP 503) instead of receiving their typed refusals
-/// (x2mv.4.27). Reads are not gated.
-const MAX_CONCURRENT_WRITERS: usize = 4;
-
-/// A bounded, deadline-aware count of in-flight write admissions.
-struct WriterGate {
-    active: Mutex<usize>,
-    released: Condvar,
-    limit: usize,
-}
-
-/// One held write admission; dropping it admits the next waiting writer.
-struct WriterPermit<'gate>(&'gate WriterGate);
-
-impl WriterGate {
-    fn new(limit: usize) -> Self {
-        Self {
-            active: Mutex::new(0),
-            released: Condvar::new(),
-            limit: limit.max(1),
-        }
-    }
-
-    /// Waits for a slot within `deadline`. `None` means the deadline passed
-    /// first: nothing of the request was admitted, so the caller answers with
-    /// a definite retry-later status, never an unknown outcome.
-    fn acquire(&self, deadline: &GitDaemonSessionDeadline) -> Option<WriterPermit<'_>> {
-        let mut active = self
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while *active >= self.limit {
-            let remaining = deadline.remaining().ok()?;
-            active = self
-                .released
-                .wait_timeout(active, remaining.min(Duration::from_secs(1)))
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0;
-        }
-        *active += 1;
-        Some(WriterPermit(self))
-    }
-}
-
-impl Drop for WriterPermit<'_> {
-    fn drop(&mut self) {
-        let mut active = self
-            .0
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *active -= 1;
-        drop(active);
-        self.0.released.notify_one();
-    }
 }
 
 struct PendingSession {

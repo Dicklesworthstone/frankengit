@@ -61,6 +61,7 @@ impl OneNode {
             .clone()
             .with_expected_repository_incarnation(self.repository_incarnation_id());
         let quota = Arc::new(PushQuota::default());
+        let writers = Arc::new(crate::WriterGate::new(crate::MAX_CONCURRENT_WRITERS));
         let completed = Arc::new(AtomicUsize::new(0));
         let refused = Arc::new(AtomicUsize::new(0));
         let mut pending: Vec<Pending> = Vec::new();
@@ -104,6 +105,7 @@ impl OneNode {
             };
             let config = config.clone();
             let quota = Arc::clone(&quota);
+            let writers = Arc::clone(&writers);
             // Queue delay counts against the same ingress deadline as socket work.
             let deadline = GitDaemonSessionDeadline::new(
                 self.git_daemon_session_timeout,
@@ -139,6 +141,7 @@ impl OneNode {
                         stream,
                         deadline,
                         Some(quota.as_ref()),
+                        Some(writers.as_ref()),
                     )?;
                     Ok(())
                 })();

@@ -153,7 +153,7 @@ impl OneNode {
             self.git_daemon_session_timeout,
             self.git_daemon_session_work_scaling,
         );
-        self.serve_guarded_git_daemon_stream_in(stream, ingress, None)
+        self.serve_guarded_git_daemon_stream_in(stream, ingress, None, None)
     }
 
     fn serve_guarded_git_daemon_stream_in(
@@ -161,11 +161,13 @@ impl OneNode {
         stream: TcpStream,
         ingress: GitDaemonSessionDeadline,
         shared_quota: Option<&crate::PushQuota>,
+        writers: Option<&crate::WriterGate>,
     ) -> Result<Option<AdmissionResult>, NodeSmartHttpRefusal> {
         self.serve_guarded_git_daemon_stream_with_admission(
             stream,
             ingress,
             shared_quota,
+            writers,
             |request, session, validated, live| {
                 self.admit_guarded_receive(request, session, validated, live)
             },
@@ -180,6 +182,7 @@ impl OneNode {
         mut stream: TcpStream,
         ingress: GitDaemonSessionDeadline,
         shared_quota: Option<&crate::PushQuota>,
+        writers: Option<&crate::WriterGate>,
         admit: F,
     ) -> Result<Option<AdmissionResult>, NodeSmartHttpRefusal>
     where
@@ -208,6 +211,7 @@ impl OneNode {
             self.git_daemon_receive_principal,
             &ingress,
             shared_quota,
+            writers,
             &limits,
             |reader| {
                 let greeting = read_git_daemon_request(reader, &limits)
@@ -256,6 +260,7 @@ impl OneNode {
         principal: Option<fgit_types::PrincipalId>,
         ingress: &GitDaemonSessionDeadline,
         shared_quota: Option<&crate::PushQuota>,
+        writers: Option<&crate::WriterGate>,
         limits: &WireLimits,
         route: G,
         admit: F,
@@ -278,6 +283,19 @@ impl OneNode {
             shared_quota
                 .unwrap_or(&self.push_quota)
                 .evaluate(&principal)?;
+            // At most MAX_CONCURRENT_WRITERS receives of one serving process
+            // admit at once (profile section 3.5, x2mv.4.27). A writer not
+            // admitted within its own deadline was admitted to nothing, so
+            // it is contained reversibly rather than left undecided.
+            let _writer = match writers {
+                Some(gate) => Some(gate.acquire(ingress).ok_or(
+                    NodeReceiveTransportRefusal::QuotaContained {
+                        code: "writer_capacity",
+                        expires_secs: 1,
+                    },
+                )?),
+                None => None,
+            };
             admits_staging_intake(self.cell_state())
                 .map_err(NodeReceiveTransportRefusal::CellState)?;
             let route = route(reader)?;

@@ -158,6 +158,7 @@ fn interrupted_raw_push_reports_unknown_and_recovers_its_committed_prefix_after_
                 stream,
                 deadline,
                 None,
+                None,
                 |request, session, validated, live| {
                     node.receive_publication_admitted()?;
                     let identity = session.authenticated_session().unwrap();
