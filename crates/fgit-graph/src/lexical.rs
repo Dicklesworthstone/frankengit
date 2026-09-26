@@ -1,7 +1,11 @@
 //! Immutable document/term graphs for bounded, model-free source retrieval.
 //!
 //! `ascii-word-postings-v1` indexes complete ASCII alphanumeric/underscore
-//! tokens, folding A-Z only. Content and path are separate channels. A posting
+//! tokens of 1..=MAX_TERM_BYTES, folding A-Z only. Longer source words are
+//! consumed in full without a posting: no legal query can name one, and neither
+//! its prefix nor its suffix is a complete token. The document, original blob
+//! identity and byte accounting are retained. Content and path are separate
+//! channels. A posting
 //! retains the first original byte span for a term in a document, not a claim
 //! about symbol identity, substring matches, Unicode words or phrase positions.
 //! Documents and results have increasing absolute IDs and raw-byte path order.
@@ -15,6 +19,8 @@ pub use stored::{
 };
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod long_word_tests;
 
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_types::{
@@ -154,15 +160,21 @@ fn tokens(
             check(live)?;
         }
         if word(byte) {
-            let from = *start.get_or_insert(at);
-            if at - from >= MAX_TERM_BYTES {
-                return Err(LexicalError::Limit("token bytes"));
+            // Retain the ORIGINAL start until a real delimiter, even after the
+            // word exceeds the query bound. Resetting at the bound would emit
+            // false prefix/suffix matches. No word-sized buffer is allocated.
+            if start.is_none() {
+                start = Some(at);
             }
-        } else if let Some(from) = start.take() {
+        } else if let Some(from) = start.take()
+            && at - from <= MAX_TERM_BYTES
+        {
             consume(&bytes[from..at], from as u32)?;
         }
     }
-    if let Some(from) = start {
+    if let Some(from) = start
+        && bytes.len() - from <= MAX_TERM_BYTES
+    {
         consume(&bytes[from..], from as u32)?;
     }
     check(live)
@@ -171,8 +183,9 @@ fn tokens(
 impl LexicalSegment {
     /// Build one complete segment from raw-path-sorted documents. IDs are
     /// assigned consecutively from `first_id`, never renumbered by compaction.
-    /// Oversized/unsupported input refuses the whole segment, not an omitted
-    /// document or a successful but incomplete index.
+    /// File/segment resource violations refuse the whole segment, never omit
+    /// a document. Overlong source words cannot be expressed by a legal query;
+    /// consume them whole while indexing every representable complete token.
     pub fn build<'a>(
         namespace: LexicalNamespace,
         first_id: u64,
