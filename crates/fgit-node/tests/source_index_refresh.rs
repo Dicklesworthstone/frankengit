@@ -517,13 +517,21 @@ fn unsupported_new_source_keeps_the_old_generation_and_does_not_omit_the_file() 
     let root = Scratch::new();
     let (node, base) = fixture(&root, GitHashAlgorithm::Sha1);
     let first = build(&node, None);
+    // More distinct words than one segment's dictionary admits (MAX_TERMS,
+    // 32 768). A single over-long word no longer makes a source unsupported
+    // (c7679132); it is retained without postings.
+    let words: Vec<String> = (0..=32_768).map(|n| format!("w{n}")).collect();
     let patch = format!(
         "diff --git a/bad b/bad\nnew file mode 100644\n--- /dev/null\n+++ b/bad\n@@ -0,0 +1 @@\n+{}\n",
-        "x".repeat(129)
+        words.join(" ")
     );
     edit(&node, base, patch.as_bytes(), b"refresh-unsupported");
     let before = generation(&node);
-    assert!(refresh(&node, &first, Default::default()).is_err());
+    let refused = format!(
+        "{:?}",
+        refresh(&node, &first, Default::default()).unwrap_err()
+    );
+    assert!(refused.contains("dictionary terms"), "{refused}");
     let observed = node
         .runtime()
         .block_on(node.recover_source_index_local_in(
