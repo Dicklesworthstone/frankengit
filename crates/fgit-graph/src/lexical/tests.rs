@@ -415,19 +415,10 @@ fn token_and_query_limits_have_permitted_boundary_twins() {
         .len(),
         1
     );
-    assert!(
-        LexicalSegment::build(
-            scope(GitHashAlgorithm::Sha1),
-            1,
-            [SourceDocument {
-                path: b"a",
-                content: &bad,
-                blob: git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, &bad)
-            }],
-            &mut || true
-        )
-        .is_err()
-    );
+    let indexed = build(GitHashAlgorithm::Sha1, 1, &[(b"a", &bad)]);
+    assert_eq!(indexed.documents().len(), 1);
+    assert_eq!(indexed.documents()[0].content_bytes as usize, bad.len());
+    assert!(find(&indexed, &[&good]).hits.is_empty());
     for term in [b"".as_slice(), b"a b", b"a-b", b"\xff", &bad] {
         assert!(LexicalQuery::new(LexicalChannel::Content, &[term.to_vec()], &[]).is_err());
     }

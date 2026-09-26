@@ -427,15 +427,19 @@ mod tests {
         }
     }
     #[test]
-    fn unsupported_document_never_becomes_an_omission_or_a_different_segmentation() {
+    fn long_words_keep_documents_but_invalid_native_content_still_refuses() {
         let docs = vec![
             document(b"a", b"small".to_vec()),
             document(b"b", vec![b'x'; 129]),
         ];
-        assert!(matches!(
-            segments(namespace(), &docs, &mut || true),
-            Err(IndexError::Lexical(LexicalError::Limit("token bytes")))
-        ));
+        let parts = segments(namespace(), &docs, &mut || true).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].documents().len(), 2);
+        for (indexed, original) in parts[0].documents().iter().zip(&docs) {
+            assert_eq!(indexed.path, original.path);
+            assert_eq!(indexed.blob, original.blob);
+            assert_eq!(indexed.content_bytes as usize, original.bytes.len());
+        }
         let mut docs = vec![document(b"a", b"small".to_vec())];
         docs[0].bytes[0] = b'S';
         assert!(matches!(
