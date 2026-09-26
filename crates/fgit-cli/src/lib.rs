@@ -979,7 +979,7 @@ fn run_import(
         });
     }
     let node = node;
-    let request = node.request_context();
+    let request = node.import_request_context(None);
     let imported = node
         .runtime()
         .block_on(node.import_loose_git_directory_durable_in(

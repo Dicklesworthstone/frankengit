@@ -3,7 +3,6 @@
 //! ceiling. The fixture writer uses stored DEFLATE blocks, not external Git.
 use fgit_crypto::{DigestHasher, GitObjectKind, Sha256Hasher, git_object_id};
 use fgit_node::{NodeConfig, OneNode};
-use fgit_runtime::{BudgetClass, BudgetPolicy, ClassLimits};
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId, RefName, RepositoryId,
     TenantId,
@@ -13,7 +12,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 const TENANT: &str = "11111111111111111111111111111111";
 const REPOSITORY: &str = "22222222222222222222222222222222";
@@ -41,24 +39,12 @@ fn text(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 fn config(path: &Path) -> NodeConfig {
-    // Building the >64 MiB fixture is not what this test measures: under a
-    // debug build its import can outlast the 15 s default database deadline,
-    // because loose import (unlike receive) does not yet scale that budget to
-    // the staged bytes. The backup and restore under test run in their own
-    // processes with explicit budgets.
-    let fixture_budget = BudgetPolicy::finite_defaults()
-        .with_class_limits(
-            BudgetClass::Database,
-            ClassLimits::finite(Duration::from_secs(600), 1_000_000, 50_000_000),
-        )
-        .expect("the fixture database class stays finite");
     NodeConfig::new(
         path.to_path_buf(),
         TenantId::from_hex(TENANT).unwrap(),
         RepositoryId::from_hex(REPOSITORY).unwrap(),
     )
     .with_object_format(FORMAT)
-    .with_runtime_budgets(fixture_budget)
 }
 fn command(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_fg-repository-backup"))
@@ -164,7 +150,9 @@ fn larger_than_64_mib_backup_restores_from_disk_and_respects_smaller_explicit_bu
     .unwrap();
     let (mut node, _) = OneNode::init(config(&root)).unwrap();
     node.bring_into_service(HeadGeneration::FIRST).unwrap();
-    let request = node.request_context();
+    // The >64 MiB fixture imports under the node's reserved import budget
+    // (x2mv.4.28), not a fixture-specific override.
+    let request = node.import_request_context(None);
     let admission = node
         .runtime()
         .block_on(node.import_loose_git_directory_durable_in(
