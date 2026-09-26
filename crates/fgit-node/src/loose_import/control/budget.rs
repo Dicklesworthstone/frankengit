@@ -1,9 +1,9 @@
 //! Reserve import work before reading the source; never replenish it mid-import.
+use crate::loose_import::MAX_IMPORT_TOTAL_OBJECT_BYTES;
 use crate::{
     GitDaemonSessionDeadline, GitDaemonSessionTimeout, GitDaemonSessionWorkScaling,
     NodeRequestContext, OneNode,
 };
-use crate::loose_import::MAX_IMPORT_TOTAL_OBJECT_BYTES;
 
 fn reserved_deadline(
     base: GitDaemonSessionTimeout,
@@ -53,10 +53,8 @@ impl OneNode {
             timeout,
         );
         NodeRequestContext {
-            authority: self.receive_admission_authority_context(
-                MAX_IMPORT_TOTAL_OBJECT_BYTES,
-                &deadline,
-            ),
+            authority: self
+                .receive_admission_authority_context(MAX_IMPORT_TOTAL_OBJECT_BYTES, &deadline),
         }
     }
 }
@@ -101,11 +99,9 @@ mod tests {
 
     #[test]
     fn reservation_keeps_custom_scaling_and_does_not_reset_elapsed_time() {
-        let scaling = GitDaemonSessionWorkScaling::try_new(
-            Duration::from_secs(1),
-            Duration::from_secs(2),
-        )
-        .unwrap();
+        let scaling =
+            GitDaemonSessionWorkScaling::try_new(Duration::from_secs(1), Duration::from_secs(2))
+                .unwrap();
         let base = GitDaemonSessionTimeout::try_new(Duration::from_secs(3)).unwrap();
         let mut reserved = reserved_deadline(base, scaling, None);
         assert_eq!(reserved.budget(), Duration::from_secs(5));
@@ -131,8 +127,12 @@ mod tests {
             .with_worker_threads(2),
         )
         .unwrap();
-        node.bring_into_service(fgit_types::HeadGeneration::FIRST).unwrap();
-        let before = node.runtime().block_on(node.authenticate_authority_head()).unwrap();
+        node.bring_into_service(fgit_types::HeadGeneration::FIRST)
+            .unwrap();
+        let before = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .unwrap();
         let live = node.import_request_context(None);
         let native = live.authority().attached_native_cx().unwrap();
         let budget = native.budget();
@@ -148,12 +148,15 @@ mod tests {
         // Bounded waiting outside production; ensure the one-nanosecond deadline
         // has elapsed without a timing-sensitive minimum source size.
         std::thread::sleep(Duration::from_millis(1));
-        let error = node.runtime().block_on(node.import_loose_git_directory_durable_in(
-            &expired,
-            &root.join("source-must-not-be-read"),
-            PrincipalId::from_bytes([0xf3; 16]),
-            b"expired-import-budget",
-        )).unwrap_err();
+        let error = node
+            .runtime()
+            .block_on(node.import_loose_git_directory_durable_in(
+                &expired,
+                &root.join("source-must-not-be-read"),
+                PrincipalId::from_bytes([0xf3; 16]),
+                b"expired-import-budget",
+            ))
+            .unwrap_err();
         assert!(matches!(error,
             crate::NodeSourceImportRefusal::Staging(error)
                 if matches!(*error, crate::LooseGitImportRefusal::Interrupted {
@@ -161,7 +164,10 @@ mod tests {
                     exhaustion: Some(Exhaustion::Deadline),
                 })
         ));
-        let after = node.runtime().block_on(node.authenticate_authority_head()).unwrap();
+        let after = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .unwrap();
         assert_eq!(before.receipt().generation(), after.receipt().generation());
         assert!(checkpoint_request(&expired).is_err());
         assert!(checkpoint_request(&live).is_ok());

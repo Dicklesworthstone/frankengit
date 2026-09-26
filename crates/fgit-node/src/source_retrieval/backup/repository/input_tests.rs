@@ -182,8 +182,13 @@ fn replacing_the_path_does_not_switch_an_already_opened_input() {
     std::fs::write(&path, &bytes).unwrap();
     std::fs::write(&new, sample(GitHashAlgorithm::Sha1, b"modified")).unwrap();
     let deadline = Profile::default().start();
-    let mut archive =
-        PinnedArchive::open(&path, super::super::super::sha256(&bytes), Default::default(), deadline).unwrap();
+    let mut archive = PinnedArchive::open(
+        &path,
+        super::super::super::sha256(&bytes),
+        Default::default(),
+        deadline,
+    )
+    .unwrap();
     std::fs::rename(&new, &path).unwrap();
     archive
         .scan(deadline, |record| {

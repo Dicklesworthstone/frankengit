@@ -115,9 +115,15 @@ fn same_key_different_payload_never_hits_the_old_receipt() {
     let dest = destination("http://example.com/hook");
     let mut request = request("same-key", &events);
     dest.remember_acknowledgement(&request, 1);
-    assert_eq!(dest.probe_acknowledgement(&request), Ok(ProbeVerdict::Delivered));
+    assert_eq!(
+        dest.probe_acknowledgement(&request),
+        Ok(ProbeVerdict::Delivered)
+    );
     request.payload_root = root(2);
-    assert_eq!(dest.probe_acknowledgement(&request), Ok(ProbeVerdict::Unknown));
+    assert_eq!(
+        dest.probe_acknowledgement(&request),
+        Ok(ProbeVerdict::Unknown)
+    );
 }
 
 #[test]
@@ -126,7 +132,10 @@ fn public_diagnostic_injection_cannot_authorize_a_probe() {
     let dest = destination("http://example.com/hook");
     let request = request("not-actually-acknowledged", &events);
     dest.acknowledged.lock().unwrap().push((request.key, 1));
-    assert_eq!(dest.probe_acknowledgement(&request), Ok(ProbeVerdict::Unknown));
+    assert_eq!(
+        dest.probe_acknowledgement(&request),
+        Ok(ProbeVerdict::Unknown)
+    );
 }
 
 #[test]
@@ -149,11 +158,20 @@ fn reconfiguration_and_restart_do_not_inherit_receipts_for_a_different_receiver(
     let request = request("reconfigured", &events);
     dest.remember_acknowledgement(&request, 1);
     dest.registration = registration("http://example.com/new-hook");
-    assert_eq!(dest.probe_acknowledgement(&request), Ok(ProbeVerdict::Unknown));
+    assert_eq!(
+        dest.probe_acknowledgement(&request),
+        Ok(ProbeVerdict::Unknown)
+    );
     dest.registration = registration("http://example.com/hook");
-    assert_eq!(dest.probe_acknowledgement(&request), Ok(ProbeVerdict::Delivered));
+    assert_eq!(
+        dest.probe_acknowledgement(&request),
+        Ok(ProbeVerdict::Delivered)
+    );
     let restarted = destination("http://example.com/hook");
-    assert_eq!(restarted.probe_acknowledgement(&request), Ok(ProbeVerdict::Unknown));
+    assert_eq!(
+        restarted.probe_acknowledgement(&request),
+        Ok(ProbeVerdict::Unknown)
+    );
 }
 
 #[test]
@@ -167,14 +185,23 @@ fn diagnostic_history_is_bounded_and_retries_replace_the_same_entry() {
         (AsciiSlug::from_static("old"), 1),
     );
     dest.remember_acknowledgement(&request, 1);
-    assert_eq!(dest.acknowledged.lock().unwrap().len(), MAX_ACKNOWLEDGEMENTS);
+    assert_eq!(
+        dest.acknowledged.lock().unwrap().len(),
+        MAX_ACKNOWLEDGEMENTS
+    );
     for attempt in 2..10 {
         dest.remember_acknowledgement(&request, attempt);
     }
     let diagnostics = dest.acknowledged.lock().unwrap();
     assert_eq!(diagnostics.len(), MAX_ACKNOWLEDGEMENTS);
     assert_eq!(diagnostics.last(), Some(&(request.key, 9)));
-    assert_eq!(diagnostics.iter().filter(|(key, _)| *key == request.key).count(), 1);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|(key, _)| *key == request.key)
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -188,9 +215,15 @@ fn poisoned_receipt_cache_is_unknown_without_panicking_or_claiming_rejection() {
         panic!("simulate a failed cache owner");
     }));
     assert!(poisoned.is_err());
-    assert_eq!(dest.probe_acknowledgement(&request), Ok(ProbeVerdict::Unknown));
+    assert_eq!(
+        dest.probe_acknowledgement(&request),
+        Ok(ProbeVerdict::Unknown)
+    );
     dest.remember_acknowledgement(&request, 2);
-    assert_eq!(dest.probe_acknowledgement(&request), Ok(ProbeVerdict::Unknown));
+    assert_eq!(
+        dest.probe_acknowledgement(&request),
+        Ok(ProbeVerdict::Unknown)
+    );
 }
 
 #[test]
@@ -200,10 +233,15 @@ fn actual_http_ack_stays_accepted_with_poisoned_diagnostics_and_binds_the_payloa
     use std::time::Duration;
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let url = format!(
+        "http://127.0.0.1:{}/hook",
+        listener.local_addr().unwrap().port()
+    );
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let mut reader = BufReader::new(&mut stream);
         let mut length = None;
         loop {
@@ -218,7 +256,9 @@ fn actual_http_ack_stays_accepted_with_poisoned_diagnostics_and_binds_the_payloa
         }
         let mut body = vec![0; length.unwrap()];
         reader.read_exact(&mut body).unwrap();
-        stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+            .unwrap();
     });
     let dest = destination(&url);
     let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -232,9 +272,15 @@ fn actual_http_ack_stays_accepted_with_poisoned_diagnostics_and_binds_the_payloa
     let result = dest.dispatch_http(&request, 1);
     server.join().unwrap();
     assert_eq!(result.unwrap().0, DeliveryVerdict::Accepted);
-    assert_eq!(dest.probe_acknowledgement(&request), Ok(ProbeVerdict::Delivered));
+    assert_eq!(
+        dest.probe_acknowledgement(&request),
+        Ok(ProbeVerdict::Delivered)
+    );
     request.payload_root = root(99);
-    assert_eq!(dest.probe_acknowledgement(&request), Ok(ProbeVerdict::Unknown));
+    assert_eq!(
+        dest.probe_acknowledgement(&request),
+        Ok(ProbeVerdict::Unknown)
+    );
     assert!(dest.dead_letters.list().is_empty());
 }
 

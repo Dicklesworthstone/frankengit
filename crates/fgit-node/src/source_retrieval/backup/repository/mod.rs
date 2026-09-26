@@ -9,10 +9,10 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
+use crate::{NodeConfig, OneNode};
 use fgit_authority::{HeadReadReceipt, StoreInstanceId};
 use fgit_authority_fsqlite::{ExportBundle, PortableStoreLimits, export_bundle};
 use fgit_crypto::GitObjectKind;
-use crate::{NodeConfig, OneNode};
 use fgit_object_fabric::ObjectKind as FabricKind;
 use fgit_treefs::integrity::{GraphLimits, GraphReport, ObjectGraphAudit};
 use fgit_types::{GitHashAlgorithm, HeadGeneration, RepositoryId, TenantId};
@@ -22,7 +22,8 @@ use archive::stream::{Seal, StreamDecoder, StreamEncoder, StreamHeader, Transfer
 use archive::{Identity, MAX_OBJECT_BYTES, MAX_OBJECTS};
 use profile::{Profile, ProfileFlags};
 
-pub const USAGE: &str = "usage: fg backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
+pub const USAGE: &str =
+    "usage: fg backup export <storage-root> <new-backup-file> <tenant-id> <repository-id>
          --trusted-local [--object-format sha1|sha256]
          [--max-archive-bytes <1..1099511627776>] [--timeout-secs <1..86400>]
 

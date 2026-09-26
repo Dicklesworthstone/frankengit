@@ -1,9 +1,9 @@
 //! Real node/store executions stopped at the production restore boundaries.
 //! Returned interruption errors are not an exhaustive process-kill/power-loss lane.
 use super::*;
+use crate::LoopbackReceiveSession;
 use fgit_authority::{ExpectedOld, IdempotencyKey, ProposedNew, RefCommand};
 use fgit_crypto::git_object_id;
-use crate::LoopbackReceiveSession;
 use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, GitOid, HeadGeneration, PrincipalId, RefName, RepositoryId,
     TenantId,

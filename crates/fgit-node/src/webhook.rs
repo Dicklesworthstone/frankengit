@@ -287,7 +287,10 @@ impl WebhookDeliveryDestination {
                 } else {
                     let reason = "missing or ambiguous Location header on redirect";
                     self.record_terminal_failure(request, attempt, reason, now_secs)?;
-                    Ok((DeliveryVerdict::PermanentRejection, reason.as_bytes().to_vec()))
+                    Ok((
+                        DeliveryVerdict::PermanentRejection,
+                        reason.as_bytes().to_vec(),
+                    ))
                 }
             }
             300..=399 => {

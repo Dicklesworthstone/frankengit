@@ -47,7 +47,10 @@ fn deliver_status(
 ) -> (WebhookDeliveryDestination, DeliveryVerdict) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let url = format!(
+        "http://127.0.0.1:{}/hook",
+        listener.local_addr().unwrap().port()
+    );
     let response = format!(
         "HTTP/1.1 {status} Test\r\n{extra_headers}Content-Length: 0\r\nConnection: close\r\n\r\n"
     );
@@ -65,7 +68,9 @@ fn deliver_status(
                 Err(error) => panic!("accept failed: {error}"),
             }
         };
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let mut reader = BufReader::new(&mut stream);
         let mut length = None;
         loop {
@@ -104,7 +109,11 @@ fn retryable_http_statuses_exhaust_to_a_truthful_dead_letter_at_the_limit() {
         assert_eq!(verdict, DeliveryVerdict::TransientFailure, "HTTP {status}");
         assert!(before.dead_letters.list().is_empty());
         let (at_limit, verdict) = deliver_status(status, "", 3, 3);
-        assert_eq!(verdict, DeliveryVerdict::PermanentRejection, "HTTP {status}");
+        assert_eq!(
+            verdict,
+            DeliveryVerdict::PermanentRejection,
+            "HTTP {status}"
+        );
         let dead = at_limit.dead_letters.list();
         assert_eq!(dead.len(), 1);
         assert_eq!(dead[0].attempts, 3);
@@ -120,11 +129,19 @@ fn policy_approved_redirects_cannot_retry_past_the_attempt_limit() {
         assert_eq!(verdict, DeliveryVerdict::TransientFailure, "HTTP {status}");
         assert!(before.dead_letters.list().is_empty());
         let (at_limit, verdict) = deliver_status(status, headers, 2, 2);
-        assert_eq!(verdict, DeliveryVerdict::PermanentRejection, "HTTP {status}");
+        assert_eq!(
+            verdict,
+            DeliveryVerdict::PermanentRejection,
+            "HTTP {status}"
+        );
         let dead = at_limit.dead_letters.list();
         assert_eq!(dead.len(), 1);
         assert_eq!(dead[0].attempts, 2);
-        assert!(dead[0].terminal_reason.contains("redirect retry budget exhausted"));
+        assert!(
+            dead[0]
+                .terminal_reason
+                .contains("redirect retry budget exhausted")
+        );
     }
 }
 
@@ -146,10 +163,18 @@ fn missing_or_duplicate_redirect_locations_are_dead_lettered_not_silently_droppe
 fn unsupported_redirect_statuses_do_not_enter_the_server_error_retry_path() {
     for status in [300, 303, 304, 305, 306] {
         let (dest, verdict) = deliver_status(status, "", 1, 3);
-        assert_eq!(verdict, DeliveryVerdict::PermanentRejection, "HTTP {status}");
+        assert_eq!(
+            verdict,
+            DeliveryVerdict::PermanentRejection,
+            "HTTP {status}"
+        );
         let dead = dest.dead_letters.list();
         assert_eq!(dead.len(), 1);
-        assert!(dead[0].terminal_reason.contains("unsupported webhook redirect"));
+        assert!(
+            dead[0]
+                .terminal_reason
+                .contains("unsupported webhook redirect")
+        );
     }
 }
 
@@ -157,7 +182,11 @@ fn unsupported_redirect_statuses_do_not_enter_the_server_error_retry_path() {
 fn non_retryable_client_errors_still_fail_immediately() {
     for status in [400, 401, 403, 404, 409, 410, 422] {
         let (dest, verdict) = deliver_status(status, "", 1, 3);
-        assert_eq!(verdict, DeliveryVerdict::PermanentRejection, "HTTP {status}");
+        assert_eq!(
+            verdict,
+            DeliveryVerdict::PermanentRejection,
+            "HTTP {status}"
+        );
         assert_eq!(dest.dead_letters.list().len(), 1);
     }
 }
@@ -166,7 +195,10 @@ fn non_retryable_client_errors_still_fail_immediately() {
 fn attempts_outside_the_schedule_are_refused_before_any_socket_is_opened() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+    let url = format!(
+        "http://127.0.0.1:{}/hook",
+        listener.local_addr().unwrap().port()
+    );
     let events = ForgeEventBatch { events: Vec::new() };
     for (attempt, max_attempts) in [(0, 3), (4, 3), (1, 0)] {
         let dest = destination(&url, max_attempts);
@@ -176,5 +208,8 @@ fn attempts_outside_the_schedule_are_refused_before_any_socket_is_opened() {
         );
         assert!(dest.dead_letters.list().is_empty());
     }
-    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
