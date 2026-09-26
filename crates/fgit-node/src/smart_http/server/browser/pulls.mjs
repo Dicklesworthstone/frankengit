@@ -44,10 +44,12 @@ export class PullClient {
     const checked = listReply(raw.value, { after, limit, head, scope: this.#scope });
     this.#scope = checked.binding; return checked;
   }
-  async show(number, head = null) {
+  async show(number, head = null, { render = false } = {}) {
+    if (typeof render !== 'boolean') fail('Invalid Markdown presentation choice.');
     integer(number, 'PR number', 1); if (head !== null) snapshot(head);
     const query = new URLSearchParams(); if (head) query.set('expected_head', head);
-    const raw = await this.#transport.request(`pulls/${number}${head ? `?${query}` : ''}`, { statuses: [200, 404] });
+    if (render) query.set('render', 'html_safe');
+    const raw = await this.#transport.request(`pulls/${number}${query.size ? `?${query}` : ''}`, { statuses: [200, 404] });
     const checked = showReply(raw.value, number, { head, scope: this.#scope });
     if (checked.reply.found !== (raw.status === 200)) fail('PR presence and HTTP status disagree.');
     this.#scope = checked.binding; return checked;

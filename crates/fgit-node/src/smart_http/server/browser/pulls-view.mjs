@@ -1,6 +1,7 @@
 // Human PR workflow over the native client. Every source string is inert data;
 // preparing, inspecting and displaying approvals never submits a mutation.
 import { PullClient } from './pulls.mjs';
+import { markdownBody } from './markdown.mjs';
 import { decimal, oid, unhex, fail } from './pulls-core.mjs';
 import { RECEIPT_LIMIT } from './pulls-actions.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
@@ -185,7 +186,10 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     item(doc, nodes.selected, 'p', `PR version ${row.version}. Opener: ${row.opened_by ?? '(not recorded)'}`);
     if (row.data) {
       item(doc, nodes.selected, 'pre', `${nativeRef(row.data, 'source_ref')} → ${nativeRef(row.data, 'target_ref')}\nSource ${row.data.source_tip}\nTarget ${row.data.target_tip}`);
-      item(doc, nodes.selected, 'pre', row.data.body);
+      const renderGeneration = generation;
+      nodes.selected.append(markdownBody(doc, row.data.body, row.data.body_rendered, {
+        cryptoImpl, current: () => client.connected && generation === renderGeneration && selected?.row === row,
+      }).element);
       if (row.data.source_ref !== null && row.data.target_ref !== null) {
         for (const [name, value] of Object.entries(fieldsFromRow(row, result.binding.format))) nodes[metadataIds[name]].value = String(value);
         nodes['pr-number'].value = String(row.number); nodes['metadata-action'].value = 'update';
@@ -197,7 +201,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     return run('read', async guard => {
       client.cancelReads(); invalidateCandidate(); clearProposal(); selected = null; nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren();
       nodes['reviews'].replaceChildren(); nodes['review-paging'].replaceChildren();
-      const result = await client.show(number, head); guard(); renderSelected(result);
+      const result = await client.show(number, head, { render: true }); guard(); renderSelected(result);
       status(result.reply.found ? 'PR loaded. Preparing a candidate uses these observed tips, not edits in the metadata proposal form.' : 'PR not found or not disclosed.');
     });
   }
@@ -247,7 +251,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   on('select-pr', 'submit', () => run('read', async guard => {
     const requested = number('select-number', 1); client.cancelReads(); invalidateCandidate(); clearProposal(); selected = null;
     nodes.selected.replaceChildren(); nodes.snapshot.replaceChildren(); nodes.reviews.replaceChildren(); nodes['review-paging'].replaceChildren();
-    const result = await client.show(requested); guard(); renderSelected(result); status('Selected an explicitly refreshed PR snapshot.');
+    const result = await client.show(requested, null, { render: true }); guard(); renderSelected(result); status('Selected an explicitly refreshed PR snapshot.');
   }));
   on('reviews-load', 'click', () => loadReviews());
   on('new-pr', 'click', () => {

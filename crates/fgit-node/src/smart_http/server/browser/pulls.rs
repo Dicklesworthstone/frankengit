@@ -16,6 +16,7 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
         b"/ui/pulls/" => Some(("text/html; charset=utf-8", include_str!("pulls.html"))),
         b"/ui/pulls.css" => Some(("text/css; charset=utf-8", include_str!("pulls.css"))),
         b"/ui/pulls-view.mjs" => Some((script, include_str!("pulls-view.mjs"))),
+        b"/ui/markdown.mjs" => Some((script, include_str!("markdown.mjs"))),
         b"/ui/pulls.mjs" => Some((script, include_str!("pulls.mjs"))),
         b"/ui/pulls-core.mjs" => Some((script, include_str!("pulls-core.mjs"))),
         b"/ui/pulls-candidate.mjs" => Some((script, include_str!("pulls-candidate.mjs"))),
@@ -103,6 +104,7 @@ mod tests {
             "/ui/pulls.css",
             "/ui/pulls-view.mjs",
             "/ui/pulls.mjs",
+            "/ui/markdown.mjs",
             "/ui/pulls-core.mjs",
             "/ui/pulls-candidate.mjs",
             "/ui/pulls-actions.mjs",
@@ -210,6 +212,7 @@ mod tests {
         for script in [
             include_str!("pulls-view.mjs"),
             include_str!("pulls.mjs"),
+            include_str!("markdown.mjs"),
             include_str!("pulls-core.mjs"),
             include_str!("pulls-candidate.mjs"),
             include_str!("pulls-actions.mjs"),
