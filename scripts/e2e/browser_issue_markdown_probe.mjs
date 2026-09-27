@@ -52,12 +52,18 @@ try {
   let nextId = 0;
   const pending = new Map();
   const exceptions = [], consoleErrors = [], logEntries = [];
+  // Headers of the served issues document as the browser received them, so
+  // the CSP it enforced is observed rather than assumed.
+  let documentHeaders = null;
   socket.onmessage = event => {
     const message = JSON.parse(event.data);
     if (message.id && pending.has(message.id)) {
       const { resolve, reject } = pending.get(message.id);
       pending.delete(message.id);
       if (message.error) reject(new Error(JSON.stringify(message.error))); else resolve(message.result);
+    } else if (message.method === 'Network.responseReceived' && message.params.type === 'Document'
+      && message.params.response.url.startsWith(uiUrl)) {
+      documentHeaders = message.params.response.headers;
     } else if (message.method === 'Runtime.exceptionThrown') {
       exceptions.push(message.params.exceptionDetails?.exception?.description ?? message.params.exceptionDetails?.text);
     } else if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') {
@@ -80,6 +86,7 @@ try {
   await send('Page.enable');
   await send('Runtime.enable');
   await send('Log.enable');
+  await send('Network.enable');
   // Installed by the protocol before any page script; the page's own CSP
   // does not govern it. It only records, it changes nothing the page does.
   await send('Page.addScriptToEvaluateOnNewDocument', { source: `
@@ -89,15 +96,27 @@ try {
   await send('Page.navigate', { url: uiUrl });
   await until(() => evaluate("document.readyState === 'complete' && !!document.getElementById('issue-token')"), 'the issues page');
 
+  // Connecting reads the issue list; the page reports "Read complete" or the
+  // refusal text in #issue-status. Anything else after the read settles is a
+  // failure, reported verbatim rather than waited on.
+  const statusText = "document.getElementById('issue-status').textContent";
+  const settledRead = async what => {
+    const text = await until(() => evaluate(`(() => {
+      const text = ${statusText};
+      return /^Reading|^Connect an explicitly/.test(text) ? '' : text;
+    })()`), what);
+    if (!/^Read complete/.test(text)) throw new Error(`${what} failed: ${text}`);
+  };
   await evaluate(`(() => {
     document.getElementById('issue-token').value = ${JSON.stringify(token)};
     document.getElementById('issue-connection').requestSubmit();
   })()`);
-  await until(() => evaluate("/[Cc]onnected/.test(document.getElementById('issue-status').textContent)"), 'a connected status');
+  await settledRead('the connecting list read');
   await evaluate(`(() => {
     document.getElementById('show-number').value = ${JSON.stringify(issue)};
     document.getElementById('issue-show').requestSubmit();
   })()`);
+  await settledRead('the issue read');
   const outcome = await until(() => evaluate(`(() => {
     const text = document.getElementById('issue-content').textContent;
     if (text.includes('Derived Markdown · fgit-doc html_safe')) return 'rendered';
@@ -124,11 +143,14 @@ try {
       javascript_links: all.filter(node => /^\\s*javascript:/i.test(node.getAttribute('href') ?? '')).length,
       pwned: window.__fgitPwned ?? null,
       violations: window.__fgitViolations ?? null,
-      csp_meta_or_header_present: true,
+      csp_meta: document.querySelector('meta[http-equiv="Content-Security-Policy" i]')?.getAttribute('content') ?? null,
     };
   })()`);
+  const cspHeader = documentHeaders === null ? null
+    : Object.entries(documentHeaders).find(([name]) => name.toLowerCase() === 'content-security-policy')?.[1] ?? null;
   const version = (await (await fetch(`http://127.0.0.1:${port}/json/version`)).json()).Browser;
   console.log(JSON.stringify({ type: 'browser_issue_markdown_probe', browser: version, outcome, ...facts,
+    document_headers_observed: documentHeaders !== null, csp_header: cspHeader,
     exceptions, console_errors: consoleErrors, csp_log_entries: logEntries.filter(entry => /Content Security Policy/i.test(entry.text)) }));
 } catch (error) {
   console.log(JSON.stringify({ type: 'browser_issue_markdown_probe_failed', error: String(error?.message ?? error), browser_log: browserLog }));

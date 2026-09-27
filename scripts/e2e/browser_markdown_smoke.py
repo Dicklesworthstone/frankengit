@@ -83,6 +83,19 @@ def api(url: str, path: str, token: str, fields: dict | None = None,
         connection.close()
 
 
+def document_csp(url: str, path: str) -> tuple[int, str | None]:
+    """The Content-Security-Policy the server sends for one UI document."""
+    endpoint = urllib.parse.urlsplit(url)
+    connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=TIMEOUT)
+    try:
+        connection.request("GET", endpoint.path + path, headers={"Connection": "close"})
+        response = connection.getresponse()
+        response.read()
+        return response.status, response.getheader("Content-Security-Policy")
+    finally:
+        connection.close()
+
+
 def exercise(fg: str, chrome: str, node: str, root: Path) -> dict:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     state = root / "node"
@@ -125,6 +138,7 @@ def exercise(fg: str, chrome: str, node: str, root: Path) -> dict:
         summary["http_source_sha256_matches"] = (
             presentation.get("source_sha256") == hashlib.sha256(BODY.encode()).hexdigest())
         summary["http_rendered_html"] = presentation.get("html")
+        summary["http_ui_status"], summary["http_ui_csp"] = document_csp(url, "/ui/issues/")
 
         probe = subprocess.run(
             [node, "--experimental-websocket", str(Path(__file__).with_name("browser_issue_markdown_probe.mjs")),
