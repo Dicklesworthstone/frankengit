@@ -25,13 +25,21 @@
       <h2 id="export-heading">Export this snapshot</h2>
       <button id="export-bundle" type="button">Export pinned Git bundle</button><button id="download-bundle" type="button">Download complete bundle</button>
       <div id="export-info"></div>
-      <p class="hint">Downloads appear only after complete bounded transfer and identity checks. A Git bundle is not a forge backup or repository capsule.</p>
+      <p class="hint">Downloads appear only after complete bounded transfer, object identity and reachable-history checks. For a full reference-inventory audit and saved-pair verification, open <a href="./verify/">Export verification</a>. A Git bundle is not a forge backup or repository capsule.</p>
     </section>
     <section aria-labelledby="intake-heading">
       <h2 id="intake-heading">Inspect a full bundle</h2>
       <label>Git bundle (up to 16 MiB)<input id="bundle-file" type="file" accept=".bundle,application/x-git-bundle"></label>
-      <button id="load-bundle" type="button">Load and inspect selected bytes</button>
-      <p class="hint">Self-contained v2/v3 bundles only. Header and pack-checksum validation is not object or closure admission. The native service verifies objects and policy before publishing. Prerequisite/filter bundles are not accepted by this profile.</p>
+      <details><summary>Optional independently trusted backup identity</summary>
+        <p>Supply values recorded through a separately trusted channel, not copied from this bundle or an unsigned adjacent manifest. Leave these blank for internal consistency checking only. Pins do not grant permissions or choose destination refs.</p>
+        <label>Trusted whole-bundle SHA-256<input id="bundle-sha256" maxlength="64" autocomplete="off" spellcheck="false"></label>
+        <label>Pin name encoding<select id="bundle-pin-encoding"><option value="text">UTF-8 full reference names</option><option value="hex">Raw lowercase hexadecimal reference names</option></select></label>
+        <label>Trusted native reference pins (one NAME=OID per line, at most 64)<textarea id="bundle-pins" rows="4" maxlength="65536" spellcheck="false" placeholder="refs/heads/main=FULL_NATIVE_COMMIT_ID"></textarea></label>
+        <label><input id="bundle-exact-refs" type="checkbox">Require exactly this direct-ref set, without additional refs</label>
+        <p>Object IDs use the selected repository format. Annotated tag pins name the tag object, not its peeled commit. Ref pins survive repacking; a whole-bundle hash requires byte-identical transport data. Without exact-set mode, other advertised refs are allowed but still fully verified.</p>
+      </details>
+      <button id="load-bundle" type="button">Verify complete selected bundle</button>
+      <p class="hint">Self-contained v2/v3 bundles only. Before a new transfer can be prepared, this browser checks every packed object and the complete reachable history. Native admission still enforces objects, permissions, policy and ref leases. Verification is bounded to 16 MiB input, 128 MiB expansion, 32,768 objects, delta depth 64 and 30 seconds. Incomplete, mismatching or over-budget data refuses without a checksum-only fallback. Prerequisite/filter bundles are unsupported.</p>
       <div id="bundle-info"></div><div id="bundle-refs"></div>
       <h3>Explicit fetch destinations</h3>
       <p>Use “Map this reference” for each source to import. Supply a complete destination ref and either <code>absent</code> or its exact old native OID. No destination or old tip is inferred; at most 64 mappings. One source may be mapped to several distinct destinations.</p>
@@ -51,7 +59,7 @@
     </section>
     <section aria-labelledby="restore-heading">
       <h2 id="restore-heading">Recover an interrupted transfer</h2>
-      <p>Connect the original valid credential, then restore its saved receipt. A successful ref listing is not required for recovery. Restore checks the exact request commitment but never dispatches it. Keep the credential bound to the original principal.</p>
+      <p>Connect the original valid credential, then restore its saved receipt. A successful ref listing is not required for recovery. Restore checks the exact request commitment but never dispatches it. Existing requests retain their original bytes and key even when a newer preflight would reject those bytes; recovery is not a fresh verification claim. Keep the credential bound to the original principal.</p>
       <label>Original receipt (up to 24 MiB)<input id="receipt-file" type="file" accept=".json,application/json"></label>
       <button id="restore-transfer" type="button">Restore original request — do not send</button>
     </section>

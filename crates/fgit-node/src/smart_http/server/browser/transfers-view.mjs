@@ -1,7 +1,7 @@
 // Native portable transfer UI. File contents, advertised refs and API text are
 // data, never markup, host paths or authority. Sending is always explicit.
 import { TransferClient } from './transfers.mjs';
-import { BUNDLE_LIMIT, MAPPING_LIMIT, bundleRef } from './transfers-protocol.mjs';
+import { BUNDLE_LIMIT, MAPPING_LIMIT, bundleRef, normalizeBundleExpectation } from './transfers-protocol.mjs';
 import { RECEIPT_LIMIT } from './pulls-actions.mjs';
 import { hex, unhex, utf8, text } from './pulls-core.mjs';
 
@@ -17,15 +17,34 @@ export function referenceLabel(value) {
 export async function selectedBytes(file, maximum, current) {
   if (!file || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > maximum) throw new Error('Choose a nonempty file within this operation’s byte limit.');
   if (!current()) throw new Error('File selection changed.');
+  const size = file.size;
   const buffer = await file.arrayBuffer();
   if (!current()) throw new Error('File selection changed while reading.');
-  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength !== file.size || buffer.byteLength > maximum) throw new Error('File size changed or exceeded the byte limit.');
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength !== size || buffer.byteLength > maximum) throw new Error('File size changed or exceeded the byte limit.');
   return new Uint8Array(buffer);
+}
+// Explicit caller pins are never inferred from bundle headers, manifests or
+// destination leases. Parse all controls before starting a local file read.
+export function intakeExpectations(algorithm, sha256, pins, encoding, exact) {
+  text(sha256, 64, 'trusted bundle SHA-256'); text(pins, 64 * 1024, 'trusted reference pins');
+  if (!['text', 'hex'].includes(encoding) || typeof exact !== 'boolean') throw new Error('Choose explicit pin encoding and ref-set semantics.');
+  const lines = pins.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  if (lines.length > MAPPING_LIMIT) throw new Error('At most 64 trusted reference pins are supported.');
+  if (!sha256 && !lines.length && !exact) return null;
+  const expected = { object_format: algorithm, ...(sha256 ? { sha256 } : {}) };
+  if (lines.length) expected.refs = lines.map(line => {
+    const split = line.lastIndexOf('=');
+    if (split < 1 || split === line.length - 1) throw new Error('Each pin must be a full reference name followed by = and its native object ID.');
+    const name = line.slice(0, split), object_id = line.slice(split + 1);
+    return { ref_hex: encoding === 'hex' ? name : hex(utf8.encode(name)), object_id };
+  });
+  if (exact) expected.exact_refs = true;
+  normalizeBundleExpectation(expected); return expected;
 }
 export function mountTransfers(doc, options = {}) {
   const client = options.client ?? new TransferClient({ href: options.href ?? globalThis.location.href });
   const ids = ['transfer-token','transfer-connect','transfer-disconnect','transfer-format','select-target','transfer-selection','transfer-status','cancel-transfer-read',
-    'export-bundle','export-info','download-bundle','bundle-file','load-bundle','bundle-info','bundle-refs','mapping-rows','stage-import','stage-fetch',
+    'export-bundle','export-info','download-bundle','bundle-file','bundle-sha256','bundle-pins','bundle-pin-encoding','bundle-exact-refs','load-bundle','bundle-info','bundle-refs','mapping-rows','stage-import','stage-fetch',
     'pending-transfer','confirm-transfer','send-transfer','recover-transfer','discard-transfer','save-transfer','receipt-file','restore-transfer'];
   const c = Object.fromEntries(ids.map(id => { const node = doc.getElementById(id); if (!node) throw new Error(`Missing transfer control ${id}`); return [id, node]; }));
   let generation = 0, session = 0, busy = false, mappings = [], summary = null, exportSummary = null;
@@ -34,6 +53,10 @@ export function mountTransfers(doc, options = {}) {
   const status = value => { c['transfer-status'].textContent = visible(value); };
   function releaseDownloads() { for (const url of urls) URL.revokeObjectURL(url); urls.clear(); }
   function clearBundle() { summary = null; mappings = []; c['bundle-info'].replaceChildren(); c['bundle-refs'].replaceChildren(); c['mapping-rows'].replaceChildren(); }
+  function clearPins() {
+    c['bundle-sha256'].value = ''; c['bundle-pins'].value = '';
+    c['bundle-exact-refs'].checked = false; c['bundle-pin-encoding'].value = 'text';
+  }
   function clearViews() {
     clearBundle(); exportSummary = null; c['export-info'].replaceChildren(); c['transfer-selection'].replaceChildren();
     c['bundle-file'].value = ''; c['receipt-file'].value = ''; c['confirm-transfer'].checked = false; releaseDownloads();
@@ -42,10 +65,10 @@ export function mountTransfers(doc, options = {}) {
     const p = client.pending, connected = client.connected, selected = client.selection;
     c['transfer-connect'].disabled = busy; c['transfer-format'].disabled = busy || !connected || !!p;
     c['select-target'].disabled = busy || !connected || !!p;
-    for (const id of ['export-bundle','bundle-file','load-bundle']) c[id].disabled = busy || !connected || !!p || !selected;
-    c['download-bundle'].disabled = busy || !connected || !exportSummary || !client.exported;
-    c['stage-import'].disabled = busy || !connected || !!p || !summary || summary.refs.length > MAPPING_LIMIT;
-    c['stage-fetch'].disabled = busy || !connected || !!p || !summary || !mappings.length;
+    for (const id of ['export-bundle','bundle-file','bundle-sha256','bundle-pins','bundle-pin-encoding','bundle-exact-refs','load-bundle']) c[id].disabled = busy || !connected || !!p || !selected;
+    c['download-bundle'].disabled = busy || !connected || !exportSummary || !client.exported || client.exportVerification?.object_closure_verified !== true;
+    c['stage-import'].disabled = busy || !connected || !!p || !summary || client.bundleVerification?.object_closure_verified !== true || summary.refs.length > MAPPING_LIMIT;
+    c['stage-fetch'].disabled = busy || !connected || !!p || !summary || client.bundleVerification?.object_closure_verified !== true || !mappings.length;
     for (const id of ['send-transfer','recover-transfer']) c[id].disabled = busy || !connected || !p;
     c['confirm-transfer'].disabled = busy || !connected || !p;
     c['discard-transfer'].disabled = busy || !p || p.sent || p.exported;
@@ -63,7 +86,7 @@ export function mountTransfers(doc, options = {}) {
     catch (error) { if (current()) status(`${error.outcomeUnknown ? 'Outcome unknown. Retain the original request and recover it. ' : ''}${error.message}`); }
     finally {
       busy = false;
-      if (!client.connected) clearViews();
+      if (!client.connected) { clearViews(); clearPins(); }
       render();
     }
   }
@@ -97,9 +120,10 @@ export function mountTransfers(doc, options = {}) {
     } catch (error) { status(error.message); }
   }
   function showBundle(value) {
+    if (client.bundleVerification?.object_closure_verified !== true) throw new Error('No complete verified bundle is selected.');
     clearBundle(); summary = value;
     const { refs, ...meta } = value;
-    c['bundle-info'].append(node('pre', JSON.stringify(meta, null, 2)), node('p', 'Transport checks passed. Objects and closure are NOT verified by this browser; native admission will validate them. Advertised HEAD is not installed.'));
+    c['bundle-info'].append(node('pre', JSON.stringify({ ...meta, verification: client.bundleVerification }, null, 2)), node('p', 'Packed bytes and complete reachable Git history were verified locally. Caller pins, when supplied, were matched; their trust comes from your independent source. Native admission still verifies objects, permissions and leases. Signatures, provenance, submodule repositories and forge state are not verified. Advertised HEAD is not installed.'));
     const table = node('table'), header = node('tr'); for (const title of ['Advertised reference','Native target','Mapped fetch']) header.append(node('th', title)); table.append(header);
     for (const r of refs) {
       const row = node('tr'), action = node('td'), button = node('button', 'Map this reference'); button.type = 'button';
@@ -109,11 +133,11 @@ export function mountTransfers(doc, options = {}) {
     c['bundle-refs'].append(table); render();
   }
   function disconnect() {
-    generation++; session++; client.disconnect(); c['transfer-token'].value = ''; clearViews(); render();
+    generation++; session++; client.disconnect(); c['transfer-token'].value = ''; clearViews(); clearPins(); render();
     status(client.pending ? 'Disconnected. Original unresolved request remains in memory; save its receipt before leaving.' : 'Disconnected. Credentials, bundle bytes and visible data cleared.');
   }
   c['transfer-connect'].addEventListener('click', () => perform(async current => {
-    const token = c['transfer-token'].value; c['transfer-token'].value = ''; clearViews();
+    const token = c['transfer-token'].value; c['transfer-token'].value = ''; clearViews(); clearPins();
     await client.connect(token); if (!current()) return;
     status(client.pending ? 'Original credential connected. Recover or retry the retained request.' : 'Connected. Select the target repository snapshot before loading or exporting a bundle.');
   }));
@@ -128,21 +152,32 @@ export function mountTransfers(doc, options = {}) {
   }));
   c['export-bundle'].addEventListener('click', () => perform(async current => {
     exportSummary = null; c['export-info'].replaceChildren(); releaseDownloads(); render();
-    const result = await client.exportBundle(); if (!current()) return;
+    const result = await client.exportBundle({ verifyClosure: true }); if (!current()) return;
     exportSummary = result; const { refs, ...meta } = result;
-    c['export-info'].append(node('pre', JSON.stringify({ ...meta, direct_ref_count: refs.length }, null, 2)));
-    status('Complete snapshot-pinned export received and transport-checked. Download is now available; no forge state or default HEAD is transferred.');
+    c['export-info'].append(node('pre', JSON.stringify({ ...meta, direct_ref_count: refs.length, verification: client.exportVerification }, null, 2)));
+    status('Complete snapshot-pinned export and reachable Git history verified. Download is ready; no forge state or default HEAD is transferred. Use the export-verification page for a complete reference-inventory audit.');
   }));
   c['download-bundle'].addEventListener('click', () => {
-    try { if (busy || !exportSummary) throw new Error('No stable export is ready.'); download(client.exportBytes(), 'repository.bundle', 'application/x-git-bundle'); status('Bundle offered for download. Verify the saved file before discarding your other copy.'); }
+    try { if (busy || !exportSummary || client.exportVerification?.object_closure_verified !== true) throw new Error('No stable verified export is ready.'); download(client.exportBytes(), 'repository.bundle', 'application/x-git-bundle'); status('Bundle offered for download. Verify the saved file before discarding your other copy.'); }
     catch (error) { status(error.message); }
   });
   c['bundle-file'].addEventListener('change', () => { generation++; client.invalidateBundle(); clearBundle(); c['confirm-transfer'].checked = false; render(); status('File selection changed. Load and inspect these bytes explicitly.'); });
+  for (const id of ['bundle-sha256', 'bundle-pins', 'bundle-pin-encoding', 'bundle-exact-refs']) {
+    const invalidate = () => {
+      generation++; client.invalidateBundle(); clearBundle(); c['confirm-transfer'].checked = false; render();
+      status('Trusted pins changed. Verify the selected bytes again; any prepared publication remains unchanged.');
+    };
+    c[id].addEventListener('input', invalidate); c[id].addEventListener('change', invalidate);
+  }
   c['load-bundle'].addEventListener('click', () => perform(async current => {
     const file = c['bundle-file'].files?.[0]; client.invalidateBundle(); clearBundle();
+    if (c['bundle-file'].files?.length !== 1) throw new Error('Choose exactly one bundle.');
+    const expectations = intakeExpectations(client.selection?.scope.format, c['bundle-sha256'].value,
+      c['bundle-pins'].value, c['bundle-pin-encoding'].value, c['bundle-exact-refs'].checked);
     const bytes = await selectedBytes(file, BUNDLE_LIMIT, () => current() && client.connected && c['bundle-file'].files?.[0] === file);
-    const result = await client.load(bytes); if (!current()) return;
-    showBundle(result); status('Bundle envelope and pack checksum checked. Select an import or explicit mapped fetch; nothing has been sent.');
+    if (!current()) return;
+    const result = await client.load(bytes, { verifyClosure: true, expectations }); if (!current()) return;
+    showBundle(result); status('Complete bundle verified locally against any supplied pins. Select import or explicit mapped fetch; no bytes have been uploaded and no publication is authorized.');
   }));
   async function stage(operation) {
     return perform(async current => {
@@ -153,7 +188,7 @@ export function mountTransfers(doc, options = {}) {
         bundleRef(destination); if (!row.old.value) throw new Error('Each destination requires absent or its exact old OID.');
         return { source_hex: row.source, destination_hex: destination, expected_old: row.old.value === 'absent' ? null : row.old.value };
       });
-      await client.stage(operation, input); if (!current()) return;
+      await client.stage(operation, input, { requireVerified: true }); if (!current()) return;
       c['confirm-transfer'].checked = false; status('Exact atomic request prepared locally. Save its receipt, inspect every effect, then confirm and Send separately.');
     });
   }

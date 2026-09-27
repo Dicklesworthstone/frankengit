@@ -16,6 +16,7 @@ export class TransferClient {
   get busy() { return this.#busy; }
   get selection() { return this.#selected && copy(this.#selected); }
   get bundle() { return this.#bundle && copy(this.#bundle.summary); }
+  get bundleVerification() { return this.connected && this.#bundle?.verification ? copy(this.#bundle.verification) : null; }
   get exported() { return this.#exported && copy(this.#exported.summary); }
   get exportVerification() { return this.connected && this.#exported?.verification ? copy(this.#exported.verification) : null; }
   get pending() {
@@ -48,12 +49,19 @@ export class TransferClient {
       this.#selected = { scope: selected.binding, head: selected.head }; return this.selection;
     });
   }
-  async load(input) {
+  async load(input, options = {}) {
     return this.#exclusive(async () => {
       this.#noPending(); this.invalidateBundle();
       if (!this.#selected) fail('Select the target repository first.');
       const serial = this.#serial, epoch = this.#transport.epoch;
-      const plan = await inspectBundle(input, this.#transport.crypto, () => this.#check(serial, epoch));
+      keys(options, ['verifyClosure', 'expectations']);
+      const verifyClosure = options.verifyClosure === undefined ? false : options.verifyClosure;
+      const expectations = options.expectations === undefined ? null : options.expectations;
+      if (typeof verifyClosure !== 'boolean' || (!verifyClosure && expectations !== null)) fail('Trusted expectations require complete object verification.');
+      const check = () => this.#check(serial, epoch);
+      const plan = verifyClosure ? await inspectVerifiedBundle(input, this.#transport.crypto, check, expectations)
+        : await inspectBundle(input, this.#transport.crypto, check);
+      check();
       if (plan.summary.object_format !== this.#selected.scope.format) fail('Bundle and target repository hash domains differ.');
       this.#bundle = plan; return this.bundle;
     });
@@ -96,9 +104,14 @@ export class TransferClient {
     if (this.#busy || !this.connected || !this.#exported) fail('No stable verified snapshot export is available.');
     return exportManifest(this.#transport.root, this.#exported.summary);
   }
-  async stage(operation, mappings = []) {
+  async stage(operation, mappings = [], options = {}) {
     return this.#exclusive(async () => {
       this.#noPending(); if (!this.#bundle || !this.#selected) fail('Select a target and inspect the exact bundle first.');
+      keys(options, ['requireVerified']);
+      const required = options.requireVerified === undefined ? false : options.requireVerified;
+      if (typeof required !== 'boolean') fail('Choose explicit transfer preflight.');
+      if (required && (this.#bundle.verification?.object_closure_verified !== true ||
+          this.#bundle.verification.sha256 !== this.#bundle.summary.sha256)) fail('Verify the complete selected bundle before preparing a new transfer.');
       const command = transferCommand(operation, this.#bundle.summary, mappings), scope = copy(this.#selected.scope);
       const serial = this.#serial, epoch = this.#transport.epoch, crypto = this.#transport.crypto;
       const nonce = hex(crypto.getRandomValues(new Uint8Array(16))), fingerprint = this.#transport.fingerprint;

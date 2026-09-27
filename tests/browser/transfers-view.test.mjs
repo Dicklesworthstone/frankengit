@@ -6,7 +6,9 @@ import { readFileSync } from 'node:fs';
 import { TransferClient } from '../../crates/fgit-node/src/smart_http/server/browser/transfers.mjs';
 import { mountTransfers, selectedBytes, referenceLabel } from '../../crates/fgit-node/src/smart_http/server/browser/transfers-view.mjs';
 import { BUNDLE_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/transfers-protocol.mjs';
-import { fixture, bundleBytes, crypto, href, token, hex, head, deferred, decodeUpload, json } from './transfers-fixtures.mjs';
+import { fixture, bundleBytes as checksumOnlyBundle, crypto, href, token, hex, head, deferred, decodeUpload, json } from './transfers-fixtures.mjs';
+import { completeBundle } from './transfer-closure-fixtures.mjs';
+import { bundle as encodeBundle } from './bundle-verify-fixtures.mjs';
 const root = '../../crates/fgit-node/src/smart_http/server/browser/';
 const html = readFileSync(new URL(root + 'transfers.html', import.meta.url), 'utf8');
 class Element {
@@ -28,7 +30,7 @@ function dom() {
 const file = (bytes, name = '../../ignored.bundle') => ({ name, size: bytes.length, async arrayBuffer() { return bytes.slice().buffer; } });
 const all = element => [element, ...element.children.flatMap(all)];
 const find = (element, tag, caption = '') => { const found = all(element).find(n => n.tagName === tag && n.textContent.includes(caption)); assert.ok(found, `${tag} ${caption}`); return found; };
-async function harness(algorithm = 'sha1', input = bundleBytes(algorithm)) {
+async function harness(algorithm = 'sha1', input = completeBundle(algorithm, { refCount: 2 }).bytes) {
   const f = fixture(algorithm, input), doc = dom(), downloads = [];
   const client = new TransferClient({ href, cryptoImpl: crypto, fetchImpl: (...args) => f.fetchImpl(...args) });
   const view = mountTransfers(doc, { client, events: doc.events, download: (bytes, name, media) => downloads.push({ bytes, name, media }) });
@@ -53,12 +55,14 @@ for (const algorithm of ['sha1', 'sha256']) {
     await h.get('export-bundle').fire('click'); assert.equal(h.downloads.length, 0);
     assert.equal(h.get('download-bundle').disabled, false); await h.get('download-bundle').fire('click');
     assert.deepEqual(h.downloads[0].bytes, h.f.input); assert.equal(h.downloads[0].name, 'repository.bundle');
+    assert.equal(h.client.exportVerification?.object_closure_verified, true);
     assert.equal(new URLSearchParams(h.f.calls.at(-1).body).get('expected_head'), head);
     assert.equal(h.f.calls.at(-1).headers['idempotency-key'], undefined); assert.match(h.get('export-info').textContent, /objects_verified/);
   });
   test(`${algorithm}: preparation and explicit confirmation precede one atomic mapped fetch`, async () => {
     const h = await harness(algorithm); await h.prepare();
     assert.equal(h.f.calls.length, 1); assert.equal(h.client.pending.operation, 'fetch');
+    assert.equal(h.client.bundleVerification?.object_closure_verified, true);
     const original = h.client.pending; await h.get('send-transfer').fire('click');
     assert.equal(h.f.calls.length, 1); assert.match(h.get('transfer-status').textContent, /Confirm the exact/);
     h.get('confirm-transfer').checked = true; await h.get('send-transfer').fire('click');
@@ -95,7 +99,7 @@ test('duplicate destinations refuse and removing the conflicting mapping permits
   await find(second, 'button', 'Remove').fire('click'); await h.get('stage-fetch').fire('click'); assert.equal(h.client.pending.count, 1);
 });
 test('large advertised sets can use mapped subsets but cannot import more than 64 refs', async () => {
-  const id = 'a'.repeat(40), input = bundleBytes('sha1', '# v2 git bundle\n' + Array.from({ length: 65 }, (_, i) => `${id} refs/heads/r${i}\n`).join('') + '\n');
+  const input = completeBundle('sha1', { refCount: 65 }).bytes;
   const h = await harness('sha1', input); await h.select(); await h.load();
   assert.equal(h.get('stage-import').disabled, true); await h.map(); await h.get('stage-fetch').fire('click'); assert.equal(h.client.pending.count, 1);
 });
@@ -105,8 +109,10 @@ test('mapping count is bounded before creating another editor', async () => {
   assert.equal(h.get('mapping-rows').children.length, 64); assert.match(h.get('transfer-status').textContent, /At most 64/);
 });
 test('source refs, malicious-looking text and direction controls remain inert labels', async () => {
-  const raw = 'refs/heads/<script>\u202e', header = `# v2 git bundle\n${'a'.repeat(40)} ${raw}\n${'a'.repeat(40)} refs/heads/`;
-  const input = bundleBytes('sha1', Buffer.concat([Buffer.from(header), Buffer.from([255]), Buffer.from('\n\n')]));
+  const raw = 'refs/heads/<script>\u202e', graph = completeBundle();
+  const input = new Uint8Array(encodeBundle(graph.records, 'sha1', { refs: [
+    { name: Buffer.from(raw), id: graph.tip }, { name: Buffer.concat([Buffer.from('refs/heads/'), Buffer.from([255])]), id: graph.tip },
+  ] }));
   const h = await harness('sha1', input); await h.select(); await h.load();
   assert.match(h.get('bundle-refs').textContent, /<script>/); assert.match(h.get('bundle-refs').textContent, /\\u\{202e\}/);
   assert.match(h.get('bundle-refs').textContent, /Byte-valued reference/); assert.ok(!all(h.get('bundle-refs')).some(n => n.tagName === 'script'));
@@ -238,4 +244,70 @@ test('static route asset closure contains every imported transfer module and ret
   const parent = readFileSync(new URL(root + '../browser.rs', import.meta.url), 'utf8');
   for (const previous of ['pulls','source_edit','initial','history','branches','search','transfers']) assert.ok(parent.includes(`if ${previous}::serve(`));
   assert.ok(router.includes('profile.allow_source')); assert.ok(router.includes('request.target.contains')); assert.ok(router.includes('request.expect_continue'));
+});
+
+test('browser intake blocks checksum-valid missing objects before preparing or uploading', async () => {
+  const h = await harness('sha1', completeBundle('sha1', { omit: 'blob', refCount: 2 }).bytes);
+  await h.select(); await h.load();
+  assert.equal(h.client.bundle, null); assert.equal(h.client.bundleVerification, null); assert.equal(h.client.pending, null);
+  assert.equal(h.get('stage-import').disabled, true); assert.equal(h.get('stage-fetch').disabled, true);
+  assert.match(h.get('transfer-status').textContent, /missing_reachable_object/); assert.equal(h.f.calls.length, 1);
+  await h.get('stage-import').fire('click'); assert.equal(h.client.pending, null); assert.equal(h.f.calls.length, 1);
+});
+for (const algorithm of ['sha1', 'sha256']) test(`${algorithm}: caller pins are verified locally before browser import can be staged`, async () => {
+  const graph = completeBundle(algorithm, { refCount: 2 }), h = await harness(algorithm, graph.bytes); await h.select();
+  h.get('bundle-sha256').value = h.f.exportHeaders['X-Fgit-Artifact-Sha256'];
+  h.get('bundle-pins').value = graph.rows.map(row => `${row.ref}=${row.object_id}`).join('\n'); h.get('bundle-exact-refs').checked = true;
+  await h.load(); assert.equal(h.client.bundleVerification.caller_expectations_matched, true);
+  assert.equal(h.client.bundleVerification.expectations.ref_set, 'exact'); assert.equal(h.f.calls.length, 1);
+  assert.match(h.get('bundle-info').textContent, /caller_expectations_matched/);
+  await h.get('stage-import').fire('click'); assert.equal(h.client.pending.count, 2); assert.equal(h.f.calls.length, 1);
+});
+test('wrong pin inputs clear a prior verified bundle and cannot silently fall back', async () => {
+  const h = await harness(); await h.select(); await h.load(); assert(h.client.bundleVerification);
+  h.get('bundle-sha256').value = 'f'.repeat(64); await h.get('bundle-sha256').fire('input');
+  assert.equal(h.client.bundle, null); assert.equal(h.client.bundleVerification, null); assert.equal(h.get('bundle-refs').textContent, '');
+  await h.get('load-bundle').fire('click'); assert.equal(h.client.bundle, null); assert.equal(h.client.pending, null);
+  assert.match(h.get('transfer-status').textContent, /expected_artifact_mismatch/); assert.equal(h.f.calls.length, 1);
+  h.get('bundle-sha256').value = ''; await h.get('bundle-sha256').fire('input'); await h.get('load-bundle').fire('click');
+  assert.equal(h.client.bundleVerification.object_closure_verified, true); assert.equal(h.get('stage-import').disabled, false);
+});
+test('malformed pins and multiple file selections refuse before a local file read', async () => {
+  const h = await harness(); await h.select(); let reads = 0;
+  const selected = { size: h.f.input.length, arrayBuffer() { reads++; return Promise.resolve(h.f.input.slice().buffer); } };
+  h.get('bundle-file').files = [selected]; h.get('bundle-pins').value = 'malformed pin';
+  await h.get('load-bundle').fire('click'); assert.equal(reads, 0); assert.equal(h.client.bundle, null);
+  h.get('bundle-pins').value = ''; h.get('bundle-file').files = [selected, selected];
+  await h.get('load-bundle').fire('click'); assert.equal(reads, 0); assert.match(h.get('transfer-status').textContent, /exactly one bundle/);
+});
+test('editing a trust anchor during asynchronous file loading cannot revive an obsolete selection', async () => {
+  const h = await harness(); await h.select(); const gate = deferred();
+  h.get('bundle-file').files = [{ size: h.f.input.length, arrayBuffer() { return gate.promise; } }];
+  const loading = h.get('load-bundle').fire('click');
+  h.get('bundle-sha256').value = 'f'.repeat(64); await h.get('bundle-sha256').fire('input');
+  gate.resolve(h.f.input.slice().buffer); await loading;
+  assert.equal(h.client.bundle, null); assert.equal(h.client.bundleVerification, null); assert.equal(h.get('bundle-refs').textContent, '');
+  assert.equal(h.f.calls.length, 1);
+});
+test('pin edits after preparation do not replace or destroy the exact submitted responsibility', async () => {
+  const h = await harness(); await h.prepare(); const original = h.client.pending;
+  h.get('bundle-sha256').value = 'f'.repeat(64); await h.get('bundle-sha256').fire('input');
+  assert.deepEqual(h.client.pending, original); assert.equal(h.get('confirm-transfer').checked, false);
+  h.get('confirm-transfer').checked = true; await h.get('send-transfer').fire('click');
+  assert.equal(h.client.pending, null); assert.equal(h.f.calls.at(-1).headers['idempotency-key'], original.key);
+});
+test('legacy checksum-only receipts can still be recovered through the new browser without a listing', async () => {
+  const old = await harness('sha1', checksumOnlyBundle()); await old.select();
+  await old.client.load(old.f.input); await old.client.stage('import'); const receipt = old.client.exportReceipt(), key = old.client.pending.key;
+  const h = await harness(); h.get('receipt-file').files = [file(new TextEncoder().encode(receipt))];
+  await h.get('restore-transfer').fire('click'); assert.equal(h.client.pending.key, key);
+  assert.equal(h.client.bundleVerification, null); assert.equal(h.f.calls.length, 0);
+  h.f.config.outcome = 'refused'; await h.get('recover-transfer').fire('click');
+  assert.equal(h.client.pending, null); assert.equal(h.f.calls.length, 1); assert.equal(h.f.calls[0].path, 'outcomes');
+});
+test('disconnect clears private caller anchors as well as loaded bundle data', async () => {
+  const h = await harness(); await h.select();
+  h.get('bundle-sha256').value = 'd'.repeat(64); h.get('bundle-pins').value = 'private refs'; h.get('bundle-exact-refs').checked = true;
+  h.view.disconnect(); assert.equal(h.get('bundle-sha256').value, ''); assert.equal(h.get('bundle-pins').value, '');
+  assert.equal(h.get('bundle-exact-refs').checked, false);
 });
