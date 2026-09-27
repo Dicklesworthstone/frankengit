@@ -24,6 +24,8 @@
       <label>Match mode<select id="search-case"><option value="exact">Exact bytes</option><option value="ascii-insensitive">Ignore ASCII case</option></select></label>
       <button type="submit">Search snapshot</button>
     </form>
+    <button id="cancel-read" type="button" disabled>Cancel read</button>
+    <p class="hint">Files up to 8 MiB can be read completely, verified against their native Git blob ID, and downloaded as inert bytes. Byte-range previews are not full-file verification. No executable permissions or symbolic links are created.</p>
     <div id="status" role="status" aria-live="polite">Enter a read-scoped token to begin.</div>
     <section id="snapshot" aria-label="Selected snapshot"></section>
     <nav id="breadcrumbs" aria-label="Repository path"></nav>

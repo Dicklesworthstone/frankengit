@@ -45,7 +45,7 @@ export function dom() {
   const nodes = new Map();
   const document = { downloads: [], createElement: tag => new Element(tag, document), getElementById: id => nodes.get(id) ?? null };
   document.defaultView = new Element('window', document);
-  for (const id of ['connection', 'token', 'reference', 'format', 'disconnect', 'search', 'needle', 'search-case', 'status', 'snapshot', 'breadcrumbs', 'content', 'paging']) {
+  for (const id of ['connection', 'token', 'reference', 'format', 'disconnect', 'cancel-read', 'search', 'needle', 'search-case', 'status', 'snapshot', 'breadcrumbs', 'content', 'paging']) {
     const node = document.createElement('div'); node.id = id; nodes.set(id, node);
   }
   const get = id => nodes.get(id);

@@ -1,5 +1,6 @@
 // No framework, remote dependencies, HTML interpolation, or persistent credentials.
 export const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+export const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const PAGE_BYTES = 64 * 1024;
 const encoder = new TextEncoder();
 const utf8 = () => new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -113,7 +114,7 @@ export function blobPage(reply, selection, source, path, offset, expected = null
 }
 export async function verifyBlob(bytes, format, expected, cryptoImpl = globalThis.crypto, checkpoint = () => {}) {
   checkpoint();
-  if (!(bytes instanceof Uint8Array) || bytes.length > MAX_RESPONSE_BYTES) throw new Error('Complete file exceeds the 8 MiB browser verification limit.');
+  if (!(bytes instanceof Uint8Array) || bytes.length > MAX_FILE_BYTES) throw new Error('Complete file exceeds the 8 MiB browser verification limit.');
   const id = commitHex(expected, format);
   if (!cryptoImpl?.subtle?.digest) throw new Error('Native blob verification requires WebCrypto.');
   const header = encoder.encode(`blob ${bytes.length}\0`), framed = new Uint8Array(header.length + bytes.length);
@@ -122,6 +123,43 @@ export async function verifyBlob(bytes, format, expected, cryptoImpl = globalThi
   checkpoint();
   if (actual !== id) throw new Error('Native blob identity verification failed. No verified bytes are available.');
   return actual;
+}
+
+
+// Read from offset zero under the already selected source and file identity.
+// Every page shares the caller's operation deadline; there is no retry, source
+// refresh, permission inference, executable materialization or symlink traversal.
+export async function collectVerifiedBlob(selection, source, path, expected, read,
+  { cryptoImpl = globalThis.crypto, checkpoint = () => {}, maxBytes = MAX_FILE_BYTES } = {}) {
+  if (!source || !expected || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_FILE_BYTES) {
+    throw new Error('Complete export requires a pinned source, file identity and bounded byte limit.');
+  }
+  checkedPath(path);
+  const selected = { ...selection }, pinned = { ...source }, identity = { ...expected };
+  if (identity.total !== undefined && safeNumber(identity.total, 'file length') > maxBytes) throw new Error('Complete export exceeds its byte limit.');
+  commitHex(identity.id, selected.format);
+  if (!['file', 'executable', 'symlink'].includes(identity.kind)) throw new Error('Unsupported export entry kind.');
+  let output = null, offset = 0;
+  for (let pages = 1; pages <= Math.max(1, Math.ceil(maxBytes / PAGE_BYTES)); pages++) {
+    checkpoint();
+    const reply = await read({ ...sourceFields(selected, pinned, path), offset: String(offset), limit: String(PAGE_BYTES) });
+    checkpoint();
+    const page = blobPage(reply, selected, pinned, path, offset, identity);
+    if (page.total > maxBytes) throw new Error('Complete export exceeds its byte limit.');
+    if (output === null) {
+      identity.total = page.total;
+      output = new Uint8Array(page.total);
+    }
+    output.set(page.bytes, offset);
+    if (page.next === null) {
+      await verifyBlob(output, selected.format, page.id, cryptoImpl, checkpoint);
+      checkpoint();
+      return { source: pinned, path, id: page.id, kind: page.kind, bytes: output, pages,
+        blobVerified: true, authorityVerified: false };
+    }
+    offset = page.next;
+  }
+  throw new Error('Complete export exceeded its page limit.');
 }
 
 export function sourceFields(selection, snapshot, path = '') {
@@ -220,6 +258,7 @@ export function blobPreview(bytes, offset) {
 
 export function mount(document, location, fetcher = globalThis.fetch, options = {}) {
   const cryptoImpl = options.cryptoImpl ?? globalThis.crypto;
+  const urlApi = options.urlApi ?? globalThis.URL;
   const timeoutMs = options.timeoutMs ?? 30_000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) throw new Error('Invalid read timeout.');
   const byId = id => document.getElementById(id);
@@ -236,14 +275,21 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
   let boundSource = null;
   let controller = null;
   let generation = 0;
-  const clear = () => ['content', 'paging', 'breadcrumbs', 'snapshot'].forEach(id => byId(id).replaceChildren());
+  let downloadUrl = null, verifiedDownload = null;
+  const cancelControl = byId('cancel-read');
+  const clearDownload = () => {
+    if (downloadUrl !== null) { urlApi.revokeObjectURL(downloadUrl); downloadUrl = null; }
+    verifiedDownload = null;
+  };
+  const clear = () => { clearDownload(); ['content', 'paging', 'breadcrumbs', 'snapshot'].forEach(id => byId(id).replaceChildren()); };
   const node = (tag, text = '') => { const element = document.createElement(tag); element.textContent = text; return element; };
-  const button = (text, action) => { const element = node('button', text); element.type = 'button'; element.addEventListener('click', action); return element; };
+  const button = (text, action) => { const view = generation, element = node('button', text); element.type = 'button'; element.addEventListener('click', () => { if (view === generation) action(); }); return element; };
   const status = text => { byId('status').textContent = text; };
   function disconnect() {
     generation += 1;
     controller?.abort(); controller = null;
     token = ''; selection = null; snapshot = null; boundSource = null;
+    if (cancelControl) cancelControl.disabled = true;
     byId('token').value = ''; byId('needle').value = ''; clear(); status('Disconnected. Repository data and token discarded.');
   }
   async function request(operation, fields, signal) {
@@ -274,9 +320,9 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
     if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
       await response.body?.cancel(); throw new Error('Unexpected API content type.');
     }
-    return boundedJson(response, MAX_RESPONSE_BYTES, signal);
+    return boundedJson(response, operation === 'blob' ? 3 * PAGE_BYTES : MAX_RESPONSE_BYTES, signal);
   }
-  async function run(operation, fields, render) {
+  async function runRead(work) {
     if (!token || !selection) { status('Enter a read-scoped token first.'); return; }
     const current = ++generation;
     controller?.abort(); controller = new AbortController();
@@ -290,22 +336,67 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
     };
     const selected = selection;
     const pinned = snapshot;
-    clear(); status('Reading repository snapshot…');
+    clear(); if (cancelControl) cancelControl.disabled = false; status('Reading repository snapshot…');
     try {
-      const reply = await request(operation, fields, active.signal);
+      const accepted = await work(selected, pinned, boundSource, active.signal, checkpoint);
       checkpoint();
-      const observed = snapshotOf(reply, selected, pinned);
-      const binding = sourceBinding(reply, selected, boundSource);
-      await render(reply, binding, checkpoint); // Complete validation before accepting a new snapshot.
-      checkpoint();
-      snapshot = observed; boundSource = binding;
+      snapshot = accepted.snapshot; boundSource = accepted.binding;
       byId('snapshot').textContent = `${selected.reference} · ${selected.format}\nCommit ${snapshot.commit}\nSnapshot ${snapshot.head}`;
-      status('Read complete. All navigation remains pinned to this snapshot.');
+      status(accepted.message ?? 'Read complete. All navigation remains pinned to this snapshot.');
     } catch (error) {
       if (current !== generation || error.name === 'AbortError') return;
       if (error.status === 401) disconnect();
       clear(); status(error.message);
-    } finally { clearTimeout(timer); if (controller === active) controller = null; }
+    } finally {
+      clearTimeout(timer);
+      if (controller === active) { controller = null; if (cancelControl) cancelControl.disabled = true; }
+    }
+  }
+  function run(operation, fields, render) {
+    return runRead(async (selected, pinned, binding, signal, checkpoint) => {
+      const reply = await request(operation, fields, signal);
+      checkpoint();
+      const observed = snapshotOf(reply, selected, pinned), source = sourceBinding(reply, selected, binding);
+      await render(reply, source, checkpoint);
+      return { snapshot: observed, binding: source };
+    });
+  }
+  function cancel() {
+    generation++; controller?.abort(); controller = null;
+    if (cancelControl) cancelControl.disabled = true;
+    clear(); status('Read canceled. No partial export or verified download was retained.');
+  }
+  function exportFile(page) {
+    const version = generation;
+    void runRead(async (selected, pinned, binding, signal, checkpoint) => {
+      if (version + 1 !== generation || !pinned || !binding) throw new Error('Reopen the selected file before exporting.');
+      const verified = await collectVerifiedBlob(selected, page.source, page.path,
+        { id: page.id, kind: page.kind, total: page.total },
+        fields => {
+          checkpoint(); status(`Reading complete file: ${fields.offset} of ${page.total} bytes. No download is available until verification finishes.`);
+          return request('blob', fields, signal);
+        }, { cryptoImpl, checkpoint });
+      checkpoint();
+      const view = generation;
+      const download = button('Download verified file bytes', () => {
+        if (generation !== view || verifiedDownload !== verified || !token) return;
+        try {
+          if (downloadUrl === null) downloadUrl = urlApi.createObjectURL(new Blob([verified.bytes], { type: 'application/octet-stream' }));
+          const anchor = node('a'); anchor.href = downloadUrl;
+          anchor.download = verified.kind === 'symlink' ? 'symlink-target.bin' : 'source.bin';
+          anchor.rel = 'noopener'; byId('content').append(anchor); anchor.click(); anchor.remove();
+        } catch { clearDownload(); status('Cannot create a download for the verified file.'); }
+      });
+      const preview = blobPreview(verified.bytes.subarray(0, PAGE_BYTES), 0);
+      byId('content').append(node('h2', displayBytes(verified.path)),
+        node('p', `Complete native blob verified (${selected.format}): ${verified.id}`),
+        node('p', `${verified.bytes.length} bytes verified across ${verified.pages} read${verified.pages === 1 ? '' : 's'}. The download contains the complete file, not just this preview.`),
+        node('p', 'This verifies blob bytes against the returned Git identity, not an authority signature or a proof that this path belongs to the tree.'),
+        node('pre', preview.text), download);
+      if (verified.kind === 'symlink') byId('content').append(node('p', 'Only symbolic-link target bytes are downloaded; no link is followed or created.'));
+      verifiedDownload = verified;
+      return { snapshot: pinned, binding, message: 'Complete file verified. Download is ready; no repository state was changed.' };
+    });
   }
   function breadcrumbs(path) {
     byId('breadcrumbs').append(button('Repository', () => tree('')));
@@ -369,6 +460,11 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
           : `Unverified byte-range preview. Native blob identity requires the complete file: ${page.id}`));
       if (page.kind === 'symlink') byId('content').append(node('p', 'Symbolic link target bytes only. The server did not follow the link.'));
       byId('content').append(node('pre', preview.text));
+      const version = generation;
+      if (page.total <= MAX_FILE_BYTES) byId('content').append(button('Verify complete file for download', () => {
+        if (version === generation) exportFile(page);
+      }));
+      else byId('content').append(node('p', 'Complete-file download exceeds the 8 MiB browser limit; byte-range previews remain available.'));
       if (offset) byId('paging').append(button('Previous byte range', () => blob(path, Math.max(0, offset - PAGE_BYTES), nextExpected)));
       if (page.next !== null) byId('paging').append(button('Next byte range', () => blob(path, page.next, nextExpected)));
     });
@@ -408,8 +504,20 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
     });
   });
   byId('disconnect').addEventListener('click', disconnect);
+  cancelControl?.addEventListener('click', cancel);
+  for (const id of ['token', 'reference', 'format']) {
+    const invalidateConnection = () => {
+      generation++; controller?.abort(); controller = null;
+      if (id === 'token') token = '';
+      selection = null; snapshot = null; boundSource = null;
+      if (cancelControl) cancelControl.disabled = true;
+      clear(); status('Connection settings changed. Open the reference explicitly before reading.');
+    };
+    byId(id).addEventListener('input', invalidateConnection);
+    byId(id).addEventListener('change', invalidateConnection);
+  }
   // Clear secrets and abort fetches before a page can enter the back-forward cache.
   document.defaultView?.addEventListener('pagehide', disconnect);
-  return { disconnect };
+  return { disconnect, cancel };
 }
 if (typeof document !== 'undefined') mount(document, window.location);
