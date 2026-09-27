@@ -62,5 +62,6 @@ main() {
 # `mkdir -p /artifact-provenance` before any assertion, both directly and
 # under run_all.sh (missing_terminal).
 fge_init artifact-provenance
+fge_kind cargo-test-wrapper
 
 main "$@"

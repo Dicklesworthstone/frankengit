@@ -440,6 +440,7 @@ main() {
 }
 
 fge_init fg044c-merge-evidence
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg044c-merge-evidence-utkg
 fge_context evidence_class E3
 fge_context oracle_pin "${PIN_ID}"

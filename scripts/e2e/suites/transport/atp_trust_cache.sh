@@ -18,6 +18,7 @@ readonly TC_TEST="$TC_REPO/crates/fgit-atp-git/tests/trust_scoped_cache.rs"
 readonly TC_SOURCE="$TC_REPO/crates/fgit-atp-git/src/cache.rs"
 
 fge_init fg075-atp-trust-cache
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg075-atp-trust-cache-5myo
 fge_context crate fgit-atp-git
 fge_context evidence_class bounded_local_cache_policy_campaign

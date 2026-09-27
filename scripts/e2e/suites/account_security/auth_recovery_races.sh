@@ -13,6 +13,7 @@ AR_REPO=$(cd "$AR_DIR/../../../.." && pwd)
 . "$AR_REPO/scripts/e2e/lib.sh"
 
 fge_init fg042c-auth-recovery-races
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg042c-account-security-evidence-9xq9
 fge_context crate fgit-identity
 

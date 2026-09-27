@@ -15,6 +15,7 @@ ORACLE="${SCRIPT_DIR}/../../oracle/oracle.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/fgit-oracle-selftest.XXXXXXXX")"
 
 fge_init oracle-selftest
+fge_kind pinned-oracle
 fge_cleanup_register rm -rf -- "${TEST_ROOT}"
 
 expect_exit() {

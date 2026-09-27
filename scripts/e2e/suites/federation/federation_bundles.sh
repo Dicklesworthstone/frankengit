@@ -33,7 +33,7 @@ main() {
   fge_phase action
   fge_obligation_open "$RUN_OBLIGATION" RunnerSlot
   fge_capture federation-tests \
-    env RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/frankengit-targets/antigravity_rc}" \
+    env RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPOSITORY_ROOT/target}" \
     cargo test --locked -p fgit-forge --test "$TEST_NAME" -- --nocapture || test_exit=$?
   fge_obligation_close "$RUN_OBLIGATION"
   if [[ -n "${FGE_LAST_STDOUT_FILE:-}" && -f "${FGE_LAST_STDOUT_FILE}" ]]; then
@@ -71,4 +71,5 @@ main() {
 }
 
 fge_init fg063-federation-bundles
+fge_kind cargo-test-wrapper
 main

@@ -6,6 +6,7 @@ set -euo pipefail
 . "${FGE_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/lib.sh}"
 
 fge_init
+fge_kind cargo-test-wrapper
 fge_phase setup
 fge_context suite pack-bombs
 seed=$(fge_seed)

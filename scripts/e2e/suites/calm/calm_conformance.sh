@@ -35,6 +35,7 @@ CALM_REPO=$(cd "$CALM_DIR/../../../.." && pwd)
 . "$CALM_REPO/scripts/e2e/lib.sh"
 
 fge_init fg070-calm-conformance
+fge_kind static-check
 fge_context bead frankengit-fg070-calm-conformance-0ttf
 fge_context scope 'docs/CALM_AND_OBLIGATIONS.md registries/calm_operations.tsv crates/fgit-calm'
 

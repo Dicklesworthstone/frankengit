@@ -211,6 +211,7 @@ main() {
 }
 
 fge_init fg092-inflate-bomb-corpus
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg092-inflate-codec-ff3u
 fge_context evidence_class E3
 fge_context oracle_pin "$PIN_ID"

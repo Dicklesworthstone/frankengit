@@ -34,6 +34,7 @@ DA_REPO=$(cd "$DA_DIR/../../../.." && pwd)
 . "$DA_REPO/scripts/e2e/lib.sh"
 
 fge_init fg093a-sqlmodel-dependency-admission
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg093a-sqlmodel-admission-cm7y
 fge_context checker fgit-registry-check
 fge_context subcommand constellation

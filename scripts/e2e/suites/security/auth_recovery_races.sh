@@ -65,4 +65,5 @@ main() {
 }
 
 fge_init fg042c-auth-recovery-races
+fge_kind cargo-test-wrapper
 main

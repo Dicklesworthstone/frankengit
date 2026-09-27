@@ -20,6 +20,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init
+fge_kind cargo-test-wrapper
 
 fge_phase setup
 work=$(fge_tempdir objectstore-authority)

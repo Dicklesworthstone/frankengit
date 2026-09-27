@@ -29,6 +29,7 @@ CD_REPO=$(cd "$CD_DIR/../../../.." && pwd)
 . "$CD_REPO/scripts/e2e/lib.sh"
 
 fge_init fg010b-capsule-drills
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg010b-capsule-drills-doa
 fge_context crate fgit-chronicle
 fge_context harness_seed "$(fge_seed)"

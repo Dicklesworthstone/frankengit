@@ -154,6 +154,7 @@ run_corpus() {
 }
 
 fge_init fg066b-resource-ceilings
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg066b-resource-ceilings-n221
 fge_context evidence_class E1+E4
 fge_context registry scripts/e2e/suites/security/resource_ceilings.tsv

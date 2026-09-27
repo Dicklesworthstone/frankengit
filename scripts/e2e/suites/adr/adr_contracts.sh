@@ -32,6 +32,7 @@ ADR_REPO=$(cd "$ADR_DIR/../../../.." && pwd)
 . "$ADR_REPO/scripts/e2e/lib.sh"
 
 fge_init fg061-adr-contracts
+fge_kind static-check
 fge_context bead frankengit-fg061-adr-sweep-hx4o
 fge_context scope docs/ADR-*.md
 

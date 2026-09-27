@@ -24,8 +24,9 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init fg029b-forge-merge-races
+fge_kind cargo-test-wrapper
 seed=$(fge_seed)
-fg029b_target_dir="${CARGO_TARGET_DIR:-/data/frankengit-targets/fg029b-e2e}"
+fg029b_target_dir="${CARGO_TARGET_DIR:-$E2E_ROOT/../../target}"
 fge_context bead frankengit-fg029b-forge-evidence-bkk
 fge_context evidence_class E1
 fge_context composed_merge_race crates/fgit-admission/tests/forge_merge_races.rs

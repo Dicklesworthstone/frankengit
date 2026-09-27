@@ -21,6 +21,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init ssh-large-transfer
+fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.4
 fge_context crate fgit-ssh
 fge_context openssh_version "$(ssh -V 2>&1 | head -1)"

@@ -14,6 +14,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init fg026b-treefs-path-security
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg026b-treefs-pathsec-37z
 fge_context evidence_class E1+E4
 fge_context corpus crates/fgit-treefs/tests/path_security_adversarial.rs

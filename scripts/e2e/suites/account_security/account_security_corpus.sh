@@ -16,6 +16,7 @@ AS_REPO=$(cd "$AS_DIR/../../../.." && pwd)
 . "$AS_REPO/scripts/e2e/lib.sh"
 
 fge_init fg042c-account-security-corpus
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg042c-account-security-evidence-9xq9
 fge_context crate fgit-identity
 

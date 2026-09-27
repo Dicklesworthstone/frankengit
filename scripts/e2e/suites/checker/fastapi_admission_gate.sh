@@ -28,6 +28,7 @@ FA_REPO=$(cd "$FA_DIR/../../../.." && pwd)
 . "$FA_REPO/scripts/e2e/lib.sh"
 
 fge_init fg048c-fastapi-admission-gate
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg048c-fastapi-admission-hogb
 fge_context checker fgit-registry-check
 fge_context subcommand constellation

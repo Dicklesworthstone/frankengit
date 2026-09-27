@@ -145,6 +145,7 @@ main() {
 }
 
 fge_init fg003c-model-campaign
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg003c-smallstate-campaign-zig
 fge_context evidence_class bounded_model
 fge_context method 'explicit breadth-first state-space enumeration with exact deduplication over the canonical encoding of state'

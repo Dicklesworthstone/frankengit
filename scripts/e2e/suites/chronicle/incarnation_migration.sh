@@ -13,6 +13,7 @@ IM_REPO=$(cd "$IM_DIR/../../../.." && pwd)
 . "$IM_REPO/scripts/e2e/lib.sh"
 
 fge_init fg059-incarnation-migration
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg059-incarnations-migration-v6f
 fge_context crate fgit-chronicle
 fge_context authority_path 'source exact-head freeze -> immutable attested export -> fresh-target root-last activation'

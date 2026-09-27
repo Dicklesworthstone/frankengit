@@ -31,6 +31,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init ssh-git-compat
+fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.4
 fge_context crate fgit-ssh
 fge_context evidence_class e2e_binary_stock_client

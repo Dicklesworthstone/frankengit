@@ -91,5 +91,6 @@ main() {
 }
 
 fge_init fg012b-obligation-quiescence
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg012b-quiescence-oracle-jp5
 main

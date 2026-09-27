@@ -156,5 +156,6 @@ main() {
 }
 
 fge_init fg054-statistical-framework
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg054-statistical-framework-t3l
 main

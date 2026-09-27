@@ -46,6 +46,7 @@ PRF_REPO=$(cd "$PRF_DIR/../../../.." && pwd)
 . "$PRF_REPO/scripts/e2e/lib.sh"
 
 fge_init fg041-proof-lane
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg041c-proof-refinement-wuy
 fge_context scope 'proofs/fg041/check.sh proofs/fg041/OrderedResidue.lean proofs/fg041/FalseVariant.lean'
 

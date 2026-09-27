@@ -18,7 +18,7 @@ REPOSITORY_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd -P)
 # shellcheck source=lib.sh
 . "$REPOSITORY_ROOT/scripts/e2e/lib.sh"
 
-readonly CARGO_TARGET_DIR_DEFAULT="/data/frankengit-targets/antigravity_rc"
+readonly CARGO_TARGET_DIR_DEFAULT="$REPOSITORY_ROOT/target"
 
 main() {
   local target_dir="${CARGO_TARGET_DIR:-$CARGO_TARGET_DIR_DEFAULT}"

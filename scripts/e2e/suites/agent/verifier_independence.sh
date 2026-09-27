@@ -9,7 +9,7 @@ REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
 
 readonly TEST_NAME='ecc_independence'
 readonly RUN_OBLIGATION='fg072-verifier-independence-test-runner'
-readonly CARGO_TARGET_DIR_DEFAULT="/data/frankengit-targets/antigravity_rc"
+readonly CARGO_TARGET_DIR_DEFAULT="$REPOSITORY_ROOT/target"
 
 main() {
   local target_dir="${CARGO_TARGET_DIR:-$CARGO_TARGET_DIR_DEFAULT}"
@@ -57,4 +57,5 @@ main() {
 }
 
 fge_init fg072-verifier-independence
+fge_kind cargo-test-wrapper
 main

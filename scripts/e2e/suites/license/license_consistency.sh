@@ -39,6 +39,7 @@ LIC_REPO=$(cd "$LIC_DIR/../../../.." && pwd)
 . "$LIC_REPO/scripts/e2e/lib.sh"
 
 fge_init fg062-license-consistency
+fge_kind static-check
 fge_context bead frankengit-fg062-license-decision-cr5e
 fge_context scope 'docs/LICENSING_DECISION.md LICENSE README.md CONTRIBUTING.md scripts/license_gate.sh'
 

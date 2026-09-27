@@ -30,6 +30,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init verified-reads-tamper
+fge_kind cargo-test-wrapper
 
 # crate : target : expected case count
 #

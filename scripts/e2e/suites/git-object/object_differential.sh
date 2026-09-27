@@ -106,6 +106,7 @@ run_algorithm() {
 }
 
 fge_init fg015b-object-differential
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg015b-object-differential-nsf
 fge_context evidence_class E3
 fge_context non_claim 'finite pinned corpus; not full Git compatibility'

@@ -20,6 +20,7 @@ RQ_REPO=$(cd "$RQ_DIR/../../../.." && pwd)
 . "$RQ_REPO/scripts/e2e/lib.sh"
 
 fge_init fg024b-raptorq-drill
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg024b-raptorq-campaigns-kp1
 fge_context crate fgit-raptorq
 fge_context harness_seed "$(fge_seed)"

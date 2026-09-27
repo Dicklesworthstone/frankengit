@@ -27,6 +27,7 @@ KL_REPO=$(cd "$KL_DIR/../../../.." && pwd)
 . "$KL_REPO/scripts/e2e/lib.sh"
 
 fge_init fg057-key-lifecycle
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg057-crypto-keys-q04
 fge_context crate fgit-crypto
 fge_context harness_seed "$(fge_seed)"

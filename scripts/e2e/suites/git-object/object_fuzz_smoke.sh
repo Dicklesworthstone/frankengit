@@ -14,7 +14,7 @@ REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd -P)"
 
 readonly ORACLE="${REPOSITORY_ROOT}/scripts/e2e/oracle/oracle.sh"
 readonly PIN_ID='git-2.54.0'
-readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-/data/tmp/frankengit-oracle}"
+readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-${HOME}/.cache/frankengit/git-oracle}"
 readonly CORPUS="${REPOSITORY_ROOT}/crates/fgit-git-object/tests/corpus/adversarial-refusals.tsv"
 
 main() {
@@ -125,6 +125,7 @@ main() {
 }
 
 fge_init fg015c-object-fuzz-smoke
+fge_kind pinned-oracle
 fge_context bead frankengit-fg015c-object-fuzz-4zf
 fge_context oracle_pin "${PIN_ID}"
 fge_context evidence_class E3

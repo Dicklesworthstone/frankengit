@@ -24,6 +24,7 @@ CA_REPO=$(cd "$CA_DIR/../../../.." && pwd)
 . "$CA_REPO/scripts/e2e/lib.sh"
 
 fge_init fg002c-codec-adversarial
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg002c-codec-adversarial-iwe
 fge_context codec fgit-codec
 fge_context verifier fgit-codec-verify

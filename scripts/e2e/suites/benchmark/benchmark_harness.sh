@@ -14,6 +14,7 @@ BH_REPO=$(cd "$BH_DIR/../../../.." && pwd)
 . "$BH_REPO/scripts/e2e/lib.sh"
 
 fge_init fg067-benchmark-harness
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg067-benchmark-harness-fvut
 fge_context crate fgit-benchmark
 fge_context claim_class benchmark_evidence_harness_self_test

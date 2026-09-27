@@ -118,5 +118,6 @@ main() {
 }
 
 fge_init fg054b-statistical-validation
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-un75
 main

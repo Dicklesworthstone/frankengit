@@ -18,13 +18,14 @@ REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
 . "$REPOSITORY_ROOT/scripts/e2e/lib.sh"
 
 fge_init fg095c-workflow-crash-cancel
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg095c-workflow-evidence-6opd
 fge_context suite workflow-crash-cancel
 fge_context evidence_class local_exact
 fge_context non_claim 'Crash, cancellation, and drain evidence verifies process tree reaping, timeout enforcement, state machine invalidation, and quiescence without surviving detached obligations in local execution profiles.'
 
 export RCH_CARGO_WRAPPER_BYPASS=1
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/frankengit-targets/antigravity_rc}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPOSITORY_ROOT/target}"
 
 main() {
   local coord_exit=0 hostile_exit=0 proc_exit=0

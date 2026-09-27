@@ -13,7 +13,7 @@ REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd -P)"
 
 readonly ORACLE="${REPOSITORY_ROOT}/scripts/e2e/oracle/oracle.sh"
 readonly PIN_ID='git-2.54.0'
-readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-/data/tmp/frankengit-oracle}"
+readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-${HOME}/.cache/frankengit/git-oracle}"
 readonly CORPUS_DENOMINATOR=15
 
 RUN_DIRECTORY=''
@@ -85,6 +85,7 @@ write_oracle_receipt() {
 }
 
 fge_init fg018b-shallow-partial-corpus
+fge_kind pinned-oracle
 fge_context bead frankengit-fg018b-shallow-partial-9tl
 fge_context evidence_class E3
 fge_context oracle_pin "${PIN_ID}"

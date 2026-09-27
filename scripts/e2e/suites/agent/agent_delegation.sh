@@ -59,4 +59,5 @@ main() {
 }
 
 fge_init fg074-agent-delegation
+fge_kind cargo-test-wrapper
 main

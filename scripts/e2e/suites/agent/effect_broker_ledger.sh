@@ -50,4 +50,5 @@ main() {
 }
 
 fge_init fg073-effect-broker-ledger
+fge_kind cargo-test-wrapper
 main

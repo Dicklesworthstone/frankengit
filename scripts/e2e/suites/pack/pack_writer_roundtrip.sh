@@ -258,6 +258,7 @@ main() {
 }
 
 fge_init fg017b-pack-writer-roundtrip
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg017b-pack-writer-evidence-evd
 fge_context evidence_class differential
 fge_context method 'FrankenGit PackWriter emits packs; pinned upstream Git indexes them under index-pack --strict inside the Bubblewrap oracle sandbox'

@@ -16,6 +16,7 @@ REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd -P)"
 . "${REPOSITORY_ROOT}/scripts/e2e/lib.sh"
 
 fge_init fg056b-quota-admission-abuse
+fge_kind cargo-test-wrapper
 
 fge_phase setup
 fge_context suite 'fg056b-quota-admission-abuse'

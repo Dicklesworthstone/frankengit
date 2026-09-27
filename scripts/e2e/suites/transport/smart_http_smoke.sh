@@ -14,6 +14,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init smart-http-smoke
+fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.8
 fge_context evidence_class e2e_binary_stock_client
 fge_context git_version "$(git --version)"

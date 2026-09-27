@@ -136,6 +136,7 @@ main() {
 }
 
 fge_init fg033c-recovery-incident-matrix
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg033c-recovery-campaign-q7v
 fge_context evidence_class bounded_fault_and_recovery_campaign
 fge_context harness_seed "$(fge_seed)"

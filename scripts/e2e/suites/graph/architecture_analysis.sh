@@ -11,6 +11,7 @@ AA_REPO=$(cd "$AA_DIR/../../../.." && pwd)
 . "$AA_REPO/scripts/e2e/lib.sh"
 
 fge_init fg081-architecture-analysis
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg081-architecture-analysis-zees
 fge_context crate fgit-graph
 fge_context evidence_class deterministic_known_answer_and_authority_fence

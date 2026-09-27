@@ -46,6 +46,7 @@ if ! [[ "${DOCS_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 fge_init verify-artifact-probe
+fge_kind cargo-test-wrapper
 
 # ---------------------------------------------------------------------------
 # DEFAULT-OFF GATE (frankengit-osqi, GoldLotus disposition option (c)).

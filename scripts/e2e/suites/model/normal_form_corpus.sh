@@ -48,6 +48,7 @@ NF_REPO=$(cd "$NF_DIR/../../../.." && pwd)
 . "$NF_REPO/scripts/e2e/lib.sh"
 
 fge_init fg008b-normal-form-corpus
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg008b-normalform-corpus-fmx
 fge_context crate fgit-txn
 fge_context campaign normal_form_corpus

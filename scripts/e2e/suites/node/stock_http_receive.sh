@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$E2E_ROOT/../.." && pwd)"
 # shellcheck source=../../lib.sh
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 fge_init stock-http-receive
+fge_kind e2e-binary
 fge_phase setup
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 [[ "$TARGET_DIR" = /* ]] || TARGET_DIR="$REPO_ROOT/$TARGET_DIR"

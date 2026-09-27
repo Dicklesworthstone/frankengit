@@ -39,6 +39,7 @@ REPO_ROOT="$(cd "$E2E_ROOT/../../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init first-clone
+fge_kind e2e-binary
 
 TENANT=11111111111111111111111111111111
 REPOID=22222222222222222222222222222222

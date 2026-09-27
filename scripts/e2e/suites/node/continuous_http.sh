@@ -5,6 +5,7 @@ set -euo pipefail
 E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 fge_init continuous-http
+fge_kind e2e-binary
 fge_phase setup
 if [[ -z "${FG_BIN:-}" || ! -x "$FG_BIN" ]]; then
   fge_unsupported FG-HTTP-CONTINUOUS-001 'an explicitly supplied, already-built FG_BIN is required'

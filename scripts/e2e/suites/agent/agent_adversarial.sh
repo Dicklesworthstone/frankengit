@@ -50,4 +50,5 @@ main() {
 }
 
 fge_init fg030c-agent-adversarial
+fge_kind cargo-test-wrapper
 main

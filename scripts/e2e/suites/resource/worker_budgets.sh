@@ -158,6 +158,7 @@ main() {
 }
 
 fge_init fg089-worker-budgets
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg089-worker-budgets-m2f1
 fge_context evidence_class determinism_property
 fge_context denominator 'the Rust suite asserts its own parameter-space denominator (6*5*4*3*3 = 1080 combinations) and asserts both branches fired; this suite asserts the drill count, so a shrinking campaign is visible from the receipt alone'

@@ -35,6 +35,7 @@ DOC_REPO=$(cd "$DOC_DIR/../../../.." && pwd)
 . "$DOC_REPO/scripts/e2e/lib.sh"
 
 fge_init fg027b-doc-equivalence
+fge_kind static-check
 fge_context bead frankengit-fg027b-doc-evidence-vsx
 fge_context crate fgit-doc
 fge_context verifier independent-shell-allowlist

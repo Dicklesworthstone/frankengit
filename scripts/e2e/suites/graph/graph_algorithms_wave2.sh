@@ -11,6 +11,7 @@ GRAPH_REPO=$(cd "$GRAPH_DIR/../../../.." && pwd)
 . "$GRAPH_REPO/scripts/e2e/lib.sh"
 
 fge_init fg082-graph-algorithms-wave2
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg082-graph-algorithms-wave2-nuft
 fge_context crate fgit-graph
 fge_context campaign wave_two_public_scalar_parity

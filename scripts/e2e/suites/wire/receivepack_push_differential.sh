@@ -34,7 +34,7 @@ REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
 . "$REPOSITORY_ROOT/scripts/e2e/lib.sh"
 
 readonly ORACLE="${REPOSITORY_ROOT}/scripts/e2e/oracle/oracle.sh"
-readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-/data/tmp/frankengit-oracle}"
+readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-${HOME}/.cache/frankengit/git-oracle}"
 readonly PIN_ID='git-2.54.0'
 readonly CORPUS_ENV='FGIT_PUSH_DIFF_CORPUS_DIR'
 readonly OUTPUT_ENV='FGIT_PUSH_DIFF_OUTPUT_DIR'
@@ -274,6 +274,7 @@ main() {
 }
 
 fge_init fg019c-receivepack-push-differential
+fge_kind pinned-oracle
 fge_context bead frankengit-fg019c-receivepack-adversarial-sht
 fge_context evidence_class differential
 fge_context oracle_pin "${PIN_ID}"

@@ -29,6 +29,7 @@ SC_REPO=$(cd "$SC_DIR/../../../.." && pwd)
 . "$SC_REPO/scripts/e2e/lib.sh"
 
 fge_init fg048a-schema-codegen
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg048a-schema-codegen-ske
 fge_context crate fgit-schema
 fge_context generator fgit-schema-gen

@@ -45,6 +45,7 @@ readonly PIN_ID="${FGIT_TREEFS_ORACLE_PIN:-git-2.54.0}"
 readonly CORPUS_SCHEMA="frankengit.treefs-export-corpus.v1"
 
 fge_init
+fge_kind cargo-test-wrapper
 
 fge_phase setup
 fge_context bead frankengit-fg026d-treefs-export-evidence-5hsh

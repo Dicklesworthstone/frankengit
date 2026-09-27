@@ -189,6 +189,7 @@ main() {
 }
 
 fge_init fg019c-receivepack-adversarial
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg019c-receivepack-adversarial-sht
 fge_context evidence_class adversarial
 fge_context method 'independent adversary over ProudJaguar receive-pack (fgit-wire) and admission (fgit-admission); every probe drives the public API and no source of theirs is modified'

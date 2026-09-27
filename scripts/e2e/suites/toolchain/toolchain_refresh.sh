@@ -37,6 +37,7 @@ TC_REPO=$(cd "$TC_DIR/../../../.." && pwd)
 . "$TC_REPO/scripts/e2e/lib.sh"
 
 fge_init fg068-toolchain-refresh
+fge_kind static-check
 fge_context bead frankengit-fg068-toolchain-refresh-x5y3
 fge_context scope 'scripts/toolchain_refresh.sh rust-toolchain.toml'
 

@@ -105,6 +105,7 @@ main() {
 }
 
 fge_init fg039b-exchange-adversarial
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg039b-exchange-adversarial-jlp
 fge_context evidence_class adversarial
 main

@@ -19,6 +19,7 @@ DSR_REPO=$(cd "$DSR_DIR/../../../.." && pwd)
 . "$DSR_REPO/scripts/e2e/lib.sh"
 
 fge_init fg035b-dsr-release-contract
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg035b-dsr-evidence-c6l
 fge_context crate fgit-release
 fge_context campaign asset_contract_resume_and_manifest_withholding

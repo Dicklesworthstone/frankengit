@@ -19,6 +19,7 @@ REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd -P)"
 . "${REPOSITORY_ROOT}/scripts/e2e/lib.sh"
 
 fge_init fg056-quota-admission
+fge_kind cargo-test-wrapper
 
 run_drill() {
   local id="$1" package="$2" filter="$3" claim="$4"

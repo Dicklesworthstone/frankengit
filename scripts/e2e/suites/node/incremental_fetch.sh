@@ -14,6 +14,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 . "${FGE_LIB:-${E2E_ROOT}/lib.sh}"
 
 fge_init node-incremental-fetch
+fge_kind e2e-binary
 
 readonly TENANT=11111111111111111111111111111111
 readonly REPOSITORY=22222222222222222222222222222222

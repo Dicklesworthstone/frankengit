@@ -25,6 +25,7 @@ MS_REPO=$(cd "$MS_DIR/../../../.." && pwd)
 . "$MS_REPO/scripts/e2e/lib.sh"
 
 fge_init fg036c-multicell-slo
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg036c-slo-economics-v6n
 fge_context crate fgit-slo
 fge_context claim_class benchmark

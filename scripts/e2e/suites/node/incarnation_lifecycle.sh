@@ -9,6 +9,7 @@ IL_REPO=$(cd "$IL_DIR/../../../.." && pwd)
 . "$IL_REPO/scripts/e2e/lib.sh"
 
 fge_init fg059-incarnation-lifecycle
+fge_kind e2e-binary
 fge_context bead frankengit-fg059-incarnations-migration-v6f
 fge_context crate fgit-cli
 fge_context non_claim 'This one-process lane proves creation-attempt recovery and stale cache refusal only. Rename, transfer, routing flip, and cross-deployment cutover remain blocked on frankengit-b5ph.'

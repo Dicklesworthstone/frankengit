@@ -29,6 +29,7 @@ ATP_REPO=$(cd "$ATP_DIR/../../../.." && pwd)
 . "$ATP_REPO/scripts/e2e/lib.sh"
 
 fge_init fg022b-atp-delta-campaign
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg022b-atp-delta-evidence-a4z
 fge_context crate fgit-atp-git
 

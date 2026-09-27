@@ -9,6 +9,7 @@ CG_REPO=$(cd "$CG_DIR/../../../.." && pwd)
 . "$CG_REPO/scripts/e2e/lib.sh"
 
 fge_init fg001c-crate-graph-constitution
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg001c-checker-crate-graph-vvr
 fge_context checker fgit-registry-check
 fge_phase setup

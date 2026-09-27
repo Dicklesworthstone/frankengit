@@ -91,5 +91,6 @@ main() {
 }
 
 fge_init fg025b-witness-refinement
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg025b-witness-evidence-zm8
 main

@@ -59,6 +59,7 @@ main() {
 }
 
 fge_init
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg034b-ci-corpus-kzi
 fge_context evidence_class adversarial_public_surface_corpus
 fge_context non_claim 'This corpus does not execute an operating-system sandbox or attest a concrete Linux namespace/cgroup provider; it verifies the typed runner control plane and its ContainmentSubstrate contract only.'

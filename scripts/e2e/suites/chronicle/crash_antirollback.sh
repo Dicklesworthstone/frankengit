@@ -17,6 +17,7 @@ CR_REPO=$(cd "$CR_DIR/../../../.." && pwd)
 . "$CR_REPO/scripts/e2e/lib.sh"
 
 fge_init fg009b-crash-antirollback
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg009b-crash-antirollback-6zy
 fge_context crate fgit-chronicle
 fge_context campaign crash_matrix_publication

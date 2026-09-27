@@ -9,6 +9,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init browser-client-fetch
+fge_kind real-browser
 fge_context bead frankengit-root-doctrine-x2mv.4.45
 fge_context evidence_class e2e_binary_real_browser
 fge_context non_claim 'One read per client class on its own page (issues, pulls, history) in one Chrome build; not a UI flow test of every page (x2mv.4.46).'

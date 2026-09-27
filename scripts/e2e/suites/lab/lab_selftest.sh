@@ -191,6 +191,7 @@ main() {
 }
 
 fge_init fg013c-lab-selftest
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg013c-coverage-crashpacks-vdj
 fge_context evidence_class deterministic_lab
 # Stated in the receipt too, but repeated here so a reader of the suite record

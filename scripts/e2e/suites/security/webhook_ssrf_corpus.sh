@@ -18,7 +18,8 @@ REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
 # shellcheck source=../../lib.sh
 . "$REPOSITORY_ROOT/scripts/e2e/lib.sh"
 
-readonly DEFAULT_TARGET_DIR="/data/frankengit-targets/antigravity_rc"
+# The worktree's own target directory, never another pane's (AGENTS.md 16.2).
+readonly DEFAULT_TARGET_DIR="$REPOSITORY_ROOT/target"
 
 main() {
   local target_dir="${CARGO_TARGET_DIR:-$DEFAULT_TARGET_DIR}"
@@ -44,10 +45,14 @@ main() {
   local secret_v1="0123456789abcdef0123456789abcdef"
   local secret_v2="fedcba9876543210fedcba9876543210"
 
-  # Ensure fg CLI binary is built with current workspace crates
-  fge_run_ok fg-build env CARGO_TARGET_DIR="$target_dir" RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo build --locked -p fgit-cli --bin fg
-  local fg_bin="$target_dir/debug/fg"
+  # A prebuilt fg from the lane (FG_BIN) is used as given; otherwise build
+  # one from the current workspace crates.
+  local fg_bin="${FG_BIN:-}"
+  if [[ -z "$fg_bin" ]]; then
+    fge_run_ok fg-build env CARGO_TARGET_DIR="$target_dir" RCH_CARGO_WRAPPER_BYPASS=1 \
+      cargo build --locked -p fgit-cli --bin fg
+    fg_bin="$target_dir/debug/fg"
+  fi
 
   fge_phase action
 
@@ -371,6 +376,7 @@ main() {
 }
 
 fge_init webhook_ssrf_corpus
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg046b-webhook-ssrf-rdro
 fge_context suite webhook-ssrf-corpus
 fge_context evidence_class local_exact

@@ -28,6 +28,7 @@ CP_VECTORS="$CP_REPO/crates/fgit-raptorq/goldens/checkpoint_vectors.tsv"
 CP_ORACLE="$CP_REPO/crates/fgit-raptorq/goldens/checkpoint_identity.py"
 
 fge_init fg077a-checkpoint-profile
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg077a-raptorq-microsegment-checkpoint-ko1i
 fge_context profile checkpoint_segment_v1
 fge_context durable_classes 'DUR-012 forge_event_checkpoint_segment; DUR-014 policy_key_format_checkpoint'

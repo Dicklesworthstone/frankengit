@@ -38,6 +38,7 @@ FT_REPO=$(cd "$FT_DIR/../../../.." && pwd)
 . "$FT_REPO/scripts/e2e/lib.sh"
 
 fge_init fg094a-ftui-dependency-admission
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg094a-ftui-admission-xxnu
 fge_context checker fgit-registry-check
 fge_context subcommand constellation

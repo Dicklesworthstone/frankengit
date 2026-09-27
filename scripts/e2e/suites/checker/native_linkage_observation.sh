@@ -6,6 +6,7 @@ set -euo pipefail
 E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 . "$E2E_ROOT/lib.sh"
 fge_init native-linkage-observation
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-audit-native-linkage-l0xt
 fge_context non_claim 'cached build-script inspection is not a current release attestation'
 

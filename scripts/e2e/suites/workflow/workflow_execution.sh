@@ -18,13 +18,14 @@ REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
 . "$REPOSITORY_ROOT/scripts/e2e/lib.sh"
 
 fge_init fg095c-workflow-execution
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg095c-workflow-evidence-6opd
 fge_context suite workflow-execution
 fge_context evidence_class local_exact
 fge_context non_claim 'Execution evidence verifies hermetic containment, secret redaction, fork attenuation, and step order in local container/process profiles without external cloud dependencies.'
 
 export RCH_CARGO_WRAPPER_BYPASS=1
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/frankengit-targets/antigravity_rc}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPOSITORY_ROOT/target}"
 
 main() {
   local exec_exit=0 hostile_exit=0 conditions_exit=0 reuse_exit=0

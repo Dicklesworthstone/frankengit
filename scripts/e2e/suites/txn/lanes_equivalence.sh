@@ -25,6 +25,7 @@ LE_REPO=$(cd "$LE_DIR/../../../.." && pwd)
 . "$LE_REPO/scripts/e2e/lib.sh"
 
 fge_init fg014b-lanes-equivalence
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg014b-lanes-evidence-j1n
 fge_context crate fgit-txn
 fge_context harness_seed "$(fge_seed)"

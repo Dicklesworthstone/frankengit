@@ -116,6 +116,7 @@ main() {
 }
 
 fge_init fg021b-fabric-faults
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg021b-fabric-faults-c8p
 fge_context evidence_class fault_injection
 fge_context adversary 'written by a different agent than the fabric under test; public surface only, no src edits'

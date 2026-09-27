@@ -11,6 +11,7 @@ readonly TG_TEST="$TG_REPO/crates/fgit-graph/tests/temporal_graph.rs"
 readonly TG_SUITE='suites-graph-temporal_graph'
 
 fge_init fg080-temporal-graph
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg080-temporal-graph-3m8i
 fge_context crate fgit-graph
 fge_context non_claim 'bounded temporal-query conformance only; no durable authority-store or performance claim'

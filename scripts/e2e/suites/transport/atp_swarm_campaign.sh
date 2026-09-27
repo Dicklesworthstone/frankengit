@@ -25,6 +25,7 @@ readonly ATP_TESTS="$ATP_REPO/crates/fgit-atp-git/tests"
 readonly ATP_SOURCE="$ATP_REPO/crates/fgit-atp-git/src"
 
 fge_init fg023b-atp-swarm-campaign
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg023b-atp-paths-evidence-t3h
 fge_context crate fgit-atp-git
 fge_context evidence_class bounded_logical_trace_campaign

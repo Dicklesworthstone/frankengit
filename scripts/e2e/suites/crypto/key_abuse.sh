@@ -65,6 +65,7 @@ main() {
 }
 
 fge_init fg057b-crypto-key-abuse
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg057b-crypto-keyabuse-mh89
 fge_context harness_seed "$(fge_seed)"
 main

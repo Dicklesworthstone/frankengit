@@ -8,6 +8,7 @@ RD_REPO=$(cd "$RD_DIR/../../../.." && pwd)
 . "$RD_REPO/scripts/e2e/lib.sh"
 
 fge_init fg059-repository-deletion-states
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg059-incarnations-migration-v6f
 fge_context crate fgit-repair
 fge_context state_model 'hidden -> tombstoned grace -> physical deletion authorized -> deleted from hot placements -> recovery material expired -> cryptographically erased'

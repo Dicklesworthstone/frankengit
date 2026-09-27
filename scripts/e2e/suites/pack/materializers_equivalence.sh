@@ -16,6 +16,7 @@ readonly PACK_ROOT="$E2E_ROOT/../../crates/fgit-pack"
 readonly TREEFS_ROOT="$E2E_ROOT/../../crates/fgit-treefs"
 
 fge_init fg052-materializers-equivalence
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg052-materializers-gy4
 fge_context evidence_class E1
 fge_context materializers 'commit-graph-v1,pack-bitmap-v1,midx-v1,bundle-uri-v1,ustar-v1,zip-store-v1,sparse-manifest-v1'

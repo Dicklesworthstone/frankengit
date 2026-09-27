@@ -12,6 +12,7 @@ GRAPH_REPO=$(cd "$GRAPH_DIR/../../../.." && pwd)
 . "$GRAPH_REPO/scripts/e2e/lib.sh"
 
 fge_init fg031b-graph-fabric-campaign
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg031b-graph-evidence-ndf
 fge_context crate fgit-graph
 fge_context campaign deterministic_public_graph_surface

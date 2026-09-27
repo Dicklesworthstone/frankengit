@@ -10,6 +10,7 @@ CP_REPO=$(cd "$CP_DIR/../../../.." && pwd)
 . "$CP_REPO/scripts/e2e/lib.sh"
 
 fge_init fg055-claims-pipeline
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg055-claims-evidence-eu7
 fge_context checker fgit-registry-check
 fge_context claim_invariant INV-017

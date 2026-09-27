@@ -15,9 +15,10 @@ REPO_ROOT="$(cd "${E2E_ROOT}/../.." && pwd -P)"
 
 readonly ORACLE="${REPO_ROOT}/scripts/e2e/oracle/oracle.sh"
 readonly ORACLE_PIN='git-2.54.0'
-readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-/data/tmp/frankengit-oracle}"
+readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-${HOME}/.cache/frankengit/git-oracle}"
 
 fge_init fg097-tag-lifecycle
+fge_kind e2e-binary
 fge_context bead frankengit-fg097-tags-wsi1
 fge_context evidence_class E3
 fge_context oracle_pin "${ORACLE_PIN}"

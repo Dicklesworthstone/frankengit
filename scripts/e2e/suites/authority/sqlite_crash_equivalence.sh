@@ -22,6 +22,7 @@ SQ_REPO=$(cd "$SQ_DIR/../../../.." && pwd)
 . "$SQ_REPO/scripts/e2e/lib.sh"
 
 fge_init fg005b-sqlite-crash-equivalence
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg005b-sqlite-crash-equiv-gda
 fge_context crate fgit-authority-fsqlite
 fge_context campaign crash_equivalence

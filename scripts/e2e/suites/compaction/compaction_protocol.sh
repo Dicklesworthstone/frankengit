@@ -15,6 +15,7 @@ CP_REPO=$(cd "$CP_DIR/../../../.." && pwd)
 readonly CP_TEST="$CP_REPO/crates/fgit-compaction/tests/compaction_protocol.rs"
 
 fge_init fg079-compaction-protocol
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg079-compaction-protocol-8v5g
 fge_context crate fgit-compaction
 fge_context authority_path ordinary_decision_batch_and_authority_head_cas

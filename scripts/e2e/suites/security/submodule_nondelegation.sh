@@ -15,7 +15,7 @@ REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd -P)"
 
 readonly ORACLE="${REPOSITORY_ROOT}/scripts/e2e/oracle/oracle.sh"
 readonly PIN_ID='git-2.54.0'
-readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-/data/tmp/frankengit-oracle}"
+readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-${HOME}/.cache/frankengit/git-oracle}"
 readonly CORPUS_SEED="${FGIT_SUBMODULE_NONDELEGATION_SEED:-85085}"
 
 RUN_DIRECTORY=''
@@ -77,6 +77,7 @@ prepare_oracle_repositories() {
 
 export FGE_SEED="${CORPUS_SEED}"
 fge_init fg085b-submodule-nondelegation
+fge_kind pinned-oracle
 fge_context bead frankengit-fg085b-submodule-nondelegation-s87u
 fge_context evidence_class 'E1 differential oracle + E3 pure-Rust negative control'
 fge_context oracle_pin "${PIN_ID}"

@@ -42,6 +42,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init multicell-faults
+fge_kind cargo-test-wrapper
 
 # The campaign's own env knob, so a failure here replays exactly by exporting the
 # same value to `cargo test` by hand. Overridable; logged either way.

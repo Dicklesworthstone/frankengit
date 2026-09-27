@@ -26,6 +26,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPOSITORY_ROOT="$(cd "$E2E_ROOT/../.." && pwd -P)"
 
 fge_init
+fge_kind cargo-test-wrapper
 
 fge_phase setup
 work=$(fge_tempdir crash-matrix)

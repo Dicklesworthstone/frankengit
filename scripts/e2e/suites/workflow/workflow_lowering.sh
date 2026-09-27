@@ -20,13 +20,14 @@ WF_REPO="$(cd "$WF_DIR/../../../.." && pwd -P)"
 . "$WF_REPO/scripts/e2e/lib.sh"
 
 fge_init fg095c-workflow-lowering
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg095c-workflow-evidence-6opd
 fge_context crate fgit-schema
 fge_context command fgit-workflow
 fge_context suite workflow-lowering
 
 export RCH_CARGO_WRAPPER_BYPASS=1
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/frankengit-targets/antigravity_rc}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$WF_REPO/target}"
 
 readonly WF_GOLDENS="$WF_REPO/crates/fgit-schema/tests/workflow-goldens"
 readonly WF_SOURCE="$WF_GOLDENS/ci.workflow.yml"

@@ -15,6 +15,7 @@ REPO_ROOT="$(cd "$E2E_ROOT/.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init fg047b-ssh-transport-security
+fge_kind e2e-binary
 fge_context bead frankengit-fg047b-ssh-security-m9rr
 fge_context crate fgit-ssh
 fge_context openssh_version "$(ssh -V 2>&1 | head -1)"

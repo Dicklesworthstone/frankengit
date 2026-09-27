@@ -16,6 +16,7 @@ POLICY_REPO=$(cd "$POLICY_DIR/../../../.." && pwd)
 . "$POLICY_REPO/scripts/e2e/lib.sh"
 
 fge_init fg043-policy-eval
+fge_kind static-check
 fge_context bead frankengit-fg043a-policy-impl-b5n
 fge_context crate fgit-policy
 fge_context campaign policy_eval

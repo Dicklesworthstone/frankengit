@@ -39,6 +39,7 @@ REPO_ROOT="$(cd "$E2E_ROOT/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init
+fge_kind static-check
 
 fge_phase setup
 fge_context bead frankengit-fg069-procmacro-audit-0gse

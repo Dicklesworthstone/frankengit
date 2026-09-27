@@ -5,6 +5,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=../../lib.sh
 . "$E2E_ROOT/lib.sh"
 fge_init pull-request-reopen
+fge_kind e2e-binary
 fge_phase setup
 [ -n "${FG_BIN:-}" ] || fge_die 'FG_BIN must select an already-built fg'
 [ -x "$FG_BIN" ] || fge_die 'FG_BIN is not executable'

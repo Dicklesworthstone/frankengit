@@ -14,6 +14,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=../../lib.sh
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 fge_init import-recovery
+fge_kind e2e-binary
 fge_context bead frankengit-root-doctrine-x2mv.4.28
 fge_context evidence_class e2e_binary_local_import
 fge_context non_claim 'No crash injection, large-import performance, general Git compatibility or completed durability profile claim.'

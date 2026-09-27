@@ -68,4 +68,5 @@ main() {
 }
 
 fge_init fg042c-account-security-corpus
+fge_kind cargo-test-wrapper
 main

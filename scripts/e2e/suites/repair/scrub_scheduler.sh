@@ -62,6 +62,7 @@ main() {
 }
 
 fge_init fg078-scrub-scheduler
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg078-scrub-scheduler-k57b
 fge_context crate fgit-repair
 fge_context durable_class DUR-016

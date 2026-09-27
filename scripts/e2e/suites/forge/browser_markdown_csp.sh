@@ -9,6 +9,7 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init browser-markdown-csp
+fge_kind real-browser
 fge_context bead frankengit-root-doctrine-x2mv.4.11
 fge_context evidence_class e2e_binary_real_browser
 fge_context non_claim 'One issue body on the issues page in one Chrome build on Linux; not PR, comment or review rendering, not other browsers, and not a sanitizer proof.'

@@ -13,7 +13,8 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init fg046-webhook-delivery
-fg_target_dir="${CARGO_TARGET_DIR:-/data/frankengit-targets/antigravity_rc}"
+fge_kind e2e-binary
+fg_target_dir="${CARGO_TARGET_DIR:-$E2E_ROOT/../../target}"
 fge_context bead frankengit-fg046-webhooks-qs6
 fge_context evidence_class E1
 fge_context forge_unit_tests crates/fgit-forge/src/webhook/tests.rs

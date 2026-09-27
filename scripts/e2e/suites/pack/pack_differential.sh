@@ -329,6 +329,7 @@ run_large_offset_case() {
 }
 
 fge_init fg016c-pack-differential
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg016c-pack-differential-md7
 fge_context evidence_class E3
 fge_context non_claim 'finite pinned corpus; not full Git compatibility'

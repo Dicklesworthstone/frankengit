@@ -8,6 +8,7 @@ CA_REPO=$(cd "$CA_DIR/../../../.." && pwd)
 . "$CA_REPO/scripts/e2e/lib.sh"
 
 fge_init fg059-creation-attempt-faults
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg059-incarnations-migration-v6f
 fge_context crate fgit-authority
 fge_context fault_matrix 'put lost response after effect; crash after effect then restart; lost request before effect'

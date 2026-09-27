@@ -200,6 +200,7 @@ main() {
 }
 
 fge_init fg017b-pack-writer-benchmark
+fge_kind cargo-test-wrapper
 fge_context bead frankengit-fg017b-pack-writer-evidence-evd
 fge_context evidence_class benchmark
 fge_context hypothesis 'STORED_V1 emits stored DEFLATE blocks, so FrankenGit packs are predicted to be LARGER than git pack-objects, with the gap tracking corpus compressibility'
