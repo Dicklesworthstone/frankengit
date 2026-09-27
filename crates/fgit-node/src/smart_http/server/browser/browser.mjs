@@ -53,6 +53,9 @@ export function snapshotOf(reply, selection, previous = null) {
     throw new Error('Unsupported source response or snapshot.');
   }
   const selected = { head: reply.snapshot_token, commit: commitHex(reply.source_commit, selection.format) };
+  if (selection.expectedCommit !== undefined && selected.commit !== commitHex(selection.expectedCommit, selection.format)) {
+    throw new Error('Source commit differs from the caller-supplied commit pin.');
+  }
   if (previous && (previous.head !== selected.head || previous.commit !== selected.commit)) {
     throw new Error('Snapshot changed. Reopen the reference rather than combining pages.');
   }
@@ -348,7 +351,14 @@ export function sourceFields(selection, snapshot, path = '') {
     throw new Error('Choose a full reference and an object format.');
   }
   const fields = { ref: selection.reference, object_format: selection.format };
-  if (snapshot) Object.assign(fields, { expected_head: snapshot.head, expected_commit: snapshot.commit });
+  if (selection.expectedCommit !== undefined) {
+    const expected = commitHex(selection.expectedCommit, selection.format);
+    if (snapshot && commitHex(snapshot.commit, selection.format) !== expected) {
+      throw new Error('Snapshot cannot override the caller-supplied commit pin.');
+    }
+    fields.expected_commit = expected;
+  }
+  if (snapshot) Object.assign(fields, { expected_head: snapshot.head, expected_commit: commitHex(snapshot.commit, selection.format) });
   if (path) { unhex(path, 4096); fields.path_hex = path; }
   return fields;
 }
@@ -471,6 +481,7 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
     controller?.abort(); controller = null;
     token = ''; selection = null; snapshot = null; boundSource = null;
     if (cancelControl) cancelControl.disabled = true;
+    if (byId('expected-commit')) byId('expected-commit').value = '';
     byId('token').value = ''; byId('needle').value = ''; clear(); status('Disconnected. Repository data and token discarded.');
   }
   async function request(operation, fields, signal) {
@@ -522,7 +533,7 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
       const accepted = await work(selected, pinned, boundSource, active.signal, checkpoint);
       checkpoint();
       snapshot = accepted.snapshot; boundSource = accepted.binding;
-      byId('snapshot').textContent = `${selected.reference} · ${selected.format}\nCommit ${snapshot.commit}\nSnapshot ${snapshot.head}`;
+      byId('snapshot').textContent = `${selected.reference} · ${selected.format}\nCommit ${snapshot.commit}\nSnapshot ${snapshot.head}${selected.expectedCommit !== undefined ? `\nCaller-supplied commit pin: ${selected.expectedCommit}` : '\nCommit selected by the server.'}`;
       status(accepted.message ?? 'Read complete. All navigation remains pinned to this snapshot.');
     } catch (error) {
       if (current !== generation || error.name === 'AbortError') return;
@@ -584,7 +595,7 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
         node('p', commitProof ? 'Native commit bytes, its root tree, every containing directory and the complete file were verified. Authority signatures and author identity were not verified.' : proof ? 'Both blob bytes and path inclusion in the selected native root tree were verified. This is not an authority signature or verification of the source commit.' : 'This verifies blob bytes against the returned Git identity, not an authority signature or a proof that this path belongs to the tree.'),
         node('pre', preview.text), download);
       if (proof) byId('content').append(node('p', `Path inclusion verified against native root tree ${proof.rootTree}: ${proof.directories} directories, ${proof.pages} pages, ${proof.entries} entries, ${proof.bytes} encoded tree bytes. ${commitProof ? 'The root-to-commit association was verified; authority remains a server claim.' : 'The root-to-commit association and authority remain server claims.'}`));
-      if (commitProof) byId('content').append(node('p', `Commit-to-file chain verified from ${commitProof.commit} (${commitProof.commitBytes} original commit bytes). The commit was selected by the server; this is not independent authentication of a branch tip.`));
+      if (commitProof) byId('content').append(node('p', `Commit-to-file chain verified from ${commitProof.commit} (${commitProof.commitBytes} original commit bytes). ${selected.expectedCommit !== undefined ? 'This matches your caller-supplied commit pin. Authority signatures, branch freshness and author identity are not independently verified.' : 'The commit was selected by the server; this is not independent authentication of a branch tip.'}`));
       if (verified.kind === 'symlink') byId('content').append(node('p', 'Only symbolic-link target bytes are downloaded; no link is followed or created.'));
       verifiedDownload = verified;
       return { snapshot: pinned, binding, message: 'Complete file verified. Download is ready; no repository state was changed.' };
@@ -674,7 +685,11 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
     const nextToken = supplied || token;
     if (!/^[0-9a-f]{64}$/.test(nextToken)) { disconnect(); status('Enter the provisioned 64-character lowercase hexadecimal token.'); return; }
     const candidate = { reference: byId('reference').value, format: byId('format').value };
-    try { sourceFields(candidate, null); } catch (error) { status(error.message); return; }
+    try {
+      const pin = byId('expected-commit')?.value ?? '';
+      if (pin !== '') candidate.expectedCommit = commitHex(pin, candidate.format);
+      sourceFields(candidate, null);
+    } catch (error) { status(error.message); return; }
     generation += 1; controller?.abort(); snapshot = null; boundSource = null; selection = candidate; token = nextToken;
     tree('');
   });
@@ -703,7 +718,7 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
   });
   byId('disconnect').addEventListener('click', disconnect);
   cancelControl?.addEventListener('click', cancel);
-  for (const id of ['token', 'reference', 'format']) {
+  for (const id of ['token', 'reference', 'format', 'expected-commit']) {
     const invalidateConnection = () => {
       generation++; controller?.abort(); controller = null;
       if (id === 'token') token = '';
@@ -711,8 +726,10 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
       if (cancelControl) cancelControl.disabled = true;
       clear(); status('Connection settings changed. Open the reference explicitly before reading.');
     };
-    byId(id).addEventListener('input', invalidateConnection);
-    byId(id).addEventListener('change', invalidateConnection);
+    const control = byId(id);
+    if (id === 'expected-commit' && !control) continue;
+    control.addEventListener('input', invalidateConnection);
+    control.addEventListener('change', invalidateConnection);
   }
   // Clear secrets and abort fetches before a page can enter the back-forward cache.
   document.defaultView?.addEventListener('pagehide', disconnect);

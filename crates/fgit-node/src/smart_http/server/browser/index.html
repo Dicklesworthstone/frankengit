@@ -16,9 +16,11 @@
       <label>Access token<input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Repository read token"></label>
       <label>Reference<input id="reference" value="refs/heads/main" autocomplete="off" spellcheck="false" required maxlength="4096"></label>
       <label>Object format<select id="format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
+      <label>Expected commit (optional, obtained independently)<input id="expected-commit" autocomplete="off" spellcheck="false" maxlength="71" placeholder="Full lowercase SHA-1 or SHA-256 commit ID" aria-describedby="commit-pin-help"></label>
       <button type="submit">Open reference</button><button id="disconnect" type="button">Disconnect</button>
     </form>
     <p class="hint">The token stays in this page’s memory only. Disconnect or close the page to discard it. Use HTTPS outside a trusted loopback connection.</p>
+    <p id="commit-pin-help" class="hint">A supplied commit pin must match the current reference and is checked locally on every response, including the first. It is never replaced by a server-selected commit or silently cleared on failure. Use commit-chain verification to bind a downloaded file to that commit. This is not a historical-object lookup or independent verification of branch freshness, authors, or authority signatures. Disconnect clears the pin.</p>
     <form id="search" role="search">
       <label>Literal source search<input id="needle" type="search" autocomplete="off" required placeholder="Text to find (up to 256 UTF-8 bytes)"></label>
       <label>Match mode<select id="search-case"><option value="exact">Exact bytes</option><option value="ascii-insensitive">Ignore ASCII case</option></select></label>
