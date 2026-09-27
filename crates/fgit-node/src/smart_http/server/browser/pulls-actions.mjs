@@ -19,11 +19,11 @@ export function collaborationCommand(action, fields) {
   form(result); return result;
 }
 export function command(action, fields) {
-  return ['open', 'update', 'close'].includes(action) ? metadataCommand(action, fields) : collaborationCommand(action, fields);
+  return ['open', 'update', 'close', 'reopen'].includes(action) ? metadataCommand(action, fields) : collaborationCommand(action, fields);
 }
 export function requestPath(number, action) {
   integer(number, 'PR number', 1);
-  if (!['open', 'update', 'close', 'approve', 'request-changes', 'withdraw', 'merge'].includes(action)) fail('Unknown action.');
+  if (!['open', 'update', 'close', 'reopen', 'approve', 'request-changes', 'withdraw', 'merge'].includes(action)) fail('Unknown action.');
   return `pulls/${number}/${['approve', 'request-changes', 'withdraw'].includes(action) ? `reviews/${action}` : action}`;
 }
 export function requestBody(action, fields, bundle, nonce) {
@@ -45,7 +45,7 @@ export function publication(reply, pending, status) {
   binding(reply, pending.scope); principal(reply.principal_id); opaque(reply.tx_id);
   integer(reply.decision_sequence, 'decision sequence', 1);
   if (!['committed', 'refused'].includes(reply.outcome) || status !== (reply.outcome === 'committed' ? 200 : 409) || reply.delivery_acknowledged !== null || reply.action !== pending.action) fail('HTTP status is not a matching terminal decision.');
-  const metadata = ['open', 'update', 'close'].includes(pending.action);
+  const metadata = ['open', 'update', 'close', 'reopen'].includes(pending.action);
   if (metadata) {
     if (reply.type !== 'pull_request_publication' || reply.number !== pending.number || reply.expected_version !== pending.fields.expected_version) fail('Wrong terminal PR command.');
   } else {

@@ -176,7 +176,7 @@ export function form(fields) {
   return body;
 }
 export function metadataCommand(action, fields) {
-  if (!['open', 'update', 'close'].includes(action)) fail('Unsupported PR metadata action.');
+  if (!['open', 'update', 'close', 'reopen'].includes(action)) fail('Unsupported PR metadata action.');
   keys(fields, ['expected_version', 'object_format', 'source_ref', 'target_ref', 'source_tip', 'target_tip', 'title', 'body']);
   const version = integer(fields.expected_version, 'expected PR version', 0, Number.MAX_SAFE_INTEGER - 1);
   if ((action === 'open') !== (version === 0)) fail('Only a new PR uses expected version zero.');
@@ -290,7 +290,7 @@ export class Transport {
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
-      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|prepare|resolve|inspect|merge|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
+      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|prepare|resolve|inspect|merge|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);
     const timer = setTimeout(() => controller.abort(), this.#timeout);

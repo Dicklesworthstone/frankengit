@@ -40,12 +40,12 @@
     </section>
   </div>
   <details>
-    <summary>Open, update, or close PR metadata</summary>
-    <p>This proposal does not change the observed PR above. Even closing submits the complete explicit metadata and expected version. There is no implicit tip refresh.</p>
+    <summary>Open, update, close, or reopen a PR</summary>
+    <p>This proposal does not change the observed PR above. Closing and reopening submit the complete explicit metadata and a positive expected version. Reopen a closed PR, not a merged one; the node enforces the lifecycle without moving refs. There is no implicit tip refresh.</p>
     <form id="metadata">
       <div class="fields">
         <label>PR number <input id="pr-number" inputmode="numeric" required></label>
-        <label>Action <select id="metadata-action"><option value="open">Open</option><option value="update">Update</option><option value="close">Close</option></select></label>
+        <label>Action <select id="metadata-action"><option value="open">Open</option><option value="update">Update</option><option value="close">Close</option><option value="reopen">Reopen closed PR</option></select></label>
         <label>Expected PR version (0 for new) <input id="expected-version" inputmode="numeric" required></label>
         <label>Object format <select id="object-format"><option value="sha1">SHA-1</option><option value="sha256">SHA-256</option></select></label>
         <label>Source ref <input id="source-ref" placeholder="refs/heads/topic" spellcheck="false" required></label>

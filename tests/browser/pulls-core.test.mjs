@@ -6,7 +6,7 @@ import { metadataCommand, form, integer, decimal, oid, listReply, showReply, rev
 import { token, head, ids, scope, row, page, show, data, reviewRow, reviews, metadata, json, options, deferred } from './pulls-fixtures.mjs';
 
 test('metadata commands preserve all explicit coordinates, Unicode and percent-encoded content', () => {
-  for (const action of ['open', 'update', 'close']) {
+  for (const action of ['open', 'update', 'close', 'reopen']) {
     const fields = metadata({ expected_version: action === 'open' ? 0 : 1, body: '%2f\n&principal=admin' });
     const result = new URLSearchParams(form(metadataCommand(action, fields)));
     assert.equal(result.get('body'), fields.body); assert.equal(result.get('source_ref'), fields.source_ref);
@@ -25,7 +25,7 @@ for (const [name, action, fields] of [
   ['forged principal', 'update', metadata({ principal: 'admin' })],
   ['implicit version', 'update', metadata({ expected_version: undefined })],
   ['zero close version', 'close', metadata({ expected_version: 0 })],
-  ['reopen unsupported', 'reopen', metadata()], ['merge is not metadata', 'merge', metadata()],
+  ['zero reopen version', 'reopen', metadata({ expected_version: 0 })], ['merge is not metadata', 'merge', metadata()],
   ['unsafe version', 'update', metadata({ expected_version: Number.MAX_SAFE_INTEGER })],
   ['wrong hash domain', 'update', metadata({ source_tip: 'a'.repeat(64) })],
   ['zero OID', 'update', metadata({ target_tip: '0'.repeat(40) })],
