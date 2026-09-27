@@ -33,9 +33,12 @@ run_algorithm() {
     "${corpus_directory}/receipt.tsv" \
     "the ${algorithm} notes corpus carries its oracle attestation receipt"
 
+  # Captured, not left to `set -e`: a failing differential must reach the
+  # assertion below instead of ending the script before it is recorded.
+  local test_exit=0
   FGIT_NOTES_DIFFERENTIAL_CORPUS="${corpus_directory}" \
-    cargo test -p fgit-git-object --test notes_differential -- --ignored
-  fge_assert_exit "FG084A-E2E-${algorithm}-003" 0 "$?" \
+    cargo test -p fgit-git-object --test notes_differential -- --ignored || test_exit=$?
+  fge_assert_exit "FG084A-E2E-${algorithm}-003" 0 "${test_exit}" \
     "differential test matches the pinned ${algorithm} oracle"
 }
 
@@ -48,6 +51,14 @@ oracle_run_dir_for() {
 
 if [[ "${1:-}" == "--list-cases" ]]; then
   printf 'FG084A-E2E-sha1-001..003\nFG084A-E2E-sha256-001..003\n'
+  exit 0
+fi
+
+fge_init
+fge_kind pinned-oracle
+if [[ -z "${FGIT_NOTES_ORACLE_RUN_DIR:-}" ]]; then
+  fge_skip FG084A-E2E-oracle-000 \
+    'FGIT_NOTES_ORACLE_RUN_DIR names no oracle.sh create-run directory; the pinned notes oracle cannot run here'
   exit 0
 fi
 
