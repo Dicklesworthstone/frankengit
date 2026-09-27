@@ -2,7 +2,7 @@
 // Generation tokens are opaque native claims, not authenticated roots here.
 import { copy, fail, form, hex, integer, keys, oid, record, snapshot, unhex, utf8 } from './pulls-core.mjs';
 import { coordinates, fields, FILE_LIMIT, pathHex, same } from './search-data.mjs';
-import { compareCounters, currentSources, sourceMode, wireCounter } from './search-current.mjs';
+import { compareCounters, currentSources, sourceMode, symbolSources, wireCounter } from './search-current.mjs';
 export const INDEX_WORK = 16 * 1024 * 1024, INDEX_PAYLOAD = 32 * 1024 * 1024;
 export const INDEX_PAGE = 100;
 const word = b => (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b === 95;
@@ -146,7 +146,8 @@ function symbolName(value) {
   return bytes;
 }
 export function symbolQuery(input) {
-  keys(input, ['mode', 'nameHex', 'match', 'kinds', 'prefixesHex', 'maxMatches', 'maxBytes', 'maxFileBytes', 'maxWork']);
+  keys(input, ['mode', 'sourceMode', 'nameHex', 'match', 'kinds', 'prefixesHex', 'maxMatches', 'maxBytes', 'maxFileBytes', 'maxWork']);
+  const mode = sourceMode(input.sourceMode);
   if (input.mode !== 'symbols') fail('Select persisted Rust declarations.');
   symbolName(input.nameHex);
   const match = input.match ?? 'exact', kinds = input.kinds ?? [], prefixes = input.prefixesHex ?? [];
@@ -158,7 +159,7 @@ export function symbolQuery(input) {
     pathHex(prefix); const bytes = unhex(prefix, 4096);
     if (bytes.filter(b => b === 47).length >= 64 || (size += bytes.length) > 32 * 1024) fail('Declaration path scope exceeds its bounds.');
   }
-  return { mode: 'symbols', nameHex: input.nameHex, match, kinds: [...new Set(kinds)].sort(), prefixesHex: [...new Set(prefixes)].sort(),
+  return { mode: 'symbols', ...(mode === 'revalidated' ? { sourceMode: mode } : {}), nameHex: input.nameHex, match, kinds: [...new Set(kinds)].sort(), prefixesHex: [...new Set(prefixes)].sort(),
     maxMatches: integer(input.maxMatches ?? INDEX_PAGE, 'declaration result limit', 1, INDEX_PAGE),
     maxBytes: integer(input.maxBytes ?? 64 * 1024 * 1024, 'referenced declaration source bytes', 1, 64 * 1024 * 1024),
     maxFileBytes: integer(input.maxFileBytes ?? FILE_LIMIT, 'declaration file bytes', 1, FILE_LIMIT),
@@ -168,10 +169,23 @@ export function symbolCommand(selected, pin, q, minimum = null) {
   const values = { ...fields(selected, pin), name_hex: q.nameHex, match: q.match, kind: q.kinds,
     path_prefix_hex: q.prefixesHex, max_matches: q.maxMatches, max_bytes: q.maxBytes,
     max_file_bytes: q.maxFileBytes, max_work: q.maxWork };
+  if (sourceMode(q.sourceMode) === 'revalidated') values.source_mode = 'revalidated';
   if (minimum) Object.assign(values, { minimum_index_token: minimum.token, minimum_index_number: minimum.number });
   return form(values);
 }
 export function symbolReply(reply, selected, q, scope = null, pin = null, minimum = null) {
+  if (sourceMode(q.sourceMode) !== 'revalidated') return exactSymbolReply(reply, selected, q, scope, pin, minimum);
+  const sources = symbolSources(reply);
+  // These source records inherit the validated wrapper's read-only schema, not
+  // a fabricated current result. The nested receipt is validated unchanged.
+  const frame = source => ({ ...source, schema_version: reply.schema_version,
+    read_only: reply.read_only, transaction_created: reply.transaction_created, published: reply.published });
+  const current = coordinates(frame(sources.current), selected, scope, pin);
+  const original = coordinates(frame(sources.indexed), selected, current.scope);
+  const result = exactSymbolReply(reply.result, selected, q, current.scope, original.pin, minimum);
+  return { ...result, ...current, sources };
+}
+function exactSymbolReply(reply, selected, q, scope = null, pin = null, minimum = null) {
   const source = coordinates(reply, selected, scope, pin);
   if (reply.type !== 'source_search_symbols_index' || reply.profile !== 'rust-declaration-heads-v1' ||
       reply.index_profile !== 'rust-declaration-tables-v1' || reply.authority_class !== 'deterministic-derived' ||

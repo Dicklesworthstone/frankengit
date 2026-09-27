@@ -80,3 +80,40 @@ export function currentSources(reply, source, previous = null) {
       !identical(previous.sources.indexed, indexed))) refuse('Indexed continuation changed source provenance.');
   return { current, indexed, distinct };
 }
+
+// Symbol revalidation wraps an UNCHANGED strict result, unlike lexical reads.
+// Accept only the native wrapper and bind its original receipt before any
+// caller installs current navigation pins or advances an index checkpoint.
+export function symbolSources(reply) {
+  const envelope = ['type', 'schema_version', 'source_mode', 'read_only', 'transaction_created',
+    'published', 'current_source', 'indexed_source', 'result'];
+  if (!reply || typeof reply !== 'object' || Array.isArray(reply) ||
+      Object.keys(reply).length !== envelope.length || Object.keys(reply).some(key => !envelope.includes(key)) ||
+      reply.type !== 'source_search_symbols_index_revalidated' || reply.schema_version !== 1 ||
+      reply.source_mode !== 'revalidated' || reply.read_only !== true || reply.transaction_created !== false || reply.published !== false) {
+    refuse('Invalid revalidated declaration envelope.');
+  }
+  const readSource = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(value, 'ref')) refuse('Missing declaration source reference.');
+    const { ref, ...rest } = value, source = sourceRecord(rest);
+    if (typeof ref !== 'string' || !ref.length || utf8.encode(ref).length > 1024 ||
+        Array.from(utf8.encode(ref), byte => byte.toString(16).padStart(2, '0')).join('') !== source.ref_hex) {
+      refuse('Declaration source reference text and bytes disagree.');
+    }
+    nativeOid(source.source_commit, source.object_format); nativeOid(source.root_tree, source.object_format);
+    return { ...source, ref };
+  };
+  const current = readSource(reply.current_source), indexed = readSource(reply.indexed_source);
+  if (NATIVE_FIELDS.some(key => current[key] !== indexed[key]) || current.ref !== indexed.ref) refuse('Revalidated declaration native source changed.');
+  const sameHead = current.snapshot_token === indexed.snapshot_token;
+  if (sameHead !== (current.source_head === indexed.source_head) ||
+      (sameHead && (current.source_rcr !== indexed.source_rcr || current.forge_position_root !== indexed.forge_position_root))) {
+    refuse('Contradictory declaration provenance at the same head.');
+  }
+  const result = reply.result;
+  if (!result || typeof result !== 'object' || Array.isArray(result) || result.ref !== indexed.ref ||
+      SOURCE_FIELDS.some(key => key !== 'forge_position_root' && result[key] !== indexed[key])) {
+    refuse('Nested declaration receipt changed its original source.');
+  }
+  return { current, indexed, distinct: !identical(current, indexed) };
+}

@@ -21,7 +21,7 @@ test('unsupported grammar, privilege fields and wrong limit boundaries refuse be
   const f = fixture();
   for (const name of ['', '1Thing', 'r#type', 'a b', 'é', 'Thing.*', 'x'.repeat(129)]) assert.throws(() => symbolQuery({ ...f.input, nameHex: hex(name) }), name);
   assert.equal(symbolQuery({ ...f.input, nameHex: hex('x'.repeat(128)) }).nameHex.length, 256);
-  for (const extra of [{ sourceMode: 'revalidated' }, { after: 1 }, { principal: 'admin' }, { maxPayloadBytes: 1 }, { match: 'regex' }, { kinds: ['call'] },
+  for (const extra of [{ sourceMode: 'automatic' }, { after: 1 }, { principal: 'admin' }, { maxPayloadBytes: 1 }, { match: 'regex' }, { kinds: ['call'] },
     { kinds: Array(9).fill('struct') }, { maxMatches: 101 }, { maxMatches: 0 }, { maxBytes: 0 }, { maxFileBytes: 8388609 }, { maxWork: 16777217 },
     { prefixesHex: [hex('../x')] }, { prefixesHex: [hex('.GiT/x')] }, { prefixesHex: [hex('a/'.repeat(64) + 'b')] }]) assert.throws(() => parsed(f, extra), JSON.stringify(extra));
   assert.doesNotThrow(() => parsed(f, { maxMatches: 100, maxWork: 1, maxFileBytes: 1, maxBytes: 1 }));
