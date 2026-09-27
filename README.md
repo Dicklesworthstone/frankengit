@@ -81,14 +81,20 @@ hard ceiling (`--session-timeout-secs`, `--session-secs-per-mib`,
 through report-status, never a silent hangup (see
 [`docs/GIT_COMPATIBILITY_MATRIX.md`](docs/GIT_COMPATIBILITY_MATRIX.md)).
 Ingress time cannot consume the independent server-work budget that starts
-after the pack trailer. `fg serve-http` (loopback-only, operator token file)
-and `fg serve-ssh` now exist, but neither is a production authenticated
-transport yet:
-- a stock `git push` over HTTP needs a nonstandard `Idempotency-Key` header;
-- the SSH key exchange uses a constant ephemeral key and is not confidential.
+after the pack trailer. `fg serve-http` and `fg serve-ssh` now carry stock
+clone, fetch and push:
+- `fg serve-http` is loopback-only and uses an operator token or a scoped
+  credentials file. It has a `--continuous` mode that drains on a stop file,
+  SIGTERM or SIGINT.
+- `fg serve-ssh` uses ed25519 deploy keys and per-session key exchange.
 
-See the [reality snapshot](#reality-snapshot-2026-09-23). Ordinary production
-push over authenticated transports therefore remains unsupported. The raw
+Neither is yet a multi-user production deployment:
+- no transport terminates TLS;
+- `fg serve-http` refuses non-loopback addresses;
+- writes from the CLI and MCP carry a self-asserted principal;
+- `fg serve` and `fg serve-ssh` have no continuous service mode.
+
+See the [reality snapshot](#reality-snapshot-2026-09-27). The raw
 git-daemon receive lane is the composition slice the `first_push.sh` E2E suite
 exercises with a real `git` client. No command
 treats local object placement, a routing hint, or a connection-local ref map
@@ -127,69 +133,71 @@ then verifies that the authoritative tracker hash did not change. Graph scores
 remain advisory: an agent may claim a bead only when the exact ID appears in
 `br ready --unassigned --no-db --json`.
 
-### Reality snapshot: 2026-09-23
+### Reality snapshot: 2026-09-27
 
-FrankenGit has a real, bounded, pure-Rust Git node and an atomic forge core. It
-is not yet a forge a team can rely on. The
+FrankenGit has a real, bounded, pure-Rust Git node and an atomic forge core. Its
+shipped transports became substantially more trustworthy in the four days after
+the 2026-09-23 check. It is still not a forge a team can rely on. The
 [reality check and bridge plan](docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) binds
-this snapshot:
-- source was inspected at `46b922e7`;
-- executable evidence comes from `94a77dfb`, the newest commit whose `fg`
-  binary builds.
+this snapshot: source and executable evidence are both taken at `2b7f35ac`.
+Its bridge work is tracked under `frankengit-root-doctrine-x2mv.4`. No bridge
+result replaces an independent batch gate.
 
-Its bridge work is tracked under `frankengit-root-doctrine-x2mv.4`. Neither the
-earlier 2026-09-07 results nor any later bridge result replaces an independent
-batch gate.
+- **Nobody is verifying.**
+  - No bead has closed since 2026-09-23, while 175 commits landed.
+  - Verification debt is 35 of the tracker's hard limit of 36.
+  - No repository lane runs an end-to-end suite.
+  - 73 of the 77 commits from the author working without a toolchain state
+    they were not compiled or tested. Five of them broke the build or its tests
+    and were repaired afterwards.
+- **Working through the `fg` binary with real clients:**
+  - raw git-daemon, SSH and smart-HTTP clone, fetch and push with stock Git,
+    over protocols v0, v1 and v2 for upload;
+  - SSH key exchange with per-session entropy;
+  - stock HTTP push without extra headers;
+  - a continuous HTTP service that drains on SIGTERM;
+  - deterministic outcomes for concurrent writers: one writer is admitted at a
+    time, and losers get a typed refusal;
+  - SHA-256 repositories and `fg at` time travel.
 
-- **Main is not currently verifiable.**
-  - `46b922e7` does not compile (fgit-runner, E0423).
-  - 163 commits since 2026-09-07 state that compilation or tests were not run; 115 of them say Cargo/rustc was unavailable.
-  - At `94a77dfb`, two test targets do not compile and rustfmt reports drift in
-    72 files. The docs lane and Clippy fail, and `full`/`release` exit 3
-    (dormant).
-  - Running every compilable test executable gives 6,779 passed, 45 failed and
-    31 ignored. The failures include seven reproducible concurrent-writer race
-    failures, where the loser gets `503 outcome_unknown`.
-- **Working through the `fg` binary with real Git clients at `94a77dfb`:**
-  - raw git-daemon clone, push and time travel (`first_clone` 19/19,
-    `first_push` 21/21, `time_travel` 15/15);
-  - SHA-256 repositories (`sha256_repo_roundtrip` 26/26);
-  - smart-HTTP fetch and push, with the header noted above, over protocols
-    v0/v1/v2.
-
-  A permitted PR merge publishes the ref move, the PR state and the outbox
-  entry in one RCR through one head CAS, and survives reopen and process death.
-  Issues, branches, tags, trusted-local TreeFS workspaces and trusted-local
-  workflow runs also work through `fg`.
+  A permitted PR merge publishes the ref move, the PR state and the outbox entry
+  in one RCR through one head CAS. PR reopen, issues, branches, tags, safe
+  Markdown rendering (HTTP, MCP and browser), trusted-local workspaces and
+  trusted-local workflow runs also work.
 - **Present, but with known defects:**
-  - SSH sessions are not confidential (constant ephemeral key-exchange secret),
-    even though its security suite passes 23/23 on authentication checks.
-  - PR and issue reads refuse after 4,096 forge events.
-  - Policy evaluation is given fabricated principal facts and fails open on
-    the receive path.
-  - Webhooks send a placeholder payload.
-  - CI runs trusted code on the host only, with no triggers or published
-    checks.
-  - Backup-restore tests fail at `94a77dfb`.
-  - PR and issue snapshot-pinned reads disagree with their own campaigns about
-    stale pins.
+  - Every browser page built on the issue, pull-request or history client could
+    not call its API in a real browser from 2026-09-18 until `56bba7ee`
+    (2026-09-27). 1,731 of 1,752 fake-DOM unit tests passed throughout. Only
+    the real-browser suites under `scripts/e2e/suites/{forge,browser}/` are
+    evidence that a page works.
+  - Forge publication stops at 16,384 events. Settled outbox entries are never
+    removed.
+  - Writers are serialized, one per process.
+  - The policy engine fails closed. Its required-check evaluation has no
+    production caller, and a published workflow check can never pass, so a
+    branch that requires a check cannot be merged.
+  - Webhooks carry real signed payloads, but there is no delivery worker.
+  - Indexed search goes stale on forge writes, and its limits are below this
+    repository's own size.
+  - CLI and MCP writes carry a self-asserted principal. No transport terminates
+    TLS.
   - A native HTTP API, a stdio MCP server and a JavaScript browser shell exist.
-    They diverge from ADR-0011 and ADR-0013 pending owner decisions.
+    They diverge from ADR-0011 and ADR-0013, pending owner decisions D1 and D2.
+    The browser now also ships a JavaScript Git pack decoder.
 - **Library-only (no production caller):**
   - the agent control plane;
   - ATP-Git;
   - RaptorQ, repair, GC and compaction;
-  - safe Markdown;
-  - projections;
-  - statistics;
-  - witness refinement;
+  - projections, statistics and witness refinement;
   - evidence exchange;
   - the remote object-store backend;
-  - admission's per-core lanes and combiner.
+  - admission's per-core lanes and combiner;
+  - typed graph views;
+  - verified reads on a transport.
 - **Closures under review.** Several beads closed on 2026-09-22 do not meet
-  their own acceptance lines, including the SSH transport and the hostile-CI
-  campaign. `frankengit-root-doctrine-x2mv.4.3` requires line-by-line
-  re-verification.
+  their own acceptance lines. `frankengit-root-doctrine-x2mv.4.3` requires
+  line-by-line re-verification. It cannot start until a verifier acts (owner
+  decision D8).
 - **Open scope decision.**
   [Plan §4.2.1](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md#421-unresolved-10-scope-contradiction)
   records the unresolved merge-queue/package 1.0 scope contradiction. The
@@ -444,7 +452,7 @@ Because canonical state will remain an immutable decision stream, “the entire
 forge at decision N” will be a well-defined object rather than a reconstruction
 heuristic over mutable tables. `fg at <decision>` will open a complete read-only
 forge snapshot, and bisection will generalize from commits to forge state.
-The [dated reality snapshot](#reality-snapshot-2026-09-23) above identifies the
+The [dated reality snapshot](#reality-snapshot-2026-09-27) above identifies the
 bounded implementation and its historical evidence. It records history loading,
 two-ended diff projection, consistency checks, and binary rendering as landed.
 The remaining historical projection work requires non-empty durable-history

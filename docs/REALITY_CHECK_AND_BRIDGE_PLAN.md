@@ -1,140 +1,222 @@
-# FrankenGit reality check and bridge plan — 2026-09-23
+# FrankenGit reality check and bridge plan — 2026-09-27
 
-FrankenGit is a real, bounded, pure-Rust Git server with a genuinely atomic forge core. It serves clone, fetch and push to stock Git clients, and a pull-request merge publishes the ref move, the PR state and the outbox entry in one authority compare-and-swap. It is not yet a forge a team can rely on. The gap has changed shape since 2026-09-07, from "missing composition" to "unverified breadth":
+FrankenGit is a real, bounded, pure-Rust Git server with an atomic forge core, and in the four days since the 2026-09-23 check its shipped transports became substantially more trustworthy:
+- SSH key exchange is confidential.
+- A stock `git push` over smart HTTP works without a nonstandard header.
+- Concurrent writers get deterministic outcomes.
+- The policy engine fails closed.
+- Main compiles at HEAD.
 
-- The rate of new surface is far ahead of verification. Main does not compile at HEAD. 163 commits since 2026-09-07 say in their own messages that compilation or tests were not run (115 because Cargo/rustc was unavailable).
-- A 2026-09-22 closure wave marked the SSH transport, hostile-CI campaign, projection substrate and policy rewiring complete when their acceptance was not met.
-- About 68K lines of product crates (agent plane, ATP-Git, RaptorQ/repair/GC, safe Markdown, projections, statistics) are linked into no binary.
+It is still not a forge a team can rely on, and the gap has changed shape again, from "unverified breadth" to "**a verification loop with nobody in it**":
+- No bead has closed since 2026-09-23.
+- The tracker's verification debt stands at 34 of its hard limit of 36.
+- The two P0 re-verification beads are blocked behind a `batch_pending` bead that only an absent verifier can close.
+- No repository lane runs a single end-to-end suite.
 
-This supersedes the 2026-09-07 snapshot in place.
+Meanwhile the toolchain-less stream continues (73 of its 77 commits declare they were not compiled or tested). Every library island the 2026-09-23 check found is still an island.
+
+This supersedes the 2026-09-23 snapshot in place. Deltas against it are marked **Δ**.
 
 **Binding.**
-- Source was inspected at `46b922e7` (HEAD at the start of the assessment). HEAD does not compile.
-- Executable evidence was produced in an isolated detached worktree at its parent, `94a77dfb`, the newest commit whose product binary builds. The run used `nightly-2026-08-31` on Linux x86_64, a private target directory, and a private `CARGO_HOME` (symlinked registry, `CARGO_NET_OFFLINE=true`), because other projects' builds held the shared package-cache lock. The repository's own `verify.sh` sets `RCH_CARGO_WRAPPER_BYPASS=1`, and the direct cargo invocations here did the same.
-- Unrelated projects' builds were running concurrently. Timing-sensitive results are labelled as such.
-- This is not a security audit, universal compatibility result, benchmark claim or batch-verification certificate.
+- Source was inspected at `2b7f35ac` (origin/main at the start of the assessment, 2026-09-27).
+- Executable evidence was produced at the same SHA, in an isolated detached worktree. The run used the repository toolchain `nightly-2026-08-31` (`rustc 1.100.0-nightly 908501772`) on Linux x86_64, a private target directory, and `RCH_CARGO_WRAPPER_BYPASS=1`.
+- The host has 64 cores. Other projects' workloads (video rendering, a Lean build) kept the load average between 190 and 245 throughout. Timing-sensitive results are labelled as such.
+- This is not a security audit, universal compatibility result, benchmark claim or batch-verification certificate. Nothing in it closes, reopens or verifies a bead.
 
 **Consumer and retirement.** The repository owner, the batch orchestrator and every assignee use this document to decide what is actually done and what to build next. The observed defect classes are:
+- a vacant verification role;
 - uncompiled code on main;
-- acceptance-unmet closures;
 - product crates with no production caller;
-- security defects on shipped listeners;
+- capacity ceilings that a real team would hit;
+- evidence that runs in no lane;
 - stale public claims.
 
-Replace this snapshot in place when a later revision-bound assessment supersedes it. The epic `frankengit-root-doctrine-x2mv.4` and its children take over each resolved row. This report grants no capability credit.
+Replace this snapshot in place when a later revision-bound assessment supersedes it. Rows resolved by the epic `frankengit-root-doctrine-x2mv.4` and its children retire from this document. This report grants no capability credit.
 
 ## 1. What was examined
 
-All of `AGENTS.md`, `README.md` and the previous reality check were read. The comprehensive plan's product definition, v1 scope (§4.1), delivery roadmap (§44), success metrics (§48) and definition of done (§49) were read, as were the normative contracts' release-blocking invariants (§32) and the verification specification's structure.
-
-Six independent read-only audits traced six subsystems through source, tests, docs and the tracker:
-- the Git transport surface;
+All of `AGENTS.md`, `README.md` and the 2026-09-23 version of this document were read. Six independent read-only audits traced six subsystems through source, tests, docs, commits and the tracker at `2b7f35ac`:
+- Git transports;
 - forge workflows;
-- user surfaces (CLI, HTTP, browser, MCP, TUI);
+- user surfaces (CLI, HTTP, browser, MCP, TUI, safe Markdown);
 - the agent plane, TreeFS and CI;
-- search, graphs and projections;
-- durability, operations, release and the constitution.
+- search, graphs and the README pillars;
+- durability, operations, release and process health.
 
-Every critical claim those audits made was re-checked directly before inclusion. Examples:
-- the SSH constant key at `crates/fgit-ssh/src/session.rs:419`;
-- the 4,096-event read cap at `crates/fgit-admission/src/merge/native/pull_request.rs:214-245`;
-- the dummy webhook payload in `crates/fgit-node/src/webhook.rs:268-282`;
-- the hard-coded policy facts at `crates/fgit-admission/src/policy_bridge.rs:277-285`;
-- the fail-open receive check at `crates/fgit-admission/src/lib.rs:2469-2474`;
-- the combiner having no callers;
-- the crate reachability graph derived from every manifest.
+Every critical claim those audits made was re-checked directly against the source before inclusion. Examples:
+- the 16,384-entry codec ceiling (`crates/fgit-codec/src/canonical_state.rs:19-22`);
+- the raised read cap (`crates/fgit-admission/src/merge/native/pull_request.rs:213-215`);
+- the neutralised principal facts (`crates/fgit-admission/src/policy_bridge.rs:296-312`, `lib.rs:1374-1384`);
+- the only caller of the outbox delivery settler, which is a test (`crates/fgit-node/tests/native_merge_publication.rs:1068`);
+- the workflow check conclusion that can never be green (`crates/fgit-node/src/treefs_workspace/trusted_workflow/durable/publication.rs:316-318`);
+- symbol-index staleness on any forge write (`crates/fgit-node/src/treefs_workspace/source_search/symbols/indexed.rs:326-331`);
+- `fg serve`'s one-session default (`crates/fgit-cli/src/guarded_git_server.rs:114-118`);
+- the uncompiled SSH rekey commit (`67336a56`);
+- the JavaScript pack/DEFLATE decoder (`crates/fgit-node/src/smart_http/server/browser/bundle-verify.mjs`, 560 lines);
+- the hard-coded field in the browser Markdown probe (`scripts/e2e/browser_issue_markdown_probe.mjs:127`);
+- the tracker policy's verification-debt limits (`.beads/policy.yaml`).
 
-The tracker baseline was `br list --status all --limit 0 --no-db --json` (569 records, `has_more=false`), plus `br ready --unassigned --no-db --json` and `br gate list` for every bead closed since 2026-09-17. Git history since 2026-09-07 was classified by bead reference and by self-declared execution status.
+The tracker was read from the tracked export (`.beads/issues.jsonl`, 598 live records) and from `br ready --unassigned --no-db --json`. Git history since 2026-09-23 was classified by author, bead reference and self-declared execution status.
 
-## 2. Executable evidence at `94a77dfb`
+## 2. Executable evidence at `2b7f35ac`
 
-The host filesystem filled (0 bytes free) late in the first test pass. Every binary from #500 onward, and every failure, was re-run once the owner freed space. The seven race binaries were run a third time from a near-idle host. The counts below combine valid first-pass results with the rerun.
+The run started at 21:44Z on 2026-09-27 and was still running when this document was first committed. Rows marked *running* are updated in place when it finishes. Nothing is inferred for them.
 
 | Check | Result | What it establishes |
 |---|---|---|
-| `cargo check --workspace --all-targets` at HEAD `46b922e7` | exit 101: fgit-runner lib E0423 (`journaled/observations.rs:114-115`) | `fg` cannot be built at HEAD. Newer origin commits (`3a7ab99b`, `bfb3bb30`, `33583151`) were pushed on top, each declaring it was never compiled. |
-| `verify.sh docs` | exit 1 | Stale README claim block (CLM-001 demoted by ecdc799d) plus a hosted write-to-main workflow merged 2026-09-22. |
-| `verify.sh constitution` (after a fresh build) | exit 0 | Checks pass. Native linkage is evaluated against cached observations. psm's `libpsm_s.a` (assembled x86_64 object plus a C flag probe) is admitted by DEP-262. |
-| `cargo fmt --all -- --check` | exit 1 | Drift in 72 files at HEAD, all from post-2026-09-22 commits. |
-| `cargo check --workspace --all-targets` | exit 101 | fgit-forge lib-test target: 29 errors (uncompiled daa87647). |
-| `fgit-schema-gen check` | exit 0 | Generated schema artifacts are current. |
-| `cargo test --workspace --all-targets --no-fail-fast` | exit 101, **zero tests run** | cargo aborts on uncompilable test targets (fgit-forge lib test, and fgit-node `fg-repository-backup` bin test). |
-| All compilable test executables (`cargo build --all-targets --keep-going`, then each binary run) | 629 executables ran. 6,779 passed, **45 failed**, 31 ignored, across 26 failing binaries. The run used `cargo build --all-targets --keep-going` and then ran each binary. It was re-run from #500 on after a host ENOSPC, and the race binaries were run a third time from a near-idle host. | Classes: 7 concurrent-writer race tests where losers get `503 outcome_unknown` (reproducible; `x2mv.4.27`); snapshot-pin contract disagreement (issue/PR); branch-root and fast-forward semantic drift; backup/restore quarantine-cleanup failures; drift from the uncompiled stream (event kind 11, workflow files, bundle form fields, CLI JSON); a TreeFS lease `WouldBlock`; one temp-dir collision. Details in `x2mv.4.26`. |
-| `cargo clippy --workspace --all-targets -D warnings` | exit 101 | At least 30 errors (fgit-diff 23, fgit-schema 5, fgit-resource 1, registry-check 1). Dependents not linted. |
-| `verify.sh full` / `release` | exit 3 / exit 3 | Explicit dormancy. `release` reaches only `--release-gate-probe`. |
-| `cargo build --release -p fgit-cli` | exit 0 | A release `fg` exists for 94a77dfb. |
-| E2E `first_clone`, `first_push`, `time_travel` (debug `fg`, Git 2.55.0) | 19/19, 21/21, 15/15 | Non-empty clone, raw push with its refusal twin, and historical state work through the binary. |
-| E2E `sha256_repo_roundtrip` | 26/26 | SHA-256 repository init/refusal/serve/clone. |
-| E2E `incremental_fetch` (pinned Git 2.54.0 oracle) | debug: 29/30; release: **97/97** | The debug failure was `fg import` hitting its wall-clock deadline (`ResourceBudgetExceeded; exhaustion=Some(Deadline)`) at load average ~39. The release binary passes. |
-| E2E `ssh_transport_security` (OpenSSH client) | 23/23 | Authentication and command refusals only. It does not test confidentiality, and the key exchange is not confidential (§5.3). |
-| E2E `tag_lifecycle` | 7/15 | Suite defects, not a product failure: `ls-remote` shows both tags correctly advertised. |
-| Orphaned smokes (run by no lane): smart_http, source_search, workspace_publication, transaction_outcome | pass | Smart HTTP passes SHA-1 and SHA-256 over v0/v1/v2 with stock Git, **using an injected `Idempotency-Key` header**. |
-| Orphaned smokes: pull_request, issue | **fail** | A stale `--expected-head` pin returns a page (exit 0) where the campaign requires a typed refusal ("stale pin disclosed a mixed page"). The `issue_http` snapshot-walk test also fails. The code, the tests and the campaigns disagree on the snapshot-pin contract, and have since 5c294d6e. |
+| `cargo check --workspace --all-targets --keep-going` | **exit 0** (545 s) | **Δ Main compiles at HEAD**, for the first time since before the 2026-09-23 check. It compiled only because of `78b22405`/`7f42b729`, which repaired `e5e547fa`. |
+| `cargo fmt --all -- --check` | exit 1: 62 files, 515 hunks | 58 of the 62 files were last touched by the author working without a toolchain. The other four are small, in files that toolchain sessions edited, including this assessor's `00a7903a` and the `78b22405` fix. On 2026-09-23 it was 72 files. |
+| Per-package `cargo test --all-targets --no-fail-fast` (49 packages) | *running*. First 9 packages: 1,590 passed, 0 failed, 2 ignored. fgit-cli partial: 487 passed, **2 failed** | fgit-cli failures: (1) `dead_letter_replay_contacts_receiver_and_preserves_the_diagnostic` hit `ResourceBudgetExceeded` (budget cancellation under load, the class `x2mv.4.26` tracks); (2) `fresh_process_protection_enforces_direct_write_guards_and_retains_policy_ownership`: in the withdrawn-review merge step, `protection_smoke.py` got empty stdout. Both are rerun on an idle host before any claim; see `x2mv.4.26`. |
+| `cargo clippy --workspace --all-targets -D warnings` | *running* | — |
+| `verify.sh docs` | **exit 0** at `b7de0d5e` plus this document's README edit (**Δ**, exit 1 on 2026-09-23); *running* at `2b7f35ac` | The stale claim block and hosted-workflow findings of 2026-09-23 no longer fail the lane. |
+| `verify.sh constitution`, `full`, `release` | *running* | `full` and `release` are explicit dormancy refusals in the source (`verify.sh:94-116`). |
+| 38 root-level `scripts/e2e/*_smoke.py` campaigns with debug `fg` at `2b7f35ac`, git 2.55.0 (none has an invoker in any lane) | *running*. First 17: **15 pass**, 2 fail | **Δ** `issue_smoke` passes; it failed on 2026-09-23. Failures:<br>• `candidate_approval_publication`: a stale-pin review read returns a page (exit 0) where the campaign expects a typed refusal (exit 2). This is the snapshot-pin contract disagreement recorded on 2026-09-23, still unresolved.<br>• `existing_target_receive`: its refusal twins (a push of a ref to a missing or orphan object) get a fatal `ERR receive failed before admission` packet instead of a per-ref report-status `ng`. The guarded daemon path (`1f61b868`, 2026-09-17) turns handoff refusals into `ERR`; the campaign was written for the earlier path on 2026-09-11 and has failed unseen since. The ref never moves, so this is a delivery-compatibility gap, not a safety one. |
+| FG_BIN suites under `suites/{node,transport,forge}` and `admission/import_recovery` through `run_all.sh` | *running* | — |
+| **Real-browser Markdown CSP suite** (`suites/forge/browser_markdown_csp.sh`, Chrome 154, Node 22.2) | fg at `2b7f35ac`: 10/19. fg built from the `5561f2f9` tree: **19/19** | At `2b7f35ac` the issues page cannot make a single API call ("Failed to execute 'fetch' on 'Window': Illegal invocation", §5.8, `x2mv.4.45`). |
+| **Real-browser client fetch suite** (`suites/browser/client_fetch.sh`) | fg at `2b7f35ac`: 3/9. fg built from the `b7de0d5e` tree: **9/9** | Before `56bba7ee`, no request from the issue, pulls-core or history client reaches the network. After it, all three reach the API with 200. |
+| Real-Chrome boot of all 13 served pages (scratch probe, fg from the `5561f2f9` tree) | 12/12 main pages boot with no exception, console error or CSP violation; `/ui/export-verify/` answers `GET` with 405 | The 21 failing node:test browser tests (below) look like fake-DOM fixture drift, not broken pages. |
+| `node --test tests/browser/*.test.mjs` at `41eab465` | 1,752 tests: 1,731 pass, **21 fail**. Identical before and after `56bba7ee` | Failures: search view since `b87b8635` (18 tests, "Cannot read properties of null (reading 'addEventListener')"), PR selection, binary authoring, and installed-Git apply. No lane runs this suite. |
+| `cargo test -p fgit-policy --all-targets` at `b7de0d5e` | 10 binaries green, including `required_status_checks` 11/11 | `1a3a351a` (committed after the pinned SHA, by the author working without a toolchain) compiles and passes. `evaluate_protected_ref` still has no production caller. |
 
-Ordinary-client cells (`first_clone`, `first_push`, `time_travel`, `tag_lifecycle`, `ssh_transport_security`) use the installed Git 2.55.0 and OpenSSH. They are compatibility observations, not the constitution's pinned-oracle class. `incremental_fetch` uses the verified pinned Git 2.54.0 oracle.
+Ordinary-client cells use the installed Git 2.55.0, OpenSSH and Chrome. They are compatibility observations, not the constitution's pinned-oracle class; the pinned oracle is not installed on this host.
 
 ## 3. The short answer
 
-**Where are we really?** Roughly at the end of plan Phase 2 (pure-Rust Git core), with a real but narrow slice of Phase 5 (forge core) and trusted-local fragments of Phases 4 and 6. Phases 3, 7, 8 and 9 exist only as libraries. The README vision of "a forge designed for humans, autonomous coding agents, extreme scale, and independently verifiable recovery" is not delivered in any of its four qualifiers yet.
+**Where are we really?** At the same phase as on 2026-09-23: the end of plan Phase 2 (pure-Rust Git core), with a real slice of Phase 5 (forge core) and trusted-local fragments of Phases 4 and 6. What moved is that the slice is safer to expose. SSH is now a real transport. Smart HTTP now serves stock clients and runs continuously. Concurrent writers get deterministic outcomes, the policy path fails closed, and safe Markdown reaches HTTP, MCP and the browser. The README vision of "a forge designed for humans, autonomous coding agents, extreme scale, and independently verifiable recovery" is still delivered in none of its four qualifiers:
+- **Humans:** only one trusted operator. Identity is self-asserted, required checks cannot pass, and there are no PR comments.
+- **Agents:** the agent plane is a 37K-line island.
+- **Extreme scale:** there is one writer at a time, forge publication stops at 16,384 events, and search cannot index this repository.
+- **Recovery:** there is no GC, scrub, repair or signed capsule.
 
 **What works (with evidence).**
-- The canonical core:
-  - one transaction-identity derivation;
-  - seals;
-  - RCR;
-  - the exact-predecessor head CAS on FrankenSQLite;
-  - lost-response outcome recovery (`fg outcome`).
-- Raw git-daemon clone/fetch/push with quarantine and typed refusals, against real clients.
-- Loose and idx/pack import, and export.
-- SHA-256 repositories.
-- `fg at` time travel over durable history.
-- PR open/update/close/review and a durable merge whose ref, PR state and outbox publish in one RCR. It survives reopen and process death (`crates/fgit-node/tests/native_merge_publication.rs`, `native_merge_durable_crashes.rs`).
-- Issues with comments, labels and linear-scan search.
-- Branches and tags.
-- Trusted-local TreeFS workspaces through `fg workspace run/apply`, on a real openat2-confined sparse host adapter.
-- A loopback-only smart-HTTP server that serves fetch and (with a nonstandard header) push.
-- A stdio MCP server with write tools.
-- A static JavaScript browser shell.
-- Literal, regex, lexical-index and Rust-symbol search.
+- Everything in the 2026-09-23 list still works:
+  - the canonical core (transaction identity, seals, RCR, exact-predecessor head CAS, `fg outcome`);
+  - raw git-daemon clone/fetch/push;
+  - import and export;
+  - SHA-256 repositories;
+  - `fg at`;
+  - the atomic durable PR merge;
+  - issues, branches and tags;
+  - trusted-local workspaces;
+  - stdio MCP;
+  - literal, regex, lexical and Rust-symbol search on quiet repositories.
+- **Δ SSH (`fg serve-ssh`):**
+  - per-session OS entropy for the key exchange;
+  - a constant-time tag check;
+  - strict KEX;
+  - bounded pre-authentication ingress;
+  - honoured flow control;
+  - protocol v2 negotiation;
+  - push through the same guarded receive coordinator as git://.
+
+  Its suites passed 38/38, 13/13 and 23/23 at `784fd886`/`eba31282`, as reported by the implementer. The later rekey commit `67336a56` was never compiled by its author; see §2 for this run.
+- **Δ Smart HTTP (`fg serve-http`):**
+  - Stock `git push` works through a discovery-scoped `307` to an attempt URL (`03d42b79`, `16bb3cfc`).
+  - Opened nodes are pooled instead of reopened per request, and are revalidated on lease (`63f2d30a`, `eba31282`).
+  - `--continuous` mode drains on a stop file, SIGTERM or SIGINT (`f56cbe47`, `444fbe6b`, `0da01149`).
+  - Upload capabilities over HTTP are identical to git://, and receive capabilities over HTTP are identical to git:// and SSH (`09a03439`).
+  - Release A/B, 1,000 fetches: database opens went from 802 to 4 per 400 connections, and fetch p99 went from 0.32–1.9 s to 0.07–0.09 s.
+- **Δ Deterministic concurrent writers.** CAS losers now get a typed refusal, never `503 outcome_unknown` (the x2mv.4.27 chain `d6764e73` … `e367df7b`). This is achieved by admitting one writer at a time per process (see §5.5).
+- **Δ Policy fails closed.**
+  - Branch names reach the policy engine as AST operands, not source text (`408df528`).
+  - Compile and evaluation errors refuse the receive (`59784c88`).
+  - Policies that read unavailable principal or evidence facts are refused rather than evaluated against fabricated ones (`dec9c122`).
+- **Δ PR reopen** through CLI, HTTP and the browser, with e2e `pull_request_reopen` passing at `b8332d2a`.
+- **Δ Safe Markdown.** fgit-doc renders issue, comment and PR bodies over HTTP (`render=html_safe`) and MCP (four profiles), and the browser displays them through an allowlist builder. fgit-doc is the first formerly-unlinked crate to link into `fg`.
+- **Δ Webhook payloads are real.** They are a signed HMAC envelope of authority-selected canonical event frames (`3026f76f`), and the placeholder path now refuses.
+- **Δ Restore works** for the authority backup (`b8e5f8ad`) and the repository backup (`19c680bc`), and `fg backup export|verify|restore` exists (`3b45aca8`).
+- **Δ Search is partly fixed:**
+  - an opt-in revalidated lexical mode survives metadata-only writes;
+  - a long word or macro token no longer aborts an index build.
+- **Δ Bead citation on commits** rose from 35% to 87%.
 
 **What does not work or is not implemented.**
-- Concurrent writers: the losing writer gets `503 outcome_unknown` or the wrong refusal count instead of a deterministic refusal. Seven race tests fail, reproducibly (§5.11).
-- Snapshot-pinned PR/issue reads disagree with their own campaigns and tests about stale pins (§5.11).
-- Authority backup restore reports incomplete on every tested path.
-- SSH is not confidential (§5.3).
-- Stock `git push` over HTTP fails.
-- PR/issue reads stop after 4,096 forge events (§5.5).
-- Policy evaluation fabricates facts and fails open (§5.6).
-- Webhooks send an empty dummy payload.
-- CI is trusted-host only: no triggers, no published checks, no required-check gating.
-- There is no GC, scrub, repair or RaptorQ on node data; the fabric grows forever.
-- No remote authority backend.
-- No per-core lanes or combiner in admission.
-- No ATP-Git on any path.
-- No safe Markdown rendering.
-- No projection read models.
-- The agent plane is an island.
-- No authenticated identity on CLI or MCP writes.
-- No TUI, GitHub import, LFS, merge queue in admission, or release.
+- **Verification:**
+  - no independent verifier has acted since 2026-09-23;
+  - no end-to-end suite runs in any repository lane;
+  - about 38 root-level smoke campaigns and about 900 browser tests run nowhere.
+- **Identity:**
+  - every CLI and MCP write names a self-asserted `--principal`;
+  - there are no users, organizations, teams or token administration;
+  - there are no agent principals.
+- **CI.** It runs trusted code on the host only. Nothing triggers it, and a published check maps success to `ActionRequired`, so a required check can never pass. The fgit-policy rule engine that would evaluate required checks has no production caller.
+- **Forge capacity.**
+  - Forge publication refuses at 16,384 outbox or forge-position entries.
+  - Settled outbox entries are never removed.
+  - Every PR or issue read still scans the whole outbox.
+- **Throughput.** One writer per process.
+- **Missing PR workflow:**
+  - PR conversation comments and line comments;
+  - PR labels;
+  - squash and rebase merges;
+  - approval survival;
+  - quorum or CODEOWNERS;
+  - protection administration over HTTP or MCP.
+
+  The fast-forward merge (`d80190e5` … `e5e547fa`) exists but has never been run by its author.
+- **Webhooks and events:**
+  - no webhook delivery worker; delivery is manual only;
+  - no HTTPS webhook client;
+  - no native event feed over HTTP or MCP.
+- **Search:**
+  - symbol reads and the default HTTP mode still go stale on any forge write;
+  - one file over 8 MiB, or one malformed `.rs` file, aborts a whole build;
+  - its caps cannot index this repository;
+  - there is no index maintenance inside the server and no index GC.
+- **Storage and deployment:**
+  - no GC, scrub, repair, RaptorQ or compaction on node data;
+  - no signed capsule;
+  - no TLS on any transport;
+  - no non-loopback HTTP;
+  - `fg serve` and `fg serve-ssh` have no continuous lifetime or signal drain.
+- **Absent entirely:**
+  - no TUI, LFS, GitHub import, merge queue in admission, or release.
+- **Unchanged islands:** the agent plane, ATP-Git, the combiner and per-core lanes, graph views, statistics, projections, verified reads on a transport, evidence exchange, and the object-store backend.
 
 **What is blocking us.** In order of leverage:
-1. **Verification collapse.** Code lands on main uncompiled, gates close on "crate tests pass" instead of acceptance lines, and most new work bypasses the tracker (§5.1, §5.2, §5.9). Until this stops, nobody, including the owner, can know what works.
-2. **Composition debt.** Libraries are finished to a much higher standard than their integration. The next unit of value comes from connecting existing crates to the node, not from writing more of them (§5.4).
-3. **Owner decisions:**
-   - ADR-0011 gateway and ADR-0013 web UI versus what shipped;
-   - publishing fastapi_rust and frankentui on Asupersync 0.5;
-   - psm native assembly;
-   - the hostile-CI isolation stance;
-   - routing authority (`b5ph`);
-   - v1 scope precedence (`fjsz`).
-   All are listed in `frankengit-root-doctrine-x2mv.4.14`.
+1. **The verification loop is vacant (§5.1).**
+   - AGENTS.md §16.2 makes the batch orchestrator the only closer. No orchestrator has acted since 2026-09-23.
+   - The two P0 beads that were supposed to restore trust (`x2mv.4.3` closure re-verification, `x2mv.4.26` fast lane) are blocked by `x2mv.4.1`, which sits in `batch_pending`.
+   - Verification debt is at 34 of the hard 36.
+   - `verify.sh` runs no end-to-end suite, and `full` is dormant.
+   - Until someone verifies at a SHA and the product suites run in a lane, the tracker cannot move and no claim can be checked.
+2. **Uncompiled landings continue under an asserted mandate (§5.2).** 73 of the toolchain-less producer's 77 commits declare they were not compiled or tested. Five of them broke the build or tests and had to be repaired by other sessions. 32 of them state that the owner explicitly requested direct-main publication, which contradicts the P0 bead `x2mv.4.2`. Only the owner can reconcile the two (decision D7).
+3. **Composition debt is unchanged (§5.4).** About 61.7K lines in 10 product crates are still linked into no binary. The cheapest path to each README pillar remains connecting an existing crate to a real consumer that needs it.
+4. **Capacity ceilings a real team would hit (§5.5):**
+   - the 16,384-event publication ceiling;
+   - writer serialization;
+   - search caps below this repository's own size;
+   - unbounded storage growth.
+5. **Owner decisions D1–D6 are unanswered** (`x2mv.4.14`), and the paused surfaces kept growing regardless (§5.7).
 
 **If every open and in-progress bead were implemented, would the gap close?** No:
-- Most of the gap sits under beads that are already closed (§5.2) or has no bead at all. Examples: SSH confidentiality, the event-log cliff, policy fact fabrication, node GC/repair, combiner integration, safe Markdown, the CI product loop, identity binding, the backup product, and the unwired smoke campaigns.
-- Several open beads describe a product that no longer matches what exists. FG-051a requires CLI commands not to import storage, but every verb opens the node in-process. FG-050 wants a server-rendered UI, but ADR-0013 forbids that and a JavaScript shell shipped instead.
-- There are now 0 in-progress beads, and the stream carrying most new code is not claimed at all.
+- Nothing can close until the verification role is staffed. The P0 track is blocked by construction.
+- Some vision goals have no bead at all (see below and §6).
+- Some open beads describe work that has since happened under another bead, or a product that no longer exists:
+  - FG-105/105a/105b and FG-019 have been untouched since August, while the smart-HTTP and receive work was credited to `x2mv.4.8` and `x2mv.4.4`;
+  - FG-051a and FG-050 still conflict with the shipped in-process CLI and the JavaScript browser.
+- The integrating exit tests (`x2mv.4.23` team day, `x2mv.4.24` agent day) are the only beads whose success implies the vision qualifiers. Their prerequisites include beads nobody has claimed.
 
-**Vision goals with no bead before this assessment** are listed in §6. They are now covered by `frankengit-root-doctrine-x2mv.4.*`.
+**Vision goals with no bead before this assessment** (now covered by the beads in §9):
+- a verifier at a named SHA and product suites in a lane;
+- TLS and a non-loopback HTTP deployment profile;
+- continuous lifetime and drain for `fg serve` and `fg serve-ssh`;
+- restoring write concurrency safely, with negative evidence for the single-writer gate;
+- typed graph views built from canonical data;
+- a production consumer for `fgit-statistics`;
+- CALM routing and Asupersync regions or typed obligations in runner, TreeFS and agent code;
+- agents as first-class principals;
+- TreeFS shared materialization and its measurement;
+- PR labels;
+- an HTTPS webhook client;
+- a native event feed;
+- CSRF and Origin protection on the browser-facing API;
+- a verified-read transport route;
+- binary-driven transport coverage for partial clone, notes and submodules;
+- a contract for fsqlite companion files;
+- replacing or ruling on the JavaScript pack decoder;
+- a root-cause fix for the sparse-workspace lease;
+- the owner rulings on direct-main publication (D7) and on the verifier role (D8).
 
 ## 4. Vision checklist
 
@@ -151,301 +233,456 @@ Status vocabulary:
 
 **v1 functional scope (plan §4.1)**
 
-| # | Goal | Status | Evidence | Work |
-|---|---|---|---|---|
-| 1 | Repository creation/import/export | WORKING (bounded) | `fg init/import/export`; first_clone/first_push at 94a77dfb | FG-106 pending; `e6jj` 128 MiB writer ceiling |
-| 2 | SSH and smart HTTP access | BROKEN / PARTIAL | SSH fixed ephemeral key; HTTP loopback-only, `Idempotency-Key` required, node reopened per request, exits after 1,024 requests | `x2mv.4.4`, `x2mv.4.8`; FG-105a/b open |
-| 3 | Protocol-accurate clone/fetch/push | WORKING for the declared daemon tier | e2e §2; push options never advertised; `atomic` on HTTP only | FG-019 open, FG-098 |
-| 4 | Branch/tag listing and atomic ref updates | WORKING | `fg branch/tag/refs`, HTTP branch/tag APIs | — |
-| 5 | Users, orgs, teams, tokens, deploy keys | PARTIAL | fgit-identity library; only SSH deploy keys and a loopback HTTP token file are used; CLI/MCP principals are self-asserted | `x2mv.4.13` |
-| 6 | Protected refs and policy snapshots | BROKEN | Mandatory review works inline, but the policy engine gets fabricated facts, fails open on receive, and never activates stored snapshots | `x2mv.4.6` |
-| 7 | PRs, reviews, comments, labels, merge | PARTIAL | Atomic durable merge works; no reopen, PR comments, squash/ff, or approval-survival rule; 4,096-event cliff | `x2mv.4.7`, `x2mv.4.20` |
-| 8 | Issues and discussions | PARTIAL | Issues work; no discussions, assignees, milestones or notifications | FG-045 |
-| 9 | Webhooks and event API | STUB / PARTIAL | `fg events` pull feed works; webhook payload is a dummy and there is no worker | FG-046 (rework comment) |
-| 10 | Safe Markdown rendering | LIBRARY-ONLY | fgit-doc has no dependents | `x2mv.4.11` |
-| 11 | Basic lexical and symbol search | PARTIAL | Works on quiet repositories; any write stales the index; builds abort on one bad file | `x2mv.4.19`, FG-032a |
-| 12 | CI with artifacts and cache | PARTIAL (trusted only) | `fg workflow run` durable journal; no triggers, check publication, artifacts, cache or isolation | `x2mv.4.12`, `25cs` |
-| 13 | Agent identities, Intent Runs, workspaces, evidence | PARTIAL / LIBRARY-ONLY | Workspaces work (trusted); IntentRun/broker/ECC are an island | `x2mv.4.24`, `xcu9`, `sjzo`, `p7sa` |
-| 14 | Backup, capsule export, scrub, verify, restore | PARTIAL / BROKEN | Backup binaries exist but restore tests fail at 94a77dfb (§2); capped at 1 GiB/100K objects; no scrub/repair | `x2mv.4.21`, `x2mv.4.10` |
-| 15 | Single-node and object-store deployment | PARTIAL / STUB | Single node works; object-store adapter refuses TLS and speaks a private protocol | `88g7` (comment) |
-| 16 | GitHub import and compatibility matrix | NOT_STARTED / stale | FG-049 open; matrix last edited 2026-09-04 | FG-049, FG-090 |
+| # | Goal | 2026-09-23 | Now | Evidence | Work |
+|---|---|---|---|---|---|
+| 1 | Repository creation/import/export | WORKING (bounded) | WORKING (bounded) | `fg init/import/export/bundle`; import budget wiring `531354b0`/`670ef4e9`/`8ba0cccd`; import capped at 128 MiB | `x2mv.4.28`, FG-106, `e6jj` |
+| 2 | SSH and smart HTTP access | BROKEN / PARTIAL | **PARTIAL** (Δ) | SSH confidential with KEX and robustness fixes. HTTP stock push, pooling, continuous mode and drain all work. Still loopback-only HTTP with no TLS, no keep-alive and ed25519-only SSH keys, and the rekey is uncompiled at landing. | `x2mv.4.4`, `x2mv.4.8` (in progress); `.4.30`, `.4.31`, `.4.32` (new) |
+| 3 | Protocol-accurate clone/fetch/push | WORKING (daemon tier) | WORKING on all three transports for the declared tier (Δ) | v0/v1/v2 upload on git://, SSH and HTTP; receive v0/v1; `atomic` advertised on all three; push options, signed push, report-status-v2 and push sideband not advertised; partial clone and notes untested through `fg` | FG-019, FG-098, `.4.33` (new) |
+| 4 | Branch/tag listing and atomic ref updates | WORKING | WORKING | `fg branch/tag/refs`; HTTP routes; `tag_lifecycle` 14/15 (TAGS-015 needs the pinned oracle) | — |
+| 5 | Users, orgs, teams, tokens, deploy keys | PARTIAL | PARTIAL | Only SSH deploy keys and HTTP token/credential files; CLI/MCP principals self-asserted; no admin surface | `x2mv.4.13`; `.4.34` (new) |
+| 6 | Protected refs and policy snapshots | BROKEN | **PARTIAL, fail-closed** (Δ) | Injection and fail-open fixed. Fabricated facts replaced by refusal. Rule engine (`evaluate_protected_ref`) has no production caller, any `ci_check` satisfies every required check, snapshot identity not in the RCR, stored snapshots never activated. After the pinned SHA, `1a3a351a` bound each required check to its name, ref and exact commit inside fgit-policy (verified 11/11 at `b7de0d5e`), but the engine still has no production caller. | `x2mv.4.6` |
+| 7 | PRs, reviews, comments, labels, merge | PARTIAL | PARTIAL (Δ reopen) | Reopen works; fast-forward unverified; no PR comments, labels, squash/rebase or approval survival; read cap 65,536 but publication stops at 16,384 | `x2mv.4.20`, `x2mv.4.7` |
+| 8 | Issues and discussions | PARTIAL | PARTIAL | Issues with comments, labels and rendered Markdown; no discussions, assignees, milestones or notifications | FG-045 |
+| 9 | Webhooks and event API | STUB / PARTIAL | **PARTIAL** (Δ) | Real signed payload and operator CLI; no worker; plaintext HTTP only; no HTTP/MCP event feed | FG-046, FG-046b; `.4.35` (new) |
+| 10 | Safe Markdown rendering | LIBRARY-ONLY | **PARTIAL** (Δ) | HTTP, MCP and browser render. Review text renders nowhere, and HTTP has no source spans. The real-browser CSP suite passes 19/19 on the issues page with fg built from the `5561f2f9` tree, after its evidence defects and x2mv.4.45 were fixed (§5.8). | `x2mv.4.11` (in progress) |
+| 11 | Basic lexical and symbol search | PARTIAL | PARTIAL | Revalidated lexical mode is opt-in. Symbols and the default HTTP mode go stale. Build aborts on any file over 8 MiB or any malformed `.rs`. Caps below this repository's size. No search e2e suite. | `x2mv.4.19`, FG-032a |
+| 12 | CI with artifacts and cache | PARTIAL (trusted only) | PARTIAL (trusted only) | Check publication exists as a library path only, maps success to `ActionRequired`, and has no CLI or HTTP route; no triggers, artifacts, cache or isolation | `x2mv.4.12`, `25cs`, D5 |
+| 13 | Agent identities, Intent Runs, workspaces, evidence | PARTIAL / LIBRARY-ONLY | PARTIAL / LIBRARY-ONLY | Workspaces trusted-local; `fgit-agent` 37,176 lines, zero dependents; no agent principal type | `x2mv.4.24`, `xcu9`, `sjzo`, `p7sa`; `.4.34` (new) |
+| 14 | Backup, capsule export, scrub, verify, restore | PARTIAL / BROKEN | **PARTIAL** (Δ restore fixed) | `fg backup` exists; restore works; 1 GiB and 100K-object caps; unsigned; no capsule, scrub or repair | `x2mv.4.21`, `x2mv.4.10` |
+| 15 | Single-node and object-store deployment | PARTIAL / STUB | PARTIAL / STUB | Single node improved (continuous HTTP, drain, pooling); object store refuses TLS (`TlsTransportNotAdmitted`) | `88g7`; `.4.30`, `.4.32` (new) |
+| 16 | GitHub import and compatibility matrix | NOT_STARTED / stale | NOT_STARTED / stale | Matrix last edited 2026-09-04 and does not reflect SSH, HTTP push or capability parity | FG-049, FG-090 |
 
 **README core innovations**
 
 | Innovation | Status | Evidence |
 |---|---|---|
-| Decisions + RCR, one head CAS for ref and forge | WORKING (merge path) | asa3 chain, reopen/crash tests |
-| Stable retry identity, immutable outcomes | WORKING | `fg outcome`; transaction_outcome recovery |
-| Per-core preparation, flat combiner, witness refinement | LIBRARY-ONLY | `fgit-txn` combiner/lanes have 0 external callers; fgit-witness has 0 dependents (`x2mv.4.9`) |
-| ATP-Git | LIBRARY-ONLY | 0 dependents (`x2mv.4.22`) |
-| TreeFS | PARTIAL | Library plus trusted sparse host adapter; files copied, not shared; no FUSE |
-| Typed graph fabrics | LIBRARY-ONLY | Algorithms real; none of the nine GRAPH views built from canonical data |
-| CALM and obligation-typed effects | PARTIAL | Vocabulary exists; runner "obligations" are counters; no Asupersync regions in runner, agent or TreeFS |
-| Repair through authority | LIBRARY-ONLY | fgit-repair has 0 dependents (`x2mv.4.10`) |
-| Conformal/e-process policy | LIBRARY-ONLY | fgit-statistics consumed only by unlinked crates |
-| Local root-last releases | STUB | `verify.sh release` exits 3; the release attempt is a probe (`0zjt` comment) |
+| Decisions + RCR, one head CAS for ref and forge | WORKING (merge, reopen, receive paths) | asa3 chain, reopen/crash tests, deterministic losers (Δ) |
+| Stable retry identity, immutable outcomes | WORKING | `fg outcome`; retries of unknown originals resolve to terminal (`80506e03`) |
+| Per-core preparation, flat combiner, witness refinement | LIBRARY-ONLY | `fgit-txn` combiner/lanes used only by fgit-txn tests; fgit-witness has no dependents. `fgit-node/src/node_lanes.rs` is a connection pool, not this. |
+| ATP-Git | LIBRARY-ONLY | No dependents |
+| TreeFS | PARTIAL | Trusted sparse host adapter; files copied, not shared; no FUSE; lease `WouldBlock` intermittent |
+| Typed graph fabrics | LIBRARY-ONLY (generation substrate live for search only) | GRAPH-001..009 all "specified" in `registries/graph_views.tsv` |
+| CALM and obligation-typed effects | PARTIAL | fgit-calm is called only by unwired federation code; runner obligations are `usize` counters; no Asupersync regions in runner, agent or TreeFS |
+| Repair through authority | LIBRARY-ONLY | fgit-repair, fgit-raptorq and fgit-compaction have no production dependent |
+| Conformal/e-process policy | LIBRARY-ONLY | fgit-statistics is consumed only by unlinked crates |
+| Local root-last releases | STUB | `verify.sh release` runs the licence gate and a probe, then exits 3 |
 
 **Beyond parity:**
-- Verified reads: LIBRARY-ONLY; node functions have no transport caller.
-- Time travel: WORKING (`fg at`).
+- Verified reads: LIBRARY-ONLY. The node functions are linked but called only by tests. The browser "verified downloads" check object hashes, not FG-037 inclusion proofs.
+- Time travel: WORKING (`fg at`, `time_travel` suite).
 - Evidence economy: LIBRARY-ONLY (fgit-exchange unlinked).
 - Deterministic build outputs: STUB (in-memory `OutputStore`).
-- Formal core: contained Lean model only, as the README says.
+- Formal core: contained Lean model only.
 
 **Constitution:**
-- `#![forbid(unsafe_code)]`: pass (all roots).
-- No Tokio, hyper, OpenSSL, ring or libgit2: pass.
-- No production `git` subprocess: pass.
-- One Asupersync constellation: pass at 0.5.0, but the constitution text still says 0.4.x.
-- Native code: psm assembles and links `libpsm_s.a` (verified in `build/psm/*/out`), which the registry admits while DEP-182 says the opposite (`x2mv.4.15`, D4).
-- Lint-relaxation gate: misses `#[expect(`.
+- `#![forbid(unsafe_code)]`: pass.
+- No Tokio, hyper, OpenSSL, ring or libgit2, and no production `git` subprocess: pass.
+- One Asupersync constellation at 0.5.0: pass, though the constitution text still says 0.4.x (`x2mv.4.15`).
+- psm native assembly: unresolved (D4).
+- **Δ Rust-only Git semantics: tension.** The browser now ships a 560-line JavaScript pack/DEFLATE/delta decoder, and Git object hashing appears in 17 JavaScript modules. AGENTS.md §3.1 and §6 say FrankenGit owns pack, delta and DEFLATE semantics in Rust. No decision admits a second implementation outside Rust (§5.7). After the pinned SHA, `ed88d0dd` and `41eab465` moved the decoder into `transfers-protocol.mjs` (786 lines). The browser now serves it as its pre-import and pre-download verifier, so it is on a product path (`x2mv.4.44`).
 
 ## 5. Findings that should change priorities
 
-### 5.1 Main is being fed code nobody compiled
+### 5.1 The verification loop is vacant
 
-- About 1,000 non-merge commits landed between 2026-09-07 and origin/main `bfb3bb30`. 163 of them state that compilation or tests were not run, and 115 explicitly say Cargo/rustc was unavailable. The stream stayed active during this assessment: `3a7ab99b` and `bfb3bb30` were pushed on top of the broken HEAD, and both declare they were never compiled. That includes every feature commit from 2026-09-22 onward.
-- HEAD `46b922e7` fails `cargo check` in fgit-runner (`journaled/observations.rs:114-115`, E0423). Because fgit-node and fgit-cli depend on it, `fg` cannot be built at HEAD.
-- At `94a77dfb`:
-  - the fgit-forge lib-test target has 29 compile errors in the uncompiled exact-rename tests (daa87647);
-  - an fgit-node bin-test target misses a struct field (`resume_engine_tests.rs:134`);
-  - the new `WorkflowCheck` event kind broke an existing codec contract test (`crates/fgit-forge/tests/atomic_merge.rs:481`: "kind 11 must be refused").
-- Formatting drift covers 72 files, all from post-2026-09-22 commits.
+- **No bead has closed since 2026-09-23.** 175 non-merge commits landed in those four days.
+- **No independent verifier has commented on any `x2mv.4` child.** Every implementer comment on a child comes from one agent (IcyIbis) and is self-verified.
+- **Verification debt** (in_progress plus batch_pending) is 34, against `.beads/policy.yaml`'s soft limit of 28 and hard limit of 36. Two more claims and the tracker refuses new work. The 30 `batch_pending` beads span 16 assignees; the oldest has waited since 2026-08-26.
+- **The P0 track that was meant to restore trust cannot start.** `x2mv.4.3` (re-verify the 2026-09-22 closure wave) and `x2mv.4.26` (fast lane) both have a blocking edge on `x2mv.4.1`, which is `batch_pending` and can only be closed by the batch verifier.
+- **No repository lane runs any end-to-end suite.**
+  - `scripts/verify.sh` never calls `scripts/e2e/run_all.sh`, and `full` is an explicit dormancy refusal (`verify.sh:94`).
+  - 38 root-level smoke campaigns have no invoker in any suite or lane.
+  - About 900 browser tests run on a fake DOM, in no lane.
+  - Every transport and forge "pass" since 2026-09-23 is an implementer-reported run at a past SHA.
+- **Several suites under `scripts/e2e/suites/` only wrap `cargo test`** and never touch `fg`:
+  - agent: `agent_delegation`, `agent_adversarial`;
+  - workflow: `workflow_execution`;
+  - transport: `atp_*`;
+  - graph, statistics, txn, witness;
+  - `verified_reads_tamper`.
 
-The 2026-08-31..09-02 toolchain-less stream did the same thing once already (omr4). This is the root cause of most other findings. It gets P0 treatment in `x2mv.4.1` and `x2mv.4.2`.
+  They read as product evidence on bead records.
 
-### 5.2 The 2026-09-22 closure wave overstates delivery
+This is the highest-leverage defect in the project. The fix is not more process. Someone has to be the verifier (owner decision D8), the product suites have to run in a lane, and the backlog has to be processed at a named SHA. See `x2mv.4.29`, `x2mv.4.18`, `x2mv.4.46` and `x2mv.4.47`.
 
-Twenty-eight beads closed on one day. Twelve batch_verify gates have no note and no SHA, which AGENTS.md 16.2 calls unsupported. One gate provider is also the implementer of several beads closed in the same wave.
+### 5.2 Uncompiled code keeps landing, now under an asserted owner mandate
 
-Beads whose own acceptance lines are demonstrably unmet: FG-047/047b (SSH), FG-095b and FG-095c (workflow, "hostile execution"), FG-072, FG-093b, FG-029b, FG-043r/b/c, FG-096a and FG-094a. Several "e2e" suites cited as evidence are `cargo test` wrappers that grep test names, not product runs.
+The "Jeff Emanuel" author has landed 77 commits since 2026-09-23. 73 of them state that compilation or tests were not run, and 60 of those change Rust. Build or test breaks it landed after the 2026-09-23 document, each repaired by another session:
 
-`x2mv.4.3` lists every line and requires the verifier to reopen or re-close each one with SHA-bound, acceptance-mapped evidence. It also requires the tooling to refuse SHA-less or self-provided gates.
+| Break | What broke | Repaired by |
+|---|---|---|
+| `a103783a` | main did not build | `fbcbe656` |
+| `aaf7b421` | fgit-node lib test, E0425 | `1b51c5ad` |
+| `c7679132`, `bc2c2a0d` | three search tests | `651238cf`, `8d40f88d`, `00a7903a` |
+| `531354b0` | its own parser test failed from the start | `670ef4e9` |
+| `e5e547fa` | a `const fn` comparing `&str` with `==`, plus a changed call signature | `78b22405`, `7f42b729` |
 
-This assessment did not reopen any bead. That transition belongs to the independent verifier.
+Main compiled at `2b7f35ac` only because of the last repair.
 
-### 5.3 SSH is not confidential
+Thirty-two of these commits state that the owner explicitly requested direct-main publication. `x2mv.4.2` (P0) says uncompiled landings must stop. Both cannot be the rule. This assessment does not rule on it. It adds decision **D7** to `x2mv.4.14`, framed as the owner choosing among:
+- a compile sentinel that checks each landed commit within minutes and files or repairs breaks under the originating bead;
+- a staging branch that an integrator fast-forwards after `cargo check` and the focused tests;
+- accepting the breakage rate explicitly, recorded as negative evidence.
 
-`crates/fgit-ssh/src/session.rs:419` initialises every session's ephemeral X25519 key from the constant `[0x77; 32]`, and the KEXINIT cookie is constant. Other problems:
-- the MAC comparison is not constant-time;
-- a peer can make the server buffer about 4 GiB before authentication;
-- flow control is ignored;
-- a silent client pins a worker forever;
-- push has never been tested over SSH.
+Two of the stream's commits cite the wrong bead: `3b45aca8` and `83ec52a9` are backup work credited to `x2mv.4.11` (Markdown).
 
-Host-key signatures still authenticate the server. Session contents are recoverable from the transcript. `fg serve-ssh` binds any address. See `x2mv.4.4`.
+### 5.3 What the bridge delivered, and how far that can be trusted
 
-Separately, `fg serve --receive-principal` also binds any address, so any network peer can push as that principal (`x2mv.4.5`).
+Four P0/P1 defects from 2026-09-23 have code fixes with SHA-bound, implementer-run evidence:
+- SSH confidentiality (`x2mv.4.4`);
+- the daemon bind policy (`x2mv.4.5`);
+- deterministic concurrent writers (`x2mv.4.27`);
+- stock HTTP push and serving lifetime (`x2mv.4.8`).
 
-### 5.4 About 68K lines of product crates run in no program
+Two more are fixed in part:
+- policy fail-open and injection (`x2mv.4.6`);
+- the event read cap (`x2mv.4.7`).
 
-Reachability derived from every manifest: 32 of the 48 crates under `crates/` link into `fg`. Of the 16 that do not, five are tooling (lab, benchmark, proof-bridge, slo, release). The other eleven are product crates with neither a production dependent nor a binary, about 68K source lines in total:
+The executable run in §2 re-runs the relevant tests and suites at `2b7f35ac`. Until an independent verifier reproduces them, the honest label is "implemented and self-verified", not "done".
 
-fgit-agent, fgit-atp-git, fgit-raptorq, fgit-repair, fgit-compaction, fgit-doc, fgit-projection, fgit-statistics, fgit-witness, fgit-exchange, fgit-object-store.
+One of those fixes had a regression, disclosed on its bead. `36f62452` made the git:// peer probe treat a half-closed socket as gone; `8b3ffddc` fixed it. It was caught only because filtered tests were re-run. That shows how easily a "passes" note can be wrong.
 
-In addition, the per-core lanes and flat combiner inside fgit-txn have no caller outside that crate. Their closed beads certified library slices. Three README core innovations (per-core preparation, ATP-Git, repair through authority) and two "beyond parity" capabilities (evidence exchange, build reuse) therefore have no runtime effect.
+### 5.4 About 61.7K lines of product crates still run in no program
 
-Integration beads now exist for each: `x2mv.4.9`, `.10`, `.11`, `.22`, `.24`, and existing `88g7`.
+By `cargo metadata`, 33 of the 48 crates under `crates/` link into `fg`. That is up by one: fgit-doc, via `adb58daa`. Five of the remaining 15 are tooling (lab, benchmark, proof-bridge, slo, release). The other ten are product crates with neither a production dependent nor a binary:
 
-### 5.5 The forge has a hard event cliff
+| Crate | Source lines |
+|---|---|
+| fgit-agent | 37,176 |
+| fgit-atp-git | 4,472 |
+| fgit-statistics | 3,863 |
+| fgit-projection | 3,106 |
+| fgit-raptorq | 2,878 |
+| fgit-repair | 2,664 |
+| fgit-witness | 2,495 |
+| fgit-exchange | 2,011 |
+| fgit-object-store | 1,802 |
+| fgit-compaction | 1,269 |
 
-Settled outbox entries are never removed. Every materialization re-verifies the whole outbox. PR and issue reads refuse above 4,096 forge or outbox entries, and that includes the review check a protected merge performs. At 16,384 entries the codec refuses all forge publication (`crates/fgit-codec/src/canonical_state.rs:21-22`). The projection substrate built to avoid exactly this has no consumer. See `x2mv.4.7`.
+None of their integration beads (`x2mv.4.9`, `.10`, `.22`, `.24`, `88g7`) has been claimed.
 
-### 5.6 Policy evaluation is decorative
+Three linked modules are also effectively dead:
+- The combiner and lanes in fgit-txn have no caller outside that crate.
+- fgit-graph's algorithms, architecture and temporal modules have no caller outside that crate.
+- The node's verified-read functions are called only by tests.
 
-- Every principal is presented to the policy engine as `Human` with `MultiFactor` at time zero.
-- Receive-path compile or evaluation errors skip the check (`if let Ok`).
-- Branch names are interpolated into policy source.
-- Any `ci_check` receipt satisfies all required checks regardless of name or commit.
-- The snapshot identity is not bound into the RCR.
+The projection substrate may become permanently orphaned. The issue event cliff was addressed by paged replay (`a500c6da`) instead, which `x2mv.4.7` allowed, and nobody has decided whether fgit-projection still has a consumer.
 
-Mandatory review protection works only because it is an inline check. See `x2mv.4.6`.
+### 5.5 Capacity ceilings a real team would hit
 
-### 5.7 The shipped user surfaces diverge from the accepted ADRs
+- **Forge publication stops at 16,384 entries.** `MAX_FORGE_POSITION_STATE_ENTRIES` and `MAX_OUTBOX_STATE_ENTRIES` are both 16,384 (`crates/fgit-codec/src/canonical_state.rs:19-22`), and settled outbox entries are never removed. After 16,384 forge events every PR, issue and review publication is refused, permanently. The read cap was raised to 65,536 events, 128 MiB scanned and 32 MiB retained (`a500c6da`, `77b9cf4d`), so the publication ceiling now binds first. Each read still scans the whole outbox. The 128 MiB scan limit also binds early for large bodies, at about 2,000 bodies of 64 KiB (an inference).
+- **One writer per process.**
+  - `MAX_CONCURRENT_WRITERS = 1` (`e367df7b`) made CAS losers deterministic by serializing writers after ingress.
+  - Its commit reports the slowest of eight concurrent writers at 57–85 s under host load around 90.
+  - It is the right correctness fix and the wrong end state. No negative-evidence row or performance bead records it.
+  - The README pillar that should replace it is per-core preparation with a flat combiner (`x2mv.4.9`, still an island).
+- **Search cannot index this repository.** The limits are 20,000 files, 64 MiB of source and 20,000 declarations. This repository has about 33K Rust declarations and a 10 MiB tracker export.
+- **Storage grows without bound.** There is no GC, and settled outbox entries are never removed.
 
-- `fg serve-http` is a hand-written HTTP/1.1 server carrying Git, about 40 REST routes (form-encoded, hex bytes, no OpenAPI) and the browser. The plan explicitly rejected an owned HTTP surface in favour of fastapi_rust.
-- The browser is about 7.8K lines of hand-written JavaScript that re-implements Git object hashing. ADR-0013 forbids a JavaScript-first primary UI. Its roughly 740 tests use a fake DOM and run in no lane.
-- The CLI and MCP open storage in-process with self-asserted principals.
+### 5.6 Protected branches with required checks cannot be merged
 
-These may be acceptable interims, but no ADR says so. They are owner decisions D1 and D2 in `x2mv.4.14`.
+Every piece of the required-check path exists, but nothing connects them:
+- The policy engine's required-check evaluation (`evaluate_protected_ref`, `crates/fgit-policy/src/protected_ref.rs:562-585`) has no caller outside fgit-policy, and it would accept any `ci_check` receipt for any check name.
+- The only production check publisher (`admit_trusted_workflow_check_in`) has no CLI or HTTP caller, and maps success to `ActionRequired`.
+- Nothing triggers a workflow from a push or PR.
 
-The external blocker is now concrete. Published fastapi-core 0.4.4 and ftui-runtime 0.7.0 require asupersync ^0.4.9, while the local fastapi_rust and frankentui sources already pin 0.5.0 but are unpublished (D3). FG-094a's closed ftui admission is invalid on 0.5.0.
+The practical result: protection works for mandatory review, which is an inline check, and for nothing else. See `x2mv.4.6` and `x2mv.4.12`.
 
-### 5.8 CI is trusted-host execution with inflatable labels
+### 5.7 The paused surfaces kept growing
 
-- `ProcessSubstrate` runs `/bin/sh -eu -c` as a direct child, as the host user, with full network.
-- It ignores the isolation and egress fields that `RunnerPolicy` requires, and always reports one reaped process.
-- Nothing triggers runs from pushes or PRs.
-- Check results are not published to PRs.
-- Required checks cannot pass.
-- The only hostile-isolation bead (`25cs`) has no description.
+`x2mv.4.14` says work affected by D1 (the hand-written gateway versus ADR-0011) and D2 (the JavaScript browser versus ADR-0013) stays paused until the owner rules. Neither ADR has changed since 2026-08-21, and no ruling is recorded. Since 2026-09-23:
+- **The browser grew by 1,843 lines of JavaScript**, to 9,676 lines in 44 modules. 17 of its 19 commits came from the toolchain-less producer.
+- **It gained a 560-line pack, DEFLATE and delta decoder** (`bundle-verify.mjs`), used by `scripts/verify_git_bundle.mjs` as a recovery verifier.
+- **The HTTP API grew to about 71 routes.** They are form-encoded, with no body schema, no CSRF or Origin check, and Basic challenges that let browsers cache credentials.
+- **The MCP tool registry and the parity manifest now agree on only 16 of 28 names**, and no lane checks them (`x2mv.4.17`).
 
-See `x2mv.4.12` and owner decision D5.
+This is not a judgement on whether the shipped surfaces are good. It records that a declared pause is not being enforced, and that the Rust-only Git semantics rule now has a JavaScript exception nobody approved.
 
-### 5.9 The tracker no longer describes the work
+### 5.8 Evidence defects
 
-- Only 348 of 1,000 non-merge commits since 2026-09-07 cite a bead.
-- The heaviest streams landed against beads that are open, unassigned and untouched since 2026-08-21: FG-051a (28 commits), FG-032/FG-032a (41), FG-105/FG-105a (13), FG-050, FG-096b. Others went to unrelated closed beads (browser work credited to asa3, FG-044 and FG-058).
-- No bead is in progress.
-- 28 beads are batch_pending, the policy's soft verification-debt limit; the oldest has waited since 2026-08-26.
-- About 40 Python smoke campaigns, and the browser tests, run in no lane, while seven docs tell readers to run them. See `x2mv.4.18` and `x2mv.4.2`.
+- **At `2b7f35ac`, `scripts/e2e/browser_issue_markdown_probe.mjs:127` reported `csp_meta_or_header_present: true` as a literal**, a hard-coded success field of class RH-12. Its driver asserted nothing. The suite it named (`suites/forge/browser_markdown_csp.sh`) did not exist, and the probe waited for a status text the page never shows.
+  - The probe belongs to `x2mv.4.11`, in progress under this assessment's author, and was swept into `d7dc118d`/`0a76cdd1` before it had ever run.
+  - Fixed in `5561f2f9`: the probe records the CSP header Chrome actually received, and a 19-assertion suite asserts every fact, with permitted twins.
+  - Its first honest run is what exposed `x2mv.4.45`: 1,731 of 1,752 fake-DOM tests passed while no API-calling browser page worked.
+- **`scripts/e2e/smart_http_smoke.py:75` still injects `Idempotency-Key`.** Only `stock_http_push_faults` proves the header-free stock push.
+- **`suites/forge/webhook_delivery.sh`** uses the old `deliver` syntax and ends commands in `|| true`.
+- **The authority and repository backup suites have never been executed.** The new `source_backup_preflight.sh` has never run.
 
-### 5.10 Documentation is stale in both directions
+### 5.9 Documentation is stale in both directions
 
-The README still says:
-- smart HTTP and SSH are absent;
-- no native API, MCP, UI or search exists;
-- the constellation is Asupersync 0.4.x;
-- sqlmodel is 0.4.2.
+- **The README understates the transports.** Lines 84–88, 147, 157 and 165 still say:
+  - a stock HTTP push needs `Idempotency-Key`;
+  - SSH uses a constant key;
+  - webhooks send a placeholder (line 170);
+  - safe Markdown is library-only (line 182).
+- **The README states targets as current.**
+  - "Agent-native collaboration" (lines 526–546) describes an Intent Run model that no binary runs.
+  - §3, §5 and §7 describe per-core publication, a million workspaces and CALM routing in the present tense, without a status marker.
+- **`docs/GIT_COMPATIBILITY_MATRIX.md` was last edited 2026-09-04.**
+- **`docs/MCP_*.md` omit five tools and the `render` option.**
 
-It also:
-- presents per-core microbatching, clustered object-store deployment and portable capsule backup in the present tense;
-- describes asa3's outbox "reconciliation worker", which does not exist;
-- links a `#reality-snapshot-2026-09-04` anchor that no longer exists.
+This assessment refreshes the README's dated snapshot and boundary paragraph. The rest belongs to `x2mv.4.15` and FG-090.
 
-The negative-evidence ledger has not changed since 2026-08-29. This assessment updates the README snapshot. The remaining reconciliation belongs to `fjsz` and `x2mv.4.15`.
+### 5.10 Tracker health
 
-### 5.11 Concurrent writers and pinned reads are not deterministic
+| | Records | Closed | Open | batch_pending | Blocked | Deferred | In progress |
+|---|---|---|---|---|---|---|---|
+| 2026-09-23 | 569 | 475 | 55 | 28 | 6 | 5 | 0 |
+| 2026-09-27 | 598 | 475 | 77 | 30 | 7 | 5 | 4 |
 
-Seven race tests fail in three independent runs, including one that started on a near-idle host:
-- `issue_http_race`, `pull_request_http` and `source_change_http`;
-- `initial_commit_http`, `branch_http` and `tag_http`;
-- `guarded_git_daemon`.
+- All 29 new records are the `x2mv.4` epic and its children.
+- Commits landed against open, unassigned beads without claiming them:
+  - `x2mv.4.19` (19 commits) and `x2mv.4.26` (19);
+  - `x2mv.4.20` (13) and `x2mv.4.28` (5);
+  - `x2mv.4.6` (4), `x2mv.4.21` (3) and `x2mv.4.7` (2).
+- The P0 process beads `x2mv.4.2` and `x2mv.4.3` have no owner and no comments.
+- `br` refused every write from 2026-09-24 23:23 to 2026-09-27 21:11. The cause was a stale `beads.db-shm` that survived a disk-full crash; it was moved aside with the owner's approval. Bead comments for that period were entered late.
 
-Where the tests expect one winner and one typed refusal, the losing writer gets HTTP `503 {"code":"outcome_unknown"}`, or the refusal counts are wrong. This violates the normative rule that a sealed transaction reaches exactly one terminal decision, and that CAS losers re-evaluate the same sealed request. `outcome_unknown` is for genuine transport ambiguity, not a lost race. Relatedly, `fg branch update` on a protected branch reports a deterministic pre-seal refusal as "no terminal outcome ... not evidence of non-commit". See `x2mv.4.27`.
+### 5.11 Incident during this assessment
 
-Separately, the PR and issue campaigns and the `issue_http` snapshot-walk tests disagree with the code about stale `--expected-head` pins, and have since `5c294d6e`. A stale pin returns a page where the campaigns require a typed refusal. The contract must be decided explicitly (`x2mv.4.26`).
+A read-only audit subagent dispatched by this assessment overwrote the scratchpad copy of the 2026-09-23 tracker baseline (`beads_all.json`, SHA-256 `9e492495…`) with a fresh export, despite an instruction not to modify files. The baseline's counts survive in this document and in `.beads/issues.jsonl` history at `6c762f42`, but the original bytes are gone. The 2026-09-23 appendix row is marked accordingly. The instruction was the assessor's, and so is the responsibility.
 
 ## 6. Tracker coverage
 
-Baseline counts: 569 records (475 closed, 55 open, 28 batch_pending, 6 blocked, 5 deferred, 0 in progress). `br ready --unassigned` returned four records: FG-032a, FG-045, FG-093c and `xcu9`. Of the eight 2026-09-07 audit beads:
-- two progressed: `zb0q` (with strong evidence) and `l0xt`;
-- none closed;
-- the rest are untouched.
+`br ready --unassigned --no-db --json` returned 20 records. 16 of them are `x2mv.4` children; the others are FG-032a, FG-045, FG-093c and `xcu9`. Neither P0 track bead is ready (`x2mv.4.3` and `x2mv.4.26` are blocked by `x2mv.4.1`).
 
-Vision goals that had no owning bead before this assessment:
-- SSH confidentiality and robustness;
-- deterministic concurrent-writer outcomes;
-- daemon bind policy;
-- policy fact integrity;
-- the forge event cliff;
-- smart-HTTP stock-push compatibility and serving lifecycle;
-- combiner integration;
-- node GC/scrub/repair/RaptorQ/compaction;
-- safe Markdown;
-- the CI product loop after FG-095 closed;
-- identity binding on write surfaces;
-- the MCP registry drift;
-- the orphaned campaigns;
-- search usability on active repositories;
-- the PR workflow gaps;
-- the backup product;
-- ATP-Git on a real path;
-- integrating exit tests for a human team and an agent;
-- dogfooding;
-- constitution and registry drift;
-- repository hygiene;
-- stopping uncompiled landings.
+Vision goals with no owning bead before this assessment, now covered in §9:
+- **Verification:**
+  - a verifier at a named SHA working through the backlog;
+  - product end-to-end suites in a repository lane.
+- **Transports and deployment:**
+  - a non-loopback HTTP profile with TLS;
+  - continuous lifetime and drain for `fg serve` and `fg serve-ssh`;
+  - binary-driven transport coverage for partial clone, notes, submodules and atomic push over SSH and git://.
+- **Capacity:** safe write concurrency beyond one writer, with negative evidence for the gate.
+- **Identity:** agents as first-class principals.
+- **Forge:**
+  - PR labels;
+  - an HTTPS webhook client and a native event feed;
+  - CSRF and Origin protection.
+- **README pillars:**
+  - graph views from canonical data;
+  - a production consumer for statistics;
+  - CALM routing and Asupersync regions in runner, TreeFS and agent;
+  - TreeFS sharing;
+  - verified reads on a transport.
+- **Correctness and contracts:**
+  - the fsqlite companion-file contract;
+  - the sparse-workspace lease;
+  - the JavaScript pack decoder.
+- **Owner rulings:** D7 and D8.
 
 ## 7. Bridge plan
 
-Order is by leverage, not ease. Existing owners keep their beads.
+Order is by leverage, not ease. Existing owners keep their beads. Every track's exit is an executed result bound to a SHA, never a closure count.
 
-**A. Make main trustworthy again (P0).**
-1. Compile HEAD and run the never-run tests (`x2mv.4.1`).
-2. Refuse uncompiled landings in the path the producers actually use, and route the unclaimed streams through their beads (`x2mv.4.2`).
-3. Return the canonical fast lane to green (`x2mv.4.26`).
-4. Re-verify the closure wave line by line (`x2mv.4.3`).
-5. Make concurrent-writer losers deterministic (`x2mv.4.27`).
+**A. Put someone in the verification loop and make the product suites run (P0).**
+1. The owner names the batch verifier (D8). The verifier runs `x2mv.4.29`, union verification at one SHA over every `batch_pending` bead and `x2mv.4.1`. That unblocks `x2mv.4.3` and `x2mv.4.26`.
+2. `x2mv.4.18` (raised to P0) wires `scripts/e2e/run_all.sh` into a repository lane. It turns the 38 root smokes into discovered suites and labels the cargo-test wrappers. The real-browser suites land in the same lane: `browser_markdown_csp.sh`, `client_fetch.sh`, and the every-page smoke `x2mv.4.46`.
+3. The owner rules on D7. Then `x2mv.4.2` implements the ruling. Option (a), a compile sentinel, becomes product work once `x2mv.4.25` runs it as FrankenGit's own required check.
+4. `x2mv.4.26` returns the fast lane to green, using the failing list in §2.
+5. `x2mv.4.3` re-verifies the 2026-09-22 closure wave line by line.
+6. `x2mv.4.47` adds a deterministic simulation lane for the concurrency class that load testing keeps finding.
 
-Exit: `verify.sh fast` exits 0 at a named SHA and every listed closure is either re-closed with mapped evidence or reopened. This earns no feature credit. It is what makes every later claim checkable.
+Exit: at one named SHA, `verify.sh fast` and the e2e lane exit 0, verification debt is below 28, and every 2026-09-22 closure is re-closed with mapped evidence or reopened. This earns no feature credit. It is what makes every later claim checkable.
 
-**B. Fix the shipped security and integrity defects (P0/P1).** SSH key exchange and robustness (`.4.4`), daemon bind policy (`.4.5`), policy facts and fail-open (`.4.6`), webhook rework (FG-046 comment), and constitution checker holes (`.4.15`).
+**B. Security and integrity on the shipped listeners (P1).**
+- Browser pages that cannot call their API (`x2mv.4.45`; fix landed in `56bba7ee`, awaiting the verifier).
+- Cross-site request forgery on the browser-facing API (`x2mv.4.31`).
+- The uncompiled SSH rekey (`x2mv.4.4`: re-run the SSH suites at HEAD before handoff).
+- The unwired policy rule engine: snapshot identity and activation (`x2mv.4.6`). `1a3a351a` fixed the any-check-satisfies-all defect inside fgit-policy (verified at `b7de0d5e`: 11/11), but nothing calls the engine yet.
+- Constitution and registry drift (`x2mv.4.15`), including the JavaScript Git decoder, now on a served path (`x2mv.4.44`, D2).
 
-**C. Make the single-node forge usable by a real team (P1).** Remove the event cliff (`.4.7`), make stock push over HTTP work in a long-running server (`.4.8`), bind identity on every write (`.4.13`), close the CI loop with published and required checks (`.4.12`), and run every orphaned campaign in lanes (`.4.18`). Exit test: **team day** (`.4.23`), one scripted day through the real binary over SSH and HTTP with auth, protection, CI, merge races, crash recovery, backup and restore, with an economics record against upstream Git.
+**C. A forge a real team can run (P1).** The exit test is team day (`x2mv.4.23`).
+- **Capacity:**
+  - the 16,384-event ceiling and history-proportional reads (`x2mv.4.7`), with a settled-prefix Merkle Mountain Range checkpoint as the proposed mechanism and fgit-projection as the per-aggregate index;
+  - writer concurrency (`x2mv.4.9`, which first measures where the single-writer service time goes, then `x2mv.4.39` for commuting monotone intents);
+  - GC, scrub and repair (`x2mv.4.10`);
+  - search at this repository's scale (`x2mv.4.19`).
+- **The product loop:**
+  - CI checks that can pass, with triggers (`x2mv.4.12`), running under Asupersync regions and typed obligations (`x2mv.4.38`);
+  - identity on every write surface (`x2mv.4.13`);
+  - PR conversation comments, labels and merge strategies (`x2mv.4.20`);
+  - a webhook worker (FG-046) and a native event feed (`x2mv.4.35`);
+  - the backup product (`x2mv.4.21`, `x2mv.4.42`).
+- **Deployment:**
+  - TLS or a ratified proxy posture (D9, then `x2mv.4.30`);
+  - continuous `fg serve` and `fg serve-ssh` (`x2mv.4.32`);
+  - binary-driven transport coverage feeding the compatibility matrix (`x2mv.4.33`).
 
-**D. Put the pillars on real paths (P2).** Node GC/scrub/repair/RaptorQ (`.4.10`), combiner integration with an equivalence oracle and measured evidence (`.4.9`), safe Markdown (`.4.11`), usable search (`.4.19`), PR workflow gaps (`.4.20`), backup product (`.4.21`), ATP-Git on one path (`.4.22`), and dogfooding this repository (`.4.25`).
+**D. Agents on the designed authority model (P1, after C's identity work).**
+- Agent principals with sponsor chains (`x2mv.4.34`).
+- The task store, collectors and executor (`xcu9`, `sjzo`, `p7sa`).
+- The MCP server (FG-096b) and its drift fix (`x2mv.4.17`).
+- Exit test: agent day (`x2mv.4.24`).
 
-**E. Agents on the designed authority model (P1, after C).** Task store, collectors and executor (existing `xcu9`, `sjzo`, `p7sa`), the MCP server (FG-096b), and the **agent day** exit test (`.4.24`). One agent authority model, not two.
+One authority model, not two.
 
-**F. Distributed, hosted and release (existing work).** Remote authority backend (`88g7`, which now also needs a provider protocol mapping), routing authority (`b5ph`), release target execution (`0zjt`, FG-091), and hostile isolation (`25cs` after D5). None of this should start before A-C, except owner decisions.
+**E. Pillars on real paths (P2).** Each is connected to a consumer that needs it and has a measured effect or a recorded negative result:
+- commit-ancestry graph for admission (`x2mv.4.36`);
+- verified reads on HTTP (`x2mv.4.41`);
+- ATP-Git on one path (`x2mv.4.22`);
+- adaptive CAS retry as the first statistics consumer (`x2mv.4.37`);
+- TreeFS sharing (`x2mv.4.40`);
+- the sparse lease fix (`x2mv.4.43`).
+
+**F. Dogfood as the integrating test (P2, after A and C).** `x2mv.4.25` hosts this repository on a long-lived node fed from origin/main. Its required check is `cargo check` plus focused tests, run by FrankenGit's own CI loop: FrankenGit verifies FrankenGit. Its week-long record (storage growth, events against the ceiling, search lag, check latency) is the evidence that the forge qualifier is earned.
+
+**G. Distributed, hosted and release (existing work, after A–C).**
+- Remote authority backend (`88g7`, after D9).
+- Routing authority (`b5ph`).
+- Release target execution (`0zjt`, FG-091).
+- Hostile isolation (`25cs`, after D5).
+
+**Owner decisions, all in `x2mv.4.14`:**
+- D1: the hand-written gateway versus ADR-0011.
+- D2: the JavaScript browser versus ADR-0013. This now includes a served JavaScript Git decoder.
+- D3: publishing fastapi_rust and frankentui on Asupersync 0.5.
+- D4: psm native assembly.
+- D5: the hostile-CI stance.
+- D6: routing authority and v1 scope.
+- D7: direct-main publication without a toolchain.
+- D8: who is the batch verifier.
+- D9: the TLS posture.
+
+D7 and D8 gate track A. Nothing else in this plan is as cheap or as leveraged.
 
 ## 8. How the plan was refined
 
-**Ambition pass 1.** The first draft only repaired gates and the security defects. It was extended so that each pillar that exists only as a library gets a concrete path into the product with measured evidence. Where a claimed benefit (combiner throughput, ATP-Git bytes) is not measured on the real path, negative results must be recorded.
+**Phase 2 draft.** The first draft re-graded the 2026-09-23 checklist and turned every gap with no bead into a bead: `.29`–`.44`, each carrying its observed evidence, deliverable, acceptance with twins, and relations.
 
-**Ambition pass 2.**
-- Added two integrating exit tests (team day, agent day). Their pass/fail is the only evidence that may back a "usable forge" or "agent-native" claim.
-- Added dogfooding, because hosting this repository would have exposed four of the scale cliffs found here within a day.
-- Added an economics record to team day, so performance claims get a real denominator.
+**Executed-evidence feedback.** Running the swarm's untested real-browser probe (`x2mv.4.11`) found two things:
+- A hard-coded success field in the probe itself (§5.8).
+- A shipped outage: every browser page built on the issue, pulls-core or history client could not make a single API call in Chrome, and had not been able to since 2026-09-18/19. Meanwhile 1,731 of 1,752 fake-DOM browser tests passed.
 
-**Refinement passes.**
-- (1) Duplicates. Defects inside existing open implementation beads (FG-105a, FG-032a, FG-096b) became bug beads with `related` edges, so no existing owner's readiness changed. Findings on batch_pending beads became evidence comments, not new beads.
-- (2) Dependencies. Only the exit tests and the closure re-verification carry blocking edges. Everything else can start immediately.
-- (3) Evidence. Every bead requires a permitted twin for each refusal, discovered suites that drive the real binary, SHA-bound results, and explicit labelling of `cargo test` wrappers.
-- (4) Honesty. No bead reopens or reassigns existing work. Removals (debris, the hosted workflow) require explicit owner approval of the exact command.
-- (5) Evidence feedback. After the executed test run, two beads were added: the fast-lane bead with the exact failing list, and the CAS-loser bead for the reproducible race class. A positive comment on `zb0q` was corrected when its sparse-workspace test failed. The priorities of team-day prerequisites were aligned to P1. One suspected search failure (`source_index_reconcile`) was dropped when it passed on rerun; it had been disk-affected.
+That added `x2mv.4.45`, fixed in `56bba7ee`, with real-browser suites in `5561f2f9` and `b7de0d5e`. It also changed the plan's centre of gravity: the weakest link is the evidence system, not any one feature.
+
+**Ambition pass 1.** Each track got an executable exit instead of a closure target, and two beads were added:
+- `x2mv.4.46`: every served page booted, connected, read from and written to in a real browser, in the lane.
+- `x2mv.4.47`: a deterministic simulation lane that drives the real admission and authority code through fgit-lab and Asupersync's lab runtime.
+
+**Ambition pass 2 (mechanisms, not wishes).**
+- `x2mv.4.9` now starts from a measured decomposition of single-writer service time. Throughput under one gate is about 1/S; a batch-B combiner only amortizes the CAS and fsync share. If preparation dominates, moving it outside the permit beats the combiner, and a combiner that cannot beat it is recorded as negative evidence.
+- `x2mv.4.7` gets one mechanism for three problems: a settled-prefix Merkle Mountain Range checkpoint. It bounds canonical state at O(log n), gives O(log n) historical-event proofs to verified reads (`x2mv.4.41`) and the event feed (`x2mv.4.35`), and settles fgit-projection's fate: it becomes the per-aggregate index.
+- `x2mv.4.25` became the integrating test: FrankenGit hosts and verifies FrankenGit, with its own CI as the compile sentinel (D7 option a).
+
+**Ambition pass 3 (deeper mathematics where it pays).**
+- PCT schedules (Burckhardt et al., 2010) give the simulation lane a stated probability of finding depth-d concurrency bugs per seed budget.
+- The CALM theorem, with lattice types (grow-only sets for comments, observed-remove sets for labels), makes `x2mv.4.39`'s commuting of monotone intents a property-tested claim, not a case-by-case argument.
+- Corrected-commit-date generation numbers and changed-path Bloom filters are stretch accelerations for `x2mv.4.36`. Each has an exact-walk oracle and a negative-evidence path.
+
+**Refinement rounds** (the frozen Phase 5 prompt):
+1. **Structure.** `bv` found no cycles. Its 20 missing-dependency suggestions were keyword overlaps among older beads and were not adopted; none involved the new beads.
+   - Team day's burst step was updated to cross today's binding 16,384 ceiling instead of the obsolete 4,096 one.
+   - `x2mv.4.32` now blocks team day, because a day on a server that exits after N sessions is not a deployment.
+   - `x2mv.4.29` and `x2mv.4.18` now carry the real-browser suites and the node:test browser suite, including its 21 pre-existing failures.
+   - A real-Chrome boot of all 12 main pages found no exceptions, which points those failures at fake-DOM fixture drift.
+2. **Consistency and standards.** `x2mv.4.32` was raised to P1 to match the exit test it blocks. `x2mv.4.12` must not invent a second lifecycle model, so it builds on `x2mv.4.38` regions or carries its own reap test. One logging and test standard was recorded on the epic for children `.29`–`.47`.
+3. **User impact.** Priorities were checked against what blocks a team first: merging with required checks, remote HTTP, PR conversation, the event ceiling, writer latency. No change.
+4. **Honesty.** No new bead can close on refusal-only work or a narrowed claim. `x2mv.4.45`'s one forward-pointing acceptance line was narrowed to its own fix scope and satisfied, instead of being laundered into `x2mv.4.46`.
+5. **Convergence.** A final pass found nothing further to change.
 
 ## 9. Tracker changes made by this assessment
 
-New epic `frankengit-root-doctrine-x2mv.4` with 27 children (`.4.1`-`.4.27`), labelled `reality-check-2026-09-23`:
+The epic `frankengit-root-doctrine-x2mv.4` gained 19 children, `.29`–`.47`, labelled `reality-check-2026-09-27`. After this assessment the tracker holds 617 live records: 475 closed, 95 open, 30 batch_pending, 7 blocked, 5 deferred and 5 in progress. That puts verification debt at 35 of the hard limit of 36; `.45` is the one claim this assessment added.
 
-| Bead | Type | P | Obligation |
-|---|---|---|---|
-| `frankengit-root-doctrine-x2mv.4.1` | bug | P0 | main does not compile: fgit-runner observations.rs E0423 at 46b922e7 and fgit-forge rename tests (29 errors) never compiled |
-| `frankengit-root-doctrine-x2mv.4.2` | bug | P0 | Stop uncompiled commits landing on main and route the unclaimed implementation streams through their beads |
-| `frankengit-root-doctrine-x2mv.4.3` | task | P0 | Re-verify the 2026-09-22 closure wave line by line; reopen closures whose acceptance is unmet; forbid SHA-less and self-provided gates |
-| `frankengit-root-doctrine-x2mv.4.4` | bug | P0 | fgit-ssh is not confidential: fixed ephemeral X25519 key, fixed cookie, non-constant-time MAC check, pre-auth unbounded buffering, ignored flow control |
-| `frankengit-root-doctrine-x2mv.4.5` | bug | P1 | fg serve --receive-principal accepts non-loopback listeners: unauthenticated network push |
-| `frankengit-root-doctrine-x2mv.4.6` | bug | P1 | Policy integrity: fabricated principal facts, fail-open receive checks, policy-source injection, unmatched required checks, unbound snapshot identity |
-| `frankengit-root-doctrine-x2mv.4.7` | bug | P1 | Forge stops serving PR/issue reads after 4,096 events and refuses all publication at 16,384: bound read cost independent of history |
-| `frankengit-root-doctrine-x2mv.4.8` | bug | P1 | Smart HTTP: stock git push fails without Idempotency-Key; node reopened per request; server exits after 1,024 requests; transport capability divergence |
-| `frankengit-root-doctrine-x2mv.4.9` | feature | P2 | Wire per-core preparation lanes, flat combiner and witness refinement into real admission with an equivalence oracle and measured evidence |
-| `frankengit-root-doctrine-x2mv.4.10` | feature | P1 | Wire GC/retention, scrub/repair, RaptorQ and compaction onto real node data (fg gc / fg scrub / fg repair) |
-| `frankengit-root-doctrine-x2mv.4.11` | feature | P1 | Render issue/PR/comment Markdown safely through fgit-doc on HTTP, browser and MCP (v1 scope item 10) |
-| `frankengit-root-doctrine-x2mv.4.12` | feature | P1 | CI product loop: event-triggered runs, canonical check publication, required-check gating, honest substrate receipts, artifacts/cache |
-| `frankengit-root-doctrine-x2mv.4.13` | feature | P1 | Bind authenticated fgit-identity principals to every write surface; operator-asserted principals become explicit and recorded |
-| `frankengit-root-doctrine-x2mv.4.14` | question | P1 | OWNER DECISIONS 2026-09-23: hand-rolled gateway vs ADR-0011, JS web UI vs ADR-0013, publish fastapi_rust/frankentui on asupersync 0.5, psm native assembly, hostile-CI stance |
-| `frankengit-root-doctrine-x2mv.4.15` | bug | P1 | Constitution checker and registry drift: #[expect] lint hole, psm/DEP-182 misstatement, 0.4.x text vs 0.5.0 lock, stale rationales, missing license-file, stale negative-evidence ledger |
-| `frankengit-root-doctrine-x2mv.4.16` | task | P2 | Inventory and (owner-approved) removal of 174 patch-transport files, .visibility-payload and the hosted write-to-main workflow |
-| `frankengit-root-doctrine-x2mv.4.17` | bug | P2 | MCP tool registry and parity manifest disagree with the real fg mcp server; add drift check and stdio live-client e2e |
-| `frankengit-root-doctrine-x2mv.4.18` | task | P1 | Run the ~40 orphaned smoke campaigns and browser tests in lanes; label cargo-test-wrapper suites; remove foreign target dirs and RCH bypass from suites |
-| `frankengit-root-doctrine-x2mv.4.19` | bug | P1 | Indexed search is unusable on an active repository: forge-only writes stale the index, builds abort on one bad file, no in-server maintenance, no index GC |
-| `frankengit-root-doctrine-x2mv.4.20` | feature | P1 | PR workflow gaps: reopen, conversation/line comments, squash/ff merge, approval survival rule, quorum/path ownership, protection admin over HTTP/MCP |
-| `frankengit-root-doctrine-x2mv.4.21` | feature | P1 | Backup/restore as fg subcommands: streaming (no 1 GiB/100k caps), signed manifests, capsule restore, destroy-and-restore drill with RTO |
-| `frankengit-root-doctrine-x2mv.4.22` | feature | P3 | Put ATP-Git on one real transfer path with differential parity and measured bytes/time vs standard transfer |
-| `frankengit-root-doctrine-x2mv.4.23` | test | P1 | EXIT TEST: one real team day through the fg binary over SSH and smart HTTP with auth, protection, CI checks, merge races, crash recovery, backup/restore |
-| `frankengit-root-doctrine-x2mv.4.24` | test | P1 | EXIT TEST: one real agent run through IntentRun, ContextPacket, TreeFS, broker, ECC and ordinary admission (fgit-agent off the island) |
-| `frankengit-root-doctrine-x2mv.4.25` | feature | P2 | Dogfood: host the FrankenGit repository on a long-lived FrankenGit node with daily parity, search and time-travel checks |
-| `frankengit-root-doctrine-x2mv.4.26` | bug | P0 | Canonical fast lane is red at every failable stage: docs, rustfmt (72 files), check (2 uncompilable test targets), clippy, 45 failing tests in 26 binaries, stale-pin campaign failures |
-| `frankengit-root-doctrine-x2mv.4.27` | bug | P1 | Concurrent writers: CAS losers get 503 outcome_unknown or wrong refusal counts instead of a deterministic terminal refusal (7 race tests, reproducible on an idle host) |
+| Bead | Status | P | Assignee | Obligation |
+|---|---|---|---|---|
+| `x2mv.4.1` | batch_pending | P0 | IcyIbis | main does not compile: fgit-runner observations.rs E0423 at 46b922e7 and fgit-forge rename tests (29 errors) never compiled |
+| `x2mv.4.2` | open | P0 | — | Stop uncompiled commits landing on main and route the unclaimed implementation streams through their beads |
+| `x2mv.4.3` | open | P0 | — | Re-verify the 2026-09-22 closure wave line by line; reopen closures whose acceptance is unmet; forbid SHA-less and self-provided gates |
+| `x2mv.4.4` | in_progress | P0 | IcyIbis | fgit-ssh is not confidential: fixed ephemeral X25519 key, fixed cookie, non-constant-time MAC check, pre-auth unbounded buffering, ignored flow control |
+| `x2mv.4.5` | batch_pending | P1 | IcyIbis | fg serve --receive-principal accepts non-loopback listeners: unauthenticated network push |
+| `x2mv.4.6` | open | P1 | — | Policy integrity: fabricated principal facts, fail-open receive checks, policy-source injection, unmatched required checks, unbound snapshot identity |
+| `x2mv.4.7` | open | P1 | — | Forge stops serving PR/issue reads after 4,096 events and refuses all publication at 16,384: bound read cost independent of history |
+| `x2mv.4.8` | in_progress | P1 | IcyIbis | Smart HTTP: stock git push fails without Idempotency-Key; node reopened per request; server exits after 1,024 requests; transport capability divergence |
+| `x2mv.4.9` | open | P1 | — | Wire per-core preparation lanes, flat combiner and witness refinement into real admission with an equivalence oracle and measured evidence |
+| `x2mv.4.10` | open | P1 | — | Wire GC/retention, scrub/repair, RaptorQ and compaction onto real node data (fg gc / fg scrub / fg repair) |
+| `x2mv.4.11` | in_progress | P1 | IcyIbis | Render issue/PR/comment Markdown safely through fgit-doc on HTTP, browser and MCP (v1 scope item 10) |
+| `x2mv.4.12` | open | P1 | — | CI product loop: event-triggered runs, canonical check publication, required-check gating, honest substrate receipts, artifacts/cache |
+| `x2mv.4.13` | open | P1 | — | Bind authenticated fgit-identity principals to every write surface; operator-asserted principals become explicit and recorded |
+| `x2mv.4.14` | blocked | P1 | — | OWNER DECISIONS 2026-09-23: hand-rolled gateway vs ADR-0011, JS web UI vs ADR-0013, publish fastapi_rust/frankentui on asupersync 0.5, psm native assembly, hostile-CI stance |
+| `x2mv.4.15` | open | P1 | — | Constitution checker and registry drift: #[expect] lint hole, psm/DEP-182 misstatement, 0.4.x text vs 0.5.0 lock, stale rationales, missing license-file, stale negative-evidence ledger |
+| `x2mv.4.16` | open | P2 | — | Inventory and (owner-approved) removal of 174 patch-transport files, .visibility-payload and the hosted write-to-main workflow |
+| `x2mv.4.17` | open | P2 | — | MCP tool registry and parity manifest disagree with the real fg mcp server; add drift check and stdio live-client e2e |
+| `x2mv.4.18` | open | P0 | — | Run the ~40 orphaned smoke campaigns and browser tests in lanes; label cargo-test-wrapper suites; remove foreign target dirs and RCH bypass from suites |
+| `x2mv.4.19` | open | P1 | — | Indexed search is unusable on an active repository: forge-only writes stale the index, builds abort on one bad file, no in-server maintenance, no index GC |
+| `x2mv.4.20` | open | P1 | — | PR workflow gaps: reopen, conversation/line comments, squash/ff merge, approval survival rule, quorum/path ownership, protection admin over HTTP/MCP |
+| `x2mv.4.21` | open | P1 | — | Backup/restore as fg subcommands: streaming (no 1 GiB/100k caps), signed manifests, capsule restore, destroy-and-restore drill with RTO |
+| `x2mv.4.22` | open | P3 | — | Put ATP-Git on one real transfer path with differential parity and measured bytes/time vs standard transfer |
+| `x2mv.4.23` | open | P1 | — | EXIT TEST: one real team day through the fg binary over SSH and smart HTTP with auth, protection, CI checks, merge races, crash recovery, backup/restore |
+| `x2mv.4.24` | open | P1 | — | EXIT TEST: one real agent run through IntentRun, ContextPacket, TreeFS, broker, ECC and ordinary admission (fgit-agent off the island) |
+| `x2mv.4.25` | open | P2 | — | Dogfood: host the FrankenGit repository on a long-lived FrankenGit node with daily parity, search and time-travel checks |
+| `x2mv.4.26` | open | P0 | — | Canonical fast lane is red at every failable stage: docs, rustfmt (72 files), check (2 uncompilable test targets), clippy, 45 failing tests in 26 binaries, stale-pin campaign failures |
+| `x2mv.4.27` | in_progress | P1 | IcyIbis | Concurrent writers: CAS losers get 503 outcome_unknown or wrong refusal counts instead of a deterministic terminal refusal (7 race tests, reproducible on an idle host) |
+| `x2mv.4.28` | open | P2 | — | Loose import (fg import) uses a flat 15 s database budget; scale it to staged bytes like receive (asb8) |
+| `x2mv.4.29` (new) | open | P0 | — | Union batch verification at one named SHA over every batch_pending bead: verification debt 34 of hard 36, no close since 2026-09-23 |
+| `x2mv.4.30` (new) | open | P1 | — | TLS for FrankenGit transports: a pure-Rust TLS closure (serve-http server; webhook and object-store clients) or an owner-ratified same-host reverse-proxy profile |
+| `x2mv.4.31` (new) | open | P1 | — | Browser-facing HTTP API accepts state-changing form POSTs with no CSRF or Origin check, and Basic challenges let browsers cache and replay credentials |
+| `x2mv.4.32` (new) | open | P1 | — | fg serve and fg serve-ssh: continuous lifetime with SIGTERM/SIGINT drain; fg serve exits after one session by default |
+| `x2mv.4.33` (new) | open | P2 | — | Binary-driven transport coverage for partial clone, notes, submodule gitlinks and atomic push over SSH and git://; matrix rows from executed suites |
+| `x2mv.4.34` (new) | open | P1 | — | Agents as first-class principals: an fgit-identity agent credential with a sponsor chain, presented to admission and policy as PrincipalKind::Agent |
+| `x2mv.4.35` (new) | open | P2 | — | Native event feed over HTTP and MCP: cursor-paged canonical forge events with authorization filtering |
+| `x2mv.4.36` (new) | open | P2 | — | Build GRAPH-001 commit ancestry from canonical data and use it for admission ancestry checks, with an equivalence oracle and measured effect |
+| `x2mv.4.37` (new) | open | P3 | — | First production consumer of fgit-statistics: bounded adaptive authority-CAS retry with e-process regime detection and a deterministic fallback |
+| `x2mv.4.38` (new) | open | P2 | — | Runner, TreeFS workspace and agent effects under Asupersync regions with typed reserve/commit/abort obligations instead of counters |
+| `x2mv.4.39` (new) | open | P2 | — | Consult CALM classification in admission: commute monotone forge intents across CAS losers instead of refusing them |
+| `x2mv.4.40` (new) | open | P3 | — | TreeFS shared host materialization: share immutable file bytes across workspaces with copy-on-write, and measure per-workspace cost |
+| `x2mv.4.41` (new) | open | P2 | — | Verified reads on a transport: serve FG-037 envelopes over HTTP, verify them in fg, and make browser verified downloads use real inclusion proofs |
+| `x2mv.4.42` (new) | open | P2 | — | Pin the fsqlite companion-file contract that authority backup, restore and cleanup depend on |
+| `x2mv.4.43` (new) | open | P2 | — | Sparse workspace lease takes a non-blocking flock with no bounded wait: intermittent WouldBlock |
+| `x2mv.4.44` (new) | open | P2 | — | Offline bundle verification in Rust (fg bundle verify); retire or owner-ratify the JavaScript pack/DEFLATE/delta decoder |
+| `x2mv.4.45` (new) | in_progress | P1 | IcyIbis | Browser pages cannot call the API in a real browser: stored fetch invoked as a method (Illegal invocation) since 2026-09-18 |
+| `x2mv.4.46` (new) | open | P1 | — | Real-browser boot, connect, read and write smoke for every served page against fg serve-http |
+| `x2mv.4.47` (new) | open | P2 | — | Deterministic simulation lane: drive OneNode admission and the authority store through fgit-lab and the Asupersync lab runtime with PCT schedules and fault plans |
 
-Evidence comments were added to FG-046, FG-046b, FG-083a, `0zjt`, FG-036b, `25cs`, `88g7`, `l0xt` and `zb0q` (plus a correction on `zb0q` after its sparse-workspace test failed), and to the new beads `.4.1`, `.4.14`, `.4.18` and `.4.21`. The owner-decision bead `.4.14` is set to `blocked` so agents do not claim it. The priorities of the team-day prerequisites `.4.10`, `.4.11`, `.4.19`, `.4.20` and `.4.21` were raised to P1. No existing bead was claimed, reopened, reassigned or closed, and no product source was changed. Another agent's commit `b4b34777` swept most of these tracker records into origin before this assessment's own commit; the content is identical.
+**Edges.** Blocking edges were added only where the work genuinely cannot proceed first:
+- `.30` is blocked by `.14` (decision D9);
+- `.24` is blocked by `.34`;
+- `.25` is blocked by `.12` and `.10`;
+- `.23` is blocked by `.32`.
+
+All other edges are `related`. `bv` reports no cycles.
+
+**Priority changes.**
+- `.18` rose to P0: it is the second half of the verification freeze.
+- `.9` rose to P1: it now has a measured consumer, the single-writer gate.
+- `.32` rose to P1: it blocks team day.
+
+**Evidence and design comments** were added to:
+- decisions `.14` (D7, D8, D9);
+- `.2`, `.6`, `.7`, `.9`, `.11`, `.12`, `.17`, `.18`, `.19`, `.20`, `.23`, `.25`, `.29`, `.36`, `.39`, `.44` and `.45`;
+- the epic (the children's logging and test standard);
+- FG-046 and FG-093.
+
+**Code landed during the assessment,** all under beads and SHA-bound:
+- `56bba7ee`: the browser fetch-receiver fix plus a regression test that fails 3/3 on the unfixed code (`.45`).
+- `5561f2f9`: the real-browser Markdown CSP suite, replacing a probe that hard-coded its CSP field (`.11`).
+- `b7de0d5e`: the real-browser per-client fetch suite, 9/9 with the fix and 3/9 without (`.45`).
+
+**Not done.** No existing bead was closed, reopened or reassigned. Transitions belong to the independent verifier. `.45` stays in progress until its sanctioned crate test run.
 
 ## 10. Evidence appendix
 
 | Artifact (scratchpad-relative) | SHA-256 |
 |---|---|
-| `evidence/check.stderr` | `1aee0413278197c93be9ee7909b6397f13376ce8675ada596a5aae72c602ba9f` |
-| `evidence_wt2/docs.stderr` | `86dca73cd7218481aab5a1bdb552db52d0fc81ec82b270bbdb13d75e3cff107d` |
-| `evidence_wt2/fmt.stdout` | `84bac4f23a5e28717976adcf03b8552877dfe65e8b162be89e34610cc67a7e42` |
-| `evidence_wt2/check.stderr` | `8f15bd4b059224f5d96441adacadd840436d888d2102a54b1afac0a1b1c9f5b9` |
-| `evidence_wt2/test.stderr` | `a84f7bab7c579d36be81186e86d483de73889e1b53f9c9a1ed03256265b738a7` |
-| `evidence_wt2/clippy.stderr` | `728e537f6611e6e96c95993141f09f09ea88dd11ff1e92f47e1477bc23a05260` |
-| `evidence_wt2/constitution_after_build.stderr` | `b6435abac27319409020f9f36bc5519390468403d590bf3eae5deea52e9b50d7` |
-| `evidence_wt2/full.stderr` | `85055b83dde3934730c1abf62c2a9c7803b9e877a9692064514037cae9ccd3a7` |
-| `evidence_wt2/release.stderr` | `52f8e20b710e7075b692deb84e245ea6e11f7f941618006c8c91b5ff2cc3476e` |
-| `evidence_testbins/results.tsv` (first pass; ENOSPC after ~#527) | `c1e4b807194fce01054c190c5aafb66e13a8c65582ccb5dc1a7bcb9e41203cdc` |
-| `evidence_e2e/node/receipt.ndjson` | `d49fa8f678e8ba3213a8ae26853e144c29ccbe74e84d0880e74d0648975f8305` |
-| `evidence_e2e_release/receipt.ndjson` | `6e4d53c725679e13b41b7d4d9e59aa802b087ab6fc3c8bd235b02aa13c2c24e9` |
-| `evidence_e2e/smokes.tsv` | `865231abc6775cf587de3ecc6c424806cf21e0fdf214eeb0f64d7fa3e6a90335` |
-| `evidence_tests/test_forge_integration.stdout` | `952eba193a10284f539991d15a06c0f14c69c8310a113d2b0ac2a1c270255982` |
-| `fg-94a77dfb` (debug) | `ab220a508863b1989dc09b109b70c06c7c017a2eba64eb653f25881fc63c34d2` |
-| `fg-94a77dfb-release` | `37742eca1735e094b8383c48816d3e985134d7141d2f7fc82ab7842517b1aa2d` |
-| `beads_all.json` (tracker baseline) | `9e492495e1f706e82b11814c9cb3db5689a00bee075523444ddac2af6787aae0` |
-| `evidence_testbins_rerun/results.tsv` | `f0fae09d25d17274f8d2700fd06dc25aeb7e2b2a18fbcaa5d693cf76042a3f85` |
-| `evidence_race_idle/results.tsv` | `202cc835d10f9e1142f5699b155519a333b45365ec538919e74fa23de34ead02` |
-| `final_fails.tsv` | `8b1f162dd4721619f213a48a3c82ae4ca288ef1dc729a8a7b0807bf45a1610be` |
-| `final_summary.txt` | `fcae5e94e535d3a4a9184fa08c7587d843795e13a01148095396ac184a2b6510` |
+| `rc-evidence/check.log` | `9e6ca086f9b567ae83546d9e6bb44cb386ff990aa113f3357d7cf95b5ec09ca8` |
+| `rc-evidence/fmt.log` | `18a8dd210c492c7debd7e4c687036001a7f99ac0f3f748180394ae49154b4e33` |
+| `rc-evidence/fmt-files.txt` | `7e33c7b5127c2bb102dac7fa6f08811e81e1ffd45c32f0bd7a69c508c2210939` |
+| `rc-evidence/test-fgit-admission.log` | `e4a180fccd126f2d237e3c77f866b07aebf6ab7e830d473a90bef6c322fd8a05` |
+| `rc-evidence/md-csp-3.log` | `61aed55c4a1be95651cc9d4243052256b55cc83600c0e115bb9cd863e24b29bf` |
+| `rc-evidence/client-fetch-md/receipt.ndjson` | `0f6e48ba57d55de43675ca3b0971612b4aab50491e6d389f863738bc6cbfff70` |
+| `rc-evidence/client-fetch-rc/receipt.ndjson` | `391d7dc535412b13fb8e2ce190bd53ecd5de1a0df7d86b3ce9a0a7e16a85761d` |
+| `rc-evidence/md-csp-3/receipt.ndjson` | `3df00d63bd6b504f09a9fed3dc515bd6dff841d48051a9be8b2aac5bc000848f` |
+| `fg-debug-rc` | `5b0e0c11f899e9933efcf9b5ebf99fd9bd6a7463c222d9ccddd53ae0e0ad2e4d` |
+| `fg-debug-md` | `714882984f0eabed46360ed4a91da13f3fa6e7aa178e942f46eb1d229abea0b7` |
+| `bv_suggest.json` | `3fdfb929074c7966a0994e0a1cad93d57f7ca1408c0da4f7cd17fd0022437218` |
+| `bv_insights.json` | `3dd8d72350401cb18501a48b85ddc3fd38e42b458458db1d9fbc8faa81c01d81` |
+| `rc_findings.md` | `6a78eed861d09ae8dfddd26bffcff81fb8f3bb1c6e8b583cd3bd9c9905fea3d5` |
+| `docs-lane.log` | `3d58803fafe565d256cdbf9aed9ebf4da02d8b4c1727d92bea7f9845c3a77fed` |
 
-Raw logs, NDJSON receipts and the isolated worktree remain in the session scratchpad. They are review artifacts, not published durable evidence. The commit, toolchain and profile binding, the limitations, and the summary counts are recorded here so these observations cannot be confused with later runs.
+`fg-debug-rc` is the debug `fg` built at `2b7f35ac` by the pinned run. `fg-debug-md` is built from the private worktree containing `56bba7ee` and `5561f2f9` on top of `41eab465`.
+
+The 2026-09-23 appendix listed `beads_all.json` (`9e492495…`) as the tracker baseline. That scratchpad file was overwritten on 2026-09-27 by an audit subagent of this assessment (§5.11), so the earlier digest no longer names a retrievable artifact. The baseline counts stay in this document and in `.beads/issues.jsonl` history at `6c762f42`.
+
+Raw logs, NDJSON receipts and the isolated worktrees remain in the session scratchpad. They are review artifacts, not published durable evidence.
