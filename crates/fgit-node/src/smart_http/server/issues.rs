@@ -24,6 +24,7 @@ use crate::{
     GitDaemonSessionDeadline, GitDaemonSessionWorkScaling, IssueReadRefusal,
     LoopbackReceiveSession, NodeReceiveTransportRefusal, OneNode,
 };
+pub(super) use rendered::Rendering;
 use request::Operation;
 pub(super) use request::{Page, Request};
 
@@ -53,8 +54,8 @@ pub(super) fn quote(text: &str) -> String {
 /// Derive a safe presentation only after the caller has selected and authorized
 /// the canonical text. Issue and PR responses share the same parser, profile,
 /// source commitment and typed rendering refusals; HTML never grants authority.
-pub(super) fn render_body(source: &str) -> String {
-    rendered::body(source)
+pub(super) fn render_body(source: &str, rendering: Rendering) -> String {
+    rendered::body(source, rendering)
 }
 pub(super) fn ref_fields(name: &'static str, reference: &fgit_types::RefName) -> String {
     output::ref_fields(name, reference)

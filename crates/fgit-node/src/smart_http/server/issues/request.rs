@@ -16,8 +16,9 @@ pub struct Page {
     pub after: u64,
     pub limit: u16,
     pub expected_head: Option<RepositoryAuthorityHeadId>,
-    /// `render=html_safe`: add a derived `body_rendered` beside each body.
-    pub render: bool,
+    /// `render=html_safe` or `render=api_json`: add a derived
+    /// `body_rendered` beside each body.
+    pub render: Option<super::rendered::Rendering>,
 }
 
 #[derive(Debug)]
@@ -228,10 +229,9 @@ pub(super) fn page(query: Option<&str>, cursor: &str) -> Result<Page, ApiError> 
         } else if name == "expected_head" {
             set_once(&mut expected, parse_head_token(&value)?)?;
         } else if name == "render" {
-            if value != "html_safe" {
-                return Err(ApiError::bad("unsupported_rendering"));
-            }
-            set_once(&mut render, true)?;
+            let rendering = super::rendered::Rendering::from_query(&value)
+                .ok_or_else(|| ApiError::bad("unsupported_rendering"))?;
+            set_once(&mut render, rendering)?;
         } else {
             return Err(ApiError::bad("unknown_query_field"));
         }
@@ -247,7 +247,7 @@ pub(super) fn page(query: Option<&str>, cursor: &str) -> Result<Page, ApiError> 
         after,
         limit: limit as u16,
         expected_head: expected,
-        render: render.unwrap_or(false),
+        render,
     })
 }
 

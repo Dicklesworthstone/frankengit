@@ -1,7 +1,7 @@
 //! Complete bounded JSON receipts. Review pages never imply merge permission;
 //! even a retained Current vote is display evidence, not current CAS authority.
 
-use super::super::super::issues::{quote, ref_fields};
+use super::super::super::issues::{quote, ref_fields, render_body};
 use super::{
     ApiError,
     request::{Command, Page},
@@ -168,7 +168,7 @@ pub(super) fn page(
                 &format!(
                     concat!(
                         "{}{{\"reviewer\":{},\"version\":{},\"subject\":{},",
-                        "\"candidate\":{},\"decision\":{},\"reason\":{},\"freshness\":{},\"reviewer_is_opener\":{}}}"
+                        "\"candidate\":{},\"decision\":{},\"reason\":{}{},\"freshness\":{},\"reviewer_is_opener\":{}}}"
                     ),
                     if index == 0 { "" } else { "," },
                     quote(&event.reviewer.to_string()),
@@ -177,6 +177,14 @@ pub(super) fn page(
                     candidate,
                     quote(decision(event.decision)),
                     quote(&event.reason),
+                    // The reason stays canonical; only an explicitly requested
+                    // derived presentation is added beside it.
+                    requested.render.map_or_else(String::new, |rendering| {
+                        format!(
+                            ",\"reason_rendered\":{}",
+                            render_body(&event.reason, rendering)
+                        )
+                    }),
                     quote(freshness(row.freshness)),
                     row.reviewer_is_opener
                         .map_or_else(|| "null".into(), |value| value.to_string())

@@ -1,7 +1,7 @@
 //! Exact client-selected review subjects and merge requirements. No current
 //! version/tip refresh, caller-supplied reviewer identity or inferred hash domain.
 
-use super::super::super::issues::{parse_decimal, parse_form, parse_snapshot};
+use super::super::super::issues::{Rendering, parse_decimal, parse_form, parse_snapshot};
 use super::{ApiError, multipart};
 use fgit_admission::merge::native::pull_request::reviews::gate::ReviewRequirements;
 use fgit_forge::event::review::{
@@ -19,6 +19,9 @@ pub struct Page {
     pub after: Option<PrincipalId>,
     pub limit: u16,
     pub expected_head: Option<RepositoryAuthorityHeadId>,
+    /// `render=html_safe` or `render=api_json`: add a derived
+    /// `reason_rendered` beside each review's canonical `reason`.
+    pub render: Option<Rendering>,
 }
 #[derive(Clone, Copy, Debug)]
 pub enum Operation {
@@ -281,13 +284,19 @@ fn principal_id(text: &str) -> Result<PrincipalId, ApiError> {
     PrincipalId::from_hex(text).map_err(|_| ApiError::bad("invalid_reviewer"))
 }
 fn page(query: Option<&str>) -> Result<Page, ApiError> {
-    let (mut after, mut limit, mut expected_head) = (None, None, None);
-    for (name, value) in parse_form(query.unwrap_or("").as_bytes(), 3)? {
+    let (mut after, mut limit, mut expected_head, mut render) = (None, None, None, None);
+    for (name, value) in parse_form(query.unwrap_or("").as_bytes(), 4)? {
         match name.as_str() {
             "after" if after.is_none() => after = Some(principal_id(&value)?),
             "limit" if limit.is_none() => limit = Some(parse_decimal(&value)?),
             "expected_head" if expected_head.is_none() => {
                 expected_head = Some(parse_snapshot(&value)?);
+            }
+            "render" if render.is_none() => {
+                render = Some(
+                    Rendering::from_query(&value)
+                        .ok_or_else(|| ApiError::bad("unsupported_rendering"))?,
+                );
             }
             _ => return Err(ApiError::bad("unknown_or_duplicate_query_field")),
         }
@@ -303,6 +312,7 @@ fn page(query: Option<&str>) -> Result<Page, ApiError> {
         after,
         limit: limit as u16,
         expected_head,
+        render,
     })
 }
 
@@ -420,5 +430,26 @@ mod tests {
         assert!(page(Some("limit=0")).is_err());
         assert!(page(Some("limit=1&limit=2")).is_err());
         assert_eq!(page(None).unwrap().limit, 50);
+    }
+
+    #[test]
+    fn review_pages_render_reasons_only_when_asked_and_only_as_safe_presentations() {
+        assert_eq!(page(None).unwrap().render, None);
+        assert_eq!(
+            page(Some("render=html_safe")).unwrap().render,
+            Some(Rendering::HtmlSafe)
+        );
+        assert_eq!(
+            page(Some("limit=2&render=api_json")).unwrap().render,
+            Some(Rendering::ApiJson)
+        );
+        for refused in [
+            "render=html",
+            "render=raw",
+            "render=html_safe&render=html_safe",
+            "render=html_safe&render=api_json",
+        ] {
+            assert!(page(Some(refused)).is_err(), "{refused}");
+        }
     }
 }

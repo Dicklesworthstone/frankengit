@@ -55,10 +55,13 @@ fn labels(values: &[String]) -> String {
             .join(",")
     )
 }
-fn action(value: &IssueAction, render: bool) -> String {
+fn action(value: &IssueAction, render: Option<super::rendered::Rendering>) -> String {
     let rendered = |body: &str| {
-        if render {
-            format!(",\"body_rendered\":{}", super::rendered::body(body))
+        if let Some(rendering) = render {
+            format!(
+                ",\"body_rendered\":{}",
+                super::rendered::body(body, rendering)
+            )
         } else {
             String::new()
         }
@@ -152,7 +155,10 @@ pub(super) fn mutation(
     )
 }
 
-fn snapshot(value: &IssueSnapshot, render: bool) -> Result<String, ApiError> {
+fn snapshot(
+    value: &IssueSnapshot,
+    render: Option<super::rendered::Rendering>,
+) -> Result<String, ApiError> {
     IssueAction::Open {
         title: value.title.clone(),
         body: value.body.clone(),
@@ -172,8 +178,11 @@ fn snapshot(value: &IssueSnapshot, render: bool) -> Result<String, ApiError> {
         value.version.get(),
         quote(&value.title),
         quote(&value.body),
-        if render {
-            format!(",\"body_rendered\":{}", super::rendered::body(&value.body))
+        if let Some(rendering) = render {
+            format!(
+                ",\"body_rendered\":{}",
+                super::rendered::body(&value.body, rendering)
+            )
         } else {
             String::new()
         },
@@ -384,7 +393,7 @@ pub(super) fn search(
         after: request.after,
         limit: request.limit,
         expected_head: request.expected_head,
-        render: false,
+        render: None,
     };
     let header = header(node, page, result.source_head)?;
     search_body(&header, request, query, result, maximum, live)
@@ -491,7 +500,7 @@ fn search_body(
         if index != 0 {
             append(&mut out, ",", maximum)?;
         }
-        append(&mut out, &snapshot(row, false)?, maximum)?;
+        append(&mut out, &snapshot(row, None)?, maximum)?;
     }
     if !live() {
         return Err(ApiError::from_status(super::Status::Timeout, false));

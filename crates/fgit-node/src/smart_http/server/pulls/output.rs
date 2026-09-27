@@ -7,7 +7,7 @@ use fgit_forge::event::pull_request::{PullRequestAction, PullRequestCommand, Pul
 use fgit_forge::{AggregateId, ExpectedVersion, ForgeEventPayload, PullRequestNumber};
 use fgit_types::{DecisionOutcome, PrincipalId, RepositoryAuthorityHeadId, TxId};
 
-use super::super::issues::{ApiError, Page, quote, ref_fields, render_body};
+use super::super::issues::{ApiError, Page, Rendering, quote, ref_fields, render_body};
 use crate::OneNode;
 
 pub(super) const MAX_REPLY_BYTES: usize = 48 * 1024 * 1024;
@@ -20,12 +20,12 @@ pub(super) const fn action(value: PullRequestAction) -> &'static str {
         PullRequestAction::Reopen => "reopen",
     }
 }
-fn data(value: &PullRequestData, rendered: bool) -> Result<String, ApiError> {
+fn data(value: &PullRequestData, rendered: Option<Rendering>) -> Result<String, ApiError> {
     value.validate().map_err(|_| ApiError::unavailable())?;
     // The original body stays byte-for-byte canonical. Only the explicitly
     // requested derived field is added, after native metadata validation.
-    let presentation = if rendered {
-        format!(",\"body_rendered\":{}", render_body(&value.body))
+    let presentation = if let Some(rendering) = rendered {
+        format!(",\"body_rendered\":{}", render_body(&value.body, rendering))
     } else {
         String::new()
     };
@@ -44,7 +44,7 @@ fn data(value: &PullRequestData, rendered: bool) -> Result<String, ApiError> {
         presentation
     ))
 }
-fn view(value: &PullRequestView, rendered: bool) -> Result<String, ApiError> {
+fn view(value: &PullRequestView, rendered: Option<Rendering>) -> Result<String, ApiError> {
     if value.event.aggregate != AggregateId::PullRequest(value.number) {
         return Err(ApiError::unavailable());
     }
@@ -206,7 +206,7 @@ pub(super) fn show(
     node: &OneNode,
     number: PullRequestNumber,
     expected: Option<RepositoryAuthorityHeadId>,
-    rendered: bool,
+    rendered: Option<Rendering>,
     result: &PullRequestPage,
     maximum: usize,
 ) -> Result<(bool, String), ApiError> {
@@ -329,13 +329,13 @@ mod tests {
             opened_by: Some(actor),
             last_metadata_actor: Some(actor),
         };
-        let encoded = view(&row, false).unwrap();
+        let encoded = view(&row, None).unwrap();
         assert!(encoded.contains("\"state\":\"open\""));
         assert!(encoded.contains("\"merge_only\":false,\"merge\":null"));
         assert!(encoded.contains("\\u000a\\\"\\\\\\u202e"));
         row.data = None;
         assert!(
-            view(&row, false).is_err(),
+            view(&row, None).is_err(),
             "metadata events cannot lose their matching content"
         );
     }
@@ -349,13 +349,13 @@ mod tests {
             title: "Native refs".into(),
             body: String::new(),
         };
-        let encoded = data(&value, false).unwrap();
+        let encoded = data(&value, None).unwrap();
         assert!(encoded.contains(
             "\"source_ref\":null,\"source_ref_hex\":\"726566732f68656164732f746f706963ff\""
         ));
         assert!(encoded.contains("\"target_ref\":\"refs/heads/main\",\"target_ref_hex\":\"726566732f68656164732f6d61696e\""));
         value.source_ref = RefName::try_new(b"refs/heads/topic").unwrap();
-        let encoded = data(&value, false).unwrap();
+        let encoded = data(&value, None).unwrap();
         assert!(encoded.contains("\"source_ref\":\"refs/heads/topic\",\"source_ref_hex\":\"726566732f68656164732f746f706963\""));
     }
     #[test]
@@ -398,16 +398,26 @@ mod tests {
             let row = markdown_row(format, source);
             let original = row.clone();
             let value = row.data.as_ref().unwrap();
-            let raw = data(value, false).unwrap();
-            let derived = data(value, true).unwrap();
-            let field = format!(",\"body_rendered\":{}", render_body(source));
+            let raw = data(value, None).unwrap();
+            let derived = data(value, Some(Rendering::HtmlSafe)).unwrap();
+            let field = format!(
+                ",\"body_rendered\":{}",
+                render_body(source, Rendering::HtmlSafe)
+            );
             assert!(!raw.contains("\"body_rendered\":"));
             assert_eq!(derived, format!("{}{field}}}", &raw[..raw.len() - 1]));
             assert!(derived.contains(&format!("\"body\":{}", quote(source))));
-            assert_eq!(view(&row, true).unwrap(), view(&row, true).unwrap());
+            assert_eq!(
+                view(&row, Some(Rendering::HtmlSafe)).unwrap(),
+                view(&row, Some(Rendering::HtmlSafe)).unwrap()
+            );
             assert_eq!(row, original, "rendering must not change canonical state");
-            assert!(view(&row, true).unwrap().contains(&derived));
-            assert!(view(&row, false).unwrap().contains(&raw));
+            assert!(
+                view(&row, Some(Rendering::HtmlSafe))
+                    .unwrap()
+                    .contains(&derived)
+            );
+            assert!(view(&row, None).unwrap().contains(&raw));
         }
     }
 
@@ -416,12 +426,15 @@ mod tests {
         for (source, expected) in [
             ("**review**", "<strong>review</strong>"),
             ("<script>alert(1)</script>", "&lt;script&gt;"),
-            ("[guide](https://example.invalid/)", "https://example.invalid/"),
+            (
+                "[guide](https://example.invalid/)",
+                "https://example.invalid/",
+            ),
             ("`<script>`", "<code>&lt;script&gt;</code>"),
         ] {
             let row = markdown_row(GitHashAlgorithm::Sha256, source);
-            let json = view(&row, true).unwrap();
-            let rendered = render_body(source);
+            let json = view(&row, Some(Rendering::HtmlSafe)).unwrap();
+            let rendered = render_body(source, Rendering::HtmlSafe);
             assert!(rendered.contains(expected), "{rendered}");
             assert!(!rendered.contains("<script>"), "{rendered}");
             assert!(json.contains(&format!("\"body_rendered\":{rendered}")));
@@ -435,18 +448,21 @@ mod tests {
         }
         let first = markdown_row(GitHashAlgorithm::Sha1, "**first**");
         let second = markdown_row(GitHashAlgorithm::Sha1, "**second**");
-        assert_ne!(view(&first, true).unwrap(), view(&second, true).unwrap());
+        assert_ne!(
+            view(&first, Some(Rendering::HtmlSafe)).unwrap(),
+            view(&second, Some(Rendering::HtmlSafe)).unwrap()
+        );
     }
 
     #[test]
     fn renderer_refusal_keeps_the_original_pr_read_available() {
         let source = ">".repeat(10_000);
         let row = markdown_row(GitHashAlgorithm::Sha1, &source);
-        let encoded = view(&row, true).unwrap();
+        let encoded = view(&row, Some(Rendering::HtmlSafe)).unwrap();
         assert!(encoded.contains(&format!("\"body\":{}", quote(&source))));
         assert!(encoded.contains("\"html\":null,\"refusal\":"));
         assert!(encoded.contains("\"state\":\"open\""));
-        assert!(!view(&row, false).unwrap().contains("\"refusal\":"));
+        assert!(!view(&row, None).unwrap().contains("\"refusal\":"));
     }
 
     #[test]
@@ -454,8 +470,8 @@ mod tests {
         for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
             let mut row = markdown_row(format, "**Reviewed before merge**");
             let metadata = row.data.as_ref().unwrap();
-            row.event.payload = ForgeEventPayload::MergeCommittedNative(
-                fgit_forge::event::NativeMerge {
+            row.event.payload =
+                ForgeEventPayload::MergeCommittedNative(fgit_forge::event::NativeMerge {
                     source_ref: metadata.source_ref.clone(),
                     source_tip: metadata.source_tip,
                     base_tip: metadata.target_tip,
@@ -463,35 +479,48 @@ mod tests {
                     target_tip_before: metadata.target_tip,
                     merge_commit: GitOid::from_hex(format, &"c".repeat(format.digest_len() * 2))
                         .unwrap(),
-                },
-            );
+                });
             row.event.version = row.event.version.next().unwrap();
-            let rendered = view(&row, true).unwrap();
+            let rendered = view(&row, Some(Rendering::HtmlSafe)).unwrap();
             assert!(rendered.contains("\"state\":\"merged\""));
             assert!(rendered.contains("<strong>Reviewed before merge</strong>"));
             row.data = None;
             row.opened_by = None;
             row.last_metadata_actor = None;
-            assert_eq!(view(&row, true).unwrap(), view(&row, false).unwrap());
-            assert!(view(&row, true).unwrap().contains("\"data\":null"));
-            assert!(!view(&row, true).unwrap().contains("body_rendered"));
+            assert_eq!(
+                view(&row, Some(Rendering::HtmlSafe)).unwrap(),
+                view(&row, None).unwrap()
+            );
+            assert!(
+                view(&row, Some(Rendering::HtmlSafe))
+                    .unwrap()
+                    .contains("\"data\":null")
+            );
+            assert!(
+                !view(&row, Some(Rendering::HtmlSafe))
+                    .unwrap()
+                    .contains("body_rendered")
+            );
         }
     }
 
     #[test]
     fn requesting_rendering_cannot_bypass_metadata_validation_or_reply_limits() {
         let mut row = markdown_row(GitHashAlgorithm::Sha1, "**Small enough**");
-        let raw = view(&row, false).unwrap();
-        let rendered = view(&row, true).unwrap();
+        let raw = view(&row, None).unwrap();
+        let rendered = view(&row, Some(Rendering::HtmlSafe)).unwrap();
         assert!(rendered.len() > raw.len());
         let mut output = String::from("[");
         let limit = raw.len() + 1;
         assert!(append(&mut output, &rendered, limit).is_err());
-        assert_eq!(output, "[", "an oversized derived record was partially appended");
+        assert_eq!(
+            output, "[",
+            "an oversized derived record was partially appended"
+        );
         append(&mut output, &raw, limit).unwrap();
         assert_eq!(output.len(), limit);
         row.data.as_mut().unwrap().body = "Substituted, uncommitted content".into();
-        assert!(view(&row, true).is_err());
-        assert!(view(&row, false).is_err());
+        assert!(view(&row, Some(Rendering::HtmlSafe)).is_err());
+        assert!(view(&row, None).is_err());
     }
 }

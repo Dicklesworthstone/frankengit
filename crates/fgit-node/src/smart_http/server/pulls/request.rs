@@ -9,7 +9,8 @@ use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId};
 use fgit_wire::smart_http::{BodyFraming, head::Envelope};
 
 use super::super::issues::{
-    ApiError, MAX_FORM_BYTES, Page, parse_decimal, parse_form, parse_page, parse_snapshot,
+    ApiError, MAX_FORM_BYTES, Page, Rendering, parse_decimal, parse_form, parse_page,
+    parse_snapshot,
 };
 
 #[derive(Debug)]
@@ -18,7 +19,7 @@ pub(super) enum Operation {
     Show {
         number: PullRequestNumber,
         expected_head: Option<RepositoryAuthorityHeadId>,
-        render: bool,
+        render: Option<Rendering>,
     },
     Mutate {
         number: PullRequestNumber,
@@ -84,10 +85,10 @@ impl<'a> Request<'a> {
                                 if render.is_some() {
                                     return Err(ApiError::bad("duplicate_field"));
                                 }
-                                if value != "html_safe" {
-                                    return Err(ApiError::bad("unsupported_rendering"));
-                                }
-                                render = Some(true);
+                                render = Some(
+                                    Rendering::from_query(&value)
+                                        .ok_or_else(|| ApiError::bad("unsupported_rendering"))?,
+                                );
                             }
                             _ => return Err(ApiError::bad("unknown_query_field")),
                         }
@@ -95,7 +96,7 @@ impl<'a> Request<'a> {
                     Operation::Show {
                         number,
                         expected_head,
-                        render: render.unwrap_or(false),
+                        render,
                     }
                 }
             }
@@ -444,7 +445,11 @@ mod tests {
     #[test]
     fn rendering_is_explicit_and_consistent_on_list_and_detail_routes() {
         for suffix in ["", "/7"] {
-            for (query, requested) in [("", false), ("?render=html_safe", true)] {
+            for (query, requested) in [
+                ("", None),
+                ("?render=html_safe", Some(Rendering::HtmlSafe)),
+                ("?render=api_json", Some(Rendering::ApiJson)),
+            ] {
                 let bytes = format!(
                     "GET /repo.git/api/v1/pulls{suffix}{query} HTTP/1.1\r\nHost: local\r\n\r\n"
                 );
@@ -473,18 +478,22 @@ mod tests {
             format!("expected_head={token}&render=html_safe"),
             format!("render=html_safe&expected_head={token}"),
         ] {
-            let bytes = format!(
-                "GET /repo.git/api/v1/pulls/7?{query} HTTP/1.1\r\nHost: local\r\n\r\n"
-            );
+            let bytes =
+                format!("GET /repo.git/api/v1/pulls/7?{query} HTTP/1.1\r\nHost: local\r\n\r\n");
             let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
                 .unwrap()
                 .unwrap();
             let request = Request::parse(&envelope).unwrap().unwrap();
-            let Operation::Show { number, expected_head, render } = request.operation else {
+            let Operation::Show {
+                number,
+                expected_head,
+                render,
+            } = request.operation
+            else {
                 panic!("single PR read");
             };
             assert_eq!(number.get(), 7);
-            assert!(render);
+            assert_eq!(render, Some(Rendering::HtmlSafe));
             assert_eq!(expected_head, Some(parse_snapshot(&token).unwrap()));
         }
     }
@@ -512,9 +521,8 @@ mod tests {
         }
         // A detail presentation must not silently become a list or history read.
         for query in ["render=html_safe&after=1", "render=html_safe&limit=1"] {
-            let bytes = format!(
-                "GET /repo.git/api/v1/pulls/7?{query} HTTP/1.1\r\nHost: local\r\n\r\n"
-            );
+            let bytes =
+                format!("GET /repo.git/api/v1/pulls/7?{query} HTTP/1.1\r\nHost: local\r\n\r\n");
             let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
                 .unwrap()
                 .unwrap();
