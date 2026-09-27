@@ -13,6 +13,8 @@ use fgit_types::{DecisionOutcome, GitHashAlgorithm, PrincipalId};
 use std::fs;
 use std::path::Path;
 
+mod pull_request_checks;
+
 fn source_ref() -> RefName {
     RefName::try_new(b"refs/heads/main").unwrap()
 }

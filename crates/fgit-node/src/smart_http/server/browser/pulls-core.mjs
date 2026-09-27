@@ -281,6 +281,9 @@ export class Transport {
         (method !== 'POST' || key !== undefined || !read || binary || path.includes('?') ||
          contentType !== 'application/x-www-form-urlencoded' || typeof body !== 'string' ||
          utf8.encode(body).length > FORM_LIMIT || statuses.length !== 1 || statuses[0] !== 200)) fail('PR diff is read-only.');
+    if (/^pulls\/[1-9][0-9]*\/checks(?:\?|$)/.test(path) &&
+        (method !== 'GET' || body !== undefined || key !== undefined || !read || binary ||
+         statuses.length !== 2 || statuses[0] !== 200 || statuses[1] !== 404)) fail('PR checks are a closed read-only profile.');
     const allowed = this.#rebase
       ? /^(?:source\/(?:tree|rebase\/(?:prepare|resolve|inspect|apply))|outcomes)$/.test(path)
       : this.#replay
@@ -297,7 +300,7 @@ export class Transport {
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
-      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|prepare|resolve|inspect|merge|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
+      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|prepare|resolve|inspect|merge|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);
     const timer = setTimeout(() => controller.abort(), this.#timeout);

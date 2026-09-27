@@ -5,6 +5,9 @@
 //! actual source and evidence; this module never trusts a journal as authority.
 use std::future::Future;
 
+mod read;
+pub use read::{PullRequestChecksPage, WorkflowCheckSummary, read_pull_request_page_at};
+
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, ScopedEntry, SealAttempt, SemanticRequest,
     TerminalOutcome,

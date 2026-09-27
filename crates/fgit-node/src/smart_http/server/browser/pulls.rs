@@ -19,6 +19,7 @@ fn asset(route: &[u8], target: &str) -> Option<(&'static str, &'static str)> {
         b"/ui/markdown.mjs" => Some((script, include_str!("markdown.mjs"))),
         b"/ui/pulls.mjs" => Some((script, include_str!("pulls.mjs"))),
         b"/ui/pulls-core.mjs" => Some((script, include_str!("pulls-core.mjs"))),
+        b"/ui/pulls-checks.mjs" => Some((script, include_str!("pulls-checks.mjs"))),
         b"/ui/pulls-candidate.mjs" => Some((script, include_str!("pulls-candidate.mjs"))),
         b"/ui/pulls-resolution.mjs" => Some((script, include_str!("pulls-resolution.mjs"))),
         b"/ui/pulls-resolution-view.mjs" => {
@@ -80,7 +81,12 @@ pub(super) fn serve(
 ) -> Result<bool, Status> {
     let Some((media, body)) = checked_asset(
         &profile.route,
-        asset_enabled(&profile.route, request.target, profile.allow_pulls, profile.allow_issues),
+        asset_enabled(
+            &profile.route,
+            request.target,
+            profile.allow_pulls,
+            profile.allow_issues,
+        ),
         profile.maximum_response_bytes,
         request,
         !trailing.is_empty(),
@@ -116,6 +122,7 @@ mod tests {
             "/ui/pulls.mjs",
             "/ui/markdown.mjs",
             "/ui/pulls-core.mjs",
+            "/ui/pulls-checks.mjs",
             "/ui/pulls-candidate.mjs",
             "/ui/pulls-actions.mjs",
             "/ui/pulls-resolution.mjs",
@@ -224,6 +231,7 @@ mod tests {
             include_str!("pulls.mjs"),
             include_str!("markdown.mjs"),
             include_str!("pulls-core.mjs"),
+            include_str!("pulls-checks.mjs"),
             include_str!("pulls-candidate.mjs"),
             include_str!("pulls-actions.mjs"),
             include_str!("pulls-resolution.mjs"),
@@ -243,21 +251,28 @@ mod tests {
                     let target = format!("/r.git{suffix}");
                     let text = format!("GET {target} HTTP/1.1\r\nHost: local\r\n\r\n");
                     let request = head::parse(text.as_bytes(), HttpLimits::default())
-                        .unwrap().unwrap();
+                        .unwrap()
+                        .unwrap();
                     let expected = pulls || (issues && suffix == "/ui/markdown.mjs");
                     assert_eq!(
                         checked_asset(
-                            b"/r.git", asset_enabled(b"/r.git", &target, pulls, issues),
-                            u64::MAX, &request, false,
-                        ).is_ok(),
+                            b"/r.git",
+                            asset_enabled(b"/r.git", &target, pulls, issues),
+                            u64::MAX,
+                            &request,
+                            false,
+                        )
+                        .is_ok(),
                         expected,
                     );
                 }
             }
         }
         for target in [
-            "/r.git-other/ui/markdown.mjs", "/other.git/ui/markdown.mjs",
-            "/r.git/ui/%6darkdown.mjs", "/r.git/ui/../markdown.mjs",
+            "/r.git-other/ui/markdown.mjs",
+            "/other.git/ui/markdown.mjs",
+            "/r.git/ui/%6darkdown.mjs",
+            "/r.git/ui/../markdown.mjs",
         ] {
             assert!(!asset_enabled(b"/r.git", target, false, true));
             assert!(asset(b"/r.git", target).is_none());
@@ -269,19 +284,31 @@ mod tests {
         for (method, suffix, headers, trailing, maximum) in [
             ("POST", "/ui/markdown.mjs", "", false, u64::MAX),
             ("GET", "/ui/markdown.mjs?token=x", "", false, u64::MAX),
-            ("GET", "/ui/markdown.mjs", "Content-Length: 1\r\n", false, u64::MAX),
+            (
+                "GET",
+                "/ui/markdown.mjs",
+                "Content-Length: 1\r\n",
+                false,
+                u64::MAX,
+            ),
             ("GET", "/ui/markdown.mjs", "", true, u64::MAX),
             ("GET", "/ui/markdown.mjs", "", false, 1),
         ] {
             let target = format!("/r.git{suffix}");
             let text = format!("{method} {target} HTTP/1.1\r\nHost: local\r\n{headers}\r\n");
             let request = head::parse(text.as_bytes(), HttpLimits::default())
-                .unwrap().unwrap();
-            assert!(checked_asset(
-                b"/r.git", asset_enabled(b"/r.git", &target, false, true),
-                maximum, &request, trailing,
-            ).is_err());
+                .unwrap()
+                .unwrap();
+            assert!(
+                checked_asset(
+                    b"/r.git",
+                    asset_enabled(b"/r.git", &target, false, true),
+                    maximum,
+                    &request,
+                    trailing,
+                )
+                .is_err()
+            );
         }
     }
-
 }

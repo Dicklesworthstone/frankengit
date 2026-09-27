@@ -371,6 +371,31 @@ fn real_source_and_pr_tools_preserve_bytes_snapshots_and_independent_grants() {
             result(&pr)["pull_request"].object().unwrap()["merge_permission"],
             Value::Null
         );
+        let checks = invoke(
+            &mut server,
+            &mut backend,
+            20,
+            "frankengit_pull_checks",
+            object([("number", text("1"))]),
+        );
+        assert_eq!(result(&checks)["found"], Value::Bool(true));
+        assert_eq!(result(&checks)["checks"], Value::Array(Vec::new()));
+        assert_eq!(result(&checks)["source_current"], Value::Bool(true));
+        assert_eq!(result(&checks)["merge_permission"], Value::Null);
+        assert_eq!(
+            result(&checks)["snapshot_token"],
+            result(&pr)["snapshot_token"]
+        );
+        let missing_checks = invoke(
+            &mut server,
+            &mut backend,
+            21,
+            "frankengit_pull_checks",
+            object([("number", text("42"))]),
+        );
+        assert_eq!(result(&missing_checks)["found"], Value::Bool(false));
+        assert_eq!(result(&missing_checks)["source_head"], Value::Null);
+        assert_eq!(result(&missing_checks)["checks"], Value::Array(Vec::new()));
         let denied = invoke(
             &mut server,
             &mut backend,
@@ -438,6 +463,17 @@ fn real_source_and_pr_tools_preserve_bytes_snapshots_and_independent_grants() {
                 ("expected_head", result(&pr)["snapshot_token"].clone()),
             ]),
         );
+        let retained_checks = invoke(
+            &mut server,
+            &mut backend,
+            22,
+            "frankengit_pull_checks",
+            object([
+                ("number", text("1")),
+                ("expected_head", result(&checks)["snapshot_token"].clone()),
+            ]),
+        );
+        assert_eq!(result(&retained_checks), result(&checks));
         assert_eq!(
             result(&retained)["snapshot_token"],
             result(&pr)["snapshot_token"]

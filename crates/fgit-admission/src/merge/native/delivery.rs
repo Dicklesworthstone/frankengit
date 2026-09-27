@@ -480,7 +480,7 @@ fn validate_payload_positions(
     Ok(())
 }
 
-fn validate_position_batch(
+pub(super) fn validate_position_batch(
     position: &ForgePositionStateEntry,
     batch: &ForgeEventBatch,
 ) -> Result<(), AdmissionError> {

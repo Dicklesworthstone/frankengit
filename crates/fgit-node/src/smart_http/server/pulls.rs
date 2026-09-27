@@ -2,6 +2,7 @@
 //! and calls the existing node engine; metadata, reviews and code publication
 //! never gain authority from each other or from request text.
 
+mod checks;
 mod collaboration;
 mod diff;
 mod inspection;
@@ -60,9 +61,13 @@ pub(super) enum Request<'a> {
     Preparation(preparation::Request<'a>),
     Inspection(inspection::Request<'a>),
     Diff(diff::Request<'a>),
+    Checks(checks::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
+        if let Some(request) = checks::Request::parse(envelope)? {
+            return Ok(Some(Self::Checks(request)));
+        }
         if let Some(request) = diff::Request::parse(envelope)? {
             return Ok(Some(Self::Diff(request)));
         }
@@ -81,7 +86,7 @@ impl<'a> Request<'a> {
         match self {
             Self::Metadata(request) => request.is_mutation(),
             Self::Collaboration(request) => request.is_mutation(),
-            Self::Preparation(_) | Self::Inspection(_) | Self::Diff(_) => false,
+            Self::Preparation(_) | Self::Inspection(_) | Self::Diff(_) | Self::Checks(_) => false,
         }
     }
     /// Preparation, inspection and diff spend bounded work on a POST body,
@@ -115,6 +120,9 @@ pub(super) fn authenticate(
     profile: &Profile,
 ) -> Result<LoopbackReceiveSession, ApiError> {
     let request = match request {
+        Request::Checks(request) => {
+            return checks::authenticate(request, envelope, raw_head, profile);
+        }
         Request::Diff(request) => return diff::authenticate(request, envelope, raw_head, profile),
         Request::Inspection(request) => {
             return inspection::authenticate(request, envelope, raw_head, profile);
@@ -158,6 +166,9 @@ pub(super) fn execute(
     maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     match request {
+        Request::Checks(request) => {
+            checks::execute(node, request, session, maximum_response).map(Reply::Json)
+        }
         Request::Diff(request) => diff::execute(
             node,
             request,

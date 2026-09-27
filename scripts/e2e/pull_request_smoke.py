@@ -177,9 +177,28 @@ def run_format(binary, algorithm):
             return report
         page(listing(), algorithm, [])
         require(showing(7, 4)["pull_request"] is None, "initial absent PR")
+        absent_checks = document(invoke(binary, read_args("checks", 7), 4))
+        require(absent_checks["found"] is False and absent_checks["source_head"] is None
+                and absent_checks["checks"] == [], "absent checks disclosed metadata")
         original = data_for(f)
         opening = mutate("open", 7, 0, "pr-open-7", original)
         row(showing(7)["pull_request"], 7, 1, "open", original)
+        check_page = document(invoke(binary, read_args("checks", 7)))
+        require(check_page["type"] == "pull_request_checks" and check_page["schema_version"] == 1,
+                "checks schema")
+        require(check_page["tenant_id"] == TENANT and check_page["repository_id"] == REPOSITORY
+                and check_page["object_format"] == algorithm, "checks repository binding")
+        require(check_page["number"] == "7" and check_page["pull_request_version"] == "1"
+                and check_page["source_tip"] == f["source"] and check_page["target_tip"] == f["target"]
+                and check_page["source_ref_hex"] == SOURCE.encode().hex()
+                and check_page["target_ref_hex"] == TARGET.encode().hex(), "checks exact PR coordinates")
+        require(check_page["found"] is True and check_page["source_current"] is True
+                and check_page["checks"] == [] and check_page["next_after"] is None
+                and check_page["complete"] is True and check_page["node_closed"] is True,
+                "checks empty page and cleanup")
+        require(check_page["scope"] == "trusted_workflow_observations"
+                and check_page["merge_permission"] is None, "checks must not invent approval")
+        require(check_page["source_head"] == showing(7)["source_head"], "checks read published state")
         missing = showing(6, 4)
         require(missing["pull_request"] is None and "next_after" not in missing, "not-found disclosed another PR")
         pinned = listing()
@@ -190,6 +209,10 @@ def run_format(binary, algorithm):
         body_path.write_bytes(updated["body"].encode())
         updating = mutate("update", 7, 1, "pr-update-7", updated, body_file=body_path)
         row(showing(7)["pull_request"], 7, 2, "open", updated)
+        require(document(invoke(binary, read_args("checks", 7, "--expected-head", check_page["snapshot_token"])))
+                == check_page, "retained checks changed after metadata publication")
+        require(document(invoke(binary, read_args("checks", 7)))["pull_request_version"] == "2",
+                "current checks did not observe the new PR version")
         require(mutate("update", 7, 1, "pr-update-7", updated) == updating, "file/inline transport changed seal")
         loser = data_for(f, "Stale competitor", BODY)
         refused = mutate("update", 7, 1, "pr-loser", loser, "EvidenceStale")

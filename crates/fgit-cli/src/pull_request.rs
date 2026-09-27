@@ -2,6 +2,7 @@
 //! Mutation inputs are complete and immutable across retries. Reads are pinned
 //! before disclosure, and receipt/cleanup errors cannot erase a known decision.
 
+mod checks;
 mod fast_forward;
 mod options;
 mod output;
@@ -36,6 +37,8 @@ usage: fg pr show <storage-root> <tenant-id> <repository-id> <number> --trusted-
 
 usage: fg pr fast-forward --help
   Fast-forward an existing PR with exact version/tips, without a new commit.
+usage: fg pr checks --help
+  Read canonical workflow observations for the PR's exact source commit.
 
 Every metadata mutation supplies complete metadata, even close; no latest-tip lookup or
 implicit metadata clearing occurs. --body '' explicitly selects an empty body.
@@ -46,7 +49,16 @@ Exit 0: committed mutation or successful read; 3: canonical command refusal;
 This is a trusted local-operator interface, not a remote authorization service.";
 
 pub fn run(arguments: &[String]) -> Result<u8, String> {
-    if arguments.first().is_some_and(|argument| argument == "fast-forward") {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "checks")
+    {
+        return checks::run(&arguments[1..], &mut std::io::stdout().lock());
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "fast-forward")
+    {
         return fast_forward::run(&arguments[1..], &mut std::io::stdout().lock());
     }
     if arguments == ["--help"]

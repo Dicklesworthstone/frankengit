@@ -1,0 +1,63 @@
+name: Pull request workflow observations
+# Consumer: PR check reads in OneNode, HTTP, CLI, MCP and the browser (.4.12).
+# This gates mixed-snapshot/commit disclosure and transport integration defects.
+# Remove this standalone job when these targets join the ordinary union job.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/pull-request-checks.yml'
+      - 'crates/fgit-admission/src/merge/native/workflow_checks/**'
+      - 'crates/fgit-node/src/treefs_workspace/pull_request/checks.rs'
+      - 'crates/fgit-node/src/treefs_workspace/trusted_workflow/durable/publication/tests/pull_request_checks.rs'
+      - 'crates/fgit-node/src/smart_http/server/pulls/checks/**'
+      - 'crates/fgit-node/src/smart_http/server/pulls/checks.rs'
+      - 'crates/fgit-node/src/smart_http/server/browser/pulls-checks.mjs'
+      - 'crates/fgit-node/tests/pull_request_checks_http.rs'
+      - 'crates/fgit-cli/src/pull_request/checks.rs'
+      - 'crates/fgit-cli/src/mcp/backend/checks.rs'
+      - 'crates/fgit-cli/src/mcp/backend/integration_tests.rs'
+      - 'scripts/e2e/pull_request_smoke.py'
+      - 'tests/browser/pulls-checks*.mjs'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pull-request-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_HTTP_USER_AGENT: 'OpenAI File Downloader, XaiImageApiFetch/1.0'
+      CARGO_TARGET_DIR: /tmp/fg-pull-checks
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Exact source and pinned compiler
+        run: |
+          git rev-parse HEAD
+          rustc -Vv
+      - name: Compile production and CLI targets
+        run: cargo check --locked -p fgit-cli --all-targets
+      - name: Canonical observation selection
+        run: cargo test --locked -p fgit-admission --lib workflow_checks::read::tests
+      - name: Persisted workflow and PR lifecycle
+        run: cargo test --locked -p fgit-node --lib pull_request_checks
+      - name: HTTP contracts and actual publication reads
+        run: |
+          cargo test --locked -p fgit-node --lib smart_http::server::pulls::checks
+          cargo test --locked -p fgit-node --test pull_request_checks_http
+      - name: CLI and MCP reads
+        run: |
+          cargo test --locked -p fgit-cli --bin fg checks
+          cargo test --locked -p fgit-cli --bin fg mcp::backend::integration_tests
+          cargo test --locked -p fgit-cli --test native_pull_request_smoke
+      - name: Browser observation protocol and panel
+        run: node --test tests/browser/pulls-checks*.test.mjs

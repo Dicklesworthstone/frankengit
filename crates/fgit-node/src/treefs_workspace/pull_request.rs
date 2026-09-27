@@ -2,7 +2,9 @@
 //! caller-minted object proof is introduced. Both code and metadata mutations
 //! use the node's existing exact-basis projection and verified object fabric.
 
+mod checks;
 mod fast_forward;
+pub use checks::{PullRequestChecksPage, PullRequestChecksReadRefusal, WorkflowCheckSummary};
 mod preparation;
 #[path = "reviews.rs"]
 mod reviews;

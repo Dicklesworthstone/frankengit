@@ -52,6 +52,9 @@ pub use treefs_workspace::{
     MergeWorkspaceReceipt, NodeWorkspaceRefusal, WorkspaceSessionRefusal, WorkspaceShutdownBlocked,
 };
 pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
+pub use treefs_workspace::{
+    PullRequestChecksPage, PullRequestChecksReadRefusal, WorkflowCheckSummary,
+};
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, HeadInit, HeadKey,

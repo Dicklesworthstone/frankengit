@@ -3,6 +3,7 @@ import { Transport, integer, principal, snapshot, listReply, showReply, reviewsR
   hex, form, subject, SUBJECT_FIELDS, oid, binding, pinned, record } from './pulls-core.mjs';
 import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, PREPARATION_LIMIT } from './pulls-candidate.mjs';
 import { resolutionUpload, verifyResolutionResult } from './pulls-resolution.mjs';
+import { checkId, checksReply } from './pulls-checks.mjs';
 import { RECEIPT_LIMIT, requestBody, requestPath, requestKey, publication, recovery, base64, fromBase64, receiptScope } from './pulls-actions.mjs';
 
 function candidateFields(fields) {
@@ -141,6 +142,24 @@ export class PullClient {
     const checked = reviewsReply(raw.value, number, { after, limit, head, scope: this.#scope });
     if (checked.reply.found !== (raw.status === 200)) fail('Review presence and HTTP status disagree.');
     this.#scope = checked.binding; return checked;
+  }
+
+  // Bind every checks page to the complete selected PR observation, including
+  // byte-only refs and both native tips. Paging never refreshes the subject.
+  async checks(number, observed, { after = null, limit = 20 } = {}) {
+    const scope = this.#selected(), epoch = this.#transport.epoch;
+    integer(number, 'PR number', 1); integer(limit, 'page size', 1, 100);
+    if (after !== null) checkId(after);
+    const saved = copy(observed); snapshot(saved.head);
+    const selected = showReply(saved.reply, number, { head: saved.head, scope });
+    if (!selected.reply.found) fail('Select an available PR before loading workflow observations.');
+    const query = new URLSearchParams({ limit: String(limit), expected_head: selected.head });
+    if (after !== null) query.set('after', after);
+    const raw = await this.#transport.request(`pulls/${number}/checks?${query}`, { statuses: [200, 404] });
+    this.#check(epoch);
+    const checked = checksReply(raw.value, number, selected, { after, limit, scope });
+    if (checked.reply.found !== (raw.status === 200)) fail('Workflow checks presence and HTTP status disagree.');
+    return checked;
   }
 
   // The observation must be a complete prior show() result. No author, policy

@@ -5,6 +5,7 @@ import { markdownBody } from './markdown.mjs';
 import { decimal, oid, unhex, fail } from './pulls-core.mjs';
 import { RECEIPT_LIMIT } from './pulls-actions.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
+import { appendChecksPanel } from './pulls-checks.mjs';
 
 export const DISPLAY_BYTES = 512 * 1024;
 const DISPLAY_HUNKS = 256;
@@ -202,6 +203,8 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     selected = { row, head: result.head, format: result.binding.format };
     item(doc, nodes.selected, 'h2', `#${row.number} · ${row.state} · ${row.data?.title ?? '(merge-only record)'}`);
     item(doc, nodes.selected, 'p', `PR version ${row.version}. Opener: ${row.opened_by ?? '(not recorded)'}`);
+    appendChecksPanel(doc, nodes.selected, { client, observed: result, run,
+      current: () => client.connected && selected?.row === row, status, displayText });
     if (row.data) {
       item(doc, nodes.selected, 'pre', `${nativeRef(row.data, 'source_ref')} → ${nativeRef(row.data, 'target_ref')}\nSource ${row.data.source_tip}\nTarget ${row.data.target_tip}`);
       const diffPanel = element(doc, 'section'), diffOutput = element(doc, 'div');
