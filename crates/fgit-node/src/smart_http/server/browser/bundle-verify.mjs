@@ -9,11 +9,12 @@ export const BUNDLE_VERIFY_LIMITS = Object.freeze({
   maxObjects: 32768, maxObjectBytes: 16 * 1024 * 1024,
   maxExpandedBytes: 128 * 1024 * 1024, maxDeltaDepth: 64,
   maxWork: 256 * 1024 * 1024, timeoutMs: 30000,
+  maxMetadataBytes: 32 * 1024 * 1024, maxLinks: 262144,
 });
 export class BundleVerificationError extends Error {
-  constructor(code) { super(`Git bundle verification refused: ${code}`); this.name = 'BundleVerificationError'; this.code = code; }
+  constructor(code, details = null) { super(`Git bundle verification refused: ${code}`); this.name = 'BundleVerificationError'; this.code = code; this.details = details; }
 }
-const refuse = code => { throw new BundleVerificationError(code); };
+const refuse = (code, details = null) => { throw new BundleVerificationError(code, details); };
 const encoder = new TextEncoder();
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 const ascii = bytes => {
@@ -354,4 +355,139 @@ async function readBundle(input, options) {
 export async function verifyGitBundleObjects(input, options = {}) {
   const { budget, summary } = await readBundle(input, options);
   budget.check(); return { ...summary, work: budget.work };
+}
+
+// Parse references out of the ORIGINAL verified bytes. Signature continuations,
+// author strings and arbitrary message encodings never create graph edges.
+// This is a closed reference-structure profile, not every git-fsck policy.
+async function metadataLinks(object, format, budget, add) {
+  const body = object.body;
+  if (object.kind === 'blob') return;
+  if (object.kind === 'tree') {
+    const width = format === 'sha1' ? 20 : 32, names = new Set(); let at = 0, previous = null;
+    while (at < body.length) {
+      budget.check(); const start = at;
+      while (at < body.length && body[at] !== 32 && at - start < 7) at++;
+      if (body[at] !== 32 || at === start || at - start > 6) refuse('invalid_tree_mode');
+      let mode = 0;
+      for (let i = start; i < at; i++) {
+        if (body[i] < 48 || body[i] > 55) refuse('invalid_tree_mode'); mode = mode * 8 + body[i] - 48;
+      }
+      const kind = mode === 0o40000 ? 'tree' : [0o100644, 0o100755, 0o120000].includes(mode) ? 'blob' : mode === 0o160000 ? 'gitlink' : null;
+      if (!kind) refuse('unsupported_tree_mode');
+      const nameStart = ++at;
+      while (at < body.length && body[at] !== 0 && at - nameStart <= 4096) at++;
+      if (at === body.length || at === nameStart || at - nameStart > 4096 || body.length - at - 1 < width) refuse('invalid_tree_entry');
+      const name = body.subarray(nameStart, at++);
+      if (name.includes(47) || (name.length <= 2 && name.every(b => b === 46)) ||
+          (name.length === 4 && name[0] === 46 && (name[1] | 32) === 103 && (name[2] | 32) === 105 && (name[3] | 32) === 116)) refuse('unsafe_tree_name');
+      const rawName = hex(name), order = rawName + (kind === 'tree' ? '2f' : '00');
+      if (names.has(rawName)) refuse('duplicate_tree_name'); names.add(rawName);
+      if (previous !== null && order <= previous) refuse('noncanonical_tree_order'); previous = order;
+      const id = hex(body.subarray(at, at + width)); at += width;
+      if (/^0+$/.test(id)) refuse('zero_tree_target');
+      budget.spend(at - start); add(id, kind);
+      if (budget.work >= budget.nextYield) await budget.yield();
+    }
+    return;
+  }
+  let at = 0, lines = 0, last = null, separated = false;
+  let tree = false, author = false, committer = false, target = null, targetKind = null, tag = false, tagger = false;
+  while (at < body.length) {
+    budget.check(); const end = body.indexOf(10, at);
+    if (end < 0) refuse('unterminated_object_header');
+    const line = body.subarray(at, end); budget.spend(line.length + 1); at = end + 1;
+    if (!line.length) { separated = true; break; }
+    if (++lines > 4096 || line.includes(0)) refuse('invalid_object_header');
+    if (line[0] === 32) {
+      if (!last || ['tree', 'parent', 'object', 'type', 'tag', 'author', 'committer', 'tagger'].includes(last)) refuse('continued_reference_or_identity_header');
+    } else {
+      const space = line.indexOf(32);
+      if (space < 1 || space > 64 || space === line.length - 1) refuse('invalid_object_header');
+      const key = ascii(line.subarray(0, space)), value = line.subarray(space + 1);
+      if (!/^[A-Za-z0-9_-]+$/.test(key)) refuse('invalid_object_header');
+      last = key;
+      if (object.kind === 'commit') {
+        if (key === 'tree') {
+          if (tree || lines !== 1) refuse('ambiguous_commit_tree');
+          tree = true; add(checkedOid(value, format), 'tree');
+        } else if (key === 'parent') {
+          if (!tree || author || committer) refuse('misplaced_commit_parent'); add(checkedOid(value, format), 'commit');
+        } else if (key === 'author') {
+          if (!tree || author || committer) refuse('invalid_commit_author_header'); author = true;
+        } else if (key === 'committer') {
+          if (!author || committer) refuse('invalid_commit_committer_header'); committer = true;
+        } else if (!committer) refuse('unsupported_commit_header_order');
+      } else {
+        if (key === 'object') {
+          if (target !== null || lines !== 1) refuse('ambiguous_tag_target'); target = checkedOid(value, format);
+        } else if (key === 'type') {
+          if (target === null || targetKind !== null || lines !== 2) refuse('invalid_tag_type_header');
+          targetKind = ascii(value); if (!Object.values(kindNames).includes(targetKind)) refuse('invalid_tag_target_type');
+        } else if (key === 'tag') {
+          if (targetKind === null || tag || lines !== 3) refuse('invalid_tag_name_header'); tag = true;
+        } else if (key === 'tagger') {
+          if (!tag || tagger) refuse('invalid_tag_identity_header'); tagger = true;
+        } else if (!tag) refuse('unsupported_tag_header_order');
+      }
+    }
+    if (budget.work >= budget.nextYield) await budget.yield();
+  }
+  if (!separated) refuse('missing_object_message_separator');
+  if (object.kind === 'commit') {
+    if (!tree || !author || !committer) refuse('incomplete_commit_headers');
+  } else {
+    if (target === null || targetKind === null || !tag) refuse('incomplete_tag_headers'); add(target, targetKind);
+  }
+}
+async function closure(decoded) {
+  const { budget, objects, byId, summary } = decoded;
+  const links = new Map(), gitlinks = new Map(), kinds = { commit: 0, tree: 0, blob: 0, tag: 0 };
+  let metadataBytes = 0, totalLinks = 0, allGitlinks = 0;
+  for (const object of objects) {
+    budget.check(); kinds[object.kind]++;
+    if (object.kind !== 'blob') {
+      metadataBytes += object.body.length;
+      if (metadataBytes > budget.limits.maxMetadataBytes) refuse('metadata_byte_limit');
+      budget.spend(object.body.length);
+    }
+    const edges = []; let external = 0;
+    await metadataLinks(object, summary.object_format, budget, (id, kind) => {
+      if (++totalLinks > budget.limits.maxLinks) refuse('object_link_limit');
+      if (kind === 'gitlink') { external++; allGitlinks++; } else edges.push({ id, kind });
+    });
+    links.set(object.id, edges); gitlinks.set(object.id, external);
+    if (budget.work >= budget.nextYield) await budget.yield();
+  }
+  const state = new Map(), stack = summary.refs.map(row => ({ id: row.object_id, kind: null, source: null, leaving: false }));
+  let reachable = 0, reachableLinks = 0, externalGitlinks = 0;
+  while (stack.length) {
+    budget.check(); budget.spend(); const item = stack.pop();
+    if (item.leaving) { state.set(item.id, 2); continue; }
+    const object = byId.get(item.id);
+    if (!object) refuse('missing_reachable_object', { source_object: item.source, target_object: item.id, expected_type: item.kind });
+    if (item.kind !== null && object.kind !== item.kind) refuse('reachable_object_type_mismatch', {
+      source_object: item.source, target_object: item.id, expected_type: item.kind, actual_type: object.kind,
+    });
+    if (state.get(item.id) === 1) refuse('cyclic_object_graph', { target_object: item.id });
+    if (state.get(item.id) === 2) continue;
+    state.set(item.id, 1); reachable++; externalGitlinks += gitlinks.get(item.id);
+    stack.push({ id: item.id, leaving: true });
+    const edges = links.get(item.id); reachableLinks += edges.length;
+    for (let i = edges.length - 1; i >= 0; i--) stack.push({ ...edges[i], source: item.id, leaving: false });
+    if (budget.work >= budget.nextYield) await budget.yield();
+  }
+  budget.check();
+  return { ...summary, profile: 'bounded-native-bundle-closure-v1', object_closure_verified: true,
+    closure_scope: 'advertised-direct-refs', reachable_objects: reachable, unreachable_objects: objects.length - reachable,
+    object_kinds: kinds, metadata_bytes: metadataBytes, parsed_links: totalLinks, reachable_links: reachableLinks,
+    gitlink_entries: allGitlinks, reachable_gitlink_entries: externalGitlinks, gitlink_targets_verified: false,
+    signatures_verified: false, author_identity_verified: false, fsck_equivalent: false, work: budget.work };
+}
+// A successful return means each advertised direct ref has its complete typed
+// commit/tree/blob/tag closure in this bundle. Gitlinks name separate repos and
+// are explicitly outside that claim. Extra transport-only objects are counted,
+// not confused with missing history or silently asserted to be reachable.
+export async function verifyGitBundle(input, options = {}) {
+  return closure(await readBundle(input, options));
 }
