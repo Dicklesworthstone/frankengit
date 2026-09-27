@@ -1,6 +1,7 @@
 // DOM/fetch contract tests, not a substitute for Chromium or live-node testing.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mount, hex } from '../../crates/fgit-node/src/smart_http/server/browser/browser.mjs';
 
 class Element {
@@ -14,16 +15,25 @@ class Element {
   fire(name) { this.listeners.get(name)?.({ preventDefault() {} }); }
 }
 const identity = { schema_version: 1, object_format: 'sha1', read_only: true, transaction_created: false,
-  published: false, snapshot_token: `alg:1:${'b'.repeat(64)}`, source_commit: 'a'.repeat(40) };
+  published: false, snapshot_token: `alg:1:${'b'.repeat(64)}`, source_commit: 'a'.repeat(40),
+  // Match the native source/output.rs envelope, including the identities the
+  // browser now retains independently across reads. No disclosure assertions
+  // below are weakened to accommodate an incomplete mock response.
+  tenant_id: '1'.repeat(32), repository_id: '2'.repeat(32), repository_incarnation: '3'.repeat(32),
+  source_head: 'source-head', source_rcr: 'source-rcr', root_tree: 'e'.repeat(40),
+  ref: 'refs/heads/main', ref_hex: hex(new TextEncoder().encode('refs/heads/main')) };
+const linkBytes = Buffer.alloc(65537, 65);
+const linkId = createHash('sha1').update(Buffer.from(`blob ${linkBytes.length}\0`)).update(linkBytes).digest('hex');
 const tree = (entries = [], extra = {}) => ({ ...identity, type: 'source_tree', path_hex: null,
-  next_after_hex: null, entries, ...extra });
+  object_id: identity.root_tree, after_hex: null, limit: 100, next_after_hex: null,
+  entries: entries.map(entry => ({ object_id: entry.kind === 'symlink' ? linkId : identity.root_tree, ...entry })), ...extra });
 const json = value => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 async function settled() { for (let i = 0; i < 12; i += 1) await new Promise(setImmediate); }
 function buttons(root) { return root.children.flatMap(child => [...(child.tagName === 'button' ? [child] : []), ...buttons(child)]); }
 function click(root, text) { const found = buttons(root).find(button => button.textContent === text); assert.ok(found, `button ${text}`); found.fire('click'); }
 function harness(respond) {
-  const names = ['connection', 'token', 'reference', 'format', 'disconnect', 'status', 'snapshot', 'breadcrumbs', 'content', 'paging', 'search', 'needle', 'search-case'];
+  const names = ['connection', 'token', 'reference', 'format', 'disconnect', 'status', 'snapshot', 'breadcrumbs', 'content', 'paging', 'search', 'needle', 'search-case', 'cancel-read'];
   const elements = Object.fromEntries(names.map(name => [name, new Element()]));
   elements.reference.value = 'refs/heads/main'; elements.format.value = 'sha1'; elements['search-case'].value = 'exact';
   const lifecycle = new Element();
@@ -69,7 +79,7 @@ test('file ranges keep their snapshot; symbolic links are previewed without foll
     if (n === 1) return json(tree([{ name_hex: '6c696e6b', kind: 'symlink' }]));
     const offset = n === 2 ? 0 : 65536;
     const bytes = new Uint8Array(n === 2 ? 65536 : 1).fill(65);
-    return json({ ...identity, type: 'source_blob', path_hex: '6c696e6b', kind: 'symlink',
+    return json({ ...identity, object_id: linkId, type: 'source_blob', path_hex: '6c696e6b', kind: 'symlink',
       total_bytes: 65537, offset, returned_bytes: bytes.length, next_offset: n === 2 ? 65536 : null,
       content_hex: hex(bytes), symlink_followed: false });
   });
