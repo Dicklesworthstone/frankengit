@@ -144,6 +144,7 @@ pub mod syntax;
 pub use basis::{
     AggregateName, AuthenticationStrength, EvidenceKind, EvidenceReceipt, IssuerLabel, LabelName,
     PolicyInputRoot, PolicyInstant, PrincipalFacts, PrincipalKind, RefUpdateFact, RefUpdateKind,
+    StatusCheckConclusion, StatusCheckReceipt,
 };
 pub use break_glass::{
     BreakGlassIntent, BreakGlassReceipt, BreakGlassRefusal, MAX_BREAK_GLASS_DURATION_SECS,

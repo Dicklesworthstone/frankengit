@@ -22,7 +22,8 @@ use fgit_types::refs::RefName;
 use fgit_types::{AsciiSlug, PrincipalId};
 
 use crate::basis::{
-    AuthenticationStrength, EvidenceKind, LabelName, PolicyInputRoot, PrincipalKind, RefUpdateKind,
+    AuthenticationStrength, EvidenceKind, LabelName, PolicyInputRoot, PrincipalKind, RefUpdateFact,
+    RefUpdateKind, StatusCheckConclusion,
 };
 use crate::glob::RefPattern;
 use crate::program::Decision;
@@ -120,7 +121,8 @@ impl Default for ReviewRequirement {
 pub struct StatusCheckRequirement {
     /// The names of the status checks that must have passed.
     pub required_checks: BTreeSet<AsciiSlug>,
-    /// Whether checks must be strictly up-to-date with the branch head.
+    /// Whether admission additionally requires branch-freshness checks.
+    /// Exact proposed-commit binding is mandatory even when this is false.
     pub strict_up_to_date: bool,
 }
 
@@ -559,30 +561,10 @@ pub fn evaluate_protected_ref(
     }
 
     // 11. Status checks requirement
-    if let (Some(check_req), Ok(ci_kind)) = (&rule.checks, EvidenceKind::try_new(b"ci_check"))
+    if let Some(check_req) = &rule.checks
         && !check_req.required_checks.is_empty()
     {
-        let matching_receipt = input
-            .receipts()
-            .iter()
-            .find(|r| r.kind() == ci_kind && r.subject() == ref_name);
-        if let Some(receipt) = matching_receipt {
-            if receipt.is_live_at(input.instant()) {
-                verdicts.push(RequirementVerdict::Passed {
-                    check_name: "status_checks",
-                });
-            } else {
-                verdicts.push(RequirementVerdict::Failed {
-                    check_name: "status_checks",
-                    reason: "status check evidence receipt is expired".to_owned(),
-                });
-            }
-        } else {
-            verdicts.push(RequirementVerdict::Failed {
-                check_name: "status_checks",
-                reason: "missing required CI status check pass receipt".to_owned(),
-            });
-        }
+        verdicts.push(status_check_verdict(check_req, input, subject));
     }
 
     // 12. Merge queue requirement
@@ -649,5 +631,47 @@ pub fn evaluate_protected_ref(
         is_protected: true,
         verdicts,
         denial_reason: failure,
+    }
+}
+
+/// Required names are bounded and ordered; lookup is logarithmic in the
+/// canonical receipt set. There is no issuer/name/ref reinterpretation and no
+/// scan that can select an older success over a conflicting current result.
+fn status_check_verdict(
+    requirement: &StatusCheckRequirement,
+    input: &PolicyInputRoot,
+    subject: &RefUpdateFact,
+) -> RequirementVerdict {
+    let failed = |reason| RequirementVerdict::Failed {
+        check_name: "status_checks",
+        reason,
+    };
+    if requirement.required_checks.len() > MAX_REQUIRED_CHECKS {
+        return failed(format!(
+            "required CI status check count exceeds {MAX_REQUIRED_CHECKS}"
+        ));
+    }
+    let Some(commit) = subject.next().copied() else {
+        return failed("required CI status checks need a proposed commit".to_owned());
+    };
+    for name in &requirement.required_checks {
+        let Some(receipt) = input.status_check(subject.name(), commit, *name) else {
+            return failed(format!(
+                "missing required CI status check `{name}` for proposed commit {commit}"
+            ));
+        };
+        if !receipt.is_live_at(input.instant()) {
+            return failed(format!(
+                "status check evidence receipt is expired or not yet live: `{name}` for {commit}"
+            ));
+        }
+        if receipt.conclusion() != StatusCheckConclusion::Success {
+            return failed(format!(
+                "required CI status check `{name}` did not succeed for proposed commit {commit}"
+            ));
+        }
+    }
+    RequirementVerdict::Passed {
+        check_name: "status_checks",
     }
 }

@@ -21,10 +21,13 @@ use fgit_types::{PrincipalId, PrincipalSnapshotId};
 
 use crate::error::PolicyInputRefusal;
 
+mod status_checks;
+pub use status_checks::{StatusCheckConclusion, StatusCheckReceipt};
+
 /// Largest number of ref updates one input root may carry.
 pub const MAX_SUBJECTS: usize = 65_536;
 
-/// Largest number of evidence receipts one input root may carry.
+/// Largest combined number of generic and status-check receipts in one input root.
 pub const MAX_RECEIPTS: usize = 65_536;
 
 /// Largest number of aggregate readings one input root may carry.
@@ -575,6 +578,7 @@ pub struct PolicyInputRoot {
     principal: PrincipalFacts,
     updates: Vec<RefUpdateFact>,
     receipts: Vec<EvidenceReceipt>,
+    status_checks: Vec<StatusCheckReceipt>,
     aggregates: BTreeMap<AggregateName, u64>,
     instant: PolicyInstant,
 }
@@ -644,6 +648,7 @@ impl PolicyInputRoot {
             principal,
             updates,
             receipts: ordered,
+            status_checks: Vec::new(),
             aggregates: keyed,
             instant,
         })
@@ -665,6 +670,62 @@ impl PolicyInputRoot {
     #[must_use]
     pub fn receipts(&self) -> &[EvidenceReceipt] {
         &self.receipts
+    }
+
+    /// Attach the complete set of verified status-check facts at this basis.
+    ///
+    /// Replaces any previously attached set. The caller must authenticate the
+    /// issuer and select the current canonical result for each (ref, commit,
+    /// check name); this method validates shape and uniqueness, not execution
+    /// truth. Repeated slots, including contradictory results or issuers, refuse
+    /// instead of selecting whichever receipt happens to appear first.
+    ///
+    /// Generic receipts and named check facts share [`MAX_RECEIPTS`]. Their
+    /// meanings remain separate: a generic `ci_check` receipt has no name,
+    /// commit or conclusion and cannot satisfy a required named check.
+    pub fn with_status_checks(
+        mut self,
+        checks: &[StatusCheckReceipt],
+    ) -> Result<Self, PolicyInputRefusal> {
+        let total = self.receipts.len().saturating_add(checks.len());
+        if total > MAX_RECEIPTS {
+            return Err(PolicyInputRefusal::CountExceeded {
+                field: "receipts",
+                observed: total,
+                limit: MAX_RECEIPTS,
+            });
+        }
+        let mut ordered = checks.to_vec();
+        ordered.sort();
+        for pair in ordered.windows(2) {
+            if pair[0].slot() == pair[1].slot() {
+                return Err(PolicyInputRefusal::DuplicateStatusCheck {
+                    subject: pair[0].subject().as_bytes().to_vec(),
+                    commit: pair[0].commit(),
+                    name: pair[0].name(),
+                });
+            }
+        }
+        self.status_checks = ordered;
+        Ok(self)
+    }
+
+    /// Verified named check facts, ordered by (ref, commit, check name).
+    #[must_use]
+    pub fn status_checks(&self) -> &[StatusCheckReceipt] {
+        &self.status_checks
+    }
+
+    pub(crate) fn status_check(
+        &self,
+        subject: &RefName,
+        commit: GitOid,
+        name: fgit_types::AsciiSlug,
+    ) -> Option<&StatusCheckReceipt> {
+        self.status_checks
+            .binary_search_by(|check| check.slot().cmp(&(subject, commit, name)))
+            .ok()
+            .map(|index| &self.status_checks[index])
     }
 
     /// The aggregate readings, keyed by name.

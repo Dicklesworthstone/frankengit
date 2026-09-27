@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use fgit_policy::basis::{
     AggregateName, AuthenticationStrength, EvidenceKind, EvidenceReceipt, IssuerLabel, LabelName,
     PolicyInputRoot, PolicyInstant, PrincipalFacts, PrincipalKind, RefUpdateFact, RefUpdateKind,
+    StatusCheckConclusion, StatusCheckReceipt,
 };
 use fgit_policy::glob::RefPattern;
 use fgit_policy::program::Decision;
@@ -25,6 +26,24 @@ use fgit_types::{AsciiSlug, PrincipalId, PrincipalSnapshotId};
 
 const fn dummy_oid(byte: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([byte; 20]))
+}
+
+fn status_check(
+    name: &'static str,
+    subject: &RefName,
+    issued: u64,
+    expires: u64,
+) -> StatusCheckReceipt {
+    StatusCheckReceipt::try_new(
+        AsciiSlug::from_static(name),
+        IssuerLabel::from_static("test.service"),
+        subject.clone(),
+        dummy_oid(2),
+        StatusCheckConclusion::Success,
+        PolicyInstant::from_seconds(issued),
+        PolicyInstant::from_seconds(expires),
+    )
+    .unwrap()
 }
 
 fn dummy_principal(
@@ -1276,16 +1295,17 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         );
 
         // 12b. Refuse expired check (expires at 80, evaluated at 100)
-        let expired_ci = dummy_receipt("ci_check", &r_name_main, 10, 80);
+        let expired_ci = status_check("unit-tests", &r_name_main, 10, 80);
         let (input_exp, ref_name) = build_input(
             "refs/heads/main",
             RefUpdateKind::FastForward,
             false,
             p.clone(),
-            vec![expired_ci],
+            vec![],
             vec![],
             100,
         );
+        let input_exp = input_exp.with_status_checks(&[expired_ci]).unwrap();
         let eval_exp = evaluate_protected_ref(std::slice::from_ref(&rule), &input_exp, &ref_name);
         assert_eq!(eval_exp.decision, Decision::Deny);
         assert!(
@@ -1297,16 +1317,17 @@ fn vocabulary_matrix_machine_readable_admit_and_refuse_coverage() {
         );
 
         // 12c. Admit valid check
-        let valid_ci = dummy_receipt("ci_check", &r_name_main, 10, 200);
+        let valid_ci = status_check("unit-tests", &r_name_main, 10, 200);
         let (input_valid, ref_name) = build_input(
             "refs/heads/main",
             RefUpdateKind::FastForward,
             false,
             p,
-            vec![valid_ci],
+            vec![],
             vec![],
             100,
         );
+        let input_valid = input_valid.with_status_checks(&[valid_ci]).unwrap();
         let eval_valid = evaluate_protected_ref(&[rule], &input_valid, &ref_name);
         assert_eq!(eval_valid.decision, Decision::Allow);
     }
@@ -1490,7 +1511,7 @@ fn composition_fixtures_composite_governance_rule() {
         &[],
     );
     let rev_rec = dummy_receipt("code_review", &r_name_main, 10, 500);
-    let ci_rec = dummy_receipt("ci_check", &r_name_main, 10, 500);
+    let ci_rec = status_check("security-audit", &r_name_main, 10, 500);
 
     // Scenario A: Everything valid -> Full Admit
     let (input_ok, ref_name) = build_input(
@@ -1498,10 +1519,13 @@ fn composition_fixtures_composite_governance_rule() {
         RefUpdateKind::FastForward,
         false,
         p_valid.clone(),
-        vec![rev_rec.clone(), ci_rec.clone()],
+        vec![rev_rec.clone()],
         vec![("unresolved_findings", 0)],
         100,
     );
+    let input_ok = input_ok
+        .with_status_checks(std::slice::from_ref(&ci_rec))
+        .unwrap();
     let eval_ok =
         evaluate_protected_ref(std::slice::from_ref(&composite_rule), &input_ok, &ref_name);
     assert_eq!(eval_ok.decision, Decision::Allow);
@@ -1515,10 +1539,13 @@ fn composition_fixtures_composite_governance_rule() {
         RefUpdateKind::FastForward,
         false,
         p_valid.clone(),
-        vec![ci_rec.clone()],
+        vec![],
         vec![("unresolved_findings", 0)],
         100,
     );
+    let input_no_rev = input_no_rev
+        .with_status_checks(std::slice::from_ref(&ci_rec))
+        .unwrap();
     let eval_no_rev = evaluate_protected_ref(
         std::slice::from_ref(&composite_rule),
         &input_no_rev,
@@ -1570,10 +1597,11 @@ fn composition_fixtures_composite_governance_rule() {
         RefUpdateKind::NonFastForward,
         false,
         p_valid,
-        vec![rev_rec, ci_rec],
+        vec![rev_rec],
         vec![("unresolved_findings", 5)],
         100,
     );
+    let input_multi_fault = input_multi_fault.with_status_checks(&[ci_rec]).unwrap();
     let eval_multi = evaluate_protected_ref(&[composite_rule], &input_multi_fault, &ref_name);
     assert_eq!(eval_multi.decision, Decision::Deny);
     let failed_checks: Vec<&str> = eval_multi

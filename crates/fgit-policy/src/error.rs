@@ -14,6 +14,7 @@
 use core::fmt;
 
 use fgit_codec::CodecRefusal;
+use fgit_types::{AsciiSlug, GitOid};
 
 use crate::basis::{AggregateName, EvidenceKind, LabelName, PolicyInstant, RefUpdateKind};
 
@@ -536,6 +537,20 @@ pub enum PolicyInputRefusal {
         /// The class of the repeated receipt.
         kind: EvidenceKind,
     },
+    /// More than one result was supplied for one named status-check slot.
+    DuplicateStatusCheck {
+        subject: Vec<u8>,
+        commit: GitOid,
+        name: AsciiSlug,
+    },
+    /// A status check names Git's zero sentinel instead of a commit.
+    StatusCheckCommitZero { name: AsciiSlug },
+    /// A named status check has no live instant.
+    StatusCheckWindowEmpty {
+        name: AsciiSlug,
+        issued_at: PolicyInstant,
+        expires_at: PolicyInstant,
+    },
     /// Two readings were offered for one aggregate.
     DuplicateAggregate {
         /// The aggregate.
@@ -589,6 +604,29 @@ impl fmt::Display for PolicyInputRefusal {
             Self::DuplicateReceipt { kind } => {
                 write!(formatter, "receipt of kind `{kind}` was offered twice")
             }
+            Self::DuplicateStatusCheck {
+                subject,
+                commit,
+                name,
+            } => write!(
+                formatter,
+                "more than one status check `{name}` was offered for `{}` at {commit}",
+                lossy(subject)
+            ),
+            Self::StatusCheckCommitZero { name } => {
+                write!(
+                    formatter,
+                    "status check `{name}` names the zero Git identity"
+                )
+            }
+            Self::StatusCheckWindowEmpty {
+                name,
+                issued_at,
+                expires_at,
+            } => write!(
+                formatter,
+                "status check `{name}` expires at {expires_at}, at or before its issue at {issued_at}"
+            ),
             Self::DuplicateAggregate { name } => {
                 write!(
                     formatter,

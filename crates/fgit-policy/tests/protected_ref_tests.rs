@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use fgit_policy::basis::{
     AggregateName, AuthenticationStrength, EvidenceKind, EvidenceReceipt, IssuerLabel,
     PolicyInputRoot, PolicyInstant, PrincipalFacts, PrincipalKind, RefUpdateFact, RefUpdateKind,
+    StatusCheckConclusion, StatusCheckReceipt,
 };
 use fgit_policy::glob::RefPattern;
 use fgit_policy::program::Decision;
@@ -209,17 +210,27 @@ fn code_reviews_and_ci_checks_are_enforced_with_receipts() {
 
     // With valid reviews and CI receipts
     let review_receipt = dummy_receipt(EvidenceKind::from_static("code_review"), &r_name, 50, 200);
-    let ci_receipt = dummy_receipt(EvidenceKind::from_static("ci_check"), &r_name, 50, 200);
+    let ci_receipt = StatusCheckReceipt::try_new(
+        fgit_types::AsciiSlug::from_static("build-and-test"),
+        IssuerLabel::from_static("test.service"),
+        r_name,
+        dummy_oid(2),
+        StatusCheckConclusion::Success,
+        PolicyInstant::from_seconds(50),
+        PolicyInstant::from_seconds(200),
+    )
+    .unwrap();
 
     let (input_valid, ref_name) = build_input(
         "refs/heads/main",
         RefUpdateKind::FastForward,
         false,
         principal,
-        vec![review_receipt, ci_receipt],
+        vec![review_receipt],
         vec![],
         100,
     );
+    let input_valid = input_valid.with_status_checks(&[ci_receipt]).unwrap();
     let eval_valid = evaluate_protected_ref(&[rule], &input_valid, &ref_name);
     assert_eq!(eval_valid.decision, Decision::Allow);
 }
