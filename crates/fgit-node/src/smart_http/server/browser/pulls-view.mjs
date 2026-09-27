@@ -34,9 +34,27 @@ export function renderInspection(doc, parent, report) {
     `Base: ${report.merge_base}\nParents (target, source): ${report.parents.join(', ')}\n` +
     `Bundle: ${report.bundle.bytes} bytes · SHA-256 ${report.bundle.sha256}\nSnapshot: ${report.snapshot_token}`);
   item(doc, parent, 'p', 'Read-only inspection. No objects staged, review recorded, or merge authorized. Binary bodies are not included.');
+  return renderComparison(doc, parent, report.comparison, 'inspection');
+}
+export function renderPullDiff(doc, parent, result) {
+  const report = result.reply;
+  parent.replaceChildren();
+  item(doc, parent, 'h3', `PR #${report.pull_request.number} changes · ${report.mode}`);
+  item(doc, parent, 'pre', `PR version ${report.pull_request.version} · snapshot ${report.snapshot_token}\n` +
+    `Recorded target: ${report.requested_before}\nRecorded source: ${report.requested_after}\n` +
+    `Compared base: ${report.compared_before}\nBefore tree: ${report.before_tree}\nAfter tree: ${report.after_tree}`);
+  item(doc, parent, 'p', report.mode === 'merge-base'
+    ? 'Changes from the native merge base to the recorded PR source. This is not the result of merging into the target.'
+    : 'Direct tree comparison from the recorded target to the recorded source, including target-only divergence.');
+  item(doc, parent, 'p', 'Read-only, snapshot-bound source evidence. No candidate, approval, transaction or publication is created. Object identities are server-reported, not independently proven by these hunks.');
+  return renderComparison(doc, parent, result.comparison, 'diff');
+}
+function renderComparison(doc, parent, comparison, kind) {
   let remaining = DISPLAY_BYTES, shownHunks = 0, clipped = false;
-  if (!report.comparison.entries.length) item(doc, parent, 'p', 'No changed paths in this exact candidate comparison. The commit identity is still significant.');
-  for (const entry of report.comparison.entries) {
+  if (!comparison.entries.length) item(doc, parent, 'p', kind === 'inspection'
+    ? 'No changed paths in this exact candidate comparison. The commit identity is still significant.'
+    : 'No changed paths in this complete selected comparison. This does not establish mergeability or approval.');
+  for (const entry of comparison.entries) {
     const section = element(doc, 'section'); parent.append(section);
     item(doc, section, 'h4', `${entry.kind}: ${displayBytes(entry.path_hex)}`);
     item(doc, section, 'pre', `Path bytes: ${entry.path_hex}\nBefore: ${identity(entry.before)}\nAfter: ${identity(entry.after)}`);
@@ -60,7 +78,7 @@ export function renderInspection(doc, parent, report) {
       }
     }
   }
-  if (clipped) item(doc, parent, 'p', 'DISPLAY CLIPPED: not every hunk or byte is shown. Download the full inspection JSON before completing review. All changed path labels remain above.');
+  if (clipped) item(doc, parent, 'p', `DISPLAY CLIPPED: not every hunk or byte is shown. Download the full ${kind} JSON before completing review. All changed path labels remain above.`);
   return { clipped, shownHunks };
 }
 function downloader(doc) {
@@ -186,6 +204,30 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     item(doc, nodes.selected, 'p', `PR version ${row.version}. Opener: ${row.opened_by ?? '(not recorded)'}`);
     if (row.data) {
       item(doc, nodes.selected, 'pre', `${nativeRef(row.data, 'source_ref')} → ${nativeRef(row.data, 'target_ref')}\nSource ${row.data.source_tip}\nTarget ${row.data.target_tip}`);
+      const diffPanel = element(doc, 'section'), diffOutput = element(doc, 'div');
+      item(doc, diffPanel, 'h3', 'Compare recorded PR changes');
+      item(doc, diffPanel, 'p', 'Inspect changed paths without preparing a merge candidate. Both Git-read and PR-read grants are required. Reads keep this exact snapshot and both recorded tips; a stale snapshot must be reloaded explicitly.');
+      let lastDiff = null;
+      const compareButtons = [];
+      const exportDiff = button(diffPanel, 'Download full diff JSON', () => run('export', async () => {
+        if (!client.connected || selected?.row !== row || !lastDiff) fail('Load a comparison for the selected PR first.');
+        downloadText(`frankengit-pr-${row.number}-diff.json`, JSON.stringify(lastDiff.reply, null, 2));
+        status('Full diff report exported without credentials. This report is not a candidate or an approval.');
+      }));
+      exportDiff.disabled = true;
+      for (const mode of ['merge-base', 'direct']) compareButtons.push(button(diffPanel, `Compare ${mode} — read only`, () => run('read', async guard => {
+        if (selected?.row !== row) fail('The selected PR changed.');
+        lastDiff = null; exportDiff.disabled = true; diffOutput.replaceChildren();
+        for (const control of compareButtons) control.disabled = true;
+        try {
+          const diff = await client.diff(row.number, result, mode); guard();
+          if (selected?.row !== row) fail('The selected PR changed.');
+          const rendered = renderPullDiff(doc, diffOutput, diff);
+          lastDiff = diff; exportDiff.disabled = false;
+          status(`PR ${mode} comparison loaded without preparing a candidate.${rendered.clipped ? ' Display clipped: download the full diff JSON.' : ''}`);
+        } finally { for (const control of compareButtons) control.disabled = !client.connected; }
+      })));
+      diffPanel.append(diffOutput); nodes.selected.append(diffPanel);
       const renderGeneration = generation;
       nodes.selected.append(markdownBody(doc, row.data.body, row.data.body_rendered, {
         cryptoImpl, current: () => client.connected && generation === renderGeneration && selected?.row === row,

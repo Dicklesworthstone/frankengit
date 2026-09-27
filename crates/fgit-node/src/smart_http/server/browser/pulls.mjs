@@ -1,13 +1,90 @@
 // Native PR client. Views are immutable observations, never merge permission.
 import { Transport, integer, principal, snapshot, listReply, showReply, reviewsReply, copy, fail, keys, text, utf8,
-  hex, form, subject, SUBJECT_FIELDS, oid, binding } from './pulls-core.mjs';
-import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, PREPARATION_LIMIT } from './pulls-candidate.mjs';
+  hex, form, subject, SUBJECT_FIELDS, oid, binding, pinned, record } from './pulls-core.mjs';
+import { checkedBundle, digest, makeBoundary, multipart, preparationCommand, preparationReply, inspectionReply, comparisonEntries, PREPARATION_LIMIT } from './pulls-candidate.mjs';
 import { resolutionUpload, verifyResolutionResult } from './pulls-resolution.mjs';
 import { RECEIPT_LIMIT, requestBody, requestPath, requestKey, publication, recovery, base64, fromBase64, receiptScope } from './pulls-actions.mjs';
 
 function candidateFields(fields) {
   keys(fields, [...SUBJECT_FIELDS, 'merge_base', 'candidate_commit']);
   return { ...subject(fields), merge_base: oid(fields.merge_base, fields.object_format), candidate_commit: oid(fields.candidate_commit, fields.object_format) };
+}
+
+// Match the native PR diff schema without treating a branch comparison as an
+// inspected merge candidate. Raw reports remain available for exact JSON export.
+export const PR_DIFF_LIMITS = Object.freeze({ max_tree_entries: 100000, max_changes: 512,
+  max_text_files: 64, max_blob_bytes: 1024 * 1024, max_output_bytes: 2 * 1024 * 1024,
+  max_hunks: 4096, max_diff_work: 1000000 });
+function diffIdentity(value, algorithm) {
+  if (value === null) return null;
+  keys(value, ['object_id', 'mode']);
+  if (!['040000', '100644', '100755', '120000', '160000'].includes(value.mode)) fail('Unsupported diff entry mode.');
+  return { mode: Number.parseInt(value.mode, 8), oid: oid(value.object_id, algorithm) };
+}
+function pullDiffReply(reply, observed, mode, scope) {
+  const selected = pinned(reply, scope, observed.head), row = observed.reply.pull_request, data = row.data;
+  if (reply.type !== 'source_diff' || reply.profile !== 'native-tree-review-v1' || reply.mode !== mode ||
+      reply.complete !== true || reply.read_only !== true || reply.transaction_created !== false ||
+      reply.published !== false || reply.approval_created !== false || reply.line_origin !== 0 || reply.context_lines !== 3 ||
+      reply.source_head !== observed.reply.source_head) fail('Unsupported, incomplete or unpinned PR comparison.');
+  record(reply.pull_request);
+  if (reply.pull_request.number !== row.number || reply.pull_request.version !== row.version ||
+      reply.before_ref_hex !== data.target_ref_hex || reply.after_ref_hex !== data.source_ref_hex ||
+      oid(reply.requested_before, scope.format) !== oid(data.target_tip, scope.format) ||
+      oid(reply.requested_after, scope.format) !== oid(data.source_tip, scope.format) ||
+      !Array.isArray(reply.path_prefixes_hex) || reply.path_prefixes_hex.length) fail('PR comparison subject or path selection changed.');
+  const before = oid(reply.compared_before, scope.format), after = oid(reply.requested_after, scope.format);
+  if (mode === 'direct' && before !== oid(data.target_tip, scope.format)) fail('Direct comparison changed its target.');
+  oid(reply.before_tree, scope.format); oid(reply.after_tree, scope.format);
+  if (!Array.isArray(reply.entries) || reply.entries.length > PR_DIFF_LIMITS.max_changes || reply.entry_count !== reply.entries.length) fail('Incomplete diff paths.');
+  let payload = 0, hunks = 0, textFiles = 0;
+  const blob = entry => entry !== null && [0o100644, 0o100755, 0o120000].includes(entry.mode);
+  const entries = reply.entries.map(entry => {
+    record(entry);
+    const before = diffIdentity(entry.before, scope.format), after = diffIdentity(entry.after, scope.format);
+    const kind = before === null && after !== null ? 'added' : after === null && before !== null ? 'deleted'
+      : before && after && (before.mode & 0o170000) !== (after.mode & 0o170000) ? 'type_changed'
+      : before && after && before.mode !== after.mode ? 'mode_changed'
+      : before && after && before.oid !== after.oid ? 'modified' : null;
+    if (!kind || entry.kind !== kind || typeof entry.path_hex !== 'string') fail('Diff change kind disagrees with entry identities.');
+    payload += entry.path_hex.length / 2;
+    const raw = record(entry.content); let content;
+    if (raw.kind === 'identical' || raw.kind === 'object_only') {
+      keys(raw, ['kind']);
+      if (raw.kind === 'identical' ? !blob(before) || !blob(after) || before.oid !== after.oid : blob(before) || blob(after)) fail('Invalid unread diff content.');
+      content = { type: raw.kind, content_read: false };
+    } else if (raw.kind === 'binary' || raw.kind === 'text') {
+      keys(raw, ['kind', 'before_bytes', 'after_bytes', ...(raw.kind === 'text' ? ['algorithm', 'additions', 'deletions', 'hunks'] : [])]);
+      for (const side of ['before', 'after']) integer(raw[`${side}_bytes`], 'diff blob bytes', 0, PR_DIFF_LIMITS.max_blob_bytes);
+      if ((!blob(before) && raw.before_bytes !== 0) || (!blob(after) && raw.after_bytes !== 0) || (!blob(before) && !blob(after))) fail('Diff bytes lack a blob identity.');
+      content = { ...raw, type: raw.kind }; delete content.kind;
+      if (raw.kind === 'binary') content.body_included = false;
+      else {
+        integer(raw.additions, 'diff additions', 0, raw.after_bytes); integer(raw.deletions, 'diff deletions', 0, raw.before_bytes);
+        if (!Array.isArray(raw.hunks) || ++textFiles > PR_DIFF_LIMITS.max_text_files) fail('Diff text files exceed limit.');
+        hunks += raw.hunks.length;
+        if (hunks > PR_DIFF_LIMITS.max_hunks) fail('Diff hunks exceed limit.');
+        let oldLine = 0, newLine = 0;
+        for (const hunk of raw.hunks) {
+          record(hunk);
+          for (const [name, bytes, total] of [['old', hunk.before_hex, raw.before_bytes], ['new', hunk.after_hex, raw.after_bytes]]) {
+            const span = record(hunk[name]);
+            if (typeof bytes !== 'string') fail('Missing diff hunk bytes.');
+            payload += bytes.length / 2;
+            integer(span.line_start, 'diff line offset', name === 'old' ? oldLine : newLine);
+            integer(span.line_count, 'diff line count');
+            if ((span.byte_start === 0 && span.line_start !== 0) || (bytes.length && span.byte_end < total && !bytes.endsWith('0a'))) fail('Inconsistent diff line boundary.');
+            if (name === 'old') oldLine = span.line_start + span.line_count; else newLine = span.line_start + span.line_count;
+          }
+        }
+      }
+    } else fail('Unknown diff content cannot be shown as an empty change.');
+    if (payload > PR_DIFF_LIMITS.max_output_bytes) fail('Diff payload exceeds limit.');
+    return { path_hex: entry.path_hex, kind, before, after, content };
+  });
+  const comparison = { mode, before, after, entry_count: entries.length, entries };
+  comparisonEntries(comparison, scope.format);
+  return { ...selected, reply, comparison };
 }
 
 export class PullClient {
@@ -64,6 +141,25 @@ export class PullClient {
     const checked = reviewsReply(raw.value, number, { after, limit, head, scope: this.#scope });
     if (checked.reply.found !== (raw.status === 200)) fail('Review presence and HTTP status disagree.');
     this.#scope = checked.binding; return checked;
+  }
+
+  // The observation must be a complete prior show() result. No author, policy
+  // epoch, candidate bundle or idempotency key is needed for this read.
+  async diff(number, observed, mode = 'merge-base') {
+    const scope = this.#selected(), epoch = this.#transport.epoch;
+    integer(number, 'PR number', 1);
+    if (!['merge-base', 'direct'].includes(mode)) fail('Choose merge-base or direct comparison.');
+    const saved = copy(observed);
+    snapshot(saved.head);
+    const selected = showReply(saved.reply, number, { head: saved.head, scope });
+    const row = selected.reply.pull_request;
+    if (!row?.data) fail('Select a PR with recorded metadata before comparing changes.');
+    const fields = { object_format: scope.format, expected_version: row.version, expected_head: selected.head,
+      expected_before: oid(row.data.target_tip, scope.format), expected_after: oid(row.data.source_tip, scope.format),
+      mode, context_lines: 3, ...PR_DIFF_LIMITS };
+    const response = await this.#transport.request(`pulls/${number}/diff`, { method: 'POST', body: form(fields) });
+    this.#check(epoch);
+    return pullDiffReply(response.value, selected, mode, scope);
   }
 
   #selected() {
