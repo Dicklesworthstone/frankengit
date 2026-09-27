@@ -3,7 +3,7 @@
 import { Transport, fail, keys, record, copy, format, pinned, hex, utf8, form, opaque, principal } from './pulls-core.mjs';
 import { multipart, digest } from './pulls-candidate.mjs';
 import { recovery, receiptScope, base64, fromBase64, RECEIPT_LIMIT } from './pulls-actions.mjs';
-import { inspectBundle, transferCommand, exportIdentity, transferPublication, EXPORT_HEADERS, BUNDLE_LIMIT, exportInventory, exportManifest } from './transfers-protocol.mjs';
+import { inspectBundle, transferCommand, exportIdentity, transferPublication, EXPORT_HEADERS, BUNDLE_LIMIT, exportInventory, exportManifest, inspectVerifiedBundle, BUNDLE_VERIFY_LIMITS } from './transfers-protocol.mjs';
 async function requestKey(root, fingerprint, scope, operation, nonce, upload, crypto) {
   const input = JSON.stringify(['frankengit-portable-bundle-v1', root.origin, root.route, fingerprint,
     [scope.tenant, scope.repository, scope.incarnation, scope.format], operation, nonce, upload.contentType, await digest(upload.bytes, crypto)]);
@@ -17,6 +17,7 @@ export class TransferClient {
   get selection() { return this.#selected && copy(this.#selected); }
   get bundle() { return this.#bundle && copy(this.#bundle.summary); }
   get exported() { return this.#exported && copy(this.#exported.summary); }
+  get exportVerification() { return this.connected && this.#exported?.verification ? copy(this.#exported.verification) : null; }
   get pending() {
     const p = this.#pending;
     return p ? copy({ operation: p.operation, scope: p.scope, fields: p.fields, count: p.count,
@@ -57,28 +58,37 @@ export class TransferClient {
       this.#bundle = plan; return this.bundle;
     });
   }
-  async exportBundle({ verifyInventory = false } = {}) {
+  async exportBundle({ verifyInventory = false, verifyClosure = false } = {}) {
     return this.#exclusive(async () => {
       this.#noPending(); this.#exported = null;
       if (!this.#selected) fail('Select a repository snapshot before exporting.');
       const selected = this.selection, serial = this.#serial, epoch = this.#transport.epoch;
-      if (typeof verifyInventory !== 'boolean') fail('Choose explicit export inventory verification.');
-      const inventory = verifyInventory ? await exportInventory(this.#transport, selected, () => this.#check(serial, epoch)) : null;
-      const response = await this.#transport.request('source/bundle/export', { method: 'POST', binary: true,
-        body: form({ object_format: selected.scope.format, expected_head: selected.head }), maximum: BUNDLE_LIMIT, headerNames: EXPORT_HEADERS });
-      const identity = exportIdentity(response, selected);
-      const plan = await inspectBundle(response.value, this.#transport.crypto, () => this.#check(serial, epoch));
-      if (plan.summary.sha256 !== identity.sha256 || plan.summary.object_format !== selected.scope.format) fail('Export bytes do not match their transport identity.');
-      this.#check(serial, epoch);
-      if (inventory && (response.headers['x-fgit-source-head'] !== inventory.source_head ||
-          JSON.stringify(plan.summary.refs) !== JSON.stringify(inventory.refs))) fail('Export bundle does not match every ref in the selected snapshot.');
-      this.#exported = { bytes: plan.bytes, summary: { ...plan.summary, scope: identity.scope, snapshot: identity.head,
-        ...(inventory ? { source_head: inventory.source_head, snapshot_refs_checked: true } : {}) } };
-      if (inventory) {
-        try { exportManifest(this.#transport.root, this.#exported.summary); }
-        catch (error) { this.#exported = null; throw error; }
-      }
-      return this.exported;
+      if (typeof verifyInventory !== 'boolean' || typeof verifyClosure !== 'boolean') fail('Choose explicit export verification.');
+      // One deadline spans every inventory page, download and verification stage.
+      // Cancel reads only: this operation never acquires mutation responsibility.
+      const deadline = performance.now() + BUNDLE_VERIFY_LIMITS.timeoutMs;
+      const check = () => { this.#check(serial, epoch); if (performance.now() >= deadline) fail('Complete export exceeded its deadline.'); };
+      const timer = setTimeout(() => this.#transport.cancelReads(), BUNDLE_VERIFY_LIMITS.timeoutMs);
+      try {
+        const inventory = verifyInventory ? await exportInventory(this.#transport, selected, check) : null;
+        check();
+        const response = await this.#transport.request('source/bundle/export', { method: 'POST', binary: true,
+          body: form({ object_format: selected.scope.format, expected_head: selected.head }), maximum: BUNDLE_LIMIT, headerNames: EXPORT_HEADERS });
+        check(); const identity = exportIdentity(response, selected);
+        const plan = verifyClosure ? await inspectVerifiedBundle(response.value, this.#transport.crypto, check,
+          { sha256: identity.sha256, object_format: selected.scope.format,
+            ...(inventory ? { refs: inventory.refs, exact_refs: true } : {}) })
+          : await inspectBundle(response.value, this.#transport.crypto, check);
+        if (plan.summary.sha256 !== identity.sha256 || plan.summary.object_format !== selected.scope.format) fail('Export bytes do not match their transport identity.');
+        check();
+        if (inventory && (response.headers['x-fgit-source-head'] !== inventory.source_head ||
+            JSON.stringify(plan.summary.refs) !== JSON.stringify(inventory.refs))) fail('Export bundle does not match every ref in the selected snapshot.');
+        const result = { bytes: plan.bytes, verification: plan.verification ?? null,
+          summary: { ...plan.summary, scope: identity.scope, snapshot: identity.head,
+            ...(inventory ? { source_head: inventory.source_head, snapshot_refs_checked: true } : {}) } };
+        if (inventory) exportManifest(this.#transport.root, result.summary);
+        check(); this.#exported = result; return this.exported;
+      } finally { clearTimeout(timer); }
     });
   }
   exportBytes() { if (!this.connected || !this.#exported) fail('No complete verified export is available.'); return this.#exported.bytes.slice(); }

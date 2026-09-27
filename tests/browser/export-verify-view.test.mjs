@@ -5,6 +5,7 @@ import { TransferClient } from '../../crates/fgit-node/src/smart_http/server/bro
 import { mountExportVerifier, transferPage, displayRef } from '../../crates/fgit-node/src/smart_http/server/browser/export-verify.mjs';
 import { BUNDLE_LIMIT, EXPORT_MANIFEST_LIMIT } from '../../crates/fgit-node/src/smart_http/server/browser/transfers-protocol.mjs';
 import { crypto, token, row, page, bundle, binary, json, deferred, hex, encode } from './export-integrity-fixtures.mjs';
+import { completeBundle, connectedTransfer } from './transfer-closure-fixtures.mjs';
 const html = readFileSync(new URL('../../crates/fgit-node/src/smart_http/server/browser/export-verify.html', import.meta.url), 'utf8');
 class Element {
   children = []; listeners = new Map(); disabled = false; files = []; ownText = ''; _value = '';
@@ -30,12 +31,13 @@ export function documentFixture() {
 }
 const file = (bytes, name = '../../ignored') => ({ name, size: bytes.length, async arrayBuffer() { return Uint8Array.from(bytes).buffer; } });
 async function setup({ algorithm = 'sha1', customize = null, saver = true, cryptoImpl = crypto } = {}) {
-  const doc = documentFixture(), calls = [], input = bundle(algorithm), saved = [], callbacks = new Map();
+  const fixture = completeBundle(algorithm);
+  const doc = documentFixture(), calls = [], input = fixture.bytes, saved = [], callbacks = new Map();
   const client = new TransferClient({ href: 'https://forge.invalid/r.git/ui/transfers/', cryptoImpl, fetchImpl: async (url, init) => {
     const path = new URL(url).pathname.split('/api/v1/')[1]; calls.push({ path, ...init });
     const fields = new URLSearchParams(init.body);
     const override = await customize?.(path, fields, input, init); if (override) return override;
-    if (path === 'source/refs') return json(page(algorithm, [row('refs/heads/main', algorithm)], { limit: Number(fields.get('limit')) }));
+    if (path === 'source/refs') return json(page(algorithm, fixture.rows, { limit: Number(fields.get('limit')) }));
     if (path === 'source/bundle/export') return binary(input, algorithm);
     throw new Error(`UI must not write: ${path}`);
   } });
@@ -51,7 +53,8 @@ async function setup({ algorithm = 'sha1', customize = null, saver = true, crypt
 }
 async function exportPair(s) {
   s.el('export-token').value = token; await s.el('export-connect').fire(); await s.el('export-build').fire();
-  assert(s.client.exported?.snapshot_refs_checked); return s.client.exportManifest();
+  assert(s.client.exported?.snapshot_refs_checked, s.el('export-status').textContent);
+  assert(s.client.exportVerification?.object_closure_verified); return s.client.exportManifest();
 }
 async function localPair(s) {
   const encoded = await exportPair(s); await s.el('export-disconnect').fire();
@@ -166,4 +169,23 @@ test('every transitive browser import is served by an exact source-gated route',
   const parent = readFileSync(new URL('../browser.rs', assets), 'utf8');
   assert(parent.includes('mod export_verify;')); assert(parent.includes('export_verify::serve(profile, request, trailing, writer)?'));
   assert(html.includes('src="export-verify.mjs"'));
+});
+
+test('checksum-valid missing files never enable verified UI downloads or leave an earlier proof', async () => {
+  let incomplete = false; const broken = completeBundle('sha1', { omit: 'blob' });
+  const s = await setup({ customize: path => incomplete && path === 'source/bundle/export' ? binary(broken.bytes) : null });
+  await exportPair(s); assert(s.client.exportVerification);
+  incomplete = true; await s.el('export-build').fire();
+  assert.equal(s.client.exported, null); assert.equal(s.client.exportVerification, null);
+  assert(s.el('export-save-bundle').disabled); assert(s.el('export-save-manifest').disabled);
+  assert.match(s.el('export-status').textContent, /missing_reachable_object/);
+  await s.el('export-save-bundle').fire(); assert.equal(s.saved.length, 0);
+});
+test('a legacy checksum-only manifest cannot turn missing history into offline UI success', async () => {
+  const broken = completeBundle('sha256', { omit: 'tree' }), other = await connectedTransfer(broken);
+  await other.client.exportBundle({ verifyInventory: true });
+  const s = await setup({ algorithm: 'sha256' });
+  s.el('verify-bundle').files = [file(broken.bytes)]; s.el('verify-manifest').files = [file(encode(other.client.exportManifest()))];
+  await s.el('verify-files').fire(); assert.equal(s.app.offline, null); assert.equal(s.calls.length, 0);
+  assert.equal(s.el('offline-report').textContent, ''); assert.match(s.el('offline-status').textContent, /missing_reachable_object/);
 });

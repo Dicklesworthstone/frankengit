@@ -72,16 +72,16 @@ export function mountExportVerifier(doc, { client, cryptoImpl = globalThis.crypt
     el('export-token').disabled = working || client.busy;
     el('export-format').disabled = working || client.busy;
     el('export-build').disabled = working || client.busy || !client.connected;
-    el('export-save-bundle').disabled = working || client.busy || client.exported?.snapshot_refs_checked !== true;
+    el('export-save-bundle').disabled = working || client.busy || !client.connected || client.exported?.snapshot_refs_checked !== true || client.exportVerification?.object_closure_verified !== true;
     el('export-save-manifest').disabled = el('export-save-bundle').disabled;
     el('verify-files').disabled = checking;
     const target = el('export-report'); target.replaceChildren();
     const exported = client.exported;
-    if (exported?.snapshot_refs_checked) {
+    if (client.connected && exported?.snapshot_refs_checked && client.exportVerification?.object_closure_verified) {
       const summary = doc.createElement('pre');
       summary.textContent = JSON.stringify({ scope: exported.scope, snapshot: exported.snapshot, source_head: exported.source_head,
         bytes: exported.bytes, sha256: exported.sha256, references: exported.refs.length,
-        pack_checksum_verified: exported.pack_checksum_verified, objects_verified: false }, null, 2);
+        pack_checksum_verified: exported.pack_checksum_verified, verification: client.exportVerification }, null, 2);
       target.append(summary); refs(target, exported.refs);
     }
   }
@@ -103,15 +103,15 @@ export function mountExportVerifier(doc, { client, cryptoImpl = globalThis.crypt
     // snapshot. Every inventory continuation and the export pin that selection.
     status('Reading the complete reference snapshot and verifying the bundle.');
     await client.select(algorithm); networkCheck(current);
-    await client.exportBundle({ verifyInventory: true }); networkCheck(current);
-    status('Bundle checksums and the complete snapshot ref set match. Save both files. Git object closure and forge state are not verified here.');
+    await client.exportBundle({ verifyInventory: true, verifyClosure: true }); networkCheck(current);
+    status('Every advertised reference, packed object and reachable Git dependency was checked. Save both files. Origin, signatures, submodule repositories and forge state are not verified.');
   }));
   el('export-format').addEventListener('change', () => { clearViews(false); status('Format changed; build a new snapshot export.'); });
   el('export-disconnect').addEventListener('click', () => { clearViews(true); status('Disconnected. Credentials, files, results and download handles cleared.'); });
   el('export-cancel').addEventListener('click', () => { clearViews(false); status('Cancelled. No partial export or verification result retained.'); });
   function saveExport(manifest) {
     try {
-      if (working || client.busy || !client.connected || client.exported?.snapshot_refs_checked !== true) throw new Error('Build a complete audited export first.');
+      if (working || client.busy || !client.connected || client.exported?.snapshot_refs_checked !== true || client.exportVerification?.object_closure_verified !== true) throw new Error('Build a complete audited export first.');
       if (manifest) download(utf8.encode(client.exportManifest()), 'repository.export.json', 'application/json');
       else download(client.exportBytes(), 'repository.bundle', 'application/x-git-bundle');
     } catch (error) { status(error.message); }
@@ -130,14 +130,14 @@ export function mountExportVerifier(doc, { client, cryptoImpl = globalThis.crypt
       const manifest = oneFile(el('verify-manifest'), EXPORT_MANIFEST_LIMIT, 'manifest (1 MiB maximum)');
       el('offline-status').textContent = 'Checking local bytes. No upload or connection is required.';
       const encoded = await fileBytes(manifest, check), bytes = await fileBytes(file, check);
-      const result = await verifyExportManifest(bytes, new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(encoded), cryptoImpl, check);
+      const result = await verifyExportManifest(bytes, new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(encoded), cryptoImpl, check, { verifyClosure: true });
       check(); offline = result;
       const report = doc.createElement('pre');
       report.textContent = JSON.stringify({ sha256: result.manifest.bundle.sha256, bytes: result.manifest.bundle.bytes,
-        references: result.manifest.bundle.refs.length, objects_verified: false, independently_authenticated: false,
+        references: result.manifest.bundle.refs.length, verification: result.verification, independently_authenticated: false,
         live_snapshot_rechecked: false, recorded_scope: result.manifest.scope, recorded_snapshot: result.manifest.snapshot }, null, 2);
       el('offline-report').replaceChildren(report); refs(el('offline-report'), result.manifest.bundle.refs);
-      el('offline-status').textContent = 'Local bundle matches the unsigned saved manifest. This does not authenticate its origin, prove object closure, or check the current server snapshot.';
+      el('offline-status').textContent = 'Local bundle matches its manifest and has complete verified Git object closure. The manifest remains unsigned: origin, signatures, submodule repositories, forge state and the current server snapshot are not verified.';
     } catch (error) {
       if (current === offlineSerial) { offline = null; el('offline-report').replaceChildren(); el('offline-status').textContent = error.message; }
     } finally { checking = false; render(); }
