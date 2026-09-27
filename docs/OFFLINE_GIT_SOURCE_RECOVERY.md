@@ -66,15 +66,81 @@ claiming rollback. Unsupported filesystem durability operations fail explicitly.
 These checks detect substitution and corruption at the checked boundaries; they
 are not an openat-based sandbox against a malicious same-user process continuously
 rewriting the operator's parent directory. Keep the destination private and do not
-modify it while recovery runs. This initial command does not resume an existing
-partial directory; a new invocation refuses it rather than guessing ownership.
+modify it while recovery runs. A normal invocation still refuses every existing
+path. Only the explicit resume mode below may continue a matching operation.
+
+## Resume after cancellation, process death or a lost response
+
+Re-run with the **same bundle, destination and explicit HEAD**, adding `--resume`:
+
+```sh
+node scripts/recover_git_bundle.mjs /backups/repository.bundle /recovery/repository.git \
+  --head refs/heads/main --resume \
+  --expect-format sha1 \
+  --expect-ref "refs/heads/main=$TRUSTED_MAIN_COMMIT"
+```
+
+Resume re-verifies the supplied bundle and regenerates the complete pack/index/
+reference/config plan. It compares the recovery receipt and every existing byte
+against that regenerated plan, never against a saved claim of success. An
+existing correct prefix can be extended; a mismatching prefix is not truncated,
+rewritten or silently repaired. Complete files keep their inode and contents,
+but are synchronized again: a killed writer can have reached full length without
+finishing `fsync`. Native ref names still do not become filesystem paths.
+
+The exact local layout is checked before any claim or source writes. Unexpected
+files/directories, hooks, alternates, loose refs, symlinks, foreign hard links,
+public permissions, other owners and changed receipts refuse. Once a recovered
+repository has been modified by ordinary Git use, resume is not a general repair
+command and will refuse additions or changes outside the original plan.
+
+A live owner is never stolen. A same-host original process lock can be superseded
+only after its PID is absent; unknown liveness, a foreign host or a reused live
+PID refuses. This requires the same host and PID namespace, an operator-controlled
+local filesystem and a private quiescent destination. It is not a distributed
+lease or a defense against a malicious same-user process.
+
+Subsequent owners use bounded, monotonically numbered records in
+`.frankengit-source-recovery-owners/`. A completely written record is installed
+by a no-replace hard link. Competing resumptions cannot both acquire the same
+number, and a dead owner is superseded rather than removed by rival lock
+reapers. A same-inode `.done` link releases ownership only after work settles.
+A copied same-byte file does not count as release. Interrupted uninstalled
+candidate records grant no authority and are retained. This journal is used by
+the command itself, not a source of FrankenGit repository authority.
+
+At most 128 numbered resume attempts and 384 ownership-directory entries are
+admitted; exhausted or malformed histories fail closed. If a process dies before
+both a complete original ownership record and a usable receipt/prefix exist,
+resume refuses to guess ownership. Inspect that directory or choose a new absent
+destination. There is no force, automatic deletion or cross-host lock takeover.
+
+A successful resume adds `resumed`, `already_published`, `owner_sequence`,
+`reused_bytes` and `appended_bytes` to the JSON result. If HEAD already matches,
+the command validates every required file before touching source data, completes
+synchronization/temporary-file cleanup, and reports `already_published: true`.
+It never recreates, changes or removes a published HEAD. A published but incomplete
+or corrupt directory is refused instead of being repaired underneath readers.
+An uncertain existing state is reported as `existing_unknown`, not non-publication.
+
+SIGINT/SIGTERM before publication stop work and release only the current owner's
+claim. SIGKILL leaves the durable ownership record for the next explicit resume.
+Cancellation after a newly published HEAD does not interrupt finalization. Errors
+retain the observed publication state, and `cleanup_error` separately identifies
+an ownership-finalization failure. A lost stdout response is not proof that HEAD
+was never installed.
 
 ## Verify the recovered source
 
 A successful directory can be opened or cloned by a compatible standard Git
 client. The source-recovery tests compare generated indexes byte-for-byte with
 installed Git, run verify-pack and fsck on complete fixtures, clone the result,
-and compare original commits, tags and binary/symlink blob bytes. Run:
+and compare original commits, tags and binary/symlink blob bytes. The resume
+campaign kills real child processes before and after publication, during an actual
+partial pack write, and during repeated resumptions, then runs the actual CLI
+without Git on PATH and clones the result. Other tests inject corruption, layout
+substitution, copied release records, live-owner contention, cancellation and
+bounded ownership histories. Run:
 
 ```sh
 node --test tests/browser/bundle-recovery*.test.mjs

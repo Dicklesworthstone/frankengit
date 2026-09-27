@@ -9,9 +9,12 @@ import { bundleRef } from '../crates/fgit-node/src/smart_http/server/browser/tra
 const HELP = `Usage: node scripts/recover_git_bundle.mjs INPUT.bundle NEW_DIRECTORY --head REF [OPTIONS]
 
 Verify all objects and history, then create a new bare Git repository.
-Requires an existing trusted parent directory. Never overwrites any destination.
+Requires an existing trusted parent directory. By default the destination must
+be absent. --resume continues only this exact operation's private directory;
+it never truncates mismatching files or replaces a published HEAD.
 This is Git source recovery, not FrankenGit forge/authority/capsule restore.
 
+  --resume                   Resume an exact interrupted recovery, never overwrite
   --head REF                 Explicit advertised refs/heads/... for HEAD
   --head-hex HEX             Byte-exact hexadecimal alternative to --head
   --expect-sha256 HEX        Separately trusted hash of the entire bundle
@@ -25,13 +28,16 @@ This is Git source recovery, not FrankenGit forge/authority/capsule restore.
 Input is bounded to 16 MiB; expanded object data to 128 MiB. No Git executable,
 network, hooks or checkout is used. HEAD is installed last. On failure, any
 incomplete destination is retained and its publication state is reported.
+Resume requires the same host/PID namespace and refuses live or unknown owners;
+it is not arbitrary repair, a force option or distributed lock takeover.
 `;
 function parse(args) {
-  const paths = [], expected = {}, seen = new Set(); let head = null, literal = false;
+  const paths = [], expected = {}, seen = new Set(); let head = null, literal = false, resume = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (!literal && arg === '--') { literal = true; continue; }
     if (!literal && arg.startsWith('-')) {
+      if (arg === '--resume') { if (resume) throw new Error('duplicate_option'); resume = true; continue; }
       if (arg === '--exact-refs') {
         if (seen.has(arg)) throw new Error('duplicate_option'); seen.add(arg); expected.exact_refs = true; continue;
       }
@@ -54,7 +60,7 @@ function parse(args) {
   if (head === null || !head.startsWith('726566732f68656164732f')) throw new Error('explicit_branch_head_required');
   bundleRef(head);
   if (Object.keys(expected).length) normalizeBundleExpectation(expected);
-  return { input: paths[0], destination: paths[1], request: { head_ref_hex: head, ...(Object.keys(expected).length ? { expectations: expected } : {}) } };
+  return { input: paths[0], destination: paths[1], resume, request: { head_ref_hex: head, ...(Object.keys(expected).length ? { expectations: expected } : {}) } };
 }
 async function readBundle(path, signal) {
   signal.throwIfAborted(); const file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
@@ -78,13 +84,13 @@ try {
   const args = process.argv.slice(2); let output;
   if (args.length === 1 && args[0] === '--help') output = HELP;
   else {
-    const { input, destination, request } = parse(args);
-    result = await recoverGitBundle(await readBundle(input, controller.signal), destination, request, { signal: controller.signal });
+    const { input, destination, request, resume } = parse(args);
+    result = await recoverGitBundle(await readBundle(input, controller.signal), destination, request, { signal: controller.signal, resume });
     output = JSON.stringify(result, null, 2) + '\n';
   }
   await new Promise((resolve, reject) => process.stdout.write(output, error => error ? reject(error) : resolve()));
 } catch (error) {
   process.stderr.write(JSON.stringify({ type: 'frankengit-source-recovery-error-v1',
     code: error.code ?? error.message ?? 'recovery_failed', state: result?.state ?? error.state ?? 'not_created',
-    destination: result?.destination ?? error.destination ?? null }) + '\n'); process.exitCode = 1;
+    destination: result?.destination ?? error.destination ?? null, cleanup_error: error.lock_cleanup_error ?? null }) + '\n'); process.exitCode = 1;
 } finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); }

@@ -1,7 +1,7 @@
 // Trusted-local source recovery into a NEW disposable bare Git materialization.
 // This is not native authority/capsule restore. Repository names never become
 // filesystem paths, and no Git executable, hook, config include or network runs.
-import { mkdir, open, lstat, realpath, link, unlink } from 'node:fs/promises';
+import { mkdir, open, lstat, realpath, link, unlink, opendir } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { resolve, dirname, basename, join } from 'node:path';
 import { webcrypto, randomUUID } from 'node:crypto';
@@ -52,7 +52,7 @@ async function verifyFile(path, expected, check, identity = null) {
     check(); return after;
   } finally { await handle.close(); }
 }
-async function writeNew(path, bytes, check, created = () => {}) {
+async function writeNew(path, bytes, check, created = () => {}, advanced = async () => {}) {
   check(); const handle = await open(path, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | flags, 0o600);
   let identity;
   try {
@@ -60,10 +60,276 @@ async function writeNew(path, bytes, check, created = () => {}) {
     while (offset < bytes.length) {
       check(); const { bytesWritten } = await handle.write(bytes, offset, Math.min(65536, bytes.length - offset), offset);
       if (!bytesWritten) failure('recovery_write_stalled'); offset += bytesWritten;
+      await advanced(offset);
     }
     check(); await handle.sync();
   } finally { await handle.close(); }
   await verifyFile(path, bytes, check, identity); return identity;
+}
+
+// Append-only ownership slots avoid a stale-lock unlink race. A complete lease
+// is atomically linked into its sequence slot; a same-inode .done link releases
+// it. Dead owners are superseded, never removed by competing contenders. This
+// trusted-local profile requires the same host and PID namespace across runs.
+const OWNERS = '.frankengit-source-recovery-owners';
+const MAX_OWNERS = 128, MAX_OWNER_ENTRIES = MAX_OWNERS * 3;
+const encode = value => new TextEncoder().encode(value);
+const privateStat = stat => {
+  if ((stat.mode & 0o077) || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) failure('recovery_permissions_or_owner');
+};
+async function maybeStat(path) {
+  try { return await lstat(path); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+async function entriesBounded(path, maximum, check) {
+  const entries = [], directory = await opendir(path, { encoding: 'buffer' });
+  try {
+    while (true) {
+      check(); const entry = await directory.read(); if (!entry) break;
+      if (entries.length === maximum) failure('recovery_directory_entry_limit');
+      // All local layout names are fixed ASCII; native ref bytes never appear here.
+      const bytes = Buffer.from(entry.name);
+      if (bytes.some(byte => byte > 127)) failure('unexpected_recovery_entry');
+      entries.push(bytes.toString('ascii'));
+    }
+  } finally { await directory.close(); }
+  return entries.sort();
+}
+async function smallFile(path, maximum, check) {
+  check(); const handle = await open(path, constants.O_RDONLY | flags);
+  try {
+    const before = await handle.stat(); privateStat(before);
+    if (!before.isFile() || before.size < 1 || before.size > maximum) failure('invalid_recovery_owner_record');
+    const bytes = new Uint8Array(before.size); let offset = 0;
+    while (offset < bytes.length) {
+      check(); const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (!bytesRead) failure('recovery_file_changed'); offset += bytesRead;
+    }
+    const after = await handle.stat(), current = await lstat(path);
+    if (!same(before, after) || !same(before, current) || !current.isFile() || before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) failure('recovery_file_changed');
+    return { bytes, identity: after };
+  } finally { await handle.close(); }
+}
+function ownerRecord(bytes, plan, sequence = null) {
+  let row;
+  try { row = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { failure('invalid_recovery_owner_record'); }
+  const fields = ['schema', 'hostname', 'pid', 'nonce', 'plan_sha256', ...(sequence === null ? [] : ['sequence'])];
+  if (!row || typeof row !== 'object' || Array.isArray(row) || Object.keys(row).length !== fields.length ||
+      Object.keys(row).some(key => !fields.includes(key)) || row.schema !== (sequence === null ? 'frankengit-source-recovery-lock-v1' : 'frankengit-source-recovery-owner-v1') ||
+      row.plan_sha256 !== plan.plan_sha256 || typeof row.hostname !== 'string' || !row.hostname || row.hostname.length > 256 ||
+      !Number.isSafeInteger(row.pid) || row.pid < 1 || row.pid > 0x7fffffff ||
+      typeof row.nonce !== 'string' || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(row.nonce) ||
+      (sequence !== null && row.sequence !== sequence)) failure('invalid_recovery_owner_record');
+  return row;
+}
+function requireDead(row) {
+  if (row.hostname !== hostname()) failure('recovery_owner_host_mismatch');
+  try { process.kill(row.pid, 0); } catch (error) { if (error.code === 'ESRCH') return; failure('recovery_owner_liveness_unknown'); }
+  failure('recovery_owner_active');
+}
+async function ownerState(path, plan, check) {
+  const identity = await maybeStat(path); if (!identity) return { identity: null, sequence: 0, entryCount: 0 };
+  if (!identity.isDirectory()) failure('recovery_directory_changed'); privateStat(identity);
+  const names = await entriesBounded(path, MAX_OWNER_ENTRIES, check), leases = [], done = new Set();
+  for (const name of names) {
+    check(); const stat = await lstat(join(path, name)); privateStat(stat);
+    if (!stat.isFile() || stat.nlink < 1 || stat.nlink > 3) failure('invalid_recovery_owner_record');
+    const installed = /^([0-9]{6})\.(lease|done)$/.exec(name);
+    if (installed) {
+      const sequence = Number(installed[1]);
+      if (sequence < 1 || sequence > MAX_OWNERS) failure('recovery_owner_limit');
+      if (installed[2] === 'lease') leases.push({ name, sequence }); else done.add(sequence);
+    } else if (!/^candidate-[1-9][0-9]{0,9}-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(name) || stat.size > 1024) {
+      failure('unexpected_recovery_entry');
+    }
+    // A partial candidate is inert: only a complete, atomically linked numbered
+    // lease grants writer ownership. Interrupted candidates are retained/bounded.
+  }
+  let latest = null;
+  for (let i = 0; i < leases.length; i++) {
+    const lease = leases[i]; if (lease.sequence !== i + 1) failure('recovery_owner_sequence_gap');
+    const original = await smallFile(join(path, lease.name), 1024, check);
+    const row = ownerRecord(original.bytes, plan, lease.sequence);
+    if (done.has(lease.sequence)) {
+      const released = await lstat(join(path, `${String(lease.sequence).padStart(6, '0')}.done`));
+      if (!released.isFile() || !same(released, original.identity)) failure('recovery_owner_release_mismatch');
+      done.delete(lease.sequence);
+    } else if (i === leases.length - 1) requireDead(row);
+    latest = { ...original, row };
+  }
+  if (done.size) failure('recovery_owner_release_mismatch');
+  return { identity, sequence: leases.length, latest, entryCount: names.length };
+}
+async function inventory(target, plan, receiptBytes, check) {
+  const allowedDirectories = new Set(plan.directories), files = new Map(plan.files.map(file => [file.path, file.bytes]));
+  files.set(MARKER, receiptBytes); files.set(HEAD_STAGE, files.get('HEAD'));
+  const directories = new Map(), found = new Map(), root = await checkedDirectory(target); privateStat(root);
+  const visit = async relative => {
+    const path = relative ? join(target, relative) : target, stat = await checkedDirectory(path); privateStat(stat); directories.set(path, stat);
+    for (const name of await entriesBounded(path, relative ? 8 : 12, check)) {
+      const child = relative ? `${relative}/${name}` : name, childPath = join(target, child), stat = await lstat(childPath); privateStat(stat);
+      if (allowedDirectories.has(child)) { if (!stat.isDirectory()) failure('recovery_directory_changed'); await visit(child); }
+      else if (files.has(child)) {
+        if (!stat.isFile() || stat.size > files.get(child).length || stat.nlink < 1 ||
+            stat.nlink > (['HEAD', HEAD_STAGE].includes(child) ? 2 : 1)) failure('recovery_file_changed');
+        found.set(child, { identity: stat, bytes: files.get(child) });
+      } else if (!relative && name === LOCK) {
+        if (!stat.isFile() || stat.size > 1024 || stat.nlink !== 1) failure('invalid_recovery_owner_record');
+      } else if (!relative && name === OWNERS) {
+        if (!stat.isDirectory()) failure('recovery_directory_changed');
+      } else failure('unexpected_recovery_entry');
+    }
+  };
+  await visit('');
+  return { directories, found };
+}
+async function validateExisting(path, expected, identity, check, complete) {
+  if (complete && identity.size !== expected.length) failure('published_recovery_incomplete');
+  await verifyFile(path, expected.subarray(0, identity.size), check, identity);
+}
+async function appendVerified(path, expected, prior, check, advanced) {
+  if (!prior) return { identity: await writeNew(path, expected, check, () => {}, advanced), reused: 0, appended: expected.length };
+  await validateExisting(path, expected, prior.identity, check, false);
+  const reused = prior.identity.size;
+  if (reused === expected.length) {
+    // A crash can leave a complete-length file before its fsync. Reuse bytes,
+    // not the old process's assertion that those bytes reached durable storage.
+    const handle = await open(path, constants.O_RDONLY | flags);
+    try { if (!same(await handle.stat(), prior.identity)) failure('recovery_file_changed'); check(); await handle.sync(); }
+    finally { await handle.close(); }
+    return { identity: await verifyFile(path, expected, check, prior.identity), reused, appended: 0 };
+  }
+  if (prior.identity.nlink !== 1) failure('recovery_file_changed');
+  check(); const handle = await open(path, constants.O_RDWR | flags);
+  try {
+    const stat = await handle.stat();
+    if (!same(stat, prior.identity) || stat.size !== reused || stat.mtimeMs !== prior.identity.mtimeMs || stat.ctimeMs !== prior.identity.ctimeMs) failure('recovery_file_changed');
+    let offset = reused;
+    while (offset < expected.length) {
+      check(); const { bytesWritten } = await handle.write(expected, offset, Math.min(65536, expected.length - offset), offset);
+      if (!bytesWritten) failure('recovery_write_stalled'); offset += bytesWritten;
+      await advanced(offset);
+    }
+    check(); await handle.sync();
+  } finally { await handle.close(); }
+  return { identity: await verifyFile(path, expected, check, prior.identity), reused, appended: expected.length - reused };
+}
+async function resumePlan(plan, target, parent, parentIdentity, check, progress, signal, ownRelease, setState, onProgress) {
+  const receiptBytes = encode(JSON.stringify({ ...plan.receipt, plan_sha256: plan.plan_sha256 }) + '\n');
+  let observed = await inventory(target, plan, receiptBytes, check);
+  const rootIdentity = observed.directories.get(target), checkRoot = () => checkedDirectory(target, rootIdentity);
+  const legacy = await maybeStat(join(target, LOCK));
+  let legacyRecord = null;
+  if (legacy) { legacyRecord = await smallFile(join(target, LOCK), 1024, check); ownerRecord(legacyRecord.bytes, plan); }
+  const ownersPath = join(target, OWNERS), owners = await ownerState(ownersPath, plan, check);
+  // A complete regenerated marker, or the exact dead original owner record,
+  // establishes that this is this operation's staging area, not a random repo.
+  const marker = observed.found.get(MARKER);
+  if (!marker || marker.identity.size !== receiptBytes.length) {
+    if (!legacyRecord) failure('recovery_receipt_missing_or_partial');
+  }
+  if (!owners.sequence && legacyRecord) requireDead(ownerRecord(legacyRecord.bytes, plan));
+  const alreadyPublished = observed.found.has('HEAD');
+  for (const [relative, file] of observed.found) await validateExisting(join(target, relative), file.bytes, file.identity, check, alreadyPublished);
+  if (alreadyPublished) {
+    if (!marker || plan.files.some(file => !observed.found.has(file.path)) ||
+        plan.directories.some(dir => !observed.directories.has(join(target, dir)))) failure('published_recovery_incomplete');
+    setState('published');
+  } else setState('staging');
+  if (owners.sequence >= MAX_OWNERS || owners.entryCount + 3 > MAX_OWNER_ENTRIES) failure('recovery_owner_limit');
+  check(); await checkRoot();
+  if (!owners.identity) {
+    try { await mkdir(ownersPath, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  }
+  const ownerDirectory = await checkedDirectory(ownersPath, owners.identity); privateStat(ownerDirectory);
+  const sequence = owners.sequence + 1, slot = String(sequence).padStart(6, '0'), nonce = randomUUID();
+  const candidate = join(ownersPath, `candidate-${process.pid}-${nonce}`), lease = join(ownersPath, `${slot}.lease`), done = join(ownersPath, `${slot}.done`);
+  const ownerBytes = encode(JSON.stringify({ schema: 'frankengit-source-recovery-owner-v1', hostname: hostname(),
+    pid: process.pid, nonce, plan_sha256: plan.plan_sha256, sequence }) + '\n');
+  const candidateIdentity = await writeNew(candidate, ownerBytes, check);
+  let acquired = false, released = false;
+  try {
+    await checkRoot(); await checkedDirectory(ownersPath, ownerDirectory); check();
+    await link(candidate, lease); acquired = true;
+    ownRelease(async () => {
+      if (released) return;
+      await checkRoot(); await checkedDirectory(ownersPath, ownerDirectory);
+      await verifyFile(lease, ownerBytes, () => {}, candidateIdentity);
+      await link(lease, done); released = true;
+      await syncDirectory(ownersPath, ownerDirectory); await syncDirectory(target, rootIdentity);
+    });
+    await syncDirectory(ownersPath, ownerDirectory); await syncDirectory(target, rootIdentity);
+  } finally {
+    // Never delete installed sequence slots, another contender's lease, or an
+    // interrupted candidate we did not create. This unlink targets our inode.
+    const stat = await lstat(candidate);
+    if (!stat.isFile() || !same(stat, candidateIdentity)) failure('recovery_owner_candidate_changed');
+    await unlink(candidate);
+  }
+  if (!acquired) failure('recovery_owner_not_acquired');
+  const checkLease = async () => {
+    await checkRoot(); await checkedDirectory(ownersPath, ownerDirectory);
+    await verifyFile(lease, ownerBytes, check, candidateIdentity);
+    if (await maybeStat(done)) failure('recovery_owner_released_early');
+  };
+  await checkLease();
+  // Re-read under the exclusive lease. A previous validation is not write authority.
+  observed = await inventory(target, plan, receiptBytes, check);
+  if (observed.found.has('HEAD') !== alreadyPublished) { setState('existing_unknown'); failure('recovery_publication_changed'); }
+  for (const [relative, file] of observed.found) await validateExisting(join(target, relative), file.bytes, file.identity, check, alreadyPublished);
+  if (legacyRecord) {
+    await verifyFile(join(target, LOCK), legacyRecord.bytes, check, legacyRecord.identity);
+    await unlink(join(target, LOCK)); await syncDirectory(target, rootIdentity);
+  }
+  await progress('resuming');
+  let reusedBytes = 0, appendedBytes = 0;
+  const keep = async (relative, bytes) => {
+    await checkLease(); await checkRoot(); const parentPath = dirname(join(target, relative));
+    await checkedDirectory(parentPath, observed.directories.get(parentPath));
+    const result = await appendVerified(join(target, relative), bytes, observed.found.get(relative), check, written => progress(`writing:${relative}`, { written, total: bytes.length }));
+    reusedBytes += result.reused; appendedBytes += result.appended;
+    observed.found.set(relative, { identity: result.identity, bytes }); return result.identity;
+  };
+  await keep(MARKER, receiptBytes);
+  for (const relative of plan.directories) {
+    check(); await checkRoot(); const path = join(target, relative);
+    if (!observed.directories.has(path)) {
+      await checkLease(); await checkedDirectory(dirname(path), observed.directories.get(dirname(path)));
+      await mkdir(path, { mode: 0o700 }); observed.directories.set(path, await checkedDirectory(path));
+    }
+  }
+  for (const file of plan.files) {
+    if (file.path === 'HEAD' && alreadyPublished) { await keep('HEAD', file.bytes); continue; }
+    await progress(`before:${file.path}`);
+    await keep(file.path === 'HEAD' ? HEAD_STAGE : file.path, file.bytes);
+    await progress(`staged:${file.path}`);
+  }
+  for (const [path, identity] of [...observed.directories].reverse()) { check(); await syncDirectory(path, identity); }
+  if (!alreadyPublished) {
+    await progress('before_publication');
+    const final = await inventory(target, plan, receiptBytes, check);
+    for (const [relative, file] of final.found) await validateExisting(join(target, relative), file.bytes, file.identity, check, true);
+    if (final.found.has('HEAD') || plan.files.some(file => !final.found.has(file.path === 'HEAD' ? HEAD_STAGE : file.path))) { setState('existing_unknown'); failure('recovery_publication_changed'); }
+    for (const [path, identity] of observed.directories) await checkedDirectory(path, identity);
+    await checkLease(); check(); setState('publication_unknown');
+    await link(join(target, HEAD_STAGE), join(target, 'HEAD')); setState('published');
+  }
+  await onProgress(Object.freeze({ phase: alreadyPublished ? 'already_published' : 'published', destination: target }));
+  // Finish an already-visible operation without cancellation-induced rollback.
+  await syncDirectory(target, rootIdentity); await syncDirectory(parent, parentIdentity);
+  const headBytes = plan.files.find(file => file.path === 'HEAD').bytes;
+  const headIdentity = await verifyFile(join(target, 'HEAD'), headBytes, () => {});
+  const staged = await maybeStat(join(target, HEAD_STAGE));
+  if (staged) {
+    if (!same(staged, headIdentity)) failure('recovery_head_identity_changed');
+    await verifyFile(join(target, HEAD_STAGE), headBytes, () => {}, headIdentity); await unlink(join(target, HEAD_STAGE));
+  }
+  await syncDirectory(target, rootIdentity);
+  return { type: 'frankengit-source-recovery-v1', state: 'complete', destination: target, bare: true,
+    resumed: true, already_published: alreadyPublished, owner_sequence: sequence, reused_bytes: reusedBytes, appended_bytes: appendedBytes,
+    head_ref_hex: plan.receipt.head_ref_hex, plan_sha256: plan.plan_sha256,
+    files_synced: true, directories_synced: true, cancellation_requested: Boolean(signal?.aborted),
+    verification: plan.verification, forge_state_restored: false, native_authority_restored: false };
 }
 
 // Every invocation re-verifies the supplied bundle; a saved JSON report cannot
@@ -73,9 +339,9 @@ export async function recoverGitBundle(input, destination, request, options = {}
   let state = 'not_created', target = null, releaseLock = null;
   try {
     if (!options || typeof options !== 'object' || Array.isArray(options) ||
-        Object.keys(options).some(key => !['signal', 'timeoutMs', 'verificationLimits', 'onProgress'].includes(key))) failure('invalid_recovery_options');
-    const { signal, onProgress = () => {}, timeoutMs = 60000, verificationLimits = {} } = options;
-    if ((signal !== undefined && !(signal instanceof AbortSignal)) || typeof onProgress !== 'function' ||
+        Object.keys(options).some(key => !['signal', 'timeoutMs', 'verificationLimits', 'onProgress', 'resume'].includes(key))) failure('invalid_recovery_options');
+    const { signal, onProgress = () => {}, timeoutMs = 60000, verificationLimits = {}, resume = false } = options;
+    if (typeof resume !== 'boolean' || (signal !== undefined && !(signal instanceof AbortSignal)) || typeof onProgress !== 'function' ||
         !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) failure('invalid_recovery_options');
     if (typeof destination !== 'string' || !destination || destination.length > 4096 ||
         destination.includes('\0') || /[\uD800-\uDFFF]/u.test(destination)) failure('invalid_recovery_destination');
@@ -93,8 +359,14 @@ export async function recoverGitBundle(input, destination, request, options = {}
     if (dirname(requested) === requested) failure('invalid_recovery_destination');
     target = join(parent, basename(requested));
     const parentIdentity = await checkedDirectory(parent);
-    const progress = async phase => { await onProgress(Object.freeze({ phase, destination: target })); check(); };
+    const progress = async (phase, details = {}) => { await onProgress(Object.freeze({ phase, destination: target, ...details })); check(); };
     await progress('verified');
+    if (resume) {
+      state = 'existing_unknown';
+      const result = await resumePlan(plan, target, parent, parentIdentity, check, progress, signal,
+        release => { releaseLock = release; }, value => { state = value; }, onProgress);
+      await releaseLock(); state = 'complete'; return result;
+    }
     // mkdir is the exclusive reservation. Existing files, directories and even
     // dangling symlinks refuse; no existence-check/rename overwrite window.
     await mkdir(target, { mode: 0o700 }); state = 'staging';
@@ -123,7 +395,7 @@ export async function recoverGitBundle(input, destination, request, options = {}
       const relative = file.path === 'HEAD' ? HEAD_STAGE : file.path;
       await progress(`before:${file.path}`); await checkRoot();
       await checkedDirectory(dirname(join(target, relative)), directories.get(dirname(join(target, relative))));
-      const identity = await writeNew(join(target, relative), file.bytes, check);
+      const identity = await writeNew(join(target, relative), file.bytes, check, () => {}, written => progress(`writing:${file.path}`, { written, total: file.bytes.length }));
       installed.push({ path: relative, bytes: file.bytes, identity });
       await progress(`staged:${file.path}`);
     }
