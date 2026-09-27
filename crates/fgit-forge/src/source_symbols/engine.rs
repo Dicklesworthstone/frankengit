@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 //! `rust-declaration-heads-v1`: source-level declaration heads, NOT compiler
 //! name resolution or macro expansion. ASCII names; comments/string contents
-//! may be UTF-8. Attributes and macro token trees are opaque. All configurations
-//! are searched, including cfg-disabled source. No source code is executed.
+//! may be UTF-8. Attributes and macro token trees are opaque, including their
+//! non-ASCII and long tokens. Names in ordinary code still use the ASCII
+//! profile. All configurations are searched, including cfg-disabled source.
+//! No source code is executed.
 
 pub const MAX_WORK: u64 = 64 * 1024 * 1024;
 pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
@@ -223,6 +225,27 @@ const fn close(open: u8) -> Option<u8> {
         _ => None,
     }
 }
+// This is an extraction profile, not a compiler lexer. Already excluded token
+// trees need literal/comment boundaries and balanced delimiters, not name
+// classification. extract() validates the entire UTF-8 source before lexing;
+// high bytes can therefore be consumed opaquely without concealing an ASCII
+// quote, comment marker or delimiter. They never become declaration names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NameContext {
+    Code,
+    OpaqueGroup,
+}
+impl NameContext {
+    const fn opaque(self) -> bool {
+        matches!(self, Self::OpaqueGroup)
+    }
+    const fn starts(self, byte: u8) -> bool {
+        start(byte) || (self.opaque() && byte >= 128)
+    }
+    const fn continues(self, byte: u8) -> bool {
+        continuation(byte) || (self.opaque() && byte >= 128)
+    }
+}
 struct Lexer<'a, 'b> {
     bytes: &'a [u8],
     at: usize,
@@ -323,18 +346,21 @@ impl Lexer<'_, '_> {
         }
         Err(self.error(ErrorKind::UnterminatedLiteral))
     }
-    fn suffix(&mut self) -> Result<(), Error> {
-        if self.byte(self.at).is_some_and(start) {
-            while self.byte(self.at).is_some_and(continuation) {
+    fn suffix(&mut self, context: NameContext) -> Result<(), Error> {
+        if self.byte(self.at).is_some_and(|b| context.starts(b)) {
+            while self.byte(self.at).is_some_and(|b| context.continues(b)) {
                 self.bump()?;
             }
         }
-        if self.byte(self.at).is_some_and(|b| b >= 128) {
+        if !context.opaque() && self.byte(self.at).is_some_and(|b| b >= 128) {
             return Err(self.error(ErrorKind::UnsupportedIdentifier));
         }
         Ok(())
     }
     fn next(&mut self) -> Result<Option<Token>, Error> {
+        self.next_in(NameContext::Code)
+    }
+    fn next_in(&mut self, context: NameContext) -> Result<Option<Token>, Error> {
         if let Some(token) = self.look.take() {
             return Ok(Some(token));
         }
@@ -380,7 +406,7 @@ impl Lexer<'_, '_> {
             }
             if self.byte(from + raw_prefix + hashes) == Some(b'"') {
                 self.raw(raw_prefix, hashes)?;
-                self.suffix()?;
+                self.suffix(context)?;
                 return Ok(Some(Token {
                     kind: TokenKind::Opaque,
                     start: from,
@@ -402,7 +428,7 @@ impl Lexer<'_, '_> {
         if let Some((prefix, quote)) = quote {
             self.advance(prefix)?;
             self.quoted(quote)?;
-            self.suffix()?;
+            self.suffix(context)?;
             return Ok(Some(Token {
                 kind: TokenKind::Opaque,
                 start: from,
@@ -414,15 +440,15 @@ impl Lexer<'_, '_> {
         if byte == b'\'' {
             // Lifetimes/labels must not swallow later declaration heads. A
             // closing quote immediately after the name instead forms a literal.
-            if self.byte(from + 1).is_some_and(start) {
+            if self.byte(from + 1).is_some_and(|b| context.starts(b)) {
                 self.bump()?;
                 if self.byte(self.at) == Some(b'r') && self.byte(self.at + 1) == Some(b'#') {
                     self.advance(2)?;
                 }
-                self.suffix()?;
+                self.suffix(context)?;
                 if self.byte(self.at) == Some(b'\'') {
                     self.bump()?;
-                    self.suffix()?;
+                    self.suffix(context)?;
                 }
             } else {
                 if self.byte(from + 1).is_some_and(|b| b >= 128) {
@@ -436,7 +462,7 @@ impl Lexer<'_, '_> {
                     }
                 }
                 self.quoted(b'\'')?;
-                self.suffix()?;
+                self.suffix(context)?;
             }
             return Ok(Some(Token {
                 kind: TokenKind::Opaque,
@@ -446,23 +472,27 @@ impl Lexer<'_, '_> {
                 column,
             }));
         }
-        if byte >= 128 {
+        if byte >= 128 && !context.opaque() {
             return Err(self.error(ErrorKind::UnsupportedIdentifier));
         }
-        if start(byte) {
+        if context.starts(byte) {
             let raw = byte == b'r'
                 && self.byte(from + 1) == Some(b'#')
-                && self.byte(from + 2).is_some_and(start);
+                && self.byte(from + 2).is_some_and(|b| context.starts(b));
             if raw {
                 self.advance(2)?;
             }
             let name_start = self.at;
-            self.suffix()?;
-            if self.at - name_start > MAX_NAME_BYTES {
+            self.suffix(context)?;
+            if !context.opaque() && self.at - name_start > MAX_NAME_BYTES {
                 return Err(self.error(ErrorKind::NameLimit));
             }
             return Ok(Some(Token {
-                kind: TokenKind::Word(raw),
+                kind: if context.opaque() {
+                    TokenKind::Opaque
+                } else {
+                    TokenKind::Word(raw)
+                },
                 start: name_start,
                 end: self.at,
                 line,
@@ -472,7 +502,7 @@ impl Lexer<'_, '_> {
         if byte.is_ascii_digit() {
             while self
                 .byte(self.at)
-                .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'))
+                .is_some_and(|b| context.continues(b) || b == b'.')
             {
                 self.bump()?;
             }
@@ -502,7 +532,9 @@ impl Lexer<'_, '_> {
     fn group(&mut self, open: u8) -> Result<(), Error> {
         let mut stack =
             vec![close(open).ok_or_else(|| self.error(ErrorKind::UnbalancedDelimiter))?];
-        while let Some(token) = self.next()? {
+        // Mode is local to this call: leaving an opaque group can never relax
+        // the following declaration, even after a literal or cached lookahead.
+        while let Some(token) = self.next_in(NameContext::OpaqueGroup)? {
             if let TokenKind::Punct(byte) = token.kind {
                 if let Some(end) = close(byte) {
                     if stack.len() == MAX_DEPTH {
@@ -697,3 +729,7 @@ pub fn extract(
 #[cfg(test)]
 #[path = "engine_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "engine_opaque_tests.rs"]
+mod opaque_tests;
