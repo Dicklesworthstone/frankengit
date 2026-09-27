@@ -10,7 +10,7 @@
 //! renderer ceiling is reported as a typed refusal inside the object; it never
 //! fails the canonical read.
 use fgit_crypto::sha256_digest;
-use fgit_doc::{Limits, ParseProfile, RenderProfile, parse_with, render};
+use fgit_doc::{Limits, ParseProfile, ProfileId, RenderProfile, parse_with, render};
 
 use super::output::quote;
 
@@ -99,7 +99,7 @@ fn presentation(source: &str, surface: RenderProfile, maximum_output_bytes: u32)
     let key = format!(
         "\"renderer\":\"fgit-doc\",\"profile\":{},\"parse_profile_sha256\":{},\"source_sha256\":{}",
         quote(surface.tag()),
-        quote(&hex(&sha256_digest(&profile.id().canonical_bytes()))),
+        quote(&profile_key(profile.id())),
         quote(&hex(&sha256_digest(source.as_bytes())))
     );
     let limits = Limits {
@@ -114,6 +114,13 @@ fn presentation(source: &str, surface: RenderProfile, maximum_output_bytes: u32)
             quote(refusal.kind().tag())
         ),
     }
+}
+
+/// The presentation key's parse-profile component. It hashes the profile's
+/// canonical bytes, which include the family implementation version, so a
+/// renderer profile bump always changes the derived key.
+fn profile_key(id: ProfileId) -> String {
+    hex(&sha256_digest(&id.canonical_bytes()))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -419,6 +426,23 @@ mod shared_profile_tests {
         // presentations of one source differ only by what was asked for.
         assert_eq!(rendered, body(source, Rendering::ApiJson));
         assert_ne!(rendered, body(source, Rendering::HtmlSafe));
+    }
+
+    #[test]
+    fn a_parse_profile_version_bump_changes_the_presentation_key() {
+        let current = ParseProfile::DEFAULT.id();
+        let bumped = ProfileId {
+            version: current.version + 1,
+            ..current
+        };
+        assert_ne!(profile_key(current), profile_key(bumped));
+        // The presentation carries exactly the current profile's key.
+        let rendered = body("text", Rendering::HtmlSafe);
+        assert!(rendered.contains(&format!(
+            "\"parse_profile_sha256\":\"{}\"",
+            profile_key(current)
+        )));
+        assert!(!rendered.contains(&profile_key(bumped)));
     }
 
     #[test]
