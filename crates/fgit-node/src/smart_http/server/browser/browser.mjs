@@ -259,6 +259,90 @@ export async function verifyBlobPath(selection, source, path, expected, readTree
     pathVerified: true, authorityVerified: false };
 }
 
+// A bounded first history page carries the original selected commit, not a
+// caller-addressable object lookup. Hash its EXACT bytes and bind its tree
+// header before any path proof. This does not verify signatures, authors or the
+// authority head. It deliberately makes no claim about unreturned ancestors.
+export const COMMIT_PROOF_LIMITS = Object.freeze({ maxCommits: 4096, maxEdges: 16384,
+  maxMetadataBytes: 4 * 1024 * 1024, maxCommitBytes: 64 * 1024, maxReplyBytes: 256 * 1024 });
+export async function verifySourceCommit(selection, source, readLog,
+  { cryptoImpl = globalThis.crypto, checkpoint = () => {} } = {}) {
+  checkpoint();
+  if (!selection || !source) throw new Error('Commit verification requires a pinned source.');
+  const selected = { ...selection }, pinned = { ...source };
+  const id = commitHex(pinned.commit, selected.format), root = commitHex(pinned.tree, selected.format);
+  if (pinned.format !== selected.format || pinned.referenceHex !== hex(encoder.encode(selected.reference)) ||
+      !pinned.head || !pinned.sourceHead || !pinned.tenant || !pinned.repository || !pinned.incarnation) {
+    throw new Error('Incomplete pinned commit source.');
+  }
+  if (!cryptoImpl?.subtle?.digest) throw new Error('Native commit verification requires WebCrypto.');
+  const reply = await readLog({ ...sourceFields(selected, pinned), after: '0', limit: '1',
+    max_commits: String(COMMIT_PROOF_LIMITS.maxCommits), max_edges: String(COMMIT_PROOF_LIMITS.maxEdges),
+    max_metadata_bytes: String(COMMIT_PROOF_LIMITS.maxMetadataBytes) });
+  checkpoint();
+  snapshotOf(reply, selected, pinned);
+  if (reply.type !== 'source_log' || reply.tenant_id !== pinned.tenant || reply.repository_id !== pinned.repository ||
+      reply.repository_incarnation !== pinned.incarnation || reply.source_head !== pinned.sourceHead ||
+      reply.ref_hex !== pinned.referenceHex || reply.author_identity_verified !== false ||
+      reply.ordering !== 'child-before-parent-native-id-v1' || reply.page_complete !== true ||
+      reply.after !== 0 || reply.limit !== 1 || !Number.isSafeInteger(reply.total_commits) ||
+      reply.total_commits < 1 || reply.total_commits > COMMIT_PROOF_LIMITS.maxCommits ||
+      reply.next_after !== (reply.total_commits > 1 ? 1 : null) || !Array.isArray(reply.commits) || reply.commits.length !== 1) {
+    throw new Error('Selected commit history envelope changed.');
+  }
+  const row = reply.commits[0];
+  if (!row || typeof row !== 'object' || Array.isArray(row) || commitHex(row.object_id, selected.format) !== id ||
+      commitHex(row.tree, selected.format) !== root || !Array.isArray(row.parents) || row.parents.length > COMMIT_PROOF_LIMITS.maxEdges) {
+    throw new Error('Selected commit or root tree changed.');
+  }
+  const bytes = unhex(row.body_hex, COMMIT_PROOF_LIMITS.maxCommitBytes);
+  // Snapshot all mutable response data before WebCrypto yields.
+  const parents = row.parents.map(parent => commitHex(parent, selected.format));
+  const header = encoder.encode(`commit ${bytes.length}\0`), framed = new Uint8Array(header.length + bytes.length);
+  framed.set(header); framed.set(bytes, header.length);
+  const actual = hex(new Uint8Array(await cryptoImpl.subtle.digest(selected.format === 'sha1' ? 'SHA-1' : 'SHA-256', framed)));
+  checkpoint();
+  if (actual !== id) throw new Error('Commit bytes do not reproduce the pinned native commit identity.');
+  // Only reference headers are interpreted. Original identity, signature and
+  // message bytes stay untouched; continued signature lines are not headers.
+  let at = 0, tree = null, separated = false, referenceHeader = false;
+  const rawParents = [];
+  while (at < bytes.length) {
+    checkpoint();
+    const end = bytes.indexOf(10, at);
+    if (end < 0) break;
+    const line = bytes.subarray(at, end);
+    if (!line.length) { separated = true; break; }
+    const starts = text => Array.from(text, c => c.charCodeAt(0)).every((b, i) => line[i] === b);
+    if (line[0] === 32) {
+      if (referenceHeader) throw new Error('Continued commit reference header is unsupported.');
+    } else {
+      const isTree = starts('tree '), isParent = starts('parent ');
+      referenceHeader = isTree || isParent;
+      if (referenceHeader) {
+        const raw = line.subarray(isTree ? 5 : 7);
+        if (raw.length !== (selected.format === 'sha1' ? 40 : 64) ||
+            !raw.every(b => (b >= 48 && b <= 57) || (b >= 65 && b <= 70) || (b >= 97 && b <= 102))) {
+          throw new Error('Invalid native commit reference header.');
+        }
+        const value = String.fromCharCode(...raw).toLowerCase();
+        if (isTree) {
+          if (tree !== null || at !== 0) throw new Error('Ambiguous native commit tree.');
+          tree = value;
+        } else rawParents.push(value);
+      }
+    }
+    at = end + 1;
+  }
+  if (!separated || tree !== root || rawParents.length !== parents.length ||
+      rawParents.some((value, i) => value !== parents[i]) || parents.includes(id)) {
+    throw new Error('Commit reference headers disagree with the selected source.');
+  }
+  checkpoint();
+  return { commit: id, rootTree: root, commitBytes: bytes.length,
+    commitVerified: true, rootTreeVerified: true, authorityVerified: false, authorIdentityVerified: false };
+}
+
 export function sourceFields(selection, snapshot, path = '') {
   if (!['sha1', 'sha256'].includes(selection.format) || !selection.reference.startsWith('refs/')) {
     throw new Error('Choose a full reference and an object format.');
@@ -391,7 +475,7 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
   }
   async function request(operation, fields, signal) {
     // This is an intentionally closed read-only operation set, despite POST framing.
-    if (!['tree', 'blob', 'search'].includes(operation)) throw new Error('Unsupported browser operation.');
+    if (!['tree', 'blob', 'search', 'log'].includes(operation)) throw new Error('Unsupported browser operation.');
     signal.throwIfAborted();
     const url = new URL(operation, apiRoot);
     const response = await fetcher(url, {
@@ -417,7 +501,7 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
     if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get('Content-Type') ?? '')) {
       await response.body?.cancel(); throw new Error('Unexpected API content type.');
     }
-    return boundedJson(response, operation === 'blob' ? 3 * PAGE_BYTES : MAX_RESPONSE_BYTES, signal);
+    return boundedJson(response, operation === 'blob' ? 3 * PAGE_BYTES : operation === 'log' ? COMMIT_PROOF_LIMITS.maxReplyBytes : MAX_RESPONSE_BYTES, signal);
   }
   async function runRead(work) {
     if (!token || !selection) { status('Enter a read-scoped token first.'); return; }
@@ -463,11 +547,15 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
     if (cancelControl) cancelControl.disabled = true;
     clear(); status('Read canceled. No partial export or verified download was retained.');
   }
-  function exportFile(page, verifyPath = false) {
+  function exportFile(page, verifyPath = false, verifyCommit = false) {
     const version = generation;
     void runRead(async (selected, pinned, binding, signal, checkpoint) => {
       if (version + 1 !== generation || !pinned || !binding) throw new Error('Reopen the selected file before exporting.');
-      const proof = verifyPath ? await verifyBlobPath(selected, page.source, page.path,
+      const commitProof = verifyCommit ? await verifySourceCommit(selected, page.source, fields => {
+        checkpoint(); status('Verifying the original commit and its root tree before reading the path…');
+        return request('log', fields, signal);
+      }, { cryptoImpl, checkpoint }) : null;
+      const proof = verifyPath || verifyCommit ? await verifyBlobPath(selected, page.source, page.path,
         { id: page.id, kind: page.kind }, fields => {
           checkpoint(); status('Verifying complete parent directories against the selected root tree…');
           return request('tree', fields, signal);
@@ -493,9 +581,10 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
       byId('content').append(node('h2', displayBytes(verified.path)),
         node('p', `Complete native blob verified (${selected.format}): ${verified.id}`),
         node('p', `${verified.bytes.length} bytes verified across ${verified.pages} read${verified.pages === 1 ? '' : 's'}. The download contains the complete file, not just this preview.`),
-        node('p', proof ? 'Both blob bytes and path inclusion in the selected native root tree were verified. This is not an authority signature or verification of the source commit.' : 'This verifies blob bytes against the returned Git identity, not an authority signature or a proof that this path belongs to the tree.'),
+        node('p', commitProof ? 'Native commit bytes, its root tree, every containing directory and the complete file were verified. Authority signatures and author identity were not verified.' : proof ? 'Both blob bytes and path inclusion in the selected native root tree were verified. This is not an authority signature or verification of the source commit.' : 'This verifies blob bytes against the returned Git identity, not an authority signature or a proof that this path belongs to the tree.'),
         node('pre', preview.text), download);
-      if (proof) byId('content').append(node('p', `Path inclusion verified against native root tree ${proof.rootTree}: ${proof.directories} directories, ${proof.pages} pages, ${proof.entries} entries, ${proof.bytes} encoded tree bytes. The root-to-commit association and authority remain server claims.`));
+      if (proof) byId('content').append(node('p', `Path inclusion verified against native root tree ${proof.rootTree}: ${proof.directories} directories, ${proof.pages} pages, ${proof.entries} entries, ${proof.bytes} encoded tree bytes. ${commitProof ? 'The root-to-commit association was verified; authority remains a server claim.' : 'The root-to-commit association and authority remain server claims.'}`));
+      if (commitProof) byId('content').append(node('p', `Commit-to-file chain verified from ${commitProof.commit} (${commitProof.commitBytes} original commit bytes). The commit was selected by the server; this is not independent authentication of a branch tip.`));
       if (verified.kind === 'symlink') byId('content').append(node('p', 'Only symbolic-link target bytes are downloaded; no link is followed or created.'));
       verifiedDownload = verified;
       return { snapshot: pinned, binding, message: 'Complete file verified. Download is ready; no repository state was changed.' };
@@ -570,6 +659,9 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
       else byId('content').append(node('p', 'Complete-file download exceeds the 8 MiB browser limit; byte-range previews remain available.'));
       if (page.total <= MAX_FILE_BYTES) byId('content').append(button('Verify path and complete file for download', () => {
         if (version === generation) exportFile(page, true);
+      }));
+      if (page.total <= MAX_FILE_BYTES) byId('content').append(button('Verify commit, path and complete file for download', () => {
+        if (version === generation) exportFile(page, true, true);
       }));
       if (offset) byId('paging').append(button('Previous byte range', () => blob(path, Math.max(0, offset - PAGE_BYTES), nextExpected)));
       if (page.next !== null) byId('paging').append(button('Next byte range', () => blob(path, page.next, nextExpected)));
