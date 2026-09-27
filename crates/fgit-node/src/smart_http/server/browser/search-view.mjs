@@ -51,7 +51,9 @@ export function readQuery(document) {
     maxPayloadBytes: decimal(value('index-payload'), 'combined payload bytes', 1),
     maxResultBytes: decimal(value('initial-result-bytes'), 'combined retained result bytes', 1),
   };
+  const indexMode = indexedMode(mode) || mode === 'symbols' ? sourceMode(document.getElementById('index-source-mode')?.value) : 'exact';
   if (mode === 'symbols') return {
+    ...(indexMode === 'revalidated' ? { sourceMode: indexMode } : {}),
     mode, nameHex: byteInput(raw, encoding, 128), match: value('symbol-match'),
     kinds: value('symbol-kind') === 'all' ? [] : [value('symbol-kind')],
     prefixesHex: prefixes === '' ? [] : lines(prefixes, 128).map(line => byteInput(line, value('prefix-encoding'), 4096)),
@@ -60,7 +62,6 @@ export function readQuery(document) {
     maxBytes: decimal(value('max-bytes'), 'referenced declaration source bytes', 1),
     maxWork: decimal(value('index-work'), 'declaration query work', 1),
   };
-  const indexMode = indexedMode(mode) ? sourceMode(document.getElementById('index-source-mode')?.value) : 'exact';
   if (indexedMode(mode)) return {
     ...(indexMode === 'revalidated' ? { sourceMode: indexMode } : {}),
     mode: 'indexed', channel: mode === 'indexed-path' ? 'path' : 'content',
@@ -110,7 +111,8 @@ export function mount(document, location, options = {}) {
     get('initial-controls').hidden = !combined; get('initial-help').hidden = !combined;
     get('initial-symbol-name').disabled = !combined; get('initial-symbol-policy').disabled = !(combined && symbolEnabled);
     get('initial-result-bytes').disabled = !combined;
-    if (get('index-source-mode')) get('index-source-mode').disabled = !indexed;
+    if (get('index-source-mode')) get('index-source-mode').disabled = !(indexed || symbols);
+    get('index-source-help').hidden = !(indexed || symbols);
     get('index-help').hidden = !indexed; get('max-matches').max = indexed || symbols || combined ? '100' : '4096';
     get('max-steps').disabled = !regex;
     get('regex-help').hidden = !regex;
@@ -156,7 +158,11 @@ export function mount(document, location, options = {}) {
       source_snapshot_mismatch: 'Combined channels did not select one source snapshot. No joined result was accepted. Release the snapshot explicitly before a new read.',
       index_generation_mismatch: 'Combined channels did not select one coherent generation vector. No partial result or automatic retry was accepted.',
       symbol_index_uninitialized: 'No persisted Rust declaration index exists. Ask the trusted local operator to build it. No scan or build was attempted.',
-      symbol_index_stale: 'The Rust declaration index does not match this exact source snapshot. An operator must refresh it; lexical revalidation does not apply. No fallback was attempted.',
+      symbol_index_stale: get('mode').value === 'symbols'
+        ? get('index-source-mode')?.value === 'revalidated'
+          ? 'The revalidated declaration index does not match current native source or has conflicting provenance. Ask the operator to reconcile it. No fallback or automatic retry was attempted.'
+          : 'The Rust declaration index does not match this exact source snapshot. Choose Revalidate unchanged Git source explicitly for metadata-only changes, or ask the operator to refresh it. No fallback was attempted.'
+        : 'Combined retrieval requires an exact symbol source snapshot. Ask the operator to refresh the index; standalone revalidation is not a combined fallback.',
       source_index_uninitialized: 'No persisted source index is initialized. Ask the trusted local operator to build it. No scan or build was attempted by this page.',
       source_index_stale: 'The persisted index does not match the source selection. Release the snapshot explicitly, or ask the trusted local operator to reconcile the index. No scan fallback was attempted.',
       index_checkpoint_unavailable: 'The selected index checkpoint cannot be resolved. The operator must recover it; this page will not fall back to an older index.',
@@ -246,6 +252,16 @@ export function mount(document, location, options = {}) {
       : `Declaration channel unavailable: ${value.symbols.reason}. This is not an empty successful result. Lexical results remain useful; no fallback or symbol checkpoint reset occurred.`));
     region.append(section);
   }
+  function renderSources(value, region) {
+    if (value.sources) {
+      const { current, indexed, distinct } = value.sources;
+      region.append(element('p', distinct
+        ? 'Native server revalidated the same commit and tree across changed repository metadata. Original index provenance is retained below.'
+        : 'Native server revalidated this index at its original source snapshot.'),
+        element('pre', `Current source snapshot ${safe(current.snapshot_token)}\nCurrent RCR ${safe(current.source_rcr)}\nCurrent forge root ${safe(current.forge_position_root)}\nOriginal indexed snapshot ${safe(indexed.snapshot_token)}\nOriginal indexed RCR ${safe(indexed.source_rcr)}\nOriginal indexed forge root ${safe(indexed.forge_position_root)}`),
+        element('p', 'File navigation uses the current pinned source. Revalidation is a server claim, not a locally verified authority proof.'));
+    }
+  }
   function renderSymbols(value, region, version, openHit = openSymbol) {
     const stats = value.stats;
     region.append(element('h2', `${value.hits.length} Rust declarations`),
@@ -256,6 +272,7 @@ export function mount(document, location, options = {}) {
       element('p', 'Declaration classification and coverage are native-server claims, not compiler resolution. Macro expansion and cfg evaluation are not performed.'),
       element('p', value.complete ? 'Native server reports the declaration query complete.'
         : 'Limited declaration prefix. Narrow the name, kind or path scope; this endpoint has no continuation cursor.'));
+    renderSources(value, region);
     for (const [index, hit] of value.hits.entries()) {
       const article = element('article'); article.className = 'match';
       const open = button(`${hit.kind} ${hit.rawIdentifier ? 'r#' : ''}${display(unhex(hit.nameHex))} · ${display(unhex(hit.pathHex))} : ${hit.line}:${hit.column}`, () => {
@@ -277,14 +294,7 @@ export function mount(document, location, options = {}) {
       element('p', value.complete ? `Native server reports the query complete; ${value.seen} matching documents visited.`
         : allowNext ? `${value.seen} matching documents visited; more remain in this exact index. Fetch the next page explicitly.`
           : `${value.seen} matching documents shown; this combined channel is truncated. Narrow the query or increase its per-channel limit.`));
-    if (value.sources) {
-      const { current, indexed, distinct } = value.sources;
-      region.append(element('p', distinct
-        ? 'Native server revalidated the same commit and tree across changed repository metadata. Original index provenance is retained below.'
-        : 'Native server revalidated this index at its original source snapshot.'),
-        element('pre', `Current source snapshot ${safe(current.snapshot_token)}\nCurrent RCR ${safe(current.source_rcr)}\nCurrent forge root ${safe(current.forge_position_root)}\nOriginal indexed snapshot ${safe(indexed.snapshot_token)}\nOriginal indexed RCR ${safe(indexed.source_rcr)}\nOriginal indexed forge root ${safe(indexed.forge_position_root)}`),
-        element('p', 'File navigation uses the current pinned source. Revalidation is a server claim, not a locally verified authority proof.'));
-    }
+    renderSources(value, region);
     for (const [index, hit] of value.hits.entries()) {
       const article = element('article'); article.className = 'match';
       const open = button(display(unhex(hit.pathHex)), () => {
@@ -324,6 +334,8 @@ export function mount(document, location, options = {}) {
     const hit = value.hit, region = get('file');
     if (value.initialChannel) region.append(element('p', `Opened the ${value.initialChannel} channel from the combined generation vector. File-byte verification does not authenticate the vector or prove search coverage.`));
     if (value.query?.mode === 'indexed') { renderIndexedFile(value, region); downloadControl(value, region); return; }
+    if (value.query?.mode === 'symbols' && value.query.sourceMode === 'revalidated') region.append(element('p',
+      `File read at current source snapshot ${safe(value.pin.head)} and RCR ${safe(value.pin.rcr)}. The symbol index keeps its original provenance in the results above.`));
     const part = preview(value.bytes, hit);
     region.append(element('h2', display(unhex(hit.pathHex))), element('p', `Native blob verified (${value.scope.format}): ${hit.blob}`),
       element('p', `Full file: ${value.bytes.length} bytes. Line ${hit.line}, byte column ${hit.column}; span [${hit.offset}, ${hit.offset + hit.length}).`),

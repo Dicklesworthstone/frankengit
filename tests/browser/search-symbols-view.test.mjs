@@ -18,16 +18,16 @@ async function until(predicate) {
   for (let i = 0; i < 100 && !predicate(); i++) await tick();
   assert.ok(predicate(), 'expected asynchronous UI transition');
 }
-test('declaration controls are explicit and cannot inherit lexical folding or revalidation', async () => {
+test('declaration controls expose explicit revalidation without lexical folding', async () => {
   const p = await setup(); assert.equal(p.get('token').value, '');
   assert.equal(p.get('symbol-controls').hidden, false); assert.equal(p.get('symbol-help').hidden, false);
-  assert.equal(p.get('case').disabled, true); assert.equal(p.get('index-source-mode').disabled, true);
+  assert.equal(p.get('case').disabled, true); assert.equal(p.get('index-source-mode').disabled, false);
   assert.equal(p.get('index-payload').disabled, true); assert.equal(p.get('index-work').disabled, false);
   p.get('case').value = 'ascii-insensitive'; p.get('index-source-mode').value = 'revalidated';
   p.get('symbol-kind').value = 'struct'; p.get('symbol-match').value = 'prefix';
   const q = symbolQuery(readQuery(p.document));
   assert.equal(q.nameHex, hex('Thing')); assert.equal(q.match, 'prefix'); assert.deepEqual(q.kinds, ['struct']);
-  assert.equal('sourceMode' in q, false); assert.equal('case' in q, false); assert.equal('maxPayloadBytes' in q, false);
+  assert.equal(q.sourceMode, 'revalidated'); assert.equal('case' in q, false); assert.equal('maxPayloadBytes' in q, false);
   p.get('mode').value = 'literal'; p.get('mode').emit('change');
   assert.equal(p.get('symbol-controls').hidden, true); assert.equal(p.get('symbol-match').disabled, true); assert.equal(p.get('case').disabled, false);
   p.ui.disconnect();
@@ -63,7 +63,7 @@ test('truncated declarations never expose a fake server continuation', async () 
 test('stale index diagnosis does not release pins, rebuild, retry or present an empty result', async () => {
   let stale = false; const p = await setup(fixture(), () => stale ? response({ error: 'symbol_index_stale', message: '<img>' }, 409) : null);
   await p.ui.search(); const pin = p.get('snapshot').textContent; stale = true; await p.ui.search();
-  assert.match(p.get('status').textContent, /lexical revalidation does not apply/);
+  assert.match(p.get('status').textContent, /Choose Revalidate unchanged Git source explicitly/);
   assert.equal(p.get('status').textContent.includes('<img>'), false); assert.equal(p.get('results').textContent, '');
   assert.equal(p.get('snapshot').textContent, pin); assert.equal(p.calls.length, 2);
   p.ui.refresh(); assert.match(p.get('snapshot').textContent, /Retained symbol checkpoint/); p.ui.disconnect();
