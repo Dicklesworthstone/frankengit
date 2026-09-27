@@ -331,8 +331,10 @@ function httpError(status) {
 export class IssueClient {
   #root; #fetch; #crypto; #token = ''; #fingerprint = ''; #epoch = 0; #pending = null;
   #binding = null; #controllers = new Set(); #readControllers = new Set(); #busy = false; #timeout;
+  // WebIDL fetch refuses any receiver but the global (Chrome: "Illegal invocation"),
+  // so the stored fetch is always invoked as a plain call, never as a method of this client.
   constructor({ href, fetchImpl = globalThis.fetch, cryptoImpl = globalThis.crypto, timeoutMs = 30_000 }) {
-    this.#root = rootFor(href); this.#fetch = fetchImpl; this.#crypto = cryptoImpl;
+    this.#root = rootFor(href); this.#fetch = (...request) => fetchImpl(...request); this.#crypto = cryptoImpl;
     this.#timeout = natural(timeoutMs, 'request timeout', 1, 300_000);
   }
   get connected() { return Boolean(this.#token); }
