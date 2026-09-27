@@ -188,11 +188,49 @@ def exercise(fg: str, chrome: str, node: str, root: Path) -> dict:
         stop.touch()
         process.wait(timeout=120)
         summary["server_drained_exit"] = process.returncode
+        # Determinism across processes: a second server process over the same
+        # persisted node must derive byte-identical presentations.
+        summary["cross_process"] = second_process_presentations(
+            fg, env, state, grants, token, root,
+            {"html_safe": presentation, "api_json": json.loads(tree_reply).get("issue", {}).get("body_rendered")})
     finally:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=10)
     return summary
+
+
+def second_process_presentations(fg: str, env: dict[str, str], state: Path, grants: Path,
+                                 token: str, root: Path, first: dict) -> dict:
+    stop, out_path = root / "serve2.stop", root / "serve2.out"
+    process = subprocess.Popen(
+        [str(a) for a in [fg, "serve-http", state, TENANT, REPOSITORY, "127.0.0.1:0",
+                          "--trusted-local", "--credentials-file", grants, "--allow-issues",
+                          "--continuous", "--stop-file", stop]],
+        env=env, stdout=out_path.open("w"), stderr=(root / "serve2.err").open("w"))
+    try:
+        url = None
+        started = time.monotonic()
+        while url is None and time.monotonic() - started < 60:
+            require(process.poll() is None, "second serve-http exited before readiness")
+            for line in out_path.read_text().splitlines():
+                if line.startswith("{") and "smart_http_listening" in line:
+                    url = json.loads(line)["url"]
+            time.sleep(0.05)
+        require(url is not None, "no readiness report from the second server")
+        facts = {}
+        for profile, earlier in first.items():
+            status, reply = api(url, f"/api/v1/issues/1?render={profile}", token)
+            later = json.loads(reply).get("issue", {}).get("body_rendered")
+            facts[profile] = status == 200 and earlier is not None and later == earlier
+        stop.touch()
+        process.wait(timeout=120)
+        facts["drained_exit"] = process.returncode
+        return facts
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
 
 
 def main() -> int:
