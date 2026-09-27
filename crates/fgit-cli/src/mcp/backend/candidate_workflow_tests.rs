@@ -91,14 +91,13 @@ impl Fixture {
         };
         let (mut node, _) = OneNode::init(config(&options)).unwrap();
         node.bring_into_service(HeadGeneration::FIRST).unwrap();
-        let request = node.request_context();
         let main = reference("refs/heads/main");
         let topic = reference("refs/heads/topic");
         let patch = b"diff --git a/file b/file\nnew file mode 100644\n--- /dev/null\n+++ b/file\n@@ -0,0 +1 @@\n+before\n";
         let (_, root_plan, root_bundle) = node
             .runtime()
             .block_on(node.prepare_trusted_initial_patch_in(
-                &request,
+                &node.request_context(),
                 &main,
                 patch,
                 &metadata(1),
@@ -109,7 +108,7 @@ impl Fixture {
         let published = node
             .runtime()
             .block_on(node.apply_initial_patch_bundle_durable_in(
-                &request,
+                &node.request_context(),
                 &session(OPENER, "root"),
                 &main,
                 root_plan.commit,
@@ -130,7 +129,7 @@ impl Fixture {
         let published = node
             .runtime()
             .block_on(node.admit_branch_updates_durable_in(
-                &request,
+                &node.request_context(),
                 &session(OPENER, "topic"),
                 &[branch],
                 Default::default(),
@@ -147,10 +146,10 @@ impl Fixture {
             (&main, b"diff --git a/target b/target\nnew file mode 100644\n--- /dev/null\n+++ b/target\n@@ -0,0 +1 @@\n+target\n".as_slice(), 3, "target"),
         ] {
             let candidate = node.runtime().block_on(node.prepare_trusted_patch_in(
-                &request, branch, root_plan.commit, [timestamp as u8; 16], patch, &metadata(timestamp), Default::default(),
+                &node.request_context(), branch, root_plan.commit, [timestamp as u8; 16], patch, &metadata(timestamp), Default::default(),
             )).unwrap();
             let published = node.runtime().block_on(node.apply_workspace_bundle_durable_in(
-                &request, actor(OPENER), key.as_bytes(), branch, root_plan.commit,
+                &node.request_context(), actor(OPENER), key.as_bytes(), branch, root_plan.commit,
                 candidate.candidate_commit, candidate.bundle_bytes(),
             )).unwrap();
             assert!(matches!(published.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));
@@ -172,7 +171,7 @@ impl Fixture {
         let (_, terminal) = node
             .runtime()
             .block_on(node.admit_pull_request_durable_in(
-                &request,
+                &node.request_context(),
                 &session(OPENER, "open-pr"),
                 &command,
                 Default::default(),
@@ -186,7 +185,7 @@ impl Fixture {
         let prepared = node
             .runtime()
             .block_on(node.prepare_merge_bundle_in(
-                &request,
+                &node.request_context(),
                 &main,
                 &topic,
                 &Default::default(),
