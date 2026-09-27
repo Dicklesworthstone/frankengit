@@ -14,7 +14,7 @@ pub(super) const NAME: &str = "frankengit_pull_merge_reviewed";
 pub(super) const FAST_FORWARD_NAME: &str = "frankengit_pull_fast_forward";
 const MAX_REVIEWERS: usize = 32;
 
-pub(super) const fn is_tool(name: &str) -> bool {
+pub(super) fn is_tool(name: &str) -> bool {
     name == NAME || name == FAST_FORWARD_NAME
 }
 
