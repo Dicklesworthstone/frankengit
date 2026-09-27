@@ -21,7 +21,12 @@ if (!chrome || !uiUrl || !/^[0-9a-f]{64}$/.test(token ?? '') || !/^\d+$/.test(is
   process.exit(2);
 }
 
+// The server binds an OS-assigned port, and on hosts whose ephemeral range
+// starts low it can be one Chrome refuses as unsafe (1719, 2049, 5060, 6000,
+// ...), which fails navigation without the server ever seeing a request.
+const serverPort = new URL(uiUrl).port;
 const browser = spawn(chrome, [
+  `--explicitly-allowed-ports=${serverPort}`,
   '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
   '--disable-extensions', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank',
 ], { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -30,10 +35,17 @@ browser.stderr.on('data', chunk => { browserLog = (browserLog + chunk).slice(-81
 
 async function until(predicate, what, timeoutMs = 30_000) {
   const started = Date.now();
+  let lastError;
   for (;;) {
-    const value = await predicate();
+    // A target that is not up yet (for example the DevTools HTTP endpoint just
+    // after DevToolsActivePort appears) throws; that is "not ready", bounded
+    // by the same timeout, not a failure of the thing under test.
+    let value;
+    try { value = await predicate(); } catch (error) { lastError = error; }
     if (value) return value;
-    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    if (Date.now() - started > timeoutMs) {
+      throw new Error(`timed out waiting for ${what}${lastError ? ` (last error: ${lastError.message ?? lastError})` : ''}`);
+    }
     await sleep(100);
   }
 }

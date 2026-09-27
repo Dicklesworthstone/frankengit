@@ -34,6 +34,7 @@ BODY = """## heading-marker
 Some **bold-marker** and *em-marker* text with a [safe-link](https://example.com/ok).
 
 - list-marker
+- ünïcode-marker `cödé`
 
 <script>window.__fgitPwned = 'script'</script>
 
@@ -81,6 +82,39 @@ def api(url: str, path: str, token: str, fields: dict | None = None,
         return response.status, response.read().decode("utf-8", "replace")
     finally:
         connection.close()
+
+
+def span_facts(presentation: dict) -> dict:
+    """Check every api_json node span against the canonical body's exact bytes."""
+    facts: dict = {"api_json_profile": presentation.get("profile"),
+                   "api_json_source_sha256_matches":
+                       presentation.get("source_sha256") == hashlib.sha256(BODY.encode()).hexdigest()}
+    content = presentation.get("content")
+    if not content:
+        facts["api_json_refusal"] = presentation.get("refusal")
+        return facts
+    source = BODY.encode()
+    nodes = json.loads(content).get("nodes", [])
+    bad, texts = [], []
+    for node in nodes:
+        span = node.get("span") or {}
+        start, end = span.get("byte_start", -1), span.get("byte_end", -1)
+        ok = 0 <= start <= end <= len(source)
+        if ok:
+            try:
+                text = source[start:end].decode()
+                ok = (len(source[:start].decode()) == span.get("char_start")
+                      and len(source[:end].decode()) == span.get("char_end"))
+            except UnicodeDecodeError:
+                ok = False
+        if not ok:
+            bad.append(node.get("id"))
+        else:
+            texts.append([node.get("kind"), text])
+    facts["api_json_nodes"] = len(nodes)
+    facts["api_json_bad_spans"] = bad
+    facts["api_json_span_texts"] = texts
+    return facts
 
 
 def document_csp(url: str, path: str) -> tuple[int, str | None]:
@@ -138,6 +172,9 @@ def exercise(fg: str, chrome: str, node: str, root: Path) -> dict:
         summary["http_source_sha256_matches"] = (
             presentation.get("source_sha256") == hashlib.sha256(BODY.encode()).hexdigest())
         summary["http_rendered_html"] = presentation.get("html")
+        status_tree, tree_reply = api(url, "/api/v1/issues/1?render=api_json", token)
+        summary["http_api_json_status"] = status_tree
+        summary.update(span_facts(json.loads(tree_reply).get("issue", {}).get("body_rendered") or {}))
         summary["http_ui_status"], summary["http_ui_csp"] = document_csp(url, "/ui/issues/")
 
         probe = subprocess.run(

@@ -76,6 +76,10 @@ fge_assert_eq MD-CSP-007 true "$(fact 'not set(tags) & {"script", "svg", "iframe
   'the server-rendered HTML contains no script, SVG, frame, image, style or form element, no event-handler attribute and no dangerous URL'
 fge_assert_eq MD-CSP-020 true "$(fact 'html.count("data-fgit-doc-rejected") == 5 and "&lt;script&gt;" in html')" \
   'each of the five hostile constructs is kept visible as rejected, escaped source rather than dropped silently'
+fge_assert_eq MD-CSP-021 true "$(fact 's.get("http_api_json_status") == 200 and s.get("api_json_profile") == "api_json" and s.get("api_json_source_sha256_matches") is True and s.get("api_json_nodes", 0) > 5 and s.get("api_json_bad_spans") == []')" \
+  'render=api_json returns a source-bound tree whose every node span lands on exact UTF-8 byte and code-point offsets of the canonical body'
+fge_assert_eq MD-CSP-022 true "$(fact '["heading", "## heading-marker"] in s.get("api_json_span_texts", []) and ["code_span", "`cödé`"] in s.get("api_json_span_texts", [])')" \
+  'spans map back to the exact source text, including multi-byte text after the first line'
 fge_assert_eq MD-CSP-008 true "$(fact 's.get("http_ui_status") == 200 and "script-src '"'"'self'"'"'" in csp and "unsafe-inline" not in csp and "default-src '"'"'none'"'"'" in csp')" \
   'the served issues document carries a CSP with script-src self, default-src none and no unsafe-inline'
 fge_assert_eq MD-CSP-009 true "$(fact 'b.get("document_headers_observed") is True and b.get("csp_header") == csp')" \
