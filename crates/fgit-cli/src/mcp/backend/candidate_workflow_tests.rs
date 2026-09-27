@@ -349,9 +349,13 @@ fn missing_review_refusal_exact_approval_coupled_merge_and_stopped_recovery_in_b
         assert!(reviewer.is_mutation(review_writes::NAME));
         assert!(!reviewer.is_mutation(merge_writes::NAME));
         assert!(
-            merge_writes::call(&reviewer, &fixture.merge("no-merge-grant", &[OPENER]))
-                .unwrap_err()
-                .invalid
+            merge_writes::call(
+                &reviewer,
+                merge_writes::NAME,
+                &fixture.merge("no-merge-grant", &[OPENER]),
+            )
+            .unwrap_err()
+            .invalid
         );
         let approved = invoke(
             &mut server,
@@ -597,9 +601,13 @@ fn lost_merge_stdout_is_recovered_by_original_key_with_no_write_grant() {
     );
     assert_eq!(result(&recovered)["outcome"].text(), Some("committed"));
     assert!(
-        merge_writes::call(&recovery, &fixture.merge("no-grant", &[REVIEWER]))
-            .unwrap_err()
-            .invalid
+        merge_writes::call(
+            &recovery,
+            merge_writes::NAME,
+            &fixture.merge("no-grant", &[REVIEWER]),
+        )
+        .unwrap_err()
+        .invalid
     );
     recovery.close().unwrap();
 }
