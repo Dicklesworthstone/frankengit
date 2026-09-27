@@ -255,7 +255,7 @@ async function objectId(kind, body, format, budget) {
   const prefix = encoder.encode(`${kind} ${body.length}\0`), framed = new Uint8Array(prefix.length + body.length);
   framed.set(prefix); framed.set(body, prefix.length); return budget.digest(framed, format);
 }
-async function readBundle(input, options) {
+async function readBundle(input, options, expected = null) {
   const budget = new Budget(options);
   if (!(input instanceof Uint8Array) || !input.length || input.length > budget.limits.maxInputBytes) refuse('input_byte_limit');
   // Own the complete input before the first asynchronous operation.
@@ -287,6 +287,26 @@ async function readBundle(input, options) {
   }
   if (!refs.size) refuse('missing_direct_references');
   if (head !== null && ![...refs.values()].some(row => row.ref_hex.startsWith('726566732f68656164732f') && row.object_id === head)) refuse('detached_bundle_head');
+  let artifactSha256 = null;
+  if (expected !== null) {
+    budget.check();
+    if (expected.object_format !== null && expected.object_format !== format) refuse('expected_object_format_mismatch');
+    for (const row of expected.refs) {
+      budget.check(); budget.spend(row.ref_hex.length / 2 + row.object_id.length / 2);
+      const actual = refs.get(row.ref_hex);
+      if (!actual) refuse('expected_ref_missing', { ref_hex: row.ref_hex });
+      if (actual.object_id !== row.object_id) refuse('expected_ref_mismatch', {
+        ref_hex: row.ref_hex, expected_object: row.object_id, actual_object: actual.object_id,
+      });
+    }
+    if (expected.ref_set === 'exact' && expected.refs.length !== refs.size) refuse('expected_ref_set_mismatch', {
+      expected_refs: expected.refs.length, actual_refs: refs.size,
+    });
+    if (expected.sha256 !== null) {
+      artifactSha256 = await budget.digest(bytes, 'sha256');
+      if (artifactSha256 !== expected.sha256) refuse('expected_artifact_mismatch');
+    }
+  }
   const headerBytes = cursor, pack = bytes.subarray(cursor), width = format === 'sha1' ? 20 : 32;
   if (pack.length < 12 + width) refuse('truncated_pack');
   const reader = new Reader(pack, 0, pack.length - width, budget);
@@ -340,7 +360,7 @@ async function readBundle(input, options) {
     const object = byId.get(row.object_id); if (!object) refuse('advertised_object_missing');
     if (row.ref_hex.startsWith('726566732f68656164732f') && object.kind !== 'commit') refuse('branch_target_not_commit');
   }
-  const sha256 = await budget.digest(bytes, 'sha256'); budget.check();
+  const sha256 = artifactSha256 ?? await budget.digest(bytes, 'sha256'); budget.check();
   return { budget, byId, objects, summary: {
     profile: 'bounded-native-bundle-objects-v1', object_format: format, bytes: bytes.length, sha256,
     header_bytes: headerBytes, pack_checksum: checksum, pack_checksum_verified: true,
@@ -490,4 +510,51 @@ async function closure(decoded) {
 // not confused with missing history or silently asserted to be reachable.
 export async function verifyGitBundle(input, options = {}) {
   return closure(await readBundle(input, options));
+}
+
+// Expectations come from a caller's separately trusted record, NOT from this
+// bundle or an unsigned manifest next to it. Normalization copies all values
+// before any await, callback or file I/O; parsing grants no authority.
+export function normalizeBundleExpectation(value) {
+  const ownRecord = (record, allowed) => {
+    if (!record || typeof record !== 'object' || Array.isArray(record) ||
+        Object.keys(record).some(key => !allowed.includes(key))) refuse('invalid_expectation');
+  };
+  ownRecord(value, ['sha256', 'object_format', 'refs', 'exact_refs']);
+  const has = key => Object.hasOwn(value, key);
+  const sha256 = has('sha256') ? value.sha256 : null;
+  if (has('sha256') && (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256))) refuse('invalid_expected_artifact');
+  const format = has('object_format') ? value.object_format : null;
+  if (has('object_format') && !['sha1', 'sha256'].includes(format)) refuse('invalid_expected_format');
+  if (has('exact_refs') && (!has('refs') || typeof value.exact_refs !== 'boolean')) refuse('invalid_expected_ref_set');
+  const refs = []; let bytes = 0;
+  if (has('refs')) {
+    if (format === null || !Array.isArray(value.refs) || !value.refs.length) refuse('invalid_expected_references');
+    if (value.refs.length > BUNDLE_VERIFY_LIMITS.maxRefs) refuse('expectation_reference_limit');
+    const names = new Set();
+    for (const row of value.refs) {
+      ownRecord(row, ['ref_hex', 'object_id']);
+      if (typeof row.ref_hex !== 'string' || row.ref_hex.length > 8192 || !/^(?:[0-9a-f]{2})+$/.test(row.ref_hex)) refuse('invalid_expected_reference');
+      bytes += row.ref_hex.length / 2;
+      if (bytes > BUNDLE_VERIFY_LIMITS.maxHeaderBytes) refuse('expectation_header_limit');
+      const name = Uint8Array.from(row.ref_hex.match(/../g), pair => Number.parseInt(pair, 16));
+      const ref_hex = reference(name);
+      if (names.has(ref_hex)) refuse('duplicate_expected_reference'); names.add(ref_hex);
+      if (typeof row.object_id !== 'string') refuse('invalid_expected_object');
+      const id = row.object_id.startsWith(`${format}:`) ? row.object_id.slice(format.length + 1) : row.object_id;
+      if (id.length !== (format === 'sha1' ? 40 : 64) || !/^[0-9a-fA-F]+$/.test(id) || /^0+$/.test(id)) refuse('invalid_expected_object');
+      refs.push({ ref_hex, object_id: id.toLowerCase() });
+    }
+  }
+  if (sha256 === null && !refs.length) refuse('missing_expectation_anchor');
+  refs.sort((a, b) => a.ref_hex < b.ref_hex ? -1 : 1);
+  return { sha256, object_format: format, refs, ref_set: refs.length ? (has('exact_refs') && value.exact_refs === true ? 'exact' : 'contains') : null };
+}
+// Match the intended artifact/ref identities AND verify full typed closure.
+// A match is relative to the caller's supplied trust anchor; it is not a claim
+// that a server, author, credential, current branch or signature is trusted.
+export async function verifyGitBundleAgainst(input, expectations, options = {}) {
+  const expected = normalizeBundleExpectation(expectations);
+  const result = await closure(await readBundle(input, options, expected));
+  return { ...result, caller_expectations_matched: true, expectations: expected };
 }

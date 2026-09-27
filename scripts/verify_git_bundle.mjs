@@ -4,7 +4,7 @@
 import { open } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { webcrypto } from 'node:crypto';
-import { BUNDLE_VERIFY_LIMITS, verifyGitBundle } from '../crates/fgit-node/src/smart_http/server/browser/bundle-verify.mjs';
+import { BUNDLE_VERIFY_LIMITS, verifyGitBundle, verifyGitBundleAgainst, normalizeBundleExpectation } from '../crates/fgit-node/src/smart_http/server/browser/bundle-verify.mjs';
 
 async function readBounded(path, signal) {
   signal.throwIfAborted();
@@ -23,14 +23,70 @@ async function readBounded(path, signal) {
     return bytes;
   } finally { await file.close(); }
 }
+const USAGE = `Usage: node scripts/verify_git_bundle.mjs PATH.bundle [OPTIONS]
+
+Verify a complete local Git bundle without Git, network, or repository writes.
+Optional expectations must come from a separately trusted source:
+  --expect-sha256 HEX         Exact SHA-256 of the entire bundle
+  --expect-format sha1|sha256 Required when supplying native reference pins
+  --expect-ref REF=OID        Repeat for each known full native reference
+  --expect-ref-hex HEX=OID    Lossless byte-name alternative (lowercase hex)
+  --exact-refs               Require exactly the supplied direct-ref set
+  --                        Treat the remaining argument as a literal path
+  --help                    Print this help without opening a file
+
+Without --exact-refs, ref pins constrain only the named refs; all advertised
+refs still undergo closure verification. An unsigned adjacent manifest is not
+an independent trust anchor. Signatures, forge state and gitlinks are not verified.
+`;
+function argumentsFor(args) {
+  let path = null, literal = false; const expected = {}, seen = new Set();
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (!literal && arg === '--') { literal = true; continue; }
+    if (!literal && arg.startsWith('-')) {
+      if (arg === '--exact-refs') {
+        if (seen.has(arg)) throw new Error('duplicate_option'); seen.add(arg); expected.exact_refs = true; continue;
+      }
+      if (!['--expect-sha256', '--expect-format', '--expect-ref', '--expect-ref-hex'].includes(arg)) throw new Error('unknown_option');
+      const value = args[++index];
+      if (!value || value.startsWith('--')) throw new Error('missing_option_value');
+      if (arg === '--expect-ref' || arg === '--expect-ref-hex') {
+        const split = value.lastIndexOf('=');
+        if (split < 1 || split === value.length - 1 || value.length > 8300) throw new Error('invalid_reference_pin');
+        const name = value.slice(0, split), object_id = value.slice(split + 1);
+        if (arg === '--expect-ref' && /[\uD800-\uDFFF]/u.test(name)) throw new Error('invalid_reference_pin');
+        const ref_hex = arg === '--expect-ref-hex' ? name : Buffer.from(name, 'utf8').toString('hex');
+        expected.refs ??= [];
+        if (expected.refs.length >= BUNDLE_VERIFY_LIMITS.maxRefs) throw new Error('expectation_reference_limit');
+        expected.refs.push({ ref_hex, object_id });
+      } else {
+        if (seen.has(arg)) throw new Error('duplicate_option'); seen.add(arg);
+        expected[arg === '--expect-sha256' ? 'sha256' : 'object_format'] = value;
+      }
+    } else {
+      if (path !== null || !arg) throw new Error('one_bundle_path_required'); path = arg;
+    }
+  }
+  if (path === null) throw new Error('bundle_path_required');
+  // Validate the complete expectation grammar before opening even the input.
+  if (Object.keys(expected).length) normalizeBundleExpectation(expected);
+  return { path, expected: Object.keys(expected).length ? expected : null };
+}
 const args = process.argv.slice(2), controller = new AbortController();
 const cancel = () => controller.abort(); process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
 // A broken output pipe is a command failure, not an unhandled stream event.
 const outputError = () => { process.exitCode = 1; }; process.stdout.on('error', outputError); process.stderr.on('error', outputError);
 try {
-  if (args.length !== 1 || !args[0] || args[0].startsWith('-')) throw new Error('usage: node scripts/verify_git_bundle.mjs PATH.bundle');
-  const result = await verifyGitBundle(await readBounded(args[0], controller.signal), { cryptoImpl: webcrypto, signal: controller.signal });
-  await new Promise((resolve, reject) => process.stdout.write(`${JSON.stringify(result, null, 2)}\n`, error => error ? reject(error) : resolve()));
+  let output;
+  if (args.length === 1 && args[0] === '--help') output = USAGE;
+  else {
+    const { path, expected } = argumentsFor(args);
+    const bytes = await readBounded(path, controller.signal), options = { cryptoImpl: webcrypto, signal: controller.signal };
+    const result = expected === null ? await verifyGitBundle(bytes, options) : await verifyGitBundleAgainst(bytes, expected, options);
+    output = `${JSON.stringify(result, null, 2)}\n`;
+  }
+  await new Promise((resolve, reject) => process.stdout.write(output, error => error ? reject(error) : resolve()));
 } catch (error) {
   const code = error?.code ?? (typeof error?.message === 'string' ? error.message : 'verification_failed');
   process.stderr.write(`${JSON.stringify({ verified: false, error: code, details: error?.details ?? null })}\n`); process.exitCode = 1;

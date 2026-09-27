@@ -44,6 +44,14 @@ for (const format of ['sha1', 'sha256']) for (const ofs of [false, true]) {
       const closure = await verifyGitBundle(bundle, { cryptoImpl: webcrypto });
       assert.equal(closure.object_closure_verified, true); assert.equal(closure.reachable_objects, inventory.length);
       assert.equal(closure.unreachable_objects, 0); assert.deepEqual(JSON.parse(cli.stdout), closure);
+      const anchored = spawnSync(process.execPath, [resolve('scripts/verify_git_bundle.mjs'), file,
+        '--expect-format', format, '--expect-ref', `refs/heads/main=${tip}`,
+        '--expect-ref', `refs/tags/release=${tag}`, '--exact-refs', '--expect-sha256', report.sha256],
+      { env: { ...env, PATH: home }, encoding: 'utf8', timeout: 15000 });
+      assert.equal(anchored.status, 0, anchored.stderr);
+      const pinned = JSON.parse(anchored.stdout);
+      assert.equal(pinned.caller_expectations_matched, true); assert.equal(pinned.expectations.ref_set, 'exact');
+      assert.equal(pinned.expectations.sha256, report.sha256); assert.equal(pinned.reachable_objects, inventory.length);
       // Stock Git's ordinary bundle command supplies another independently
       // framed export, including HEAD, through the same production verifier.
       const stock = join(root, 'stock.bundle'); git(['bundle', 'create', stock, '--all']);
