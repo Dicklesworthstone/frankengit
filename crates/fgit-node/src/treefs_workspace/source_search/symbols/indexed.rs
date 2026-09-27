@@ -12,6 +12,7 @@ use fgit_graph::{
 use fgit_types::cell::admits_staging_intake;
 use fgit_types::{SchemaFamily, SchemaId};
 
+mod current;
 mod directory;
 mod refresh;
 use directory::{generation_body, symbol_directory_root, symbol_manifest_root};
@@ -248,7 +249,11 @@ impl OneNode {
     /// Persisted read only. Current source and hidden-ref policy precede index
     /// metadata. Staleness, missing backing and failed checkpoints never scan
     /// source, rebuild, fall back, or disclose a different generation.
-    pub async fn search_source_symbols_index_snapshot_local_in(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "source pins, checkpoint, query, read limits and explicit source mode are independent"
+    )]
+    async fn read_source_symbols_index_local_in(
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
@@ -258,7 +263,8 @@ impl OneNode {
         query: &SymbolQuery,
         limits: SearchLimits,
         maximum_payload_bytes: usize,
-    ) -> Result<data::Report, Failure> {
+        source_mode: current::SourceMode,
+    ) -> Result<(data::Source, data::Report), Failure> {
         live(request)?;
         limits.validate().map_err(|e| Failure::Index(e.into()))?;
         if maximum_payload_bytes == 0 || maximum_payload_bytes > data::MAX_INDEX_BYTES {
@@ -300,6 +306,18 @@ impl OneNode {
                 return Err(Failure::Source(NodeWorkspaceRefusal::RefUnavailable));
             }
         };
+        let current_source = if source_mode == current::SourceMode::Revalidated {
+            Some(
+                self.current_symbol_source_in(
+                    request,
+                    reference,
+                    (head, rcr, selected.basis().body().forge_position_root, commit),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let mut is_live = || workspace_request_live(request);
         let generation =
             GenerationAuthority::new(&self.authority, self.symbol_head_key(reference)?)
@@ -323,13 +341,18 @@ impl OneNode {
         let manifest = data::Manifest::decode(&raw, root, &cancelled).map_err(Failure::Index)?;
         let source = manifest.source();
         self.validate_symbol_source(source, body, reference)?;
-        if source.head != head
+        if let Some(current) = &current_source {
+            if !current::revalidates(source, current) {
+                return Err(Failure::Stale);
+            }
+        } else if source.head != head
             || source.commit != commit
             || source.rcr != rcr
             || source.forge != selected.basis().body().forge_position_root
         {
             return Err(Failure::Stale);
         }
+        let current_source = current_source.unwrap_or_else(|| source.clone());
         drop(raw);
         let mut search = data::Query::new(query, limits.max_matches).map_err(Failure::Index)?;
         let candidates = if let Some(root) = symbol_directory_root(body)? {
@@ -382,7 +405,7 @@ impl OneNode {
             }
         }
         live(request)?;
-        Ok(search.finish(
+        let report = search.finish(
             &manifest,
             *generation
                 .activation()
@@ -390,7 +413,8 @@ impl OneNode {
                 .as_internal_object_id(),
             generation.activation().authority_generation.get(),
             bytes,
-        ))
+        );
+        Ok((current_source, report))
     }
     fn validate_symbol_source(
         &self,

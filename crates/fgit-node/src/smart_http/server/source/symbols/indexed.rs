@@ -1,6 +1,7 @@
 //! Authenticated persisted declaration reads. Shared envelope/query parsing and
 //! row validation remain owned by the declaration service, not copied here.
 use super::*;
+mod current;
 use fgit_crypto::{IdentityDomain, internal_algorithm_id, internal_domain_tag};
 use fgit_forge::source_symbols::index::{self as data, AccessError, TableError};
 use fgit_graph::{GenerationActivation, GenerationAuthorityError, GraphGenerationId};
@@ -29,12 +30,18 @@ pub(in super::super) fn refusal(error: Failure) -> ApiError {
 fn indexed_command(
     bytes: &[u8],
     format: GitHashAlgorithm,
-) -> Result<(Command, Option<GenerationActivation>), ApiError> {
+) -> Result<(Command, Option<GenerationActivation>, current::SourceMode), ApiError> {
     let mut query = Vec::new();
     let mut token = None;
     let mut number = None;
-    for (name, value) in parse_form(bytes, 150)? {
+    let mut source_mode = None;
+    for (name, value) in parse_form(bytes, 151)? {
         match name.as_str() {
+            "source_mode" => {
+                if source_mode.replace(value).is_some() {
+                    return Err(ApiError::bad("duplicate_field"));
+                }
+            }
             "minimum_index_token" => {
                 if token.replace(value).is_some() {
                     return Err(ApiError::bad("duplicate_field"));
@@ -83,7 +90,11 @@ fn indexed_command(
         }
         _ => return Err(ApiError::bad("incomplete_index_checkpoint")),
     };
-    Ok((command_fields(query, format)?, floor))
+    Ok((
+        command_fields(query, format)?,
+        floor,
+        current::SourceMode::parse(source_mode.as_deref())?,
+    ))
 }
 pub(super) fn execute(
     node: &OneNode,
@@ -96,7 +107,7 @@ pub(super) fn execute(
     if session.authenticated_session().is_none() {
         return Err(ApiError::new(Status::Unauthorized, "unauthorized"));
     }
-    let (command, minimum) =
+    let (command, minimum, source_mode) =
         indexed_command(&read_form(reader, framing, http)?, node.object_format)?;
     let deadline = GitDaemonSessionDeadline::new(
         node.git_daemon_session_timeout,
@@ -104,29 +115,47 @@ pub(super) fn execute(
     );
     let context = node.session_request_context(&deadline);
     let mut live = || !deadline.expired();
-    let report = drive_request_while(
-        node,
-        &context,
-        node.search_source_symbols_index_snapshot_local_in(
-            &context,
-            &command.selection.reference,
-            command.selection.expected_head,
-            command.selection.expected_commit,
-            minimum.as_ref(),
-            &command.query,
-            command.limits,
-            data::MAX_INDEX_BYTES,
-        ),
-        &mut live,
-    )
-    .map_err(refusal)?;
-    let body = render(
-        node,
-        &command,
-        &report,
-        usize::try_from(maximum).unwrap_or(usize::MAX),
-        &mut live,
-    )?;
+    let maximum = usize::try_from(maximum).unwrap_or(usize::MAX);
+    let body = match source_mode {
+        current::SourceMode::Exact => {
+            let report = drive_request_while(
+                node,
+                &context,
+                node.search_source_symbols_index_snapshot_local_in(
+                    &context,
+                    &command.selection.reference,
+                    command.selection.expected_head,
+                    command.selection.expected_commit,
+                    minimum.as_ref(),
+                    &command.query,
+                    command.limits,
+                    data::MAX_INDEX_BYTES,
+                ),
+                &mut live,
+            )
+            .map_err(refusal)?;
+            render(node, &command, &report, maximum, &mut live)?
+        }
+        current::SourceMode::Revalidated => {
+            let (current, report) = drive_request_while(
+                node,
+                &context,
+                node.search_source_symbols_index_revalidated_local_in(
+                    &context,
+                    &command.selection.reference,
+                    command.selection.expected_head,
+                    command.selection.expected_commit,
+                    minimum.as_ref(),
+                    &command.query,
+                    command.limits,
+                    data::MAX_INDEX_BYTES,
+                ),
+                &mut live,
+            )
+            .map_err(refusal)?;
+            current::render(node, &command, &current, &report, maximum, &mut live)?
+        }
+    };
     Ok(JsonReply {
         status: Status::Success,
         body,
@@ -363,7 +392,7 @@ mod tests {
             "a".repeat(64)
         );
         let full = form.to_owned() + &pair;
-        let (_, floor) = indexed_command(full.as_bytes(), GitHashAlgorithm::Sha1).unwrap();
+        let (_, floor, _) = indexed_command(full.as_bytes(), GitHashAlgorithm::Sha1).unwrap();
         assert_eq!(floor.unwrap().authority_generation.get(), 7);
         assert!(command(full.as_bytes(), GitHashAlgorithm::Sha1).is_err());
         for suffix in [
