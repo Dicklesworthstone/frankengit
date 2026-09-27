@@ -1,5 +1,5 @@
-//! Initial SSH algorithm negotiation. No algorithm is selected merely because
-//! the server implements it: both directional offers must actually admit it.
+//! Initial and subsequent SSH algorithm negotiation. Implementing an algorithm
+//! does not select it: both directional offers must actually admit it.
 
 use super::{
     CIPHER_CHACHA20_POLY1305, Curve25519Kex, KEX_CURVE25519_SHA256,
@@ -65,14 +65,24 @@ impl SshServerSession {
         if !contains(lists[6], "none") || !contains(lists[7], "none") {
             return Err(refusal("compression is unsupported in one or both directions"));
         }
+        let initial = self.inbound_cipher.is_none();
         let strict = contains(lists[0], KEX_STRICT_CLIENT);
-        if strict && self.inbound_packet_count != 1 {
+        if initial && strict && self.inbound_packet_count != 1 {
             return Err(refusal("strict KEX requires KEXINIT to be the first packet"));
         }
         let wrong_guess = lists[0].split(',').next() != Some(selected_kex)
             || lists[1].split(',').next() != Some(SSH_ED25519_ALGORITHM);
 
-        self.strict_kex = strict;
+        if initial {
+            self.strict_kex = strict;
+        } else {
+            // All ten lists and the tail were checked before any new state.
+            // A peer's reply to our KEXINIT must not emit a second offer.
+            if self.rekey.phase == super::RekeyPhase::Idle {
+                self.request_rekey()?;
+            }
+            self.rekey.phase = super::RekeyPhase::AwaitEcdh;
+        }
         self.discard_next_kex_packet = follows && wrong_guess;
         self.client_kexinit_payload = Some(payload.to_vec());
         self.ephemeral_kex = Some(Curve25519Kex::from_private_bytes(self.random_bytes()));

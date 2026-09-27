@@ -1,13 +1,15 @@
 //! SSH-2.0 protocol session state machine and channel management.
 //!
 //! Provides a pure-Rust, SANS-I/O SSH server state machine that executes
-//! identification exchange, initial key exchange, user authentication, and one
-//! session channel with typed Git command dispatch. Additional channels and
-//! rekey are explicitly refused; neither may replace a running Git command.
+//! identification exchange, initial and subsequent key exchanges, authentication,
+//! and one session channel with typed Git command dispatch. Rekey preserves the
+//! authenticated identity and running command; additional channels are refused.
 
 mod guard;
 mod ingress;
 mod negotiation;
+mod rekey;
+use rekey::{RekeyPhase, RekeyState};
 #[cfg(test)]
 mod protocol_tests;
 #[cfg(test)]
@@ -157,6 +159,8 @@ pub enum SessionPhase {
 /// A server-side SSH session.
 pub struct SshServerSession {
     phase: SessionPhase,
+    rekey: RekeyState,
+    terminal_error: Option<SshSessionError>,
     /// Runtime-owned entropy for the ephemeral key, KEXINIT cookie and padding.
     entropy: Arc<dyn EntropySource>,
     /// Whether both sides negotiated OpenSSH strict key exchange.
@@ -218,6 +222,8 @@ impl SshServerSession {
     ) -> Self {
         Self {
             phase: SessionPhase::Identification,
+            rekey: RekeyState::default(),
+            terminal_error: None,
             entropy,
             strict_kex: false,
             discard_next_kex_packet: false,
@@ -366,20 +372,11 @@ impl SshServerSession {
             });
         }
         let result = self.process_incoming_bytes(input);
-        if result.is_err() {
-            // A malformed authenticated packet must not leave a resumable
-            // half-transition. This says nothing about a Git publication's
-            // outcome; that remains the admission/outcome protocol's job.
-            self.phase = SessionPhase::Closed;
-            self.incoming_buffer.clear();
-            self.channel_input_data.clear();
-            self.ephemeral_kex = None;
-            self.pending_inbound_key = None;
-            self.discard_next_kex_packet = false;
-            self.userauth_service_accepted = false;
-            self.authenticated_key = None;
-            self.authenticated_principal = None;
-            self.active_command = None;
+        // Preserve the original bounded-output refusal even if more bytes in
+        // the same burst subsequently encounter the already-closed session.
+        let result = self.terminal_error.clone().map_or(result, Err);
+        if let Err(error) = &result {
+            self.fail_session(error.clone());
         }
         result
     }
@@ -452,6 +449,17 @@ impl SshServerSession {
 
     /// Sends a packet with payload.
     fn send_packet(&mut self, payload: &[u8]) {
+        if self.phase == SessionPhase::Closed {
+            return;
+        }
+        match self.defer_rekey_output(payload) {
+            Ok(true) => return,
+            Err(error) => {
+                self.fail_session(error);
+                return;
+            }
+            Ok(false) => {}
+        }
         // RFC 4253 section 6: padding SHOULD be random.
         let padding: [u8; 16] = self.random_bytes();
         if let Some(ref mut cipher) = self.outbound_cipher {
@@ -472,11 +480,16 @@ impl SshServerSession {
         let cookie: [u8; 16] = self.random_bytes();
         writer.write_raw(&cookie);
         // KEX algorithms; the strict-KEX marker is a capability, never selected
-        writer.write_name_list(&[
-            KEX_CURVE25519_SHA256,
-            KEX_CURVE25519_SHA256_LIBSSH,
-            KEX_STRICT_SERVER,
-        ]);
+        if self.session_id.is_none() {
+            writer.write_name_list(&[
+                KEX_CURVE25519_SHA256,
+                KEX_CURVE25519_SHA256_LIBSSH,
+                KEX_STRICT_SERVER,
+            ]);
+        } else {
+            // Strict KEX is negotiated once; its sequence resets persist.
+            writer.write_name_list(&[KEX_CURVE25519_SHA256, KEX_CURVE25519_SHA256_LIBSSH]);
+        }
         // Server host key algorithms
         writer.write_name_list(&[SSH_ED25519_ALGORITHM]);
         // Ciphers
@@ -623,7 +636,10 @@ impl SshServerSession {
                 let outbound_sequence = if self.strict_kex {
                     0
                 } else {
-                    self.outbound_packet_count
+                    self.outbound_cipher.as_ref().map_or(
+                        self.outbound_packet_count,
+                        OpenSshChaCha20Poly1305::sequence_number,
+                    )
                 };
                 self.outbound_cipher = Some(OpenSshChaCha20Poly1305::new_with_sequence(
                     &s_key_arr,
@@ -632,7 +648,14 @@ impl SshServerSession {
 
                 // Stash inbound key to activate upon receiving client NEWKEYS
                 self.pending_inbound_key = Some(c_key_arr);
-                self.phase = SessionPhase::UserAuth;
+                if self.rekey.phase == RekeyPhase::AwaitEcdh {
+                    self.rekey.phase = RekeyPhase::AwaitNewkeys;
+                    // Our NEWKEYS was encrypted with the OLD outbound key.
+                    // Only now may queued application replies use the new key.
+                    self.flush_rekey_output();
+                } else {
+                    self.phase = SessionPhase::UserAuth;
+                }
             }
             msg::NEWKEYS => {
                 // Client has activated encryption. Future inbound packets use this cipher.
@@ -640,12 +663,19 @@ impl SshServerSession {
                     let inbound_sequence = if self.strict_kex {
                         0
                     } else {
-                        self.inbound_packet_count
+                        self.inbound_cipher.as_ref().map_or(
+                            self.inbound_packet_count,
+                            OpenSshChaCha20Poly1305::sequence_number,
+                        )
                     };
                     self.inbound_cipher = Some(OpenSshChaCha20Poly1305::new_with_sequence(
                         &c_key,
                         inbound_sequence,
                     ));
+                    self.rekey.phase = RekeyPhase::Idle;
+                    if self.channel_teardown.close_received {
+                        self.phase = SessionPhase::Closed;
+                    }
                 }
             }
             msg::SERVICE_REQUEST => {
@@ -914,7 +944,12 @@ impl SshServerSession {
                     self.send_packet(&close.into_bytes());
                     self.channel_teardown.close_sent = true;
                 }
-                self.phase = SessionPhase::Closed;
+                // A peer CLOSE may have crossed our locally initiated
+                // KEXINIT. Finish the transport exchange so its queued CLOSE
+                // acknowledgement can be sent under the correct outbound key.
+                if !self.is_rekeying() {
+                    self.phase = SessionPhase::Closed;
+                }
             }
             _ => {
                 // Send unimplemented
@@ -965,10 +1000,14 @@ impl SshServerSession {
     /// CHANNEL_DATA packets no larger than the client's maximum packet size,
     /// and returns how many bytes were accepted.
     ///
-    /// Zero means the window is exhausted: the caller must feed incoming
-    /// bytes (a CHANNEL_WINDOW_ADJUST) before offering the rest again.
+    /// Zero means the window is exhausted or outbound rekey is pending: feed
+    /// incoming transport bytes before offering the same remaining data again.
+    /// Bulk data is never copied into the deferred control queue.
     pub fn send_channel_data(&mut self, data: &[u8]) -> usize {
-        if self.phase == SessionPhase::Closed || self.channel_teardown.close_sent {
+        if self.phase == SessionPhase::Closed
+            || self.channel_teardown.close_sent
+            || self.rekey.blocks_output()
+        {
             return 0;
         }
         let Some(channel) = self.client_channel_id else {

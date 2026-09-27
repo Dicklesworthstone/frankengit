@@ -27,6 +27,15 @@ impl SshServerSession {
         )?;
         let mut reader = WireReader::new(payload);
         let kind = reader.read_u8()?;
+        // After the peer's KEXINIT, application traffic must wait for its
+        // NEWKEYS, even for an already authenticated principal. While waiting
+        // for a reply to our own KEXINIT, earlier in-flight traffic is legal.
+        require(
+            !self.rekey.blocks_input()
+                || ((1..50).contains(&kind)
+                    && !matches!(kind, msg::SERVICE_REQUEST | msg::SERVICE_ACCEPT)),
+            "application message between peer KEXINIT and NEWKEYS",
+        )?;
         if kind >= 80 {
             self.require_authenticated_connection()?;
         }
@@ -39,12 +48,14 @@ impl SshServerSession {
         match kind {
             msg::KEXINIT => {
                 require(
-                    self.phase == SessionPhase::KeyExchange
+                    (self.phase == SessionPhase::KeyExchange
                         && self.session_id.is_none()
                         && self.client_kexinit_payload.is_none()
                         && self.server_kexinit_payload.is_some()
-                        && self.client_ident.is_some(),
-                    "duplicate or unsupported rekey KEXINIT",
+                        && self.client_ident.is_some())
+                        || self.can_start_rekey()
+                        || self.rekey.phase == super::RekeyPhase::AwaitKexinit,
+                    "duplicate KEXINIT or incomplete key exchange",
                 )?;
                 // Negotiation is parsed by the KEXINIT handler. Rekey must
                 // not reset authentication or reuse the initial transcript.
@@ -52,21 +63,23 @@ impl SshServerSession {
             }
             msg::KEX_ECDH_INIT => {
                 require(
-                    self.phase == SessionPhase::KeyExchange
+                    ((self.phase == SessionPhase::KeyExchange && self.session_id.is_none())
+                        || self.rekey.phase == super::RekeyPhase::AwaitEcdh)
                         && self.ephemeral_kex.is_some()
                         && self.client_kexinit_payload.is_some()
                         && self.server_kexinit_payload.is_some()
                         && self.client_ident.is_some()
-                        && self.session_id.is_none(),
-                    "ECDH_INIT outside the initial key exchange",
+                        && self.pending_inbound_key.is_none(),
+                    "ECDH_INIT without a negotiated key exchange",
                 )?;
                 reader.read_string()?;
             }
             msg::NEWKEYS => {
                 require(
-                    self.phase == SessionPhase::UserAuth
+                    ((self.phase == SessionPhase::UserAuth && self.inbound_cipher.is_none())
+                        || (self.rekey.phase == super::RekeyPhase::AwaitNewkeys
+                            && self.inbound_cipher.is_some()))
                         && self.pending_inbound_key.is_some()
-                        && self.inbound_cipher.is_none()
                         && self.outbound_cipher.is_some(),
                     "NEWKEYS without a pending key exchange",
                 )?;

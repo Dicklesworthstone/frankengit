@@ -2,6 +2,9 @@
 //! Encrypted, transcript-verified regression tests for the single-channel boundary.
 //! Both strict and legacy KEX run through the production SANS-I/O engine.
 
+#[path = "ssh_channel_boundaries/rekey.rs"]
+mod rekey;
+
 use std::sync::Arc;
 
 use asupersync::util::DetEntropy;
@@ -515,18 +518,19 @@ fn duplicate_key_exchange_messages_cannot_restart_authentication() {
 }
 
 #[test]
-fn unsupported_rekey_cannot_reset_an_active_channel_to_userauth() {
+fn rekey_cannot_reset_an_active_channel_to_userauth() {
     for strict in [false, true] {
         let (mut session, mut peer) = ready(strict, 37, 1024);
         peer.send(&mut session, &exec_packet(0, "git-upload-pack 'repo.git'")).unwrap();
         peer.receive(&mut session);
         let session_id = session.session_id();
-        let error = peer.send(&mut session, &kexinit(strict)).unwrap_err();
-        assert!(matches!(error, SshSessionError::ProtocolViolation { ref reason }
-            if reason.contains("unsupported rekey")));
+        let principal = session.authenticated_principal();
+        let command = session.active_command().unwrap().clone();
+        rekey::round_trip(&mut session, &mut peer, strict, false, 0x44);
         assert_eq!(session.session_id(), session_id);
-        assert_eq!(*session.phase(), SessionPhase::Closed);
-        assert!(session.active_command().is_none());
+        assert_eq!(*session.phase(), SessionPhase::ActiveChannel);
+        assert_eq!(session.authenticated_principal(), principal);
+        assert_eq!(session.active_command(), Some(&command));
         assert!(peer.receive(&mut session).is_empty());
     }
 }
