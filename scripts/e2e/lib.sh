@@ -1659,6 +1659,27 @@ fge_context() {
   return 0
 }
 
+# What kind of evidence this script produces, from a closed set. It rides on
+# every record (terminal included), and run_all totals scripts per kind, so a
+# `cargo test` wrapper is never counted as a run of the product binary:
+#   e2e-binary          drives a prebuilt `fg` with ordinary clients
+#   real-browser        drives a prebuilt `fg` and an installed browser engine
+#   pinned-oracle       differential against the pinned upstream Git oracle
+#   cargo-test-wrapper  runs cargo tests and grades their output
+#   js-unit             runs node:test contract tests (fake DOM, no browser)
+#   static-check        inspects files, registries or build metadata only
+FGE_KINDS='e2e-binary real-browser pinned-oracle cargo-test-wrapper js-unit static-check'
+fge_kind() {
+  case " $FGE_KINDS " in
+    *" ${1-} "*) FGE_CONTEXT_FIELDS[kind]=$1 ;;
+    *)
+      printf 'fge: invalid kind %s (one of: %s)\n' "${1-}" "$FGE_KINDS" >&2
+      return 2
+      ;;
+  esac
+  return 0
+}
+
 fge_field() {
   FGE_NEXT_FIELDS[${1-}]=${2-}
   return 0

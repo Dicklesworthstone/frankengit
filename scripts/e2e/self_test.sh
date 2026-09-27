@@ -537,6 +537,45 @@ fge_assert_contains FG-000A-ST-PROFILE-NESTED-UNREGISTERED "$profile_nested_stde
   'the nested suite is attributed to the declared area and cannot escape as uncovered'
 
 # ---------------------------------------------------------------------------
+# evidence kinds: a declared kind is counted under its own name, an undeclared
+# script is never counted as end-to-end evidence, and an invented kind is
+# refused by the library
+# ---------------------------------------------------------------------------
+fge_phase action
+run_case evidence-kinds 60 1 pos_control.sh pos_kind_declared.sh
+kinds_receipt=$CASE_RECEIPT
+kind_of() { # script id -> evidence_kind from its suite_script record
+  local line
+  line=$(grep '"kind":"suite_script"' "$kinds_receipt" 2>/dev/null | grep -F "\"script_id\":\"$1\"" | head -1)
+  if [ -n "$line" ] && fge_json_top "$line"; then
+    fge_json_unquote "${FGE_JSON[evidence_kind]-\"\"}"
+  fi
+}
+kinds_declared=$(kind_of selftests-fixtures-pos_kind_declared)
+kinds_undeclared=$(kind_of selftests-fixtures-pos_control)
+kinds_totals=''
+kinds_line=$(grep -m1 '"kind":"suite_terminal"' "$kinds_receipt" 2>/dev/null || printf '')
+if [ -n "$kinds_line" ] && fge_json_top "$kinds_line"; then
+  kinds_totals=${FGE_JSON[evidence_kinds]-}
+fi
+kinds_rc=$CASE_RC
+run_case evidence-kind-invalid 60 1 neg_kind_invalid.sh
+fge_phase assert
+fge_assert_eq FG-000A-ST-KIND-RC 0 "$kinds_rc" \
+  'a declared-kind control and an undeclared control both pass'
+fge_assert_eq FG-000A-ST-KIND-DECLARED e2e-binary "$kinds_declared" \
+  'a script declaring fge_kind e2e-binary is reported under that kind'
+fge_assert_eq FG-000A-ST-KIND-UNDECLARED undeclared "$kinds_undeclared" \
+  'a script that declares no kind is reported as undeclared, never as e2e evidence'
+fge_assert_eq FG-000A-ST-KIND-TOTALS \
+  '{"e2e-binary":{"started":1,"passed":1},"undeclared":{"started":1,"passed":1}}' "$kinds_totals" \
+  'the suite terminal totals scripts per kind instead of summing them'
+fge_assert_eq FG-000A-ST-KIND-INVALID-RC 1 "$CASE_RC" \
+  'an invented evidence kind makes the script fail rather than be counted'
+fge_assert_ne FG-000A-ST-KIND-INVALID-DISP ok "$CASE_DISPOSITION" \
+  'the invented-kind script does not receive a passing disposition'
+
+# ---------------------------------------------------------------------------
 # evidence retention
 # ---------------------------------------------------------------------------
 fge_preserve "$CASES" 'self-test case outputs, receipts and run_all stderr'

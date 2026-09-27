@@ -621,6 +621,8 @@ RA_V_DISPOSITION=''
 RA_V_DETAIL=''
 RA_V_RECORDS=0
 RA_V_TERMINAL=''
+RA_V_TERMFIELDS=''
+RA_V_KIND=undeclared
 declare -a RA_V_IDS=() RA_V_PASSED=() RA_V_FAILED=() RA_V_SKIPPED=()
 declare -a RA_V_UNSUPPORTED=() RA_V_ERRORS=() RA_V_DUPS=()
 RA_V_STATUS=''
@@ -638,6 +640,8 @@ ra_validate_log() {
   RA_V_DETAIL=''
   RA_V_RECORDS=0
   RA_V_TERMINAL=''
+  RA_V_TERMFIELDS=''
+  RA_V_KIND=undeclared
   RA_V_IDS=()
   RA_V_PASSED=()
   RA_V_FAILED=()
@@ -722,6 +726,7 @@ ra_validate_log() {
       termcount=$((termcount + 1))
       termline=$n
       RA_V_TERMINAL=${FGE_JSON[terminal]:-}
+      RA_V_TERMFIELDS=${FGE_JSON[fields]:-}
     fi
   done <"$log"
 
@@ -745,6 +750,19 @@ ra_validate_log() {
     RA_V_DISPOSITION=truncated_log
     RA_V_DETAIL="highest seq is $maxseq but only $n records are present"
     return 1
+  fi
+
+  # The script's declared evidence kind (fge_kind), read from the terminal
+  # record. A script that declares nothing is counted as undeclared, never as
+  # end-to-end evidence.
+  if [ -n "$RA_V_TERMFIELDS" ] && [ "$RA_V_TERMFIELDS" != null ] && fge_json_top "$RA_V_TERMFIELDS"; then
+    if [ -n "${FGE_JSON[kind]:-}" ]; then
+      RA_V_KIND=$(fge_json_unquote "${FGE_JSON[kind]}")
+      case " $FGE_KINDS " in
+        *" $RA_V_KIND "*) : ;;
+        *) RA_V_KIND=invalid ;;
+      esac
+    fi
   fi
 
   if [ -z "$RA_V_TERMINAL" ]; then
@@ -921,6 +939,8 @@ declare -a S_NOTRUN=() S_FLAKY=() S_EXITMISMATCH=() S_TRUNCATED=()
 declare -a S_CLEANUPFAILED=()
 declare -a ALL_IDS=() CROSS_DUP=()
 declare -A ID_OWNER=()
+# Per evidence kind (fge_kind): scripts started and scripts that passed.
+declare -A KIND_STARTED=() KIND_PASSED=()
 
 S_DISCOVERED=("${RA_ALL_DISCOVERED[@]+"${RA_ALL_DISCOVERED[@]}"}")
 # FILTERED: discovered, then excluded by the selected profile. Recorded because
@@ -984,6 +1004,7 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
   fi
 
   S_STARTED+=("$sid")
+  RA_V_KIND=undeclared
 
   first_status=''
   final_disposition=''
@@ -1092,6 +1113,9 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
     S_FLAKY+=("$sid")
   fi
 
+  KIND_STARTED[$RA_V_KIND]=$((${KIND_STARTED[$RA_V_KIND]:-0} + 1))
+  [ "$final_disposition" = ok ] && KIND_PASSED[$RA_V_KIND]=$((${KIND_PASSED[$RA_V_KIND]:-0} + 1))
+
   case $final_disposition in
     ok) S_PASSED+=("$sid") ;;
     failed) S_FAILED+=("$sid") ;;
@@ -1132,6 +1156,8 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
   fge__jstr script_id "$sid"
   FGE__J+=','
   fge__jstr disposition "$final_disposition"
+  FGE__J+=','
+  fge__jstr evidence_kind "$RA_V_KIND"
   FGE__J+=','
   fge__jstrn detail "$final_detail"
   FGE__J+=','
@@ -1290,6 +1316,21 @@ for pair in \
   unset -n arr
 done
 FGE__J+=','
+# Scripts started and passed per evidence kind, so end-to-end runs of the
+# product and cargo-test wrappers are never summed into one number.
+fge__esc evidence_kinds
+FGE__J+="\"$FGE__E\":{"
+ra_kind_sep=''
+RA_KIND_LINE=''
+while IFS= read -r ra_kind; do
+  [ -n "$ra_kind" ] || continue
+  fge__esc "$ra_kind"
+  FGE__J+="$ra_kind_sep\"$FGE__E\":{\"started\":${KIND_STARTED[$ra_kind]},\"passed\":${KIND_PASSED[$ra_kind]:-0}}"
+  ra_kind_sep=','
+  RA_KIND_LINE+=" $ra_kind=${KIND_PASSED[$ra_kind]:-0}/${KIND_STARTED[$ra_kind]}"
+done < <(printf '%s\n' "${!KIND_STARTED[@]}" | LC_ALL=C sort)
+FGE__J+='}'
+FGE__J+=','
 fge__esc acceptance_ids
 FGE__J+="\"$FGE__E\":"
 fge__jarr_str_into "${ALL_IDS[@]+"${ALL_IDS[@]}"}"
@@ -1312,6 +1353,7 @@ if [ -n "$RA_PROFILE" ]; then
   printf 'run_all: profile=%s uncovered_areas=[%s]\n' \
     "$RA_PROFILE" "${S_MANIFEST_UNCOVERED_AREAS[*]-}" >&2
 fi
+printf 'run_all: kinds (passed/started):%s\n' "${RA_KIND_LINE:- none}" >&2
 printf 'run_all: receipt: %s\n' "$RA_RECEIPT" >&2
 
 [ "$suite_status" = pass ] || exit 1
