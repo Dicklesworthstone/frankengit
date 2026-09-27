@@ -204,7 +204,7 @@ export async function verifyExportManifest(input, encoded, crypto, checkpoint = 
 // One implementation shared by the served transfer browser and offline command.
 // A lexical scope keeps decoder helpers private to verification, separate from
 // HTTP/manifest parsing. This module is already served by both transfer routes.
-export const { BUNDLE_VERIFY_LIMITS, BundleVerificationError, verifyGitBundleObjects, verifyGitBundle, normalizeBundleExpectation, verifyGitBundleAgainst } = (() => {
+export const { BUNDLE_VERIFY_LIMITS, BundleVerificationError, verifyGitBundleObjects, verifyGitBundle, normalizeBundleExpectation, verifyGitBundleAgainst, prepareGitBundleRecovery } = (() => {
 // Independent, read-only verification of portable Git bytes. This is not the
 // node's admission engine: it never imports objects, consults ambient Git state,
 // follows submodules, authenticates authors, or grants publication authority.
@@ -568,7 +568,7 @@ async function readBundle(input, options, expected = null) {
     if (row.ref_hex.startsWith('726566732f68656164732f') && object.kind !== 'commit') refuse('branch_target_not_commit');
   }
   const sha256 = artifactSha256 ?? await budget.digest(bytes, 'sha256'); budget.check();
-  return { budget, byId, objects, summary: {
+  return { budget, byId, objects, pack, summary: {
     profile: 'bounded-native-bundle-objects-v1', object_format: format, bytes: bytes.length, sha256,
     header_bytes: headerBytes, pack_checksum: checksum, pack_checksum_verified: true,
     pack_objects: count, objects_verified: true, object_closure_verified: false,
@@ -766,7 +766,87 @@ async function verifyGitBundleAgainst(input, expectations, options = {}) {
   return { ...result, caller_expectations_matched: true, expectations: expected };
 }
 
-return { BUNDLE_VERIFY_LIMITS, BundleVerificationError, verifyGitBundleObjects, verifyGitBundle, normalizeBundleExpectation, verifyGitBundleAgainst };
+// Prepare standard Git interchange files, never a FrankenGit authority store.
+// Pack bytes are retained verbatim. Reference names live in packed-refs and
+// HEAD bytes, not host paths; the caller explicitly selects the default branch.
+async function prepareGitBundleRecovery(input, request, options = {}) {
+  if (!request || typeof request !== 'object' || Array.isArray(request) ||
+      Object.keys(request).some(key => !['head_ref_hex', 'expectations'].includes(key))) refuse('invalid_recovery_request');
+  const head = request.head_ref_hex;
+  if (typeof head !== 'string' || head.length > 8192 || !/^(?:[0-9a-f]{2})+$/.test(head)) refuse('invalid_recovery_head');
+  const fromHex = value => Uint8Array.from(value.match(/../g) ?? [], pair => Number.parseInt(pair, 16));
+  reference(fromHex(head));
+  if (!head.startsWith('726566732f68656164732f')) refuse('recovery_head_not_branch');
+  const expected = request.expectations === undefined ? null : normalizeBundleExpectation(request.expectations);
+  const decoded = await readBundle(input, options, expected), { budget, pack, objects } = decoded;
+  const verification = await closure(decoded), format = verification.object_format, width = format === 'sha1' ? 20 : 32;
+  if (!verification.refs.some(row => row.ref_hex === head)) refuse('recovery_head_not_advertised');
+  // A packed-refs file can encode names that cannot coexist as loose refs.
+  // Refuse those namespaces rather than create a repository Git cannot update.
+  const names = new Set(verification.refs.map(row => row.ref_hex));
+  for (const row of verification.refs) {
+    budget.check(); const name = fromHex(row.ref_hex); budget.spend(name.length);
+    for (let i = 0; i < name.length; i++) if (name[i] === 47) {
+      budget.spend(i); if (names.has(hex(name.subarray(0, i)))) refuse('overlapping_recovery_refs');
+    }
+  }
+  // Git idx-v2: fanout, sorted OIDs, per-record CRC32, 31-bit offsets,
+  // pack checksum, index checksum. The existing 16 MiB cap excludes large offsets.
+  budget.spend(2048); const crcTable = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let value = i; for (let bit = 0; bit < 8; bit++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    crcTable[i] = value;
+  }
+  const rows = [], fanout = new Uint32Array(256);
+  for (let i = 0; i < objects.length; i++) {
+    budget.check(); const object = objects[i], end = objects[i + 1]?.offset ?? pack.length - width;
+    let crc = 0xffffffff;
+    for (let start = object.offset; start < end; start += 65536) {
+      const until = Math.min(start + 65536, end); budget.spend(until - start);
+      for (let at = start; at < until; at++) crc = crcTable[(crc ^ pack[at]) & 255] ^ (crc >>> 8);
+      if (budget.work >= budget.nextYield) await budget.yield();
+    }
+    rows.push({ id: object.id, offset: object.offset, crc: (crc ^ 0xffffffff) >>> 0 });
+    fanout[Number.parseInt(object.id.slice(0, 2), 16)]++;
+  }
+  rows.sort((a, b) => { budget.spend(width); return a.id < b.id ? -1 : 1; });
+  budget.check();
+  const index = new Uint8Array(8 + 1024 + rows.length * (width + 8) + width * 2), view = new DataView(index.buffer);
+  view.setUint32(0, 0xff744f63); view.setUint32(4, 2);
+  let total = 0;
+  for (let i = 0; i < 256; i++) { total += fanout[i]; view.setUint32(8 + i * 4, total); }
+  for (let i = 0; i < rows.length; i++) {
+    budget.spend(width + 8); index.set(fromHex(rows[i].id), 1032 + i * width);
+    view.setUint32(1032 + rows.length * width + i * 4, rows[i].crc);
+    view.setUint32(1032 + rows.length * (width + 4) + i * 4, rows[i].offset);
+    if (budget.work >= budget.nextYield) await budget.yield();
+  }
+  index.set(pack.subarray(-width), index.length - width * 2);
+  index.set(fromHex(await budget.digest(index.subarray(0, -width), format)), index.length - width);
+  const join = parts => {
+    const length = parts.reduce((sum, part) => sum + part.length, 0), out = new Uint8Array(length); let at = 0;
+    budget.spend(length); for (const part of parts) { out.set(part, at); at += part.length; } return out;
+  };
+  const packedRefs = join([encoder.encode('# pack-refs with: sorted\n'), ...verification.refs.map(row =>
+    join([encoder.encode(`${row.object_id} `), fromHex(row.ref_hex), encoder.encode('\n')]))]);
+  const config = encoder.encode(`[core]\n\trepositoryformatversion = ${format === 'sha256' ? 1 : 0}\n\tbare = true\n` +
+    (format === 'sha256' ? '[extensions]\n\tobjectformat = sha256\n' : ''));
+  const prefix = `objects/pack/pack-${verification.pack_checksum}`;
+  const files = [{ path: `${prefix}.pack`, bytes: pack }, { path: `${prefix}.idx`, bytes: index },
+    { path: 'packed-refs', bytes: packedRefs }, { path: 'config', bytes: config },
+    { path: 'HEAD', bytes: join([encoder.encode('ref: '), fromHex(head), encoder.encode('\n')]) }];
+  const manifest = [];
+  for (const file of files) manifest.push({ path: file.path, bytes: file.bytes.length, sha256: await budget.digest(file.bytes, 'sha256') });
+  const receipt = { schema: 'frankengit-source-recovery-v1', bundle_sha256: verification.sha256,
+    object_format: format, head_ref_hex: head, files: manifest };
+  const plan_sha256 = await budget.digest(encoder.encode(JSON.stringify(receipt)), 'sha256');
+  budget.check();
+  return { files, directories: ['objects', 'objects/pack', 'refs'], receipt, plan_sha256,
+    verification: { ...verification, ...(expected ? { caller_expectations_matched: true, expectations: expected } : {}) },
+    work: budget.work, filesystem_written: false, forge_state_restored: false };
+}
+
+return { BUNDLE_VERIFY_LIMITS, BundleVerificationError, verifyGitBundleObjects, verifyGitBundle, normalizeBundleExpectation, verifyGitBundleAgainst, prepareGitBundleRecovery };
 })();
 
 // Own the exact payload before asynchronous verification. Keep the legacy v1
