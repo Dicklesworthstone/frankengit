@@ -8,6 +8,8 @@ mod refresh;
 pub use refresh::{LexicalRefreshStats, LexicalReuse, RefreshDocument};
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod scope_tests;
 
 use super::{
     BTreeMap, Digest, Entry, GitHashAlgorithm, GitOid, IndexedDocument, LexicalError, LexicalHit,
@@ -553,10 +555,12 @@ impl<S: AuthorityStore> LexicalIndexStore<'_, S> {
             return Err(IndexError::SourceMismatch);
         }
         for reference in &selection.manifest.segments {
-            if after.is_some_and(|id| reference.last_id <= id) {
+            if after.is_some_and(|id| reference.last_id <= id)
+                || !reference.may_match(query, &mut scan.budget, live)?
+            {
                 continue;
             }
-            scan.before(read_limits, live)?;
+            scan.before(reference, read_limits, live)?;
             let bytes = payload(
                 self.store.read_immutable(&payload_key(
                     self.namespace,
@@ -708,10 +712,12 @@ impl<S: AsyncAuthorityStore> LexicalIndexStore<'_, S> {
             return Err(IndexError::SourceMismatch);
         }
         for reference in &selection.manifest.segments {
-            if after.is_some_and(|id| reference.last_id <= id) {
+            if after.is_some_and(|id| reference.last_id <= id)
+                || !reference.may_match(query, &mut scan.budget, live)?
+            {
                 continue;
             }
-            scan.before(read_limits, live)?;
+            scan.before(reference, read_limits, live)?;
             let bytes = payload(
                 self.store
                     .read_immutable(cx, &payload_key(self.namespace, "segment", reference.root)?)
@@ -756,10 +762,21 @@ impl Scan {
     }
     fn before(
         &mut self,
+        reference: &SegmentRef,
         limits: LexicalReadLimits,
         live: &mut impl FnMut() -> bool,
     ) -> Result<(), IndexError> {
         before_read(self.bytes, limits, live)?;
+        // The selected manifest already commits to this encoded length. Refuse
+        // a read known not to fit BEFORE calling either storage implementation.
+        // payload()/observe() still verify actual lengths and commitments.
+        if self
+            .bytes
+            .checked_add(reference.bytes as usize)
+            .is_none_or(|total| total > limits.max_payload_bytes)
+        {
+            return Err(LexicalError::Limit("index read bytes").into());
+        }
         if self.segments == limits.max_segments {
             return Err(LexicalError::Limit("index segment reads").into());
         }

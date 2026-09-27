@@ -1,8 +1,8 @@
 use super::{
-    Digest, IndexError, LexicalError, LexicalNamespace, LexicalSegment, LexicalSource,
+    Digest, IndexError, LexicalError, LexicalNamespace, LexicalQuery, LexicalSegment, LexicalSource,
     MAX_DOCUMENTS, MAX_INDEX_BYTES, MAX_INDEX_DOCUMENTS, MAX_POSTINGS, MAX_SEGMENT_BYTES,
-    MAX_SEGMENTS, MAX_SOURCE_BYTES, MAX_TERMS, RepositoryAuthorityHeadId, RepositoryCommitId,
-    SchemaFamily, SchemaId, bounded_add, check, path_valid,
+    MAX_SEGMENTS, MAX_SOURCE_BYTES, MAX_TERMS, QueryBudget, RepositoryAuthorityHeadId,
+    RepositoryCommitId, SchemaFamily, SchemaId, bounded_add, check, path_valid,
 };
 use crate::lexical::encoding::{
     count, decode_limits, namespace_read, namespace_write, oid_read, payload_root,
@@ -100,6 +100,41 @@ impl SegmentRef {
             terms: segment.term_count() as u32,
             postings: segment.posting_count() as u32,
         })
+    }
+    /// Conservative pruning from the already authenticated catalog. The scope
+    /// is a union of exact paths and descendants, not a textual starts-with
+    /// filter: `src-old` must not be included by `src`. A descendant lies in
+    /// [prefix + '/', prefix + '0') in native byte order. Compare iterators so
+    /// even a maximum-length or non-UTF-8 prefix needs no successor allocation.
+    /// A positive answer is not a hit or a grant; the segment still verifies
+    /// its commitment and applies the original per-document query predicate.
+    pub(super) fn may_match(
+        &self,
+        query: &LexicalQuery,
+        budget: &mut QueryBudget,
+        live: &mut impl FnMut() -> bool,
+    ) -> Result<bool, LexicalError> {
+        check(live)?;
+        if query.prefixes().is_empty() {
+            return Ok(true);
+        }
+        let first = self.first_path.as_slice();
+        let last = self.last_path.as_slice();
+        for prefix in query.prefixes() {
+            // Bound all four byte comparisons before doing them. This shares
+            // the same query budget across skipped and visited segments.
+            budget.charge(4 * (prefix.len() as u64 + 1), live)?;
+            let prefix = prefix.as_slice();
+            if (first <= prefix && prefix <= last)
+                || (last.iter().copied().cmp(prefix.iter().copied().chain([b'/']))
+                    != std::cmp::Ordering::Less
+                    && first.iter().copied().cmp(prefix.iter().copied().chain([b'0']))
+                        == std::cmp::Ordering::Less)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     fn write(&self, out: &mut Encoder) -> Result<(), IndexError> {
         out.write_digest(&self.root)?;
