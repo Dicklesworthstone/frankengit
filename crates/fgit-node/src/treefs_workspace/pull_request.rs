@@ -2,6 +2,7 @@
 //! caller-minted object proof is introduced. Both code and metadata mutations
 //! use the node's existing exact-basis projection and verified object fabric.
 
+mod fast_forward;
 mod preparation;
 #[path = "reviews.rs"]
 mod reviews;
