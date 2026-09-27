@@ -162,6 +162,103 @@ export async function collectVerifiedBlob(selection, source, path, expected, rea
   throw new Error('Complete export exceeded its page limit.');
 }
 
+// Directory listings disclose kinds, not original mode bytes. Reconstruct only
+// canonical Git modes; a legacy spelling must fail its hash, never be normalized
+// into a verified claim. API byte-name order differs from Git's directory order.
+export const PATH_PROOF_LIMITS = Object.freeze({ maxPages: 128, maxEntries: 12_800, maxBytes: 4 * 1024 * 1024 });
+const TREE_MODES = Object.freeze({ file: '100644', executable: '100755', directory: '40000', symlink: '120000', gitlink: '160000' });
+function proofEntry(row) {
+  if (!row || typeof row !== 'object' || !Object.hasOwn(TREE_MODES, row.kind)) throw new Error('Unsupported tree entry kind.');
+  checkedPath(row.name_hex);
+  const name = unhex(row.name_hex, 4096);
+  if (name.includes(47)) throw new Error('Tree entry must name one immediate child.');
+  return { name, nameHex: row.name_hex, kind: row.kind, objectId: row.object_id, mode: TREE_MODES[row.kind] };
+}
+export async function verifyDirectory(entries, format, expected, cryptoImpl = globalThis.crypto, checkpoint = () => {}) {
+  checkpoint();
+  const id = commitHex(expected, format);
+  if (!Array.isArray(entries) || entries.length > PATH_PROOF_LIMITS.maxEntries) throw new Error('Tree entry budget exceeded.');
+  if (!cryptoImpl?.subtle?.digest) throw new Error('Native tree verification requires WebCrypto.');
+  let size = 0;
+  const names = new Set();
+  const rows = entries.map(entry => {
+    checkpoint();
+    const row = proofEntry(entry), oid = unhex(commitHex(row.objectId, format), 32);
+    if (names.has(row.nameHex)) throw new Error('Duplicate tree entry name.');
+    names.add(row.nameHex);
+    size += row.mode.length + row.name.length + 2 + oid.length;
+    if (size > PATH_PROOF_LIMITS.maxBytes) throw new Error('Tree byte budget exceeded.');
+    return { ...row, oid, order: row.nameHex + (row.kind === 'directory' ? '2f' : '00') };
+  });
+  rows.sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : 0);
+  const header = encoder.encode(`tree ${size}\0`), framed = new Uint8Array(header.length + size);
+  framed.set(header); let offset = header.length;
+  for (const row of rows) {
+    checkpoint();
+    const mode = encoder.encode(row.mode + ' ');
+    framed.set(mode, offset); offset += mode.length;
+    framed.set(row.name, offset); offset += row.name.length;
+    framed[offset++] = 0; framed.set(row.oid, offset); offset += row.oid.length;
+  }
+  const actual = hex(new Uint8Array(await cryptoImpl.subtle.digest(format === 'sha1' ? 'SHA-1' : 'SHA-256', framed)));
+  checkpoint();
+  if (actual !== id) throw new Error('Directory listing does not reproduce its native tree identity; inconsistent data or unsupported original modes.');
+  return { id, bytes: size, entries: rows.length };
+}
+// Verify EVERY containing directory from the selected root, not merely the last
+// parent or a server-supplied file ID. All ancestors share one cumulative budget.
+// This proves path inclusion relative to that root; it does not authenticate the
+// root's association with the commit or an authority head, or confer read grants.
+export async function verifyBlobPath(selection, source, path, expected, readTree,
+  { cryptoImpl = globalThis.crypto, checkpoint = () => {}, limits = PATH_PROOF_LIMITS } = {}) {
+  if (!source || !expected || !limits || typeof limits !== 'object' ||
+      Object.keys(limits).some(key => !Object.hasOwn(PATH_PROOF_LIMITS, key))) throw new Error('Path proof requires a pinned source, file and bounded limits.');
+  const bounds = { ...PATH_PROOF_LIMITS, ...limits };
+  for (const key of Object.keys(bounds)) if (!Number.isSafeInteger(bounds[key]) || bounds[key] < 1 || bounds[key] > PATH_PROOF_LIMITS[key]) throw new Error('Invalid path-proof budget.');
+  checkedPath(path);
+  const selected = { ...selection }, pinned = { ...source }, wanted = { ...expected };
+  const root = commitHex(pinned.tree, selected.format), target = commitHex(wanted.id, selected.format);
+  if (!['file', 'executable', 'symlink'].includes(wanted.kind)) throw new Error('Path proof requires a file or symlink target.');
+  const rawPath = unhex(path, 4096), components = []; let start = 0;
+  for (let i = 0; i <= rawPath.length; i++) if (i === rawPath.length || rawPath[i] === 47) { components.push(hex(rawPath.subarray(start, i))); start = i + 1; }
+  let parent = '', treeId = root, pages = 0, count = 0, bytes = 0;
+  for (const [depth, name] of components.entries()) {
+    const rows = []; let after = null;
+    do {
+      checkpoint();
+      if (pages >= bounds.maxPages) throw new Error('Path-proof page budget exceeded.');
+      pages++;
+      const reply = await readTree({ ...sourceFields(selected, pinned, parent), limit: '100', ...(after === null ? {} : { after_hex: after }) });
+      checkpoint(); sourceBinding(reply, selected, pinned);
+      if (reply.type !== 'source_tree' || reply.path_hex !== (parent || null) || reply.after_hex !== after || reply.limit !== 100 ||
+          commitHex(reply.object_id, selected.format) !== treeId || !Array.isArray(reply.entries) || reply.entries.length > 100) throw new Error('Path-proof directory selection or page changed.');
+      let previous = after;
+      for (const entry of reply.entries) {
+        checkpoint();
+        const row = proofEntry(entry), id = commitHex(row.objectId, selected.format);
+        if (previous !== null && row.nameHex <= previous) throw new Error('Path-proof directory ordering changed.');
+        previous = row.nameHex;
+        if (++count > bounds.maxEntries) throw new Error('Path-proof entry budget exceeded.');
+        bytes += row.mode.length + row.name.length + 2 + id.length / 2;
+        if (bytes > bounds.maxBytes) throw new Error('Path-proof byte budget exceeded.');
+        rows.push({ name_hex: row.nameHex, kind: row.kind, object_id: id });
+      }
+      if (reply.next_after_hex !== null && (reply.entries.length !== 100 || reply.next_after_hex !== previous)) throw new Error('Path-proof continuation is incomplete.');
+      after = reply.next_after_hex;
+    } while (after !== null);
+    await verifyDirectory(rows, selected.format, treeId, cryptoImpl, checkpoint);
+    const child = rows.find(entry => entry.name_hex === name);
+    if (!child) throw new Error('Selected path is absent from the verified directory.');
+    if (depth + 1 < components.length) {
+      if (child.kind !== 'directory') throw new Error('Path proof never traverses symlinks, files or gitlinks.');
+      treeId = child.object_id; parent = pathJoin(parent, name);
+    } else if (child.object_id !== target || child.kind !== wanted.kind) throw new Error('Selected file is not the verified tree entry.');
+  }
+  checkpoint();
+  return { rootTree: root, path, id: target, kind: wanted.kind, directories: components.length, pages, entries: count, bytes,
+    pathVerified: true, authorityVerified: false };
+}
+
 export function sourceFields(selection, snapshot, path = '') {
   if (!['sha1', 'sha256'].includes(selection.format) || !selection.reference.startsWith('refs/')) {
     throw new Error('Choose a full reference and an object format.');
@@ -366,10 +463,15 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
     if (cancelControl) cancelControl.disabled = true;
     clear(); status('Read canceled. No partial export or verified download was retained.');
   }
-  function exportFile(page) {
+  function exportFile(page, verifyPath = false) {
     const version = generation;
     void runRead(async (selected, pinned, binding, signal, checkpoint) => {
       if (version + 1 !== generation || !pinned || !binding) throw new Error('Reopen the selected file before exporting.');
+      const proof = verifyPath ? await verifyBlobPath(selected, page.source, page.path,
+        { id: page.id, kind: page.kind }, fields => {
+          checkpoint(); status('Verifying complete parent directories against the selected root tree…');
+          return request('tree', fields, signal);
+        }, { cryptoImpl, checkpoint }) : null;
       const verified = await collectVerifiedBlob(selected, page.source, page.path,
         { id: page.id, kind: page.kind, total: page.total },
         fields => {
@@ -391,8 +493,9 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
       byId('content').append(node('h2', displayBytes(verified.path)),
         node('p', `Complete native blob verified (${selected.format}): ${verified.id}`),
         node('p', `${verified.bytes.length} bytes verified across ${verified.pages} read${verified.pages === 1 ? '' : 's'}. The download contains the complete file, not just this preview.`),
-        node('p', 'This verifies blob bytes against the returned Git identity, not an authority signature or a proof that this path belongs to the tree.'),
+        node('p', proof ? 'Both blob bytes and path inclusion in the selected native root tree were verified. This is not an authority signature or verification of the source commit.' : 'This verifies blob bytes against the returned Git identity, not an authority signature or a proof that this path belongs to the tree.'),
         node('pre', preview.text), download);
+      if (proof) byId('content').append(node('p', `Path inclusion verified against native root tree ${proof.rootTree}: ${proof.directories} directories, ${proof.pages} pages, ${proof.entries} entries, ${proof.bytes} encoded tree bytes. The root-to-commit association and authority remain server claims.`));
       if (verified.kind === 'symlink') byId('content').append(node('p', 'Only symbolic-link target bytes are downloaded; no link is followed or created.'));
       verifiedDownload = verified;
       return { snapshot: pinned, binding, message: 'Complete file verified. Download is ready; no repository state was changed.' };
@@ -465,6 +568,9 @@ export function mount(document, location, fetcher = globalThis.fetch, options = 
         if (version === generation) exportFile(page);
       }));
       else byId('content').append(node('p', 'Complete-file download exceeds the 8 MiB browser limit; byte-range previews remain available.'));
+      if (page.total <= MAX_FILE_BYTES) byId('content').append(button('Verify path and complete file for download', () => {
+        if (version === generation) exportFile(page, true);
+      }));
       if (offset) byId('paging').append(button('Previous byte range', () => blob(path, Math.max(0, offset - PAGE_BYTES), nextExpected)));
       if (page.next !== null) byId('paging').append(button('Next byte range', () => blob(path, page.next, nextExpected)));
     });
