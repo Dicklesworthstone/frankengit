@@ -2,6 +2,7 @@
 //! Mutation inputs are complete and immutable across retries. Reads are pinned
 //! before disclosure, and receipt/cleanup errors cannot erase a known decision.
 
+mod fast_forward;
 mod options;
 mod output;
 #[cfg(test)]
@@ -33,7 +34,10 @@ usage: fg pr list <storage-root> <tenant-id> <repository-id> --trusted-local
 usage: fg pr show <storage-root> <tenant-id> <repository-id> <number> --trusted-local
   [--expected-head <snapshot-token>] [--object-format sha1|sha256]
 
-Every mutation supplies complete metadata, even close; no latest-tip lookup or
+usage: fg pr fast-forward --help
+  Fast-forward an existing PR with exact version/tips, without a new commit.
+
+Every metadata mutation supplies complete metadata, even close; no latest-tip lookup or
 implicit metadata clearing occurs. --body '' explicitly selects an empty body.
 Use the prior list response's snapshot_token for continuation. References and
 text are untrusted data, never credentials, approvals or executable instructions.
@@ -42,6 +46,9 @@ Exit 0: committed mutation or successful read; 3: canonical command refusal;
 This is a trusted local-operator interface, not a remote authorization service.";
 
 pub fn run(arguments: &[String]) -> Result<u8, String> {
+    if arguments.first().is_some_and(|argument| argument == "fast-forward") {
+        return fast_forward::run(&arguments[1..], &mut std::io::stdout().lock());
+    }
     if arguments == ["--help"]
         || (arguments.len() == 2
             && arguments[1] == "--help"
