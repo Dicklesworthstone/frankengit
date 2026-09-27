@@ -45,7 +45,7 @@ export RCH_CARGO_WRAPPER_BYPASS=1
 echo_step() { printf '\033[1;36m==> %s\033[0m\n' "$*" >&2; }
 artifact_warning() { printf 'verify: replay artifact unavailable: %s\n' "$1" >&2 || true; }
 print_usage() {
-  printf 'usage: %s [--no-artifact] {docs|constitution|fast|full|release}\n' "$0" >&2
+  printf 'usage: %s [--no-artifact] {docs|constitution|fast|e2e|full|release}\n' "$0" >&2
   printf 'feature lanes: exact-patch|index-maintenance|source-symbols|symbol-index|symbol-index-native|symbol-index-maintenance|review-protection|admission-tests|native-rebase-check|native-rebase-test\n' "$0" >&2
 }
 refuse_dormant() {
@@ -91,6 +91,41 @@ run_fast() {
   cargo clippy --workspace --all-targets --locked -- -D warnings
 }
 
+# The product lane (frankengit-root-doctrine-x2mv.4.18). It builds `fg` once
+# and runs, through scripts/e2e/run_all.sh, every discovered suite whose
+# declared evidence kind says it exercises the product or the browser shell:
+# e2e-binary (a prebuilt fg with stock clients, including every registered
+# smoke campaign), real-browser (fg plus an installed Chrome) and js-unit (the
+# browser contract tests). Cargo-test wrappers are not selected: they are not
+# evidence that the product works, and `fast` already runs the tests they wrap.
+# Suites that need a missing client (Chrome, Node, the pinned oracle) report a
+# non-pass skip, so this lane cannot go green by skipping them.
+run_e2e() {
+  echo_step "Building the fg binary once for the product suites"
+  cargo build --locked -p fgit-cli --bin fg
+  local target_dir
+  target_dir=$(cargo metadata --locked --no-deps --format-version 1 |
+    grep -o '"target_directory":"[^"]*"' | cut -d'"' -f4)
+  [ -x "$target_dir/debug/fg" ] || {
+    printf 'verify: e2e: no fg binary at %s/debug/fg\n' "$target_dir" >&2
+    return 1
+  }
+  local -a suites=()
+  local suite
+  while IFS= read -r suite; do
+    suites+=("$suite")
+  done < <(grep -rlE --include='*.sh' \
+    '^fge_kind (e2e-binary|real-browser|js-unit)$|^fge_smoke_campaign ' \
+    "$ROOT/scripts/e2e/suites" | LC_ALL=C sort)
+  [ "${#suites[@]}" -gt 0 ] || {
+    printf 'verify: e2e: no product suites discovered\n' >&2
+    return 1
+  }
+  echo_step "Running ${#suites[@]} product suites against $target_dir/debug/fg"
+  FG_BIN="$target_dir/debug/fg" "$ROOT/scripts/e2e/run_all.sh" \
+    --timeout "${FGE_E2E_TIMEOUT:-1800}" "${suites[@]}"
+}
+
 run_full() {
   refuse_dormant "Full conformance/lab/fault/fuzz/corpus lane is not implemented yet"
 }
@@ -121,6 +156,7 @@ run_lane() {
     docs) run_docs ;;
     constitution) run_constitution ;;
     fast) run_fast ;;
+    e2e) run_e2e ;;
     full) run_full ;;
     release) run_release ;;
     # Feature lanes: thin dispatch to repository-owned verification scripts so
