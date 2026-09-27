@@ -4,21 +4,33 @@
 use super::super::json::{self, Object, Value, object, text};
 use super::super::protocol::{Tool, ToolError};
 use super::{NodeTools, require_fields};
-use super::{mutations as common, review_writes as candidate};
-use fgit_forge::ExpectedVersion;
+use super::{mutations as common, pull_writes, review_writes as candidate};
+use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::review::{CandidateBinding, ReviewSubject};
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, PrincipalId};
 use std::collections::BTreeSet;
 
 pub(super) const NAME: &str = "frankengit_pull_merge_reviewed";
+pub(super) const FAST_FORWARD_NAME: &str = "frankengit_pull_fast_forward";
 const MAX_REVIEWERS: usize = 32;
 
+pub(super) const fn is_tool(name: &str) -> bool {
+    name == NAME || name == FAST_FORWARD_NAME
+}
+
 pub(super) fn tools() -> Vec<Tool> {
-    vec![Tool {
-        name: NAME,
-        description: "Atomically publish an exact native merge candidate AND its PR merge event, requiring every explicitly named reviewer to have approved that exact candidate at current PR/policy versions. Requires the independent reviewed-merge grant. Opener/submitter votes cannot satisfy the gate. No unreviewed fallback, force push, latest-tip refresh or repository-wide protection configuration.",
-        schema: schema(),
-    }]
+    vec![
+        Tool {
+            name: NAME,
+            description: "Atomically publish an exact native merge candidate AND its PR merge event, requiring every explicitly named reviewer to have approved that exact candidate at current PR/policy versions. Requires the independent reviewed-merge grant. Opener/submitter votes cannot satisfy the gate. No unreviewed fallback, force push, latest-tip refresh or repository-wide protection configuration.",
+            schema: schema(),
+        },
+        Tool {
+            name: FAST_FORWARD_NAME,
+            description: "Fast-forward an existing exact-version PR to its already-admitted source tip under the independent merge grant. Current repository branch protection is enforced by native admission. Requires exact source/target refs and tips; creates no commit or approval, accepts no bundle, does not refresh coordinates, force push, or fall back to another merge method.",
+            schema: fast_forward_schema(),
+        },
+    ]
 }
 
 struct Input {
@@ -76,7 +88,21 @@ fn parse(
     })
 }
 
-pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
+pub(super) fn call(
+    backend: &NodeTools,
+    name: &str,
+    args: &Object,
+) -> Result<Value, ToolError> {
+    if name == FAST_FORWARD_NAME {
+        return call_fast_forward(backend, args);
+    }
+    if name != NAME {
+        return Err(ToolError::invalid("tool_not_granted"));
+    }
+    call_reviewed(backend, args)
+}
+
+fn call_reviewed(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     if !backend.options.writes.merges {
         return Err(ToolError::invalid("tool_not_granted"));
     }
@@ -136,6 +162,115 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     );
     result.insert("delivery_acknowledged".into(), Value::Null);
     Ok(Value::Object(result))
+}
+
+
+struct FastForwardInput {
+    number: PullRequestNumber,
+    version: AggregateVersion,
+    source_ref: fgit_types::RefName,
+    source_tip: fgit_types::GitOid,
+    target_ref: fgit_types::RefName,
+    target_tip: fgit_types::GitOid,
+}
+
+fn parse_fast_forward(
+    args: &Object,
+    format: GitHashAlgorithm,
+) -> Result<FastForwardInput, ToolError> {
+    require_fields(
+        args,
+        &[
+            "number",
+            "expected_version",
+            "idempotency_key",
+            "source_reference",
+            "source_reference_hex",
+            "target_reference",
+            "target_reference_hex",
+            "expected_source",
+            "expected_target",
+        ],
+    )?;
+    common::key(args)?;
+    let number = PullRequestNumber::try_new(common::number(args, "number")?)
+        .ok_or(ToolError::invalid("positive_pull_number_required"))?;
+    let ExpectedVersion::Exactly(version) = common::version(args, false)? else {
+        return Err(ToolError::invalid("positive_pr_version_required"));
+    };
+    Ok(FastForwardInput {
+        number,
+        version,
+        source_ref: pull_writes::branch(args, "source_reference", "source_reference_hex")?,
+        source_tip: pull_writes::oid(args, "expected_source", format)?,
+        target_ref: pull_writes::branch(args, "target_reference", "target_reference_hex")?,
+        target_tip: pull_writes::oid(args, "expected_target", format)?,
+    })
+}
+
+fn call_fast_forward(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
+    if !backend.options.writes.merges {
+        return Err(ToolError::invalid("tool_not_granted"));
+    }
+    let input = parse_fast_forward(args, backend.options.format)?;
+    let session = common::session(backend, common::key(args)?)?;
+    let principal = session
+        .authenticated_session()
+        .ok_or(ToolError::invalid("principal_not_bound"))?
+        .principal_id();
+    let context = backend.node.request_context();
+    let (tx, terminal) = backend
+        .node
+        .runtime()
+        .block_on(backend.node.fast_forward_pull_request_durable_in(
+            &context,
+            &session,
+            input.number,
+            input.version,
+            &input.source_ref,
+            input.source_tip,
+            &input.target_ref,
+            input.target_tip,
+            Default::default(),
+            Default::default(),
+        ))
+        .map_err(|_| ToolError::uncertain("mutation_outcome_unknown"))?;
+    let mut result = common::binding(backend, principal, false);
+    result.extend(common::terminal(tx, &terminal));
+    result.insert("type".into(), text("fast_forward_publication"));
+    result.insert("method".into(), text("fast-forward-only/v1"));
+    result.insert("number".into(), text(input.number.get().to_string()));
+    result.insert("expected_version".into(), text(input.version.get().to_string()));
+    result.insert("source_reference_hex".into(), text(super::hex(input.source_ref.as_bytes())));
+    result.insert("target_reference_hex".into(), text(super::hex(input.target_ref.as_bytes())));
+    result.insert("expected_source".into(), text(input.source_tip.to_string()));
+    result.insert("expected_target".into(), text(input.target_tip.to_string()));
+    result.insert("complete".into(), Value::Bool(true));
+    result.insert("atomic".into(), Value::Bool(true));
+    result.insert("coupled_pr_and_ref".into(), Value::Bool(true));
+    result.insert("creates_commit".into(), Value::Bool(false));
+    result.insert("creates_approval".into(), Value::Bool(false));
+    result.insert("current_protection_enforced".into(), Value::Bool(true));
+    result.insert("current_refs_asserted".into(), Value::Bool(false));
+    result.insert("delivery_acknowledged".into(), Value::Null);
+    Ok(Value::Object(result))
+}
+
+fn fast_forward_schema() -> Value {
+    let mut properties = candidate::properties();
+    for name in ["policy_epoch", "merge_base", "candidate_commit", "bundle_hex_chunks"] {
+        properties.remove(name);
+    }
+    candidate::candidate_schema(
+        properties,
+        &[
+            "number",
+            "expected_version",
+            "idempotency_key",
+            "expected_source",
+            "expected_target",
+        ],
+    )
 }
 
 fn schema() -> Value {
@@ -295,4 +430,48 @@ mod tests {
                 && required.contains(&text("bundle_hex_chunks"))
         );
     }
+    #[test]
+    fn fast_forward_is_exact_bundle_free_and_separate_from_reviewed_merge() {
+        for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+            let Value::Object(mut input) = object([
+                ("number", text("7")),
+                ("expected_version", text("3")),
+                ("idempotency_key", text("ff-key")),
+                ("source_reference", text("refs/heads/topic")),
+                ("target_reference", text("refs/heads/main")),
+                ("expected_source", text("11".repeat(format.digest_len()))),
+                ("expected_target", text("22".repeat(format.digest_len()))),
+            ]) else {
+                unreachable!()
+            };
+            let parsed = parse_fast_forward(&input, format).unwrap();
+            assert_eq!(parsed.number, PullRequestNumber::try_new(7).unwrap());
+            assert_eq!(parsed.version, AggregateVersion::try_new(3).unwrap());
+            assert_ne!(FAST_FORWARD_NAME, NAME);
+            for forbidden in [
+                "bundle_hex_chunks",
+                "candidate_commit",
+                "merge_base",
+                "policy_epoch",
+                "required_reviewers",
+                "force",
+                "principal",
+            ] {
+                let mut bad = input.clone();
+                bad.insert(forbidden.into(), text("not-authority"));
+                assert!(parse_fast_forward(&bad, format).is_err(), "{forbidden}");
+            }
+            input.insert("expected_version".into(), text("0"));
+            assert!(parse_fast_forward(&input, format).is_err());
+            let encoded = fast_forward_schema().encode(16 * 1024).unwrap();
+            assert!(json::parse(encoded.as_bytes()).is_ok());
+            assert!(!encoded.contains("bundle_hex_chunks"));
+            assert!(!encoded.contains("candidate_commit"));
+            assert!(!encoded.contains("required_reviewers"));
+        }
+        assert!(is_tool(NAME));
+        assert!(is_tool(FAST_FORWARD_NAME));
+        assert!(!is_tool("frankengit_pull_force"));
+    }
+
 }

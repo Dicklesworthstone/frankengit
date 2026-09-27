@@ -139,7 +139,7 @@ impl ReadTools for NodeTools {
             || (self.options.writes.pulls && pull_writes::is_tool(name))
             || (self.options.writes.source && source_writes::is_tool(name))
             || (self.options.writes.reviews && name == review_writes::NAME)
-            || (self.options.writes.merges && name == merge_writes::NAME)
+            || (self.options.writes.merges && merge_writes::is_tool(name))
     }
     fn result_is_error(&self, name: &str, value: &Value) -> bool {
         self.is_mutation(name)
@@ -162,8 +162,8 @@ impl ReadTools for NodeTools {
         if self.options.writes.reviews && name == review_writes::NAME {
             return review_writes::call(self, args);
         }
-        if self.options.writes.merges && name == merge_writes::NAME {
-            return merge_writes::call(self, args);
+        if self.options.writes.merges && merge_writes::is_tool(name) {
+            return merge_writes::call(self, name, args);
         }
         if self.options.outcomes && name == outcomes::NAME {
             return outcomes::call(self, args);
