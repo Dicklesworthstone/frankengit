@@ -361,7 +361,6 @@ impl OneNode {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn serve_ssh_with_lifetime<L: Borrow<TcpListener>>(
         &self,
         listener: L,
@@ -516,7 +515,6 @@ impl OneNode {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn serve_one_ssh_session(
         mut stream: TcpStream,
         host_key: SigningKey,
@@ -840,7 +838,6 @@ impl OneNode {
     /// UNKNOWN response (never invented `ng` rows) when admission may already
     /// have committed. The writer is the deploy key's principal, falling back
     /// to the operator's receive principal as before.
-    #[allow(clippy::too_many_arguments)]
     fn serve_ssh_receive_pack<R: Read, W: ReceiveResponseWriter>(
         &self,
         reader: &mut R,
