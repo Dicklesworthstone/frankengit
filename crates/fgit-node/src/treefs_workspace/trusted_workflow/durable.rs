@@ -4,6 +4,7 @@
 //! runner owns scheduling, per-job evidence custody and the execution fence.
 //! Neither a local script's exit status nor a custody receipt grants a check.
 
+mod dispatch;
 mod publication;
 mod recovery;
 

@@ -1,6 +1,7 @@
 //! Explicit local-owner entry point for repository-bound workflow execution.
 //! Parsing never opens a repository or interprets workflow text as authority.
 
+mod dispatch;
 mod merge;
 mod publish;
 mod recovery;
@@ -30,6 +31,7 @@ base. Review and trust those candidate scripts before invoking. The bundle is
 validated without object import, ref publication, or a canonical green check.
 Canonical base provenance and actual executed candidate remain separate in JSON.
 For explicit two-parent merge inputs: fg workflow run-merge-candidate --help.
+For event-matched directory dispatch: fg workflow dispatch --help.
 For offline saved results/evidence (without replay): fg workflow recover --help.
 To record a saved job observation on its canonical branch: fg workflow publish --help.
 
@@ -78,6 +80,9 @@ struct Options {
 }
 
 pub fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|action| action == "dispatch") {
+        return dispatch::run(args);
+    }
     if args.first().is_some_and(|action| action == "publish") {
         return publish::run(args, &mut std::io::stdout().lock());
     }
