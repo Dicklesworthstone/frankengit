@@ -4,6 +4,8 @@
 import { open } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { webcrypto } from 'node:crypto';
+import { readAuthenticatedSourceBackup } from './lib/source-attestation.mjs';
+import { SourceAttestationOptions, ATTESTATION_HELP } from './lib/source-attestation-options.mjs';
 import { BUNDLE_VERIFY_LIMITS, verifyGitBundle, verifyGitBundleAgainst, normalizeBundleExpectation } from '../crates/fgit-node/src/smart_http/server/browser/bundle-verify.mjs';
 
 async function readBounded(path, signal) {
@@ -32,19 +34,22 @@ Optional expectations must come from a separately trusted source:
   --expect-ref REF=OID        Repeat for each known full native reference
   --expect-ref-hex HEX=OID    Lossless byte-name alternative (lowercase hex)
   --exact-refs               Require exactly the supplied direct-ref set
-  --                        Treat the remaining argument as a literal path
+${ATTESTATION_HELP}  --                        Treat the remaining argument as a literal path
   --help                    Print this help without opening a file
 
 Without --exact-refs, ref pins constrain only the named refs; all advertised
 refs still undergo closure verification. An unsigned adjacent manifest is not
-an independent trust anchor. Signatures, forge state and gitlinks are not verified.
+an independent trust anchor. All four attestation options are required together;
+failed authentication never falls back to unsigned mode. A detached source
+approval is separate from Git author/signature, forge-state and gitlink checks.
 `;
 function argumentsFor(args) {
-  let path = null, literal = false; const expected = {}, seen = new Set();
+  let path = null, literal = false; const expected = {}, seen = new Set(), signed = new SourceAttestationOptions();
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (!literal && arg === '--') { literal = true; continue; }
     if (!literal && arg.startsWith('-')) {
+      const next = signed.take(args, index); if (next !== index) { index = next; continue; }
       if (arg === '--exact-refs') {
         if (seen.has(arg)) throw new Error('duplicate_option'); seen.add(arg); expected.exact_refs = true; continue;
       }
@@ -71,7 +76,7 @@ function argumentsFor(args) {
   if (path === null) throw new Error('bundle_path_required');
   // Validate the complete expectation grammar before opening even the input.
   if (Object.keys(expected).length) normalizeBundleExpectation(expected);
-  return { path, expected: Object.keys(expected).length ? expected : null };
+  return { path, expected: Object.keys(expected).length ? expected : null, attestation: signed.finish() };
 }
 const args = process.argv.slice(2), controller = new AbortController();
 const cancel = () => controller.abort(); process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
@@ -81,9 +86,16 @@ try {
   let output;
   if (args.length === 1 && args[0] === '--help') output = USAGE;
   else {
-    const { path, expected } = argumentsFor(args);
-    const bytes = await readBounded(path, controller.signal), options = { cryptoImpl: webcrypto, signal: controller.signal };
+    const { path, expected, attestation } = argumentsFor(args);
+    const signed = attestation === null ? null : await readAuthenticatedSourceBackup(path,
+      attestation.envelope, attestation.key, attestation.policy, { signal: controller.signal });
+    // Use exactly the authenticated bytes. Never reopen the path after checking
+    // the signature or let an approval bypass object/closure and explicit pins.
+    const bytes = signed === null ? await readBounded(path, controller.signal) : signed.bytes;
+    const options = { cryptoImpl: webcrypto, signal: controller.signal };
     const result = expected === null ? await verifyGitBundle(bytes, options) : await verifyGitBundleAgainst(bytes, expected, options);
+    signed?.checkCurrent();
+    if (signed !== null) result.source_attestation = signed.authentication;
     output = `${JSON.stringify(result, null, 2)}\n`;
   }
   await new Promise((resolve, reject) => process.stdout.write(output, error => error ? reject(error) : resolve()));

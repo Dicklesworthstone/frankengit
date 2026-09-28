@@ -3,6 +3,8 @@
 import { open } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { recoverGitBundle } from './lib/source-recovery.mjs';
+import { readAuthenticatedSourceBackup } from './lib/source-attestation.mjs';
+import { SourceAttestationOptions, ATTESTATION_HELP } from './lib/source-attestation-options.mjs';
 import { BUNDLE_VERIFY_LIMITS, normalizeBundleExpectation } from '../crates/fgit-node/src/smart_http/server/browser/bundle-verify.mjs';
 import { bundleRef } from '../crates/fgit-node/src/smart_http/server/browser/transfers-protocol.mjs';
 
@@ -22,7 +24,7 @@ This is Git source recovery, not FrankenGit forge/authority/capsule restore.
   --expect-ref REF=OID       Repeat for independently known native ref tips
   --expect-ref-hex HEX=OID   Raw-byte reference pin
   --exact-refs               Reject additional advertised direct refs
-  --                        Remaining arguments are literal paths
+${ATTESTATION_HELP}  --                        Remaining arguments are literal paths
   --help                    Print help without opening files
 
 Input is bounded to 16 MiB; expanded object data to 128 MiB. No Git executable,
@@ -30,13 +32,17 @@ network, hooks or checkout is used. HEAD is installed last. On failure, any
 incomplete destination is retained and its publication state is reported.
 Resume requires the same host/PID namespace and refuses live or unknown owners;
 it is not arbitrary repair, a force option or distributed lock takeover.
+Supply all four attestation options to require an externally trusted approval.
+Authentication is repeated for --resume, even after an earlier published HEAD.
+A failed approval never downgrades to unsigned recovery or changes the target.
 `;
 function parse(args) {
-  const paths = [], expected = {}, seen = new Set(); let head = null, literal = false, resume = false;
+  const paths = [], expected = {}, seen = new Set(), signed = new SourceAttestationOptions(); let head = null, literal = false, resume = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (!literal && arg === '--') { literal = true; continue; }
     if (!literal && arg.startsWith('-')) {
+      const next = signed.take(args, i); if (next !== i) { i = next; continue; }
       if (arg === '--resume') { if (resume) throw new Error('duplicate_option'); resume = true; continue; }
       if (arg === '--exact-refs') {
         if (seen.has(arg)) throw new Error('duplicate_option'); seen.add(arg); expected.exact_refs = true; continue;
@@ -60,7 +66,7 @@ function parse(args) {
   if (head === null || !head.startsWith('726566732f68656164732f')) throw new Error('explicit_branch_head_required');
   bundleRef(head);
   if (Object.keys(expected).length) normalizeBundleExpectation(expected);
-  return { input: paths[0], destination: paths[1], resume, request: { head_ref_hex: head, ...(Object.keys(expected).length ? { expectations: expected } : {}) } };
+  return { input: paths[0], destination: paths[1], resume, attestation: signed.finish(), request: { head_ref_hex: head, ...(Object.keys(expected).length ? { expectations: expected } : {}) } };
 }
 async function readBundle(path, signal) {
   signal.throwIfAborted(); const file = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
@@ -79,18 +85,30 @@ async function readBundle(path, signal) {
 const controller = new AbortController(), cancel = () => controller.abort();
 process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
 const pipeError = () => { process.exitCode = 1; }; process.stdout.on('error', pipeError); process.stderr.on('error', pipeError);
-let result = null;
+let result = null, signedResumeDestination = null;
 try {
   const args = process.argv.slice(2); let output;
   if (args.length === 1 && args[0] === '--help') output = HELP;
   else {
-    const { input, destination, request, resume } = parse(args);
-    result = await recoverGitBundle(await readBundle(input, controller.signal), destination, request, { signal: controller.signal, resume });
+    const { input, destination, request, resume, attestation } = parse(args);
+    if (attestation !== null && resume) signedResumeDestination = destination;
+    const signed = attestation === null ? null : await readAuthenticatedSourceBackup(input,
+      attestation.envelope, attestation.key, attestation.policy, { signal: controller.signal });
+    const bytes = signed === null ? await readBundle(input, controller.signal) : signed.bytes;
+    result = await recoverGitBundle(bytes, destination, request, { signal: controller.signal, resume,
+      ...(signed === null ? {} : { onProgress(event) {
+        // No destination write occurs before verified. Check again when starting
+        // prepublication validation. After HEAD is visible, finalize responsibility
+        // even if the approval expires; expiry never retroactively rolls it back.
+        if (event.phase === 'verified' || event.phase === 'before_publication') signed.checkCurrent();
+      } }) });
+    if (signed !== null) result.source_attestation = signed.authentication;
     output = JSON.stringify(result, null, 2) + '\n';
   }
   await new Promise((resolve, reject) => process.stdout.write(output, error => error ? reject(error) : resolve()));
 } catch (error) {
   process.stderr.write(JSON.stringify({ type: 'frankengit-source-recovery-error-v1',
-    code: error.code ?? error.message ?? 'recovery_failed', state: result?.state ?? error.state ?? 'not_created',
-    destination: result?.destination ?? error.destination ?? null, cleanup_error: error.lock_cleanup_error ?? null }) + '\n'); process.exitCode = 1;
+    code: error.code ?? error.message ?? 'recovery_failed',
+    state: result?.state ?? (signedResumeDestination !== null && (!error.state || error.state === 'not_created') ? 'existing_unknown' : error.state ?? 'not_created'),
+    destination: result?.destination ?? error.destination ?? signedResumeDestination, cleanup_error: error.lock_cleanup_error ?? null }) + '\n'); process.exitCode = 1;
 } finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); }

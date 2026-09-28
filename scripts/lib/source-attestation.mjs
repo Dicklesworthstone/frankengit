@@ -197,8 +197,11 @@ export async function readAuthenticatedSourceBackup(path, envelopePath, keyPath,
   const authentication = await verifySourceAttestation(encoded, key, policy, captured);
   const bytes = await readAttestationFile(path, ATTESTATION_LIMITS.bundleBytes, { signal, expectedBytes: authentication.statement.artifact.bytes });
   if (await artifactHash(bytes, signal) !== authentication.statement.artifact.sha256) fail('attestation_artifact_mismatch');
-  freshness(authentication.statement, policy, current());
-  check(signal); return { bytes, authentication };
+  // The guard owns its policy and verified timing fields. Changing a returned
+  // display record cannot extend validity during downstream Git verification.
+  const validity = { ...authentication.statement };
+  const checkCurrent = () => { check(signal); freshness(validity, policy, current()); };
+  checkCurrent(); return { bytes, authentication, checkCurrent };
 }
 
 // Publish a small detached envelope without replacing anything. Once linked,
