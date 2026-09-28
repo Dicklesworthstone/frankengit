@@ -252,7 +252,6 @@ impl OneNode {
     /// binding reads it from the git-daemon greeting, SSH takes it from the
     /// authorized exec request. `principal` is the authenticated writer;
     /// `None` is refused before any byte of the request is read.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn serve_guarded_receive_session<R, W, G, F>(
         &self,
         reader: &mut R,

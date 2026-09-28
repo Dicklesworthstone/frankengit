@@ -732,7 +732,6 @@ impl OneNode {
     /// ingress completes this receive waits, on its server-work clock, for
     /// one of `writers`' admissions before it materializes, validates and
     /// admits.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn smart_http_receive_stream_gated_in<R, W, C>(
         &self,
         request: &RequestHead<'_>,
@@ -761,7 +760,6 @@ impl OneNode {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn smart_http_receive_body_in<W, C>(
         &self,
         request: &RequestHead<'_>,
