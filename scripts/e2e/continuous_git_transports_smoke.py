@@ -41,6 +41,17 @@ def private_file(path: Path, text: str) -> None:
         out.write(text)
 
 
+def proxy_program(path: Path, mode: str) -> Path:
+    """GIT_PROXY_COMMAND names one program, run without a shell, as
+    `<program> <host> <port>`; a command line with arguments cannot be exec'd
+    ("cannot exec '... proxy.py raw': No such file or directory"). This private
+    wrapper is that program."""
+    command = shlex.join([sys.executable, str(PROXY), mode])
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700), "w") as out:
+        out.write(f'#!/bin/sh\nexec {command} "$@"\n')
+    return path
+
+
 def digest(path: Path) -> str:
     with path.open("rb") as stream:
         hasher = hashlib.sha256()
@@ -313,7 +324,7 @@ def held_push(service: Service, server: Child, url: str, address: tuple[str, int
     env.update(FG_CONTINUOUS_BARRIER_READY=str(ready), FG_CONTINUOUS_BARRIER_RELEASE=str(release),
                FG_CONTINUOUS_PROXY_TIMEOUT=str(max(180, commands.timeout)), GIT_TRACE_PACKET=str(trace))
     if service.transport == "git":
-        env["GIT_PROXY_COMMAND"] = shlex.join([sys.executable, str(PROXY), "raw"])
+        env["GIT_PROXY_COMMAND"] = str(proxy_program(service.root / f"{label}.git-proxy", "raw"))
     else:
         env["GIT_SSH_COMMAND"] = shlex.join([sys.executable, str(PROXY), "ssh", *service.ssh_base])
     args = commands.git_args("-C", str(source), "push", "--porcelain", "--atomic", url,
