@@ -4,6 +4,8 @@
 //! must authorize whole-repository inspection, including hidden and historical
 //! objects, before calling it.
 
+pub mod bundle_verify;
+
 use std::fmt;
 use std::time::{Duration, Instant};
 

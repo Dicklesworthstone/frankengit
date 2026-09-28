@@ -1,6 +1,7 @@
 //! Bounded offline Git transfer; canonical publication remains in OneNode.
 mod fetch;
 mod incremental;
+mod verify;
 use super::merge_apply::preparation::{publish_new_bundle, require_absent};
 use super::publication_support::{describe, quote, read_bundle, set_once, write_terminal_receipt};
 use fgit_authority::{IdempotencyKey, MAX_IDEMPOTENCY_KEY_BYTES, TerminalOutcome};
@@ -147,6 +148,9 @@ fn key_bytes(key: &Key, input: &mut impl Read) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 pub fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|arg| arg == "verify") {
+        return verify::run(&args[1..]);
+    }
     if args
         .first()
         .is_some_and(|arg| matches!(arg.as_str(), "sync-export" | "sync-import"))
@@ -163,9 +167,10 @@ pub fn run(args: &[String]) -> Result<u8, String> {
     {
         writeln!(
             std::io::stdout().lock(),
-            "{USAGE}\n\n{}\n\n{}",
+            "{USAGE}\n\n{}\n\n{}\n\n{}",
             fetch::USAGE,
-            incremental::USAGE
+            incremental::USAGE,
+            verify::USAGE
         )
         .map_err(|e| e.to_string())?;
         return Ok(0);
