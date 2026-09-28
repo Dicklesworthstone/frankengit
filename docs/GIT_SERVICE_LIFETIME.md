@@ -122,13 +122,47 @@ The discovered stock-client campaign is:
 FG_BIN=/absolute/path/to/fg scripts/e2e/suites/node/continuous_git_transports.sh
 ```
 
+`./scripts/verify.sh continuous-serve` runs the owning Rust tests. It then
+builds `fg`, runs the campaign in both hash domains, and runs the SSH
+compatibility suite with its quiet-command regression.
+
 It is designed for 70 push/fetch/fresh-clone cycles per transport, followed by
 held atomic pushes, their no-signal twins, SIGTERM/SIGINT/stop-file shutdown and
 canonical restart checks. A 30-second base with work scaling disabled gives this
 campaign a 120-second signal-to-exit assertion. That assertion is a test setting,
 not an operator-independent production timeout.
 
-The execution environment disconnected during implementation. The reconstructed
-source and campaign need fresh Rust formatting, compilation, unit tests and real
-stock-client execution; prior fixture syntax checks do not establish a pass for
-this revision.
+## Executed evidence (2026-09-28)
+
+The source was reconstructed after its executor disconnected, and was committed
+(7847acca) unformatted, uncompiled and unrun. It has since been executed:
+
+- It compiles (`cargo check -p fgit-node -p fgit-cli --all-targets` at
+  `bd45641f`). Eight of its files were rustfmt-formatted in `e98c2d05`, with no
+  code change.
+- The owning Rust tests pass at `bd45641f`:
+  - the fgit-node `ssh::` and daemon supervisor tests, 22/22;
+  - `tests/guarded_git_daemon`, 10/10, including the three continuous tests;
+  - the `fg` serve-command tests, 28/28.
+- The first run of the stock-client campaign found one harness defect.
+  `GIT_PROXY_COMMAND` was given a command line, which Git cannot exec, because
+  it runs the proxy without a shell. It was fixed in `f4560746`; the relay and
+  every assertion are unchanged.
+- The runs used a release `fg` built at `bd45641f`, OpenSSH 10.2p1 and git
+  2.55.0 on a shared, loaded host:
+  - the discovered suite passed 11/11 in the SHA-1 domain;
+  - the same campaign with `--format sha256` passed all four acceptance lines
+    for both transports;
+  - together that is 840 sequential stock sessions.
+- In each of the four transport and format runs:
+  - SIGTERM during the held atomic push let the push complete;
+  - the drain receipt settled 217 accepted = 217 completed;
+  - the process exited 2.5–3.5 s after the signal;
+  - a connection attempted during the drain was refused (ECONNREFUSED) while
+    the server and the held push were still alive.
+- Planted negative: the suite fails against `fg` built at `b8b79a11`, before
+  this change, because that binary refuses `--continuous`.
+
+These are one agent's local runs, not a batch-verification result. The
+signal-to-exit times were measured with the campaign's 30-second session base on
+small repositories. They are not a production drain bound.
