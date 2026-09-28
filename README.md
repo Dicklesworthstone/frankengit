@@ -86,7 +86,11 @@ clone, fetch and push:
 - `fg serve-http` is loopback-only and uses an operator token or a scoped
   credentials file. It has a `--continuous` mode that drains on a stop file,
   SIGTERM or SIGINT.
-- `fg serve-ssh` uses ed25519 deploy keys and per-session key exchange.
+- `fg serve-ssh` uses ed25519 deploy keys and per-session key exchange. A
+  connection that has not yet started a Git command is dropped after 60 s of
+  silence. Once a command runs, each read or write may wait up to
+  `--session-timeout-secs` (default 300 s), so a client that is still
+  compressing a large pack is not dropped mid-push.
 
 Neither is yet a multi-user production deployment:
 - no transport terminates TLS;

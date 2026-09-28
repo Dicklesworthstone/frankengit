@@ -10,7 +10,9 @@
 # 3. a push to a review-protected ref is refused by admission through
 #    report-status and publishes nothing;
 # 4. a silent client holding the only worker is released by the session read
-#    timeout, after which a real clone succeeds;
+#    timeout, after which a real clone succeeds; an authenticated command
+#    whose client is quiet for longer than that pre-command bound (as git is
+#    while it compresses a large pack) is not dropped;
 # 5. a clone killed mid-transfer leaves the server serving the next clone;
 # 6. the same node served over `fg serve-http` returns the identical refs and
 #    the identical object set (HTTP-vs-SSH differential).
@@ -189,6 +191,22 @@ fge_assert_eq SSH-COMPAT-062 0 "$AFTER_RC" 'ls-remote after the refusal succeeds
 fge_assert_cmd SSH-COMPAT-063 'the refused ref was not created' bash -c '! grep -q "refs/heads/protected" "$1"' _ "$WORK/after.refs"
 fge_assert_eq SSH-COMPAT-064 "$(git -C "$SRC" rev-parse main)" \
   "$(awk '$2 == "refs/heads/main" {print $1}' "$WORK/after.refs")" 'main is unchanged by the refused push'
+
+# 4b. Once an authenticated command runs, client silence is bounded by the
+#     session timeout (default 300 s), not the 60 s pre-command bound: git
+#     sends nothing while it compresses a large pack. Stock ssh starts
+#     git-upload-pack, reads the advertisement, stays silent for 75 s, then
+#     ends the session with a flush-pkt as `git ls-remote` does.
+read -r -a SSH_ARGV <<<"$SSH_CMD"
+QUIET_RC=0
+QUIET_START=$(date +%s)
+{ sleep 75; printf 0000; } | timeout 300 "${SSH_ARGV[@]}" git@127.0.0.1 "git-upload-pack '/$REPOID.git'" \
+  >"$WORK/quiet.out" 2>"$WORK/quiet.err" || QUIET_RC=$?
+QUIET_WAIT=$(( $(date +%s) - QUIET_START ))
+fge_context quiet_command_wait_s "$QUIET_WAIT"
+fge_assert_eq SSH-COMPAT-065 0 "$QUIET_RC" 'an upload-pack session whose client is silent for 75 s after the advertisement ends cleanly'
+fge_assert_cmd SSH-COMPAT-066 'premise: the quiet session advertised main and its client really stayed silent for >= 75 s' \
+  bash -c 'grep -aq "$1 refs/heads/main" "$2" && test "$3" -ge 75' _ "$(git -C "$SRC" rev-parse main)" "$WORK/quiet.out" "$QUIET_WAIT"
 
 # 5. A silent client holds the only worker until the session read timeout
 #    (60 s) releases it; a real clone queued behind it then succeeds.

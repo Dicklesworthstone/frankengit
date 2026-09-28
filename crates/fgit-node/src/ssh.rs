@@ -489,6 +489,18 @@ impl OneNode {
             return false;
         };
 
+        // Until a command is authorized, a silent connection is bounded by the
+        // short accept-time timeout so it cannot pin a worker. Once an
+        // authenticated Git command runs, silence is the client working (git
+        // compresses a large pack before sending a byte of it), so each read
+        // and write may wait up to the operator's session timeout instead of
+        // dropping the push after the first quiet minute. The serve paths
+        // still check the work-scaled session deadline at each step; unlike
+        // git://, one read is not cut to that deadline's remaining time.
+        let command_timeout = Some(child_node.git_daemon_session_timeout.duration());
+        let _ = stream.set_read_timeout(command_timeout);
+        let _ = stream.set_write_timeout(command_timeout);
+
         // `GIT_PROTOCOL` from the client's `env` request selects the wire
         // version under the same rule as a git-daemon greeting.
         let git_protocol = session
@@ -516,7 +528,8 @@ impl OneNode {
                     .serve_ssh_upload_pack(&mut reader, &mut writer, &git_protocol, &|| {
                         client.alive()
                     })
-                    .is_ok()
+                    .map(|_| ())
+                    .map_err(|error| format!("upload-pack: {error}"))
             }
             SshGitService::ReceivePack => {
                 let mut reader = SshReader(&state_cell);
@@ -529,11 +542,21 @@ impl OneNode {
                         &git_protocol,
                         writers,
                     )
-                    .is_ok()
+                    .map(|_| ())
+                    .map_err(|error| format!("receive-pack: {error}"))
             }
         };
+        // The client sees only a generic protocol error, so the typed cause goes
+        // to the operator's stderr log, the channel the node lanes use.
+        if let Err(error) = &served {
+            eprintln!("ssh session failed: {error}");
+        }
 
-        let (exit_code, success) = if served { (0, true) } else { (1, false) };
+        let (exit_code, success) = if served.is_ok() {
+            (0, true)
+        } else {
+            (1, false)
+        };
 
         let mut final_state = state_cell.into_inner();
         final_state.session.send_channel_eof();
@@ -551,6 +574,9 @@ impl OneNode {
         } else {
             child_node.shutdown()
         };
+        if let Err(error) = &cleanup {
+            eprintln!("ssh session cleanup failed: {error}");
+        }
         success && cleanup.is_ok()
     }
 
