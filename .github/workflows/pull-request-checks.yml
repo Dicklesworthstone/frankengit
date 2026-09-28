@@ -10,14 +10,22 @@ on:
       - 'crates/fgit-admission/src/merge/native/workflow_checks/**'
       - 'crates/fgit-node/src/treefs_workspace/pull_request/checks.rs'
       - 'crates/fgit-node/src/treefs_workspace/trusted_workflow/durable/publication/tests/pull_request_checks.rs'
+      - 'crates/fgit-node/src/treefs_workspace/trusted_workflow/durable/publication/tests/saved_check_record.rs'
+      - 'crates/fgit-node/src/treefs_workspace/trusted_workflow/durable/recovery.rs'
+      - 'crates/fgit-node/src/treefs_workspace/trusted_workflow/durable/recovery/**'
       - 'crates/fgit-node/src/smart_http/server/pulls/checks/**'
       - 'crates/fgit-node/src/smart_http/server/pulls/checks.rs'
       - 'crates/fgit-node/src/smart_http/server/browser/pulls-checks.mjs'
       - 'crates/fgit-node/tests/pull_request_checks_http.rs'
       - 'crates/fgit-cli/src/pull_request/checks.rs'
+      - 'crates/fgit-cli/src/workflow_command.rs'
+      - 'crates/fgit-cli/src/workflow_command/publish.rs'
+      - 'crates/fgit-cli/src/workflow_command/publish/**'
+      - 'crates/fgit-cli/tests/workflow_publication.rs'
       - 'crates/fgit-cli/src/mcp/backend/checks.rs'
       - 'crates/fgit-cli/src/mcp/backend/integration_tests.rs'
       - 'scripts/e2e/pull_request_smoke.py'
+      - 'scripts/e2e/workflow_publication_smoke.py'
       - 'tests/browser/pulls-checks*.mjs'
   workflow_dispatch:
 permissions:
@@ -49,7 +57,13 @@ jobs:
       - name: Canonical observation selection
         run: cargo test --locked -p fgit-admission --lib workflow_checks::read::tests
       - name: Persisted workflow and PR lifecycle
-        run: cargo test --locked -p fgit-node --lib pull_request_checks
+        run: |
+          cargo test --locked -p fgit-node --lib pull_request_checks
+          cargo test --locked -p fgit-node --lib saved_check_record
+      - name: Run, recover, publish and read canonical checks
+        run: |
+          cargo test --locked -p fgit-cli --bin fg workflow_command::publish::tests
+          cargo test --locked -p fgit-cli --test workflow_publication
       - name: HTTP contracts and actual publication reads
         run: |
           cargo test --locked -p fgit-node --lib smart_http::server::pulls::checks

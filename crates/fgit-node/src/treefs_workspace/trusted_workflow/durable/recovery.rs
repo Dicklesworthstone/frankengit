@@ -145,3 +145,6 @@ mod tests;
 
 // Read-only node API for CLI/agent recovery without execution capabilities.
 mod inspect;
+
+// Exact saved-job selection for the existing canonical publication boundary.
+mod publish;

@@ -1,10 +1,15 @@
 # Canonical publication of workflow observations
 
-FG-095b now has a node/library path from a retained trusted job observation to
+FG-095b has a node/library path and an explicit `fg workflow publish` command
+from a retained trusted job observation to
 an immutable canonical forge event and its delivery obligation. This is not a
 passing required check, a runner signature, or permission to merge. The event
 records what an authenticated local publisher submitted; it does not establish
 that its producer was independently trusted or that its process was isolated.
+
+See the [publication command guide](WORKFLOW_PUBLICATION_COMMAND.md) for the
+saved-run selection, canonical receipt and retry flow. The command composes the
+existing node publisher; it introduces no second publication authority.
 
 ## One publication path, no second authority
 
@@ -107,8 +112,9 @@ changes; it does not authorize a new effect under the old policy.
 `workflow_checks::read_at` resolves one immutable observation through an exact
 authority-selected forge frontier and verifies the stored event identity. It is
 a storage-level reader: serving callers must authenticate the requester and apply
-source-ref/log disclosure policy before returning its contents. No new public
-HTTP or CLI publication endpoint is introduced in this increment.
+source-ref/log disclosure policy before returning its contents. The CLI publisher
+is restricted to the explicit trusted-local profile; there is no untrusted HTTP
+check-upload endpoint.
 
 ## Verification boundary
 

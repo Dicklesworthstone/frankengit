@@ -55,6 +55,10 @@ fn apply_pr(node: &OneNode, command: &PullRequestCommand, key: &[u8]) {
 }
 
 fn open_pr(node: &OneNode, tip: GitOid) -> PullRequestCommand {
+    open_pr_from(node, tip, source_ref())
+}
+
+fn open_pr_from(node: &OneNode, tip: GitOid, source: RefName) -> PullRequestCommand {
     update_branch(
         node,
         target_ref(),
@@ -67,7 +71,7 @@ fn open_pr(node: &OneNode, tip: GitOid) -> PullRequestCommand {
         expected_version: ExpectedVersion::NewStream,
         action: PullRequestAction::Open,
         data: PullRequestData {
-            source_ref: source_ref(),
+            source_ref: source,
             target_ref: target_ref(),
             source_tip: tip,
             target_tip: tip,
@@ -322,13 +326,27 @@ fn canonical_check_pages_preserve_publishers_order_visibility_and_reopen() {
 fn source_movement_suppresses_stale_checks_until_matching_new_execution_is_published() {
     let temp = Temp::new();
     let (node, config, run) = run_fixture(&temp, GitHashAlgorithm::Sha256, false);
-    let mut command = open_pr(&node, run.source_commit);
-    let old_record = submitted_record(&run);
+    // The imported main branch remains the protected default. Exercise the
+    // full deletion lifecycle on a separate canonical PR source instead.
+    let topic = RefName::try_new(b"refs/heads/checks-topic").unwrap();
+    update_branch(
+        &node,
+        topic.clone(),
+        ExpectedOld::Absent,
+        ProposedNew::Update(run.source_commit),
+        b"checks-create-topic",
+    );
+    let mut command = open_pr_from(&node, run.source_commit, topic.clone());
+    let mut old_record = submitted_record(&run);
+    // Reporting may name another canonical branch at the executed commit;
+    // admission independently verifies that exact branch/commit binding.
+    old_record.source_ref = topic.clone();
     assert!(matches!(
         publish(&node, &old_record, b"checks-old-source").1.outcome,
         DecisionOutcome::Committed { .. }
     ));
     let old_page = page(&node, None, 100, None);
+    assert_eq!(old_page.source_ref, topic);
     assert_eq!(old_page.checks.len(), 1);
     let root = temp.0.join("source");
     let body = format!(
@@ -362,10 +380,10 @@ fn source_movement_suppresses_stale_checks_until_matching_new_execution_is_publi
     );
     update_branch(
         &node,
-        source_ref(),
+        topic.clone(),
         ExpectedOld::Exactly(run.source_commit),
         ProposedNew::Update(next),
-        b"checks-advance-main",
+        b"checks-advance-topic",
     );
     let stale = page(&node, None, 100, None);
     assert!(!stale.source_current);
@@ -392,7 +410,7 @@ fn source_movement_suppresses_stale_checks_until_matching_new_execution_is_publi
         .runtime()
         .block_on(node.run_trusted_workflow_in(
             &node.request_context(),
-            &source_ref(),
+            &topic,
             b"workflow.yml",
             [2; 16],
             &temp.0,
@@ -405,7 +423,8 @@ fn source_movement_suppresses_stale_checks_until_matching_new_execution_is_publi
         ))
         .unwrap();
     assert!(next_run.succeeded());
-    let new_record = submitted_record(&next_run);
+    let mut new_record = submitted_record(&next_run);
+    new_record.source_ref = topic.clone();
     assert_ne!(new_record.run_id, old_record.run_id);
     assert!(matches!(
         publish(&node, &new_record, b"checks-new-source").1.outcome,
@@ -422,7 +441,7 @@ fn source_movement_suppresses_stale_checks_until_matching_new_execution_is_publi
     assert_eq!(page(&node, None, 100, Some(old_page.source_head)), old_page);
     update_branch(
         &node,
-        source_ref(),
+        topic.clone(),
         ExpectedOld::Exactly(next),
         ProposedNew::Delete,
         b"checks-delete-source",
@@ -430,6 +449,13 @@ fn source_movement_suppresses_stale_checks_until_matching_new_execution_is_publi
     let deleted = page(&node, None, 100, None);
     assert!(!deleted.source_current);
     assert!(deleted.checks.is_empty());
+    let after_deletion = materialize(&node);
+    assert!(!after_deletion.snapshot().refs.contains_key(&topic));
+    assert_eq!(
+        after_deletion.snapshot().refs.get(&source_ref()),
+        Some(&run.source_commit),
+        "deleting the topic must preserve the default branch"
+    );
     assert_eq!(page(&node, None, 100, Some(current.source_head)), current);
     node.shutdown().unwrap();
     let mut reopened = OneNode::open_existing(config).unwrap();

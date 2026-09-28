@@ -2,6 +2,7 @@
 //! Parsing never opens a repository or interprets workflow text as authority.
 
 mod merge;
+mod publish;
 mod recovery;
 use super::publication_support::quote;
 use fgit_types::{
@@ -30,6 +31,7 @@ validated without object import, ref publication, or a canonical green check.
 Canonical base provenance and actual executed candidate remain separate in JSON.
 For explicit two-parent merge inputs: fg workflow run-merge-candidate --help.
 For offline saved results/evidence (without replay): fg workflow recover --help.
+To record a saved job observation on its canonical branch: fg workflow publish --help.
 
 Linux only. The run parent must already exist with mode 0700. Review and trust
 ALL scripts before invoking: jobs run as your host user, not inside a hostile-code
@@ -76,6 +78,9 @@ struct Options {
 }
 
 pub fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|action| action == "publish") {
+        return publish::run(args, &mut std::io::stdout().lock());
+    }
     if args.first().is_some_and(|action| action == "recover") {
         return recovery::run(args);
     }

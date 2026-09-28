@@ -130,7 +130,7 @@ impl OneNode {
     }
 }
 
-fn checked_root(value: Digest) -> Result<Commitment, TrustedWorkflowFailure> {
+pub(super) fn checked_root(value: Digest) -> Result<Commitment, TrustedWorkflowFailure> {
     if value.algorithm() != DigestAlgorithm::Sha256.id() || value.bytes().as_bytes().len() != 32 {
         return Err(TrustedWorkflowFailure::InvalidInput(
             "custody recovery requires a 32-byte SHA-256 digest",
@@ -139,7 +139,7 @@ fn checked_root(value: Digest) -> Result<Commitment, TrustedWorkflowFailure> {
     Commitment::try_from_digest(value)
         .map_err(|_| TrustedWorkflowFailure::InvalidInput("unsupported custody recovery digest"))
 }
-fn checked_scope(
+pub(super) fn checked_scope(
     value: (TenantId, RepositoryId, Digest),
 ) -> Result<CheckJournalScope, TrustedWorkflowFailure> {
     Ok(CheckJournalScope {
@@ -148,7 +148,7 @@ fn checked_scope(
         journal_id: checked_root(value.2)?,
     })
 }
-fn checked_pin(value: (u64, Digest)) -> Result<CheckJournalPin, TrustedWorkflowFailure> {
+pub(super) fn checked_pin(value: (u64, Digest)) -> Result<CheckJournalPin, TrustedWorkflowFailure> {
     if !(72..=4 * 1024 * 1024 * 1024).contains(&value.0) {
         return Err(TrustedWorkflowFailure::InvalidInput(
             "invalid custody recovery pin length",
@@ -156,7 +156,7 @@ fn checked_pin(value: (u64, Digest)) -> Result<CheckJournalPin, TrustedWorkflowF
     }
     Ok(CheckJournalPin::new(value.0, checked_root(value.1)?))
 }
-fn failure(directory: &Path, error: impl std::fmt::Display) -> TrustedWorkflowFailure {
+pub(super) fn failure(directory: &Path, error: impl std::fmt::Display) -> TrustedWorkflowFailure {
     TrustedWorkflowFailure::Journal {
         directory: directory.to_path_buf(),
         detail: error.to_string(),

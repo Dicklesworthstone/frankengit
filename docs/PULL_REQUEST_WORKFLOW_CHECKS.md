@@ -6,6 +6,11 @@ repositories and includes only checks for the PR's exact recorded source ref and
 commit. Results retain the publisher and original conclusion; evidence is
 summarized by SHA-256 and byte count, with no execution output in the response.
 
+Publish a retained job result with
+[`fg workflow publish`](WORKFLOW_PUBLICATION_COMMAND.md), then read it through
+any of the interfaces below. Publication requires the reporting branch to name
+the exact executed commit.
+
 ## Interfaces
 
 - HTTP: `GET /<repository-route>/api/v1/pulls/<number>/checks`. Enable the existing
