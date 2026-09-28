@@ -59,8 +59,12 @@ fn host_key() -> SigningKey {
 /// A connected socket that has actually been accepted and sent identification.
 fn client(addr: SocketAddr) -> TcpStream {
     let mut client = TcpStream::connect(addr).unwrap();
-    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    client.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let mut identification = Vec::new();
     while !identification.ends_with(b"\r\n") {
         let mut byte = [0u8; 1];
@@ -75,7 +79,10 @@ fn client(addr: SocketAddr) -> TcpStream {
 fn wait_until(mut condition: impl FnMut() -> bool) {
     let started = Instant::now();
     while !condition() {
-        assert!(started.elapsed() < Duration::from_secs(5), "condition did not settle");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "condition did not settle"
+        );
         std::thread::sleep(Duration::from_millis(2));
     }
 }
@@ -88,7 +95,10 @@ fn serving_entry_revalidates_forged_limits_and_requires_a_serving_cell() {
         let error = node
             .serve_ssh_bounded(
                 &listener,
-                SshServerLimits { max_sessions, max_in_flight },
+                SshServerLimits {
+                    max_sessions,
+                    max_in_flight,
+                },
                 host_key(),
                 Vec::new(),
                 false,
@@ -125,24 +135,21 @@ fn stop_error_and_stop_panic_close_the_listener_while_a_full_pool_drains() {
         let child_stop = Arc::clone(&stop);
         let child_observed = Arc::clone(&observed);
         let worker = std::thread::spawn(move || {
-            let result = node.serve_ssh_until_stopped(
-                listener,
-                1,
-                host_key(),
-                Vec::new(),
-                false,
-                &|| {
+            let result =
+                node.serve_ssh_until_stopped(listener, 1, host_key(), Vec::new(), false, &|| {
                     if !child_stop.load(Ordering::Acquire) {
                         return Ok(false);
                     }
                     child_observed.store(true, Ordering::Release);
                     match mode {
                         0 => Ok(true),
-                        1 => Err(io::Error::new(io::ErrorKind::PermissionDenied, "stop failed")),
+                        1 => Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "stop failed",
+                        )),
                         _ => panic!("stop callback panic"),
                     }
-                },
-            );
+                });
             node.shutdown().unwrap();
             result
         });
@@ -156,7 +163,10 @@ fn stop_error_and_stop_panic_close_the_listener_while_a_full_pool_drains() {
                 false
             }
         });
-        assert!(!worker.is_finished(), "listener closed only after child exit");
+        assert!(
+            !worker.is_finished(),
+            "listener closed only after child exit"
+        );
         drop(held);
         let result = worker.join().unwrap();
         if mode == 0 {
@@ -178,14 +188,10 @@ fn no_stop_twin_keeps_serving_after_refused_sessions_then_drains_cleanly() {
     let stop = Arc::new(AtomicBool::new(false));
     let child_stop = Arc::clone(&stop);
     let worker = std::thread::spawn(move || {
-        let result = node.serve_ssh_until_stopped(
-            listener,
-            1,
-            host_key(),
-            Vec::new(),
-            false,
-            &|| Ok(child_stop.load(Ordering::Acquire)),
-        );
+        let result =
+            node.serve_ssh_until_stopped(listener, 1, host_key(), Vec::new(), false, &|| {
+                Ok(child_stop.load(Ordering::Acquire))
+            });
         node.shutdown().unwrap();
         result
     });
@@ -226,7 +232,10 @@ fn partial_identification_trickle_cannot_hold_a_handshake_past_its_accepted_budg
     let completed_without_client_close = worker.is_finished();
     drop(client);
     let receipt = worker.join().unwrap().unwrap();
-    assert!(completed_without_client_close, "trickle extended the accepted deadline");
+    assert!(
+        completed_without_client_close,
+        "trickle extended the accepted deadline"
+    );
     assert_eq!(receipt.accepted_sessions, 1);
     assert_eq!(receipt.refused_sessions, 1);
 }
@@ -235,10 +244,15 @@ fn partial_identification_trickle_cannot_hold_a_handshake_past_its_accepted_budg
 fn buffered_git_reads_and_window_waits_keep_the_budget_but_native_response_restart_is_usable() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let (stream, _) = listener.accept().unwrap();
-    let mut session =
-        SshServerSession::new(host_key(), Vec::new(), Arc::new(asupersync::util::OsEntropy));
+    let mut session = SshServerSession::new(
+        host_key(),
+        Vec::new(),
+        Arc::new(asupersync::util::OsEntropy),
+    );
     session.start();
     let mut expired = GitDaemonSessionDeadline::new(
         GitDaemonSessionTimeout::try_new(Duration::from_millis(1)).unwrap(),
@@ -255,8 +269,14 @@ fn buffered_git_reads_and_window_waits_keep_the_budget_but_native_response_resta
     let mut reader = SshReader(&state);
     let mut writer = SshWriter(&state);
     let mut bytes = [0u8; 3];
-    assert_eq!(reader.read(&mut bytes).unwrap_err().kind(), io::ErrorKind::TimedOut);
-    assert_eq!(writer.write(b"x").unwrap_err().kind(), io::ErrorKind::TimedOut);
+    assert_eq!(
+        reader.read(&mut bytes).unwrap_err().kind(),
+        io::ErrorKind::TimedOut
+    );
+    assert_eq!(
+        writer.write(b"x").unwrap_err().kind(),
+        io::ErrorKind::TimedOut
+    );
     assert_eq!(writer.flush().unwrap_err().kind(), io::ErrorKind::TimedOut);
 
     let response = GitDaemonSessionDeadline::new(
@@ -273,5 +293,8 @@ fn buffered_git_reads_and_window_waits_keep_the_budget_but_native_response_resta
     assert_eq!(&bytes, b"git");
     let state = state.borrow();
     assert_eq!(state.deadline.started, response_started);
-    assert_eq!(state.deadline.shared.admitted_bytes.load(Ordering::Relaxed), 3);
+    assert_eq!(
+        state.deadline.shared.admitted_bytes.load(Ordering::Relaxed),
+        3
+    );
 }

@@ -102,8 +102,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server, _) = listener.accept().unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        client.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         (client, server)
     }
 
@@ -126,7 +130,9 @@ mod tests {
             io::ErrorKind::TimedOut
         );
         assert_eq!(
-            write_all(&mut server, &expired, b"refused").unwrap_err().kind(),
+            write_all(&mut server, &expired, b"refused")
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::TimedOut
         );
 
@@ -182,7 +188,10 @@ mod tests {
         assert_eq!(&byte, b"b");
 
         client.write_all(b"c").unwrap();
-        assert_eq!(read_handshake(&mut server, &deadline, &mut byte).unwrap(), 1);
+        assert_eq!(
+            read_handshake(&mut server, &deadline, &mut byte).unwrap(),
+            1
+        );
         assert!(server.read_timeout().unwrap().unwrap() <= Duration::from_secs(60));
         write_all_handshake(&mut server, &deadline, b"d").unwrap();
         assert!(server.write_timeout().unwrap().unwrap() <= Duration::from_secs(60));

@@ -123,7 +123,11 @@ impl<'a> StopControl<'a> {
     }
 
     pub(crate) fn should_stop(&self) -> io::Result<bool> {
-        if self.signals.as_ref().is_some_and(TerminationSignals::requested) {
+        if self
+            .signals
+            .as_ref()
+            .is_some_and(TerminationSignals::requested)
+        {
             if !self.announced.replace(true) {
                 eprintln!("fg: termination signal received; draining accepted connections");
             }
@@ -315,6 +319,4 @@ mod tests {
         fs::write(parent.join("stop"), b"").unwrap();
         assert!(control.inspect().unwrap());
     }
-
-
 }

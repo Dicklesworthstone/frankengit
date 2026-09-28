@@ -88,25 +88,28 @@ mod tests {
             continuous.keep_accepting(usize::MAX),
             Err(NodeSshRefusal::CounterExhausted)
         ));
-        assert!(!Acceptance::UntilStopped(&|| Ok(true))
-            .keep_accepting(usize::MAX)
-            .unwrap());
+        assert!(
+            !Acceptance::UntilStopped(&|| Ok(true))
+                .keep_accepting(usize::MAX)
+                .unwrap()
+        );
     }
 
     #[test]
     fn control_errors_and_panics_are_refusals_not_successful_retirement() {
         assert!(matches!(
-            Acceptance::UntilStopped(&|| Err(io::Error::other("control failed")))
-                .keep_accepting(0),
+            Acceptance::UntilStopped(&|| Err(io::Error::other("control failed"))).keep_accepting(0),
             Err(NodeSshRefusal::StopControl(_))
         ));
         assert!(matches!(
             Acceptance::UntilStopped(&|| panic!("control panic")).keep_accepting(0),
             Err(NodeSshRefusal::StopControl(_))
         ));
-        assert!(!Acceptance::UntilStopped(&|| Ok(true))
-            .keep_accepting(0)
-            .unwrap());
+        assert!(
+            !Acceptance::UntilStopped(&|| Ok(true))
+                .keep_accepting(0)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -130,11 +133,13 @@ mod tests {
 
         let unwinding = guard(false);
         let panic_finished = Arc::clone(&unwinding.finished);
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _completion = unwinding;
-            panic!("session panic");
-        }))
-        .is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _completion = unwinding;
+                panic!("session panic");
+            }))
+            .is_err()
+        );
         assert!(panic_finished.load(Ordering::Acquire));
 
         let unscheduled = guard(false);

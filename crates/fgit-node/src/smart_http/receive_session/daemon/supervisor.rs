@@ -23,13 +23,16 @@ impl Acceptance<'_> {
         match self {
             Self::Bounded(maximum) => Ok(accepted < *maximum),
             Self::UntilStopped(stop) => {
-                let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stop()))
-                    .map_err(|_| io::Error::other("guarded daemon stop control panicked"))??;
+                let stopped =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stop()))
+                        .map_err(|_| io::Error::other("guarded daemon stop control panicked"))??;
                 if stopped {
                     return Ok(false);
                 }
                 if accepted == usize::MAX {
-                    return Err(io::Error::other("guarded daemon lifetime counter exhausted"));
+                    return Err(io::Error::other(
+                        "guarded daemon lifetime counter exhausted",
+                    ));
                 }
                 Ok(true)
             }
@@ -314,17 +317,31 @@ mod tests {
     #[test]
     fn stop_errors_panics_and_counter_exhaustion_take_the_draining_error_path() {
         let error = || {
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "control unreadable"))
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "control unreadable",
+            ))
         };
         assert_eq!(
-            Acceptance::UntilStopped(&error).keep_accepting(0).unwrap_err().kind(),
+            Acceptance::UntilStopped(&error)
+                .keep_accepting(0)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::PermissionDenied
         );
         let panic = || -> io::Result<bool> { panic!("planted stop failure") };
         assert!(Acceptance::UntilStopped(&panic).keep_accepting(0).is_err());
         let running = || Ok(false);
-        assert!(Acceptance::UntilStopped(&running).keep_accepting(usize::MAX - 1).unwrap());
-        assert!(Acceptance::UntilStopped(&running).keep_accepting(usize::MAX).is_err());
+        assert!(
+            Acceptance::UntilStopped(&running)
+                .keep_accepting(usize::MAX - 1)
+                .unwrap()
+        );
+        assert!(
+            Acceptance::UntilStopped(&running)
+                .keep_accepting(usize::MAX)
+                .is_err()
+        );
     }
 
     #[test]
@@ -337,7 +354,12 @@ mod tests {
             let completed = Arc::clone(&completed);
             let refused = Arc::clone(&refused);
             move || {
-                let _completion = Completion { finished, completed, refused, success: false };
+                let _completion = Completion {
+                    finished,
+                    completed,
+                    refused,
+                    success: false,
+                };
                 panic!("planted child failure");
             }
         });

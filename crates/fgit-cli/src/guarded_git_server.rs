@@ -133,7 +133,8 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
             return Err("--continuous and a nonempty --stop-file must be supplied together".into());
         }
     };
-    if !continuous && flags.contains_key("--max-sessions") != flags.contains_key("--max-in-flight") {
+    if !continuous && flags.contains_key("--max-sessions") != flags.contains_key("--max-in-flight")
+    {
         return Err("--max-sessions and --max-in-flight must be selected together".into());
     }
     let sessions = flags
@@ -248,7 +249,9 @@ pub(crate) fn apply_session_and_envelope_flags(
 
 pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
     let prepared = parse(arguments)?;
-    let stop = prepared.stop_file.as_ref()
+    let stop = prepared
+        .stop_file
+        .as_ref()
         .map(|path| crate::service_stop::StopFile::arm(path))
         .transpose()
         .map_err(|error| format!("cannot arm git-daemon stop control: {error}"))?;
@@ -280,7 +283,9 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
         }
         if let Some(control) = control {
             node.serve_guarded_git_daemon_until_stopped(
-                listener, prepared.limits.max_in_flight(), &|| control.should_stop(),
+                listener,
+                prepared.limits.max_in_flight(),
+                &|| control.should_stop(),
             )
         } else {
             node.serve_guarded_git_daemon_bounded(&listener, prepared.limits)
@@ -418,8 +423,13 @@ mod tests {
     #[test]
     fn continuous_lifetime_is_explicit_without_widening_receive_authority() {
         let parsed = parse(&arguments(&[
-            "--continuous", "--stop-file", "service.stop", "--max-in-flight", "2",
-        ])).unwrap();
+            "--continuous",
+            "--stop-file",
+            "service.stop",
+            "--max-in-flight",
+            "2",
+        ]))
+        .unwrap();
         assert_eq!(parsed.stop_file, Some(PathBuf::from("service.stop")));
         assert_eq!(parsed.limits.max_in_flight(), 2);
         assert!(!parsed.receive_enabled);
@@ -428,10 +438,33 @@ mod tests {
             vec!["--continuous"],
             vec!["--stop-file", "service.stop"],
             vec!["--continuous", "--stop-file", ""],
-            vec!["--continuous", "--continuous", "--stop-file", "service.stop"],
-            vec!["--continuous", "--stop-file", "service.stop", "--max-sessions", "1"],
-            vec!["--continuous", "--stop-file", "service.stop", "--max-in-flight", "0"],
-            vec!["--continuous", "--stop-file", "service.stop", "--max-in-flight", "17"],
+            vec![
+                "--continuous",
+                "--continuous",
+                "--stop-file",
+                "service.stop",
+            ],
+            vec![
+                "--continuous",
+                "--stop-file",
+                "service.stop",
+                "--max-sessions",
+                "1",
+            ],
+            vec![
+                "--continuous",
+                "--stop-file",
+                "service.stop",
+                "--max-in-flight",
+                "0",
+            ],
+            vec![
+                "--continuous",
+                "--stop-file",
+                "service.stop",
+                "--max-in-flight",
+                "17",
+            ],
         ] {
             assert!(parse(&arguments(&flags)).is_err(), "{flags:?}");
         }

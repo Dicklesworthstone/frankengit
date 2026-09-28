@@ -219,7 +219,8 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
         .unwrap_or(16);
 
     let sessions = usize::try_from(sessions).map_err(|_| "SSH session limit exceeds platform")?;
-    let in_flight = usize::try_from(in_flight).map_err(|_| "SSH in-flight limit exceeds platform")?;
+    let in_flight =
+        usize::try_from(in_flight).map_err(|_| "SSH in-flight limit exceeds platform")?;
     let limits = SshServerLimits::try_new(sessions, in_flight).map_err(|e| e.to_string())?;
 
     let tenant = TenantId::from_hex(tenant).map_err(|e| e.to_string())?;
@@ -291,7 +292,9 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
 
 pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
     let prepared = parse(arguments)?;
-    let stop = prepared.stop_file.as_ref()
+    let stop = prepared
+        .stop_file
+        .as_ref()
         .map(|path| crate::service_stop::StopFile::arm(path))
         .transpose()
         .map_err(|error| format!("cannot arm SSH stop control: {error}"))?;
@@ -406,10 +409,9 @@ mod tests {
 
     #[test]
     fn serve_ssh_takes_the_same_receive_envelope_and_session_flags_as_serve() {
-        let key = HostKey(std::env::temp_dir().join(format!(
-            "fg-serve-ssh-envelope-{}.key",
-            std::process::id()
-        )));
+        let key = HostKey(
+            std::env::temp_dir().join(format!("fg-serve-ssh-envelope-{}.key", std::process::id())),
+        );
         fs::write(&key.0, "11".repeat(32)).unwrap();
         let arguments = |extra: &[&str]| -> Vec<String> {
             [
@@ -434,8 +436,13 @@ mod tests {
         };
         let default = format!("{:?}", parse(&arguments(&[])).unwrap().configuration);
         let continuous = parse(&arguments(&[
-            "--continuous", "--stop-file", "ssh.stop", "--max-in-flight", "2",
-        ])).unwrap();
+            "--continuous",
+            "--stop-file",
+            "ssh.stop",
+            "--max-in-flight",
+            "2",
+        ]))
+        .unwrap();
         assert_eq!(continuous.stop_file, Some(PathBuf::from("ssh.stop")));
         assert_eq!(continuous.limits.max_in_flight, 2);
         assert!(!continuous.allow_receive);
@@ -463,14 +470,37 @@ mod tests {
         for flags in [
             vec!["--receive-max-input-mib", "0"],
             vec!["--session-timeout-secs", "0"],
-            vec!["--pack-max-expanded-mib", "1", "--pack-max-expanded-mib", "2"],
+            vec![
+                "--pack-max-expanded-mib",
+                "1",
+                "--pack-max-expanded-mib",
+                "2",
+            ],
             vec!["--continuous"],
             vec!["--stop-file", "ssh.stop"],
             vec!["--continuous", "--stop-file", ""],
             vec!["--continuous", "--continuous", "--stop-file", "ssh.stop"],
-            vec!["--continuous", "--stop-file", "ssh.stop", "--max-sessions", "1"],
-            vec!["--continuous", "--stop-file", "ssh.stop", "--max-in-flight", "0"],
-            vec!["--continuous", "--stop-file", "ssh.stop", "--max-in-flight", "17"],
+            vec![
+                "--continuous",
+                "--stop-file",
+                "ssh.stop",
+                "--max-sessions",
+                "1",
+            ],
+            vec![
+                "--continuous",
+                "--stop-file",
+                "ssh.stop",
+                "--max-in-flight",
+                "0",
+            ],
+            vec![
+                "--continuous",
+                "--stop-file",
+                "ssh.stop",
+                "--max-in-flight",
+                "17",
+            ],
             vec!["--max-sessions", "18446744073709551615"],
         ] {
             assert!(parse(&arguments(&flags)).is_err(), "{flags:?}");

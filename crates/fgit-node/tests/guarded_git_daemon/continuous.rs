@@ -57,10 +57,16 @@ fn continuous_stop_closes_before_draining_an_atomic_push_and_live_twin_keeps_acc
             let (oid, zero, pack) = pack(format);
             let mut socket = connect(address, &path);
             assert!(!records(&mut socket)[0].starts_with(b"ERR "));
-            socket.write_all(&prefix(format, &[
-                (zero, oid, "refs/tags/atomic-a"),
-                (zero, oid, "refs/tags/atomic-b"),
-            ], true)).unwrap();
+            socket
+                .write_all(&prefix(
+                    format,
+                    &[
+                        (zero, oid, "refs/tags/atomic-a"),
+                        (zero, oid, "refs/tags/atomic-b"),
+                    ],
+                    true,
+                ))
+                .unwrap();
             socket.write_all(&pack[..12]).unwrap();
 
             let closed_while_held = if stop_during_push {
@@ -82,12 +88,18 @@ fn continuous_stop_closes_before_draining_an_atomic_push_and_live_twin_keeps_acc
             let receipt = server.join().unwrap();
             assert!(accepted_child_still_draining);
             assert_eq!(closed_while_held, stop_during_push);
-            assert_eq!(response, [
-                b"unpack ok\n".to_vec(),
-                b"ok refs/tags/atomic-a\n".to_vec(),
-                b"ok refs/tags/atomic-b\n".to_vec(),
-            ]);
-            assert_eq!(receipt.accepted_sessions(), if stop_during_push { 4 } else { 5 });
+            assert_eq!(
+                response,
+                [
+                    b"unpack ok\n".to_vec(),
+                    b"ok refs/tags/atomic-a\n".to_vec(),
+                    b"ok refs/tags/atomic-b\n".to_vec(),
+                ]
+            );
+            assert_eq!(
+                receipt.accepted_sessions(),
+                if stop_during_push { 4 } else { 5 }
+            );
             assert_eq!(receipt.completed_sessions(), receipt.accepted_sessions());
             assert_eq!(receipt.refused_sessions(), 0);
             let node = start(config, true);
@@ -117,8 +129,13 @@ fn stop_control_failure_and_panic_close_acceptance_then_settle_the_active_child(
         let server = thread::spawn(move || {
             let result = node.serve_guarded_git_daemon_until_stopped(listener, 1, &|| {
                 if child_fail.load(Ordering::Acquire) {
-                    if panic_control { panic!("planted stop callback failure"); }
-                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, "control lost"));
+                    if panic_control {
+                        panic!("planted stop callback failure");
+                    }
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "control lost",
+                    ));
                 }
                 Ok(false)
             });
@@ -150,7 +167,10 @@ fn invalid_continuous_limits_close_the_unpublished_owned_listener() {
     for limit in [0, 17, usize::MAX] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        assert!(node.serve_guarded_git_daemon_until_stopped(listener, limit, &|| Ok(false)).is_err());
+        assert!(
+            node.serve_guarded_git_daemon_until_stopped(listener, limit, &|| Ok(false))
+                .is_err()
+        );
         assert!(eventually_refuses_connections(address));
     }
     node.shutdown().unwrap();
