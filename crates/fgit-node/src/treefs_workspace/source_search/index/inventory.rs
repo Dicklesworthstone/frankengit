@@ -79,7 +79,8 @@ impl LocalSearch for InventoryRequest {
             path_bytes: 0,
             excluded: 0,
         };
-        discover(
+        discover_selected(
+            self.0.prefixes(),
             base,
             source,
             capability,
@@ -140,11 +141,22 @@ impl LocalSearch for InventoryRequest {
     }
 }
 
+// Full refresh keeps its existing, unscoped coverage and call contract.
+#[expect(clippy::too_many_arguments, reason = "shared native inventory inputs")]
+fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
+    base: &BaseView<A>, source: &S, capability: &mut TreeCapability,
+    now: u64, limits: SearchLimits, cancelled: &dyn Fn() -> bool,
+    directory: Option<&TreePath>, depth: usize, found: &mut Discovery<A>,
+) -> Result<(), SearchError> {
+    discover_selected(&[], base, source, capability, now, limits, cancelled, directory, depth, found)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one capability and one shared discovery budget span recursive tree traversal"
 )]
-fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
+fn discover_selected<A: GitHashAlgorithm, S: ObjectSource<A>>(
+    prefixes: &[TreePath],
     base: &BaseView<A>,
     source: &S,
     capability: &mut TreeCapability,
@@ -175,7 +187,13 @@ fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
         .map_err(|error| SearchError::Base(Box::new(BaseError::Path(error))))?;
         match entry {
             BaseEntry::Directory { .. } => {
-                discover(
+                if !prefixes.is_empty() && !prefixes.iter().any(|prefix| {
+                    path.starts_with(prefix) || prefix.starts_with(&path)
+                }) {
+                    continue;
+                }
+                discover_selected(
+                    prefixes,
                     base,
                     source,
                     capability,
@@ -188,6 +206,9 @@ fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
                 )?;
             }
             BaseEntry::File { oid, mode } => {
+                if !prefixes.is_empty() && !prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+                    continue;
+                }
                 if mode != b"100644" && mode != b"100755" {
                     return Err(SearchError::Budget("unsupported index file mode"));
                 }
@@ -208,7 +229,11 @@ fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
                     return Err(SearchError::Budget("duplicate index path"));
                 }
             }
-            BaseEntry::Symlink { .. } | BaseEntry::Submodule { .. } => found.excluded += 1,
+            BaseEntry::Symlink { .. } | BaseEntry::Submodule { .. } => {
+                if prefixes.is_empty() || prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+                    found.excluded += 1;
+                }
+            }
         }
     }
     Ok(())

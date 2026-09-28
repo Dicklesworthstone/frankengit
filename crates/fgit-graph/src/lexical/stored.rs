@@ -5,6 +5,7 @@
 
 mod manifest;
 mod refresh;
+pub mod scoped;
 pub use refresh::{LexicalRefreshStats, LexicalReuse, RefreshDocument};
 #[cfg(test)]
 mod tests;

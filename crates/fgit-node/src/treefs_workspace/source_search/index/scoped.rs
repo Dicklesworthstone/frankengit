@@ -1,130 +1,32 @@
-//! Native lexical indexing of one authority-selected source tree. Only the
-//! trusted local build entrypoint writes; queries and recovery never build.
-mod inventory;
-mod scoped;
+//! Native path-scoped lexical indexing. Whole-repository index entrypoints
+//! remain unchanged; these methods require explicit immutable coverage and
+//! use separately identified generation heads. Caller must already have
+//! trusted-local repository authority. Coverage never grants source access.
 use super::*;
-use fgit_forge::source_search::SearchCase;
-use fgit_graph::lexical::{
-    IndexError, IndexedLexicalReport, LexicalError, LexicalIndexStore, LexicalNamespace,
-    LexicalQuery, LexicalQueryLimits, LexicalReadLimits, LexicalSegment, LexicalSource,
-    MAX_DOCUMENTS, PreparedLexicalIndex, SourceDocument,
+use fgit_graph::lexical::scoped::{
+    LexicalScope, PreparedScopedLexicalIndex, ScopedLexicalIndexStore, ScopedLexicalReport,
 };
-use fgit_graph::{
-    GenerationActivation, GenerationReadLimits, GenerationRecovery, GraphGenerationId,
-};
-use inventory::{Document, InventoryRequest};
-
-fn index_error(error: impl Into<IndexError>) -> NodeWorkspaceRefusal {
-    NodeWorkspaceRefusal::SourceIndex(Box::new(error.into()))
-}
-fn live(request: &NodeRequestContext) -> Result<(), NodeWorkspaceRefusal> {
-    if workspace_request_live(request) {
-        Ok(())
-    } else {
-        Err(search_error(SearchError::Cancelled))
-    }
-}
-
-/// Split only segment-capacity failures, never malformed content or missing
-/// source. Tree bytes are read once. Bisection is deterministic; its additional
-/// hashing/tokenization is independently bounded and cancellable.
-fn segments(
-    namespace: LexicalNamespace,
-    documents: &[Document],
-    request_live: &mut impl FnMut() -> bool,
-) -> Result<Vec<LexicalSegment>, IndexError> {
-    if !request_live() {
-        return Err(LexicalError::Cancelled.into());
-    }
-    let mut output = Vec::new();
-    let mut attempts = 0usize;
-    let mut rescanned = 0usize;
-    let mut encoded_bytes = 0usize;
-    for (group, chunk) in documents.chunks(MAX_DOCUMENTS).enumerate() {
-        let first = group * MAX_DOCUMENTS;
-        let mut pending = vec![(first, chunk)];
-        while let Some((offset, inputs)) = pending.pop() {
-            if !request_live() {
-                return Err(LexicalError::Cancelled.into());
-            }
-            attempts += 1;
-            if attempts > 256 {
-                return Err(LexicalError::Limit("segment build attempts").into());
-            }
-            let bytes: usize = inputs
-                .iter()
-                .map(|input| input.bytes.len() + input.path.len())
-                .sum();
-            rescanned = rescanned
-                .checked_add(bytes)
-                .filter(|n| *n <= 256 * 1024 * 1024)
-                .ok_or(LexicalError::Limit("segment build byte work"))?;
-            let built = LexicalSegment::build(
-                namespace,
-                offset as u64 + 1,
-                inputs.iter().map(|input| SourceDocument {
-                    path: &input.path,
-                    blob: input.blob,
-                    content: &input.bytes,
-                }),
-                request_live,
-            );
-            match built {
-                Ok(segment) => {
-                    if output.len() == 128 {
-                        return Err(LexicalError::Limit("index segments").into());
-                    }
-                    encoded_bytes = encoded_bytes
-                        .checked_add(segment.encode(request_live)?.len())
-                        .filter(|n| *n <= 32 * 1024 * 1024)
-                        .ok_or(LexicalError::Limit("index bytes"))?;
-                    output.push(segment);
-                }
-                Err(LexicalError::Limit(
-                    "documents" | "dictionary terms" | "postings" | "segment bytes",
-                )) if inputs.len() > 1 => {
-                    let middle = inputs.len() / 2;
-                    pending.push((offset + middle, &inputs[middle..]));
-                    pending.push((offset, &inputs[..middle]));
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-    }
-    Ok(output)
-}
 
 impl OneNode {
-    const fn lexical_namespace(&self) -> LexicalNamespace {
-        LexicalNamespace {
-            tenant: self.tenant_id,
-            repository: self.repository_id,
-            incarnation: self.repository_incarnation_id(),
-            object_format: self.object_format,
-        }
-    }
-
-    /// Build and activate an index of EVERY regular file in one visible ref's
-    /// verified tree. Trusted-local operator API: not a remote read permission.
-    /// No caller-supplied documents, source stamps, root keys or payloads enter.
-    /// The predecessor is explicit; None requires an uninitialized index.
-    ///
-    /// Source can advance while this derived build runs. The receipt names the
-    /// original source, never claims freshness at completion, and queries refuse
-    /// an index not matching their own current source selection. A failed root
-    /// publication preserves its candidate ID for read-only recovery.
-    pub async fn build_source_index_local_in(
+    /// Build EVERY regular file in the explicit scope, not the entire tree.
+    /// Separate scope identity prevents replacement of an unscoped index.
+    /// None requires an uninitialized scoped head; a rebuild requires its exact
+    /// predecessor. Source pins and finite build budgets retain their meaning.
+    #[expect(clippy::too_many_arguments, reason = "explicit coverage, source pins and predecessor")]
+    pub async fn build_scoped_source_index_local_in(
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
+        scope: &LexicalScope,
         expected_head: Option<RepositoryAuthorityHeadId>,
         expected_commit: Option<GitOid>,
         predecessor: Option<GraphGenerationId>,
         limits: SearchLimits,
     ) -> Result<(LexicalSource, GenerationActivation), NodeWorkspaceRefusal> {
-        self.build_source_index_guarded_local_in(
+        self.build_scoped_source_index_guarded_local_in(
             request,
             reference,
+            scope,
             expected_head,
             expected_commit,
             predecessor,
@@ -148,10 +50,11 @@ impl OneNode {
         clippy::too_many_arguments,
         reason = "write-ahead barrier is independent of source pins and build budgets"
     )]
-    pub async fn build_source_index_guarded_local_in(
+    pub async fn build_scoped_source_index_guarded_local_in(
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
+        scope: &LexicalScope,
         expected_head: Option<RepositoryAuthorityHeadId>,
         expected_commit: Option<GitOid>,
         predecessor: Option<GraphGenerationId>,
@@ -164,10 +67,10 @@ impl OneNode {
         if expected_commit.is_some_and(|id| id.is_zero() || id.algorithm() != self.object_format) {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
         }
-        // SourceQuery is used only for its shared top-level scope selector.
+        // SourceQuery supplies explicit inventory coverage, not a literal scan.
         // No literal matcher runs and no search result limit truncates intake.
         let query = InventoryRequest(
-            SourceQuery::new(b"index", SearchCase::Exact, &[]).map_err(search_error)?,
+            SourceQuery::new(b"index", SearchCase::Exact, scope.prefixes()).map_err(search_error)?,
         );
         let (head, forge_position_root, inventory) = match self.object_format {
             Format::Sha1 => {
@@ -209,9 +112,9 @@ impl OneNode {
         let excluded = inventory.source.non_regular_entries;
         drop(inventory); // Source file buffers are not retained during async staging.
         let prepared =
-            PreparedLexicalIndex::new(source.clone(), parts, excluded, &mut request_live)
+            PreparedScopedLexicalIndex::new(source.clone(), scope.clone(), parts, excluded, &mut request_live)
                 .map_err(index_error)?;
-        let store = LexicalIndexStore::new(&self.authority, source.namespace, reference.clone())
+        let store = ScopedLexicalIndexStore::new(&self.authority, source.namespace, reference.clone(), scope.clone())
             .map_err(index_error)?;
         let candidate = store
             .candidate_id(&prepared, predecessor)
@@ -234,7 +137,7 @@ impl OneNode {
         Ok((source, activation))
     }
 
-    /// Query a persisted index only after selecting canonical current source
+    /// Query only the explicit persisted coverage after selecting current source
     /// and visibility. An old generation is usable only when it describes that
     /// same exact source head/commit/RCR/forge position. No rebuild, old-source
     /// fallback, substring scan, arbitrary object read or repository write.
@@ -242,10 +145,11 @@ impl OneNode {
         clippy::too_many_arguments,
         reason = "source pins, index pins, pagination and independent resource budgets are distinct contracts"
     )]
-    pub async fn search_source_index_local_in(
+    pub async fn search_scoped_source_index_local_in(
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
+        scope: &LexicalScope,
         expected_head: Option<RepositoryAuthorityHeadId>,
         expected_commit: Option<GitOid>,
         generation: Option<&GenerationActivation>,
@@ -254,7 +158,7 @@ impl OneNode {
         after: Option<u64>,
         query_limits: LexicalQueryLimits,
         read_limits: LexicalReadLimits,
-    ) -> Result<IndexedLexicalReport, NodeWorkspaceRefusal> {
+    ) -> Result<ScopedLexicalReport, NodeWorkspaceRefusal> {
         live(request)?;
         // A bare document ID is not a stable continuation without its original
         // source and index. The query is repeated explicitly, not changed here.
@@ -301,7 +205,7 @@ impl OneNode {
             }
         };
         let store =
-            LexicalIndexStore::new(&self.authority, self.lexical_namespace(), reference.clone())
+            ScopedLexicalIndexStore::new(&self.authority, self.lexical_namespace(), reference.clone(), scope.clone())
                 .map_err(index_error)?;
         let mut request_live = || workspace_request_live(request);
         let index = store
@@ -338,13 +242,14 @@ impl OneNode {
         Ok(report)
     }
 
-    /// Observe an interrupted derived-index activation, without retrying the
+    /// Observe an interrupted SCOPED activation, without retrying the
     /// build or creating a repository transaction. Current ref visibility is
     /// checked before any historical index metadata can be returned.
-    pub async fn recover_source_index_local_in(
+    pub async fn recover_scoped_source_index_local_in(
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
+        scope: &LexicalScope,
         candidate: GraphGenerationId,
         minimum: Option<&GenerationActivation>,
         limits: GenerationReadLimits,
@@ -362,7 +267,7 @@ impl OneNode {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
         let store =
-            LexicalIndexStore::new(&self.authority, self.lexical_namespace(), reference.clone())
+            ScopedLexicalIndexStore::new(&self.authority, self.lexical_namespace(), reference.clone(), scope.clone())
                 .map_err(index_error)?;
         store
             .recover_async(request.authority(), candidate, minimum, limits, &mut || {
@@ -370,97 +275,5 @@ impl OneNode {
             })
             .await
             .map_err(index_error)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use fgit_crypto::{GitObjectKind, git_object_id};
-    fn namespace() -> LexicalNamespace {
-        LexicalNamespace {
-            tenant: fgit_types::TenantId::from_bytes([1; 16]),
-            repository: fgit_types::RepositoryId::from_bytes([2; 16]),
-            incarnation: fgit_types::RepositoryIncarnationId::from_bytes([3; 16]),
-            object_format: fgit_types::GitHashAlgorithm::Sha256,
-        }
-    }
-    fn document(path: &[u8], bytes: Vec<u8>) -> Document {
-        Document {
-            path: path.to_vec(),
-            blob: git_object_id(namespace().object_format, GitObjectKind::Blob, &bytes),
-            bytes,
-        }
-    }
-    #[test]
-    fn partitioning_preserves_every_document_and_absolute_id_under_dictionary_pressure() {
-        let documents: Vec<_> = (0..3)
-            .map(|n| {
-                document(
-                    format!("file{n}").as_bytes(),
-                    (0..20_000)
-                        .map(|i| format!("word{:05} ", n * 20_000 + i))
-                        .collect::<String>()
-                        .into_bytes(),
-                )
-            })
-            .collect();
-        let parts = segments(namespace(), &documents, &mut || true).unwrap();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(
-            parts
-                .iter()
-                .flat_map(|p| p.documents())
-                .map(|d| d.id)
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
-        for (part, original) in parts.iter().zip(&documents) {
-            assert_eq!(part.documents()[0].blob, original.blob);
-            assert_eq!(part.documents()[0].path, original.path);
-        }
-        let again = segments(namespace(), &documents, &mut || true).unwrap();
-        for (left, right) in parts.iter().zip(again) {
-            assert_eq!(
-                left.encode(&mut || true).unwrap(),
-                right.encode(&mut || true).unwrap()
-            );
-        }
-    }
-    #[test]
-    fn long_words_keep_documents_but_invalid_native_content_still_refuses() {
-        let docs = vec![
-            document(b"a", b"small".to_vec()),
-            document(b"b", vec![b'x'; 129]),
-        ];
-        let parts = segments(namespace(), &docs, &mut || true).unwrap();
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].documents().len(), 2);
-        for (indexed, original) in parts[0].documents().iter().zip(&docs) {
-            assert_eq!(indexed.path, original.path);
-            assert_eq!(indexed.blob, original.blob);
-            assert_eq!(indexed.content_bytes as usize, original.bytes.len());
-        }
-        let mut docs = vec![document(b"a", b"small".to_vec())];
-        docs[0].bytes[0] = b'S';
-        assert!(matches!(
-            segments(namespace(), &docs, &mut || true),
-            Err(IndexError::Lexical(LexicalError::NativeIdentityMismatch))
-        ));
-    }
-    #[test]
-    fn empty_inventory_is_distinct_from_cancelled_build() {
-        assert!(segments(namespace(), &[], &mut || true).unwrap().is_empty());
-        let docs = vec![document(b"a", Vec::new())];
-        assert!(matches!(
-            segments(namespace(), &docs, &mut || false),
-            Err(IndexError::Lexical(LexicalError::Cancelled))
-        ));
-        assert_eq!(
-            segments(namespace(), &docs, &mut || true).unwrap()[0]
-                .documents()
-                .len(),
-            1
-        );
     }
 }

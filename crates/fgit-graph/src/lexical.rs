@@ -13,6 +13,7 @@
 
 mod encoding;
 mod stored;
+pub use stored::scoped;
 pub use stored::{
     IndexError, IndexedLexicalReport, LexicalIndexStore, LexicalReadLimits, LexicalRefreshStats,
     LexicalReuse, LexicalSelection, LexicalSource, PreparedLexicalIndex, RefreshDocument,
