@@ -2,7 +2,7 @@
 // Detached backup approval, separate from Git/capsule validity and authority.
 import { resolve } from 'node:path';
 import { ATTESTATION_LIMITS, attestationMetadata, attestationPolicy, signSourceBackupFile,
-  readAttestationFile, authenticateSourceBackupFile, attestationFileLimits, publishAttestation } from './lib/source-attestation.mjs';
+  readAttestationFile, authenticateSourceBackupFile, copyAuthenticatedSourceBackup, attestationFileLimits, publishAttestation } from './lib/source-attestation.mjs';
 const HELP = `Usage:
   node scripts/attest_git_bundle.mjs sign INPUT.bundle OUTPUT.dsse.json \\
     --key PRIVATE.pem --repository OWNER/REPO --sequence POSITIVE_DECIMAL [--expires-at UTC]
@@ -25,12 +25,17 @@ Both modes stream local files in at most 64 KiB reads. Optional resource bounds:
   --max-input-bytes DECIMAL  Explicit file ceiling (default 16777216)
   --timeout-secs DECIMAL     Total streaming/signature deadline (default 300; max 86400)
 Larger signing/authentication does not raise the Git verifier/restore limits.
+Check mode also accepts --copy-to NEW.bundle to publish an authenticated copy
+through a private staging file and no-replace installation. The destination
+parent must be owned by this user and not writable by group/others.
+Without --copy-to, check remains read-only. This does not restore a repository.
 Use -- before literal paths that start with a dash; --help opens no files.
 `;
 function parse(args) {
   const operation = args[0], paths = [], values = {}; let literal = false;
   const allowed = operation === 'sign' ? ['key', 'repository', 'sequence', 'expires-at'] : operation === 'check' ? ['trust-key', 'repository', 'minimum-sequence'] : [];
   if (!allowed.length) throw new Error('attestation_sign_or_check_required');
+  if (operation === 'check') allowed.push('copy-to');
   allowed.push('max-input-bytes', 'timeout-secs');
   for (let i = 1; i < args.length; i++) {
     const arg = args[i]; if (!literal && arg === '--') { literal = true; continue; }
@@ -55,7 +60,9 @@ function parse(args) {
     if (resolve(paths[0]) === resolve(paths[1]) || resolve(key) === resolve(paths[1])) throw new Error('attestation_output_conflicts_with_input');
     return { operation, paths, key, metadata, limits };
   }
-  return { operation, paths, key, limits, policy: attestationPolicy({ repository: values.repository, minimum_sequence: values['minimum-sequence'] }) };
+  const copyTo = values['copy-to'] ?? null;
+  if (copyTo !== null && [paths[0], paths[1], key].some(path => resolve(path) === resolve(copyTo))) throw new Error('attestation_output_conflicts_with_input');
+  return { operation, paths, key, limits, copyTo, policy: attestationPolicy({ repository: values.repository, minimum_sequence: values['minimum-sequence'] }) };
 }
 const controller = new AbortController(), cancel = () => controller.abort();
 process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
@@ -77,12 +84,16 @@ try {
     } else {
       const encoded = await readAttestationFile(command.paths[1], ATTESTATION_LIMITS.envelopeBytes, { signal });
       const key = await readAttestationFile(command.key, ATTESTATION_LIMITS.keyBytes, { signal });
-      const { authentication, streaming } = await authenticateSourceBackupFile(command.paths[0], encoded, key, command.policy, { signal, ...command.limits });
-      output = JSON.stringify({ type: 'frankengit-source-attestation-checked-v1', ...authentication, streaming }, null, 2) + '\n';
+      const result = command.copyTo === null
+        ? await authenticateSourceBackupFile(command.paths[0], encoded, key, command.policy, { signal, ...command.limits })
+        : await copyAuthenticatedSourceBackup(command.paths[0], command.copyTo, encoded, key, command.policy, { signal, ...command.limits });
+      publication = result.copy ?? null;
+      output = JSON.stringify({ type: 'frankengit-source-attestation-checked-v1', ...result.authentication, streaming: result.streaming,
+        ...(result.copy ? { copy: result.copy } : {}) }, null, 2) + '\n';
     }
   }
   await new Promise((resolve, reject) => process.stdout.write(output, error => error ? reject(error) : resolve()));
 } catch (error) {
   process.stderr.write(JSON.stringify({ type: 'frankengit-source-attestation-error-v1', code: error.code ?? error.message ?? 'attestation_failed',
-    state: publication?.state ?? error.attestation_state ?? 'not_created', cleanup_error: error.attestation_cleanup_error ?? null }) + '\n'); process.exitCode = 1;
+    state: publication?.state ?? error.attestation_state ?? 'not_created', cleanup_error: error.attestation_cleanup_error ?? null, temporary: error.attestation_temporary ?? null }) + '\n'); process.exitCode = 1;
 } finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); }

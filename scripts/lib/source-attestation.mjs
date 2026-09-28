@@ -3,7 +3,7 @@
 // repository/sequence policy. No key, URL, or trust floor is learned from input.
 // DSSE v1 PAE: https://github.com/secure-systems-lab/dsse/blob/master/protocol.md
 import { createHash, createPrivateKey, createPublicKey, sign, verify, randomBytes } from 'node:crypto';
-import { open, link, lstat, unlink } from 'node:fs/promises';
+import { open, link, lstat, unlink, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, basename, resolve, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -194,7 +194,7 @@ function fileSettings(options) {
   guard(); return { ...limits, ...clock, captured, guard, progress };
 }
 const FILE_IDENTITY_FIELDS = ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'mode', 'uid', 'nlink'];
-async function streamArtifact(path, context, expected = null) {
+async function streamArtifact(path, context, expected = null, consume = null) {
   const { guard, progress, maximumBytes } = context; guard();
   if (typeof path !== 'string' || !path || path.length > 8192 || path.includes('\0') || /[\uD800-\uDFFF]/u.test(path)) fail('invalid_attestation_path');
   if (constants.O_NOFOLLOW === undefined) fail('unsupported_attestation_file_profile');
@@ -211,7 +211,9 @@ async function streamArtifact(path, context, expected = null) {
     while (at < total) {
       guard(); const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, total - at), at); guard();
       if (!bytesRead) fail('attestation_file_changed');
-      digest.update(buffer.subarray(0, bytesRead)); at += bytesRead; readCalls++; maximumRead = Math.max(maximumRead, bytesRead);
+      const chunk = buffer.subarray(0, bytesRead); digest.update(chunk);
+      if (consume !== null) { await consume(chunk, at); guard(); }
+      at += bytesRead; readCalls++; maximumRead = Math.max(maximumRead, bytesRead);
       await progress(Object.freeze({ bytes_hashed: at, total_bytes: total })); guard();
     }
     if ((await file.read(buffer, 0, 1, total)).bytesRead) fail('attestation_file_changed');
@@ -221,7 +223,7 @@ async function streamArtifact(path, context, expected = null) {
     if (!named.isFile() || FILE_IDENTITY_FIELDS.some(key => before[key] !== after[key] || after[key] !== named[key])) fail('attestation_file_changed');
     guard(); const sha256 = digest.digest('hex');
     if (expected !== null && sha256 !== expected.sha256) fail('attestation_artifact_mismatch');
-    return { bytes: total, sha256, streaming: { read_calls: readCalls, maximum_read_bytes: maximumRead } };
+    return { bytes: total, sha256, identity: after, streaming: { read_calls: readCalls, maximum_read_bytes: maximumRead } };
   } finally { buffer?.fill(0); await file.close(); }
 }
 // Same canonical DSSE statement as the in-memory path; only file traversal and
@@ -245,6 +247,99 @@ export async function authenticateSourceBackupFile(path, encoded, publicPem, exp
   const guard = () => { context.guard(); freshness(authentication.statement, policy, context.current()); };
   guard(); const artifact = await streamArtifact(path, { ...context, guard }, authentication.statement.artifact); guard();
   return { authentication, streaming: artifact.streaming };
+}
+
+// Copy only the bytes traversed by the authenticated reader. A quarantine file
+// is synchronized and independently read back before an exclusive hard-link
+// install exposes the destination. This stages an artifact, not a repository.
+export async function copyAuthenticatedSourceBackup(path, destination, encoded, publicPem, expected, options = {}) {
+  const context = fileSettings(options), policy = attestationPolicy(expected);
+  if (typeof destination !== 'string' || !destination || destination.length > 8192 || destination.includes('\0') ||
+      /[\uD800-\uDFFF]/u.test(destination)) fail('invalid_attestation_path');
+  if (constants.O_DIRECTORY === undefined || constants.O_NOFOLLOW === undefined || typeof process.getuid !== 'function') fail('unsupported_attestation_file_profile');
+  const authentication = await verifySourceAttestation(encoded, publicPem, policy,
+    { ...context.captured, maximumBytes: context.maximumBytes });
+  const guard = () => { context.guard(); freshness(authentication.statement, policy, context.current()); };
+  guard();
+  const requested = resolve(destination);
+  if (dirname(requested) === requested) fail('invalid_attestation_path');
+  const parent = await realpath(dirname(requested)), target = join(parent, basename(requested));
+  const temporary = join(parent, `.fgit-authenticated-${randomBytes(16).toString('hex')}.tmp`);
+  let output = null, directory = null, identity = null, parentIdentity = null, errorSeen = null;
+  let state = 'not_created', writeCalls = 0;
+  const same = (a, b) => a.dev === b.dev && a.ino === b.ino;
+  const report = async (phase, detail = {}) => context.progress(Object.freeze({ phase, destination: target, temporary, ...detail }));
+  async function checkParent() {
+    const named = await lstat(parent, { bigint: true }), opened = await directory.stat({ bigint: true });
+    if (!named.isDirectory() || !same(named, opened) || !same(opened, parentIdentity) ||
+        named.uid !== BigInt(process.getuid()) || (named.mode & 0o22n) !== 0n || named.mode !== parentIdentity.mode) fail('attestation_output_parent_changed');
+  }
+  async function removeOwned() {
+    if (!identity) return;
+    await checkParent();
+    const named = await lstat(temporary, { bigint: true });
+    if (!named.isFile() || !same(named, identity)) fail('attestation_temporary_changed');
+    await unlink(temporary); identity = null;
+  }
+  try {
+    guard(); directory = await open(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    parentIdentity = await directory.stat({ bigint: true }); await checkParent();
+    try { await lstat(target); const exists = new Error('EEXIST'); exists.code = 'EEXIST'; throw exists; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    guard(); output = await open(temporary, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    identity = await output.stat({ bigint: true }); state = 'staging';
+    await report('staging'); guard();
+    const artifact = await streamArtifact(path, { ...context, guard,
+      progress: event => report('copying', event) }, authentication.statement.artifact,
+    async (chunk, offset) => {
+      let written = 0;
+      while (written < chunk.length) {
+        guard(); const { bytesWritten } = await output.write(chunk, written, chunk.length - written, offset + written);
+        if (!bytesWritten) fail('attestation_output_short_write'); written += bytesWritten; writeCalls++; guard();
+      }
+    });
+    guard(); await output.sync(); guard();
+    await report('before_readback'); guard();
+    const readback = await streamArtifact(temporary, { ...context, guard,
+      progress: event => report('readback', event) }, authentication.statement.artifact);
+    const final = await output.stat({ bigint: true });
+    if (!same(final, identity) || !same(final, readback.identity) || final.nlink !== 1n ||
+        final.uid !== BigInt(process.getuid()) || (final.mode & 0o777n) !== 0o600n ||
+        FILE_IDENTITY_FIELDS.some(key => final[key] !== readback.identity[key])) fail('attestation_temporary_changed');
+    await checkParent(); guard();
+    state = 'publication_unknown';
+    try { await link(temporary, target); }
+    catch (error) { if (error.code === 'EEXIST') state = 'not_created'; throw error; }
+    state = 'published';
+    // Publication acquired responsibility: neither expiry, cancellation nor a
+    // failing observer skips directory synchronization and owned-temp cleanup.
+    let notificationError = null, notificationFailed = false;
+    try { await report('published'); } catch (error) { notificationError = error; notificationFailed = true; }
+    await directory.sync(); await removeOwned(); await directory.sync(); await checkParent();
+    const installed = await lstat(target, { bigint: true });
+    if (!installed.isFile() || !same(installed, final) || installed.size !== final.size || installed.mtimeNs !== final.mtimeNs ||
+        installed.mode !== final.mode || installed.uid !== final.uid || installed.nlink !== 1n) fail('attestation_installed_file_changed');
+    if (notificationFailed) throw notificationError;
+    return { authentication, streaming: artifact.streaming,
+      copy: { path: target, state: 'complete', bytes: artifact.bytes, sha256: artifact.sha256,
+        readback_checked: true, file_synced: true, directory_synced: true, write_calls: writeCalls,
+        approval_checked_before_publication: true,
+        cancellation_requested: Boolean(context.signal?.aborted) } };
+  } catch (caught) {
+    const error = caught instanceof Error ? caught : new SourceAttestationError('attestation_observer_failed');
+    errorSeen = error; error.attestation_state = state;
+    try { await removeOwned(); } catch { error.attestation_cleanup_error = 'attestation_temporary_cleanup_failed'; }
+    if (identity) error.attestation_temporary = temporary;
+    // Never unlink or roll back the destination, even after an uncertain link.
+    throw error;
+  } finally {
+    let closeError = null;
+    for (const handle of [output, directory]) { try { await handle?.close(); } catch (error) { closeError ??= error; } }
+    if (closeError) {
+      if (errorSeen) errorSeen.attestation_cleanup_error = 'attestation_handle_close_failed';
+      else { closeError.attestation_state = state; throw closeError; }
+    }
+  }
 }
 
 // Trusted local file boundary. Final path components are never followed; a

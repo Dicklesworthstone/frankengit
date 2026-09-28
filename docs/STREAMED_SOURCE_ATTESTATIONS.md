@@ -40,8 +40,9 @@ These checks are not a filesystem sandbox against a malicious same-user process.
 Authentication verifies the signature, externally selected key, repository name,
 sequence floor and lifetime **before opening the artifact**. Cancellation and
 lifetime checks continue during reading; the monotonic deadline includes the
-cryptographic operation. No successful report is returned after an observed
-cancellation, timeout, mismatch or file change. Handles close on all exits.
+cryptographic operation. Read-only authentication and signing return no success
+after an observed cancellation, timeout, mismatch or file change. Handles close
+on all exits. Copy publication has the explicit finalization rule below.
 Signing still uses exclusive, synchronized detached-envelope publication and
 never overwrites an existing output. The command prints no private-key bytes.
 
@@ -85,3 +86,78 @@ opaque artifact, not a claim about Git validity or disk-throughput performance.
 Other tests cover exact small-envelope equivalence, byte allowances, same-size
 substitution, path and metadata mutation, cancellation, deadlines, signer and
 policy capture, expiry during reads, and actual sign/check CLI execution.
+
+
+## Materialize an authenticated large bundle
+
+A successful read-only check is not permission to reopen an untrusted input path
+for a later copy. Use the explicit `--copy-to` option to authenticate and copy
+**the same streamed bytes** into a new operator-owned staging location:
+
+```sh
+node scripts/attest_git_bundle.mjs check \
+  /incoming/repository.bundle /incoming/repository.dsse.json \
+  --trust-key /trusted/backup-public.pem \
+  --repository team/repository --minimum-sequence 42 \
+  --max-input-bytes 10737418240 --timeout-secs 1800 \
+  --copy-to /recovery/verified-source.bundle
+```
+
+Without this option, `check` remains read-only. Signing does not accept
+`--copy-to`. The copy destination must be absent, and its existing parent must
+be owned by the current user and not writable by group or others. This is a
+local POSIX profile requiring no-follow opens, exclusive creation, hard links
+and directory synchronization. The parent must remain quiescent; this is not
+an openat-based sandbox against a malicious same-user process.
+
+The command authenticates the envelope, key, repository and sequence floor
+before opening the input or output directory. It then hashes and copies each
+input chunk into a random private 0600 temporary file. The source is never
+reopened between the checked read and copying. A changed source, wrong signed
+length/hash, exhausted allowance, timeout or prepublication cancellation refuses.
+
+Only after all source checks pass does it synchronize the temporary file and
+read it back against the signed hash/length. It checks the held output inode,
+pathname, permissions, link count and parent identity before a no-replace hard
+link installs the destination. Two competing invocations cannot replace each
+other's output. Existing files, directories and dangling symlinks all refuse.
+No destination is unlinked or rolled back by this command.
+
+Once the destination is linked, the command owns finalization: expiration or
+cancellation does not skip directory synchronization and removal of its own
+temporary link. A failing observer still permits finalization and then reports
+failure with `state: published`. Other errors distinguish `not_created`,
+`staging`, `publication_unknown` and `published` for this attempt; `not_created`
+does not assert that a file from another attempt is absent. A lost response
+never proves that publication did not happen. There is no automatic retry.
+
+Success adds a `copy` record with the exact destination, digest and size,
+readback/synchronization results and whether cancellation was requested after
+publication. It still reports `object_closure_verified: false`. This creates
+an authenticated **bundle file**, not a bare repository or native authority
+store; native object/closure validation remains required before restoration.
+The copied path must remain private and unmodified until its consumer checks
+and uses it. Signature checking does not make a mutable filesystem immutable.
+
+Failures clean up only this invocation's identified temporary inode. A changed
+parent or substituted temporary file is not guessed safe to delete; a separate
+`cleanup_error` and temporary path identify incomplete cleanup. SIGKILL can
+leave a private `.fgit-authenticated-*.tmp` file. Later invocations do not reap
+unknown leftovers, resume them, or count them as verified output. After a kill
+following installation, the complete destination may already exist and a new
+copy attempt refuses to overwrite it. Read-only authentication can check it.
+Power-loss behavior has not been tested by the process-kill tests.
+
+The library entry is `copyAuthenticatedSourceBackup`, with the same external
+trust inputs and explicit file limits as the read-only streaming API. Copying,
+readback and signature work share one deadline before publication. Data is
+passed to the writer internally; no caller-supplied chunk handler may turn an
+unverified stream into arbitrary effects.
+
+Run all attestation tests, including real SIGKILL before/after installation:
+
+```sh
+node --test tests/browser/bundle-attestation.test.mjs \
+  tests/browser/bundle-attestation-stream.test.mjs \
+  tests/browser/bundle-attestation-copy.test.mjs
+```
