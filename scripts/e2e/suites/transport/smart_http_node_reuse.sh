@@ -25,7 +25,13 @@ fge_phase setup
 FG_BIN="${FG_BIN:-}"
 fge_assert_cmd HTTP-REUSE-001 'FG_BIN names a prebuilt fg binary' test -n "$FG_BIN"
 [ -x "$FG_BIN" ] || fge_die 'FG_BIN must name a prebuilt executable'
-FETCHES="${FG_E2E_REUSE_FETCHES:-1000}"
+# Lane default: 200 untimed-budget fetches, enough for p50/p99 and for the
+# every-fetch-succeeds assertion. The x2mv.4.8 acceptance measurement ran
+# 1,000 on a release fg (FG_E2E_REUSE_FETCHES=1000). At 1,000 a debug fg on a
+# host at load ~200 took ~40 minutes and outran the 30-minute lane budget,
+# while its reopen count (the traced run below) was already 4 per 400
+# connections. The traced run, which carries the reopen assertion, is unchanged.
+FETCHES="${FG_E2E_REUSE_FETCHES:-200}"
 TRACED="${FG_E2E_REUSE_TRACED_FETCHES:-200}"
 fge_context fetches "$FETCHES"
 fge_context traced_fetches "$TRACED"
