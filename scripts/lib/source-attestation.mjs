@@ -42,8 +42,8 @@ function instant(value) {
   if (!Number.isFinite(parsed) || new Date(parsed).toISOString().replace('.000Z', 'Z') !== value) fail('invalid_attestation_time');
   return value;
 }
-function settings(options) {
-  record(options, ['signal', 'now'], []);
+function settings(options, allowMaximum = false) {
+  record(options, ['signal', 'now', ...(allowMaximum ? ['maximumBytes'] : [])], []);
   const signal = options.signal, fixed = Object.hasOwn(options, 'now'), now = fixed ? options.now : Date.now();
   if ((signal !== undefined && !(signal instanceof AbortSignal)) || !Number.isSafeInteger(now) || now < 0 || now > 253402300799999) fail('invalid_attestation_options');
   check(signal); return { signal, now, current: () => fixed ? now : Date.now() };
@@ -101,8 +101,8 @@ async function artifactHash(bytes, signal) {
   }
   check(signal); return digest.digest('hex');
 }
-function statement(metadata, bytes, sha256) {
-  if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > ATTESTATION_LIMITS.bundleBytes || typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) fail('invalid_attestation_artifact');
+function statement(metadata, bytes, sha256, maximum = ATTESTATION_LIMITS.bundleBytes) {
+  if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > maximum || typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) fail('invalid_attestation_artifact');
   return { type: STATEMENT_TYPE, ...metadata, artifact: { media_type: 'application/x-git-bundle', bytes, sha256 }, scope: 'portable-git-source-only' };
 }
 function freshness(signed, policy, now) {
@@ -119,14 +119,19 @@ export async function signSourceBackup(input, privatePem, metadata, options = {}
   freshness(data, { repository: data.repository, minimum_sequence: data.sequence }, now);
   const bytes = owned(input, ATTESTATION_LIMITS.bundleBytes, 'attestation_bundle_byte_limit'), key = pemKey(privatePem, true);
   const signed = statement(data, bytes.length, await artifactHash(bytes, signal));
-  const payload = Buffer.from(JSON.stringify(signed));
-  const signature = await signAsync(null, attestationPAE(payload), key); check(signal);
-  freshness(data, { repository: data.repository, minimum_sequence: data.sequence }, current());
+  return signStatement(signed, key, () => {
+    check(signal); freshness(data, { repository: data.repository, minimum_sequence: data.sequence }, current());
+  });
+}
+async function signStatement(signed, key, guard) {
+  guard(); const payload = Buffer.from(JSON.stringify(signed));
+  const signature = await signAsync(null, attestationPAE(payload), key); guard();
   const envelope = { payloadType: ATTESTATION_TYPE, payload: payload.toString('base64'), signatures: [{ keyid: keyId(key), sig: signature.toString('base64') }] };
   return { envelope: Buffer.from(JSON.stringify(envelope) + '\n'), statement: signed, signer_key_id: keyId(key) };
 }
 export async function verifySourceAttestation(encoded, publicPem, expected, options = {}) {
-  const { signal, now, current } = settings(options), policy = attestationPolicy(expected);
+  const { signal, now, current } = settings(options, true), policy = attestationPolicy(expected);
+  const { maximumBytes } = attestationFileLimits({ maximumBytes: Object.hasOwn(options, 'maximumBytes') ? options.maximumBytes : ATTESTATION_LIMITS.bundleBytes });
   const bytes = owned(encoded, ATTESTATION_LIMITS.envelopeBytes, 'attestation_envelope_byte_limit'), key = pemKey(publicPem), trustedId = keyId(key);
   let envelope;
   try { envelope = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)); }
@@ -147,7 +152,7 @@ export async function verifySourceAttestation(encoded, publicPem, expected, opti
   record(parsed, ['type', 'repository', 'sequence', 'issued_at', 'expires_at', 'artifact', 'scope']);
   record(parsed.artifact, ['media_type', 'bytes', 'sha256']);
   const data = attestationMetadata({ repository: parsed.repository, sequence: parsed.sequence, issued_at: parsed.issued_at, expires_at: parsed.expires_at }, now);
-  const normalized = statement(data, parsed.artifact.bytes, parsed.artifact.sha256);
+  const normalized = statement(data, parsed.artifact.bytes, parsed.artifact.sha256, maximumBytes);
   // The authenticated original payload is also the application payload. Exact
   // canonical bytes reject duplicates, ignored claims and alternate encodings.
   if (!Buffer.from(JSON.stringify(normalized)).equals(payload)) fail('noncanonical_attestation_statement');
@@ -163,6 +168,83 @@ export async function authenticateSourceBackup(input, encoded, publicPem, expect
   if (bytes.length !== authentication.statement.artifact.bytes || await artifactHash(bytes, signal) !== authentication.statement.artifact.sha256) fail('attestation_artifact_mismatch');
   freshness(authentication.statement, { repository: authentication.repository, minimum_sequence: authentication.minimum_sequence }, current());
   check(signal); return { bytes, authentication };
+}
+
+// Streaming is an explicit local-file profile, not a larger allocation budget
+// for the byte-returning verifier/recovery APIs. No statement chooses its own
+// resource allowance. Existing callers retain their 16 MiB default.
+export function attestationFileLimits(value = {}) {
+  record(value, ['maximumBytes', 'timeoutMs'], []);
+  const maximumBytes = Object.hasOwn(value, 'maximumBytes') ? value.maximumBytes : ATTESTATION_LIMITS.bundleBytes;
+  const timeoutMs = Object.hasOwn(value, 'timeoutMs') ? value.timeoutMs : 300000;
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 ||
+      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 86400000) fail('invalid_attestation_file_limits');
+  return { maximumBytes, timeoutMs };
+}
+function fileSettings(options) {
+  record(options, ['signal', 'now', 'maximumBytes', 'timeoutMs', 'onProgress'], []);
+  const limits = attestationFileLimits(Object.fromEntries(['maximumBytes', 'timeoutMs']
+    .filter(key => Object.hasOwn(options, key)).map(key => [key, options[key]])));
+  const captured = { ...(Object.hasOwn(options, 'signal') ? { signal: options.signal } : {}),
+    ...(Object.hasOwn(options, 'now') ? { now: options.now } : {}) };
+  const clock = settings(captured), progress = Object.hasOwn(options, 'onProgress') ? options.onProgress : (() => {});
+  if (typeof progress !== 'function') fail('invalid_attestation_options');
+  const deadline = performance.now() + limits.timeoutMs;
+  const guard = () => { check(clock.signal); if (performance.now() >= deadline) fail('attestation_deadline'); };
+  guard(); return { ...limits, ...clock, captured, guard, progress };
+}
+const FILE_IDENTITY_FIELDS = ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'mode', 'uid', 'nlink'];
+async function streamArtifact(path, context, expected = null) {
+  const { guard, progress, maximumBytes } = context; guard();
+  if (typeof path !== 'string' || !path || path.length > 8192 || path.includes('\0') || /[\uD800-\uDFFF]/u.test(path)) fail('invalid_attestation_path');
+  if (constants.O_NOFOLLOW === undefined) fail('unsupported_attestation_file_profile');
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  let buffer;
+  try {
+    const before = await file.stat({ bigint: true }); guard();
+    if (!before.isFile() || before.size < 1n || before.size > BigInt(maximumBytes)) fail('attestation_file_size_or_type');
+    const total = Number(before.size);
+    if (expected !== null && total !== expected.bytes) fail('attestation_artifact_mismatch');
+    buffer = Buffer.alloc(Math.min(65536, total));
+    const digest = createHash('sha256'); let at = 0, readCalls = 0, maximumRead = 0;
+    await progress(Object.freeze({ bytes_hashed: 0, total_bytes: total })); guard();
+    while (at < total) {
+      guard(); const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, total - at), at); guard();
+      if (!bytesRead) fail('attestation_file_changed');
+      digest.update(buffer.subarray(0, bytesRead)); at += bytesRead; readCalls++; maximumRead = Math.max(maximumRead, bytesRead);
+      await progress(Object.freeze({ bytes_hashed: at, total_bytes: total })); guard();
+    }
+    if ((await file.read(buffer, 0, 1, total)).bytesRead) fail('attestation_file_changed');
+    const after = await file.stat({ bigint: true });
+    let named;
+    try { named = await lstat(path, { bigint: true }); } catch { fail('attestation_file_changed'); }
+    if (!named.isFile() || FILE_IDENTITY_FIELDS.some(key => before[key] !== after[key] || after[key] !== named[key])) fail('attestation_file_changed');
+    guard(); const sha256 = digest.digest('hex');
+    if (expected !== null && sha256 !== expected.sha256) fail('attestation_artifact_mismatch');
+    return { bytes: total, sha256, streaming: { read_calls: readCalls, maximum_read_bytes: maximumRead } };
+  } finally { buffer?.fill(0); await file.close(); }
+}
+// Same canonical DSSE statement as the in-memory path; only file traversal and
+// explicitly supplied resource bounds differ. No complete artifact is retained.
+export async function signSourceBackupFile(path, privatePem, metadata, options = {}) {
+  const context = fileSettings(options), data = attestationMetadata(metadata, context.now);
+  const policy = { repository: data.repository, minimum_sequence: data.sequence };
+  const guard = () => { context.guard(); freshness(data, policy, context.current()); };
+  guard(); const key = pemKey(privatePem, true); // validate/capture before file I/O
+  const artifact = await streamArtifact(path, { ...context, guard }); guard();
+  const signed = await signStatement(statement(data, artifact.bytes, artifact.sha256, context.maximumBytes), key, guard);
+  return { ...signed, streaming: artifact.streaming };
+}
+// Authentication precedes opening the artifact. The returned report does not
+// expose bytes or authorize reopening the path for restore; use the existing
+// owned-byte boundary for that. It establishes identity at this read only.
+export async function authenticateSourceBackupFile(path, encoded, publicPem, expected, options = {}) {
+  const context = fileSettings(options), policy = attestationPolicy(expected);
+  const authentication = await verifySourceAttestation(encoded, publicPem, policy,
+    { ...context.captured, maximumBytes: context.maximumBytes });
+  const guard = () => { context.guard(); freshness(authentication.statement, policy, context.current()); };
+  guard(); const artifact = await streamArtifact(path, { ...context, guard }, authentication.statement.artifact); guard();
+  return { authentication, streaming: artifact.streaming };
 }
 
 // Trusted local file boundary. Final path components are never followed; a
