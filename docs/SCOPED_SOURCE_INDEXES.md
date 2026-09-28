@@ -16,6 +16,11 @@ not automatic sharding, whole-repository coverage, or an index GC policy.
 
 ## Native operator API
 
+The [`fg-index-scope` operator command](SCOPED_INDEX_COMMAND.md) exposes build,
+search, exact continuation and original-candidate recovery over these methods.
+It requires write-ahead candidate recording for builds and emits explicit scope
+coverage; it does not change the existing whole-repository command paths.
+
 Construct `fgit_graph::lexical::scoped::LexicalScope` with 1–128 raw-byte paths.
 Use `OneNode::build_scoped_source_index_local_in` or its guarded variant to
 build/rebuild, `search_scoped_source_index_local_in` to query, and
