@@ -1,5 +1,6 @@
 //! Explicit Rust declaration retrieval through the native snapshot reader.
 //! No compiler, macro expansion, index build or repository mutation is performed.
+mod indexed;
 mod options;
 #[cfg(test)]
 mod tests;
@@ -36,9 +37,13 @@ Malformed or unsupported Rust source, stale pins and exhausted resource budgets
 are errors, not empty successful answers. Syntax errors include a hexadecimal
 path and byte offset. The snapshot_token can be reused as --expected-head.
 Exit 0: complete answer (including no matches); 3: truncated match prefix;
-2: argument, read, shutdown or output error. A prefix is not a paginated cursor.";
+2: argument, read, shutdown or output error. A prefix is not a paginated cursor.
+For existing persisted tables: fg search --symbols --indexed-current --help";
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
+    if args.first().is_some_and(|arg| arg == "--indexed-current") {
+        return indexed::run(&args[1..]);
+    }
     if args == ["--help"] {
         write_report(&mut std::io::stdout().lock(), USAGE)?;
         return Ok(0);
@@ -139,7 +144,19 @@ fn render(
         report.non_regular_entries, report.unsupported_language_files, report.declarations_examined,
         report.macro_bodies_skipped, report.attributes_skipped, quote(&report.work_units.to_string()),
     );
-    for (ordinal, hit) in report.matches.iter().enumerate() {
+    append_matches(&mut out, &report.matches)?;
+    out.push_str("]}");
+    if out.len() > MAX_OUTPUT_BYTES {
+        return Err("symbol search JSON exceeds its output budget".into());
+    }
+    Ok(out)
+}
+
+fn append_matches(
+    out: &mut String,
+    matches: &[fgit_forge::source_symbols::SymbolMatch],
+) -> Result<(), String> {
+    for (ordinal, hit) in matches.iter().enumerate() {
         if ordinal != 0 { out.push(','); }
         let location = &hit.location;
         out.push_str(&format!(concat!(
@@ -155,9 +172,5 @@ fn render(
             return Err("symbol search JSON exceeds its output budget".into());
         }
     }
-    out.push_str("]}");
-    if out.len() > MAX_OUTPUT_BYTES {
-        return Err("symbol search JSON exceeds its output budget".into());
-    }
-    Ok(out)
+    Ok(())
 }

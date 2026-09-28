@@ -123,7 +123,7 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     })
 }
 
-fn positive_u64(text: &str) -> Result<u64, String> {
+pub(super) fn positive_u64(text: &str) -> Result<u64, String> {
     if text.is_empty() || text.starts_with('0') || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err("expected a positive canonical decimal integer".into());
     }
@@ -132,6 +132,11 @@ fn positive_u64(text: &str) -> Result<u64, String> {
 
 // Same algorithm-qualified snapshot token as fg tree/show and lexical search.
 fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
+    let (algorithm, digest) = parse_id(text)?;
+    Ok(RepositoryAuthorityHeadId::from_digest(algorithm, CANONICAL_CODEC_VERSION, digest))
+}
+
+pub(super) fn parse_id(text: &str) -> Result<(DigestAlgorithmId, DigestBytes), String> {
     let (algorithm, digest) = text.strip_prefix("alg:")
         .and_then(|text| text.split_once(':'))
         .ok_or("expected an algorithm-qualified token: alg:<number>:<lowercase-hex>")?;
@@ -142,5 +147,5 @@ fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
     }
     let digest = DigestBytes::try_new(&super::super::unhex(digest, 64)?)
         .map_err(|_| "invalid digest width")?;
-    Ok(RepositoryAuthorityHeadId::from_digest(algorithm, CANONICAL_CODEC_VERSION, digest))
+    Ok((algorithm, digest))
 }
