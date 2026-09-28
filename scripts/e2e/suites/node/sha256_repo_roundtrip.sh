@@ -42,14 +42,20 @@ fge_phase action
 # prevents Cargo from reusing that artifact, and deliberately ignores FG_BIN:
 # an externally supplied binary has no revision binding this test can prove.
 BUILD_TARGET=$(fge_tempdir sha256-repo-roundtrip-binary)
-BUILD_RC=0
-fge_run sha256-repo-roundtrip-build-fg \
-  env RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="$BUILD_TARGET" \
-  cargo build --locked -p fgit-cli \
-  || BUILD_RC=$?
-fge_assert_eq FG-058-SHA256-001 0 "$BUILD_RC" \
-  'fg builds from this checkout into the lane-private target directory'
-FG_BIN="$BUILD_TARGET/debug/fg"
+# A lane-supplied FG_BIN is used as given; otherwise build one from this
+# checkout into the lane-private target directory.
+if [ -n "${FG_BIN:-}" ]; then
+  fge_context fg_bin supplied
+else
+  BUILD_RC=0
+  fge_run sha256-repo-roundtrip-build-fg \
+    env RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="$BUILD_TARGET" \
+    cargo build --locked -p fgit-cli \
+    || BUILD_RC=$?
+  fge_assert_eq FG-058-SHA256-001 0 "$BUILD_RC" \
+    'fg builds from this checkout into the lane-private target directory'
+  FG_BIN="$BUILD_TARGET/debug/fg"
+fi
 fge_assert_cmd FG-058-SHA256-002 'the node binary is executable' test -x "$FG_BIN"
 
 WORK=$(fge_tempdir sha256-repo-roundtrip-work)

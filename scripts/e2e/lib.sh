@@ -1668,7 +1668,9 @@ fge_context() {
 #   cargo-test-wrapper  runs cargo tests and grades their output
 #   js-unit             runs node:test contract tests (fake DOM, no browser)
 #   static-check        inspects files, registries or build metadata only
-FGE_KINDS='e2e-binary real-browser pinned-oracle cargo-test-wrapper js-unit static-check'
+#   benchmark           a performance measurement; meaningful only on a release
+#                       binary and a quiet host, so not part of a functional lane
+FGE_KINDS='e2e-binary real-browser pinned-oracle cargo-test-wrapper js-unit static-check benchmark'
 fge_kind() {
   case " $FGE_KINDS " in
     *" ${1-} "*) FGE_CONTEXT_FIELDS[kind]=$1 ;;

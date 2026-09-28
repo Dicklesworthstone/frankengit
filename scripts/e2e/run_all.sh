@@ -634,6 +634,28 @@ RA_V_ZERO=''
 RA_V_FIRST=''
 RA_V_WALL=''
 
+# The declared evidence kind from the newest complete record of a log the
+# runner had to stop, so a timed-out script still counts under the kind it
+# declared rather than as undeclared.
+ra_kind_from_log() {
+  local line fields
+  RA_V_KIND=undeclared
+  [ -s "$1" ] || return 0
+  while IFS= read -r line; do
+    fge_json_top "$line" || continue
+    fields=${FGE_JSON[fields]:-}
+    [ -n "$fields" ] && [ "$fields" != null ] && fge_json_top "$fields" || continue
+    [ -n "${FGE_JSON[kind]:-}" ] || continue
+    RA_V_KIND=$(fge_json_unquote "${FGE_JSON[kind]}")
+    case " $FGE_KINDS " in
+      *" $RA_V_KIND "*) : ;;
+      *) RA_V_KIND=invalid ;;
+    esac
+    return 0
+  done < <(tail -n 8 "$1" | tac)
+  return 0
+}
+
 ra_validate_log() {
   local log=$1
   RA_V_DISPOSITION=''
@@ -1042,6 +1064,7 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
       ra_validate_log "$rundir/e2e.ndjson" || true
       disposition=timeout
       detail="exceeded the ${RA_TIMEOUT}s wall budget"
+      ra_kind_from_log "$rundir/e2e.ndjson"
     elif ! ra_validate_log "$rundir/e2e.ndjson"; then
       disposition=$RA_V_DISPOSITION
       detail=$RA_V_DETAIL

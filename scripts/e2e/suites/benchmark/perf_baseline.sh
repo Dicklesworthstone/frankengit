@@ -73,7 +73,7 @@ PB_REPO=$(cd "$PB_DIR/../../../.." && pwd)
 . "$PB_REPO/scripts/e2e/lib.sh"
 
 fge_init fg028c-perf-baseline
-fge_kind e2e-binary
+fge_kind benchmark
 fge_context bead frankengit-fg028c-perf-baseline-adh
 fge_context crate fgit-benchmark
 fge_context claim_class one_node_transport_baseline_anchor

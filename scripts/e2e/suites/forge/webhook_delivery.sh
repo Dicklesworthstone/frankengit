@@ -30,13 +30,13 @@ repo_id="00000000000000000000000000000002"
 valid_secret="0123456789abcdef0123456789abcdef"
 rotated_secret="fedcba9876543210fedcba9876543210"
 
-# Build fg binary if needed
-fge_run_ok fg-build env CARGO_TARGET_DIR="$fg_target_dir" RCH_CARGO_WRAPPER_BYPASS=1 \
-  cargo build --locked -p fgit-cli --bin fg
-
-FG_BIN="$fg_target_dir/debug/fg"
-if [ ! -x "$FG_BIN" ]; then
-  FG_BIN="$(command -v fg || echo "$E2E_ROOT/../../target/debug/fg")"
+# A lane-supplied FG_BIN is used as given; otherwise build one.
+if [ -n "${FG_BIN:-}" ]; then
+  fge_context fg_bin supplied
+else
+  fge_run_ok fg-build env CARGO_TARGET_DIR="$fg_target_dir" RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo build --locked -p fgit-cli --bin fg
+  FG_BIN="$fg_target_dir/debug/fg"
 fi
 
 fge_phase action

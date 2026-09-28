@@ -24,14 +24,20 @@ BUILD_TARGET=$(fge_tempdir fg059-incarnation-lifecycle-binary)
 WORK=$(fge_tempdir fg059-incarnation-lifecycle-work)
 
 fge_phase action
-BUILD_RC=0
-fge_run fg059-incarnation-build-fg \
-  env RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="$BUILD_TARGET" \
-  cargo build --locked -p fgit-cli \
-  || BUILD_RC=$?
-fge_assert_eq FG-059-E2E-030 0 "$BUILD_RC" \
-  'the assembled fg binary is built from this checkout in a lane-private target root'
-FG_BIN="$BUILD_TARGET/debug/fg"
+# A lane-supplied FG_BIN is used as given; otherwise build one from this
+# checkout into a lane-private target root.
+if [ -n "${FG_BIN:-}" ]; then
+  fge_context fg_bin supplied
+else
+  BUILD_RC=0
+  fge_run fg059-incarnation-build-fg \
+    env RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="$BUILD_TARGET" \
+    cargo build --locked -p fgit-cli \
+    || BUILD_RC=$?
+  fge_assert_eq FG-059-E2E-030 0 "$BUILD_RC" \
+    'the assembled fg binary is built from this checkout in a lane-private target root'
+  FG_BIN="$BUILD_TARGET/debug/fg"
+fi
 fge_assert_cmd FG-059-E2E-031 'the assembled fg binary is executable' test -x "$FG_BIN"
 
 fge_capture fg059-first-create \

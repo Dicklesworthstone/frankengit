@@ -574,6 +574,18 @@ fge_assert_eq FG-000A-ST-KIND-INVALID-RC 1 "$CASE_RC" \
   'an invented evidence kind makes the script fail rather than be counted'
 fge_assert_ne FG-000A-ST-KIND-INVALID-DISP ok "$CASE_DISPOSITION" \
   'the invented-kind script does not receive a passing disposition'
+fge_phase action
+run_case evidence-kind-timeout 3 1 neg_timeout_declared.sh
+timeout_kind=''
+timeout_line=$(grep -m1 '"kind":"suite_script"' "$CASE_RECEIPT" 2>/dev/null || printf '')
+if [ -n "$timeout_line" ] && fge_json_top "$timeout_line"; then
+  timeout_kind=$(fge_json_unquote "${FGE_JSON[evidence_kind]-\"\"}")
+fi
+fge_phase assert
+fge_assert_eq FG-000A-ST-KIND-TIMEOUT-DISP timeout "$CASE_DISPOSITION" \
+  'the declared-kind fixture still outlives the wall budget'
+fge_assert_eq FG-000A-ST-KIND-TIMEOUT-KIND e2e-binary "$timeout_kind" \
+  'a script the runner had to stop is counted under the kind it declared'
 
 # ---------------------------------------------------------------------------
 # evidence retention
