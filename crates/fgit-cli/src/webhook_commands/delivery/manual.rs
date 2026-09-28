@@ -11,6 +11,8 @@ use fgit_types::{AsciiSlug, Digest};
 use super::{Options, check_head, head_token, with_node};
 use crate::publication_support::quote;
 
+mod replay_budget;
+
 pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), String> {
     if !options.at_least_once {
         return Err(
@@ -50,21 +52,20 @@ pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), S
     } else {
         None
     };
-    let attempt = if let Some(record) = &previous {
-        let next = record
-            .attempts
-            .checked_add(1)
-            .ok_or("manual attempt overflow")?;
-        if options.attempt.is_some_and(|attempt| attempt != next) {
-            return Err("replay --attempt must follow the retained diagnostic attempt".into());
-        }
-        next
-    } else {
-        options.attempt.unwrap_or(1)
-    };
-    if !(1..=16).contains(&attempt) {
-        return Err("manual delivery attempt must be 1..16".into());
-    }
+    let automatic_attempt_limit = registration.retry_schedule.max_attempts;
+    let budget = replay_budget::plan(
+        automatic_attempt_limit,
+        previous.as_ref().map(|record| record.attempts),
+        options.attempt,
+    )?;
+    let attempt = budget.ordinal;
+    // After canonical selection, binding checks and explicit at-least-once
+    // consent, replay gets THIS send beyond an exhausted automatic schedule.
+    // Keep the cumulative attempt in HTTP headers; never reset it to one or
+    // raise the saved automatic policy. Headers are not covered by the payload
+    // HMAC. This owned registration copy is never registered or persisted.
+    let mut registration = registration;
+    registration.retry_schedule.max_attempts = budget.invocation_limit;
 
     let policy = if options.permissive {
         SsrfPolicy::PERMISSIVE_FOR_TESTS
@@ -79,7 +80,7 @@ pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), S
     // path. Keep the diagnostic, including after a successful manual send.
     let diagnostic_retained = store.get_dead_letter(key).is_some();
     let output = format!(
-        "{{\"type\":\"webhook_delivery_observed\",\"schema_version\":1,\"mode\":\"manual-at-least-once\",\"tenant_id\":{},\"repository_id\":{},\"source_head\":{},\"snapshot_token\":{},\"webhook_id\":{},\"delivery_id\":{},\"destination\":{},\"payload_root\":{},\"attempt\":{},\"replay\":{},\"verdict\":{},\"outcome_unknown\":{},\"diagnostic_retained\":{},\"canonical_settled\":false,\"automatic_retry\":false,\"node_closed\":true,\"response_summary\":{}}}",
+        "{{\"type\":\"webhook_delivery_observed\",\"schema_version\":1,\"mode\":\"manual-at-least-once\",\"tenant_id\":{},\"repository_id\":{},\"source_head\":{},\"snapshot_token\":{},\"webhook_id\":{},\"delivery_id\":{},\"destination\":{},\"payload_root\":{},\"attempt\":{},\"automatic_attempt_limit\":{},\"invocation_attempt_limit\":{},\"replay\":{},\"verdict\":{},\"outcome_unknown\":{},\"diagnostic_retained\":{},\"canonical_settled\":false,\"automatic_retry\":false,\"node_closed\":true,\"response_summary\":{}}}",
         quote(&options.tenant.to_string()),
         quote(&options.repository.to_string()),
         quote(&selected.source_head().to_string()),
@@ -89,6 +90,8 @@ pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), S
         quote(destination.as_str()),
         quote(&request.payload_root.to_string()),
         attempt,
+        automatic_attempt_limit,
+        budget.invocation_limit,
         replay,
         quote(verdict),
         verdict == "AmbiguousTimeout",

@@ -102,6 +102,22 @@ and do not reset or bypass the automatic worker's canonical retry protocol.
 Repeated manual invocations can duplicate effects. A retained diagnostic is not
 proof that a previous attempt failed, nor proof that the next send is safe.
 
+An exhausted automatic schedule does not disable explicit recovery. Once the
+canonical selection and diagnostic checks pass, replay grants the adapter one
+invocation-only allowance for that next ordinal. For example, a retained fifth
+attempt under an automatic limit of five replays as attempt six, not attempt
+one. The owned adapter configuration receives a ceiling of six; the stored
+registration and every automatic worker retain their original limit of five.
+There is still at most one HTTP attempt and no automatic retry loop. Ordinary
+`deliver` does not receive this override. Zero limits, invalid diagnostics,
+overflow, mismatched explicit ordinals, and ordinals beyond 16 refuse.
+
+Observation JSON distinguishes `automatic_attempt_limit` (the saved schedule)
+from `invocation_attempt_limit` (this adapter's temporary ceiling). A successful
+replay preserves the existing diagnostic; these counters are not a durable
+reservation or a count of every historical network send. The original payload
+and HMAC remain unchanged by attempt metadata; the HMAC does not cover headers.
+
 ## Limits and verification
 
 Pagination bounds output, not total verification work: the existing canonical
@@ -126,3 +142,10 @@ real replay with diagnostic retention, refusal before connecting, and a lost
 receiver acknowledgement without an automatic retry. They were added but not executed in the
 implementation session: no Rust compiler or Cargo was available. No gate pass,
 FG-046 closure, or production-readiness claim follows from source inspection.
+
+Replay-budget unit tests additionally cover unchanged ordinary-delivery ceilings,
+exact next-ordinal allowances, all bounded ordinal combinations, overflow,
+zero limits, and refused ordinal resets. The existing real loopback replay test
+covers the exhausted five-attempt schedule followed by an attempt-six send.
+The budget correction itself still requires native Cargo execution; its source
+review does not establish that these tests have passed on this revision.
