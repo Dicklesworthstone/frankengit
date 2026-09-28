@@ -10,13 +10,13 @@ use std::time::Duration;
 use fgit_crypto::sha256_digest;
 use fgit_node::{
     GitDaemonReceiveProcessingTimeout, GitDaemonServerLimits, GitDaemonServerReceipt,
-    GitDaemonSessionTimeout, NodeConfig, OneNode, TerminationSignals,
+    GitDaemonSessionTimeout, NodeConfig, OneNode,
 };
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
 use crate::publication_support::quote;
 
-mod stop_file;
+use crate::service_stop as stop_file;
 
 const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository-id> <loopback-address>
   --trusted-local (--token-file <path> --principal <id> | --credentials-file <path>)
@@ -467,31 +467,15 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
             CredentialInput::Reloadable(_) => "reloadable",
             _ => "static",
         };
+        let control = stop.as_ref().map(stop_file::StopControl::new);
         let mut output = io::stdout().lock();
         writeln!(output, "{{\"type\":\"smart_http_listening\",\"schema_version\":1,\"url\":{},\"receive_enabled\":{},\"issues_enabled\":{},\"outcomes_enabled\":{},\"pulls_enabled\":{},\"source_enabled\":{},\"repository_incarnation\":{},\"credential_mode\":{},\"lifetime\":{}}}",
             quote(&url), options.allow_receive, options.allow_issues, options.allow_outcomes, options.allow_pulls,
             options.allow_source, quote(&node.repository_incarnation_id().to_string()), quote(mode), quote(if stop.is_some() { "continuous" } else { "bounded" }))
             .and_then(|()| output.flush()).map_err(|e| format!("cannot report HTTP readiness: {e}"))?;
         drop(output);
-        if let Some(control) = &stop {
-            // SIGTERM and SIGINT request the same drain as the stop file.
-            // Installed only here, where this process owns its lifetime; a
-            // platform that cannot deliver them keeps its default behaviour.
-            let signals = TerminationSignals::install()
-                .inspect_err(|error| {
-                    eprintln!("fg: termination signals not installed ({error}); use the stop file");
-                })
-                .ok();
-            let announced = std::cell::Cell::new(false);
-            let should_stop = || -> io::Result<bool> {
-                if signals.as_ref().is_some_and(TerminationSignals::requested) {
-                    if !announced.replace(true) {
-                        eprintln!("fg: termination signal received; draining accepted connections");
-                    }
-                    return Ok(true);
-                }
-                control.should_stop()
-            };
+        if let Some(control) = control {
+            let should_stop = || control.should_stop();
             // One continuous service, not repeated bounded windows: quotas and
             // accepted-child accounting remain live until the requested stop.
             return match &options.credentials {
@@ -781,5 +765,83 @@ mod tests {
         ));
         args.push("--allow-receive".into());
         assert!(parse(&args).is_err());
+    }
+
+    #[test]
+    fn continuous_cli_mode_requires_an_explicit_stop_control() {
+        let base = arguments();
+        assert!(parse(&base).unwrap().stop_file.is_none());
+        for flags in [vec!["--continuous"], vec!["--stop-file", "stop"]] {
+            let mut args = base.clone();
+            args.extend(flags.into_iter().map(str::to_owned));
+            assert!(parse(&args).is_err());
+        }
+        let mut args = base;
+        args.extend(["--continuous".into(), "--stop-file".into(), "stop".into()]);
+        let options = parse(&args).unwrap();
+        assert_eq!(options.stop_file, Some(PathBuf::from("stop")));
+        assert_eq!(options.limits.max_in_flight(), 4);
+        assert!(!options.allow_receive);
+    }
+
+    #[test]
+    fn continuous_cli_mode_never_silently_ignores_requested_retirement_limits() {
+        for (flag, value) in [("--max-sessions", "2"), ("--idle-timeout-secs", "1")] {
+            let mut args = arguments();
+            args.extend([flag.into(), value.into()]);
+            assert!(parse(&args).is_ok());
+            args.extend(["--continuous".into(), "--stop-file".into(), "stop".into()]);
+            assert!(parse(&args).is_err());
+        }
+    }
+
+    #[test]
+    fn continuous_cli_does_not_relax_scopes_or_connection_bounds() {
+        let mut args = arguments();
+        args.extend(["--continuous".into(), "--stop-file".into(), "stop".into()]);
+        let mut too_many = args.clone();
+        too_many.extend(["--max-in-flight".into(), "17".into()]);
+        assert!(parse(&too_many).is_err());
+        args.extend(["--max-in-flight".into(), "16".into()]);
+        assert!(parse(&args).is_ok());
+        args.push("--allow-issues".into());
+        assert!(parse(&args).is_err());
+    }
+
+    #[test]
+    fn continuous_reloadable_mode_preserves_all_independent_endpoint_ceilings() {
+        let mut args = arguments()[..5].to_vec();
+        args.extend([
+            "--credentials-file".into(),
+            "grants".into(),
+            "--continuous".into(),
+            "--stop-file".into(),
+            "stop".into(),
+        ]);
+        let options = parse(&args).unwrap();
+        assert!(options.stop_file.is_some());
+        assert!(
+            !options.allow_receive
+                && !options.allow_issues
+                && !options.allow_outcomes
+                && !options.allow_pulls
+                && !options.allow_source
+        );
+        for flag in [
+            "--allow-receive",
+            "--allow-issues",
+            "--allow-outcomes",
+            "--allow-pulls",
+            "--allow-source",
+        ] {
+            let mut selected = args.clone();
+            selected.push(flag.into());
+            let options = parse(&selected).unwrap();
+            assert_eq!(options.allow_receive, flag == "--allow-receive");
+            assert_eq!(options.allow_issues, flag == "--allow-issues");
+            assert_eq!(options.allow_outcomes, flag == "--allow-outcomes");
+            assert_eq!(options.allow_pulls, flag == "--allow-pulls");
+            assert_eq!(options.allow_source, flag == "--allow-source");
+        }
     }
 }

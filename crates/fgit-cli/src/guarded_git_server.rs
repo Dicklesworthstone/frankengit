@@ -9,11 +9,12 @@ use fgit_node::{
 };
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16>] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]";
+const USAGE: &str = "usage: fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <1..1000000> --max-in-flight <1..16> | --continuous --stop-file <absent-path> [--max-in-flight <1..16>]] [--receive-principal <principal-id-hex> [--allow-unauthenticated-network-push]] [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>] [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]";
 
 struct Prepared {
     /// The operator explicitly accepted that any network peer can push as the
@@ -22,6 +23,8 @@ struct Prepared {
     configuration: NodeConfig,
     listen: String,
     limits: GitDaemonServerLimits,
+    stop_file: Option<PathBuf>,
+    receive_enabled: bool,
 }
 fn integer(value: &str, flag: &str, zero: bool) -> Result<u64, String> {
     if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
@@ -46,9 +49,18 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
     let mut flags = BTreeMap::new();
     let mut positional = Vec::new();
     let mut unauthenticated_network_push = false;
+    let mut continuous = false;
     let mut index = 1;
     while index < arguments.len() {
         let argument = arguments[index].as_str();
+        if argument == "--continuous" {
+            if continuous {
+                return Err("duplicate --continuous".into());
+            }
+            continuous = true;
+            index += 1;
+            continue;
+        }
         if argument == "--allow-unauthenticated-network-push" {
             if unauthenticated_network_push {
                 return Err(format!("duplicate {argument}"));
@@ -64,6 +76,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
                     | "--receive-principal"
                     | "--max-sessions"
                     | "--max-in-flight"
+                    | "--stop-file"
                     | "--session-timeout-secs"
                     | "--session-secs-per-mib"
                     | "--session-max-extension-secs"
@@ -108,7 +121,19 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
             ));
         }
     }
-    if flags.contains_key("--max-sessions") != flags.contains_key("--max-in-flight") {
+    let stop_file = match (continuous, flags.get("--stop-file")) {
+        (false, None) => None,
+        (true, Some(path)) if !path.is_empty() && !flags.contains_key("--max-sessions") => {
+            Some(PathBuf::from(*path))
+        }
+        (true, Some(_)) if flags.contains_key("--max-sessions") => {
+            return Err("--continuous cannot be combined with --max-sessions".into());
+        }
+        _ => {
+            return Err("--continuous and a nonempty --stop-file must be supplied together".into());
+        }
+    };
+    if !continuous && flags.contains_key("--max-sessions") != flags.contains_key("--max-in-flight") {
         return Err("--max-sessions and --max-in-flight must be selected together".into());
     }
     let sessions = flags
@@ -148,6 +173,8 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
         configuration,
         listen: (*listen).to_owned(),
         limits,
+        stop_file,
+        receive_enabled: flags.contains_key("--receive-principal"),
     })
 }
 
@@ -221,6 +248,10 @@ pub(crate) fn apply_session_and_envelope_flags(
 
 pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
     let prepared = parse(arguments)?;
+    let stop = prepared.stop_file.as_ref()
+        .map(|path| crate::service_stop::StopFile::arm(path))
+        .transpose()
+        .map_err(|error| format!("cannot arm git-daemon stop control: {error}"))?;
     if prepared.unauthenticated_network_push {
         eprintln!(
             "fg: WARNING: --allow-unauthenticated-network-push: any client that can reach {} \
@@ -239,17 +270,49 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
             .map_err(|e| e.to_string())?;
         node.bring_into_service(selected.receipt().generation())
             .map_err(|e| e.to_string())?;
-        node.serve_guarded_git_daemon_bounded(&listener, prepared.limits)
-            .map_err(|e| e.to_string())
+        let control = stop.as_ref().map(crate::service_stop::StopControl::new);
+        if control.is_some() {
+            let mut out = io::stdout().lock();
+            writeln!(out, "{{\"type\":\"git_daemon_listening\",\"schema_version\":1,\"address\":\"{listen_address}\",\"lifetime\":\"continuous\",\"repository_incarnation\":\"{}\",\"receive_enabled\":{}}}",
+                node.repository_incarnation_id(), prepared.receive_enabled)
+                .and_then(|()| out.flush())
+                .map_err(|error| format!("cannot report git-daemon readiness: {error}"))?;
+        }
+        if let Some(control) = control {
+            node.serve_guarded_git_daemon_until_stopped(
+                listener, prepared.limits.max_in_flight(), &|| control.should_stop(),
+            )
+        } else {
+            node.serve_guarded_git_daemon_bounded(&listener, prepared.limits)
+        }
+        .map_err(|e| e.to_string())
     })();
     let cleanup = node.shutdown();
     match (serving, cleanup) {
-        (Ok(service), Ok(())) => Ok(CliOutcome::Served {
-            listen_address,
-            service,
-            receive_path: "guarded-git-daemon-admission",
-            unauthenticated_network_push: prepared_unauthenticated_network_push,
-        }),
+        (Ok(service), Ok(())) => {
+            if stop.is_some() {
+                let mut out = io::stdout().lock();
+                writeln!(out, "{{\"type\":\"git_daemon_drained\",\"schema_version\":1,\"accepted\":{},\"completed_transports\":{},\"refused_transports\":{},\"lifetime\":\"continuous\"}}",
+                    service.accepted_sessions(), service.completed_sessions(), service.refused_sessions())
+                    .and_then(|()| out.flush())
+                    .map_err(|error| format!("cannot report git-daemon drain: {error}"))?;
+            }
+            Ok(if stop.is_some() {
+                CliOutcome::ContinuouslyServed {
+                    listen_address,
+                    service,
+                    receive_path: "guarded-git-daemon-admission",
+                    unauthenticated_network_push: prepared_unauthenticated_network_push,
+                }
+            } else {
+                CliOutcome::Served {
+                    listen_address,
+                    service,
+                    receive_path: "guarded-git-daemon-admission",
+                    unauthenticated_network_push: prepared_unauthenticated_network_push,
+                }
+            })
+        }
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(format!(
             "guarded serve completed but node shutdown failed: {error}"
@@ -325,6 +388,7 @@ mod tests {
         let default = parse(&arguments(&[])).unwrap();
         assert_eq!(default.limits.max_sessions(), 1);
         assert_eq!(default.limits.max_in_flight(), 1);
+        assert!(default.stop_file.is_none());
         let selected = parse(&arguments(&[
             "--max-sessions",
             "7",
@@ -351,6 +415,28 @@ mod tests {
         assert_eq!(selected.limits.max_sessions(), 7);
         assert_eq!(selected.limits.max_in_flight(), 2);
     }
+    #[test]
+    fn continuous_lifetime_is_explicit_without_widening_receive_authority() {
+        let parsed = parse(&arguments(&[
+            "--continuous", "--stop-file", "service.stop", "--max-in-flight", "2",
+        ])).unwrap();
+        assert_eq!(parsed.stop_file, Some(PathBuf::from("service.stop")));
+        assert_eq!(parsed.limits.max_in_flight(), 2);
+        assert!(!parsed.receive_enabled);
+        assert!(!parsed.unauthenticated_network_push);
+        for flags in [
+            vec!["--continuous"],
+            vec!["--stop-file", "service.stop"],
+            vec!["--continuous", "--stop-file", ""],
+            vec!["--continuous", "--continuous", "--stop-file", "service.stop"],
+            vec!["--continuous", "--stop-file", "service.stop", "--max-sessions", "1"],
+            vec!["--continuous", "--stop-file", "service.stop", "--max-in-flight", "0"],
+            vec!["--continuous", "--stop-file", "service.stop", "--max-in-flight", "17"],
+        ] {
+            assert!(parse(&arguments(&flags)).is_err(), "{flags:?}");
+        }
+    }
+
     #[test]
     fn malformed_duplicate_overflow_and_unknown_flags_refuse_before_any_open() {
         for flags in [

@@ -397,6 +397,18 @@ pub enum CliOutcome {
         /// (`--allow-unauthenticated-network-push` on a non-loopback listener).
         unauthenticated_network_push: bool,
     },
+    /// An explicitly continuous Git service stopped accepting and fully drained
+    /// every accepted transport after an operator stop request.
+    ContinuouslyServed {
+        /// Socket address actually bound for this service run.
+        listen_address: SocketAddr,
+        /// Exact transport counts after every accepted child drained.
+        service: GitDaemonServerReceipt,
+        /// Raw Git or authenticated SSH receive path used by this service.
+        receive_path: &'static str,
+        /// Whether the operator explicitly enabled unauthenticated network push.
+        unauthenticated_network_push: bool,
+    },
     /// `fg export` made a completed authority-selected Git pack visible at a
     /// previously absent local path.
     Exported {

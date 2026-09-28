@@ -22,7 +22,7 @@ import zlib
 
 from pull_request_smoke import (
     PRINCIPAL, REPOSITORY, SOURCE, TARGET, TENANT,
-    commit, data_for, document, identity, invoke, publication, require,
+    commit, data_for, document, identity, invoke, publication, require, sha256_stream,
 )
 
 RUN_ID = "61" * 16
@@ -422,7 +422,7 @@ def main():
     binary = args.fg.resolve()
     require(binary.is_file() and os.access(binary, os.X_OK), "an executable built fg is required; no skipped success")
     with binary.open("rb") as executable:
-        print(json.dumps(dict(type="binary_identity", sha256=hashlib.file_digest(executable, "sha256").hexdigest())))
+        print(json.dumps(dict(type="binary_identity", sha256=sha256_stream(executable))))
     for algorithm in ["sha1", "sha256"]:
         run_format(binary, algorithm)
 

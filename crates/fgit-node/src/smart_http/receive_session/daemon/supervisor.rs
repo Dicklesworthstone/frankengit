@@ -4,12 +4,38 @@
 use super::{GitDaemonSessionDeadline, NodeSmartHttpRefusal, invalid, io_error};
 use crate::{GitDaemonServerLimits, GitDaemonServerReceipt, OneNode, PushQuota};
 use fgit_types::cell::CellState;
+use std::borrow::Borrow;
+use std::io;
 use std::net::TcpListener;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
+
+enum Acceptance<'a> {
+    Bounded(usize),
+    UntilStopped(&'a dyn Fn() -> io::Result<bool>),
+}
+
+impl Acceptance<'_> {
+    fn keep_accepting(&self, accepted: usize) -> io::Result<bool> {
+        match self {
+            Self::Bounded(maximum) => Ok(accepted < *maximum),
+            Self::UntilStopped(stop) => {
+                let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stop()))
+                    .map_err(|_| io::Error::other("guarded daemon stop control panicked"))??;
+                if stopped {
+                    return Ok(false);
+                }
+                if accepted == usize::MAX {
+                    return Err(io::Error::other("guarded daemon lifetime counter exhausted"));
+                }
+                Ok(true)
+            }
+        }
+    }
+}
 
 struct Pending {
     finished: Arc<AtomicBool>,
@@ -50,12 +76,52 @@ impl OneNode {
         listener: &TcpListener,
         limits: GitDaemonServerLimits,
     ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        if !(1..=1_000_000).contains(&limits.max_sessions()) {
+            return Err(invalid("guarded daemon connection limits exceeded"));
+        }
+        self.serve_guarded_git_daemon_lifetime(
+            listener,
+            limits.max_in_flight(),
+            Acceptance::Bounded(limits.max_sessions()),
+        )
+    }
+
+    /// Serve until the owner requests stop, without a session-count or idle cap.
+    ///
+    /// The service owns this listener and closes it BEFORE joining accepted
+    /// children. Peers arriving during drain therefore cannot queue on a live
+    /// listener that will never accept them. Existing children retain their
+    /// ingress, processing, response and cleanup bounds and their native outcome
+    /// semantics; stopping never implies that an accepted push did not commit.
+    /// One set of node lanes, quotas and writer gates spans the whole lifetime.
+    ///
+    /// `should_stop` runs on the accepting thread, including while every slot is
+    /// occupied, and must be bounded and nonblocking. An error or unwinding panic
+    /// closes acceptance and drains children before returning an error. A
+    /// panic-abort build cannot recover an aborting callback.
+    pub fn serve_guarded_git_daemon_until_stopped(
+        &self,
+        listener: TcpListener,
+        max_in_flight: usize,
+        should_stop: &dyn Fn() -> io::Result<bool>,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
+        self.serve_guarded_git_daemon_lifetime(
+            listener,
+            max_in_flight,
+            Acceptance::UntilStopped(should_stop),
+        )
+    }
+
+    fn serve_guarded_git_daemon_lifetime<L: Borrow<TcpListener>>(
+        &self,
+        listener: L,
+        max_in_flight: usize,
+        acceptance: Acceptance<'_>,
+    ) -> Result<GitDaemonServerReceipt, NodeSmartHttpRefusal> {
         if self.cell_state() != CellState::Serving {
             return Err(invalid("guarded daemon requires a serving node"));
         }
-        if !(1..=16).contains(&limits.max_in_flight())
-            || !(1..=1_000_000).contains(&limits.max_sessions())
-        {
+        if !(1..=16).contains(&max_in_flight) {
             return Err(invalid("guarded daemon connection limits exceeded"));
         }
         let config = self
@@ -66,7 +132,7 @@ impl OneNode {
         let writers = Arc::new(crate::WriterGate::new(crate::MAX_CONCURRENT_WRITERS));
         let nodes = Arc::new(crate::node_lanes::NodeLanes::new(
             config,
-            limits.max_in_flight(),
+            max_in_flight,
             "guarded daemon",
         ));
         let completed = Arc::new(AtomicUsize::new(0));
@@ -75,9 +141,10 @@ impl OneNode {
         let mut accepted = 0;
         let mut failure = None;
         listener
+            .borrow()
             .set_nonblocking(true)
             .map_err(|e| io_error("configure guarded daemon listener", e))?;
-        while accepted < limits.max_sessions() {
+        loop {
             let mut index = 0;
             while index < pending.len() {
                 if pending[index].finished.load(Ordering::Acquire) {
@@ -86,11 +153,19 @@ impl OneNode {
                     index += 1;
                 }
             }
-            if pending.len() >= limits.max_in_flight() {
+            match acceptance.keep_accepting(accepted) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => {
+                    failure = Some(io_error("poll guarded daemon service stop", error));
+                    break;
+                }
+            }
+            if pending.len() >= max_in_flight {
                 self.runtime.wait_for(Duration::from_millis(1));
                 continue;
             }
-            let (stream, _) = match listener.accept() {
+            let (stream, _) = match listener.borrow().accept() {
                 Ok(connection) => connection,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -124,14 +199,21 @@ impl OneNode {
                 let Some(node) = nodes.lease() else {
                     return;
                 };
-                let served: Result<(), NodeSmartHttpRefusal> = node
-                    .serve_guarded_git_daemon_stream_in(
+                let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    node.serve_guarded_git_daemon_stream_in(
                         stream,
                         deadline,
                         Some(quota.as_ref()),
                         Some(writers.as_ref()),
                     )
-                    .map(|_| ());
+                    .map(|_| ())
+                }))
+                .unwrap_or_else(|_| {
+                    Err(io_error(
+                        "guarded daemon child panicked; publication outcome may be unknown",
+                        io::Error::other("native Git session panicked"),
+                    ))
+                });
                 // Keep service and cleanup observations separate. Neither can
                 // undo an outcome already published by the connection's session.
                 // Only a node whose session succeeded goes back to the pool.
@@ -164,6 +246,14 @@ impl OneNode {
                 }
             }
         }
+        // The owned continuous listener closes before any potentially blocking
+        // join. For a borrowed bounded listener this restores its prior contract
+        // and releases only the borrow; the caller retains its socket.
+        let restored = listener
+            .borrow()
+            .set_nonblocking(false)
+            .map_err(|e| io_error("restore guarded daemon listener", e));
+        drop(listener);
         for child in pending {
             (child.join)();
         }
@@ -176,9 +266,6 @@ impl OneNode {
                 )
             });
         }
-        let restored = listener
-            .set_nonblocking(false)
-            .map_err(|e| io_error("restore guarded daemon listener", e));
         if let Some(error) = failure {
             if let Err(cleanup) = restored {
                 return Err(io_error(
@@ -201,5 +288,70 @@ impl OneNode {
             completed_sessions,
             refused_sessions,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn continuous_acceptance_survives_finite_limits_and_observes_the_stop_control() {
+        let stopped = Cell::new(false);
+        let stop = || Ok(stopped.get());
+        let continuous = Acceptance::UntilStopped(&stop);
+        for count in [0, 1, 1_000, 1_000_000, 1_000_001] {
+            assert!(continuous.keep_accepting(count).unwrap());
+        }
+        stopped.set(true);
+        assert!(!continuous.keep_accepting(1_000_001).unwrap());
+        assert!(!continuous.keep_accepting(usize::MAX).unwrap());
+        assert!(Acceptance::Bounded(1).keep_accepting(0).unwrap());
+        assert!(!Acceptance::Bounded(1).keep_accepting(1).unwrap());
+    }
+
+    #[test]
+    fn stop_errors_panics_and_counter_exhaustion_take_the_draining_error_path() {
+        let error = || {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "control unreadable"))
+        };
+        assert_eq!(
+            Acceptance::UntilStopped(&error).keep_accepting(0).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let panic = || -> io::Result<bool> { panic!("planted stop failure") };
+        assert!(Acceptance::UntilStopped(&panic).keep_accepting(0).is_err());
+        let running = || Ok(false);
+        assert!(Acceptance::UntilStopped(&running).keep_accepting(usize::MAX - 1).unwrap());
+        assert!(Acceptance::UntilStopped(&running).keep_accepting(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn unwinding_a_child_settles_refusal_and_releases_its_completion_slot() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let refused = Arc::new(AtomicUsize::new(0));
+        let unwind = std::panic::catch_unwind({
+            let finished = Arc::clone(&finished);
+            let completed = Arc::clone(&completed);
+            let refused = Arc::clone(&refused);
+            move || {
+                let _completion = Completion { finished, completed, refused, success: false };
+                panic!("planted child failure");
+            }
+        });
+        assert!(unwind.is_err());
+        assert!(finished.load(Ordering::Acquire));
+        assert_eq!(completed.load(Ordering::Acquire), 0);
+        assert_eq!(refused.load(Ordering::Acquire), 1);
+        drop(Completion {
+            finished,
+            completed: Arc::clone(&completed),
+            refused: Arc::clone(&refused),
+            success: true,
+        });
+        assert_eq!(completed.load(Ordering::Acquire), 1);
+        assert_eq!(refused.load(Ordering::Acquire), 1);
     }
 }

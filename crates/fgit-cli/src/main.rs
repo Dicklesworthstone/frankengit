@@ -17,6 +17,7 @@ mod pull_request;
 mod rebase;
 mod rebase_apply;
 mod review_commands;
+mod service_stop;
 mod smart_http_server;
 mod source_browse;
 mod source_history;
@@ -447,6 +448,20 @@ fn main() -> ExitCode {
         }) => {
             println!(
                 "served bounded git-daemon run on {listen_address}: accepted={}, completed={}, refused={}, receive_path={receive_path}, unauthenticated_network_push={unauthenticated_network_push}",
+                service.accepted_sessions(),
+                service.completed_sessions(),
+                service.refused_sessions(),
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(fgit_cli::CliOutcome::ContinuouslyServed {
+            listen_address,
+            service,
+            receive_path,
+            unauthenticated_network_push,
+        }) => {
+            println!(
+                "served continuous Git service on {listen_address}: accepted={}, completed={}, refused={}, receive_path={receive_path}, unauthenticated_network_push={unauthenticated_network_push}",
                 service.accepted_sessions(),
                 service.completed_sessions(),
                 service.refused_sessions(),

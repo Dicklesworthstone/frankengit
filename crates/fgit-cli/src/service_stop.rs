@@ -10,9 +10,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use fgit_node::TerminationSignals;
+
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-pub(super) struct StopFile {
+pub(crate) struct StopFile {
     path: PathBuf,
     parent: PathBuf,
     parent_metadata: fs::Metadata,
@@ -23,11 +25,11 @@ pub(super) struct StopFile {
 impl StopFile {
     /// Refuse a pre-existing stop entry BEFORE repository open or listener bind.
     /// Reusing a previous stop request must never accidentally report readiness.
-    pub(super) fn arm(path: &Path) -> io::Result<Self> {
+    pub(crate) fn arm(path: &Path) -> io::Result<Self> {
         let name = path.file_name().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "HTTP stop path needs a file name",
+                "service stop path needs a file name",
             )
         })?;
         let parent = path
@@ -39,7 +41,7 @@ impl StopFile {
         if !parent_metadata.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "HTTP stop parent is not a directory",
+                "service stop parent is not a directory",
             ));
         }
         let control = Self {
@@ -52,7 +54,7 @@ impl StopFile {
         if control.inspect()? {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "HTTP stop file already exists",
+                "service stop file already exists",
             ));
         }
         Ok(control)
@@ -62,20 +64,20 @@ impl StopFile {
         // A missing/replaced parent is not a negative stop observation.
         let parent = fs::symlink_metadata(&self.parent)?;
         if !parent.is_dir() || !same_directory(&parent, &self.parent_metadata) {
-            return Err(io::Error::other("HTTP stop directory changed"));
+            return Err(io::Error::other("service stop directory changed"));
         }
         match fs::symlink_metadata(&self.path) {
             Ok(metadata) if metadata.is_file() => Ok(true),
             Ok(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "HTTP stop entry must be a regular file, not a link or special file",
+                "service stop entry must be a regular file, not a link or special file",
             )),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
         }
     }
 
-    pub(super) fn should_stop(&self) -> io::Result<bool> {
+    pub(crate) fn should_stop(&self) -> io::Result<bool> {
         self.poll_at(Instant::now())
     }
 
@@ -94,6 +96,40 @@ impl StopFile {
         let stopped = self.inspect()?;
         self.stopped.set(stopped);
         Ok(stopped)
+    }
+}
+
+/// The executable owns process signals; library listeners only poll an explicit
+/// callback. Install this before readiness so a supervisor cannot signal a
+/// newly announced service before its handlers exist.
+pub(crate) struct StopControl<'a> {
+    file: &'a StopFile,
+    signals: Option<TerminationSignals>,
+    announced: Cell<bool>,
+}
+
+impl<'a> StopControl<'a> {
+    pub(crate) fn new(file: &'a StopFile) -> Self {
+        let signals = TerminationSignals::install()
+            .inspect_err(|error| {
+                eprintln!("fg: termination signals not installed ({error}); use the stop file");
+            })
+            .ok();
+        Self {
+            file,
+            signals,
+            announced: Cell::new(false),
+        }
+    }
+
+    pub(crate) fn should_stop(&self) -> io::Result<bool> {
+        if self.signals.as_ref().is_some_and(TerminationSignals::requested) {
+            if !self.announced.replace(true) {
+                eprintln!("fg: termination signal received; draining accepted connections");
+            }
+            return Ok(true);
+        }
+        self.file.should_stop()
     }
 }
 
@@ -257,61 +293,6 @@ mod tests {
         assert!(control.inspect().unwrap());
     }
 
-    fn arguments() -> Vec<String> {
-        vec![
-            "state".into(),
-            "11".repeat(16),
-            "22".repeat(16),
-            "127.0.0.1:0".into(),
-            "--trusted-local".into(),
-            "--token-file".into(),
-            "token".into(),
-            "--principal".into(),
-            "33".repeat(16),
-        ]
-    }
-
-    #[test]
-    fn continuous_cli_mode_requires_an_explicit_stop_control() {
-        let base = arguments();
-        assert!(super::super::parse(&base).unwrap().stop_file.is_none());
-        for flags in [vec!["--continuous"], vec!["--stop-file", "stop"]] {
-            let mut args = base.clone();
-            args.extend(flags.into_iter().map(str::to_owned));
-            assert!(super::super::parse(&args).is_err());
-        }
-        let mut args = base;
-        args.extend(["--continuous".into(), "--stop-file".into(), "stop".into()]);
-        let options = super::super::parse(&args).unwrap();
-        assert_eq!(options.stop_file, Some(PathBuf::from("stop")));
-        assert_eq!(options.limits.max_in_flight(), 4);
-        assert!(!options.allow_receive);
-    }
-
-    #[test]
-    fn continuous_cli_mode_never_silently_ignores_requested_retirement_limits() {
-        for (flag, value) in [("--max-sessions", "2"), ("--idle-timeout-secs", "1")] {
-            let mut args = arguments();
-            args.extend([flag.into(), value.into()]);
-            assert!(super::super::parse(&args).is_ok());
-            args.extend(["--continuous".into(), "--stop-file".into(), "stop".into()]);
-            assert!(super::super::parse(&args).is_err());
-        }
-    }
-
-    #[test]
-    fn continuous_cli_does_not_relax_scopes_or_connection_bounds() {
-        let mut args = arguments();
-        args.extend(["--continuous".into(), "--stop-file".into(), "stop".into()]);
-        let mut too_many = args.clone();
-        too_many.extend(["--max-in-flight".into(), "17".into()]);
-        assert!(super::super::parse(&too_many).is_err());
-        args.extend(["--max-in-flight".into(), "16".into()]);
-        assert!(super::super::parse(&args).is_ok());
-        args.push("--allow-issues".into());
-        assert!(super::super::parse(&args).is_err());
-    }
-
     #[cfg(unix)]
     #[test]
     fn replaced_control_directory_cannot_hide_a_stop_request() {
@@ -326,7 +307,7 @@ mod tests {
         // A different empty directory must not be observed as continued service.
         assert_eq!(
             control.inspect().unwrap_err().to_string(),
-            "HTTP stop directory changed"
+            "service stop directory changed"
         );
         fs::remove_dir(&parent).unwrap();
         fs::rename(&moved, &parent).unwrap();
@@ -335,40 +316,5 @@ mod tests {
         assert!(control.inspect().unwrap());
     }
 
-    #[test]
-    fn continuous_reloadable_mode_preserves_all_independent_endpoint_ceilings() {
-        let mut args = arguments()[..5].to_vec();
-        args.extend([
-            "--credentials-file".into(),
-            "grants".into(),
-            "--continuous".into(),
-            "--stop-file".into(),
-            "stop".into(),
-        ]);
-        let options = super::super::parse(&args).unwrap();
-        assert!(options.stop_file.is_some());
-        assert!(
-            !options.allow_receive
-                && !options.allow_issues
-                && !options.allow_outcomes
-                && !options.allow_pulls
-                && !options.allow_source
-        );
-        for flag in [
-            "--allow-receive",
-            "--allow-issues",
-            "--allow-outcomes",
-            "--allow-pulls",
-            "--allow-source",
-        ] {
-            let mut selected = args.clone();
-            selected.push(flag.into());
-            let options = super::super::parse(&selected).unwrap();
-            assert_eq!(options.allow_receive, flag == "--allow-receive");
-            assert_eq!(options.allow_issues, flag == "--allow-issues");
-            assert_eq!(options.allow_outcomes, flag == "--allow-outcomes");
-            assert_eq!(options.allow_pulls, flag == "--allow-pulls");
-            assert_eq!(options.allow_source, flag == "--allow-source");
-        }
-    }
+
 }

@@ -62,8 +62,9 @@ write-side envelope (`--pack-max-expanded-mib`; 128 MiB expanded by default),
 and an over-envelope clone receives a diagnosable Fatal sideband refusal
 rather than an unexplained early EOF.
 
-`serve` accepts a bounded raw git-daemon service run, drains every admitted
-session, and reports accepted/completed/refused counts before it exits. The
+`serve` defaults to a bounded raw git-daemon run and also supports an explicit
+`--continuous --stop-file <path>` lifetime. Both modes drain every admitted
+session and report accepted/completed/refused counts before exiting. The
 upload-pack lane is enabled by default. The receive-pack lane is available only
 when the operator explicitly supplies `--receive-principal
 <principal-id-hex>`; without that binding, a push is refused and publishes
@@ -88,15 +89,19 @@ clone, fetch and push:
   SIGTERM or SIGINT.
 - `fg serve-ssh` uses ed25519 deploy keys and per-session key exchange. A
   connection that has not yet started a Git command is dropped after 60 s of
-  silence. Once a command runs, each read or write may wait up to
-  `--session-timeout-secs` (default 300 s), so a client that is still
-  compressing a large pack is not dropped mid-push.
+  silence. Once a command runs, reads and writes use the remaining absolute
+  session budget (`--session-timeout-secs`, default 300 s, plus the configured
+  allowance for admitted Git bytes), so a client still compressing a large
+  pack is not subject to the pre-command 60 s idle cutoff.
+- `fg serve` and `fg serve-ssh` support `--continuous --stop-file <path>`, with
+  SIGTERM/SIGINT requesting the same drain. The owned listener closes before
+  accepted sessions settle; [service lifetime controls](docs/GIT_SERVICE_LIFETIME.md)
+  describe bounds, readiness and transport receipts.
 
 Neither is yet a multi-user production deployment:
 - no transport terminates TLS;
 - `fg serve-http` refuses non-loopback addresses;
 - writes from the CLI and MCP carry a self-asserted principal;
-- `fg serve` and `fg serve-ssh` have no continuous service mode.
 
 See the [reality snapshot](#reality-snapshot-2026-09-27). The raw
 git-daemon receive lane is the composition slice the `first_push.sh` E2E suite

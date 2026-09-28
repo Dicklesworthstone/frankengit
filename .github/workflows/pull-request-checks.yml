@@ -1,6 +1,6 @@
 name: Pull request workflow observations
-# Consumer: PR check reads in OneNode, HTTP, CLI, MCP and the browser (.4.12).
-# This gates mixed-snapshot/commit disclosure and transport integration defects.
+# Consumers: saved workflow publication and PR checks (.4.12), and continuous
+# Git/SSH services (.4.32). Covers canonical binding, retries and bounded drain.
 # Remove this standalone job when these targets join the ordinary union job.
 on:
   push:
@@ -26,6 +26,20 @@ on:
       - 'crates/fgit-cli/src/mcp/backend/integration_tests.rs'
       - 'scripts/e2e/pull_request_smoke.py'
       - 'scripts/e2e/workflow_publication_smoke.py'
+      - 'crates/fgit-cli/src/lib.rs'
+      - 'crates/fgit-cli/src/main.rs'
+      - 'crates/fgit-cli/src/guarded_git_server.rs'
+      - 'crates/fgit-cli/src/ssh_server.rs'
+      - 'crates/fgit-cli/src/smart_http_server.rs'
+      - 'crates/fgit-cli/src/service_stop.rs'
+      - 'crates/fgit-node/src/smart_http/receive_session/daemon/supervisor.rs'
+      - 'crates/fgit-node/src/ssh.rs'
+      - 'crates/fgit-node/src/ssh/**'
+      - 'crates/fgit-node/tests/guarded_git_daemon.rs'
+      - 'crates/fgit-node/tests/guarded_git_daemon/**'
+      - 'scripts/e2e/continuous_git_transports_smoke.py'
+      - 'scripts/e2e/continuous_git_proxy.py'
+      - 'scripts/e2e/suites/node/continuous_git_transports.sh'
       - 'tests/browser/pulls-checks*.mjs'
   workflow_dispatch:
 permissions:
@@ -36,7 +50,7 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
@@ -73,5 +87,17 @@ jobs:
           cargo test --locked -p fgit-cli --bin fg checks
           cargo test --locked -p fgit-cli --bin fg mcp::backend::integration_tests
           cargo test --locked -p fgit-cli --test native_pull_request_smoke
+      - name: Continuous service ownership and deadlines
+        run: |
+          cargo test --locked -p fgit-cli --bin fg guarded_git_server::tests
+          cargo test --locked -p fgit-cli --bin fg ssh_server::tests
+          cargo test --locked -p fgit-cli --bin fg service_stop::tests
+          cargo test --locked -p fgit-node --lib daemon::supervisor::tests
+          cargo test --locked -p fgit-node --lib ssh::
+          cargo test --locked -p fgit-node --test guarded_git_daemon continuous
+      - name: Stock Git continuous clone fetch push and signal drain
+        run: python3 scripts/e2e/continuous_git_transports_smoke.py --fg "$CARGO_TARGET_DIR/debug/fg" --format sha1 --format sha256
+      - name: SSH quiet-command and transport compatibility
+        run: FG_BIN="$CARGO_TARGET_DIR/debug/fg" bash scripts/e2e/suites/transport/ssh_git_compat.sh
       - name: Browser observation protocol and panel
         run: node --test tests/browser/pulls-checks*.test.mjs

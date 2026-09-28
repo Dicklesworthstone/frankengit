@@ -1,6 +1,6 @@
 //! Executable `fg serve-ssh` binding for the pure-Rust SSH transport service.
 //!
-//! Provides bounded SSH listener execution with host key configuration,
+//! Provides bounded or explicitly continuous SSH service with host key configuration,
 //! deploy-key authentication, and typed Git command dispatch (`git-upload-pack`
 //! and `git-receive-pack`).
 
@@ -26,6 +26,7 @@ const USAGE: &str = "usage: fg serve-ssh <storage-root> <tenant-id> <repository-
   [--expected-incarnation <id>]
   [--max-sessions <1..1000000>]
   [--max-in-flight <1..16>]
+  [--continuous --stop-file <absent-path>]
   [--session-timeout-secs <non-zero>] [--session-secs-per-mib <n>] [--session-max-extension-secs <n>]
   [--receive-max-input-mib <non-zero>] [--receive-max-expanded-mib <non-zero>] [--pack-max-expanded-mib <non-zero>]";
 
@@ -36,6 +37,7 @@ struct Prepared {
     host_signing_key: SigningKey,
     deploy_keys: Vec<DeployKeyBinding>,
     allow_receive: bool,
+    stop_file: Option<PathBuf>,
 }
 
 fn integer(value: &str, flag: &str, zero: bool) -> Result<u64, String> {
@@ -145,11 +147,18 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
     let mut flags = BTreeMap::new();
     let mut positional = Vec::new();
     let mut allow_receive = false;
+    let mut continuous = false;
 
     let mut index = 1;
     while index < arguments.len() {
         let argument = arguments[index].as_str();
-        if argument == "--allow-receive" {
+        if argument == "--continuous" {
+            if continuous {
+                return Err("duplicate --continuous".into());
+            }
+            continuous = true;
+            index += 1;
+        } else if argument == "--allow-receive" {
             allow_receive = true;
             index += 1;
         } else if argument.starts_with("--") {
@@ -163,6 +172,7 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
                     | "--expected-incarnation"
                     | "--max-sessions"
                     | "--max-in-flight"
+                    | "--stop-file"
             ) && !crate::guarded_git_server::SESSION_AND_ENVELOPE_FLAGS.contains(&argument)
             {
                 return Err(USAGE.into());
@@ -185,6 +195,18 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
         return Err(USAGE.into());
     };
 
+    let stop_file = match (continuous, flags.get("--stop-file")) {
+        (false, None) => None,
+        (true, Some(path)) if !path.is_empty() && !flags.contains_key("--max-sessions") => {
+            Some(PathBuf::from(*path))
+        }
+        (true, Some(_)) if flags.contains_key("--max-sessions") => {
+            return Err("--continuous cannot be combined with --max-sessions".into());
+        }
+        _ => {
+            return Err("--continuous and a nonempty --stop-file must be supplied together".into());
+        }
+    };
     let sessions = flags
         .get("--max-sessions")
         .map(|v| integer(v, "--max-sessions", false))
@@ -196,8 +218,9 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
         .transpose()?
         .unwrap_or(16);
 
-    let limits = SshServerLimits::try_new(sessions as usize, in_flight as usize)
-        .map_err(|e| e.to_string())?;
+    let sessions = usize::try_from(sessions).map_err(|_| "SSH session limit exceeds platform")?;
+    let in_flight = usize::try_from(in_flight).map_err(|_| "SSH in-flight limit exceeds platform")?;
+    let limits = SshServerLimits::try_new(sessions, in_flight).map_err(|e| e.to_string())?;
 
     let tenant = TenantId::from_hex(tenant).map_err(|e| e.to_string())?;
     let repository = RepositoryId::from_hex(repository).map_err(|e| e.to_string())?;
@@ -262,11 +285,16 @@ fn parse(arguments: &[String]) -> Result<Prepared, String> {
         host_signing_key,
         deploy_keys,
         allow_receive,
+        stop_file,
     })
 }
 
 pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
     let prepared = parse(arguments)?;
+    let stop = prepared.stop_file.as_ref()
+        .map(|path| crate::service_stop::StopFile::arm(path))
+        .transpose()
+        .map_err(|error| format!("cannot arm SSH stop control: {error}"))?;
     let listener = TcpListener::bind(&prepared.listen).map_err(|e| e.to_string())?;
     let listen_address = listener.local_addr().map_err(|e| e.to_string())?;
     let mut node = OneNode::open_existing(prepared.configuration).map_err(|e| e.to_string())?;
@@ -279,41 +307,69 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, String> {
         node.bring_into_service(selected.receipt().generation())
             .map_err(|e| e.to_string())?;
 
+        let control = stop.as_ref().map(crate::service_stop::StopControl::new);
         let mut out = io::stdout().lock();
-        let _ = writeln!(
+        writeln!(
             out,
-            "{{\"type\":\"ssh_listening\",\"schema_version\":1,\"address\":\"{}\",\"allow_receive\":{},\"repository_incarnation\":\"{}\"}}",
+            "{{\"type\":\"ssh_listening\",\"schema_version\":1,\"address\":\"{}\",\"allow_receive\":{},\"repository_incarnation\":\"{}\",\"lifetime\":\"{}\"}}",
             listen_address,
             prepared.allow_receive,
-            node.repository_incarnation_id()
-        );
-        let _ = out.flush();
+            node.repository_incarnation_id(),
+            if control.is_some() { "continuous" } else { "bounded" },
+        )
+        .and_then(|()| out.flush())
+        .map_err(|error| format!("cannot report SSH readiness: {error}"))?;
         drop(out);
 
-        node.serve_ssh_bounded(
-            &listener,
-            prepared.limits,
-            prepared.host_signing_key,
-            prepared.deploy_keys,
-            prepared.allow_receive,
-        )
+        if let Some(control) = control {
+            node.serve_ssh_until_stopped(
+                listener,
+                prepared.limits.max_in_flight,
+                prepared.host_signing_key,
+                prepared.deploy_keys,
+                prepared.allow_receive,
+                &|| control.should_stop(),
+            )
+        } else {
+            node.serve_ssh_bounded(
+                &listener,
+                prepared.limits,
+                prepared.host_signing_key,
+                prepared.deploy_keys,
+                prepared.allow_receive,
+            )
+        }
         .map_err(|e| e.to_string())
     })();
 
     let cleanup = node.shutdown();
     match (serving, cleanup) {
         (Ok(receipt), Ok(())) => {
-            println!(
-                "{{\"type\":\"ssh_drained\",\"schema_version\":1,\"accepted\":{},\"completed_transports\":{},\"refused_transports\":{}}}",
+            let mut out = io::stdout().lock();
+            writeln!(
+                out,
+                "{{\"type\":\"ssh_drained\",\"schema_version\":1,\"accepted\":{},\"completed_transports\":{},\"refused_transports\":{},\"lifetime\":\"{}\"}}",
                 receipt.accepted_sessions(),
                 receipt.completed_sessions(),
-                receipt.refused_sessions()
-            );
-            Ok(CliOutcome::Served {
-                listen_address,
-                service: receipt,
-                receive_path: "ssh",
-                unauthenticated_network_push: false,
+                receipt.refused_sessions(),
+                if stop.is_some() { "continuous" } else { "bounded" },
+            )
+            .and_then(|()| out.flush())
+            .map_err(|error| format!("cannot report SSH drain: {error}"))?;
+            Ok(if stop.is_some() {
+                CliOutcome::ContinuouslyServed {
+                    listen_address,
+                    service: receipt,
+                    receive_path: "ssh",
+                    unauthenticated_network_push: false,
+                }
+            } else {
+                CliOutcome::Served {
+                    listen_address,
+                    service: receipt,
+                    receive_path: "ssh",
+                    unauthenticated_network_push: false,
+                }
             })
         }
         (Err(error), Ok(())) => Err(error),
@@ -377,6 +433,12 @@ mod tests {
             .collect()
         };
         let default = format!("{:?}", parse(&arguments(&[])).unwrap().configuration);
+        let continuous = parse(&arguments(&[
+            "--continuous", "--stop-file", "ssh.stop", "--max-in-flight", "2",
+        ])).unwrap();
+        assert_eq!(continuous.stop_file, Some(PathBuf::from("ssh.stop")));
+        assert_eq!(continuous.limits.max_in_flight, 2);
+        assert!(!continuous.allow_receive);
         let widened = format!(
             "{:?}",
             parse(&arguments(&[
@@ -402,6 +464,14 @@ mod tests {
             vec!["--receive-max-input-mib", "0"],
             vec!["--session-timeout-secs", "0"],
             vec!["--pack-max-expanded-mib", "1", "--pack-max-expanded-mib", "2"],
+            vec!["--continuous"],
+            vec!["--stop-file", "ssh.stop"],
+            vec!["--continuous", "--stop-file", ""],
+            vec!["--continuous", "--continuous", "--stop-file", "ssh.stop"],
+            vec!["--continuous", "--stop-file", "ssh.stop", "--max-sessions", "1"],
+            vec!["--continuous", "--stop-file", "ssh.stop", "--max-in-flight", "0"],
+            vec!["--continuous", "--stop-file", "ssh.stop", "--max-in-flight", "17"],
+            vec!["--max-sessions", "18446744073709551615"],
         ] {
             assert!(parse(&arguments(&flags)).is_err(), "{flags:?}");
         }

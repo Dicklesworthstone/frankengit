@@ -39,7 +39,7 @@ A mutation's lost response or shutdown is never treated as proof of non-commit.
 In continuous mode, SIGTERM (what a service manager sends to stop a service)
 and SIGINT (Ctrl-C) request the same drain as the stop file, and stderr says
 so once. The handlers are installed through the runtime's signal support only
-when continuous serving starts, so a bounded run keeps the default behaviour.
+before continuous readiness is printed, so a bounded run keeps the default behaviour.
 A signal is latched like a stop file; a second signal during the drain does
 not cut it short. A platform that cannot install the handlers keeps the default
 behaviour and prints why, leaving the stop file as the drain control

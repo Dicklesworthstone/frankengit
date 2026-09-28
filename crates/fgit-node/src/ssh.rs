@@ -1,17 +1,18 @@
 //! SSH transport service integration for FrankenGit node assembly (FG-047/FG-047b).
 //!
-//! Provides pure-Rust bounded SSH service execution for Git operations:
+//! Provides pure-Rust bounded and continuously supervised SSH service execution:
 //! - Shell-free command parsing and dispatch (`git-upload-pack`, `git-receive-pack`)
 //! - RFC 8731 Curve25519 key exchange and OpenSSH ChaCha20-Poly1305 encryption
 //! - Deploy-key authentication and repository-scoped authorization
 //! - SANS-I/O session state machine mapped to Asupersync blocking threads
 
+use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use fgit_identity::deploy_key::DeployKeyBinding;
@@ -22,10 +23,16 @@ use fgit_types::PrincipalId;
 use fgit_wire::{UploadPackRepository, WireLimits};
 
 use crate::{
-    GitDaemonRequest, GitDaemonServerReceipt, GitDaemonService, GitDaemonSessionOutcome,
-    GitDaemonTransportRefusal, NodeGitDaemonServeRefusal, NodeRefusal, OneNode,
+    GitDaemonRequest, GitDaemonServerReceipt, GitDaemonService, GitDaemonSessionDeadline,
+    GitDaemonSessionOutcome, GitDaemonSessionTimeout, GitDaemonSessionWorkScaling,
+    GitDaemonTransportRefusal, NodeGitDaemonServeRefusal, NodeRefusal, OneNode, PushQuota,
     ReceiveResponseWriter,
 };
+
+mod deadline;
+mod lifetime;
+
+use lifetime::{Acceptance, Completion, Pending, reap};
 
 /// Bounded concurrency and session limits for the SSH server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,7 +67,7 @@ impl SshServerLimits {
     }
 }
 
-/// Outcome receipt after the SSH server has completed its bounded session budget.
+/// Outcome receipt after SSH acceptance has stopped and every child has settled.
 pub type SshServerReceipt = GitDaemonServerReceipt;
 
 /// Refusals occurring during SSH server execution.
@@ -69,6 +76,10 @@ pub enum NodeSshRefusal {
     ZeroSessionLimit,
     ZeroInFlightLimit,
     LimitsExceeded,
+    NotServing,
+    StopControl(io::Error),
+    CounterExhausted,
+    UnsettledChildren,
     Accept(io::Error),
     Session(SshSessionError),
     Service(String),
@@ -85,6 +96,10 @@ impl Display for NodeSshRefusal {
                 formatter,
                 "SSH limits exceeded (max 1000000 sessions, max 16 in-flight)"
             ),
+            Self::NotServing => write!(formatter, "SSH requires a serving node"),
+            Self::StopControl(err) => write!(formatter, "SSH stop control failed: {err}"),
+            Self::CounterExhausted => write!(formatter, "SSH session counter exhausted"),
+            Self::UnsettledChildren => write!(formatter, "SSH child accounting did not settle"),
             Self::Accept(err) => write!(formatter, "cannot accept SSH connection: {err}"),
             Self::Session(err) => write!(formatter, "SSH session protocol error: {err}"),
             Self::Service(err) => write!(formatter, "SSH service error: {err}"),
@@ -113,13 +128,14 @@ impl From<NodeRefusal> for NodeSshRefusal {
 /// destroy output too. So keep processing the client's packets (window
 /// adjustments, its CLOSE) until it disconnects, bounded in time and bytes.
 fn close_gracefully(session: &mut SshServerSession, stream: &mut TcpStream) {
-    let _ = stream.flush();
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let started = std::time::Instant::now();
+    let deadline = GitDaemonSessionDeadline::new(
+        GitDaemonSessionTimeout::try_new(Duration::from_secs(10)).expect("nonzero close budget"),
+        GitDaemonSessionWorkScaling::FLAT,
+    );
     let mut drained = 0usize;
     let mut buf = [0u8; 16384];
-    while started.elapsed() < Duration::from_secs(10) && drained < 4 * 1024 * 1024 {
-        match stream.read(&mut buf) {
+    while !deadline.expired() && drained < 4 * 1024 * 1024 {
+        match deadline::read(stream, &deadline, &mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 drained += n;
@@ -127,7 +143,7 @@ fn close_gracefully(session: &mut SshServerSession, stream: &mut TcpStream) {
                     break;
                 }
                 let out = session.take_outgoing_bytes();
-                if !out.is_empty() && (stream.write_all(&out).is_err() || stream.flush().is_err()) {
+                if deadline::write_all(stream, &deadline, &out).is_err() {
                     break;
                 }
             }
@@ -138,6 +154,7 @@ fn close_gracefully(session: &mut SshServerSession, stream: &mut TcpStream) {
 struct SshConnectionState {
     session: SshServerSession,
     stream: TcpStream,
+    deadline: GitDaemonSessionDeadline,
     read_buf: Vec<u8>,
     read_pos: usize,
 }
@@ -153,12 +170,9 @@ impl SshConnectionState {
     }
 
     fn flush_outgoing(&mut self) -> io::Result<()> {
+        self.deadline.remaining()?;
         let out = self.session.take_outgoing_bytes();
-        if !out.is_empty() {
-            self.stream.write_all(&out)?;
-            self.stream.flush()?;
-        }
-        Ok(())
+        deadline::write_all(&mut self.stream, &self.deadline, &out)
     }
 
     /// Reads one burst from the client and feeds it to the session. A socket
@@ -169,7 +183,7 @@ impl SshConnectionState {
         // client before we block waiting for it to send more.
         self.flush_outgoing()?;
         let mut wire_buf = [0u8; 16384];
-        let n = match self.stream.read(&mut wire_buf) {
+        let n = match deadline::read(&mut self.stream, &self.deadline, &mut wire_buf) {
             Ok(n) => n,
             Err(source)
                 if matches!(
@@ -194,11 +208,16 @@ impl SshConnectionState {
     }
 
     fn read_channel(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.deadline.remaining()?;
         if self.read_pos < self.read_buf.len() {
             let available = &self.read_buf[self.read_pos..];
             let to_copy = available.len().min(buf.len());
             buf[..to_copy].copy_from_slice(&available[..to_copy]);
             self.read_pos += to_copy;
+            self.deadline.note_admitted(to_copy);
             return Ok(to_copy);
         }
 
@@ -206,6 +225,7 @@ impl SshConnectionState {
         self.read_pos = 0;
 
         loop {
+            self.deadline.remaining()?;
             // Data already decoded (for example while waiting for window
             // space in `write_channel`) is delivered before EOF is reported.
             let new_data = self.session.take_channel_input();
@@ -214,6 +234,7 @@ impl SshConnectionState {
                 let to_copy = self.read_buf.len().min(buf.len());
                 buf[..to_copy].copy_from_slice(&self.read_buf[..to_copy]);
                 self.read_pos = to_copy;
+                self.deadline.note_admitted(to_copy);
                 return Ok(to_copy);
             }
             if self.session.is_channel_eof_received() || self.session.is_channel_closed() {
@@ -230,6 +251,7 @@ impl SshConnectionState {
                 let to_copy = self.read_buf.len().min(buf.len());
                 buf[..to_copy].copy_from_slice(&self.read_buf[..to_copy]);
                 self.read_pos = to_copy;
+                self.deadline.note_admitted(to_copy);
                 return Ok(to_copy);
             }
         }
@@ -238,6 +260,7 @@ impl SshConnectionState {
     fn write_channel(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut written = 0;
         while written < buf.len() {
+            self.deadline.remaining()?;
             let accepted = self.session.send_channel_data(&buf[written..]);
             written += accepted;
             self.flush_outgoing()?;
@@ -284,12 +307,16 @@ impl Write for SshWriter<'_> {
 }
 
 impl ReceiveResponseWriter for SshWriter<'_> {
-    fn restart_deadline(&mut self, _deadline: crate::GitDaemonSessionDeadline) {}
+    fn restart_deadline(&mut self, deadline: GitDaemonSessionDeadline) {
+        // The native coordinator restarts only after a terminal result exists.
+        // Its response may still require SSH window-adjust packets to arrive.
+        self.0.borrow_mut().deadline = deadline;
+    }
 }
 
 impl OneNode {
-    /// Serves incoming Git operations over SSH on the provided listener until
-    /// the session budget is exhausted.
+    /// Serves SSH until the finite acceptance budget is exhausted, then drains.
+    /// The caller retains ownership of the listening socket.
     pub fn serve_ssh_bounded(
         &self,
         listener: &TcpListener,
@@ -298,38 +325,94 @@ impl OneNode {
         deploy_keys: Vec<DeployKeyBinding>,
         allow_receive: bool,
     ) -> Result<SshServerReceipt, NodeSshRefusal> {
+        let limits = SshServerLimits::try_new(limits.max_sessions, limits.max_in_flight)?;
+        self.serve_ssh_with_lifetime(
+            listener,
+            limits.max_in_flight,
+            server_signing_key,
+            deploy_keys,
+            allow_receive,
+            Acceptance::Bounded(limits.max_sessions),
+        )
+    }
+
+    /// Serves SSH until the control callback requests retirement.
+    ///
+    /// The owned listener closes before accepted sessions are joined. Accepted
+    /// work retains its finite ingress, processing, response and close budgets.
+    /// Stop control is checked even when all session slots are occupied.
+    pub fn serve_ssh_until_stopped(
+        &self,
+        listener: TcpListener,
+        max_in_flight: usize,
+        server_signing_key: SigningKey,
+        deploy_keys: Vec<DeployKeyBinding>,
+        allow_receive: bool,
+        should_stop: &dyn Fn() -> io::Result<bool>,
+    ) -> Result<SshServerReceipt, NodeSshRefusal> {
+        SshServerLimits::try_new(1, max_in_flight)?;
+        self.serve_ssh_with_lifetime(
+            listener,
+            max_in_flight,
+            server_signing_key,
+            deploy_keys,
+            allow_receive,
+            Acceptance::UntilStopped(should_stop),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn serve_ssh_with_lifetime<L: Borrow<TcpListener>>(
+        &self,
+        listener: L,
+        max_in_flight: usize,
+        server_signing_key: SigningKey,
+        deploy_keys: Vec<DeployKeyBinding>,
+        allow_receive: bool,
+        acceptance: Acceptance<'_>,
+    ) -> Result<SshServerReceipt, NodeSshRefusal> {
+        if self.cell_state() != fgit_types::cell::CellState::Serving {
+            return Err(NodeSshRefusal::NotServing);
+        }
         listener
+            .borrow()
             .set_nonblocking(true)
             .map_err(NodeSshRefusal::Accept)?;
 
-        let active = Arc::new(AtomicUsize::new(0));
         let writers = Arc::new(crate::WriterGate::new(crate::MAX_CONCURRENT_WRITERS));
-        // Sessions lease already-opened nodes (profile section 3.3) instead of
-        // opening and closing one each.
+        // Rate accounting belongs to the service, not a short-lived lane lease.
+        let quota = Arc::new(PushQuota::default());
         let nodes = Arc::new(crate::node_lanes::NodeLanes::new(
-            self.service_config.clone(),
-            limits.max_in_flight,
+            self.service_config
+                .clone()
+                .with_expected_repository_incarnation(self.repository_incarnation_id()),
+            max_in_flight,
             "SSH",
         ));
         let completed = Arc::new(AtomicUsize::new(0));
         let refused = Arc::new(AtomicUsize::new(0));
-        let mut child_tasks = Vec::with_capacity(limits.max_sessions);
-        let mut accepted = 0_usize;
+        let mut pending = Vec::with_capacity(max_in_flight);
+        let mut accepted = 0usize;
         let mut terminal_refusal = None;
 
-        while accepted < limits.max_sessions {
-            if active.load(Ordering::Acquire) >= limits.max_in_flight {
+        loop {
+            reap(&mut pending);
+            match acceptance.keep_accepting(accepted) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => {
+                    terminal_refusal = Some(error);
+                    break;
+                }
+            }
+            if pending.len() >= max_in_flight {
                 self.runtime.wait_for(Duration::from_millis(1));
                 continue;
             }
 
-            let (stream, _) = match listener.accept() {
-                Ok((stream, addr)) => {
-                    let _ = stream.set_nonblocking(false);
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
-                    let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
-                    (stream, addr)
-                }
+            let stream = match listener.borrow().accept() {
+                Ok((stream, _)) => stream,
+                Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
                 Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
                     self.runtime.wait_for(Duration::from_millis(1));
                     continue;
@@ -340,68 +423,100 @@ impl OneNode {
                 }
             };
 
-            accepted = accepted.saturating_add(1);
-            active.fetch_add(1, Ordering::AcqRel);
+            let Some(next_accepted) = accepted.checked_add(1) else {
+                terminal_refusal = Some(NodeSshRefusal::CounterExhausted);
+                break;
+            };
+            accepted = next_accepted;
+            // Queueing and authentication consume this same accepted budget.
+            let deadline = GitDaemonSessionDeadline::new(
+                self.git_daemon_session_timeout,
+                self.git_daemon_session_work_scaling,
+            );
+            let finished = Arc::new(AtomicBool::new(false));
+            let completion = Completion {
+                finished: Arc::clone(&finished),
+                completed: Arc::clone(&completed),
+                refused: Arc::clone(&refused),
+                success: false,
+            };
             let child_nodes = Arc::clone(&nodes);
-            let child_active = Arc::clone(&active);
-            let child_completed = Arc::clone(&completed);
-            let child_refused = Arc::clone(&refused);
             let host_key = server_signing_key.clone();
             let keys = deploy_keys.clone();
             let child_writers = Arc::clone(&writers);
+            let child_quota = Arc::clone(&quota);
 
             let task = match self.runtime.submit_blocking(move || {
-                let success = Self::serve_one_ssh_session(
+                let mut completion = completion;
+                completion.success = Self::serve_one_ssh_session(
                     stream,
                     host_key,
                     keys,
                     &child_nodes,
                     allow_receive,
                     &child_writers,
+                    &child_quota,
+                    deadline,
                 );
-                if success {
-                    child_completed.fetch_add(1, Ordering::AcqRel);
-                } else {
-                    child_refused.fetch_add(1, Ordering::AcqRel);
-                }
-                child_active.fetch_sub(1, Ordering::AcqRel);
+                // Drop settles accounting even if the session unwinds. A
+                // rejected submission also drops this owned completion guard.
             }) {
                 Ok(task) => task,
                 Err(error) => {
-                    active.fetch_sub(1, Ordering::AcqRel);
-                    refused.fetch_add(1, Ordering::AcqRel);
                     terminal_refusal =
                         Some(NodeSshRefusal::Node(NodeRefusal::Runtime(Box::new(error))));
                     break;
                 }
             };
-            child_tasks.push(task);
+            pending.push(Pending {
+                finished,
+                join: Box::new(move || {
+                    task.wait();
+                }),
+            });
         }
 
-        for task in &child_tasks {
-            task.wait();
+        if let Err(error) = listener.borrow().set_nonblocking(false) {
+            if terminal_refusal.is_none() {
+                terminal_refusal = Some(NodeSshRefusal::Accept(error));
+            } else {
+                eprintln!("SSH listener cleanup failed: {error}");
+            }
         }
-        if let Err(error) = nodes.close()
-            && terminal_refusal.is_none()
-        {
-            terminal_refusal = Some(NodeSshRefusal::Node(error));
+        // For controlled service this owns the socket: close it before waiting
+        // for active sessions, so a draining server cannot admit new connects.
+        drop(listener);
+        for task in pending {
+            (task.join)();
+        }
+        if let Err(error) = nodes.close() {
+            if terminal_refusal.is_none() {
+                terminal_refusal = Some(NodeSshRefusal::Shutdown(error));
+            } else {
+                eprintln!("SSH lane cleanup failed: {error}");
+            }
         }
 
-        let accepted_sessions = accepted;
         let completed_sessions = completed.load(Ordering::Acquire);
         let refused_sessions = refused.load(Ordering::Acquire);
-
+        if completed_sessions.checked_add(refused_sessions) != Some(accepted) {
+            if terminal_refusal.is_none() {
+                terminal_refusal = Some(NodeSshRefusal::UnsettledChildren);
+            } else {
+                eprintln!("SSH child accounting did not settle");
+            }
+        }
         if let Some(refusal) = terminal_refusal {
             return Err(refusal);
         }
-
         Ok(SshServerReceipt {
-            accepted_sessions,
+            accepted_sessions: accepted,
             completed_sessions,
             refused_sessions,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn serve_one_ssh_session(
         mut stream: TcpStream,
         host_key: SigningKey,
@@ -409,29 +524,34 @@ impl OneNode {
         nodes: &crate::node_lanes::NodeLanes,
         allow_receive: bool,
         writers: &crate::WriterGate,
+        quota: &PushQuota,
+        deadline: GitDaemonSessionDeadline,
     ) -> bool {
+        if stream.set_nonblocking(false).is_err() || deadline.expired() {
+            return false;
+        }
         // Per-session secrets come from the runtime's OS entropy source.
         let mut session =
             SshServerSession::new(host_key, deploy_keys, Arc::new(asupersync::util::OsEntropy));
         session.start();
 
         let initial_bytes = session.take_outgoing_bytes();
-        if stream.write_all(&initial_bytes).is_err() || stream.flush().is_err() {
+        if deadline::write_all_handshake(&mut stream, &deadline, &initial_bytes).is_err() {
             return false;
         }
 
         let mut wire_buf = [0u8; 16384];
         while session.phase() != &SessionPhase::ActiveChannel {
+            if deadline.expired() {
+                return false;
+            }
             if session.phase() == &SessionPhase::Closed {
                 let out = session.take_outgoing_bytes();
-                if !out.is_empty() {
-                    let _ = stream.write_all(&out);
-                    let _ = stream.flush();
-                }
+                let _ = deadline::write_all_handshake(&mut stream, &deadline, &out);
                 return false;
             }
 
-            let n = match stream.read(&mut wire_buf) {
+            let n = match deadline::read_handshake(&mut stream, &deadline, &mut wire_buf) {
                 Ok(0) => return false,
                 Ok(n) => n,
                 Err(_) => return false,
@@ -439,15 +559,12 @@ impl OneNode {
 
             if session.handle_incoming_bytes(&wire_buf[..n]).is_err() {
                 let out = session.take_outgoing_bytes();
-                if !out.is_empty() {
-                    let _ = stream.write_all(&out);
-                    let _ = stream.flush();
-                }
+                let _ = deadline::write_all_handshake(&mut stream, &deadline, &out);
                 return false;
             }
 
             let out = session.take_outgoing_bytes();
-            if !out.is_empty() && (stream.write_all(&out).is_err() || stream.flush().is_err()) {
+            if deadline::write_all_handshake(&mut stream, &deadline, &out).is_err() {
                 return false;
             }
         }
@@ -456,7 +573,6 @@ impl OneNode {
             Some(cmd) => cmd.clone(),
             None => return false,
         };
-
         if command.service() == SshGitService::ReceivePack && !allow_receive {
             let recipient = session.client_channel_id().unwrap_or(0);
             session.send_channel_extended_data(
@@ -465,13 +581,17 @@ impl OneNode {
             );
             session.send_channel_exit_and_close(1);
             let out = session.take_outgoing_bytes();
-            let _ = stream.write_all(&out);
-            let _ = stream.flush();
+            let _ = deadline::write_all(&mut stream, &deadline, &out);
             close_gracefully(&mut session, &mut stream);
             return false;
         }
 
         let principal = session.authenticated_principal();
+        // GIT_PROTOCOL selects the same wire version as a daemon greeting.
+        let git_protocol = session
+            .git_protocol()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
 
         // A leased node is already authenticated and in service; the pool
         // logs why when it cannot supply one.
@@ -483,93 +603,86 @@ impl OneNode {
             );
             session.send_channel_exit_and_close(1);
             let out = session.take_outgoing_bytes();
-            let _ = stream.write_all(&out);
-            let _ = stream.flush();
+            let _ = deadline::write_all(&mut stream, &deadline, &out);
             close_gracefully(&mut session, &mut stream);
             return false;
         };
-
-        // Until a command is authorized, a silent connection is bounded by the
-        // short accept-time timeout so it cannot pin a worker. Once an
-        // authenticated Git command runs, silence is the client working (git
-        // compresses a large pack before sending a byte of it), so each read
-        // and write may wait up to the operator's session timeout instead of
-        // dropping the push after the first quiet minute. The serve paths
-        // still check the work-scaled session deadline at each step; unlike
-        // git://, one read is not cut to that deadline's remaining time.
-        let command_timeout = Some(child_node.git_daemon_session_timeout.duration());
-        let _ = stream.set_read_timeout(command_timeout);
-        let _ = stream.set_write_timeout(command_timeout);
-
-        // `GIT_PROTOCOL` from the client's `env` request selects the wire
-        // version under the same rule as a git-daemon greeting.
-        let git_protocol = session
-            .git_protocol()
-            .map(<[u8]>::to_vec)
-            .unwrap_or_default();
+        // Authenticated Git may be quiet while the client compresses a pack.
+        // Use the full remaining session budget here; the 60-second idle cap
+        // applies only before a command is authorized.
         let state_cell = RefCell::new(SshConnectionState {
             session,
             stream,
+            deadline: deadline.clone(),
             read_buf: Vec::new(),
             read_pos: 0,
         });
 
-        let served = match command.service() {
-            SshGitService::UploadPack => {
-                let mut reader = SshReader(&state_cell);
-                let mut writer = SshWriter(&state_cell);
-                let client = crate::ClientLiveness::new(|| {
-                    state_cell
-                        .try_borrow()
-                        .ok()
-                        .map(|state| state.peer_connected())
-                });
-                child_node
-                    .serve_ssh_upload_pack(&mut reader, &mut writer, &git_protocol, &|| {
-                        client.alive()
-                    })
-                    .map(|_| ())
-                    .map_err(|error| format!("upload-pack: {error}"))
-            }
-            SshGitService::ReceivePack => {
-                let mut reader = SshReader(&state_cell);
-                let mut writer = SshWriter(&state_cell);
-                child_node
-                    .serve_ssh_receive_pack(
-                        &mut reader,
-                        &mut writer,
-                        principal,
-                        &git_protocol,
-                        writers,
-                    )
-                    .map(|_| ())
-                    .map_err(|error| format!("receive-pack: {error}"))
-            }
-        };
-        // The client sees only a generic protocol error, so the typed cause goes
-        // to the operator's stderr log, the channel the node lanes use.
-        if let Err(error) = &served {
-            eprintln!("ssh session failed: {error}");
-        }
+        // Keep the leased node outside both unwind guards so every refusal,
+        // including a panic during SSH finalization, reaches explicit shutdown.
+        let served =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match command.service() {
+                SshGitService::UploadPack => {
+                    let mut reader = SshReader(&state_cell);
+                    let mut writer = SshWriter(&state_cell);
+                    let client = crate::ClientLiveness::new(|| {
+                        state_cell
+                            .try_borrow()
+                            .ok()
+                            .map(|state| state.peer_connected())
+                    });
+                    child_node
+                        .serve_ssh_upload_pack(
+                            &mut reader,
+                            &mut writer,
+                            &git_protocol,
+                            &|| client.alive(),
+                            &deadline,
+                        )
+                        .inspect_err(|error| eprintln!("ssh session failed: upload-pack: {error}"))
+                        .is_ok()
+                }
+                SshGitService::ReceivePack => {
+                    let mut reader = SshReader(&state_cell);
+                    let mut writer = SshWriter(&state_cell);
+                    child_node
+                        .serve_ssh_receive_pack(
+                            &mut reader,
+                            &mut writer,
+                            principal,
+                            &git_protocol,
+                            writers,
+                            quota,
+                            &deadline,
+                        )
+                        .inspect_err(|error| eprintln!("ssh session failed: receive-pack: {error}"))
+                        .is_ok()
+                }
+            }))
+            .unwrap_or_else(|_| {
+                eprintln!("SSH Git operation panicked; publication outcome may be unknown");
+                false
+            });
 
-        let (exit_code, success) = if served.is_ok() {
-            (0, true)
-        } else {
-            (1, false)
-        };
+        let exit_code = if served { 0 } else { 1 };
+        let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut final_state = state_cell.into_inner();
+            final_state.session.send_channel_eof();
+            final_state.session.send_channel_exit_and_close(exit_code);
+            let final_out = final_state.session.take_outgoing_bytes();
+            let delivered =
+                deadline::write_all(&mut final_state.stream, &final_state.deadline, &final_out)
+                    .is_ok();
+            close_gracefully(&mut final_state.session, &mut final_state.stream);
+            delivered
+        }))
+        .unwrap_or_else(|_| {
+            eprintln!("SSH finalization panicked; publication outcome may be unknown");
+            false
+        });
 
-        let mut final_state = state_cell.into_inner();
-        final_state.session.send_channel_eof();
-        final_state.session.send_channel_exit_and_close(exit_code);
-        let final_out = final_state.session.take_outgoing_bytes();
-        if !final_out.is_empty() {
-            let _ = final_state.stream.write_all(&final_out);
-            let _ = final_state.stream.flush();
-        }
-        close_gracefully(&mut final_state.session, &mut final_state.stream);
-
-        // Only a node whose session succeeded goes back to the pool.
-        let cleanup = if success {
+        // Only a node whose complete session succeeded returns to the pool.
+        let cleanup = if served && delivered {
             nodes.restore(child_node)
         } else {
             child_node.shutdown()
@@ -577,7 +690,7 @@ impl OneNode {
         if let Err(error) = &cleanup {
             eprintln!("ssh session cleanup failed: {error}");
         }
-        success && cleanup.is_ok()
+        served && delivered && cleanup.is_ok()
     }
 
     fn serve_ssh_upload_pack<R: Read, W: Write>(
@@ -586,14 +699,11 @@ impl OneNode {
         writer: &mut W,
         git_protocol: &[u8],
         peer_alive: &dyn Fn() -> bool,
+        deadline: &GitDaemonSessionDeadline,
     ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal> {
         let service =
             ssh_git_service(true, git_protocol).map_err(NodeGitDaemonServeRefusal::from)?;
         let limits = WireLimits::default();
-        let deadline = crate::GitDaemonSessionDeadline::new(
-            self.git_daemon_session_timeout,
-            self.git_daemon_session_work_scaling,
-        );
         let request = self.request_context();
         deadline
             .check("materialize authenticated admission")
@@ -627,7 +737,7 @@ impl OneNode {
         };
 
         let disclosure =
-            self.prepare_visible_upload_pack(&request, &materialized, &limits, &deadline)?;
+            self.prepare_visible_upload_pack(&request, &materialized, &limits, deadline)?;
         let repository = disclosure.repository();
         let advertised_capabilities =
             crate::git_daemon_capabilities(self.object_format, repository.symref_target(b"HEAD"));
@@ -642,9 +752,9 @@ impl OneNode {
             repository,
             capabilities,
             limits,
-            Some(&deadline),
+            Some(deadline),
             |_request, pack_request| {
-                let pack_context = self.session_pack_materialization_context(&deadline);
+                let pack_context = self.session_pack_materialization_context(deadline);
                 let database_exhaustion = std::cell::Cell::new(None);
                 let mut stopped = false;
                 let session_deadline_expired = std::cell::Cell::new(false);
@@ -730,6 +840,7 @@ impl OneNode {
     /// UNKNOWN response (never invented `ng` rows) when admission may already
     /// have committed. The writer is the deploy key's principal, falling back
     /// to the operator's receive principal as before.
+    #[allow(clippy::too_many_arguments)]
     fn serve_ssh_receive_pack<R: Read, W: ReceiveResponseWriter>(
         &self,
         reader: &mut R,
@@ -737,19 +848,17 @@ impl OneNode {
         principal: Option<PrincipalId>,
         git_protocol: &[u8],
         writers: &crate::WriterGate,
+        quota: &PushQuota,
+        ingress: &GitDaemonSessionDeadline,
     ) -> Result<Option<fgit_admission::AdmissionResult>, crate::NodeSmartHttpRefusal> {
         ssh_git_service(false, git_protocol).map_err(NodeGitDaemonServeRefusal::from)?;
-        let ingress = crate::GitDaemonSessionDeadline::new(
-            self.git_daemon_session_timeout,
-            self.git_daemon_session_work_scaling,
-        );
         let route = self.git_daemon_repository_path.as_bytes().to_vec();
         self.serve_guarded_receive_session(
             reader,
             writer,
             principal.or(self.git_daemon_receive_principal),
-            &ingress,
-            None,
+            ingress,
+            Some(quota),
             Some(writers),
             &WireLimits::default(),
             |_| Ok(route),
@@ -770,6 +879,9 @@ fn ssh_git_service(
 ) -> Result<GitDaemonService, GitDaemonTransportRefusal> {
     crate::git_protocol_service(is_upload, git_protocol.split(|byte| *byte == b':'))
 }
+
+#[cfg(test)]
+mod service_tests;
 
 #[cfg(test)]
 mod tests {

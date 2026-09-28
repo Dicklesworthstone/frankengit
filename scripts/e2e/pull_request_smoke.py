@@ -23,6 +23,14 @@ def require(value, message):
         raise AssertionError(message)
 
 
+def sha256_stream(stream):
+    """Hash an opened binary stream with bounded memory on Python 3.10+."""
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def identity(algorithm, kind, body):
     return hashlib.new(algorithm, f"{kind} {len(body)}\0".encode() + body).hexdigest()
 
@@ -403,7 +411,7 @@ def main():
     binary = args.fg.resolve()
     require(binary.is_file() and os.access(binary, os.X_OK), "an executable built fg is required; no skipped success")
     with binary.open("rb") as executable:
-        fingerprint = hashlib.file_digest(executable, "sha256").hexdigest()
+        fingerprint = sha256_stream(executable)
     print(json.dumps(dict(type="binary_identity", sha256=fingerprint)))
     for algorithm in ["sha1", "sha256"]:
         run_format(binary, algorithm)
