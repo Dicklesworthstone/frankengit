@@ -50,10 +50,20 @@ class Elements(HTMLParser):
         self.found = []
     def handle_starttag(self, tag, attrs):
         self.found.append((tag, dict(attrs)))
-parsed = Elements()
-parsed.feed(html)
-tags = [tag for tag, _ in parsed.found]
-attrs = [(name.lower(), (value or "").strip().lower()) for _, a in parsed.found for name, value in a.items()]
+def elements(markup):
+    found = Elements()
+    found.feed(markup or "")
+    return ([tag for tag, _ in found.found],
+            [(name.lower(), (value or "").strip().lower()) for _, a in found.found for name, value in a.items()])
+tags, attrs = elements(html)
+pr_html = s.get("http_pr_rendered_html") or ""
+pr_tags, pr_attrs = elements(pr_html)
+p = b.get("pull") or {}
+DANGEROUS = {"script", "svg", "iframe", "object", "embed", "img", "style", "form"}
+def inert(tag_list, attr_list):
+    return (not set(tag_list) & DANGEROUS and not any(n.startswith("on") for n, _ in attr_list)
+            and not any(n in ("href", "src") and v.startswith(("javascript:", "data:", "vbscript:"))
+                        for n, v in attr_list))
 print(str(bool(eval(sys.argv[2]))).lower())
 PY
 }
@@ -106,5 +116,17 @@ fge_assert_eq MD-CSP-018 true "$(fact 'b.get("exceptions") == [] and b.get("cons
   'the page raised no uncaught exception and logged no console error'
 fge_assert_eq MD-CSP-019 true "$(fact 's.get("browser_probe_exit") == 0 and s.get("server_drained_exit") == 0')" \
   'the probe exited cleanly and the continuous server drained on its stop file'
+
+# The same body as a pull-request description, over HTTP and on /ui/pulls/.
+fge_assert_eq MD-CSP-030 true "$(fact 's.get("http_pr_open_status") == 200 and s.get("http_pr_rendered_status") == 200 and s.get("http_pr_body_unchanged") is True and s.get("http_pr_source_sha256_matches") is True')" \
+  'a PR opened over HTTP with the hostile body reads back byte-identical, with a source-bound html_safe presentation'
+fge_assert_eq MD-CSP-031 true "$(fact 'inert(pr_tags, pr_attrs) and all(m in pr_html for m in ["heading-marker", "bold-marker", "em-marker", "list-marker", "https://example.com/ok"]) and pr_html.count("data-fgit-doc-rejected") == 5')" \
+  'the server-rendered PR description keeps its benign structure, has no active content, and shows all five hostile constructs as rejected source'
+fge_assert_eq MD-CSP-032 true "$(fact 'p.get("outcome") == "rendered" and "heading-marker" in p.get("headings", []) and "bold-marker" in p.get("strong", []) and "em-marker" in p.get("emphasis", []) and "list-marker" in p.get("list_items", []) and any(l.get("href") == "https://example.com/ok" for l in p.get("links", []))')" \
+  'permitted twin on /ui/pulls/: the selected PR description is displayed as the derived presentation with real structure'
+fge_assert_eq MD-CSP-033 true "$(fact 'p.get("pwned") is None and p.get("event_handler_attributes") == [] and p.get("javascript_links") == 0 and p.get("svg_elements") == 0 and p.get("iframes") == 0 and "inline" not in p.get("scripts", ["inline"]) and p.get("violations") == [] and p.get("csp_log_entries") == [] and p.get("exceptions") == [] and p.get("console_errors") == []')" \
+  'nothing on the PR page executed, violated the CSP, threw or logged an error'
+fge_assert_eq MD-CSP-034 true "$(fact 's.get("http_pulls_ui_status") == 200 and p.get("document_headers_observed") is True and p.get("csp_header") == s.get("http_pulls_ui_csp") and "script-src \x27self\x27" in (s.get("http_pulls_ui_csp") or "") and "unsafe-inline" not in (s.get("http_pulls_ui_csp") or "")')" \
+  'the pulls document carries the same strict CSP over HTTP and as Chrome observed it'
 
 fge_phase teardown

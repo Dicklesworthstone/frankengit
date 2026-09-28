@@ -9,15 +9,19 @@
 // exception. It asserts nothing itself; browser_markdown_smoke.py does.
 //
 // usage: node --experimental-websocket browser_issue_markdown_probe.mjs \
-//          <chrome> <ui-url> <token> <issue-number> <profile-dir>
+//          <chrome> <ui-url> <token> <issue-number> <profile-dir> [<pulls-url> <pr-number>]
+//
+// With the optional pair it also opens the served /ui/pulls/ page, selects the
+// PR and reports the same facts for the rendered PR description.
 import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-const [chrome, uiUrl, token, issue, profileDir] = process.argv.slice(2);
-if (!chrome || !uiUrl || !/^[0-9a-f]{64}$/.test(token ?? '') || !/^\d+$/.test(issue ?? '') || !profileDir) {
-  console.error('usage: browser_issue_markdown_probe.mjs <chrome> <ui-url> <token> <issue> <profile-dir>');
+const [chrome, uiUrl, token, issue, profileDir, pullsUrl, pr] = process.argv.slice(2);
+if (!chrome || !uiUrl || !/^[0-9a-f]{64}$/.test(token ?? '') || !/^\d+$/.test(issue ?? '') || !profileDir
+    || (pullsUrl !== undefined && !/^\d+$/.test(pr ?? ''))) {
+  console.error('usage: browser_issue_markdown_probe.mjs <chrome> <ui-url> <token> <issue> <profile-dir> [<pulls-url> <pr>]');
   process.exit(2);
 }
 
@@ -67,6 +71,7 @@ try {
   // Headers of the served issues document as the browser received them, so
   // the CSP it enforced is observed rather than assumed.
   let documentHeaders = null;
+  let expectedDocument = uiUrl;
   socket.onmessage = event => {
     const message = JSON.parse(event.data);
     if (message.id && pending.has(message.id)) {
@@ -74,7 +79,7 @@ try {
       pending.delete(message.id);
       if (message.error) reject(new Error(JSON.stringify(message.error))); else resolve(message.result);
     } else if (message.method === 'Network.responseReceived' && message.params.type === 'Document'
-      && message.params.response.url.startsWith(uiUrl)) {
+      && message.params.response.url.startsWith(expectedDocument)) {
       documentHeaders = message.params.response.headers;
     } else if (message.method === 'Runtime.exceptionThrown') {
       exceptions.push(message.params.exceptionDetails?.exception?.description ?? message.params.exceptionDetails?.text);
@@ -136,8 +141,9 @@ try {
     return '';
   })()`), 'the rendered issue body');
 
-  const facts = await evaluate(`(() => {
-    const content = document.getElementById('issue-content');
+  // The same observations for any rendered-Markdown container on a page.
+  const factsIn = containerId => evaluate(`(() => {
+    const content = document.getElementById(${JSON.stringify(containerId)});
     const all = [...document.querySelectorAll('*')];
     const text = selector => [...content.querySelectorAll(selector)].map(node => node.textContent);
     return {
@@ -158,11 +164,52 @@ try {
       csp_meta: document.querySelector('meta[http-equiv="Content-Security-Policy" i]')?.getAttribute('content') ?? null,
     };
   })()`);
-  const cspHeader = documentHeaders === null ? null
-    : Object.entries(documentHeaders).find(([name]) => name.toLowerCase() === 'content-security-policy')?.[1] ?? null;
+  const cspOf = headers => headers === null ? null
+    : Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-security-policy')?.[1] ?? null;
+  const facts = await factsIn('issue-content');
+  const cspHeader = cspOf(documentHeaders);
+  const issueHeadersObserved = documentHeaders !== null;
+
+  // Optional second page: the PR description on /ui/pulls/, same facts.
+  let pull = null;
+  if (pullsUrl !== undefined) {
+    const before = { exceptions: exceptions.length, console: consoleErrors.length, log: logEntries.length };
+    expectedDocument = pullsUrl;
+    documentHeaders = null;
+    await send('Page.navigate', { url: pullsUrl });
+    await until(() => evaluate("document.readyState === 'complete' && !!document.getElementById('token')"), 'the pulls page');
+    const pullStatus = "document.getElementById('status').textContent";
+    await evaluate(`(() => {
+      document.getElementById('token').value = ${JSON.stringify(token)};
+      document.getElementById('connection').requestSubmit();
+    })()`);
+    // Connecting lists PRs into #pr-list ("Snapshot: ..."); a refused list
+    // leaves the credential and says so in #status.
+    const listed = await until(() => evaluate(`(() => {
+      if (/^Snapshot:/.test(document.getElementById('pr-list').textContent)) return 'listed';
+      const text = ${pullStatus};
+      return /^Credential retained|failed|refused|unavailable/i.test(text) ? text : '';
+    })()`), 'the connecting PR list');
+    if (listed !== 'listed') throw new Error(`the connecting PR list failed: ${listed}`);
+    await evaluate(`(() => {
+      document.getElementById('select-number').value = ${JSON.stringify(pr)};
+      document.getElementById('select-pr').requestSubmit();
+    })()`);
+    const pullOutcome = await until(() => evaluate(`(() => {
+      const text = document.getElementById('selected').textContent;
+      if (text.includes('Derived Markdown · fgit-doc html_safe')) return 'rendered';
+      if (text.includes('Rendered presentation unavailable')) return 'refused';
+      if (text.includes('not found or is not disclosed')) return 'missing';
+      return '';
+    })()`), 'the rendered PR description');
+    pull = { outcome: pullOutcome, ...(await factsIn('selected')),
+      document_headers_observed: documentHeaders !== null, csp_header: cspOf(documentHeaders),
+      exceptions: exceptions.slice(before.exceptions), console_errors: consoleErrors.slice(before.console),
+      csp_log_entries: logEntries.slice(before.log).filter(entry => /Content Security Policy/i.test(entry.text)) };
+  }
   const version = (await (await fetch(`http://127.0.0.1:${port}/json/version`)).json()).Browser;
   console.log(JSON.stringify({ type: 'browser_issue_markdown_probe', browser: version, outcome, ...facts,
-    document_headers_observed: documentHeaders !== null, csp_header: cspHeader,
+    document_headers_observed: issueHeadersObserved, csp_header: cspHeader, pull,
     exceptions, console_errors: consoleErrors, csp_log_entries: logEntries.filter(entry => /Content Security Policy/i.test(entry.text)) }));
 } catch (error) {
   console.log(JSON.stringify({ type: 'browser_issue_markdown_probe_failed', error: String(error?.message ?? error), browser_log: browserLog }));
