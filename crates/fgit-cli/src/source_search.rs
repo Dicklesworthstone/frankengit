@@ -1,5 +1,6 @@
 //! Machine-readable, read-only source search for a trusted local operator.
 mod indexed;
+mod symbols;
 use super::publication_support::{quote, set_once};
 use fgit_forge::source_search::{
     SearchCase, SearchCompletion, SearchLimits, SourceQuery, SourceSearchReport,
@@ -24,8 +25,11 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
     if arguments.first().is_some_and(|arg| arg == "--indexed-current") {
         return indexed::run(&arguments[1..]);
     }
+    if arguments.first().is_some_and(|arg| arg == "--symbols") {
+        return symbols::run(&arguments[1..]);
+    }
     if arguments == ["--help"] {
-        println!("{USAGE}\nFor persisted lexical search: fg search --indexed-current --help");
+        println!("{USAGE}\nFor persisted lexical search: fg search --indexed-current --help\nFor Rust declarations: fg search --symbols --help");
         return Ok(0);
     }
     let options = parse(arguments)?;
