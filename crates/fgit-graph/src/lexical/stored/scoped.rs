@@ -6,7 +6,13 @@
 //! Payload codecs and word semantics are shared; publication and selection
 //! retain the original authority, cancellation, budget and recovery paths.
 
-use super::*;
+use super::{
+    AsyncAuthorityStore, AuthorityStore, GenerationActivation, GenerationReadLimits,
+    GraphGenerationId, GraphViewId, HeadKey, IndexError, IndexedLexicalReport, LexicalError,
+    LexicalIndexStore, LexicalNamespace, LexicalQuery, LexicalQueryLimits, LexicalReadLimits,
+    LexicalSegment, LexicalSelection, LexicalSource, MAX_SEGMENTS, PreparedLexicalIndex, RefName,
+    bounded_add, check, key_prefix, path_valid,
+};
 
 const MAX_PREFIXES: usize = 128;
 const MAX_PREFIX_BYTES: usize = 32 * 1024;
@@ -134,7 +140,7 @@ impl PreparedScopedLexicalIndex {
         &self.scope
     }
     #[must_use]
-    pub fn source(&self) -> &LexicalSource {
+    pub const fn source(&self) -> &LexicalSource {
         self.inner.source()
     }
     #[must_use]
@@ -155,15 +161,15 @@ pub struct ScopedLexicalSelection {
 }
 impl ScopedLexicalSelection {
     #[must_use]
-    pub fn source(&self) -> &LexicalSource {
+    pub const fn source(&self) -> &LexicalSource {
         self.inner.source()
     }
     #[must_use]
-    pub fn activation(&self) -> &GenerationActivation {
+    pub const fn activation(&self) -> &GenerationActivation {
         self.inner.activation()
     }
     #[must_use]
-    pub fn selected_head(&self) -> &GenerationActivation {
+    pub const fn selected_head(&self) -> &GenerationActivation {
         self.inner.selected_head()
     }
 }

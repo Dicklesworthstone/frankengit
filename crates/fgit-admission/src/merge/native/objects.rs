@@ -304,12 +304,12 @@ fn validate_candidate_objects(
             return Err(invalid());
         }
     }
-    if let Some(base) = fast_forward_base {
-        if !is_ancestor(base, candidate, &parents, deadline)? {
-            return Err(ProjectionFailure::Refuse(
-                RefusalCode::NonFastForwardRefused,
-            ));
-        }
+    if let Some(base) = fast_forward_base
+        && !is_ancestor(base, candidate, &parents, deadline)?
+    {
+        return Err(ProjectionFailure::Refuse(
+            RefusalCode::NonFastForwardRefused,
+        ));
     }
     checkpoint(deadline)?;
     let closure = PermittedObjectClosure::new(visited);

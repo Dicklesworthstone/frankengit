@@ -24,10 +24,10 @@ pub(super) struct RekeyState {
     deferred_bytes: usize,
 }
 impl RekeyState {
-    pub(super) fn blocks_output(&self) -> bool {
+    pub(super) const fn blocks_output(&self) -> bool {
         matches!(self.phase, RekeyPhase::AwaitKexinit | RekeyPhase::AwaitEcdh)
     }
-    pub(super) fn blocks_input(&self) -> bool {
+    pub(super) const fn blocks_input(&self) -> bool {
         matches!(self.phase, RekeyPhase::AwaitEcdh | RekeyPhase::AwaitNewkeys)
     }
 }

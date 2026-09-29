@@ -159,7 +159,7 @@ fn newkeys(peer: &mut Peer, keys: &Exchanged, strict: bool) -> Vec<u8> {
     wire
 }
 
-pub(super) fn round_trip(
+pub fn round_trip(
     session: &mut SshServerSession,
     peer: &mut Peer,
     strict: bool,

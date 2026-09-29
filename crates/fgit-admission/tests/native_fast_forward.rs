@@ -2,6 +2,7 @@
 //! Native object fixtures, not authority or authorization substitutes.
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 use fgit_admission::merge::native::objects::{
     MergeObjectLimits, validate_fast_forward_objects, validate_merge_objects,
@@ -47,7 +48,7 @@ impl Objects {
     ) -> GitOid {
         let mut body = format!("tree {tree}\n");
         for parent in parents {
-            body.push_str(&format!("parent {parent}\n"));
+            let _ = writeln!(body, "parent {parent}");
         }
         body.push_str("author Fixture <test@example.invalid> 1 +0000\ncommitter Fixture <test@example.invalid> 1 +0000\n\n");
         body.push_str(message);

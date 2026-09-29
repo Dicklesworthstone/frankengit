@@ -2,9 +2,12 @@
 //! not native-node, disk-durability or process-crash evidence.
 use super::*;
 use crate::lexical::{LexicalChannel, SourceDocument};
-use fgit_authority::MemoryAuthorityStore;
+use fgit_authority::{MemoryAuthorityStore, StoreInstanceId};
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, internal_object_id};
-use fgit_types::{CodecVersion, RepositoryId, RepositoryIncarnationId, TenantId};
+use fgit_types::{
+    CodecVersion, Digest, GitHashAlgorithm, RepositoryAuthorityHeadId, RepositoryCommitId,
+    RepositoryId, RepositoryIncarnationId, SchemaFamily, SchemaId, TenantId,
+};
 
 fn scope(paths: &[&[u8]]) -> LexicalScope {
     LexicalScope::new(&paths.iter().map(|p| p.to_vec()).collect::<Vec<_>>()).unwrap()

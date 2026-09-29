@@ -82,8 +82,7 @@ fn unicode_lifetimes_raw_lifetimes_and_chars_do_not_swallow_group_ends() {
 
 #[test]
 fn opaque_literal_suffixes_do_not_enter_the_ascii_name_profile() {
-    let text =
-        r####"m!(1名 1.0名 "}"名 r#"]"#名 b'}'名 br#")"#名 c"}"名 cr#"]"#名); fn Keep() {}"####;
+    let text = r##"m!(1名 1.0名 "}"名 r#"]"#名 b'}'名 br#")"#名 c"}"名 cr#"]"#名); fn Keep() {}"##;
     assert_eq!(names(text.as_bytes()), vec![b"Keep".as_slice()]);
 }
 
@@ -298,8 +297,8 @@ fn utf8_bom_and_crlf_coordinates_remain_byte_exact_after_opaque_tokens() {
 #[test]
 fn original_ascii_token_boundaries_and_work_are_identical_in_both_contexts() {
     for input in [
-        r####"fn r#type<'a>(x: &'a str) { let x = 12.4_u8; }"####,
-        r####"/* comment /* nested */ */ "quote"suffix r##"raw }"## b'}' 'é' cr"C""####,
+        r"fn r#type<'a>(x: &'a str) { let x = 12.4_u8; }",
+        r###"/* comment /* nested */ */ "quote"suffix r##"raw }"## b'}' 'é' cr"C""###,
     ] {
         let lexed = |context| {
             let mut budget = Budget::new(MAX_WORK).unwrap();

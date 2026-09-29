@@ -130,12 +130,12 @@ impl SegmentRef {
                 || (last
                     .iter()
                     .copied()
-                    .cmp(prefix.iter().copied().chain([b'/']))
+                    .cmp(prefix.iter().copied().chain(*b"/"))
                     != std::cmp::Ordering::Less
                     && first
                         .iter()
                         .copied()
-                        .cmp(prefix.iter().copied().chain([b'0']))
+                        .cmp(prefix.iter().copied().chain(*b"0"))
                         == std::cmp::Ordering::Less)
             {
                 return Ok(true);

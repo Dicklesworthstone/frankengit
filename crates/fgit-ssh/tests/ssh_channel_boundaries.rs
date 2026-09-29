@@ -152,28 +152,28 @@ fn exchange(strict: bool, finish_newkeys: bool) -> (SshServerSession, Peer) {
         decode_cleartext_packet(&wire[first_length..]).unwrap(),
         &[msg::NEWKEYS]
     );
-    let mut r = WireReader::new(reply);
-    assert_eq!(r.read_u8().unwrap(), msg::KEX_ECDH_REPLY);
-    let host_blob = r.read_string().unwrap();
-    let server_public: [u8; 32] = r.read_string().unwrap().try_into().unwrap();
-    let signature = r.read_string().unwrap();
+    let mut reader = WireReader::new(reply);
+    assert_eq!(reader.read_u8().unwrap(), msg::KEX_ECDH_REPLY);
+    let host_blob = reader.read_string().unwrap();
+    let server_public: [u8; 32] = reader.read_string().unwrap().try_into().unwrap();
+    let signature = reader.read_string().unwrap();
     let shared = ephemeral.compute_shared_secret(&server_public).unwrap();
     let mut k = WireWriter::new();
     k.write_mpint(&shared);
     let k = k.into_bytes();
-    let mut h = WireWriter::new();
-    h.write_string(&CLIENT_IDENT[..CLIENT_IDENT.len() - 2]);
-    h.write_string(SERVER_IDENTIFICATION.as_bytes());
-    h.write_string(&client_kex);
-    h.write_string(server_kex);
-    h.write_string(host_blob);
-    h.write_string(ephemeral.public_key());
-    h.write_string(&server_public);
-    h.write_raw(&k);
-    let hash = sha256_digest(&h.into_bytes());
+    let mut exchange = WireWriter::new();
+    exchange.write_string(&CLIENT_IDENT[..CLIENT_IDENT.len() - 2]);
+    exchange.write_string(SERVER_IDENTIFICATION.as_bytes());
+    exchange.write_string(&client_kex);
+    exchange.write_string(server_kex);
+    exchange.write_string(host_blob);
+    exchange.write_string(ephemeral.public_key());
+    exchange.write_string(&server_public);
+    exchange.write_raw(&k);
+    let hash = sha256_digest(&exchange.into_bytes());
     verify_ed25519(&host.verifying_key().to_bytes(), &hash, signature).unwrap();
-    let c: [u8; 64] = derive_key(&k, &hash, b'C', &hash, 64).try_into().unwrap();
-    let s: [u8; 64] = derive_key(&k, &hash, b'D', &hash, 64).try_into().unwrap();
+    let client_key: [u8; 64] = derive_key(&k, &hash, b'C', &hash, 64).try_into().unwrap();
+    let server_key: [u8; 64] = derive_key(&k, &hash, b'D', &hash, 64).try_into().unwrap();
     if finish_newkeys {
         session
             .handle_incoming_bytes(&encode_cleartext_packet(&[msg::NEWKEYS], &[0; 16]))
@@ -184,8 +184,8 @@ fn exchange(strict: bool, finish_newkeys: bool) -> (SshServerSession, Peer) {
     (
         session,
         Peer {
-            out: OpenSshChaCha20Poly1305::new_with_sequence(&c, sequence),
-            inbound: OpenSshChaCha20Poly1305::new_with_sequence(&s, sequence),
+            out: OpenSshChaCha20Poly1305::new_with_sequence(&client_key, sequence),
+            inbound: OpenSshChaCha20Poly1305::new_with_sequence(&server_key, sequence),
             key,
             session_id: hash,
         },

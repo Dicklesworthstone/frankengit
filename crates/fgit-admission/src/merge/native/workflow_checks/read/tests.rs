@@ -42,56 +42,62 @@ impl AsyncAuthorityStore for Store {
     fn limits(&self) -> AuthorityLimits {
         self.memory.limits()
     }
-    async fn put_if_absent(
+    fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
-    ) -> Result<PutOutcome, AuthorityFailure> {
-        self.memory.put_if_absent(key, body)
+    ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
+        std::future::ready(self.memory.put_if_absent(key, body))
     }
-    async fn read_immutable(
+    fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
-    ) -> Result<ImmutableRead, AuthorityFailure> {
-        if let Some((selected, response)) = self.fault.lock().unwrap().as_ref() {
-            if selected == key {
-                self.fault_reads.fetch_add(1, Ordering::Relaxed);
-                return Ok(response.clone());
-            }
+    ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
+        if let Some((selected, response)) = self.fault.lock().unwrap().as_ref()
+            && selected == key
+        {
+            self.fault_reads.fetch_add(1, Ordering::Relaxed);
+            return std::future::ready(Ok(response.clone()));
         }
-        self.memory.read_immutable(key)
+        std::future::ready(self.memory.read_immutable(key))
     }
-    async fn initialize_head(
+    fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: fgit_types::HeadGeneration,
         body: &[u8],
-    ) -> Result<HeadInit, AuthorityFailure> {
-        self.memory.initialize_head(key, generation, body)
+    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
+        std::future::ready(self.memory.initialize_head(key, generation, body))
     }
-    async fn read_head(&self, _: &(), key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
-        self.memory.read_head(key)
-    }
-    async fn compare_exchange_head(
+    fn read_head(
         &self,
-        _: &(),
+        (): &(),
+        key: &HeadKey,
+    ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
+        std::future::ready(self.memory.read_head(key))
+    }
+    fn compare_exchange_head(
+        &self,
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: fgit_types::HeadGeneration,
         body: &[u8],
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        self.memory
-            .compare_exchange_head(key, expected, generation, body)
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        std::future::ready(
+            self.memory
+                .compare_exchange_head(key, expected, generation, body),
+        )
     }
-    async fn authenticate_head_receipt(
+    fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
-    ) -> Result<AuthenticatedHead, AuthorityFailure> {
-        self.memory.authenticate_head_receipt(receipt)
+    ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
+        std::future::ready(self.memory.authenticate_head_receipt(receipt))
     }
 }
 
@@ -371,7 +377,7 @@ fn unselected_staged_observation_never_appears_in_the_authenticated_page() {
 fn hidden_source_or_target_is_not_disclosed_and_does_not_read_check_frames() {
     let format = GitHashAlgorithm::Sha1;
     let observation = check(format, 7);
-    let fixture = Fixture::checks(format, &[observation.clone()]);
+    let fixture = Fixture::checks(format, std::slice::from_ref(&observation));
     let allowed = fixture.page(None, 10);
     fixture.fault(
         fixture
@@ -406,7 +412,7 @@ fn moved_or_deleted_source_suppresses_checks_while_the_retained_basis_is_stable(
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         for deleted in [false, true] {
             let observation = check(format, 7);
-            let mut fixture = Fixture::checks(format, &[observation.clone()]);
+            let mut fixture = Fixture::checks(format, std::slice::from_ref(&observation));
             let retained_basis = fixture.basis.clone();
             let retained_refs = fixture.refs.clone();
             let retained_page = fixture.page(None, 1);
@@ -510,7 +516,7 @@ fn absent_and_legacy_prs_are_absent_but_native_merge_only_prs_keep_source_coordi
 fn selected_missing_corrupt_or_substituted_frames_return_typed_refusals() {
     let format = GitHashAlgorithm::Sha1;
     let observation = check(format, 7);
-    let fixture = Fixture::checks(format, &[observation.clone()]);
+    let fixture = Fixture::checks(format, std::slice::from_ref(&observation));
     let allowed = fixture.page(None, 10);
     let substitute = check(format, 8);
     let substitute_frame = encode_body(&ForgeEventBatch::of_one(

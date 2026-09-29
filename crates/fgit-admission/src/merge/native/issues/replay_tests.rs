@@ -33,50 +33,56 @@ impl AsyncAuthorityStore for Store {
     fn limits(&self) -> AuthorityLimits {
         self.0.limits()
     }
-    async fn put_if_absent(
+    fn put_if_absent(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
         body: &[u8],
-    ) -> Result<PutOutcome, AuthorityFailure> {
-        self.0.put_if_absent(key, body)
+    ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
+        std::future::ready(self.0.put_if_absent(key, body))
     }
-    async fn read_immutable(
+    fn read_immutable(
         &self,
-        _: &(),
+        (): &(),
         key: &ImmutableKey,
-    ) -> Result<ImmutableRead, AuthorityFailure> {
-        self.0.read_immutable(key)
+    ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
+        std::future::ready(self.0.read_immutable(key))
     }
-    async fn initialize_head(
+    fn initialize_head(
         &self,
-        _: &(),
+        (): &(),
         key: &HeadKey,
         generation: fgit_types::HeadGeneration,
         body: &[u8],
-    ) -> Result<HeadInit, AuthorityFailure> {
-        self.0.initialize_head(key, generation, body)
+    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
+        std::future::ready(self.0.initialize_head(key, generation, body))
     }
-    async fn read_head(&self, _: &(), key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
-        self.0.read_head(key)
-    }
-    async fn compare_exchange_head(
+    fn read_head(
         &self,
-        _: &(),
+        (): &(),
+        key: &HeadKey,
+    ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
+        std::future::ready(self.0.read_head(key))
+    }
+    fn compare_exchange_head(
+        &self,
+        (): &(),
         key: &HeadKey,
         expected: AuthorityVersionToken,
         generation: fgit_types::HeadGeneration,
         body: &[u8],
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        self.0
-            .compare_exchange_head(key, expected, generation, body)
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        std::future::ready(
+            self.0
+                .compare_exchange_head(key, expected, generation, body),
+        )
     }
-    async fn authenticate_head_receipt(
+    fn authenticate_head_receipt(
         &self,
-        _: &(),
+        (): &(),
         receipt: &HeadReadReceipt,
-    ) -> Result<AuthenticatedHead, AuthorityFailure> {
-        self.0.authenticate_head_receipt(receipt)
+    ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
+        std::future::ready(self.0.authenticate_head_receipt(receipt))
     }
 }
 
@@ -421,7 +427,7 @@ fn missing_selected_history_is_not_an_empty_or_partially_replayed_issue() {
             .unwrap();
             batch.events[0].version.get() == 2
         })
-        .cloned()
+        .copied()
         .unwrap();
     fixture.outbox =
         CanonicalOutboxState::try_new(fixture.basis.body().repository_id, vec![last]).unwrap();

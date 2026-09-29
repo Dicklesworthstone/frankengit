@@ -46,7 +46,7 @@ fn collected(bytes: &[u8]) -> Vec<(Vec<u8>, u32)> {
 fn unqueryable_words_do_not_poison_other_words_or_change_native_identity() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut body = b"BEFORE ".to_vec();
-        body.extend_from_slice(&vec![b'x'; MAX_TERM_BYTES + 1]);
+        body.extend_from_slice(&[b'x'; MAX_TERM_BYTES + 1]);
         body.extend_from_slice(b" after BEFORE");
         let segment = build(format, 7, b"a.rs", &body);
         let before = search(&segment, LexicalChannel::Content, b"before");
@@ -65,13 +65,9 @@ fn unqueryable_words_do_not_poison_other_words_or_change_native_identity() {
             git_object_id(format, GitObjectKind::Blob, &body)
         );
         assert!(
-            search(
-                &segment,
-                LexicalChannel::Content,
-                &vec![b'x'; MAX_TERM_BYTES]
-            )
-            .hits
-            .is_empty()
+            search(&segment, LexicalChannel::Content, &[b'x'; MAX_TERM_BYTES])
+                .hits
+                .is_empty()
         );
         assert!(
             search(&segment, LexicalChannel::Content, b"x")
@@ -144,7 +140,7 @@ fn long_paths_keep_path_channel_suffixes_and_all_original_byte_offsets() {
         MAX_TERM_BYTES + 2
     );
     assert!(
-        search(&segment, LexicalChannel::Path, &vec![b'p'; MAX_TERM_BYTES])
+        search(&segment, LexicalChannel::Path, &[b'p'; MAX_TERM_BYTES])
             .hits
             .is_empty()
     );
