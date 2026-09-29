@@ -674,6 +674,65 @@ All other edges are `related`. `bv` reports no cycles.
 
 **Not done.** No existing bead was closed, reopened or reassigned. Transitions belong to the independent verifier. `.45` stays in progress until its sanctioned crate test run.
 
+### Batch verification at `14ce0fa1` and what followed (2026-09-28/29, decision D8)
+
+The owner appointed IcyIbis as batch verifier (D8). The terms: verify every batch_pending bead at one pinned SHA (`14ce0fa1`). Close only beads IcyIbis did not author, and only when every acceptance line is observed with SHA-bound evidence; otherwise send the bead to rework, naming the failing line. IcyIbis's own beads wait for another verifier. This supersedes the "Not done" paragraph above for everything after 2026-09-28.
+
+**Union run at `14ce0fa1`.**
+
+| Step | Result |
+|---|---|
+| docs | pass |
+| constitution | fail: one first-party `too_many_arguments` allow, removed in `e6854d0b` |
+| fmt | fail: 81 files, formatted in `417c7bb8` |
+| check | pass |
+| schema | pass |
+| workspace tests | 654 binaries, 7,766 passed, 58 failed |
+| clippy | fail at the lowest layer |
+
+- Rerun alone, 56 of the 58 test failures pass. They are budget cancellations under parallel load.
+- The two deterministic failures:
+  - `native_protection_smoke` (fixed by x2mv.4.50, passing at `0b142c15`);
+  - `pull_request_checks_http::actual_workflow_observations_are_paged_by_exact_ids_without_evidence_bodies` (x2mv.4.12).
+- The e2e lane passed 46 of 55 suites. Rerun with a release `fg` at `0b142c15`, `continuous_git_transports` passes 11/11. Its failure was the flat 15 s served-upload clock. The other eight are the defects already mapped on x2mv.4.18.
+
+**Verdicts, 28 beads.**
+- **Closed (10):**
+  - hfh8, smke, omr4, 3wy2, x796, xefn, clzl;
+  - rpqx: count-once accounting; the 85 MB push works with a release `fg`;
+  - l0xt: a planted forbidden native link is refused by name;
+  - x7ja: a stock-client fetch receives exactly the 13 missing objects of 36;
+  - 1n25: a same-session A/B at `14ce0fa1` with only the fix reverted took the clone from 21.9 s to 4.2 s (5.2x), with pack bytes identical.
+- **Rework (17):**
+  - 1e3q, 0zjt, c7tb, fg083a, fg063, fg074, fg036b, fg038b, zb0q, jkbo, fg019c, fg046, fg046b, asb8, e6jj;
+  - x2mv.2: one-copy and determinism are not exercised;
+  - b3wy: two schema descriptions do not match their encoders.
+- Each verdict is a comment on its bead. Verification debt fell from 36 (the hard limit) to 12. Every remaining batch_pending bead is IcyIbis's own.
+
+**A regression the verifier introduced, and its repair.**
+- `0b142c15` (x2mv.4.53) moved the served git:// and SSH paths from the Database class onto the session clock. It added a structural test enforcing that.
+- This broke x7ja R5's ratified contract: the kxmb test `git_daemon_deadline::one_node_reports_database_budget_expiry_while_the_session_is_live`.
+- The sanctioned run found it. `b9919b20` restored the ceiling, and the regression is noticed on x7ja and x2mv.4.53.
+- R5 and e6jj's XL clone-back (PUSH-036) then conflicted under the fixed 15 s default. The owner ruled for a work-scaled ceiling, landed in `0b0f3ecb`: served fabric reads earn Database time by the verified bytes they deliver (the receive-side doctrine of asb8). kxmb stays 9/9.
+
+**Capability landed.**
+
+| Change | Commit | Measured |
+|---|---|---|
+| Served packs use `COMPRESSED_V3` | `ac618476` (frankengit-77qh) | Planning is 2.4-27x faster than V2 across three corpus shapes. The XL clone-back went from 297.6 s to 131 s and now passes under the default envelope. FG-028c egress +0.04%. |
+| CLI commands run on one operator time policy | `b7f4e427` (x2mv.4.50, batch_pending) | Protection smoke 2/2 and the command-time suite 25/25 under load at `ac618476`. |
+| Clippy's lowest layer drained | `319eddfb` | fgit-graph, fgit-ssh, fgit-forge and fgit-admission are clean. |
+
+**Filed.**
+- frankengit-pazc: the client's `thin-pack` is parsed and never used, so a 3-commit fetch costs 99.5% of a clone's bytes.
+- frankengit-77qh: done above.
+- frankengit-mkgq: `source_symbols_cli` has failed 4/4 since `9ce9b346`. Root-scope narrowing refuses the test's non-UTF-8 fixture.
+
+**Not claimed.**
+- The workspace clippy lane is still red. The crates above the drained layer, fgit-node and up, are unmeasured.
+- Path-aware delta candidate order and stored-delta reuse are not built.
+- No bead IcyIbis authored has been independently verified.
+
 ## 10. Evidence appendix
 
 | Artifact (scratchpad-relative) | SHA-256 |
