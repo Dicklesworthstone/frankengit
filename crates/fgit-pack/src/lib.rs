@@ -67,9 +67,9 @@ pub use verify::{
     NativeChecksumVerifier, object_type_from_base_entry, verify_base_entry, verify_native_object,
 };
 pub use writer::{
-    CanonicalObjectSource, CanonicalPackObject, DeterministicPackEncoder, MaterializedPack,
-    PackArtifactSink, PackEntryEncoder, PackPlan, PackPlanEntry, PackPlanner, PackWriteError,
-    PackWriteProfile, PackWriteReceipt, PackWriter, PlannedDelta,
+    CanonicalObjectSource, CanonicalPackObject, DeltaWorkBudget, DeterministicPackEncoder,
+    MaterializedPack, PackArtifactSink, PackEntryEncoder, PackPlan, PackPlanEntry, PackPlanner,
+    PackWriteError, PackWriteProfile, PackWriteReceipt, PackWriter, PlannedDelta,
 };
 
 use std::error::Error;

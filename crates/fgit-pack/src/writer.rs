@@ -164,6 +164,42 @@ pub enum DeltaSearch {
     IndexedBlocks,
 }
 
+/// Deterministic ceiling on the delta search spent on one target.
+///
+/// Every candidate base the search scans may visit every position of the
+/// target, so a scan is charged the target's full length *before* it runs and
+/// a candidate that would overrun the allowance is not scanned. Candidates are
+/// offered nearest-first, so the allowance keeps the nearest bases and drops
+/// the farther ones -- the same preference the window already encodes -- and
+/// the plan depends only on the objects, never on time or machine speed.
+///
+/// The allowance is `max(floor_bytes, target_multiple x target length)`. A
+/// target small enough that the whole window fits under `floor_bytes` is
+/// searched exactly as without a budget; only large targets lose far
+/// candidates. The measurement that motivated it: a served clone of 24
+/// similar 13 MB blobs spent ~76% of 300+ s single-threaded CPU in 276
+/// full-length pair scans under the unbudgeted window (frankengit-77qh).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeltaWorkBudget {
+    /// Allowance every target gets regardless of its size.
+    pub floor_bytes: usize,
+    /// Allowance per target byte, in full target scans.
+    pub target_multiple: usize,
+}
+
+impl DeltaWorkBudget {
+    /// Scanned target bytes allowed for a target of `target_len` bytes.
+    #[must_use]
+    pub const fn allowance(self, target_len: usize) -> usize {
+        let scaled = self.target_multiple.saturating_mul(target_len);
+        if scaled > self.floor_bytes {
+            scaled
+        } else {
+            self.floor_bytes
+        }
+    }
+}
+
 /// Frozen deterministic pack-construction policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackWriteProfile {
@@ -177,6 +213,9 @@ pub struct PackWriteProfile {
     pub compression: DeflateProfile,
     /// Exact deterministic delta-program search policy.
     pub delta_search: DeltaSearch,
+    /// Per-target ceiling on delta-search work; `None` searches the whole
+    /// window for every target.
+    pub delta_work: Option<DeltaWorkBudget>,
 }
 
 impl PackWriteProfile {
@@ -192,6 +231,7 @@ impl PackWriteProfile {
         max_delta_depth: 8,
         compression: DeflateProfile::FAST_STORED,
         delta_search: DeltaSearch::PrefixSuffix,
+        delta_work: None,
     };
 
     /// Deterministic fixed-Huffman pack emission with bounded match search.
@@ -207,6 +247,25 @@ impl PackWriteProfile {
         max_delta_depth: 8,
         compression: DeflateProfile::DEFAULT,
         delta_search: DeltaSearch::PrefixSuffix,
+        delta_work: None,
+    };
+
+    /// [`Self::COMPRESSED_V1`]'s compression with delta emission disabled.
+    ///
+    /// The v0/v1 wire contract permits OFS_DELTA entries only when the client
+    /// echoed the `ofs-delta` capability, so a serving path needs a profile
+    /// that can never emit one. A zero window admits no delta bases, which
+    /// removes the emission structurally rather than by a filter a later
+    /// change could bypass. Also the honest fallback for the latent violation
+    /// where a delta-capable profile served OFS entries to clients that never
+    /// negotiated them.
+    pub const COMPRESSED_NO_DELTA_V1: Self = Self {
+        id: "git-pack-compressed-no-delta-v1",
+        delta_window: 0,
+        max_delta_depth: 8,
+        compression: DeflateProfile::DEFAULT,
+        delta_search: DeltaSearch::PrefixSuffix,
+        delta_work: None,
     };
 
     /// [`Self::COMPRESSED_V1`] with interior-match delta search.
@@ -223,29 +282,39 @@ impl PackWriteProfile {
     /// every object ships as a full base.  The versions of a line-oriented file
     /// differ by a shift, which leaves no common prefix and a one-byte common
     /// suffix -- the one shape prefix/suffix search cannot encode.
-    /// [`Self::COMPRESSED_V1`]'s compression with delta emission disabled.
-    ///
-    /// The v0/v1 wire contract permits OFS_DELTA entries only when the client
-    /// echoed the `ofs-delta` capability, so a serving path needs a profile
-    /// that can never emit one. A zero window admits no delta bases, which
-    /// removes the emission structurally rather than by a filter a later
-    /// change could bypass. Also the honest fallback for the latent violation
-    /// where a delta-capable profile served OFS entries to clients that never
-    /// negotiated them.
-    pub const COMPRESSED_NO_DELTA_V1: Self = Self {
-        id: "git-pack-compressed-no-delta-v1",
-        delta_window: 0,
-        max_delta_depth: 8,
-        compression: DeflateProfile::DEFAULT,
-        delta_search: DeltaSearch::PrefixSuffix,
-    };
-
     pub const COMPRESSED_V2: Self = Self {
         id: "git-pack-compressed-v2",
         delta_window: 32,
         max_delta_depth: 8,
         compression: DeflateProfile::DEFAULT,
         delta_search: DeltaSearch::IndexedBlocks,
+        delta_work: None,
+    };
+
+    /// [`Self::COMPRESSED_V2`] with a per-target delta-search work budget.
+    ///
+    /// A separate profile because it changes which base a large target may
+    /// choose, so its packs are not [`Self::COMPRESSED_V2`]'s (a measured
+    /// profile is never silently redefined). Every target keeps a 4 MiB
+    /// allowance, which covers the whole 32-entry window for any target of at
+    /// most 128 KiB, so ordinary source objects plan exactly as under
+    /// [`Self::COMPRESSED_V2`]. A larger target may scan at most four times
+    /// its own length, i.e. its four nearest same-type candidates.
+    ///
+    /// Why not a sampled probe that skips hopeless pairs (NEG-033's proposal):
+    /// the served-clone cost it was measured against is similar blobs, where
+    /// every candidate is a good base and a probe skips nothing. The budget
+    /// bounds both shapes.
+    pub const COMPRESSED_V3: Self = Self {
+        id: "git-pack-compressed-v3",
+        delta_window: 32,
+        max_delta_depth: 8,
+        compression: DeflateProfile::DEFAULT,
+        delta_search: DeltaSearch::IndexedBlocks,
+        delta_work: Some(DeltaWorkBudget {
+            floor_bytes: 4 << 20,
+            target_multiple: 4,
+        }),
     };
 }
 
@@ -986,7 +1055,13 @@ fn select_deltas(
     for object in objects {
         checkpoint(deadline)?;
         let window_start = entries.len().saturating_sub(profile.delta_window);
-        let mut selected: Option<PlannedDelta> = None;
+        // The candidates the window offers, nearest first, with the chain depth
+        // a delta against each would have.
+        let offered = entries.len() - window_start;
+        let mut candidates: Vec<(usize, usize)> = Vec::new();
+        candidates
+            .try_reserve(offered)
+            .map_err(|_| PackError::AllocationFailed { requested: offered })?;
         for base_index in (window_start..entries.len()).rev() {
             checkpoint(deadline)?;
             let base = &entries[base_index];
@@ -1005,25 +1080,50 @@ fn select_deltas(
             if depth > profile.max_delta_depth {
                 continue;
             }
+            candidates.push((base_index, depth));
+        }
+        // Every full scan may visit every target position, so the allowance
+        // buys whole scans. Only when it cannot pay for every candidate does
+        // the budget change anything: then the scans go to the candidates a
+        // cheap probe ranks most promising.
+        if let Some(budget) = profile.delta_work {
+            let scans = budget
+                .allowance(object.body.len())
+                .checked_div(object.body.len())
+                .unwrap_or(usize::MAX);
+            if candidates.len() > scans {
+                if profile.delta_search == DeltaSearch::IndexedBlocks {
+                    candidates = rank_for_budget(
+                        &candidates,
+                        &object.body,
+                        &entries,
+                        &mut indexes,
+                        profile.delta_window,
+                        limits,
+                        deadline,
+                    )?;
+                }
+                candidates.truncate(scans);
+            }
+        }
+        let mut selected: Option<PlannedDelta> = None;
+        for (base_index, depth) in candidates {
+            let base = &entries[base_index];
             let index = match profile.delta_search {
                 DeltaSearch::PrefixSuffix => None,
-                DeltaSearch::IndexedBlocks => {
-                    if !indexes.iter().any(|(cached, _)| *cached == base_index) {
-                        let built = BaseDeltaIndex::build(&base.object.body, limits, deadline)?;
-                        while indexes.len() >= profile.delta_window.max(1) {
-                            indexes.pop_front();
-                        }
-                        indexes.push_back((base_index, built));
-                    }
-                    indexes
-                        .iter()
-                        .find(|(cached, _)| *cached == base_index)
-                        .and_then(|(_, built)| built.as_ref())
-                }
+                DeltaSearch::IndexedBlocks => ensure_index(
+                    &mut indexes,
+                    base_index,
+                    &base.object.body,
+                    profile.delta_window,
+                    limits,
+                    deadline,
+                )?,
             };
             // A candidate replaces the current choice only when strictly
-            // shorter (candidates are visited nearest-first, so an equal
-            // length never wins the tie-break below), and a program is only
+            // shorter (candidates are visited nearest-first -- best-probed
+            // first under a binding budget -- so an equal length never wins
+            // the tie-break below), and a program is only
             // ever emitted when shorter than its target. Anything at or over
             // this bound is irrelevant, so the search may stop proving it.
             let bound = selected.as_ref().map_or(object.body.len(), |current| {
@@ -1070,6 +1170,105 @@ fn select_deltas(
         }
     }
     Ok(entries)
+}
+
+/// The window's index for `base_index`, built on first use.
+///
+/// One index per candidate base is retained only while that base is still
+/// inside the window: every target in the window would otherwise rebuild the
+/// same index, which is the whole cost of the search. An evicted index is
+/// rebuilt identically, so eviction never changes a plan.
+fn ensure_index<'a>(
+    indexes: &'a mut VecDeque<(usize, Option<BaseDeltaIndex>)>,
+    base_index: usize,
+    base: &[u8],
+    window: usize,
+    limits: &PackLimits,
+    deadline: &mut impl Deadline,
+) -> Result<Option<&'a BaseDeltaIndex>, PackWriteError> {
+    if !indexes.iter().any(|(cached, _)| *cached == base_index) {
+        let built = BaseDeltaIndex::build(base, limits, deadline)?;
+        while indexes.len() >= window.max(1) {
+            indexes.pop_front();
+        }
+        indexes.push_back((base_index, built));
+    }
+    Ok(indexes
+        .iter()
+        .find(|(cached, _)| *cached == base_index)
+        .and_then(|(_, built)| built.as_ref()))
+}
+
+/// Orders candidates for a budget that cannot scan them all.
+///
+/// Each candidate is scored by [`probe_score`]; a candidate the probe finds
+/// nothing in is dropped, and the rest are ordered by score, the nearer
+/// candidate first on a tie. The order is total and depends only on bytes.
+fn rank_for_budget(
+    candidates: &[(usize, usize)],
+    target: &[u8],
+    entries: &[PackPlanEntry],
+    indexes: &mut VecDeque<(usize, Option<BaseDeltaIndex>)>,
+    window: usize,
+    limits: &PackLimits,
+    deadline: &mut impl Deadline,
+) -> Result<Vec<(usize, usize)>, PackWriteError> {
+    let mut scored: Vec<(usize, usize, usize, usize)> = Vec::new();
+    scored
+        .try_reserve(candidates.len())
+        .map_err(|_| PackError::AllocationFailed {
+            requested: candidates.len(),
+        })?;
+    for (nearness, &(base_index, depth)) in candidates.iter().enumerate() {
+        let base = &entries[base_index].object.body;
+        let score = match ensure_index(indexes, base_index, base, window, limits, deadline)? {
+            Some(index) => probe_score(index, base, target, deadline)?,
+            None => 0,
+        };
+        if score > 0 {
+            scored.push((score, nearness, base_index, depth));
+        }
+    }
+    scored.sort_unstable_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    Ok(scored
+        .into_iter()
+        .map(|(_, _, base_index, depth)| (base_index, depth))
+        .collect())
+}
+
+/// Target samples a binding budget probes per candidate.
+const DELTA_PROBE_SAMPLES: usize = 32;
+
+/// How many of [`DELTA_PROBE_SAMPLES`] evenly spaced target samples find an
+/// indexed base block.
+///
+/// The base is indexed only at block-aligned offsets, so each sample tries
+/// every alignment of one block: at most `32 x 16` bucket lookups, against one
+/// per target byte for a full scan. A score of zero means no sampled region of
+/// the target occurs in the base.
+fn probe_score(
+    index: &BaseDeltaIndex,
+    base: &[u8],
+    target: &[u8],
+    deadline: &mut impl Deadline,
+) -> Result<usize, PackWriteError> {
+    let Some(span) = target.len().checked_sub(2 * DELTA_INDEX_BLOCK_BYTES) else {
+        return Ok(0);
+    };
+    let stride = span / DELTA_PROBE_SAMPLES;
+    let mut hits = 0;
+    for sample in 0..DELTA_PROBE_SAMPLES {
+        checkpoint(deadline)?;
+        let start = stride * sample;
+        for position in start..start + DELTA_INDEX_BLOCK_BYTES {
+            let window = &target[position..position + DELTA_INDEX_BLOCK_BYTES];
+            if index.has_block(base, window, block_fingerprint(window)) {
+                hits += 1;
+                break;
+            }
+        }
+    }
+    Ok(hits)
 }
 
 /// Builds the profile's delta program for one base/target pair.
@@ -1286,6 +1485,32 @@ impl BaseDeltaIndex {
             candidate = self.chain[slot];
         }
         best
+    }
+}
+
+impl BaseDeltaIndex {
+    /// Whether `window` (exactly one block) equals an indexed base block.
+    ///
+    /// Walks the same bounded chain as [`Self::best_match`], so it answers
+    /// `true` exactly when `best_match` would return `Some` at this position,
+    /// but compares one block instead of extending the match: on a target that
+    /// is a shifted copy of its base a match runs to the end of the object, and
+    /// measuring it made every probe cost a full scan.
+    fn has_block(&self, base: &[u8], window: &[u8], fingerprint: u32) -> bool {
+        let mut candidate = self.heads[(fingerprint & self.mask) as usize];
+        let mut examined = 0_usize;
+        while candidate != Self::NONE && examined < DELTA_MAX_MATCH_CHAIN {
+            examined += 1;
+            let slot = candidate as usize;
+            if self.fingerprints[slot] == fingerprint {
+                let offset = self.offsets[slot] as usize;
+                if base[offset..offset + DELTA_INDEX_BLOCK_BYTES] == *window {
+                    return true;
+                }
+            }
+            candidate = self.chain[slot];
+        }
+        false
     }
 }
 
@@ -2174,6 +2399,115 @@ mod tests {
         }
     }
 
+    /// Planner time and plan shape, COMPRESSED_V2 against the bounded-work
+    /// COMPRESSED_V3, on two large-object shapes (frankengit-77qh):
+    /// - "unrelated": NEG-033's 24 unrelated 1 MiB blobs plus 4 in-place
+    ///   versions whose bases sit 24 entries back;
+    /// - "similar": 12 line-oriented 2 MiB blobs that differ only by a
+    ///   per-file digit on every line, like the XL clone-back corpus.
+    ///
+    /// Run explicitly: `cargo test --release -p fgit-pack --lib -- --ignored
+    /// --nocapture bounded_work_profile_throughput`. Three interleaved rounds
+    /// after a warm-up; each arm's repeat is its own A-A control. Prints
+    /// timings, delta counts, and total program bytes; asserts only
+    /// determinism, never a duration.
+    #[test]
+    #[ignore = "measurement; run explicitly in release"]
+    fn bounded_work_profile_throughput() {
+        let mut unrelated: Vec<Vec<u8>> = (0..24_u64)
+            .map(|seed| noise(1_000 + seed, 1 << 20))
+            .collect();
+        for version in 0..4_usize {
+            let mut edited = unrelated[version].clone();
+            edited[4_096 * (version + 1)] ^= 1;
+            unrelated.push(edited);
+        }
+        let similar: Vec<Vec<u8>> = (0..12_usize)
+            .map(|file| {
+                let mut body = Vec::new();
+                let mut line = 0_usize;
+                while body.len() < 2 << 20 {
+                    body.extend_from_slice(format!("xl-file-{file} line {line}\n").as_bytes());
+                    line += 1;
+                }
+                body
+            })
+            .collect();
+        // The FG-028c anchor corpus: 8 commits x 4 files, each `seq a a+300000`
+        // with a = commit x file, so every version is a shifted copy of the others.
+        let mut shifted: Vec<Vec<u8>> = Vec::new();
+        for commit in 1..=8_usize {
+            for file in 1..=4_usize {
+                let first = commit * file;
+                let mut body = Vec::new();
+                for value in first..=first + 300_000 {
+                    body.extend_from_slice(format!("{value}\n").as_bytes());
+                }
+                shifted.push(body);
+            }
+        }
+        let limits = PackLimits {
+            max_object_bytes: 1 << 24,
+            max_index_entries: 1_000_000,
+            ..wide_limits()
+        };
+        for (shape, mut bodies) in [
+            ("unrelated", unrelated),
+            ("similar", similar),
+            ("shifted", shifted),
+        ] {
+            // The served source orders a window by object ID, not by path.
+            if shape == "shifted" {
+                bodies.sort_by_key(|body| {
+                    fgit_crypto::git_object_id(ObjectFormat::Sha1, ObjectType::Blob, body)
+                });
+            }
+            let objects: Vec<_> = bodies
+                .iter()
+                .enumerate()
+                .map(|(at, body)| object(ObjectType::Blob, body, 0, at as u64))
+                .collect();
+            let run = |profile: PackWriteProfile| {
+                let started = std::time::Instant::now();
+                let plan = select_deltas(&objects, profile, &limits, &mut always).expect("plan");
+                (started.elapsed(), plan)
+            };
+            // Interleaved rounds, so host load drifts over both arms alike.
+            let mut v2_ms = Vec::new();
+            let mut v3_ms = Vec::new();
+            let (_, v2_a) = run(PackWriteProfile::COMPRESSED_V2);
+            let (_, v3) = run(PackWriteProfile::COMPRESSED_V3);
+            for _ in 0..3 {
+                let (v2_time, v2_again) = run(PackWriteProfile::COMPRESSED_V2);
+                let (v3_time, v3_again) = run(PackWriteProfile::COMPRESSED_V3);
+                assert_eq!(v2_a, v2_again);
+                assert_eq!(v3, v3_again);
+                v2_ms.push(v2_time.as_millis());
+                v3_ms.push(v3_time.as_millis());
+            }
+            let shape_of = |plan: &[PackPlanEntry]| {
+                let deltas: Vec<_> = plan
+                    .iter()
+                    .filter_map(|entry| entry.delta.as_ref())
+                    .collect();
+                let program_bytes: usize = deltas.iter().map(|delta| delta.program.len()).sum();
+                let whole_bytes: usize = plan
+                    .iter()
+                    .filter(|entry| entry.delta.is_none())
+                    .map(|entry| entry.object.body.len())
+                    .sum();
+                (deltas.len(), program_bytes, whole_bytes)
+            };
+            println!(
+                "shape={shape} objects={} v2_ms={v2_ms:?} v3_ms={v3_ms:?} \
+                 v2(deltas,program_bytes,whole_bytes)={:?} v3={:?}",
+                objects.len(),
+                shape_of(&v2_a),
+                shape_of(&v3)
+            );
+        }
+    }
+
     #[test]
     fn the_indexed_scan_stops_at_its_limit_and_is_exact_below_it() {
         let base = noise(7, 4_000);
@@ -2740,6 +3074,159 @@ mod tests {
         )
         .expect("writer delta program resolves through pack delta engine");
         assert_eq!(resolved, plan.entries()[1].object().body());
+    }
+
+    /// The probe's block test answers exactly what `best_match` would, at every
+    /// target position, over corpora with shifted, edited, repeated and
+    /// unrelated bodies (frankengit-77qh).
+    #[test]
+    fn the_probe_block_test_agrees_with_best_match_at_every_position() {
+        let mut positions = 0;
+        let mut hits = 0;
+        for objects in delta_corpora() {
+            for base in &objects {
+                let Some(index) =
+                    BaseDeltaIndex::build(&base.body, &wide_limits(), &mut always).expect("index")
+                else {
+                    continue;
+                };
+                for target in &objects {
+                    let Some(last) = target.body.len().checked_sub(DELTA_INDEX_BLOCK_BYTES) else {
+                        continue;
+                    };
+                    for position in 0..=last {
+                        let window = &target.body[position..position + DELTA_INDEX_BLOCK_BYTES];
+                        let fingerprint = block_fingerprint(window);
+                        let expected = index
+                            .best_match(&base.body, &target.body, position, fingerprint)
+                            .is_some();
+                        assert_eq!(index.has_block(&base.body, window, fingerprint), expected);
+                        positions += 1;
+                        hits += usize::from(expected);
+                    }
+                }
+            }
+        }
+        assert!(hits > 10_000 && hits < positions, "{hits} of {positions}");
+    }
+
+    #[test]
+    fn a_delta_work_allowance_is_the_larger_of_its_floor_and_its_multiple() {
+        let budget = DeltaWorkBudget {
+            floor_bytes: 4 << 20,
+            target_multiple: 4,
+        };
+        assert_eq!(budget.allowance(0), 4 << 20);
+        assert_eq!(budget.allowance(1 << 20), 4 << 20);
+        assert_eq!(budget.allowance((1 << 20) + 1), (4 << 20) + 4);
+        assert_eq!(budget.allowance(13 << 20), 52 << 20);
+        assert_eq!(budget.allowance(usize::MAX), usize::MAX);
+    }
+
+    /// While a target's whole window fits the floor, the budget cannot bind,
+    /// so the bounded-work profile must plan exactly like the one it bounds
+    /// (frankengit-77qh). The corpora carry deltas, so equality is not vacuous.
+    #[test]
+    fn the_bounded_work_profile_plans_exactly_like_v2_while_the_window_fits_its_floor() {
+        let profile = PackWriteProfile::COMPRESSED_V3;
+        let floor = profile.delta_work.expect("v3 is budgeted").floor_bytes;
+        let limits = wide_limits();
+        let mut compared = 0;
+        let mut deltas = 0;
+        for objects in delta_corpora() {
+            let largest = objects.iter().map(|object| object.body.len()).max();
+            assert!(largest.expect("non-empty corpus") * profile.delta_window <= floor);
+            let bounded = select_deltas(&objects, profile, &limits, &mut always).expect("v3");
+            let unbounded = select_deltas(
+                &objects,
+                PackWriteProfile::COMPRESSED_V2,
+                &limits,
+                &mut always,
+            )
+            .expect("v2");
+            assert_eq!(bounded, unbounded);
+            compared += 1;
+            deltas += bounded.iter().filter(|entry| entry.delta.is_some()).count();
+        }
+        assert_eq!(compared, 12);
+        assert!(deltas > 20, "only {deltas} deltas selected");
+    }
+
+    /// A binding budget spends its scans on the candidates a cheap probe ranks
+    /// most promising, not simply the nearest: one scan still finds a
+    /// near-identical base behind three unrelated nearer candidates, which the
+    /// probe finds nothing in and which are never scanned.
+    #[test]
+    fn a_binding_delta_work_budget_scans_the_best_probed_candidate_first() {
+        let good = noise(71, 8_192);
+        let mut target = good.clone();
+        target[4_000] ^= 1;
+        let mut bodies = vec![good];
+        bodies.extend((0..3_u64).map(|seed| noise(80 + seed, 8_192)));
+        bodies.push(target);
+        let objects: Vec<_> = bodies
+            .iter()
+            .enumerate()
+            .map(|(at, body)| object(ObjectType::Blob, body, 0, at as u64))
+            .collect();
+        let limits = wide_limits();
+        let target_delta = |profile| {
+            let plan = select_deltas(&objects, profile, &limits, &mut always).expect("plan");
+            plan[4].delta.clone()
+        };
+
+        let unbounded =
+            target_delta(PackWriteProfile::COMPRESSED_V2).expect("v2 deltas the edited copy");
+        assert_eq!(unbounded.base_index(), 0);
+        assert_eq!(target_delta(scans(1)), Some(unbounded));
+    }
+
+    /// Among equally promising candidates a binding budget keeps the nearest,
+    /// so it can miss a farther base that would have given a shorter program:
+    /// the trade the profile makes, visible here and gone once the allowance
+    /// covers both scans.
+    #[test]
+    fn a_binding_delta_work_budget_prefers_the_nearest_of_equally_probed_candidates() {
+        let target = noise(90, 8_192);
+        // Edits sit in blocks 1 and 2, which no probe sample aligns to (the
+        // samples start every 255 bytes and use blocks 0, 16, 32, ...), so
+        // both candidates probe perfectly and differ only in distance.
+        let mut far = target.clone();
+        far[20] ^= 1;
+        let mut near = far.clone();
+        near[40] ^= 1;
+        let objects: Vec<_> = [far, near, target]
+            .iter()
+            .enumerate()
+            .map(|(at, body)| object(ObjectType::Blob, body, 0, at as u64))
+            .collect();
+        let limits = wide_limits();
+        let target_delta = |profile| {
+            let plan = select_deltas(&objects, profile, &limits, &mut always).expect("plan");
+            plan[2].delta.clone().expect("the target is deltified")
+        };
+
+        let unbounded = target_delta(PackWriteProfile::COMPRESSED_V2);
+        assert_eq!(unbounded.base_index(), 0, "the one-edit base is shorter");
+        let one_scan = target_delta(scans(1));
+        assert_eq!(
+            one_scan.base_index(),
+            1,
+            "a tie in probe score keeps the nearer"
+        );
+        assert!(one_scan.program().len() > unbounded.program().len());
+        assert_eq!(target_delta(scans(2)), unbounded);
+    }
+
+    fn scans(target_multiple: usize) -> PackWriteProfile {
+        PackWriteProfile {
+            id: "delta-work-budget-test",
+            delta_work: Some(DeltaWorkBudget {
+                floor_bytes: 0,
+                target_multiple,
+            }),
+            ..PackWriteProfile::COMPRESSED_V3
+        }
     }
 
     #[test]

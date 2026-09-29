@@ -604,3 +604,41 @@ against COMPRESSED_V2 for pack size as well as time, never a silent revision.
 
 **Revisit conditions:** a proposed sampled-probe profile, or a planner that
 reuses stored deltas, measured on real repositories as well as this fixture.
+
+**Follow-up (2026-09-29, frankengit-77qh).** The output-changing lever now
+exists as a separate profile, `COMPRESSED_V3` (`git-pack-compressed-v3`), and
+serving selects it. It does not use the sampled probe alone. The served-clone
+cost that motivated it is the opposite shape: 24 *similar* 13 MB blobs, where
+every candidate is a good base and a probe skips nothing. A symbolized `perf`
+of that clone at 0b142c15 put 76.5% of CPU in the delta search.
+
+V3 therefore bounds work per target at `max(4 MiB, 4 x target length)` of
+scanned bytes. Only when that allowance cannot pay for every window candidate
+does it probe (32 samples, every alignment) and spend its scans on the
+best-probed candidates. A candidate with a zero score is never scanned.
+Wherever the window fits the allowance, V3 plans exactly as V2; an oracle test
+asserts this.
+
+Measured in-binary (`writer::tests::bounded_work_profile_throughput`, release,
+three interleaved rounds, load ~165-183):
+- this fixture: V2 12.9-13.3 s against V3 0.45-0.49 s, with an identical plan
+  shape (4 deltas, 300 program bytes);
+- 12 similar 2 MiB blobs: V2 3.3-3.5 s against V3 2.0-2.1 s, +5 bytes over
+  18.76 MB of delta programs;
+- the FG-028c shape (32 shifted `seq` blobs in object-ID order): V2 0.80-0.94 s
+  against V3 0.33-0.40 s, +885 bytes of programs.
+
+A first V3 probe asked `best_match`, which measures each match to its end. On
+the shifted shape every candidate is a near-copy, so each probe hit compared
+about a megabyte, and V3 ran 10x *slower* than V2 (15.2 s against 1.4 s). The
+probe now asks only whether one block matches (`BaseDeltaIndex::has_block`),
+with an oracle test proving it agrees with `best_match` at every position.
+Keep this in mind for any future probe: a probe must be bounded per sample,
+never by match length.
+
+This row stays refuted: output-preserving bounds still cannot skip hopeless
+pairs. V3 is the separately identified, measured change the consequence
+paragraph called for. Deferred:
+- a planner that reuses stored deltas;
+- path-aware candidate order. The served source supplies `path_hash = 0` and
+  `recency = 0`, so the window is ordered by object ID.

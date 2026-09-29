@@ -3329,10 +3329,12 @@ fn reachable_within_permitted_closure_bounded(
 ///
 /// `ofs-delta` gates the delta-capable interior-match profile; a client that
 /// never echoed it receives structurally delta-free full bases, because a
-/// v0/v1 pack may carry OFS_DELTA entries only under that capability.
+/// v0/v1 pack may carry OFS_DELTA entries only under that capability. The
+/// delta profile bounds its search work per target, so a large repository's
+/// clone fits the session envelope (frankengit-77qh).
 pub(crate) const fn selected_write_profile(ofs_delta_negotiated: bool) -> PackWriteProfile {
     if ofs_delta_negotiated {
-        PackWriteProfile::COMPRESSED_V2
+        PackWriteProfile::COMPRESSED_V3
     } else {
         PackWriteProfile::COMPRESSED_NO_DELTA_V1
     }
@@ -7708,7 +7710,7 @@ impl OneNode {
                 &[],
                 // Local authority materialization has no wire capability to
                 // respect; a pack file carries OFS deltas unconditionally.
-                PackWriteProfile::COMPRESSED_V2,
+                PackWriteProfile::COMPRESSED_V3,
                 request.authority(),
                 &database_exhaustion,
                 None,

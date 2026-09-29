@@ -45,9 +45,9 @@ use std::path::PathBuf;
 
 use fgit_git_object::{ObjectType, Sha1, native_object_oid};
 use fgit_pack::{
-    CanonicalObjectSource, CanonicalPackObject, NativeChecksumVerifier, ObjectFormat, ObjectId,
-    PackLimits, PackPlan, PackPlanner, PackWriteError, PackWriteProfile, PackWriter,
-    ScalarResolver, parse_quarantined_pack, read_verified_pack,
+    CanonicalObjectSource, CanonicalPackObject, DeltaWorkBudget, NativeChecksumVerifier,
+    ObjectFormat, ObjectId, PackLimits, PackPlan, PackPlanner, PackWriteError, PackWriteProfile,
+    PackWriter, ScalarResolver, parse_quarantined_pack, read_verified_pack,
 };
 
 /// Where the e2e lane asks the producer to leave packs and their manifests.
@@ -744,4 +744,76 @@ fn delta_emission_is_structural_per_profile() {
             );
         }
     }
+}
+
+/// A plan whose work budget binds still writes a pack our reader resolves to
+/// exactly the planned objects (frankengit-77qh). The budget here admits one
+/// candidate scan per target, so every target after the first of each run of
+/// versions loses candidates the unbudgeted window would have offered.
+#[test]
+fn a_budget_bound_plan_round_trips_through_our_reader() {
+    let mut objects = Vec::new();
+    let mut text = String::new();
+    for line in 0..600 {
+        let _ = writeln!(text, "line number {line} keeps every row distinct");
+    }
+    for version in 0..6_usize {
+        let mut body = text.clone().into_bytes();
+        body.splice(0..0, format!("version {version}\n").into_bytes());
+        body[500 * (version + 1)] ^= 1;
+        objects.push(blob(&body));
+    }
+    let roots = objects.iter().map(|object| object.id).collect();
+    let corpus = Corpus {
+        name: "budget-bound-versions",
+        objects,
+        roots,
+    };
+    let one_scan = PackWriteProfile {
+        id: "delta-work-one-scan-test",
+        delta_work: Some(DeltaWorkBudget {
+            floor_bytes: 0,
+            target_multiple: 1,
+        }),
+        ..PackWriteProfile::COMPRESSED_V3
+    };
+    let (bytes, plan) = plan_under(&corpus, one_scan);
+    assert!(
+        plan.entries().iter().any(|entry| entry.delta().is_some()),
+        "the nearest candidate must still be scanned and deltified"
+    );
+
+    let mut deadline = || true;
+    let quarantined = read_verified_pack(
+        &bytes,
+        ObjectFormat::Sha1,
+        &limits(),
+        &mut deadline,
+        &NativeChecksumVerifier,
+    )
+    .expect("our reader accepts a budget-bound pack");
+    let offsets: Vec<u64> = quarantined
+        .entries()
+        .iter()
+        .map(|entry| entry.offset)
+        .collect();
+    let scalar = quarantined
+        .into_scalar_objects(|_| None)
+        .expect("scalar conversion");
+    let resolver_limits = limits();
+    let resolver =
+        ScalarResolver::new(&scalar, &(), &resolver_limits, &mut || true).expect("resolver");
+    let mut surfaced = BTreeSet::new();
+    for offset in offsets {
+        let body = resolver
+            .resolve_offset(offset, &mut || true)
+            .expect("every entry resolves");
+        surfaced.insert(fgit_crypto::git_object_id(
+            ObjectFormat::Sha1,
+            ObjectType::Blob,
+            &body,
+        ));
+    }
+    let planned: BTreeSet<ObjectId> = corpus.objects.iter().map(|object| object.id).collect();
+    assert_eq!(surfaced, planned);
 }
