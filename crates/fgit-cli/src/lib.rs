@@ -8,6 +8,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -18,7 +19,8 @@ use fgit_forge::snapshot::{
 use fgit_node::{
     DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionTimeout,
     GitDaemonSessionWorkScaling, NodeConfig, NodeGitDaemonServeRefusal, NodeGitDaemonServerRefusal,
-    NodeInitialization, NodeSourceImportRefusal, OneNode, RepositoryResolutionInput,
+    NodeInitialization, NodeRequestContext, NodeSourceImportRefusal, OneNode,
+    RepositoryResolutionInput,
 };
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::numeric::{CodecVersion, DecisionSequence, HeadGeneration, RepositorySequence};
@@ -29,6 +31,73 @@ use fgit_types::{
 };
 
 const EXPORT_TEMPORARY_ATTEMPTS: usize = 16;
+
+/// The operator's one command time policy for this process
+/// (frankengit-root-doctrine-x2mv.4.50). `None` means each command runs on its
+/// node's session timeout; set at most once, from `fg --timeout-secs <s> ...`.
+static COMMAND_TIMEOUT: OnceLock<Option<GitDaemonSessionTimeout>> = OnceLock::new();
+
+/// Removes a leading global `--timeout-secs <seconds>` from `arguments` and
+/// selects it as this process's command time policy. Seconds are a positive
+/// decimal with at most nine fractional digits (`300`, `0.5`, `0.001`).
+/// Without the option every command runs on its node's session timeout
+/// (300 s by default) instead of the Database class's flat 15 s.
+///
+/// # Errors
+///
+/// The value is missing, zero, malformed, repeated, or the policy was
+/// already selected in this process.
+pub fn take_global_command_timeout(mut arguments: Vec<String>) -> Result<Vec<String>, String> {
+    let mut selected = None;
+    while arguments.first().map(String::as_str) == Some("--timeout-secs") {
+        if selected.is_some() {
+            return Err("duplicate global --timeout-secs".into());
+        }
+        let value = arguments
+            .get(1)
+            .ok_or("global --timeout-secs requires a value")?;
+        selected = Some(parse_command_timeout(value)?);
+        arguments.drain(..2);
+    }
+    COMMAND_TIMEOUT
+        .set(selected)
+        .map_err(|_| "the command time policy is already selected".to_owned())?;
+    Ok(arguments)
+}
+
+fn parse_command_timeout(value: &str) -> Result<GitDaemonSessionTimeout, String> {
+    let invalid = || format!("invalid --timeout-secs {value:?}: expected positive decimal seconds");
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if whole.is_empty() && fraction.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+        || fraction.len() > 9
+        || value.ends_with('.')
+    {
+        return Err(invalid());
+    }
+    let seconds = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u64>().map_err(|_| invalid())?
+    };
+    let nanos = if fraction.is_empty() {
+        0
+    } else {
+        format!("{fraction:0<9}")
+            .parse::<u32>()
+            .map_err(|_| invalid())?
+    };
+    GitDaemonSessionTimeout::try_new(Duration::new(seconds, nanos)).map_err(|_| invalid())
+}
+
+/// The authority context every CLI and MCP command runs under: one operator
+/// time policy (frankengit-root-doctrine-x2mv.4.50), never the Database
+/// class's flat default. See [`OneNode::command_request_context`].
+#[must_use]
+pub fn command_request_context(node: &OneNode) -> NodeRequestContext {
+    node.command_request_context(COMMAND_TIMEOUT.get().copied().flatten())
+}
 
 static NEXT_EXPORT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
 
@@ -1055,9 +1124,12 @@ fn run_export(
         resolution_input,
     )?)?)
     .map_err(CliRefusal::Node)?;
+    // The command time policy bounds the export's materialization, not the
+    // Database class's flat 15 s (frankengit-root-doctrine-x2mv.4.53).
+    let request = command_request_context(&node);
     let exported = node
         .runtime()
-        .block_on(node.authority_selected_pack_payload())
+        .block_on(node.authority_selected_pack_payload_in(&request))
         .map_err(|error| CliRefusal::ExportMaterialization(Box::new(error)))
         .and_then(|payload| {
             let bytes = payload.into_bytes();
@@ -1417,7 +1489,7 @@ fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
     .map_err(CliRefusal::Node)?;
 
     let result = node.runtime().block_on(async {
-        let request = node.request_context();
+        let request = command_request_context(&node);
         let head_read = node
             .read_authority_head_in(&request)
             .await
@@ -2433,5 +2505,112 @@ mod tests {
             run(&export),
             Err(CliRefusal::ExportDestinationExists(existing)) if *existing == destination
         ));
+    }
+}
+
+#[cfg(test)]
+mod command_time_policy_tests {
+    use super::parse_command_timeout;
+    use std::path::Path;
+    use std::time::Duration;
+
+    #[test]
+    fn global_timeout_parses_positive_decimal_seconds_only() {
+        for (text, expected) in [
+            ("300", Duration::from_secs(300)),
+            ("1", Duration::from_secs(1)),
+            ("0.5", Duration::from_millis(500)),
+            ("0.001", Duration::from_millis(1)),
+            (".25", Duration::from_millis(250)),
+            ("2.000000001", Duration::new(2, 1)),
+        ] {
+            assert_eq!(
+                parse_command_timeout(text).unwrap().duration(),
+                expected,
+                "{text}"
+            );
+        }
+        // Refused: zero, empty, signs, units, exponent, too many digits.
+        for text in [
+            "0",
+            "0.0",
+            "",
+            ".",
+            "1.",
+            "-1",
+            "+1",
+            "1s",
+            "1e3",
+            "0.0000000001",
+            "1.2.3",
+            " 1",
+        ] {
+            assert!(parse_command_timeout(text).is_err(), "{text:?}");
+        }
+    }
+
+    /// Every CLI and MCP command takes its deadline from the one policy, never
+    /// from the Database class default (frankengit-root-doctrine-x2mv.4.50,
+    /// acceptance 3). Test modules may still mint class contexts for fixtures.
+    #[test]
+    fn no_command_path_mints_the_class_default_context() {
+        fn visit(dir: &Path, offenders: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(&path, offenders);
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if !name.ends_with(".rs") || name == "tests.rs" || name.ends_with("_tests.rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                // Skip only the item a `#[cfg(test)]` gates (an inline test
+                // module or fixture), tracking braces; production code after
+                // it is still scanned.
+                let mut skip_depth: Option<i64> = None;
+                let mut gated = false;
+                for (index, line) in text.lines().enumerate() {
+                    let code = line.split("//").next().unwrap();
+                    let braces =
+                        code.matches('{').count() as i64 - code.matches('}').count() as i64;
+                    if let Some(depth) = skip_depth.as_mut() {
+                        *depth += braces;
+                        if *depth <= 0 {
+                            skip_depth = None;
+                        }
+                        continue;
+                    }
+                    let trimmed = code.trim();
+                    if trimmed == "#[cfg(test)]" {
+                        gated = true;
+                        continue;
+                    }
+                    if gated {
+                        if trimmed.starts_with("#[") || trimmed.is_empty() {
+                            continue;
+                        }
+                        gated = false;
+                        if braces > 0 {
+                            skip_depth = Some(braces);
+                        }
+                        continue;
+                    }
+                    if code.contains(".request_context()") {
+                        offenders.push(format!("{}:{}", path.display(), index + 1));
+                    }
+                }
+            }
+        }
+        let mut offenders = Vec::new();
+        visit(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut offenders,
+        );
+        assert!(
+            offenders.is_empty(),
+            "command paths must use fgit_cli::command_request_context: {offenders:?}"
+        );
     }
 }

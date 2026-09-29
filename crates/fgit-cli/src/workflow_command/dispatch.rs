@@ -122,7 +122,7 @@ fn execute(options: Options, event: &str) -> Result<u8, String> {
             .map_err(|e| e.to_string())?;
         node.bring_into_service(head.receipt().generation())
             .map_err(|e| e.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         node.runtime()
             .block_on(node.dispatch_trusted_workflows_in(
                 &request,

@@ -75,7 +75,7 @@ fn with_node<T>(
 
 fn list(options: &Options) -> Result<String, String> {
     let page = with_node(options, |node| {
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         node.runtime()
             .block_on(node.read_forge_outbox_in(&request, options.after, options.limit, None))
             .map_err(|error| error.to_string())
@@ -108,7 +108,7 @@ fn inspect(options: &Options) -> Result<String, String> {
     let key = options.key.ok_or("missing --delivery-id")?;
     let destination = options.destination.ok_or("missing --destination")?;
     let selected = with_node(options, |node| {
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         node.runtime()
             .block_on(node.select_forge_delivery_in(&request, key, destination, None))
             .map_err(|error| error.to_string())

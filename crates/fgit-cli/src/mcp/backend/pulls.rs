@@ -55,7 +55,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     let limit = if show { 1 } else { limit(args)? };
     // A show lookup is not a paginated suffix and needs no previous token.
     let expected = head(args, if show { 0 } else { after })?;
-    let context = backend.node.request_context();
+    let context = fgit_cli::command_request_context(&backend.node);
     let page = backend
         .node
         .runtime()

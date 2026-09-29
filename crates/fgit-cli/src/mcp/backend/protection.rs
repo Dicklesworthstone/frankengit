@@ -112,7 +112,7 @@ impl ProtectionTools {
         require_fields(args, &["expected_head"])?;
         let expected = head(args, 0)?;
         let node = &self.backend.node;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         let selected = node
             .runtime()
             .block_on(node.read_review_protection_in(&request))

@@ -107,7 +107,7 @@ fn call_reviewed(backend: &NodeTools, args: &Object) -> Result<Value, ToolError>
         .principal
         .ok_or(ToolError::invalid("principal_not_bound"))?;
     let input = parse(args, backend.options.format, principal)?;
-    let context = backend.node.request_context();
+    let context = fgit_cli::command_request_context(&backend.node);
     let (tx, terminal) = backend
         .node
         .runtime()
@@ -213,7 +213,7 @@ fn call_fast_forward(backend: &NodeTools, args: &Object) -> Result<Value, ToolEr
         .authenticated_session()
         .ok_or(ToolError::invalid("principal_not_bound"))?
         .principal_id();
-    let context = backend.node.request_context();
+    let context = fgit_cli::command_request_context(&backend.node);
     let (tx, terminal) = backend
         .node
         .runtime()

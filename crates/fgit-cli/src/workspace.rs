@@ -48,7 +48,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
     let operation = (|| {
         node.bring_into_service(HeadGeneration::FIRST)
             .map_err(|error| error.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         let mut command = Command::new(&options.program);
         command.args(&options.arguments);
         node.runtime()

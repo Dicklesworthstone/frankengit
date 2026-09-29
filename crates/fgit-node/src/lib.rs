@@ -6936,6 +6936,40 @@ impl OneNode {
         NodeRequestContext { authority }
     }
 
+    /// Mints the authority context for one operator command (CLI or MCP).
+    ///
+    /// Commands used to mint [`Self::request_context`], whose Database-class
+    /// wall clock is a flat 15 s. On a loaded host an ordinary write such as
+    /// `fg pr open` then ended "ambiguous: cancelled after transmission" while
+    /// its CAS was still resolving (frankengit-root-doctrine-x2mv.4.50). A
+    /// command now has one time policy, shaped like
+    /// [`Self::session_request_context`] for HTTP: its wall clock is `timeout`
+    /// when the operator chose one, otherwise this node's session timeout
+    /// ([`GitDaemonSessionTimeout::DEFAULT`] unless configured). The Database
+    /// class keeps its poll and cost floors as the liveness backstop, and an
+    /// expiry still yields the typed ambiguous outcome that `fg outcome` or an
+    /// identical retry resolves; a timeout never proves non-commit.
+    #[must_use]
+    pub fn command_request_context(
+        &self,
+        timeout: Option<GitDaemonSessionTimeout>,
+    ) -> NodeRequestContext {
+        let wall_clock = timeout.unwrap_or(self.git_daemon_session_timeout);
+        let limits = ClassLimits {
+            timeout: Some(wall_clock.duration()),
+            ..self
+                .service_config
+                .runtime_budgets
+                .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS)
+        };
+        let authority = FsqliteCx::new();
+        authority.set_native_cx(
+            self.runtime
+                .request_cx_with_budget(limits.at(self.runtime.now())),
+        );
+        NodeRequestContext { authority }
+    }
+
     fn pack_materialization_context(&self) -> FsqliteCx {
         let context = FsqliteCx::new();
         context.set_native_cx(self.runtime.request_cx(SELECTED_PACK_BUDGET_CLASS));
@@ -7901,7 +7935,10 @@ impl OneNode {
             return Err(NodeGitDaemonServeRefusal::RepositoryPathMismatch);
         }
 
-        let request = self.request_context();
+        // The session's own deadline bounds admission and the fabric reads of
+        // pack materialization; the Database class's flat 15 s wall clock
+        // killed large clones on loaded hosts (frankengit-root-doctrine-x2mv.4.53).
+        let request = self.session_request_context(&deadline);
         deadline
             .check("materialize authenticated admission")
             .map_err(NodeGitDaemonServeRefusal::from)?;
@@ -9808,6 +9845,183 @@ mod tests {
         ));
         drop(pack_context);
         node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn a_command_runs_on_one_operator_clock_with_database_floors() {
+        // frankengit-root-doctrine-x2mv.4.50: a CLI/MCP command's authority
+        // context is not the Database class's flat 15 s wall clock.
+        let scratch = ScratchDirectory::new();
+        let (node, _) =
+            OneNode::init(test_config(scratch.path().to_path_buf())).expect("node initializes");
+        let remaining = |context: &NodeRequestContext| {
+            context
+                .authority()
+                .attached_native_cx()
+                .expect("native context")
+                .budget()
+                .remaining(node.runtime.now())
+        };
+
+        // The class default still bounds a plain request at 15 s or less.
+        let class = remaining(&node.request_context());
+        assert!(
+            class
+                .deadline
+                .is_some_and(|left| left <= Duration::from_secs(15)),
+            "{class:?}"
+        );
+
+        // A command without an explicit timeout runs on the node's session
+        // timeout (300 s by default), and the class poll floor still bounds it.
+        let default = remaining(&node.command_request_context(None));
+        assert!(
+            default
+                .deadline
+                .is_some_and(|left| left > Duration::from_secs(250)
+                    && left <= GitDaemonSessionTimeout::DEFAULT.duration()),
+            "{default:?}"
+        );
+        assert_eq!(default.polls, class.polls);
+
+        // An explicit operator timeout is the command's ceiling, larger or
+        // smaller than the class default.
+        let long = GitDaemonSessionTimeout::try_new(Duration::from_secs(1800)).unwrap();
+        let explicit = remaining(&node.command_request_context(Some(long)));
+        assert!(
+            explicit
+                .deadline
+                .is_some_and(|left| left > Duration::from_secs(1700)),
+            "{explicit:?}"
+        );
+
+        // Its twin: a deliberately tiny timeout expires, stops at the next
+        // checkpoint with an attributed Deadline, and a real authority read
+        // under it is refused rather than served.
+        let tiny = GitDaemonSessionTimeout::try_new(Duration::from_millis(1)).unwrap();
+        let expired = node.command_request_context(Some(tiny));
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(matches!(
+            checkpoint_pack_context(expired.authority()),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: Some(Exhaustion::Deadline)
+            }
+        ));
+        assert!(
+            node.runtime()
+                .block_on(node.read_authority_head_in(&expired))
+                .is_err()
+        );
+        // The permitted twin under the default policy reads the head.
+        let live = node.command_request_context(None);
+        assert!(
+            node.runtime()
+                .block_on(node.read_authority_head_in(&live))
+                .is_ok()
+        );
+        drop((expired, live));
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn a_served_sessions_authority_context_runs_on_the_session_clock() {
+        // frankengit-root-doctrine-x2mv.4.53: admission and the fabric reads of
+        // pack materialization in a served git:// / SSH session run on the
+        // session's deadline, not the Database class's flat 15 s.
+        let scratch = ScratchDirectory::new();
+        let (node, _) =
+            OneNode::init(test_config(scratch.path().to_path_buf())).expect("node initializes");
+        let session = |budget| {
+            super::GitDaemonSessionDeadline::new(
+                GitDaemonSessionTimeout::try_new(budget).unwrap(),
+                super::GitDaemonSessionWorkScaling::FLAT,
+            )
+        };
+        let class_polls = node
+            .request_context()
+            .authority()
+            .attached_native_cx()
+            .expect("native context")
+            .budget()
+            .remaining(node.runtime.now())
+            .polls;
+        let long = node.session_request_context(&session(Duration::from_secs(1800)));
+        let remaining = long
+            .authority()
+            .attached_native_cx()
+            .expect("native context")
+            .budget()
+            .remaining(node.runtime.now());
+        assert!(
+            remaining
+                .deadline
+                .is_some_and(|left| left > Duration::from_secs(1700)),
+            "{remaining:?}"
+        );
+        assert_eq!(remaining.polls, class_polls, "Database floors are kept");
+        assert!(
+            node.runtime()
+                .block_on(node.read_authority_head_in(&long))
+                .is_ok()
+        );
+
+        // Its twin: a spent session's context stops at the next checkpoint.
+        let spent = node.session_request_context(&session(Duration::from_millis(1)));
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(matches!(
+            checkpoint_pack_context(spent.authority()),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: Some(Exhaustion::Deadline)
+            }
+        ));
+        drop((long, spent));
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    /// Served session paths take their authority context from the session
+    /// deadline (frankengit-root-doctrine-x2mv.4.53, acceptance 3).
+    #[test]
+    fn served_session_paths_never_mint_the_class_default_context() {
+        fn body<'a>(source: &'a str, function: &str) -> &'a str {
+            let start = source
+                .find(&format!("fn {function}"))
+                .unwrap_or_else(|| panic!("{function} not found"));
+            let open = start + source[start..].find('{').expect("function body");
+            let mut depth = 0_i64;
+            for (offset, character) in source[open..].char_indices() {
+                match character {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &source[open..=open + offset];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("{function} body is unbalanced")
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for (file, function) in [
+            ("lib.rs", "serve_git_daemon_stream_with_limits"),
+            ("ssh.rs", "serve_ssh_upload_pack"),
+            (
+                "smart_http/receive_session/daemon.rs",
+                "serve_guarded_receive_session",
+            ),
+        ] {
+            let source = std::fs::read_to_string(root.join(file)).unwrap();
+            let text = body(&source, function);
+            assert!(
+                !text.contains(".request_context()"),
+                "{file}::{function} mints the Database class default context"
+            );
+            assert!(
+                text.contains("session_request_context("),
+                "{file}::{function} must bind its authority context to the session deadline"
+            );
+        }
     }
 
     #[test]

@@ -702,7 +702,9 @@ impl OneNode {
         let service =
             ssh_git_service(true, git_protocol).map_err(NodeGitDaemonServeRefusal::from)?;
         let limits = WireLimits::default();
-        let request = self.request_context();
+        // On the session's deadline, not the Database class's flat 15 s
+        // (frankengit-root-doctrine-x2mv.4.53).
+        let request = self.session_request_context(deadline);
         deadline
             .check("materialize authenticated admission")
             .map_err(NodeGitDaemonServeRefusal::from)?;

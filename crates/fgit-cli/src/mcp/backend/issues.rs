@@ -39,7 +39,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     let after = decimal(args, if show { "after_version" } else { "after" }, 0)?;
     let limit = limit(args)?;
     let expected = head(args, after)?;
-    let request = backend.node.request_context();
+    let request = fgit_cli::command_request_context(&backend.node);
     if show {
         let number = IssueNumber::try_new(decimal(args, "number", 0)?)
             .ok_or(ToolError::invalid("positive_issue_number_required"))?;

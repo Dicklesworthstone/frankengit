@@ -25,7 +25,7 @@ pub(super) fn tools() -> Vec<Tool> {
 pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
     let file = name == "frankengit_source_blob";
     let (reference, query) = parse(args, file, backend.options.format)?;
-    let request = backend.node.request_context();
+    let request = fgit_cli::command_request_context(&backend.node);
     let report = backend
         .node
         .runtime()

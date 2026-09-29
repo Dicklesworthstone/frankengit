@@ -62,7 +62,7 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
     let operation = (|| {
         node.bring_into_service(HeadGeneration::FIRST)
             .map_err(|error| error.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         node.runtime()
             .block_on(node.apply_merge_bundle_durable_in(
                 &request,

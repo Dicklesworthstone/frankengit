@@ -66,7 +66,7 @@ pub fn run(arguments: &[String], is_blame: bool) -> Result<(), String> {
     let operation = (|| -> Result<_, String> {
         node.bring_into_service(HeadGeneration::FIRST)
             .map_err(|e| e.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         match &options.query {
             Query::Log(query) => node
                 .runtime()

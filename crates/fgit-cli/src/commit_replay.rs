@@ -62,7 +62,7 @@ pub fn run(args: &[String], direction: ReplayDirection) -> Result<u8, String> {
     let operation = (|| {
         node.bring_into_service(HeadGeneration::FIRST)
             .map_err(|error| error.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         match resolutions.as_deref() {
             Some(choices) => node
                 .runtime()

@@ -99,7 +99,7 @@ pub fn run(args: &[String], mode: Mode) -> Result<u8, String> {
     let operation = (|| -> Result<_, String> {
         node.bring_into_service(HeadGeneration::FIRST)
             .map_err(|e| e.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         if mode == Mode::Review {
             let session = LoopbackReceiveSession::authenticated(
                 options.principal,
@@ -406,7 +406,7 @@ fn run_read(options: ReadOptions) -> Result<u8, String> {
     let operation = (|| -> Result<_, String> {
         node.bring_into_service(HeadGeneration::FIRST)
             .map_err(|e| e.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         node.runtime()
             .block_on(node.read_reviews_in(
                 &request,

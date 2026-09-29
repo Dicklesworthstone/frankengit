@@ -146,7 +146,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     command
         .proposed_event(principal)
         .map_err(|_| ToolError::invalid("invalid_issue_command"))?;
-    let context = backend.node.request_context();
+    let context = fgit_cli::command_request_context(&backend.node);
     // From here onward a failed response is not proof of non-commit. Native
     // admission recovers a prior terminal result before current intake gates.
     let (tx, outcome) = backend
