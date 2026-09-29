@@ -339,7 +339,7 @@ fn execute(options: Options, output: &mut impl Write) -> Result<u8, String> {
         if !live() {
             return Err("pre-admission read timeout".to_owned());
         }
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         entered_admission = true;
         node.runtime()
             .block_on(node.admit_trusted_workflow_check_in(

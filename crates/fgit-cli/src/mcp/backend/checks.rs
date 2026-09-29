@@ -77,7 +77,7 @@ fn query(args: &Object) -> Result<Query, ToolError> {
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     let query = query(args)?;
-    let context = backend.node.request_context();
+    let context = fgit_cli::command_request_context(&backend.node);
     let page = backend
         .node
         .runtime()

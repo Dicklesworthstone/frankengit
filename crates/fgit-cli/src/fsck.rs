@@ -403,7 +403,7 @@ fn inspect_graph(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
         },
         timeout: Duration::from_secs(options.limits.seconds),
     };
-    let request = node.request_context();
+    let request = fgit_cli::command_request_context(&node);
     let report = node
         .runtime()
         .block_on(node.audit_selected_object_graph_local_in(&request, query))
@@ -425,7 +425,7 @@ fn inspect(node: &OneNode, options: &Options) -> Result<Report, Refusal> {
         return inspect_graph(node, options);
     }
     let started = Instant::now();
-    let request = node.request_context();
+    let request = fgit_cli::command_request_context(&node);
     let selected = node
         .runtime()
         .block_on(node.materialize_admission_in(&request))

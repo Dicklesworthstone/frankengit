@@ -27,7 +27,7 @@ pub(super) fn execute(options: &Options, replay: bool) -> Result<(u8, String), S
     // Authentication/selection and runtime shutdown finish BEFORE external I/O.
     // This result owns the exact canonical bytes, not a mutable local preview.
     let selected = with_node(options, |node| {
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         node.runtime()
             .block_on(node.select_forge_delivery_in(&request, key, destination, None))
             .map_err(|error| error.to_string())

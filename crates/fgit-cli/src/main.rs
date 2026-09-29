@@ -37,6 +37,15 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    // One operator time policy for every command: `fg --timeout-secs <s> ...`
+    // (frankengit-root-doctrine-x2mv.4.50).
+    let arguments = match fgit_cli::take_global_command_timeout(arguments) {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            eprintln!("fg: {error}");
+            return ExitCode::from(2);
+        }
+    };
     if arguments
         .first()
         .is_some_and(|argument| argument == "backup")

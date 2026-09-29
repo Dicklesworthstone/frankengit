@@ -44,7 +44,7 @@ pub fn run(args: &[String]) -> Result<u8, String> {
     .map_err(|e| e.to_string())?;
     // Recovery intentionally does not bring a cell into serving state. It can
     // report historical outcomes even when new mutation admission is disabled.
-    let request = node.request_context();
+    let request = fgit_cli::command_request_context(&node);
     let operation = node
         .runtime()
         .block_on(node.recover_transaction_in(&request, &session));

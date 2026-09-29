@@ -70,7 +70,7 @@ pub(super) fn run(arguments: &[String], output: &mut impl Write) -> Result<u8, S
                 "fast-forward intake unavailable ({error}); only existing outcome recovery may succeed"
             );
         }
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         entered_admission = true;
         node.runtime()
             .block_on(node.fast_forward_pull_request_durable_in(

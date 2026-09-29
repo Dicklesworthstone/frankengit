@@ -236,7 +236,7 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         .authenticated_session()
         .ok_or(ToolError::invalid("principal_not_bound"))?
         .principal_id();
-    let request = backend.node.request_context();
+    let request = fgit_cli::command_request_context(&backend.node);
     let admitted = if let Some(bytes) = &input.bundle {
         let command = &input.commands[0];
         let (ExpectedOld::Exactly(base), ProposedNew::Update(candidate)) =

@@ -376,7 +376,7 @@ fn execute(options: Options, merge: Option<fgit_forge::event::NativeMerge>) -> R
             .map_err(|e| e.to_string())?;
         node.bring_into_service(head.receipt().generation())
             .map_err(|e| e.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         let result = match (merge.as_ref(), &options.candidate, bundle.as_deref()) {
             (Some(merge), Some(_), Some(bytes)) => {
                 node.runtime().block_on(node.run_trusted_merge_workflow_in(

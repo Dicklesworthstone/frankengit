@@ -153,7 +153,7 @@ pub(super) fn run(arguments: &[String]) -> Result<u8, String> {
     let result = (|| {
         node.bring_into_service(HeadGeneration::FIRST)
             .map_err(|error| error.to_string())?;
-        let context = node.request_context();
+        let context = fgit_cli::command_request_context(&node);
         let page = issue_search::search(
             &options.query,
             SearchRequest {

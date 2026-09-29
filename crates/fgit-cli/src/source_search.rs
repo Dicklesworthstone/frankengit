@@ -46,7 +46,7 @@ pub fn run(arguments: &[String]) -> Result<u8, String> {
     let operation = (|| {
         node.bring_into_service(HeadGeneration::FIRST)
             .map_err(|error| error.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         node.runtime()
             .block_on(node.search_source_local_in(
                 &request,

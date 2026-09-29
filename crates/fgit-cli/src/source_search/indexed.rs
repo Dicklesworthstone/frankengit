@@ -67,7 +67,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
             .map_err(|error| error.to_string())?;
         node.bring_into_service(authenticated.receipt().generation())
             .map_err(|error| error.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         node.runtime()
             .block_on(node.search_source_index_revalidated_local_in(&request, options.request()))
             .map_err(|error| error.to_string())

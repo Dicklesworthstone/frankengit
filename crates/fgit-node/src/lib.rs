@@ -6936,6 +6936,40 @@ impl OneNode {
         NodeRequestContext { authority }
     }
 
+    /// Mints the authority context for one operator command (CLI or MCP).
+    ///
+    /// Commands used to mint [`Self::request_context`], whose Database-class
+    /// wall clock is a flat 15 s. On a loaded host an ordinary write such as
+    /// `fg pr open` then ended "ambiguous: cancelled after transmission" while
+    /// its CAS was still resolving (frankengit-root-doctrine-x2mv.4.50). A
+    /// command now has one time policy, shaped like
+    /// [`Self::session_request_context`] for HTTP: its wall clock is `timeout`
+    /// when the operator chose one, otherwise this node's session timeout
+    /// ([`GitDaemonSessionTimeout::DEFAULT`] unless configured). The Database
+    /// class keeps its poll and cost floors as the liveness backstop, and an
+    /// expiry still yields the typed ambiguous outcome that `fg outcome` or an
+    /// identical retry resolves; a timeout never proves non-commit.
+    #[must_use]
+    pub fn command_request_context(
+        &self,
+        timeout: Option<GitDaemonSessionTimeout>,
+    ) -> NodeRequestContext {
+        let wall_clock = timeout.unwrap_or(self.git_daemon_session_timeout);
+        let limits = ClassLimits {
+            timeout: Some(wall_clock.duration()),
+            ..self
+                .service_config
+                .runtime_budgets
+                .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS)
+        };
+        let authority = FsqliteCx::new();
+        authority.set_native_cx(
+            self.runtime
+                .request_cx_with_budget(limits.at(self.runtime.now())),
+        );
+        NodeRequestContext { authority }
+    }
+
     fn pack_materialization_context(&self) -> FsqliteCx {
         let context = FsqliteCx::new();
         context.set_native_cx(self.runtime.request_cx(SELECTED_PACK_BUDGET_CLASS));
@@ -9807,6 +9841,82 @@ mod tests {
             }
         ));
         drop(pack_context);
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn a_command_runs_on_one_operator_clock_with_database_floors() {
+        // frankengit-root-doctrine-x2mv.4.50: a CLI/MCP command's authority
+        // context is not the Database class's flat 15 s wall clock.
+        let scratch = ScratchDirectory::new();
+        let (node, _) =
+            OneNode::init(test_config(scratch.path().to_path_buf())).expect("node initializes");
+        let remaining = |context: &NodeRequestContext| {
+            context
+                .authority()
+                .attached_native_cx()
+                .expect("native context")
+                .budget()
+                .remaining(node.runtime.now())
+        };
+
+        // The class default still bounds a plain request at 15 s or less.
+        let class = remaining(&node.request_context());
+        assert!(
+            class
+                .deadline
+                .is_some_and(|left| left <= Duration::from_secs(15)),
+            "{class:?}"
+        );
+
+        // A command without an explicit timeout runs on the node's session
+        // timeout (300 s by default), and the class poll floor still bounds it.
+        let default = remaining(&node.command_request_context(None));
+        assert!(
+            default
+                .deadline
+                .is_some_and(|left| left > Duration::from_secs(250)
+                    && left <= GitDaemonSessionTimeout::DEFAULT.duration()),
+            "{default:?}"
+        );
+        assert_eq!(default.polls, class.polls);
+
+        // An explicit operator timeout is the command's ceiling, larger or
+        // smaller than the class default.
+        let long = GitDaemonSessionTimeout::try_new(Duration::from_secs(1800)).unwrap();
+        let explicit = remaining(&node.command_request_context(Some(long)));
+        assert!(
+            explicit
+                .deadline
+                .is_some_and(|left| left > Duration::from_secs(1700)),
+            "{explicit:?}"
+        );
+
+        // Its twin: a deliberately tiny timeout expires, stops at the next
+        // checkpoint with an attributed Deadline, and a real authority read
+        // under it is refused rather than served.
+        let tiny = GitDaemonSessionTimeout::try_new(Duration::from_millis(1)).unwrap();
+        let expired = node.command_request_context(Some(tiny));
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(matches!(
+            checkpoint_pack_context(expired.authority()),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: Some(Exhaustion::Deadline)
+            }
+        ));
+        assert!(
+            node.runtime()
+                .block_on(node.read_authority_head_in(&expired))
+                .is_err()
+        );
+        // The permitted twin under the default policy reads the head.
+        let live = node.command_request_context(None);
+        assert!(
+            node.runtime()
+                .block_on(node.read_authority_head_in(&live))
+                .is_ok()
+        );
+        drop((expired, live));
         node.shutdown().expect("node closes cleanly");
     }
 

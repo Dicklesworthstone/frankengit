@@ -174,7 +174,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     let operation = (|| -> Result<Completed, String> {
         node.bring_into_service(HeadGeneration::FIRST)
             .map_err(|e| e.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         if let (Some(input), Some(session)) = (&input, &session) {
             let result = node
                 .runtime()

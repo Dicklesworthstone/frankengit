@@ -127,7 +127,7 @@ pub(super) fn run(args: &[String], out: &mut impl Write) -> Result<u8, String> {
             .map_err(|e| e.to_string())?;
         node.bring_into_service(head.receipt().generation())
             .map_err(|e| e.to_string())?;
-        let request = node.request_context();
+        let request = fgit_cli::command_request_context(&node);
         node.runtime()
             .block_on(node.read_pull_request_checks_in(
                 &request,
