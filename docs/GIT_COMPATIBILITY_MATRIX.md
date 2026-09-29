@@ -134,6 +134,22 @@ naming the limit (diagnosable, not an unexplained early EOF); without
 sideband the connection ends as in upstream mid-service failure. `fg export`
 prints the typed refusal directly.
 
+The **upload read ceiling** (frankengit-root-doctrine-x2mv.4.53) bounds the
+object-fabric reads behind one served pack under the Database class, anchored
+at the session's greeting.
+- A session that idles or stalls past the class deadline (default 15 s) is
+  refused with the exact Database dimension (x7ja R5).
+- Those reads follow the same work-proportional doctrine: each verified object
+  byte read earns the session's per-byte allowance (about 1 s per MiB by
+  default, up to the extension ceiling). The poll and cost quotas carry over
+  unchanged.
+- A read that delivers nothing earns nothing, and the session deadline still
+  bounds everything.
+
+A clone of a few hundred MB therefore reads under a ceiling proportional to its
+size instead of failing at 15 s. The closure walk and the planner each read the
+selected blobs once.
+
 `fg serve` selects the receive envelope explicitly: `--session-timeout-secs`,
 `--session-secs-per-mib`, `--session-max-extension-secs`,
 `--receive-max-input-mib`, `--receive-max-expanded-mib`; `fg serve` and

@@ -2972,15 +2972,36 @@ impl VerifiedFabricPackSource<'_> {
     }
 
     fn read_object(&self, id: &GitOid) -> Result<(ObjectType, Vec<u8>), PackWriteError> {
+        self.read_object_within(id, None)
+    }
+
+    /// [`Self::read_object`] under an optional work-scaled Database ceiling.
+    ///
+    /// The ceiling is re-armed before the pre-read Database check, and it is
+    /// credited with the read's verified bytes (and re-armed again) before the
+    /// post-read checks, so a long read that delivers is judged against the
+    /// ceiling it earned.
+    fn read_object_within(
+        &self,
+        id: &GitOid,
+        ceiling: Option<&FabricReadCeiling<'_>>,
+    ) -> Result<(ObjectType, Vec<u8>), PackWriteError> {
         // Preserve the outer-session → Database → synchronous fabric read →
         // outer-session → Database ordering. In particular, retain the fabric
         // result until both post-read probes ran, so an expiry cannot be
         // overwritten by a later missing-object or parse refusal.
         self.session_checkpoint()?;
+        if let Some(ceiling) = ceiling {
+            ceiling.rearm(self.database_context);
+        }
         if !self.database_read_is_live() {
             return Err(PackError::DeadlineExceeded.into());
         }
         let read = self.fabric.read_whole(*id);
+        if let (Some(ceiling), Ok(verified)) = (ceiling, &read) {
+            ceiling.note_read(verified.object.payload().len());
+            ceiling.rearm(self.database_context);
+        }
         self.session_checkpoint()?;
         if !self.database_read_is_live() {
             return Err(PackError::DeadlineExceeded.into());
@@ -3011,7 +3032,15 @@ impl VerifiedFabricPackSource<'_> {
     }
 
     fn object_references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
-        let (object_type, body) = self.read_object(id)?;
+        self.object_references_within(id, None)
+    }
+
+    fn object_references_within(
+        &self,
+        id: &GitOid,
+        ceiling: Option<&FabricReadCeiling<'_>>,
+    ) -> Result<Vec<GitOid>, PackWriteError> {
+        let (object_type, body) = self.read_object_within(id, ceiling)?;
         self.references_from_body(object_type, &body)
     }
 
@@ -3136,6 +3165,135 @@ fn is_gitlink_tree_mode(mode: &[u8]) -> bool {
 impl CanonicalObjectSource for VerifiedFabricPackSource<'_> {
     fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
         let (object_type, body) = self.read_object(id)?;
+        Ok(CanonicalPackObject::new(
+            *id,
+            object_type,
+            body,
+            Vec::new(),
+            0,
+            0,
+        ))
+    }
+}
+
+/// The Database ceiling over one served pack's object-fabric reads, scaled
+/// by the verified object bytes those reads deliver
+/// (frankengit-root-doctrine-x2mv.4.53, owner ruling 2026-09-29).
+///
+/// x7ja R5 places fabric reads under the Database class, with a ceiling
+/// anchored at the session's greeting. A session that idles or stalls past
+/// that ceiling is refused with the exact Database dimension.
+///
+/// A fixed ceiling also refused every clone whose reads legitimately take
+/// longer. A 322 MB repository's verified objects are read twice, once by the
+/// closure walk and once by the planner, and a loaded host cannot do that in
+/// 15 s. So, like receive admission (frankengit-asb8), the ceiling scales with
+/// work:
+/// - each verified byte read earns the node's session work-scaling allowance
+///   (about 1 s per MiB by default, up to its hard cap);
+/// - a read that delivers nothing earns nothing;
+/// - the poll and cost quotas carry over unchanged;
+/// - the outer session deadline still bounds everything.
+struct FabricReadCeiling<'n> {
+    node: &'n OneNode,
+    scaling: GitDaemonSessionWorkScaling,
+    /// The greeting-anchored Database deadline this ceiling extends.
+    base: Instant,
+    /// The deadline the Database context is currently armed with.
+    armed: Cell<Instant>,
+    /// Verified object bytes the reads have delivered.
+    bytes: Cell<u64>,
+}
+
+impl<'n> FabricReadCeiling<'n> {
+    /// `None` when `context` has no finite deadline to extend.
+    fn new(
+        node: &'n OneNode,
+        context: &FsqliteCx,
+        scaling: GitDaemonSessionWorkScaling,
+    ) -> Option<Self> {
+        let native = context.attached_native_cx()?;
+        let left = native.budget().remaining(node.runtime.now()).deadline?;
+        let base = Instant::now().checked_add(left)?;
+        Some(Self {
+            node,
+            scaling,
+            base,
+            armed: Cell::new(base),
+            bytes: Cell::new(0),
+        })
+    }
+
+    fn note_read(&self, bytes: usize) {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.bytes.set(self.bytes.get().saturating_add(bytes));
+    }
+
+    /// Re-arms `context` when the delivered bytes have earned a later deadline
+    /// than the one it holds, before anything checkpoints the expiring one.
+    ///
+    /// Only the wall clock grows: the replacement carries the remaining poll
+    /// and cost quotas of the context it replaces. A context already stopped
+    /// is never revived, and a deadline already in the past is never granted.
+    fn rearm(&self, context: &FsqliteCx) {
+        let Some(earned) = self
+            .base
+            .checked_add(self.scaling.extension(self.bytes.get()))
+        else {
+            return;
+        };
+        let now = Instant::now();
+        if earned <= self.armed.get() || earned <= now || context.is_cancel_requested() {
+            return;
+        }
+        let Some(native) = context.attached_native_cx() else {
+            return;
+        };
+        let left = native.budget().remaining(self.node.runtime.now());
+        let floors = self
+            .node
+            .service_config
+            .runtime_budgets
+            .limits_for(AUTHORITY_CONTEXT_BUDGET_CLASS);
+        let limits = ClassLimits {
+            timeout: Some(earned - now),
+            poll_quota: left.polls.unwrap_or(u32::MAX),
+            cost_quota: left.cost,
+            priority: floors.priority,
+        };
+        context.set_native_cx(
+            self.node
+                .runtime
+                .request_cx_with_budget(limits.at(self.node.runtime.now())),
+        );
+        self.armed.set(earned);
+    }
+}
+
+/// The fabric source a served pack reads through: the verified source plus,
+/// for a served session, its work-scaled Database ceiling.
+struct CeiledFabricSource<'s, 'a> {
+    inner: &'s VerifiedFabricPackSource<'a>,
+    ceiling: Option<&'s FabricReadCeiling<'s>>,
+}
+
+impl PermittedClosureTraversalSource for CeiledFabricSource<'_, '_> {
+    fn object_format(&self) -> GitHashAlgorithm {
+        self.inner.object_format
+    }
+
+    fn selection_checkpoint(&self) -> Result<(), PackWriteError> {
+        self.inner.session_checkpoint()
+    }
+
+    fn references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
+        self.inner.object_references_within(id, self.ceiling)
+    }
+}
+
+impl CanonicalObjectSource for CeiledFabricSource<'_, '_> {
+    fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
+        let (object_type, body) = self.inner.read_object_within(id, self.ceiling)?;
         Ok(CanonicalPackObject::new(
             *id,
             object_type,
@@ -3341,7 +3499,7 @@ pub(crate) const fn selected_write_profile(ofs_delta_negotiated: bool) -> PackWr
 }
 
 fn selected_pack_ids(
-    source: &VerifiedFabricPackSource<'_>,
+    source: &impl PermittedClosureTraversalSource,
     closure: &PermittedObjectClosure,
     client_wants: Option<&[GitOid]>,
     client_haves: &[GitOid],
@@ -3386,7 +3544,7 @@ fn selected_pack_ids(
     // permitted object when a tiny wanted closure sits inside a huge P.
     for &id in included {
         source
-            .session_checkpoint()
+            .selection_checkpoint()
             .map_err(NodePackMaterializationRefusal::from)?;
         if excluded.contains(&id) {
             continue;
@@ -7792,6 +7950,16 @@ impl OneNode {
             database_exhaustion,
             session_is_live,
         };
+        // A served session's fabric reads earn Database time by the bytes they
+        // deliver (frankengit-root-doctrine-x2mv.4.53); direct in-process
+        // materialization keeps its caller's context unchanged.
+        let ceiling = session_is_live.and_then(|_| {
+            FabricReadCeiling::new(self, database_context, self.git_daemon_session_work_scaling)
+        });
+        let served = CeiledFabricSource {
+            inner: &source,
+            ceiling: ceiling.as_ref(),
+        };
         let mut ids =
             if fetch.is_some_and(|(_, request)| upload_visibility::shallow::requested(request)) {
                 // A shallow have proves only history above the client's boundary.
@@ -7799,7 +7967,7 @@ impl OneNode {
                 Vec::new()
             } else {
                 selected_pack_ids(
-                    &source,
+                    &served,
                     disclosure_closure,
                     client_wants,
                     client_haves,
@@ -7815,7 +7983,7 @@ impl OneNode {
         }
         let planner = PackPlanner::new(self.object_format, write_profile, limits.clone());
         let plan = planner
-            .plan_selected(&source, &ids, is_live)
+            .plan_selected(&served, &ids, is_live)
             .map_err(NodePackMaterializationRefusal::from)?;
         let (bytes, receipt) = PackWriter::new(limits)
             .write(&plan, is_live)
@@ -9843,6 +10011,95 @@ mod tests {
             }
         ));
         drop(pack_context);
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    /// A served pack's fabric-read ceiling (frankengit-root-doctrine-x2mv.4.53):
+    /// - reads that deliver nothing earn nothing, so the greeting-anchored
+    ///   deadline still expires with its exact dimension (the kxmb shape);
+    /// - delivered bytes extend it, carrying the poll quota over unchanged;
+    /// - a stall past the earned time still expires.
+    #[test]
+    fn a_fabric_read_ceiling_extends_only_with_delivered_bytes() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) =
+            OneNode::init(test_config(scratch.path().to_path_buf())).expect("node initializes");
+        let scaling = super::GitDaemonSessionWorkScaling::try_new(
+            Duration::from_micros(1),
+            Duration::from_secs(3600),
+        )
+        .expect("a finite scaling profile");
+        let context = |timeout| {
+            let limits = ClassLimits {
+                timeout: Some(timeout),
+                ..node
+                    .service_config
+                    .runtime_budgets
+                    .limits_for(super::AUTHORITY_CONTEXT_BUDGET_CLASS)
+            };
+            let authority = FsqliteCx::new();
+            authority.set_native_cx(
+                node.runtime
+                    .request_cx_with_budget(limits.at(node.runtime.now())),
+            );
+            authority
+        };
+        let remaining = |authority: &FsqliteCx| {
+            authority
+                .attached_native_cx()
+                .expect("native context")
+                .budget()
+                .remaining(node.runtime.now())
+        };
+
+        let idle = context(Duration::from_millis(100));
+        let ceiling =
+            super::FabricReadCeiling::new(&node, &idle, scaling).expect("finite deadline");
+        std::thread::sleep(Duration::from_millis(200));
+        ceiling.rearm(&idle);
+        assert!(matches!(
+            checkpoint_pack_context(&idle),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: Some(Exhaustion::Deadline)
+            }
+        ));
+
+        // 20 MB at 1 µs per byte earns 20 s past the 100 ms base.
+        let working = context(Duration::from_millis(100));
+        let polls_before = remaining(&working).polls;
+        let ceiling =
+            super::FabricReadCeiling::new(&node, &working, scaling).expect("finite deadline");
+        ceiling.note_read(20_000_000);
+        ceiling.rearm(&working);
+        let rearmed = remaining(&working);
+        assert!(
+            rearmed
+                .deadline
+                .is_some_and(|left| left > Duration::from_secs(10)),
+            "{rearmed:?}"
+        );
+        assert_eq!(rearmed.polls, polls_before, "only the wall clock grows");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(matches!(
+            checkpoint_pack_context(&working),
+            PackContextCheckpoint::Live
+        ));
+
+        // 200 KB earns 200 ms; a stall past it expires.
+        let stalled = context(Duration::from_millis(100));
+        let ceiling =
+            super::FabricReadCeiling::new(&node, &stalled, scaling).expect("finite deadline");
+        ceiling.note_read(200_000);
+        ceiling.rearm(&stalled);
+        std::thread::sleep(Duration::from_millis(700));
+        ceiling.rearm(&stalled);
+        assert!(matches!(
+            checkpoint_pack_context(&stalled),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: Some(Exhaustion::Deadline)
+            }
+        ));
+        drop((idle, working, stalled));
         node.shutdown().expect("node closes cleanly");
     }
 
