@@ -291,7 +291,9 @@ impl OneNode {
                 .max_commands
                 .min(AdmissionLimits::default().max_commands);
             let receive_limits = context.limits.clone();
-            let advertisement_request = self.request_context();
+            // On the session's ingress deadline, not the Database class's
+            // flat 15 s (frankengit-root-doctrine-x2mv.4.53).
+            let advertisement_request = self.session_request_context(ingress);
             let mut live = || !ingress.expired();
             let selected = drive_request_while(
                 self,

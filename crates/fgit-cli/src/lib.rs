@@ -1124,9 +1124,12 @@ fn run_export(
         resolution_input,
     )?)?)
     .map_err(CliRefusal::Node)?;
+    // The command time policy bounds the export's materialization, not the
+    // Database class's flat 15 s (frankengit-root-doctrine-x2mv.4.53).
+    let request = command_request_context(&node);
     let exported = node
         .runtime()
-        .block_on(node.authority_selected_pack_payload())
+        .block_on(node.authority_selected_pack_payload_in(&request))
         .map_err(|error| CliRefusal::ExportMaterialization(Box::new(error)))
         .and_then(|payload| {
             let bytes = payload.into_bytes();
