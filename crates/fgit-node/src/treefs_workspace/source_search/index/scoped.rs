@@ -12,7 +12,10 @@ impl OneNode {
     /// Separate scope identity prevents replacement of an unscoped index.
     /// None requires an uninitialized scoped head; a rebuild requires its exact
     /// predecessor. Source pins and finite build budgets retain their meaning.
-    #[expect(clippy::too_many_arguments, reason = "explicit coverage, source pins and predecessor")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit coverage, source pins and predecessor"
+    )]
     pub async fn build_scoped_source_index_local_in(
         &self,
         request: &NodeRequestContext,
@@ -70,7 +73,8 @@ impl OneNode {
         // SourceQuery supplies explicit inventory coverage, not a literal scan.
         // No literal matcher runs and no search result limit truncates intake.
         let query = InventoryRequest(
-            SourceQuery::new(b"index", SearchCase::Exact, scope.prefixes()).map_err(search_error)?,
+            SourceQuery::new(b"index", SearchCase::Exact, scope.prefixes())
+                .map_err(search_error)?,
         );
         let (head, forge_position_root, inventory) = match self.object_format {
             Format::Sha1 => {
@@ -111,11 +115,21 @@ impl OneNode {
             .map_err(index_error)?;
         let excluded = inventory.source.non_regular_entries;
         drop(inventory); // Source file buffers are not retained during async staging.
-        let prepared =
-            PreparedScopedLexicalIndex::new(source.clone(), scope.clone(), parts, excluded, &mut request_live)
-                .map_err(index_error)?;
-        let store = ScopedLexicalIndexStore::new(&self.authority, source.namespace, reference.clone(), scope.clone())
-            .map_err(index_error)?;
+        let prepared = PreparedScopedLexicalIndex::new(
+            source.clone(),
+            scope.clone(),
+            parts,
+            excluded,
+            &mut request_live,
+        )
+        .map_err(index_error)?;
+        let store = ScopedLexicalIndexStore::new(
+            &self.authority,
+            source.namespace,
+            reference.clone(),
+            scope.clone(),
+        )
+        .map_err(index_error)?;
         let candidate = store
             .candidate_id(&prepared, predecessor)
             .map_err(index_error)?;
@@ -204,9 +218,13 @@ impl OneNode {
                 return Err(NodeWorkspaceRefusal::RefUnavailable);
             }
         };
-        let store =
-            ScopedLexicalIndexStore::new(&self.authority, self.lexical_namespace(), reference.clone(), scope.clone())
-                .map_err(index_error)?;
+        let store = ScopedLexicalIndexStore::new(
+            &self.authority,
+            self.lexical_namespace(),
+            reference.clone(),
+            scope.clone(),
+        )
+        .map_err(index_error)?;
         let mut request_live = || workspace_request_live(request);
         let index = store
             .select_async(
@@ -266,9 +284,13 @@ impl OneNode {
         {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
-        let store =
-            ScopedLexicalIndexStore::new(&self.authority, self.lexical_namespace(), reference.clone(), scope.clone())
-                .map_err(index_error)?;
+        let store = ScopedLexicalIndexStore::new(
+            &self.authority,
+            self.lexical_namespace(),
+            reference.clone(),
+            scope.clone(),
+        )
+        .map_err(index_error)?;
         store
             .recover_async(request.authority(), candidate, minimum, limits, &mut || {
                 workspace_request_live(request)

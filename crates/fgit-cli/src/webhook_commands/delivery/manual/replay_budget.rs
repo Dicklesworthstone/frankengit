@@ -56,7 +56,10 @@ mod tests {
                 let selected = plan(automatic, None, Some(ordinal)).unwrap();
                 assert_eq!(selected.ordinal, ordinal);
                 assert_eq!(selected.invocation_limit, automatic);
-                assert_eq!(selected.ordinal <= selected.invocation_limit, ordinal <= automatic);
+                assert_eq!(
+                    selected.ordinal <= selected.invocation_limit,
+                    ordinal <= automatic
+                );
             }
             assert_eq!(plan(automatic, None, None).unwrap().ordinal, 1);
         }
@@ -64,16 +67,22 @@ mod tests {
 
     #[test]
     fn replay_after_exhaustion_grants_only_its_next_cumulative_ordinal() {
-        assert_eq!(plan(5, Some(5), None).unwrap(), AttemptPlan {
-            ordinal: 6,
-            invocation_limit: 6,
-        });
+        assert_eq!(
+            plan(5, Some(5), None).unwrap(),
+            AttemptPlan {
+                ordinal: 6,
+                invocation_limit: 6,
+            }
+        );
         for automatic in 1..=16 {
             for previous in 1..16 {
                 let selected = plan(automatic, Some(previous), None).unwrap();
                 assert_eq!(selected.ordinal, previous + 1);
                 assert_eq!(selected.invocation_limit, automatic.max(previous + 1));
-                assert_eq!(selected, plan(automatic, Some(previous), Some(previous + 1)).unwrap());
+                assert_eq!(
+                    selected,
+                    plan(automatic, Some(previous), Some(previous + 1)).unwrap()
+                );
             }
         }
     }
@@ -85,7 +94,11 @@ mod tests {
         }
         assert_eq!(plan(5, Some(15), None).unwrap().ordinal, 16);
         assert!(plan(5, Some(16), None).is_err());
-        assert!(plan(5, Some(u32::MAX), None).unwrap_err().contains("overflow"));
+        assert!(
+            plan(5, Some(u32::MAX), None)
+                .unwrap_err()
+                .contains("overflow")
+        );
         assert!(plan(5, Some(0), None).is_err());
     }
 

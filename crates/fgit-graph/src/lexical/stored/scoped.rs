@@ -28,11 +28,18 @@ impl LexicalScope {
         for path in prefixes {
             if !path_valid(path)
                 || path.split(|b| *b == b'/').count() > 64
-                || path.split(|b| *b == b'/').any(|p| p.eq_ignore_ascii_case(b".git"))
+                || path
+                    .split(|b| *b == b'/')
+                    .any(|p| p.eq_ignore_ascii_case(b".git"))
             {
                 return Err(LexicalError::Invalid("index scope path").into());
             }
-            bounded_add(&mut bytes, path.len(), MAX_PREFIX_BYTES, "index scope bytes")?;
+            bounded_add(
+                &mut bytes,
+                path.len(),
+                MAX_PREFIX_BYTES,
+                "index scope bytes",
+            )?;
         }
         // Validate before copying. Input duplicates still consume admission
         // budgets. Collapse descendants, not similarly spelled siblings.
@@ -40,7 +47,10 @@ impl LexicalScope {
         ordered.sort();
         let mut canonical: Vec<Vec<u8>> = Vec::new();
         for path in ordered {
-            if !canonical.iter().any(|prefix| super::super::under(&path, prefix)) {
+            if !canonical
+                .iter()
+                .any(|prefix| super::super::under(&path, prefix))
+            {
                 canonical.push(path);
             }
         }
@@ -50,7 +60,10 @@ impl LexicalScope {
             encoded.extend_from_slice(&(prefix.len() as u32).to_be_bytes());
             encoded.extend_from_slice(prefix);
         }
-        Ok(Self { prefixes: canonical, digest: fgit_crypto::sha256_digest(&encoded) })
+        Ok(Self {
+            prefixes: canonical,
+            digest: fgit_crypto::sha256_digest(&encoded),
+        })
     }
     #[must_use]
     pub fn prefixes(&self) -> &[Vec<u8>] {
@@ -62,7 +75,9 @@ impl LexicalScope {
     }
     #[must_use]
     pub fn includes(&self, path: &[u8]) -> bool {
-        self.prefixes.iter().any(|prefix| super::super::under(path, prefix))
+        self.prefixes
+            .iter()
+            .any(|prefix| super::super::under(path, prefix))
     }
     fn view(&self) -> Result<GraphViewId, IndexError> {
         // Lowercase base32 retains ALL 256 digest bits in a bounded ASCII slug.
@@ -115,13 +130,21 @@ impl PreparedScopedLexicalIndex {
         Ok(Self { scope, inner })
     }
     #[must_use]
-    pub const fn scope(&self) -> &LexicalScope { &self.scope }
+    pub const fn scope(&self) -> &LexicalScope {
+        &self.scope
+    }
     #[must_use]
-    pub fn source(&self) -> &LexicalSource { self.inner.source() }
+    pub fn source(&self) -> &LexicalSource {
+        self.inner.source()
+    }
     #[must_use]
-    pub fn document_count(&self) -> usize { self.inner.document_count() }
+    pub fn document_count(&self) -> usize {
+        self.inner.document_count()
+    }
     #[must_use]
-    pub fn encoded_bytes(&self) -> usize { self.inner.encoded_bytes() }
+    pub fn encoded_bytes(&self) -> usize {
+        self.inner.encoded_bytes()
+    }
 }
 
 /// A scoped selection never converts implicitly into a whole-tree selection.
@@ -132,11 +155,17 @@ pub struct ScopedLexicalSelection {
 }
 impl ScopedLexicalSelection {
     #[must_use]
-    pub fn source(&self) -> &LexicalSource { self.inner.source() }
+    pub fn source(&self) -> &LexicalSource {
+        self.inner.source()
+    }
     #[must_use]
-    pub fn activation(&self) -> &GenerationActivation { self.inner.activation() }
+    pub fn activation(&self) -> &GenerationActivation {
+        self.inner.activation()
+    }
     #[must_use]
-    pub fn selected_head(&self) -> &GenerationActivation { self.inner.selected_head() }
+    pub fn selected_head(&self) -> &GenerationActivation {
+        self.inner.selected_head()
+    }
 }
 
 /// `index.results.complete` means completion WITHIN this explicit coverage and
@@ -167,7 +196,9 @@ impl<'a, S> ScopedLexicalIndexStore<'a, S> {
         Ok(Self { scope, inner })
     }
     fn agrees(&self, scope: &LexicalScope) -> Result<(), IndexError> {
-        if &self.scope != scope { return Err(IndexError::SourceMismatch); }
+        if &self.scope != scope {
+            return Err(IndexError::SourceMismatch);
+        }
         Ok(())
     }
     pub fn candidate_id(
@@ -185,39 +216,61 @@ impl<'a, S> ScopedLexicalIndexStore<'a, S> {
     ) -> Result<ScopedLexicalReport, IndexError> {
         for hit in &index.results.hits {
             check(live)?;
-            if !self.scope.includes(&hit.path) { return Err(IndexError::SourceMismatch); }
+            if !self.scope.includes(&hit.path) {
+                return Err(IndexError::SourceMismatch);
+            }
         }
         check(live)?;
-        Ok(ScopedLexicalReport { scope: self.scope.clone(), index })
+        Ok(ScopedLexicalReport {
+            scope: self.scope.clone(),
+            index,
+        })
     }
 }
 
 impl<S: AuthorityStore> ScopedLexicalIndexStore<'_, S> {
     pub fn publish(
-        &self, prepared: &PreparedScopedLexicalIndex, predecessor: Option<GraphGenerationId>,
+        &self,
+        prepared: &PreparedScopedLexicalIndex,
+        predecessor: Option<GraphGenerationId>,
         live: &mut impl FnMut() -> bool,
     ) -> Result<GenerationActivation, IndexError> {
         self.agrees(&prepared.scope)?;
         self.inner.publish(&prepared.inner, predecessor, live)
     }
     pub fn select(
-        &self, expected: Option<&GenerationActivation>, minimum: Option<&GenerationActivation>,
-        limits: LexicalReadLimits, live: &mut impl FnMut() -> bool,
+        &self,
+        expected: Option<&GenerationActivation>,
+        minimum: Option<&GenerationActivation>,
+        limits: LexicalReadLimits,
+        live: &mut impl FnMut() -> bool,
     ) -> Result<ScopedLexicalSelection, IndexError> {
-        Ok(ScopedLexicalSelection { scope: self.scope.clone(),
-            inner: self.inner.select(expected, minimum, limits, live)? })
+        Ok(ScopedLexicalSelection {
+            scope: self.scope.clone(),
+            inner: self.inner.select(expected, minimum, limits, live)?,
+        })
     }
     pub fn search(
-        &self, selection: &ScopedLexicalSelection, query: &LexicalQuery, after: Option<u64>,
-        reads: LexicalReadLimits, limits: LexicalQueryLimits, live: &mut impl FnMut() -> bool,
+        &self,
+        selection: &ScopedLexicalSelection,
+        query: &LexicalQuery,
+        after: Option<u64>,
+        reads: LexicalReadLimits,
+        limits: LexicalQueryLimits,
+        live: &mut impl FnMut() -> bool,
     ) -> Result<ScopedLexicalReport, IndexError> {
         self.agrees(&selection.scope)?;
-        let report = self.inner.search(&selection.inner, query, after, reads, limits, live)?;
+        let report = self
+            .inner
+            .search(&selection.inner, query, after, reads, limits, live)?;
         self.report(report, live)
     }
     pub fn recover(
-        &self, candidate: GraphGenerationId, minimum: Option<&GenerationActivation>,
-        limits: GenerationReadLimits, live: &mut impl FnMut() -> bool,
+        &self,
+        candidate: GraphGenerationId,
+        minimum: Option<&GenerationActivation>,
+        limits: GenerationReadLimits,
+        live: &mut impl FnMut() -> bool,
     ) -> Result<crate::GenerationRecovery, IndexError> {
         self.inner.recover(candidate, minimum, limits, live)
     }
@@ -225,34 +278,61 @@ impl<S: AuthorityStore> ScopedLexicalIndexStore<'_, S> {
 
 impl<S: AsyncAuthorityStore> ScopedLexicalIndexStore<'_, S> {
     pub async fn publish_async(
-        &self, cx: &S::Context, prepared: &PreparedScopedLexicalIndex,
-        predecessor: Option<GraphGenerationId>, live: &mut (impl FnMut() -> bool + Send),
+        &self,
+        cx: &S::Context,
+        prepared: &PreparedScopedLexicalIndex,
+        predecessor: Option<GraphGenerationId>,
+        live: &mut (impl FnMut() -> bool + Send),
     ) -> Result<GenerationActivation, IndexError> {
         self.agrees(&prepared.scope)?;
-        self.inner.publish_async(cx, &prepared.inner, predecessor, live).await
+        self.inner
+            .publish_async(cx, &prepared.inner, predecessor, live)
+            .await
     }
     pub async fn select_async(
-        &self, cx: &S::Context, expected: Option<&GenerationActivation>,
-        minimum: Option<&GenerationActivation>, limits: LexicalReadLimits,
+        &self,
+        cx: &S::Context,
+        expected: Option<&GenerationActivation>,
+        minimum: Option<&GenerationActivation>,
+        limits: LexicalReadLimits,
         live: &mut (impl FnMut() -> bool + Send),
     ) -> Result<ScopedLexicalSelection, IndexError> {
-        Ok(ScopedLexicalSelection { scope: self.scope.clone(),
-            inner: self.inner.select_async(cx, expected, minimum, limits, live).await? })
+        Ok(ScopedLexicalSelection {
+            scope: self.scope.clone(),
+            inner: self
+                .inner
+                .select_async(cx, expected, minimum, limits, live)
+                .await?,
+        })
     }
     pub async fn search_async(
-        &self, cx: &S::Context, selection: &ScopedLexicalSelection, query: &LexicalQuery,
-        after: Option<u64>, reads: LexicalReadLimits, limits: LexicalQueryLimits,
+        &self,
+        cx: &S::Context,
+        selection: &ScopedLexicalSelection,
+        query: &LexicalQuery,
+        after: Option<u64>,
+        reads: LexicalReadLimits,
+        limits: LexicalQueryLimits,
         live: &mut (impl FnMut() -> bool + Send),
     ) -> Result<ScopedLexicalReport, IndexError> {
         self.agrees(&selection.scope)?;
-        let report = self.inner.search_async(cx, &selection.inner, query, after, reads, limits, live).await?;
+        let report = self
+            .inner
+            .search_async(cx, &selection.inner, query, after, reads, limits, live)
+            .await?;
         self.report(report, live)
     }
     pub async fn recover_async(
-        &self, cx: &S::Context, candidate: GraphGenerationId, minimum: Option<&GenerationActivation>,
-        limits: GenerationReadLimits, live: &mut (impl FnMut() -> bool + Send),
+        &self,
+        cx: &S::Context,
+        candidate: GraphGenerationId,
+        minimum: Option<&GenerationActivation>,
+        limits: GenerationReadLimits,
+        live: &mut (impl FnMut() -> bool + Send),
     ) -> Result<crate::GenerationRecovery, IndexError> {
-        self.inner.recover_async(cx, candidate, minimum, limits, live).await
+        self.inner
+            .recover_async(cx, candidate, minimum, limits, live)
+            .await
     }
 }
 

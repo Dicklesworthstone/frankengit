@@ -130,7 +130,11 @@ pub(super) fn append_sources(
     live: &mut impl FnMut() -> bool,
 ) -> Result<(), ApiError> {
     check(live)?;
-    append(out, "\"source_mode\":\"revalidated\",\"current_source\":", maximum)?;
+    append(
+        out,
+        "\"source_mode\":\"revalidated\",\"current_source\":",
+        maximum,
+    )?;
     append(out, &source_json(current), maximum)?;
     append(out, ",\"indexed_source\":", maximum)?;
     append(out, &source_json(indexed), maximum)?;

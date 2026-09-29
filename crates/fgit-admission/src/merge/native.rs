@@ -520,12 +520,16 @@ where
                 return Err(ProjectionFailure::Refuse(code).into());
             }
             let closure = match intent.method() {
-                NativeMergeMethod::MergeCommit => projection
-                    .validate_merge_async(store, cx, &basis, &authenticated, intent)
-                    .await?,
-                NativeMergeMethod::FastForwardOnly => projection
-                    .validate_fast_forward_async(store, cx, &basis, &authenticated, intent)
-                    .await?,
+                NativeMergeMethod::MergeCommit => {
+                    projection
+                        .validate_merge_async(store, cx, &basis, &authenticated, intent)
+                        .await?
+                }
+                NativeMergeMethod::FastForwardOnly => {
+                    projection
+                        .validate_fast_forward_async(store, cx, &basis, &authenticated, intent)
+                        .await?
+                }
             };
             // A self-consistent caller-supplied set is not native-object
             // evidence. Require the exact independently verified closure and

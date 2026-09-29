@@ -144,11 +144,28 @@ impl LocalSearch for InventoryRequest {
 // Full refresh keeps its existing, unscoped coverage and call contract.
 #[expect(clippy::too_many_arguments, reason = "shared native inventory inputs")]
 fn discover<A: GitHashAlgorithm, S: ObjectSource<A>>(
-    base: &BaseView<A>, source: &S, capability: &mut TreeCapability,
-    now: u64, limits: SearchLimits, cancelled: &dyn Fn() -> bool,
-    directory: Option<&TreePath>, depth: usize, found: &mut Discovery<A>,
+    base: &BaseView<A>,
+    source: &S,
+    capability: &mut TreeCapability,
+    now: u64,
+    limits: SearchLimits,
+    cancelled: &dyn Fn() -> bool,
+    directory: Option<&TreePath>,
+    depth: usize,
+    found: &mut Discovery<A>,
 ) -> Result<(), SearchError> {
-    discover_selected(&[], base, source, capability, now, limits, cancelled, directory, depth, found)
+    discover_selected(
+        &[],
+        base,
+        source,
+        capability,
+        now,
+        limits,
+        cancelled,
+        directory,
+        depth,
+        found,
+    )
 }
 
 #[expect(
@@ -187,9 +204,11 @@ fn discover_selected<A: GitHashAlgorithm, S: ObjectSource<A>>(
         .map_err(|error| SearchError::Base(Box::new(BaseError::Path(error))))?;
         match entry {
             BaseEntry::Directory { .. } => {
-                if !prefixes.is_empty() && !prefixes.iter().any(|prefix| {
-                    path.starts_with(prefix) || prefix.starts_with(&path)
-                }) {
+                if !prefixes.is_empty()
+                    && !prefixes
+                        .iter()
+                        .any(|prefix| path.starts_with(prefix) || prefix.starts_with(&path))
+                {
                     continue;
                 }
                 discover_selected(

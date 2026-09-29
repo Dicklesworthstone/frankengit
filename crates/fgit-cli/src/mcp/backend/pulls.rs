@@ -1,6 +1,6 @@
 //! PR metadata and merge receipts from canonical, current-disclosure-filtered reads.
-use super::*;
 use super::issues::rendered;
+use super::*;
 use fgit_forge::event::{
     NativeMerge,
     pull_request::{PullRequestAction, PullRequestData},

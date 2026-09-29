@@ -14,7 +14,9 @@ use fgit_pack::{
     CachedResolver, DeltaObject, NativeChecksumVerifier, PackError, PackLimits, PackObject,
     ResolutionBudget, read_verified_pack,
 };
-use fgit_treefs::integrity::{GraphLimits, GraphRefusal, GraphReport, ObjectGraphAudit, ObjectKind};
+use fgit_treefs::integrity::{
+    GraphLimits, GraphRefusal, GraphReport, ObjectGraphAudit, ObjectKind,
+};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName};
 
 /// Payload and work limits are independent. They are not a total-process RSS limit.
@@ -60,7 +62,9 @@ impl fmt::Display for BundleVerifyError {
             Self::Pack(error) => write!(out, "bundle_pack: {error}"),
             Self::Graph(error) => write!(out, "bundle_graph: {error}"),
             Self::DuplicateObject(id) => write!(out, "duplicate_bundle_object: {id}"),
-            Self::ResolutionIncomplete => out.write_str("bundle_delta_base_missing_or_unresolvable"),
+            Self::ResolutionIncomplete => {
+                out.write_str("bundle_delta_base_missing_or_unresolvable")
+            }
             Self::Allocation => out.write_str("bundle_allocation_refused"),
         }
     }
@@ -84,33 +88,58 @@ pub struct VerifiedGitBundle {
 }
 impl VerifiedGitBundle {
     #[must_use]
-    pub const fn format(&self) -> GitHashAlgorithm { self.format }
+    pub const fn format(&self) -> GitHashAlgorithm {
+        self.format
+    }
     #[must_use]
-    pub const fn bytes(&self) -> usize { self.bytes }
+    pub const fn bytes(&self) -> usize {
+        self.bytes
+    }
     #[must_use]
-    pub const fn sha256(&self) -> &[u8; 32] { &self.sha256 }
+    pub const fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
     #[must_use]
-    pub const fn pack_bytes(&self) -> usize { self.pack_bytes }
+    pub const fn pack_bytes(&self) -> usize {
+        self.pack_bytes
+    }
     #[must_use]
-    pub const fn pack_checksum(&self) -> GitOid { self.pack_checksum }
+    pub const fn pack_checksum(&self) -> GitOid {
+        self.pack_checksum
+    }
     #[must_use]
-    pub const fn advertised_head(&self) -> Option<GitOid> { self.advertised_head }
+    pub const fn advertised_head(&self) -> Option<GitOid> {
+        self.advertised_head
+    }
     #[must_use]
-    pub fn references(&self) -> &BTreeMap<RefName, GitOid> { &self.references }
+    pub fn references(&self) -> &BTreeMap<RefName, GitOid> {
+        &self.references
+    }
     #[must_use]
-    pub const fn graph(&self) -> &GraphReport { &self.graph }
+    pub const fn graph(&self) -> &GraphReport {
+        &self.graph
+    }
     #[must_use]
-    pub const fn delta_objects(&self) -> usize { self.delta_objects }
+    pub const fn delta_objects(&self) -> usize {
+        self.delta_objects
+    }
     #[must_use]
-    pub const fn resolution_passes(&self) -> usize { self.resolution_passes }
+    pub const fn resolution_passes(&self) -> usize {
+        self.resolution_passes
+    }
 }
 
 fn checkpoint(live: &mut impl FnMut() -> bool) -> Result<(), BundleVerifyError> {
-    if live() { Ok(()) } else { Err(BundleVerifyError::Stopped) }
+    if live() {
+        Ok(())
+    } else {
+        Err(BundleVerifyError::Stopped)
+    }
 }
 const fn offset(object: &PackObject) -> u64 {
     match object {
-        PackObject::Base { offset, .. } | PackObject::TypedBase { offset, .. }
+        PackObject::Base { offset, .. }
+        | PackObject::TypedBase { offset, .. }
         | PackObject::Delta(DeltaObject { offset, .. }) => *offset,
     }
 }
@@ -136,7 +165,9 @@ fn resolve(
     let mut completed = BTreeSet::new();
     let mut budget = ResolutionBudget::new();
     let mut payload = 0_u64;
-    if objects.is_empty() { return Ok((verified, 0)); }
+    if objects.is_empty() {
+        return Ok((verified, 0));
+    }
     // One pass establishes base identities; at most one additional pass per
     // dependency level is necessary. Count also bounds absurd caller depths.
     for pass in 0..=limits.pack.max_delta_depth.min(objects.len()) {
@@ -148,15 +179,23 @@ fn resolve(
             let mut resolver = result.map_err(BundleVerifyError::Pack)?;
             for (index, object) in objects.iter().enumerate() {
                 checkpoint(live)?;
-                if completed.contains(&index) { continue; }
-                let result = resolver.resolve_offset_typed_with_budget(offset(object), &mut budget, live);
+                if completed.contains(&index) {
+                    continue;
+                }
+                let result =
+                    resolver.resolve_offset_typed_with_budget(offset(object), &mut budget, live);
                 checkpoint(live)?;
                 match result {
                     Ok((kind, body)) => {
-                        payload = payload.checked_add(body.len() as u64)
+                        payload = payload
+                            .checked_add(body.len() as u64)
                             .filter(|value| *value <= limits.graph.max_payload_bytes)
-                            .ok_or(BundleVerifyError::Graph(GraphRefusal::Limit("payload bytes")))?;
-                        newly_resolved.try_reserve(1).map_err(|_| BundleVerifyError::Allocation)?;
+                            .ok_or(BundleVerifyError::Graph(GraphRefusal::Limit(
+                                "payload bytes",
+                            )))?;
+                        newly_resolved
+                            .try_reserve(1)
+                            .map_err(|_| BundleVerifyError::Allocation)?;
                         newly_resolved.push((index, kind, body));
                     }
                     Err(PackError::MissingDeltaBase) => {}
@@ -164,7 +203,9 @@ fn resolve(
                 }
             }
         }
-        if newly_resolved.is_empty() { return Err(BundleVerifyError::ResolutionIncomplete); }
+        if newly_resolved.is_empty() {
+            return Err(BundleVerifyError::ResolutionIncomplete);
+        }
         for (index, kind, body) in newly_resolved {
             checkpoint(live)?;
             let id = git_object_id(format, kind, &body);
@@ -175,7 +216,9 @@ fn resolve(
             set_id(&mut objects[index], id);
             completed.insert(index);
         }
-        if completed.len() == objects.len() { return Ok((verified, pass + 1)); }
+        if completed.len() == objects.len() {
+            return Ok((verified, pass + 1));
+        }
     }
     Err(BundleVerifyError::ResolutionIncomplete)
 }
@@ -191,7 +234,9 @@ pub fn verify_git_bundle(
 ) -> Result<VerifiedGitBundle, BundleVerifyError> {
     let mut stopped = false;
     let mut live = || {
-        if !stopped && !allow_work() { stopped = true; }
+        if !stopped && !allow_work() {
+            stopped = true;
+        }
         !stopped
     };
     checkpoint(&mut live)?;
@@ -201,24 +246,37 @@ pub fn verify_git_bundle(
     if envelope.references().len() > limits.graph.max_references {
         return Err(BundleVerifyError::Graph(GraphRefusal::Limit("references")));
     }
-    let references = envelope.references().iter()
-        .map(|row| (row.name().clone(), *row.target())).collect();
+    let references = envelope
+        .references()
+        .iter()
+        .map(|row| (row.name().clone(), *row.target()))
+        .collect();
     // Apply the tighter caller-selected object count before the pack reader's
     // table reservation or inflation. The graph may deliberately be narrower.
     let mut pack_limits = limits.pack.clone();
-    pack_limits.max_entries = pack_limits.max_entries.min(
-        u32::try_from(limits.graph.max_objects).unwrap_or(u32::MAX),
+    pack_limits.max_entries = pack_limits
+        .max_entries
+        .min(u32::try_from(limits.graph.max_objects).unwrap_or(u32::MAX));
+    let result = read_verified_pack(
+        envelope.pack_bytes(),
+        envelope.format(),
+        &pack_limits,
+        &mut live,
+        &NativeChecksumVerifier,
     );
-    let result = read_verified_pack(envelope.pack_bytes(), envelope.format(), &pack_limits,
-        &mut live, &NativeChecksumVerifier);
     checkpoint(&mut live)?;
     let pack = result.map_err(BundleVerifyError::Pack)?;
     if pack.entries().len() > limits.graph.max_objects {
         return Err(BundleVerifyError::Graph(GraphRefusal::Limit("objects")));
     }
     let pack_checksum = pack.trailer;
-    let objects = pack.into_scalar_objects(|_| None).map_err(BundleVerifyError::Pack)?;
-    let delta_objects = objects.iter().filter(|object| matches!(object, PackObject::Delta(_))).count();
+    let objects = pack
+        .into_scalar_objects(|_| None)
+        .map_err(BundleVerifyError::Pack)?;
+    let delta_objects = objects
+        .iter()
+        .filter(|object| matches!(object, PackObject::Delta(_)))
+        .count();
     let (verified, resolution_passes) = resolve(objects, envelope.format(), limits, &mut live)?;
     let ids = verified.keys().copied().collect();
     let result = ObjectGraphAudit::new(&ids, envelope.format(), limits.graph, &mut live);
@@ -235,9 +293,16 @@ pub fn verify_git_bundle(
     let sha256 = sha256_digest(input);
     checkpoint(&mut live)?;
     Ok(VerifiedGitBundle {
-        format: envelope.format(), bytes: input.len(), sha256,
-        pack_bytes: envelope.pack_bytes().len(), pack_checksum,
-        advertised_head: envelope.head(), references, graph, delta_objects, resolution_passes,
+        format: envelope.format(),
+        bytes: input.len(),
+        sha256,
+        pack_bytes: envelope.pack_bytes().len(),
+        pack_checksum,
+        advertised_head: envelope.head(),
+        references,
+        graph,
+        delta_objects,
+        resolution_passes,
     })
 }
 

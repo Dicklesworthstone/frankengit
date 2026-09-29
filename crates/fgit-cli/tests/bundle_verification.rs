@@ -35,15 +35,19 @@ impl Fixture {
             .unwrap()
     }
     fn write(&self, hex: &str) -> Vec<u8> {
-        let bytes: Vec<_> = hex.as_bytes().chunks_exact(2).map(|pair| {
-            u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()
-        }).collect();
+        let bytes: Vec<_> = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
         std::fs::write(self.0.join("source.bundle"), &bytes).unwrap();
         bytes
     }
 }
 impl Drop for Fixture {
-    fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); }
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
 }
 
 #[test]
@@ -52,7 +56,12 @@ fn binary_verifies_both_formats_without_git_credentials_or_node_storage() {
         let fixture = Fixture::new();
         let original = fixture.write(encoded);
         let result = fixture.run(&["bundle", "verify", "source.bundle"]);
-        assert_eq!(result.status.code(), Some(0), "{}", String::from_utf8_lossy(&result.stderr));
+        assert_eq!(
+            result.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         assert!(result.stderr.is_empty());
         let text = String::from_utf8(result.stdout).unwrap();
         assert_eq!(text.lines().count(), 1);
@@ -61,7 +70,10 @@ fn binary_verifies_both_formats_without_git_credentials_or_node_storage() {
         assert!(text.contains("\"object_graph_verified\":true"));
         assert!(text.contains("\"repository_opened\":false"));
         assert!(text.contains("\"origin_authenticated\":false"));
-        assert_eq!(std::fs::read(fixture.0.join("source.bundle")).unwrap(), original);
+        assert_eq!(
+            std::fs::read(fixture.0.join("source.bundle")).unwrap(),
+            original
+        );
         assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 1);
     }
 }
@@ -94,8 +106,17 @@ fn binary_help_and_literal_path_require_no_repository_configuration() {
         assert!(String::from_utf8_lossy(&result.stdout).contains("fg bundle verify"));
     }
     fixture.write(SHA256);
-    std::fs::rename(fixture.0.join("source.bundle"), fixture.0.join("--literal.bundle")).unwrap();
+    std::fs::rename(
+        fixture.0.join("source.bundle"),
+        fixture.0.join("--literal.bundle"),
+    )
+    .unwrap();
     let result = fixture.run(&["bundle", "verify", "--", "--literal.bundle"]);
-    assert_eq!(result.status.code(), Some(0), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 1);
 }

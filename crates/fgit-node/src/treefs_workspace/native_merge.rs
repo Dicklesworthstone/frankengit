@@ -533,10 +533,14 @@ impl NativeMergeProjection<FsqliteAuthorityStore> for NodeNativeMergeProjection<
                 }
                 let closure = result?;
                 if intent.method() == NativeMergeMethod::FastForwardOnly
-                    && !closure.objects.is_subset(selected.selected_closure().closure().objects())
+                    && !closure
+                        .objects
+                        .is_subset(selected.selected_closure().closure().objects())
                 {
                     // A fast-forward cannot admit merely staged dependencies.
-                    return Err(ProjectionFailure::Refuse(RefusalCode::ObjectClosureIncomplete));
+                    return Err(ProjectionFailure::Refuse(
+                        RefusalCode::ObjectClosureIncomplete,
+                    ));
                 }
                 if let Some((_, expected_tree, expected_base)) = self.workspace {
                     if merge.target_tip_before != expected_base {

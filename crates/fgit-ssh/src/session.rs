@@ -11,9 +11,9 @@ mod negotiation;
 mod rekey;
 use rekey::{RekeyPhase, RekeyState};
 #[cfg(test)]
-mod protocol_tests;
-#[cfg(test)]
 mod ingress_tests;
+#[cfg(test)]
+mod protocol_tests;
 
 use core::fmt::{self, Display, Formatter};
 use std::sync::Arc;
@@ -789,11 +789,11 @@ impl SshServerSession {
             }
             msg::CHANNEL_REQUEST => {
                 let _local_channel = reader.read_u32()?; // validated before dispatch
-                let recipient_channel = self.client_channel_id.ok_or_else(|| {
-                    SshSessionError::ProtocolViolation {
-                        reason: "channel request without an open channel".to_owned(),
-                    }
-                })?;
+                let recipient_channel =
+                    self.client_channel_id
+                        .ok_or_else(|| SshSessionError::ProtocolViolation {
+                            reason: "channel request without an open channel".to_owned(),
+                        })?;
                 let request_type = reader.read_utf8()?;
                 let want_reply = reader.read_bool()?;
 

@@ -19,9 +19,9 @@ pub use stored::{
     LexicalReuse, LexicalSelection, LexicalSource, PreparedLexicalIndex, RefreshDocument,
 };
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod long_word_tests;
+#[cfg(test)]
+mod tests;
 
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_types::{

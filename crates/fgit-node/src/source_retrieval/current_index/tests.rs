@@ -11,9 +11,8 @@ use fgit_types::{
 
 fn source(label: &[u8]) -> LexicalSource {
     let schema = |family| SchemaId::new(SchemaFamily::from_static(family), 1, 0);
-    let id = |domain, family| {
-        internal_object_id(domain, schema(family), CodecVersion::new(1, 0), label)
-    };
+    let id =
+        |domain, family| internal_object_id(domain, schema(family), CodecVersion::new(1, 0), label);
     LexicalSource {
         namespace: LexicalNamespace {
             tenant: TenantId::from_bytes([1; 16]),

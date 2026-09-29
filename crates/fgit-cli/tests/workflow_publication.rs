@@ -29,5 +29,8 @@ fn event_dispatch_preserves_child_custody_publication_and_no_replay_boundaries()
         .arg(env!("CARGO_BIN_EXE_fg"))
         .status()
         .expect("start the required native workflow dispatch campaign");
-    assert!(status.success(), "workflow dispatch campaign failed: {status}");
+    assert!(
+        status.success(),
+        "workflow dispatch campaign failed: {status}"
+    );
 }

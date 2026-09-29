@@ -98,7 +98,12 @@ impl OneNode {
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
-        selected: (RepositoryAuthorityHeadId, RepositoryCommitId, Digest, GitOid),
+        selected: (
+            RepositoryAuthorityHeadId,
+            RepositoryCommitId,
+            Digest,
+            GitOid,
+        ),
     ) -> Result<data::Source, Failure> {
         let (head, rcr, forge, commit) = selected;
         let query = SourceBrowseQuery {
@@ -127,7 +132,9 @@ impl OneNode {
             || native.root_tree.algorithm() != self.object_format
             || !matches!(native.content, SourceBrowseContent::Directory { .. })
         {
-            return Err(Failure::Index(data::Error::Invalid("current native source")));
+            return Err(Failure::Index(data::Error::Invalid(
+                "current native source",
+            )));
         }
         Ok(data::Source {
             tenant: self.tenant_id,
@@ -151,10 +158,14 @@ mod tests {
     use fgit_types::{CodecVersion, RepositoryId, RepositoryIncarnationId, TenantId};
 
     fn source(label: &[u8]) -> data::Source {
-        let id = |domain, family| internal_object_id(
-            domain, SchemaId::new(SchemaFamily::from_static(family), 1, 0),
-            CodecVersion::new(1, 0), label,
-        );
+        let id = |domain, family| {
+            internal_object_id(
+                domain,
+                SchemaId::new(SchemaFamily::from_static(family), 1, 0),
+                CodecVersion::new(1, 0),
+                label,
+            )
+        };
         data::Source {
             tenant: TenantId::from_bytes([1; 16]),
             repository: RepositoryId::from_bytes([2; 16]),
@@ -162,17 +173,29 @@ mod tests {
             format: Format::Sha1,
             reference: RefName::try_new(b"refs/heads/main").unwrap(),
             head: RepositoryAuthorityHeadId::from_internal_object_id(id(
-                IdentityDomain::RepositoryAuthorityHead, "repository-authority-head",
-            )).unwrap(),
+                IdentityDomain::RepositoryAuthorityHead,
+                "repository-authority-head",
+            ))
+            .unwrap(),
             rcr: RepositoryCommitId::from_internal_object_id(id(
-                IdentityDomain::RepositoryCommitRecord, "repository-commit-record",
-            )).unwrap(),
+                IdentityDomain::RepositoryCommitRecord,
+                "repository-commit-record",
+            ))
+            .unwrap(),
             forge: {
                 let value = id(IdentityDomain::MerkleLeaf, "test-forge");
                 Digest::new(value.algorithm(), *value.digest())
             },
-            commit: fgit_crypto::git_object_id(Format::Sha1, fgit_crypto::GitObjectKind::Commit, b"commit"),
-            tree: fgit_crypto::git_object_id(Format::Sha1, fgit_crypto::GitObjectKind::Tree, b"tree"),
+            commit: fgit_crypto::git_object_id(
+                Format::Sha1,
+                fgit_crypto::GitObjectKind::Commit,
+                b"commit",
+            ),
+            tree: fgit_crypto::git_object_id(
+                Format::Sha1,
+                fgit_crypto::GitObjectKind::Tree,
+                b"tree",
+            ),
         }
     }
 
@@ -194,21 +217,47 @@ mod tests {
     fn all_namespace_ref_and_native_identity_coordinates_are_required() {
         let before = source(b"before");
         let mut changed = Vec::new();
-        let mut s = source(b"after"); s.tenant = TenantId::from_bytes([8; 16]); changed.push(s);
-        let mut s = source(b"after"); s.repository = RepositoryId::from_bytes([8; 16]); changed.push(s);
-        let mut s = source(b"after"); s.incarnation = RepositoryIncarnationId::from_bytes([8; 16]); changed.push(s);
-        let mut s = source(b"after"); s.reference = RefName::try_new(b"refs/heads/other").unwrap(); changed.push(s);
-        let mut s = source(b"after"); s.format = Format::Sha256; changed.push(s);
-        let mut s = source(b"after"); s.commit = fgit_crypto::git_object_id(Format::Sha1, fgit_crypto::GitObjectKind::Commit, b"other commit"); changed.push(s);
-        let mut s = source(b"after"); s.tree = fgit_crypto::git_object_id(Format::Sha1, fgit_crypto::GitObjectKind::Tree, b"other tree"); changed.push(s);
-        for s in changed { assert!(!revalidates(&before, &s)); }
+        let mut s = source(b"after");
+        s.tenant = TenantId::from_bytes([8; 16]);
+        changed.push(s);
+        let mut s = source(b"after");
+        s.repository = RepositoryId::from_bytes([8; 16]);
+        changed.push(s);
+        let mut s = source(b"after");
+        s.incarnation = RepositoryIncarnationId::from_bytes([8; 16]);
+        changed.push(s);
+        let mut s = source(b"after");
+        s.reference = RefName::try_new(b"refs/heads/other").unwrap();
+        changed.push(s);
+        let mut s = source(b"after");
+        s.format = Format::Sha256;
+        changed.push(s);
+        let mut s = source(b"after");
+        s.commit = fgit_crypto::git_object_id(
+            Format::Sha1,
+            fgit_crypto::GitObjectKind::Commit,
+            b"other commit",
+        );
+        changed.push(s);
+        let mut s = source(b"after");
+        s.tree = fgit_crypto::git_object_id(
+            Format::Sha1,
+            fgit_crypto::GitObjectKind::Tree,
+            b"other tree",
+        );
+        changed.push(s);
+        for s in changed {
+            assert!(!revalidates(&before, &s));
+        }
     }
 
     #[test]
     fn one_head_cannot_have_two_rcr_or_forge_identities() {
         let before = source(b"before");
-        let mut different_rcr = before.clone(); different_rcr.rcr = source(b"after").rcr;
-        let mut different_forge = before.clone(); different_forge.forge = source(b"after").forge;
+        let mut different_rcr = before.clone();
+        different_rcr.rcr = source(b"after").rcr;
+        let mut different_forge = before.clone();
+        different_forge.forge = source(b"after").forge;
         assert!(!revalidates(&before, &different_rcr));
         assert!(!revalidates(&before, &different_forge));
     }

@@ -24,7 +24,13 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
     require_fields(
         args,
         if show {
-            &["number", "after_version", "limit", "expected_head", "render"]
+            &[
+                "number",
+                "after_version",
+                "limit",
+                "expected_head",
+                "render",
+            ]
         } else {
             &["after", "limit", "expected_head", "render"]
         },
@@ -105,11 +111,14 @@ pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Val
         result.insert(
             "issues".into(),
             Value::Array(
-                page.issues.iter().map(|issue| {
-                    let mut row = snapshot(issue);
-                    rendering.annotate(&mut row)?;
-                    Ok(row)
-                }).collect::<Result<Vec<_>, ToolError>>()?,
+                page.issues
+                    .iter()
+                    .map(|issue| {
+                        let mut row = snapshot(issue);
+                        rendering.annotate(&mut row)?;
+                        Ok(row)
+                    })
+                    .collect::<Result<Vec<_>, ToolError>>()?,
             ),
         );
         result.insert("next_after".into(), optional(page.next_after));

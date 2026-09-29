@@ -12,12 +12,15 @@ use fgit_forge::source_symbols::{
     SymbolSearchReport,
 };
 use fgit_node::{NodeConfig, OneNode};
-use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId, RepositoryId, TenantId};
+use fgit_types::{
+    GitHashAlgorithm, GitOid, RefName, RepositoryAuthorityHeadId, RepositoryId, TenantId,
+};
 use std::io::Write;
 use std::path::PathBuf;
 
 const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
-const USAGE: &str = "usage: fg search --symbols <storage-root> <tenant-id> <repository-id> <full-ref>
+const USAGE: &str =
+    "usage: fg search --symbols <storage-root> <tenant-id> <repository-id> <full-ref>
   --trusted-local --name <ASCII-identifier> [--match exact|prefix]
   [--kind function|struct|enum|trait|type|module|union|macro]...
   [--path <prefix> | --path-hex <bytes>]... [--object-format sha1|sha256]
@@ -102,12 +105,20 @@ fn finish(
     };
     let rendered = render(options, head, &report)?;
     write_report(output, &rendered)?;
-    Ok(if report.completion == SearchCompletion::Complete { 0 } else { 3 })
+    Ok(if report.completion == SearchCompletion::Complete {
+        0
+    } else {
+        3
+    })
 }
 
 fn head_token(head: RepositoryAuthorityHeadId) -> String {
     let id = head.as_internal_object_id();
-    format!("alg:{}:{}", id.algorithm().code_point(), hex(id.digest().as_bytes()))
+    format!(
+        "alg:{}:{}",
+        id.algorithm().code_point(),
+        hex(id.digest().as_bytes())
+    )
 }
 
 fn render(
@@ -120,29 +131,61 @@ fn render(
         SymbolMatchMode::Exact => "exact",
         SymbolMatchMode::Prefix => "prefix",
     };
-    let kinds = options.query.kinds().iter()
-        .map(|kind| quote(kind.as_str())).collect::<Vec<_>>().join(",");
-    let paths = options.query.source_scope().prefixes().iter()
-        .map(|path| quote(&hex(path.as_bytes()))).collect::<Vec<_>>().join(",");
-    let mut out = format!(concat!(
-        "{{\"type\":\"source_symbol_search\",\"schema_version\":1,\"profile\":{},",
-        "\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"reference_hex\":{},",
-        "\"source_head\":{},\"snapshot_token\":{},\"source_rcr\":{},\"source_commit\":{},\"source_tree\":{},",
-        "\"name_hex\":{},\"match_mode\":{},\"kinds\":[{}],\"path_prefixes_hex\":[{}],",
-        "\"complete\":{},\"truncated_reason\":{},\"match_count\":{},\"max_matches\":{},",
-        "\"files_selected\":{},\"files_read\":{},\"bytes_read\":{},\"bytes_searched\":{},",
-        "\"non_regular_entries\":{},\"unsupported_language_files\":{},\"declarations_examined\":{},",
-        "\"macro_bodies_skipped\":{},\"attributes_skipped\":{},\"work_units\":{},",
-        "\"node_closed\":true,\"repository_changed\":false,\"index_changed\":false,\"matches\":["),
-        quote(PROFILE), quote(&options.tenant.to_string()), quote(&report.repository.to_string()),
-        quote(options.format.as_str()), quote(&hex(options.reference.as_bytes())),
-        quote(&head.to_string()), quote(&head_token(head)), quote(&report.source_rcr.to_string()),
-        quote(&report.source_commit.to_string()), quote(&report.source_tree.to_string()),
-        quote(&hex(options.query.name())), quote(mode), kinds, paths, complete,
-        if complete { "null" } else { "\"match_limit\"" }, report.matches.len(), options.limits.max_matches,
-        report.files_selected, report.files_read, report.bytes_read, report.bytes_searched,
-        report.non_regular_entries, report.unsupported_language_files, report.declarations_examined,
-        report.macro_bodies_skipped, report.attributes_skipped, quote(&report.work_units.to_string()),
+    let kinds = options
+        .query
+        .kinds()
+        .iter()
+        .map(|kind| quote(kind.as_str()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let paths = options
+        .query
+        .source_scope()
+        .prefixes()
+        .iter()
+        .map(|path| quote(&hex(path.as_bytes())))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut out = format!(
+        concat!(
+            "{{\"type\":\"source_symbol_search\",\"schema_version\":1,\"profile\":{},",
+            "\"tenant_id\":{},\"repository_id\":{},\"object_format\":{},\"reference_hex\":{},",
+            "\"source_head\":{},\"snapshot_token\":{},\"source_rcr\":{},\"source_commit\":{},\"source_tree\":{},",
+            "\"name_hex\":{},\"match_mode\":{},\"kinds\":[{}],\"path_prefixes_hex\":[{}],",
+            "\"complete\":{},\"truncated_reason\":{},\"match_count\":{},\"max_matches\":{},",
+            "\"files_selected\":{},\"files_read\":{},\"bytes_read\":{},\"bytes_searched\":{},",
+            "\"non_regular_entries\":{},\"unsupported_language_files\":{},\"declarations_examined\":{},",
+            "\"macro_bodies_skipped\":{},\"attributes_skipped\":{},\"work_units\":{},",
+            "\"node_closed\":true,\"repository_changed\":false,\"index_changed\":false,\"matches\":["
+        ),
+        quote(PROFILE),
+        quote(&options.tenant.to_string()),
+        quote(&report.repository.to_string()),
+        quote(options.format.as_str()),
+        quote(&hex(options.reference.as_bytes())),
+        quote(&head.to_string()),
+        quote(&head_token(head)),
+        quote(&report.source_rcr.to_string()),
+        quote(&report.source_commit.to_string()),
+        quote(&report.source_tree.to_string()),
+        quote(&hex(options.query.name())),
+        quote(mode),
+        kinds,
+        paths,
+        complete,
+        if complete { "null" } else { "\"match_limit\"" },
+        report.matches.len(),
+        options.limits.max_matches,
+        report.files_selected,
+        report.files_read,
+        report.bytes_read,
+        report.bytes_searched,
+        report.non_regular_entries,
+        report.unsupported_language_files,
+        report.declarations_examined,
+        report.macro_bodies_skipped,
+        report.attributes_skipped,
+        quote(&report.work_units.to_string()),
     );
     append_matches(&mut out, &report.matches)?;
     out.push_str("]}");
@@ -157,16 +200,27 @@ fn append_matches(
     matches: &[fgit_forge::source_symbols::SymbolMatch],
 ) -> Result<(), String> {
     for (ordinal, hit) in matches.iter().enumerate() {
-        if ordinal != 0 { out.push(','); }
+        if ordinal != 0 {
+            out.push(',');
+        }
         let location = &hit.location;
-        out.push_str(&format!(concat!(
-            "{{\"name_hex\":{},\"kind\":{},\"raw_identifier\":{},\"path_hex\":{},\"blob\":{},",
-            "\"byte_offset\":{},\"line\":{},\"byte_column\":{},\"excerpt_hex\":{},",
-            "\"excerpt_offset\":{},\"match_length\":{}}}"),
-            quote(&hex(&hit.name)), quote(hit.kind.as_str()), hit.raw_identifier,
-            quote(&hex(&location.path)), quote(&location.blob.to_string()), location.byte_offset,
-            location.line, location.byte_column, quote(&hex(&location.excerpt)),
-            location.excerpt_offset, location.match_length,
+        out.push_str(&format!(
+            concat!(
+                "{{\"name_hex\":{},\"kind\":{},\"raw_identifier\":{},\"path_hex\":{},\"blob\":{},",
+                "\"byte_offset\":{},\"line\":{},\"byte_column\":{},\"excerpt_hex\":{},",
+                "\"excerpt_offset\":{},\"match_length\":{}}}"
+            ),
+            quote(&hex(&hit.name)),
+            quote(hit.kind.as_str()),
+            hit.raw_identifier,
+            quote(&hex(&location.path)),
+            quote(&location.blob.to_string()),
+            location.byte_offset,
+            location.line,
+            location.byte_column,
+            quote(&hex(&location.excerpt)),
+            location.excerpt_offset,
+            location.match_length,
         ));
         if out.len() > MAX_OUTPUT_BYTES {
             return Err("symbol search JSON exceeds its output budget".into());

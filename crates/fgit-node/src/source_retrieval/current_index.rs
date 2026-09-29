@@ -168,7 +168,11 @@ impl OneNode {
             .await
             .map_err(|error| NodeWorkspaceRefusal::Authority(Box::new(error)))?;
         live(request)?;
-        if selected.snapshot().hidden_refs.hides(query.reference.as_bytes()) {
+        if selected
+            .snapshot()
+            .hidden_refs
+            .hides(query.reference.as_bytes())
+        {
             return Err(NodeWorkspaceRefusal::RefUnavailable);
         }
         let commit = *selected
@@ -182,7 +186,10 @@ impl OneNode {
                 SourceBrowseError::SnapshotMoved,
             )));
         }
-        if query.expected_commit.is_some_and(|expected| expected != commit) {
+        if query
+            .expected_commit
+            .is_some_and(|expected| expected != commit)
+        {
             return Err(NodeWorkspaceRefusal::SourceBrowse(Box::new(
                 SourceBrowseError::CommitMoved,
             )));
@@ -204,7 +211,10 @@ impl OneNode {
                     path: None,
                     expected_head: Some(head),
                     expected_commit: Some(commit),
-                    action: SourceBrowseAction::List { after: None, limit: 1 },
+                    action: SourceBrowseAction::List {
+                        after: None,
+                        limit: 1,
+                    },
                 },
             )
             .await?;
@@ -264,7 +274,10 @@ impl OneNode {
             .await
             .map_err(index_error)?;
         live(request)?;
-        Ok(RevalidatedIndexReport { current_source, index })
+        Ok(RevalidatedIndexReport {
+            current_source,
+            index,
+        })
     }
 }
 

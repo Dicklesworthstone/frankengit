@@ -5,15 +5,24 @@ use fgit_forge::source_symbols::{SymbolMatch, SymbolSyntaxError, SymbolSyntaxErr
 use fgit_types::{CodecVersion, RepositoryCommitId, SchemaFamily, SchemaId};
 
 fn args() -> Vec<String> {
-    vec!["node".into(), "11".repeat(16), "22".repeat(16), "refs/heads/main".into(),
-        "--trusted-local".into(), "--name".into(), "needle".into()]
+    vec![
+        "node".into(),
+        "11".repeat(16),
+        "22".repeat(16),
+        "refs/heads/main".into(),
+        "--trusted-local".into(),
+        "--name".into(),
+        "needle".into(),
+    ]
 }
 fn head() -> RepositoryAuthorityHeadId {
     RepositoryAuthorityHeadId::from_internal_object_id(internal_object_id(
         IdentityDomain::RepositoryAuthorityHead,
         SchemaId::new(SchemaFamily::from_static("repository-authority-head"), 1, 0),
-        CodecVersion::new(1, 0), b"symbol-cli-head",
-    )).unwrap()
+        CodecVersion::new(1, 0),
+        b"symbol-cli-head",
+    ))
+    .unwrap()
 }
 fn report() -> SymbolSearchReport {
     SymbolSearchReport {
@@ -21,14 +30,24 @@ fn report() -> SymbolSearchReport {
         source_rcr: RepositoryCommitId::from_internal_object_id(internal_object_id(
             IdentityDomain::RepositoryCommitRecord,
             SchemaId::new(SchemaFamily::from_static("repository-commit-record"), 1, 0),
-            CodecVersion::new(1, 0), b"symbol-cli-rcr",
-        )).unwrap(),
+            CodecVersion::new(1, 0),
+            b"symbol-cli-rcr",
+        ))
+        .unwrap(),
         source_commit: git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Commit, b"commit"),
         source_tree: git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Tree, b"tree"),
-        matches: Vec::new(), completion: SearchCompletion::Complete,
-        files_selected: 1, files_read: 1, bytes_read: 32, bytes_searched: 32,
-        non_regular_entries: 2, unsupported_language_files: 3, declarations_examined: 4,
-        macro_bodies_skipped: 5, attributes_skipped: 6, work_units: u64::MAX,
+        matches: Vec::new(),
+        completion: SearchCompletion::Complete,
+        files_selected: 1,
+        files_read: 1,
+        bytes_read: 32,
+        bytes_searched: 32,
+        non_regular_entries: 2,
+        unsupported_language_files: 3,
+        declarations_examined: 4,
+        macro_bodies_skipped: 5,
+        attributes_skipped: 6,
+        work_units: u64::MAX,
     }
 }
 
@@ -36,16 +55,35 @@ fn report() -> SymbolSearchReport {
 fn parses_case_sensitive_names_kinds_byte_paths_and_both_native_formats() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let mut args = args();
-        args.extend([
-            "--object-format", format.as_str(), "--match", "prefix", "--kind", "struct",
-            "--kind", "function", "--path-hex", "737263ff", "--max-work", "1024",
-        ].map(str::to_owned));
+        args.extend(
+            [
+                "--object-format",
+                format.as_str(),
+                "--match",
+                "prefix",
+                "--kind",
+                "struct",
+                "--kind",
+                "function",
+                "--path-hex",
+                "737263ff",
+                "--max-work",
+                "1024",
+            ]
+            .map(str::to_owned),
+        );
         let options = options::parse(&args).unwrap();
         assert_eq!(options.format, format);
         assert_eq!(options.query.name(), b"needle");
         assert_eq!(options.query.mode(), SymbolMatchMode::Prefix);
-        assert_eq!(options.query.kinds(), &[SymbolKind::Function, SymbolKind::Struct]);
-        assert_eq!(options.query.source_scope().prefixes()[0].as_bytes(), b"src\xff");
+        assert_eq!(
+            options.query.kinds(),
+            &[SymbolKind::Function, SymbolKind::Struct]
+        );
+        assert_eq!(
+            options.query.source_scope().prefixes()[0].as_bytes(),
+            b"src\xff"
+        );
         assert_eq!(options.query.maximum_work(), 1024);
     }
 }
@@ -55,15 +93,28 @@ fn round_trips_snapshot_tokens_and_validates_commit_hash_domains() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
         let commit = git_object_id(format, GitObjectKind::Commit, b"commit");
         let mut args = args();
-        args.extend(["--object-format".into(), format.as_str().into(),
-            "--expected-head".into(), head_token(head()),
-            "--expected-commit".into(), commit.to_string()]);
+        args.extend([
+            "--object-format".into(),
+            format.as_str().into(),
+            "--expected-head".into(),
+            head_token(head()),
+            "--expected-commit".into(),
+            commit.to_string(),
+        ]);
         let options = options::parse(&args).unwrap();
         assert_eq!(options.expected_head, Some(head()));
         assert_eq!(options.expected_commit, Some(commit));
-        *args.last_mut().unwrap() = "00".repeat(if format == GitHashAlgorithm::Sha1 { 20 } else { 32 });
+        *args.last_mut().unwrap() = "00".repeat(if format == GitHashAlgorithm::Sha1 {
+            20
+        } else {
+            32
+        });
         assert!(options::parse(&args).is_err());
-        *args.last_mut().unwrap() = "11".repeat(if format == GitHashAlgorithm::Sha1 { 32 } else { 20 });
+        *args.last_mut().unwrap() = "11".repeat(if format == GitHashAlgorithm::Sha1 {
+            32
+        } else {
+            20
+        });
         assert!(options::parse(&args).is_err());
     }
 }
@@ -71,14 +122,25 @@ fn round_trips_snapshot_tokens_and_validates_commit_hash_domains() {
 #[test]
 fn refuses_unsupported_queries_duplicates_limits_and_unqualified_pins() {
     for pair in [
-        ["--name", "other"], ["--regex", ".*"], ["--after", "1"],
-        ["--match", "fuzzy"], ["--kind", "reference"], ["--path", "../secret"],
-        ["--path-hex", "ffz0"], ["--object-format", "SHA256"],
-        ["--max-matches", "4097"], ["--max-work", "67108865"],
-        ["--max-work", "18446744073709551616"], ["--max-work", "0"],
-        ["--max-files", "01"], ["--max-files", "20001"], ["--max-bytes", "67108865"],
-        ["--max-file-bytes", "8388609"], ["--expected-head", "1234"],
-        ["--expected-head", "alg:01:abcd"], ["--expected-head", "alg:1:ABCD"],
+        ["--name", "other"],
+        ["--regex", ".*"],
+        ["--after", "1"],
+        ["--match", "fuzzy"],
+        ["--kind", "reference"],
+        ["--path", "../secret"],
+        ["--path-hex", "ffz0"],
+        ["--object-format", "SHA256"],
+        ["--max-matches", "4097"],
+        ["--max-work", "67108865"],
+        ["--max-work", "18446744073709551616"],
+        ["--max-work", "0"],
+        ["--max-files", "01"],
+        ["--max-files", "20001"],
+        ["--max-bytes", "67108865"],
+        ["--max-file-bytes", "8388609"],
+        ["--expected-head", "1234"],
+        ["--expected-head", "alg:01:abcd"],
+        ["--expected-head", "alg:1:ABCD"],
     ] {
         let mut args = args();
         args.extend(pair.map(str::to_owned));
@@ -98,22 +160,35 @@ fn refuses_unsupported_queries_duplicates_limits_and_unqualified_pins() {
 fn requires_trust_full_ref_and_bounded_arguments_before_io() {
     let mut untrusted = args();
     untrusted.remove(4);
-    assert!(options::parse(&untrusted).unwrap_err().contains("--trusted-local"));
-    let mut duplicate = args(); duplicate.push("--trusted-local".into());
+    assert!(
+        options::parse(&untrusted)
+            .unwrap_err()
+            .contains("--trusted-local")
+    );
+    let mut duplicate = args();
+    duplicate.push("--trusted-local".into());
     assert!(options::parse(&duplicate).is_err());
-    let mut short = args(); short[3] = "main".into();
+    let mut short = args();
+    short[3] = "main".into();
     assert!(options::parse(&short).is_err());
-    let mut missing = args(); missing.push("--kind".into());
+    let mut missing = args();
+    missing.push("--kind".into());
     assert!(options::parse(&missing).is_err());
-    let mut wide = args(); wide[0] = "x".repeat(8193);
+    let mut wide = args();
+    wide[0] = "x".repeat(8193);
     assert!(options::parse(&wide).is_err());
-    let mut many = args(); many.extend(vec!["--trusted-local".into(); 321]);
+    let mut many = args();
+    many.extend(vec!["--trusted-local".into(); 321]);
     assert!(options::parse(&many).is_err());
     let mut paths = args();
-    for _ in 0..129 { paths.extend(["--path", "src"].map(str::to_owned)); }
+    for _ in 0..129 {
+        paths.extend(["--path", "src"].map(str::to_owned));
+    }
     assert!(options::parse(&paths).is_err());
     let mut kinds = args();
-    for _ in 0..9 { kinds.extend(["--kind", "function"].map(str::to_owned)); }
+    for _ in 0..9 {
+        kinds.extend(["--kind", "function"].map(str::to_owned));
+    }
     assert!(options::parse(&kinds).is_err());
 }
 
@@ -122,12 +197,22 @@ fn renders_provenance_exact_byte_spans_and_nonsemantic_scope_counters() {
     let options = options::parse(&args()).unwrap();
     let mut report = report();
     report.matches.push(SymbolMatch {
-        name: b"type".to_vec(), kind: SymbolKind::Function, raw_identifier: true,
+        name: b"type".to_vec(),
+        kind: SymbolKind::Function,
+        raw_identifier: true,
         location: SourceMatch {
             path: b"src/\xff\x1b\n.rs".to_vec(),
-            blob: git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"fn r#type() {}\n"),
-            byte_offset: 5, line: 1, byte_column: 6,
-            excerpt: b"fn r#type() {}\n".to_vec(), excerpt_offset: 0, match_length: 4,
+            blob: git_object_id(
+                GitHashAlgorithm::Sha1,
+                GitObjectKind::Blob,
+                b"fn r#type() {}\n",
+            ),
+            byte_offset: 5,
+            line: 1,
+            byte_column: 6,
+            excerpt: b"fn r#type() {}\n".to_vec(),
+            excerpt_offset: 0,
+            match_length: 4,
         },
     });
     let text = render(&options, head(), &report).unwrap();
@@ -147,12 +232,27 @@ fn renders_provenance_exact_byte_spans_and_nonsemantic_scope_counters() {
 fn empty_completion_and_match_limit_have_different_exit_codes() {
     let options = options::parse(&args()).unwrap();
     let mut output = Vec::new();
-    assert_eq!(finish(&mut output, &options, Ok((head(), report())), None).unwrap(), 0);
-    assert!(String::from_utf8(output).unwrap().contains("\"complete\":true,\"truncated_reason\":null,\"match_count\":0"));
-    let mut truncated = report(); truncated.completion = SearchCompletion::MatchLimit;
+    assert_eq!(
+        finish(&mut output, &options, Ok((head(), report())), None).unwrap(),
+        0
+    );
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("\"complete\":true,\"truncated_reason\":null,\"match_count\":0")
+    );
+    let mut truncated = report();
+    truncated.completion = SearchCompletion::MatchLimit;
     let mut output = Vec::new();
-    assert_eq!(finish(&mut output, &options, Ok((head(), truncated)), None).unwrap(), 3);
-    assert!(String::from_utf8(output).unwrap().contains("\"complete\":false,\"truncated_reason\":\"match_limit\""));
+    assert_eq!(
+        finish(&mut output, &options, Ok((head(), truncated)), None).unwrap(),
+        3
+    );
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("\"complete\":false,\"truncated_reason\":\"match_limit\"")
+    );
 }
 
 #[test]
@@ -169,7 +269,10 @@ fn refusal_and_shutdown_failure_never_emit_a_success_receipt() {
     }
     let error: SymbolReadError<&str> = SymbolReadError::Syntax {
         path: b"\xff\x1b\n.rs".to_vec(),
-        error: SymbolSyntaxError { kind: SymbolSyntaxErrorKind::UnbalancedDelimiter, byte_offset: 17 },
+        error: SymbolSyntaxError {
+            kind: SymbolSyntaxErrorKind::UnbalancedDelimiter,
+            byte_offset: 17,
+        },
     };
     let message = read_error(error);
     assert!(message.contains("path_hex=ff1b0a2e7273"));
@@ -183,12 +286,18 @@ fn output_budget_write_and_flush_errors_are_not_success() {
     let options = options::parse(&args()).unwrap();
     let mut oversized = report();
     oversized.matches.push(SymbolMatch {
-        name: b"needle".to_vec(), kind: SymbolKind::Function, raw_identifier: false,
+        name: b"needle".to_vec(),
+        kind: SymbolKind::Function,
+        raw_identifier: false,
         location: SourceMatch {
             path: b"a.rs".to_vec(),
             blob: git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"blob"),
-            byte_offset: 0, line: 1, byte_column: 1,
-            excerpt: vec![0; MAX_OUTPUT_BYTES / 2], excerpt_offset: 0, match_length: 6,
+            byte_offset: 0,
+            line: 1,
+            byte_column: 1,
+            excerpt: vec![0; MAX_OUTPUT_BYTES / 2],
+            excerpt_offset: 0,
+            match_length: 6,
         },
     });
     let mut output = Vec::new();
@@ -197,11 +306,25 @@ fn output_budget_write_and_flush_errors_are_not_success() {
     struct Failure(bool);
     impl Write for Failure {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if self.0 { Ok(bytes.len()) } else { Err(std::io::ErrorKind::BrokenPipe.into()) }
+            if self.0 {
+                Ok(bytes.len())
+            } else {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
         }
-        fn flush(&mut self) -> std::io::Result<()> { Err(std::io::ErrorKind::BrokenPipe.into()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
     }
     for flush_only in [false, true] {
-        assert!(finish(&mut Failure(flush_only), &options, Ok((head(), report())), None).is_err());
+        assert!(
+            finish(
+                &mut Failure(flush_only),
+                &options,
+                Ok((head(), report())),
+                None
+            )
+            .is_err()
+        );
     }
 }

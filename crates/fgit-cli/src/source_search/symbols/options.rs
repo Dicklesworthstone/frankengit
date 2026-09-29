@@ -17,13 +17,16 @@ pub(super) struct Options {
 }
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
-    if args.len() < 4 || args.len() > 320
+    if args.len() < 4
+        || args.len() > 320
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
     {
         return Err(USAGE.into());
     }
-    if args[0].is_empty() { return Err("storage root must be nonempty".into()); }
+    if args[0].is_empty() {
+        return Err("storage root must be nonempty".into());
+    }
     let tenant = TenantId::from_hex(&args[1]).map_err(|error| error.to_string())?;
     let repository = RepositoryId::from_hex(&args[2]).map_err(|error| error.to_string())?;
     let reference = RefName::try_new(args[3].as_bytes()).map_err(|error| error.to_string())?;
@@ -39,22 +42,39 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         let flag = args[cursor].as_str();
         cursor += 1;
         if flag == "--trusted-local" {
-            if trusted { return Err("duplicate --trusted-local".into()); }
+            if trusted {
+                return Err("duplicate --trusted-local".into());
+            }
             trusted = true;
             continue;
         }
-        if !matches!(flag,
-            "--name" | "--match" | "--kind" | "--path" | "--path-hex"
-            | "--object-format" | "--expected-head" | "--expected-commit"
-            | "--max-matches" | "--max-work" | "--max-bytes" | "--max-file-bytes" | "--max-files")
-        {
+        if !matches!(
+            flag,
+            "--name"
+                | "--match"
+                | "--kind"
+                | "--path"
+                | "--path-hex"
+                | "--object-format"
+                | "--expected-head"
+                | "--expected-commit"
+                | "--max-matches"
+                | "--max-work"
+                | "--max-bytes"
+                | "--max-file-bytes"
+                | "--max-files"
+        ) {
             return Err(format!("unknown symbol search option {flag}"));
         }
-        let value = args.get(cursor).ok_or_else(|| format!("missing value for {flag}"))?;
+        let value = args
+            .get(cursor)
+            .ok_or_else(|| format!("missing value for {flag}"))?;
         cursor += 1;
         match flag {
             "--kind" => {
-                if kinds.len() == 8 { return Err("at most eight kind filters are supported".into()); }
+                if kinds.len() == 8 {
+                    return Err("at most eight kind filters are supported".into());
+                }
                 kinds.push(match value.as_str() {
                     "function" => SymbolKind::Function,
                     "struct" => SymbolKind::Struct,
@@ -68,7 +88,9 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
                 });
             }
             "--path" | "--path-hex" => {
-                if paths.len() == 128 { return Err("at most 128 path prefixes are supported".into()); }
+                if paths.len() == 128 {
+                    return Err("at most 128 path prefixes are supported".into());
+                }
                 paths.push(if flag == "--path" {
                     value.as_bytes().to_vec()
                 } else {
@@ -82,7 +104,9 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             }
         }
     }
-    if !trusted { return Err("--trusted-local is required for whole-repository symbol reads".into()); }
+    if !trusted {
+        return Err("--trusted-local is required for whole-repository symbol reads".into());
+    }
     let format = match flags.get("--object-format").copied().unwrap_or("sha1") {
         "sha1" => GitHashAlgorithm::Sha1,
         "sha256" => GitHashAlgorithm::Sha256,
@@ -93,21 +117,37 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         "prefix" => SymbolMatchMode::Prefix,
         _ => return Err("match mode must be exact or prefix".into()),
     };
-    let work = flags.get("--max-work").map(|text| positive_u64(text))
-        .transpose()?.unwrap_or(MAX_SYMBOL_WORK);
+    let work = flags
+        .get("--max-work")
+        .map(|text| positive_u64(text))
+        .transpose()?
+        .unwrap_or(MAX_SYMBOL_WORK);
     let query = SymbolQuery::new(
         flags.get("--name").ok_or("--name is required")?.as_bytes(),
-        mode, &kinds, &paths, work,
-    ).map_err(|error| error.to_string())?;
-    let expected_head = flags.get("--expected-head").map(|text| parse_head(text)).transpose()?;
-    let expected_commit = flags.get("--expected-commit")
-        .map(|text| GitOid::from_hex(format, text).map_err(|error| error.to_string())).transpose()?;
+        mode,
+        &kinds,
+        &paths,
+        work,
+    )
+    .map_err(|error| error.to_string())?;
+    let expected_head = flags
+        .get("--expected-head")
+        .map(|text| parse_head(text))
+        .transpose()?;
+    let expected_commit = flags
+        .get("--expected-commit")
+        .map(|text| GitOid::from_hex(format, text).map_err(|error| error.to_string()))
+        .transpose()?;
     if expected_commit.is_some_and(|id| id.is_zero()) {
         return Err("expected commit must be nonzero".into());
     }
     let defaults = SearchLimits::default();
     let bound = |name: &str, default| -> Result<usize, String> {
-        Ok(flags.get(name).map(|text| super::super::decimal(text)).transpose()?.unwrap_or(default))
+        Ok(flags
+            .get(name)
+            .map(|text| super::super::decimal(text))
+            .transpose()?
+            .unwrap_or(default))
     };
     let limits = SearchLimits {
         max_matches: bound("--max-matches", defaults.max_matches)?,
@@ -118,8 +158,15 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     };
     limits.validate().map_err(|error| error.to_string())?;
     Ok(Options {
-        storage: args[0].clone().into(), tenant, repository, reference, format, query,
-        expected_head, expected_commit, limits,
+        storage: args[0].clone().into(),
+        tenant,
+        repository,
+        reference,
+        format,
+        query,
+        expected_head,
+        expected_commit,
+        limits,
     })
 }
 
@@ -133,16 +180,24 @@ pub(super) fn positive_u64(text: &str) -> Result<u64, String> {
 // Same algorithm-qualified snapshot token as fg tree/show and lexical search.
 fn parse_head(text: &str) -> Result<RepositoryAuthorityHeadId, String> {
     let (algorithm, digest) = parse_id(text)?;
-    Ok(RepositoryAuthorityHeadId::from_digest(algorithm, CANONICAL_CODEC_VERSION, digest))
+    Ok(RepositoryAuthorityHeadId::from_digest(
+        algorithm,
+        CANONICAL_CODEC_VERSION,
+        digest,
+    ))
 }
 
 pub(super) fn parse_id(text: &str) -> Result<(DigestAlgorithmId, DigestBytes), String> {
-    let (algorithm, digest) = text.strip_prefix("alg:")
+    let (algorithm, digest) = text
+        .strip_prefix("alg:")
         .and_then(|text| text.split_once(':'))
         .ok_or("expected an algorithm-qualified token: alg:<number>:<lowercase-hex>")?;
     let algorithm = u16::try_from(positive_u64(algorithm)?).map_err(|_| "algorithm overflow")?;
     let algorithm = DigestAlgorithmId::try_new(algorithm).map_err(|_| "invalid algorithm")?;
-    if !digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+    if !digest
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return Err("token digest must be lowercase hexadecimal".into());
     }
     let digest = DigestBytes::try_new(&super::super::unhex(digest, 64)?)

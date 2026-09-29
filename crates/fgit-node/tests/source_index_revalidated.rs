@@ -3,7 +3,6 @@
 //! authenticated HTTP issue writes. No substitute authority or lexical engine.
 #[path = "source_http/support.rs"]
 mod support;
-use support::*;
 use fgit_admission::AdmissionLimits;
 use fgit_authority::IdempotencyKey;
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest, sha256_digest};
@@ -12,13 +11,12 @@ use fgit_forge::source_search::SearchLimits;
 use fgit_git_object::ParseLimits;
 use fgit_graph::GenerationActivation;
 use fgit_graph::lexical::{IndexError, LexicalChannel, LexicalError, LexicalQuery};
-use fgit_node::source_retrieval::current_index::{
-    RevalidatedIndexReport, RevalidatedIndexRequest,
-};
+use fgit_node::source_retrieval::current_index::{RevalidatedIndexReport, RevalidatedIndexRequest};
 use fgit_node::{LoopbackReceiveSession, NodeWorkspaceRefusal, OneNode};
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, GitOid, RefName};
 use fgit_wire::receive::{ReceiveContext, ReceiveLimits, SignedPushProfile};
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, WireLimits, encode_packets};
+use support::*;
 
 fn reference() -> RefName {
     RefName::try_new(b"refs/heads/main").unwrap()
@@ -29,19 +27,29 @@ fn query() -> LexicalQuery {
 fn build(node: &OneNode, predecessor: Option<&GenerationActivation>) -> GenerationActivation {
     node.runtime()
         .block_on(node.build_source_index_local_in(
-            &node.request_context(), &reference(), None, None,
-            predecessor.map(|p| p.generation_id), SearchLimits::default(),
+            &node.request_context(),
+            &reference(),
+            None,
+            None,
+            predecessor.map(|p| p.generation_id),
+            SearchLimits::default(),
         ))
         .unwrap()
         .1
 }
 fn search(node: &OneNode) -> Result<RevalidatedIndexReport, NodeWorkspaceRefusal> {
-    node.runtime().block_on(node.search_source_index_revalidated_local_in(
-        &node.request_context(), RevalidatedIndexRequest::new(&reference(), &query()),
-    ))
+    node.runtime()
+        .block_on(node.search_source_index_revalidated_local_in(
+            &node.request_context(),
+            RevalidatedIndexRequest::new(&reference(), &query()),
+        ))
 }
 fn issue_write(node: OneNode, root: &Scratch) -> OneNode {
-    let format = search(&node).unwrap().current_source().namespace.object_format;
+    let format = search(&node)
+        .unwrap()
+        .current_source()
+        .namespace
+        .object_format;
     let config = root.config(format);
     let path = root.0.join("credentials");
     credentials(&node, &path);
@@ -50,12 +58,16 @@ fn issue_write(node: OneNode, root: &Scratch) -> OneNode {
     let response = exchange(
         &server.client,
         &request(
-            &server.client, "/api/v1/issues/1/open", 'b',
+            &server.client,
+            "/api/v1/issues/1/open",
+            'b',
             &format!(
                 "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nIdempotency-Key: revalidated-index-issue\r\n",
                 body.len(),
-            ), body,
-        ), true,
+            ),
+            body,
+        ),
+        true,
     );
     status(&response, 200);
     assert_eq!(server.finish().accepted_sessions(), 1);
@@ -76,8 +88,14 @@ fn metadata_write_keeps_search_usable_without_rebuilding_or_relabelling_evidence
         let authority_before_read = generation(&node);
         let after = search(&node).unwrap();
         assert!(after.has_distinct_provenance());
-        assert_ne!(after.current_source().source_head, before.current_source().source_head);
-        assert_ne!(after.current_source().forge_position_root, before.current_source().forge_position_root);
+        assert_ne!(
+            after.current_source().source_head,
+            before.current_source().source_head
+        );
+        assert_ne!(
+            after.current_source().forge_position_root,
+            before.current_source().forge_position_root
+        );
         assert_eq!(after.current_source().commit, commit);
         assert_eq!(after.current_source().tree, before.current_source().tree);
         assert_eq!(after.index().source, before.index().source);
@@ -88,8 +106,16 @@ fn metadata_write_keeps_search_usable_without_rebuilding_or_relabelling_evidence
         // Keep the original exact-snapshot contract; it must still refuse.
         assert!(matches!(
             node.runtime().block_on(node.search_source_index_local_in(
-                &node.request_context(), &reference(), None, None, None, None,
-                &query(), None, Default::default(), Default::default(),
+                &node.request_context(),
+                &reference(),
+                None,
+                None,
+                None,
+                None,
+                &query(),
+                None,
+                Default::default(),
+                Default::default(),
             )),
             Err(NodeWorkspaceRefusal::SourceIndexStale)
         ));
@@ -115,25 +141,35 @@ fn pages_pin_current_source_and_original_generation_even_after_new_index_activat
     let mut options = RevalidatedIndexRequest::new(&reference, &query);
     options.generation = Some(&first);
     options.query_limits.max_results = 2;
-    let page = node.runtime().block_on(node.search_source_index_revalidated_local_in(
-        &node.request_context(), options.clone(),
-    )).unwrap();
+    let page = node
+        .runtime()
+        .block_on(
+            node.search_source_index_revalidated_local_in(&node.request_context(), options.clone()),
+        )
+        .unwrap();
     assert!(!page.index().results.complete);
     let second = build(&node, Some(&first));
     options.expected_head = Some(page.current_source().source_head);
     options.expected_commit = Some(page.current_source().commit);
     options.minimum = Some(&second);
     options.after = page.index().results.next_after;
-    let next = node.runtime().block_on(node.search_source_index_revalidated_local_in(
-        &node.request_context(), options,
-    )).unwrap();
+    let next = node
+        .runtime()
+        .block_on(node.search_source_index_revalidated_local_in(&node.request_context(), options))
+        .unwrap();
     assert_eq!(next.index().generation, first);
     assert_eq!(next.index().selected_generation_head, second);
     assert_eq!(next.current_source(), page.current_source());
     assert_eq!(next.index().source, page.index().source);
     assert!(next.index().results.complete);
-    let ids: Vec<_> = page.index().results.hits.iter()
-        .chain(&next.index().results.hits).map(|h| h.document_id).collect();
+    let ids: Vec<_> = page
+        .index()
+        .results
+        .hits
+        .iter()
+        .chain(&next.index().results.hits)
+        .map(|h| h.document_id)
+        .collect();
     assert_eq!(ids, vec![1, 2, 3, 5]);
     node.shutdown().unwrap();
 }
@@ -262,7 +298,10 @@ fn different_commit_with_even_the_same_tree_refuses_until_a_real_index_refresh()
         let first = build(&node, None);
         let before = search(&node).unwrap();
         let child = advance_commit(&root, &node, commit, before.current_source().tree);
-        assert!(matches!(search(&node), Err(NodeWorkspaceRefusal::SourceIndexStale)));
+        assert!(matches!(
+            search(&node),
+            Err(NodeWorkspaceRefusal::SourceIndexStale)
+        ));
         let second = build(&node, Some(&first));
         let after = search(&node).unwrap();
         assert_eq!(after.current_source().commit, child);
@@ -277,15 +316,20 @@ fn different_commit_with_even_the_same_tree_refuses_until_a_real_index_refresh()
 fn missing_index_ref_and_insufficient_budgets_are_not_complete_empty_results() {
     let root = Scratch::new();
     let (node, _) = fixture(&root, GitHashAlgorithm::Sha1);
-    assert!(matches!(search(&node), Err(NodeWorkspaceRefusal::SourceIndex(error))
-        if matches!(*error, IndexError::Uninitialized)));
+    assert!(
+        matches!(search(&node), Err(NodeWorkspaceRefusal::SourceIndex(error))
+        if matches!(*error, IndexError::Uninitialized))
+    );
     build(&node, None);
     let query = query();
     let missing = RefName::try_new(b"refs/heads/missing").unwrap();
     assert!(matches!(
-        node.runtime().block_on(node.search_source_index_revalidated_local_in(
-            &node.request_context(), RevalidatedIndexRequest::new(&missing, &query),
-        )), Err(NodeWorkspaceRefusal::RefUnavailable)
+        node.runtime()
+            .block_on(node.search_source_index_revalidated_local_in(
+                &node.request_context(),
+                RevalidatedIndexRequest::new(&missing, &query),
+            )),
+        Err(NodeWorkspaceRefusal::RefUnavailable)
     ));
     let reference = reference();
     let mut options = RevalidatedIndexRequest::new(&reference, &query);
@@ -298,9 +342,13 @@ fn missing_index_ref_and_insufficient_budgets_are_not_complete_empty_results() {
     ));
     options.query_limits = Default::default();
     options.read_limits.max_payload_bytes = 1;
-    assert!(node.runtime().block_on(node.search_source_index_revalidated_local_in(
-        &node.request_context(), options,
-    )).is_err());
+    assert!(
+        node.runtime()
+            .block_on(
+                node.search_source_index_revalidated_local_in(&node.request_context(), options,)
+            )
+            .is_err()
+    );
     assert_eq!(search(&node).unwrap().index().results.hits.len(), 4);
     node.shutdown().unwrap();
 }
@@ -332,14 +380,21 @@ fn continuation_requires_all_pins_and_rejects_wrong_native_domain() {
                 if matches!(*error, IndexError::Lexical(LexicalError::Invalid(_)))
         ));
     }
-    assert!(node.runtime().block_on(node.search_source_index_revalidated_local_in(
-        &node.request_context(), complete.clone(),
-    )).is_ok());
-    complete.expected_commit = Some(GitOid::from_hex(GitHashAlgorithm::Sha256, &"a".repeat(64)).unwrap());
+    assert!(
+        node.runtime()
+            .block_on(node.search_source_index_revalidated_local_in(
+                &node.request_context(),
+                complete.clone(),
+            ))
+            .is_ok()
+    );
+    complete.expected_commit =
+        Some(GitOid::from_hex(GitHashAlgorithm::Sha256, &"a".repeat(64)).unwrap());
     assert!(matches!(
-        node.runtime().block_on(node.search_source_index_revalidated_local_in(
-            &node.request_context(), complete,
-        )), Err(NodeWorkspaceRefusal::ObjectFormatMismatch)
+        node.runtime().block_on(
+            node.search_source_index_revalidated_local_in(&node.request_context(), complete,)
+        ),
+        Err(NodeWorkspaceRefusal::ObjectFormatMismatch)
     ));
     node.shutdown().unwrap();
 }

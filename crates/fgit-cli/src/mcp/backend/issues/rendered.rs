@@ -40,31 +40,57 @@ pub(in crate::mcp::backend) struct RenderBudget {
 }
 impl RenderBudget {
     pub(in crate::mcp::backend) fn from_args(args: &Object) -> Result<Self, ToolError> {
-        let profile = string(args, "render")?.map(|requested| {
-            PROFILES.into_iter().find(|profile| *profile == requested)
-                .ok_or_else(|| ToolError::invalid("unsupported_rendering"))
-        }).transpose()?;
-        Ok(Self { profile, remaining: MAX_RENDERED_BYTES })
+        let profile = string(args, "render")?
+            .map(|requested| {
+                PROFILES
+                    .into_iter()
+                    .find(|profile| *profile == requested)
+                    .ok_or_else(|| ToolError::invalid("unsupported_rendering"))
+            })
+            .transpose()?;
+        Ok(Self {
+            profile,
+            remaining: MAX_RENDERED_BYTES,
+        })
     }
 
     /// Operate on one known body-bearing record only. No recursive search of
     /// arbitrary JSON/source text, and no creation of absent edit/merge fields.
     pub(in crate::mcp::backend) fn annotate(&mut self, value: &mut Value) -> Result<(), ToolError> {
-        let Some(profile) = self.profile else { return Ok(()); };
-        let Value::Object(fields) = value else { return Ok(()); };
-        let Some(source) = fields.get("body").and_then(Value::text) else { return Ok(()); };
-        let encoded = OneNode::render_markdown_presentation(source, profile, self.remaining.min(MAX_BODY_RENDERED_BYTES))
-            .map_err(ToolError::failed)?;
+        let Some(profile) = self.profile else {
+            return Ok(());
+        };
+        let Value::Object(fields) = value else {
+            return Ok(());
+        };
+        let Some(source) = fields.get("body").and_then(Value::text) else {
+            return Ok(());
+        };
+        let encoded = OneNode::render_markdown_presentation(
+            source,
+            profile,
+            self.remaining.min(MAX_BODY_RENDERED_BYTES),
+        )
+        .map_err(ToolError::failed)?;
         let presentation = json::parse(encoded.as_bytes())
             .map_err(|_| ToolError::failed("invalid_document_presentation"))?;
-        let output_field = if profile == "html_safe" { "html" } else { "content" };
-        let output_bytes = presentation.object()
+        let output_field = if profile == "html_safe" {
+            "html"
+        } else {
+            "content"
+        };
+        let output_bytes = presentation
+            .object()
             .and_then(|fields| fields.get(output_field))
             .and_then(Value::text)
             .map_or(0, str::len);
-        self.remaining = self.remaining.checked_sub(
-            u32::try_from(output_bytes).map_err(|_| ToolError::failed("document_budget_exceeded"))?
-        ).ok_or_else(|| ToolError::failed("document_budget_exceeded"))?;
+        self.remaining = self
+            .remaining
+            .checked_sub(
+                u32::try_from(output_bytes)
+                    .map_err(|_| ToolError::failed("document_budget_exceeded"))?,
+            )
+            .ok_or_else(|| ToolError::failed("document_budget_exceeded"))?;
         fields.insert("body_rendered".into(), presentation);
         Ok(())
     }

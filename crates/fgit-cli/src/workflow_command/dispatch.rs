@@ -38,8 +38,10 @@ fn options(args: &[String]) -> Result<(Options, String), String> {
     if args.first().map(String::as_str) != Some("dispatch") || args.len() < 5 {
         return Err(USAGE.into());
     }
-    if args.len() > 2102 || args.iter().any(|s| s.len() > 8192)
-        || args.iter().map(String::len).sum::<usize>() > 128 * 1024 {
+    if args.len() > 2102
+        || args.iter().any(|s| s.len() > 8192)
+        || args.iter().map(String::len).sum::<usize>() > 128 * 1024
+    {
         return Err("dispatch arguments exceed the bounded profile".into());
     }
     // Preserve the ordinary parser's input, byte-name, trust and size rules.
@@ -70,7 +72,10 @@ fn options(args: &[String]) -> Result<(Options, String), String> {
     }
     let parsed = parse(&ordinary)?;
     if parsed.head.is_none() || parsed.commit.is_none() {
-        return Err("dispatch requires --expected-head and --expected-commit; no moving-source discovery".into());
+        return Err(
+            "dispatch requires --expected-head and --expected-commit; no moving-source discovery"
+                .into(),
+        );
     }
     Ok((parsed, event.ok_or("--event is mandatory")?))
 }
@@ -82,7 +87,9 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     }
     let (options, event) = options(args)?;
     #[cfg(target_os = "linux")]
-    { execute(options, &event) }
+    {
+        execute(options, &event)
+    }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (options, event);
@@ -93,36 +100,79 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
 #[cfg(target_os = "linux")]
 fn execute(options: Options, event: &str) -> Result<u8, String> {
     use fgit_node::{NodeConfig, OneNode};
-    let expected = (options.head.ok_or("missing dispatch head")?, options.commit.ok_or("missing dispatch commit")?);
-    let mut node = OneNode::open_existing(NodeConfig::new(options.storage, options.tenant, options.repository)
-        .with_object_format(options.format)).map_err(|e| e.to_string())?;
+    let expected = (
+        options.head.ok_or("missing dispatch head")?,
+        options.commit.ok_or("missing dispatch commit")?,
+    );
+    let mut node = OneNode::open_existing(
+        NodeConfig::new(options.storage, options.tenant, options.repository)
+            .with_object_format(options.format),
+    )
+    .map_err(|e| e.to_string())?;
     let operation = (|| {
-        if options.incarnation.is_some_and(|id| id != node.repository_incarnation_id()) {
+        if options
+            .incarnation
+            .is_some_and(|id| id != node.repository_incarnation_id())
+        {
             return Err("repository incarnation changed; no dispatch started".to_owned());
         }
-        let head = node.runtime().block_on(node.authenticate_authority_head()).map_err(|e| e.to_string())?;
-        node.bring_into_service(head.receipt().generation()).map_err(|e| e.to_string())?;
+        let head = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .map_err(|e| e.to_string())?;
+        node.bring_into_service(head.receipt().generation())
+            .map_err(|e| e.to_string())?;
         let request = node.request_context();
-        node.runtime().block_on(node.dispatch_trusted_workflows_in(
-            &request, &options.reference, &options.workflow, event, options.run_id, &options.parent,
-            &options.inputs, expected, Default::default(),
-        )).map_err(|e| e.to_string())
+        node.runtime()
+            .block_on(node.dispatch_trusted_workflows_in(
+                &request,
+                &options.reference,
+                &options.workflow,
+                event,
+                options.run_id,
+                &options.parent,
+                &options.inputs,
+                expected,
+                Default::default(),
+            ))
+            .map_err(|e| e.to_string())
     })();
     let cleanup = node.shutdown().err().map(|e| e.to_string());
     match operation {
-        Ok(report) => finish(&mut std::io::stdout().lock(), &report.to_json(), report.succeeded(), cleanup.as_deref())
-            .map_err(|e| format!("{e}; dispatch report remains at {}; do not replay the batch", report.run_directory.join("report.json").display())),
-        Err(error) => Err(format!("{error}{}; inspect any existing dispatch/child journals before retrying; an error is not proof that no job ran",
-            cleanup.map_or_else(String::new, |e| format!("; node shutdown also failed: {e}")))),
+        Ok(report) => finish(
+            &mut std::io::stdout().lock(),
+            &report.to_json(),
+            report.succeeded(),
+            cleanup.as_deref(),
+        )
+        .map_err(|e| {
+            format!(
+                "{e}; dispatch report remains at {}; do not replay the batch",
+                report.run_directory.join("report.json").display()
+            )
+        }),
+        Err(error) => Err(format!(
+            "{error}{}; inspect any existing dispatch/child journals before retrying; an error is not proof that no job ran",
+            cleanup.map_or_else(String::new, |e| format!("; node shutdown also failed: {e}"))
+        )),
     }
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn finish(output: &mut impl Write, report: &str, succeeded: bool, cleanup: Option<&str>) -> Result<u8, String> {
+fn finish(
+    output: &mut impl Write,
+    report: &str,
+    succeeded: bool,
+    cleanup: Option<&str>,
+) -> Result<u8, String> {
     let error = cleanup.map_or_else(|| "null".to_owned(), super::quote);
     writeln!(output, "{{\"type\":\"workflow_dispatch_result\",\"schema_version\":1,\"node_closed\":{},\"node_cleanup_error\":{error},\"dispatch\":{report}}}", cleanup.is_none())
         .and_then(|()| output.flush()).map_err(|e| format!("dispatch receipt output incomplete: {e}"))?;
-    Ok(if cleanup.is_some() { 2 } else { u8::from(!succeeded) })
+    Ok(if cleanup.is_some() {
+        2
+    } else {
+        u8::from(!succeeded)
+    })
 }
 
 #[cfg(test)]
@@ -130,11 +180,31 @@ mod tests {
     use super::*;
 
     fn args() -> Vec<String> {
-        ["dispatch", "/not-opened", &"11".repeat(16), &"22".repeat(16), "refs/heads/main",
-            "--trusted-local", "--event", "push", "--workflow", ".github/workflows", "--input", ".github",
-            "--run-parent", "/private", "--run-id", &"33".repeat(16),
-            "--expected-head", &format!("alg:2:{}", "44".repeat(32)), "--expected-commit", &"55".repeat(20)]
-            .into_iter().map(str::to_owned).collect()
+        [
+            "dispatch",
+            "/not-opened",
+            &"11".repeat(16),
+            &"22".repeat(16),
+            "refs/heads/main",
+            "--trusted-local",
+            "--event",
+            "push",
+            "--workflow",
+            ".github/workflows",
+            "--input",
+            ".github",
+            "--run-parent",
+            "/private",
+            "--run-id",
+            &"33".repeat(16),
+            "--expected-head",
+            &format!("alg:2:{}", "44".repeat(32)),
+            "--expected-commit",
+            &"55".repeat(20),
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     }
 
     #[test]
@@ -159,15 +229,25 @@ mod tests {
             missing.drain(at..at + 2);
             assert!(options(&missing).is_err());
         }
-        let mut untrusted = args(); untrusted.remove(5);
+        let mut untrusted = args();
+        untrusted.remove(5);
         assert!(options(&untrusted).is_err());
-        for extra in [vec!["--event", "push"], vec!["--event", "pull_request"], vec!["--bundle", "candidate.bundle"],
-            vec!["--force"], vec!["--input", ".github"], vec!["--input", "../host"]] {
-            let mut input = args(); input.extend(extra.into_iter().map(str::to_owned));
+        for extra in [
+            vec!["--event", "push"],
+            vec!["--event", "pull_request"],
+            vec!["--bundle", "candidate.bundle"],
+            vec!["--force"],
+            vec!["--input", ".github"],
+            vec!["--input", "../host"],
+        ] {
+            let mut input = args();
+            input.extend(extra.into_iter().map(str::to_owned));
             assert!(options(&input).is_err());
         }
         for event in ["Push", "schedule", "push\n", ""] {
-            let mut input = args(); input[7] = event.into(); assert!(options(&input).is_err());
+            let mut input = args();
+            input[7] = event.into();
+            assert!(options(&input).is_err());
         }
     }
 
@@ -175,7 +255,10 @@ mod tests {
     fn option_looking_values_do_not_become_dispatch_controls() {
         let mut input = args();
         input[13] = "--event".into();
-        assert!(options(&input).is_err(), "a run-parent value is not another event flag");
+        assert!(
+            options(&input).is_err(),
+            "a run-parent value is not another event flag"
+        );
         let mut input = args();
         input[9] = "--event".into();
         input[11] = "--event".into();
@@ -188,14 +271,29 @@ mod tests {
     fn non_green_cleanup_and_output_loss_never_report_success() {
         let mut output = Vec::new();
         assert_eq!(finish(&mut output, "{}", false, None).unwrap(), 1);
-        assert!(String::from_utf8(output).unwrap().contains("\"dispatch\":{}"));
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("\"dispatch\":{}")
+        );
         let mut output = Vec::new();
-        assert_eq!(finish(&mut output, "{}", true, Some("close\nfailed")).unwrap(), 2);
-        assert!(String::from_utf8(output).unwrap().contains("\"node_closed\":false"));
+        assert_eq!(
+            finish(&mut output, "{}", true, Some("close\nfailed")).unwrap(),
+            2
+        );
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("\"node_closed\":false")
+        );
         struct Broken;
         impl Write for Broken {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { Err(std::io::Error::other("broken")) }
-            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("broken"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
         assert!(finish(&mut Broken, "{}", true, None).is_err());
     }

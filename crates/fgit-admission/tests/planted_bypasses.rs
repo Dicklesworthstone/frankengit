@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 use fgit_admission::CanonicalRefState;
 use fgit_admission::policy_bridge::{
     InMemoryPolicySnapshots, MissingAdmissionFact, PolicySourceRefusal, SubjectCodeMap,
-    compile_branch_protection_policy,
-    compile_protected_branch_rules, default_principal_snapshot_id, evaluate_effects_protection,
-    evaluate_protection, evaluate_receive_pack_protection,
+    compile_branch_protection_policy, compile_protected_branch_rules,
+    default_principal_snapshot_id, evaluate_effects_protection, evaluate_protection,
+    evaluate_receive_pack_protection,
 };
 use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
 use fgit_reference::effect::RefEffect;

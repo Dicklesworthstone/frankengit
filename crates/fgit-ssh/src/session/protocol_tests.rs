@@ -16,7 +16,11 @@ struct Peer {
 }
 
 impl Peer {
-    fn send(&mut self, session: &mut SshServerSession, payload: &[u8]) -> Result<(), SshSessionError> {
+    fn send(
+        &mut self,
+        session: &mut SshServerSession,
+        payload: &[u8],
+    ) -> Result<(), SshSessionError> {
         session.handle_incoming_bytes(&self.out.encrypt_packet(payload, &[0; 16]))
     }
 
@@ -27,7 +31,11 @@ impl Peer {
         while !rest.is_empty() {
             let length: [u8; 4] = rest[..4].try_into().expect("packet length");
             let total = 4 + self.inbound.decrypt_packet_length(&length) as usize + 16;
-            packets.push(self.inbound.decrypt_packet(&rest[..total]).expect("authenticated response"));
+            packets.push(
+                self.inbound
+                    .decrypt_packet(&rest[..total])
+                    .expect("authenticated response"),
+            );
             rest = &rest[total..];
         }
         packets
@@ -43,7 +51,8 @@ fn transport() -> (SshServerSession, Peer) {
         PrincipalId::from_bytes([0xab; 16]),
         fgit_crypto::VerifyingKey::from_bytes(signing.verifying_key().to_bytes()),
         &[DeployKeyScope::Read, DeployKeyScope::Write],
-    ).expect("binding");
+    )
+    .expect("binding");
     let mut session = SshServerSession::new(
         SigningKey::from_bytes(&[0x11; 32]),
         vec![binding],
@@ -64,7 +73,10 @@ fn transport() -> (SshServerSession, Peer) {
 fn auth(seed: u8, service: &str) -> Vec<u8> {
     let key = SigningKey::from_bytes(&[seed; 32]);
     let blob = encode_ed25519_public_key(&key.verifying_key().to_bytes());
-    let signature = sign_ed25519(&key, &build_userauth_signature_preimage(&SESSION_ID, "git", service, &blob));
+    let signature = sign_ed25519(
+        &key,
+        &build_userauth_signature_preimage(&SESSION_ID, "git", service, &blob),
+    );
     let mut w = WireWriter::new();
     w.write_u8(msg::USERAUTH_REQUEST);
     w.write_utf8("git");
@@ -118,7 +130,8 @@ fn env(channel: u32, name: &str) -> Vec<u8> {
 }
 
 fn authenticate(session: &mut SshServerSession, peer: &mut Peer) {
-    peer.send(session, &auth(0x22, "ssh-connection")).expect("valid authentication");
+    peer.send(session, &auth(0x22, "ssh-connection"))
+        .expect("valid authentication");
     assert_eq!(peer.receive(session), vec![vec![msg::USERAUTH_SUCCESS]]);
     assert_eq!(session.phase, SessionPhase::ChannelReady);
 }
@@ -126,7 +139,11 @@ fn authenticate(session: &mut SshServerSession, peer: &mut Peer) {
 fn connected() -> (SshServerSession, Peer) {
     let (mut session, mut peer) = transport();
     authenticate(&mut session, &mut peer);
-    peer.send(&mut session, &open(REMOTE_CHANNEL, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET_SIZE)).expect("open");
+    peer.send(
+        &mut session,
+        &open(REMOTE_CHANNEL, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET_SIZE),
+    )
+    .expect("open");
     let response = peer.receive(&mut session);
     assert_eq!(response.len(), 1);
     assert_eq!(response[0][0], msg::CHANNEL_OPEN_CONFIRMATION);
@@ -140,12 +157,21 @@ fn assert_response_channel(packet: &[u8], kind: u8, channel: u32) {
 }
 
 fn assert_protocol_refusal(result: Result<(), SshSessionError>) {
-    assert!(matches!(result, Err(SshSessionError::ProtocolViolation { .. })), "{result:?}");
+    assert!(
+        matches!(result, Err(SshSessionError::ProtocolViolation { .. })),
+        "{result:?}"
+    );
 }
 
 #[test]
 fn every_connection_message_requires_authentication_and_an_actual_channel() {
-    for kind in [msg::CHANNEL_DATA, msg::CHANNEL_WINDOW_ADJUST, msg::CHANNEL_REQUEST, msg::CHANNEL_EOF, msg::CHANNEL_CLOSE] {
+    for kind in [
+        msg::CHANNEL_DATA,
+        msg::CHANNEL_WINDOW_ADJUST,
+        msg::CHANNEL_REQUEST,
+        msg::CHANNEL_EOF,
+        msg::CHANNEL_CLOSE,
+    ] {
         let packet = match kind {
             msg::CHANNEL_DATA => data(0, b"git input"),
             msg::CHANNEL_WINDOW_ADJUST => {
@@ -169,7 +195,8 @@ fn every_connection_message_requires_authentication_and_an_actual_channel() {
 
         // The same bytes are legal once that exact channel exists.
         let (mut session, mut peer) = connected();
-        peer.send(&mut session, &packet).expect("permitted channel twin");
+        peer.send(&mut session, &packet)
+            .expect("permitted channel twin");
     }
     let (mut session, mut peer) = transport();
     assert_protocol_refusal(peer.send(&mut session, &open(REMOTE_CHANNEL, 100, 40)));
@@ -181,7 +208,10 @@ fn userauth_requires_inbound_newkeys_even_for_legacy_non_strict_clients() {
     let (mut session, _) = transport();
     session.inbound_cipher = None;
     session.pending_inbound_key = Some(CLIENT_KEY);
-    assert_protocol_refusal(session.handle_incoming_bytes(&encode_cleartext_packet(&auth(0x22, "ssh-connection"), &[0; 16])));
+    assert_protocol_refusal(session.handle_incoming_bytes(&encode_cleartext_packet(
+        &auth(0x22, "ssh-connection"),
+        &[0; 16],
+    )));
     assert!(session.authenticated_key.is_none());
     let (mut session, mut peer) = transport();
     authenticate(&mut session, &mut peer);
@@ -198,7 +228,8 @@ fn authentication_is_bound_to_both_requested_services() {
     let mut service = WireWriter::new();
     service.write_u8(msg::SERVICE_REQUEST);
     service.write_utf8("ssh-userauth");
-    peer.send(&mut session, &service.into_bytes()).expect("service request");
+    peer.send(&mut session, &service.into_bytes())
+        .expect("service request");
     assert_eq!(peer.receive(&mut session)[0][0], msg::SERVICE_ACCEPT);
     authenticate(&mut session, &mut peer);
 
@@ -210,20 +241,33 @@ fn authentication_is_bound_to_both_requested_services() {
 #[test]
 fn successful_authentication_and_exec_cannot_be_replaced() {
     let (mut session, mut peer) = connected();
-    peer.send(&mut session, &request(0, "git-upload-pack 'repo.git'", true)).expect("first exec");
-    assert_response_channel(&peer.receive(&mut session)[0], msg::CHANNEL_SUCCESS, REMOTE_CHANNEL);
+    peer.send(
+        &mut session,
+        &request(0, "git-upload-pack 'repo.git'", true),
+    )
+    .expect("first exec");
+    assert_response_channel(
+        &peer.receive(&mut session)[0],
+        msg::CHANNEL_SUCCESS,
+        REMOTE_CHANNEL,
+    );
     let key = session.authenticated_key;
     let principal = session.authenticated_principal;
     assert!(principal.is_some());
 
     // A valid signature by a different key used to reset the phase and key.
-    peer.send(&mut session, &auth(0x44, "ssh-connection")).expect("late auth is ignored");
+    peer.send(&mut session, &auth(0x44, "ssh-connection"))
+        .expect("late auth is ignored");
     assert!(peer.receive(&mut session).is_empty());
     assert_eq!(session.authenticated_key, key);
     assert_eq!(session.phase, SessionPhase::ActiveChannel);
 
     for reply in [true, false] {
-        peer.send(&mut session, &request(0, "git-receive-pack 'repo.git'", reply)).expect("second exec refused without closing worker");
+        peer.send(
+            &mut session,
+            &request(0, "git-receive-pack 'repo.git'", reply),
+        )
+        .expect("second exec refused without closing worker");
         let responses = peer.receive(&mut session);
         if reply {
             assert_eq!(responses.len(), 1);
@@ -232,28 +276,47 @@ fn successful_authentication_and_exec_cannot_be_replaced() {
             assert!(responses.is_empty());
         }
         assert_eq!(session.authenticated_principal, principal);
-        assert_eq!(session.active_command.as_ref().expect("original command").service(), crate::command::SshGitService::UploadPack);
+        assert_eq!(
+            session
+                .active_command
+                .as_ref()
+                .expect("original command")
+                .service(),
+            crate::command::SshGitService::UploadPack
+        );
     }
-    peer.send(&mut session, &data(0, b"still the original worker")).expect("original channel remains usable");
-    assert_eq!(session.take_channel_input(), b"still the original worker".to_vec());
+    peer.send(&mut session, &data(0, b"still the original worker"))
+        .expect("original channel remains usable");
+    assert_eq!(
+        session.take_channel_input(),
+        b"still the original worker".to_vec()
+    );
 }
 
 #[test]
 fn another_channel_is_refused_without_overwriting_the_first() {
     let (mut session, mut peer) = connected();
-    peer.send(&mut session, &open(99, 1, 40)).expect("channel-open refusal response");
+    peer.send(&mut session, &open(99, 1, 40))
+        .expect("channel-open refusal response");
     let responses = peer.receive(&mut session);
     assert_eq!(responses.len(), 1);
     assert_response_channel(&responses[0], msg::CHANNEL_OPEN_FAILURE, 99);
     assert_eq!(session.client_channel_id, Some(REMOTE_CHANNEL));
     assert_eq!(session.client_window_size, DEFAULT_WINDOW_SIZE);
-    peer.send(&mut session, &data(0, b"first channel")).expect("first channel is intact");
+    peer.send(&mut session, &data(0, b"first channel"))
+        .expect("first channel is intact");
     assert_eq!(session.take_channel_input(), b"first channel".to_vec());
 }
 
 #[test]
 fn local_and_remote_channel_identifiers_are_never_interchangeable() {
-    for kind in [msg::CHANNEL_DATA, msg::CHANNEL_WINDOW_ADJUST, msg::CHANNEL_REQUEST, msg::CHANNEL_EOF, msg::CHANNEL_CLOSE] {
+    for kind in [
+        msg::CHANNEL_DATA,
+        msg::CHANNEL_WINDOW_ADJUST,
+        msg::CHANNEL_REQUEST,
+        msg::CHANNEL_EOF,
+        msg::CHANNEL_CLOSE,
+    ] {
         let (mut session, mut peer) = connected();
         let packet = match kind {
             msg::CHANNEL_DATA => data(REMOTE_CHANNEL, b"wrong channel"),
@@ -272,14 +335,24 @@ fn local_and_remote_channel_identifiers_are_never_interchangeable() {
         assert!(!session.channel_teardown.close_received);
     }
     let (mut session, mut peer) = connected();
-    for (name, kind) in [("GIT_PROTOCOL", msg::CHANNEL_SUCCESS), ("LD_PRELOAD", msg::CHANNEL_FAILURE)] {
-        peer.send(&mut session, &env(0, name)).expect("properly addressed request");
+    for (name, kind) in [
+        ("GIT_PROTOCOL", msg::CHANNEL_SUCCESS),
+        ("LD_PRELOAD", msg::CHANNEL_FAILURE),
+    ] {
+        peer.send(&mut session, &env(0, name))
+            .expect("properly addressed request");
         assert_response_channel(&peer.receive(&mut session)[0], kind, REMOTE_CHANNEL);
     }
-    peer.send(&mut session, &request(0, "not-a-git-command", true)).expect("typed exec refusal");
+    peer.send(&mut session, &request(0, "not-a-git-command", true))
+        .expect("typed exec refusal");
     let responses = peer.receive(&mut session);
     assert_eq!(responses.len(), 4);
-    for (packet, kind) in responses.iter().zip([msg::CHANNEL_FAILURE, msg::CHANNEL_EXTENDED_DATA, msg::CHANNEL_REQUEST, msg::CHANNEL_CLOSE]) {
+    for (packet, kind) in responses.iter().zip([
+        msg::CHANNEL_FAILURE,
+        msg::CHANNEL_EXTENDED_DATA,
+        msg::CHANNEL_REQUEST,
+        msg::CHANNEL_CLOSE,
+    ]) {
         assert_response_channel(packet, kind, REMOTE_CHANNEL);
     }
 }
@@ -287,13 +360,20 @@ fn local_and_remote_channel_identifiers_are_never_interchangeable() {
 #[test]
 fn malformed_or_trailing_packets_do_not_mutate_or_leave_a_resumable_session() {
     let valid = channel_message(msg::CHANNEL_EOF, 0).into_bytes();
-    for packet in [vec![msg::CHANNEL_EOF], [valid.as_slice(), &[1]].concat(), [data(0, b"uncommitted input").as_slice(), &[1]].concat()] {
+    for packet in [
+        vec![msg::CHANNEL_EOF],
+        [valid.as_slice(), &[1]].concat(),
+        [data(0, b"uncommitted input").as_slice(), &[1]].concat(),
+    ] {
         let (mut session, mut peer) = connected();
         assert!(peer.send(&mut session, &packet).is_err());
         assert!(!session.channel_teardown.eof_received);
         assert!(session.channel_input_data.is_empty());
         assert_eq!(session.phase, SessionPhase::Closed);
-        assert!(matches!(peer.send(&mut session, &data(0, b"retry")), Err(SshSessionError::Disconnected { .. })));
+        assert!(matches!(
+            peer.send(&mut session, &data(0, b"retry")),
+            Err(SshSessionError::Disconnected { .. })
+        ));
         assert_eq!(session.send_channel_data(b"late output"), 0);
     }
     let (mut session, mut peer) = connected();
@@ -303,7 +383,10 @@ fn malformed_or_trailing_packets_do_not_mutate_or_leave_a_resumable_session() {
 
 #[test]
 fn advertised_packet_limit_and_eof_are_enforced_before_buffering() {
-    for size in [DEFAULT_MAX_PACKET_SIZE as usize, DEFAULT_MAX_PACKET_SIZE as usize + 1] {
+    for size in [
+        DEFAULT_MAX_PACKET_SIZE as usize,
+        DEFAULT_MAX_PACKET_SIZE as usize + 1,
+    ] {
         let (mut session, mut peer) = connected();
         let bytes = vec![b'x'; size];
         let result = peer.send(&mut session, &data(0, &bytes));
@@ -317,7 +400,11 @@ fn advertised_packet_limit_and_eof_are_enforced_before_buffering() {
         }
     }
     let (mut session, mut peer) = connected();
-    peer.send(&mut session, &channel_message(msg::CHANNEL_EOF, 0).into_bytes()).expect("EOF");
+    peer.send(
+        &mut session,
+        &channel_message(msg::CHANNEL_EOF, 0).into_bytes(),
+    )
+    .expect("EOF");
     assert_protocol_refusal(peer.send(&mut session, &data(0, b"after EOF")));
     assert!(session.channel_input_data.is_empty());
 }
@@ -345,12 +432,25 @@ fn unusable_packet_sizes_do_not_create_a_channel_and_a_usable_retry_succeeds() {
     let (mut session, mut peer) = transport();
     authenticate(&mut session, &mut peer);
     for maximum in [0, CHANNEL_DATA_OVERHEAD] {
-        peer.send(&mut session, &open(REMOTE_CHANNEL, 100, maximum)).expect("open refusal");
-        assert_response_channel(&peer.receive(&mut session)[0], msg::CHANNEL_OPEN_FAILURE, REMOTE_CHANNEL);
+        peer.send(&mut session, &open(REMOTE_CHANNEL, 100, maximum))
+            .expect("open refusal");
+        assert_response_channel(
+            &peer.receive(&mut session)[0],
+            msg::CHANNEL_OPEN_FAILURE,
+            REMOTE_CHANNEL,
+        );
         assert!(session.client_channel_id.is_none());
     }
-    peer.send(&mut session, &open(REMOTE_CHANNEL, 100, CHANNEL_DATA_OVERHEAD + 1)).expect("usable retry");
-    assert_response_channel(&peer.receive(&mut session)[0], msg::CHANNEL_OPEN_CONFIRMATION, REMOTE_CHANNEL);
+    peer.send(
+        &mut session,
+        &open(REMOTE_CHANNEL, 100, CHANNEL_DATA_OVERHEAD + 1),
+    )
+    .expect("usable retry");
+    assert_response_channel(
+        &peer.receive(&mut session)[0],
+        msg::CHANNEL_OPEN_CONFIRMATION,
+        REMOTE_CHANNEL,
+    );
     assert_eq!(session.send_channel_data(b"xy"), 2);
     for packet in peer.receive(&mut session) {
         assert_eq!(packet.len(), CHANNEL_DATA_OVERHEAD as usize + 1);
@@ -370,6 +470,8 @@ fn unsolicited_newkeys_and_rekey_do_not_reset_an_authenticated_session() {
     session.inbound_cipher = None;
     session.pending_inbound_key = Some(CLIENT_KEY);
     session.strict_kex = true;
-    session.handle_incoming_bytes(&encode_cleartext_packet(&[msg::NEWKEYS], &[0; 16])).expect("pending initial NEWKEYS");
+    session
+        .handle_incoming_bytes(&encode_cleartext_packet(&[msg::NEWKEYS], &[0; 16]))
+        .expect("pending initial NEWKEYS");
     authenticate(&mut session, &mut peer);
 }

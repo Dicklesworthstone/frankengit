@@ -3,14 +3,25 @@ use fgit_types::GitHashAlgorithm;
 
 fn args(format: GitHashAlgorithm) -> Vec<String> {
     vec![
-        "/not-opened-by-the-parser".into(), "e1".repeat(16), "e2".repeat(16), "7".into(),
-        "--trusted-local".into(), "--principal".into(), "02".repeat(16),
-        "--idempotency-key".into(), "ff-key".into(),
-        "--expected-version".into(), "2".into(),
-        "--source-ref".into(), "refs/heads/topic".into(),
-        "--expected-source".into(), "aa".repeat(format.digest_len()),
-        "--target-ref".into(), "refs/heads/main".into(),
-        "--expected-target".into(), "bb".repeat(format.digest_len()),
+        "/not-opened-by-the-parser".into(),
+        "e1".repeat(16),
+        "e2".repeat(16),
+        "7".into(),
+        "--trusted-local".into(),
+        "--principal".into(),
+        "02".repeat(16),
+        "--idempotency-key".into(),
+        "ff-key".into(),
+        "--expected-version".into(),
+        "2".into(),
+        "--source-ref".into(),
+        "refs/heads/topic".into(),
+        "--expected-source".into(),
+        "aa".repeat(format.digest_len()),
+        "--target-ref".into(),
+        "refs/heads/main".into(),
+        "--expected-target".into(),
+        "bb".repeat(format.digest_len()),
     ]
 }
 fn set(args: &mut [String], name: &str, value: &str) {
@@ -39,9 +50,15 @@ fn exact_native_coordinates_are_parsed_without_repo_or_metadata_lookup() {
 #[test]
 fn the_operator_grant_and_every_semantic_coordinate_are_mandatory() {
     let good = args(GitHashAlgorithm::Sha1);
-    for name in ["--principal", "--idempotency-key", "--expected-version", "--source-ref",
-        "--target-ref", "--expected-source", "--expected-target"]
-    {
+    for name in [
+        "--principal",
+        "--idempotency-key",
+        "--expected-version",
+        "--source-ref",
+        "--target-ref",
+        "--expected-source",
+        "--expected-target",
+    ] {
         let mut missing = good.clone();
         let at = missing.iter().position(|arg| arg == name).unwrap();
         missing.drain(at..at + 2);
@@ -50,7 +67,15 @@ fn the_operator_grant_and_every_semantic_coordinate_are_mandatory() {
     let mut untrusted = good.clone();
     untrusted.retain(|arg| arg != "--trusted-local");
     assert!(options::parse(&untrusted).is_err());
-    for flag in ["--force", "--method", "--body", "--title", "--bundle", "--expected-head", "--policy-epoch"] {
+    for flag in [
+        "--force",
+        "--method",
+        "--body",
+        "--title",
+        "--bundle",
+        "--expected-head",
+        "--policy-epoch",
+    ] {
         let mut injected = good.clone();
         injected.extend([flag.into(), "ignored-is-not-allowed".into()]);
         assert!(options::parse(&injected).is_err(), "{flag}");
@@ -61,11 +86,25 @@ fn the_operator_grant_and_every_semantic_coordinate_are_mandatory() {
 fn positive_and_exhausted_u64_versions_are_not_lossily_coerced() {
     let mut input = args(GitHashAlgorithm::Sha256);
     input[3] = u64::MAX.to_string();
-    set(&mut input, "--expected-version", &(u64::MAX - 1).to_string());
+    set(
+        &mut input,
+        "--expected-version",
+        &(u64::MAX - 1).to_string(),
+    );
     let edge = options::parse(&input).unwrap();
     assert_eq!(edge.number.get(), u64::MAX);
     assert_eq!(edge.version.get(), u64::MAX - 1);
-    for bad in ["0", "00", "01", "-1", "+1", "1.0", "1e2", "18446744073709551615", "18446744073709551616"] {
+    for bad in [
+        "0",
+        "00",
+        "01",
+        "-1",
+        "+1",
+        "1.0",
+        "1e2",
+        "18446744073709551615",
+        "18446744073709551616",
+    ] {
         set(&mut input, "--expected-version", bad);
         assert!(options::parse(&input).is_err(), "{bad}");
     }
@@ -101,7 +140,13 @@ fn object_formats_zero_equal_tips_and_nonbranch_coordinates_refuse_before_io() {
 #[test]
 fn aliases_and_duplicate_flags_cannot_hide_conflicting_expectations() {
     let good = args(GitHashAlgorithm::Sha1);
-    for name in ["--expected-source", "--source-tip", "--target-tip", "--expected-version", "--principal"] {
+    for name in [
+        "--expected-source",
+        "--source-tip",
+        "--target-tip",
+        "--expected-version",
+        "--principal",
+    ] {
         let mut repeated = good.clone();
         repeated.extend([name.into(), "aa".repeat(20)]);
         assert!(options::parse(&repeated).is_err(), "{name}");
@@ -109,11 +154,14 @@ fn aliases_and_duplicate_flags_cannot_hide_conflicting_expectations() {
     let mut repeated = good.clone();
     repeated.push("--trusted-local".into());
     assert!(options::parse(&repeated).is_err());
-    let aliases: Vec<_> = good.iter().map(|arg| match arg.as_str() {
-        "--expected-source" => "--source-tip".to_owned(),
-        "--expected-target" => "--target-tip".to_owned(),
-        _ => arg.clone(),
-    }).collect();
+    let aliases: Vec<_> = good
+        .iter()
+        .map(|arg| match arg.as_str() {
+            "--expected-source" => "--source-tip".to_owned(),
+            "--expected-target" => "--target-tip".to_owned(),
+            _ => arg.clone(),
+        })
+        .collect();
     let normal = options::parse(&good).unwrap();
     let alternate = options::parse(&aliases).unwrap();
     assert_eq!(alternate.source, normal.source);
@@ -125,10 +173,16 @@ fn aliases_and_duplicate_flags_cannot_hide_conflicting_expectations() {
 fn byte_references_stay_exact_and_competing_spellings_are_not_merged() {
     let good = args(GitHashAlgorithm::Sha1);
     let mut encoded = good.clone();
-    let at = encoded.iter().position(|arg| arg == "--source-ref").unwrap();
+    let at = encoded
+        .iter()
+        .position(|arg| arg == "--source-ref")
+        .unwrap();
     encoded[at] = "--source-ref-hex".into();
     encoded[at + 1] = hex(b"refs/heads/topic\xff");
-    assert_eq!(options::parse(&encoded).unwrap().source_ref.as_bytes(), b"refs/heads/topic\xff");
+    assert_eq!(
+        options::parse(&encoded).unwrap().source_ref.as_bytes(),
+        b"refs/heads/topic\xff"
+    );
     for malformed in ["", "a", "AA", "zz", "00"] {
         let mut bad = encoded.clone();
         bad[at + 1] = malformed.into();
@@ -181,9 +235,15 @@ fn help_and_invalid_input_do_not_open_storage_or_suppress_output_failure() {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
             Err(std::io::ErrorKind::BrokenPipe.into())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-    assert!(run(&["--help".into()], &mut Broken).unwrap_err().contains("help output failed"));
+    assert!(
+        run(&["--help".into()], &mut Broken)
+            .unwrap_err()
+            .contains("help output failed")
+    );
     let mut bad = args(GitHashAlgorithm::Sha1);
     set(&mut bad, "--expected-version", "0");
     let error = run(&bad, &mut Vec::new()).unwrap_err();

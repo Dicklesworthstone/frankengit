@@ -306,7 +306,9 @@ fn validate_candidate_objects(
     }
     if let Some(base) = fast_forward_base {
         if !is_ancestor(base, candidate, &parents, deadline)? {
-            return Err(ProjectionFailure::Refuse(RefusalCode::NonFastForwardRefused));
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::NonFastForwardRefused,
+            ));
         }
     }
     checkpoint(deadline)?;

@@ -607,16 +607,18 @@ fn render_at(
             quote(&token(
                 report.generation.generation_id.as_internal_object_id()
             )),
-            command.source_mode.counter(report.generation.authority_generation.get()),
+            command
+                .source_mode
+                .counter(report.generation.authority_generation.get()),
             quote(&token(
                 report
                     .selected_generation_head
                     .generation_id
                     .as_internal_object_id()
             )),
-            command.source_mode.counter(
-                report.selected_generation_head.authority_generation.get(),
-            ),
+            command
+                .source_mode
+                .counter(report.selected_generation_head.authority_generation.get(),),
             quote(match command.query.channel() {
                 LexicalChannel::Content => "content",
                 LexicalChannel::Path => "path",

@@ -2,13 +2,14 @@
 //! does not select it: both directional offers must actually admit it.
 
 use super::{
-    CIPHER_CHACHA20_POLY1305, Curve25519Kex, KEX_CURVE25519_SHA256,
-    KEX_CURVE25519_SHA256_LIBSSH, KEX_STRICT_CLIENT, SSH_ED25519_ALGORITHM,
-    SshServerSession, SshSessionError, WireReader, msg,
+    CIPHER_CHACHA20_POLY1305, Curve25519Kex, KEX_CURVE25519_SHA256, KEX_CURVE25519_SHA256_LIBSSH,
+    KEX_STRICT_CLIENT, SSH_ED25519_ALGORITHM, SshServerSession, SshSessionError, WireReader, msg,
 };
 
 fn refusal(reason: &'static str) -> SshSessionError {
-    SshSessionError::ProtocolViolation { reason: reason.to_owned() }
+    SshSessionError::ProtocolViolation {
+        reason: reason.to_owned(),
+    }
 }
 
 fn contains(list: &str, algorithm: &str) -> bool {
@@ -16,9 +17,10 @@ fn contains(list: &str, algorithm: &str) -> bool {
 }
 
 fn valid_names(list: &str) -> bool {
-    list.is_empty() || list.split(',').all(|name| {
-        !name.is_empty() && name.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
-    })
+    list.is_empty()
+        || list
+            .split(',')
+            .all(|name| !name.is_empty() && name.bytes().all(|byte| (0x21..=0x7e).contains(&byte)))
 }
 
 impl SshServerSession {
@@ -31,11 +33,16 @@ impl SshServerSession {
         // Borrow all ten lists. Even a packet full of commas cannot allocate
         // a Vec entry per name, and no state changes precede full validation.
         let lists = [
-            reader.read_utf8()?, reader.read_utf8()?,
-            reader.read_utf8()?, reader.read_utf8()?,
-            reader.read_utf8()?, reader.read_utf8()?,
-            reader.read_utf8()?, reader.read_utf8()?,
-            reader.read_utf8()?, reader.read_utf8()?,
+            reader.read_utf8()?,
+            reader.read_utf8()?,
+            reader.read_utf8()?,
+            reader.read_utf8()?,
+            reader.read_utf8()?,
+            reader.read_utf8()?,
+            reader.read_utf8()?,
+            reader.read_utf8()?,
+            reader.read_utf8()?,
+            reader.read_utf8()?,
         ];
         let follows = reader.read_bool()?;
         let reserved = reader.read_u32()?;
@@ -49,9 +56,10 @@ impl SshServerSession {
         }
         // RFC 4253 section 7.1: client order chooses the first common KEX.
         // Extension markers are not key-exchange methods.
-        let selected_kex = lists[0].split(',').find(|name| {
-            *name == KEX_CURVE25519_SHA256 || *name == KEX_CURVE25519_SHA256_LIBSSH
-        }).ok_or_else(|| refusal("no mutually supported key-exchange algorithm"))?;
+        let selected_kex = lists[0]
+            .split(',')
+            .find(|name| *name == KEX_CURVE25519_SHA256 || *name == KEX_CURVE25519_SHA256_LIBSSH)
+            .ok_or_else(|| refusal("no mutually supported key-exchange algorithm"))?;
         if !contains(lists[1], SSH_ED25519_ALGORITHM) {
             return Err(refusal("no mutually supported host-key algorithm"));
         }
@@ -63,12 +71,16 @@ impl SshServerSession {
         // ChaCha20-Poly1305 authenticates its own packets; the separately
         // offered MAC algorithms are not selected for this AEAD cipher.
         if !contains(lists[6], "none") || !contains(lists[7], "none") {
-            return Err(refusal("compression is unsupported in one or both directions"));
+            return Err(refusal(
+                "compression is unsupported in one or both directions",
+            ));
         }
         let initial = self.inbound_cipher.is_none();
         let strict = contains(lists[0], KEX_STRICT_CLIENT);
         if initial && strict && self.inbound_packet_count != 1 {
-            return Err(refusal("strict KEX requires KEXINIT to be the first packet"));
+            return Err(refusal(
+                "strict KEX requires KEXINIT to be the first packet",
+            ));
         }
         let wrong_guess = lists[0].split(',').next() != Some(selected_kex)
             || lists[1].split(',').next() != Some(SSH_ED25519_ALGORITHM);

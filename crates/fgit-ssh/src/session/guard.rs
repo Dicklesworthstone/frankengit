@@ -22,7 +22,10 @@ impl SshServerSession {
     /// by the dispatcher; they never reach a supported operation accidentally.
     pub(super) fn validate_packet(&self, payload: &[u8]) -> Result<(), SshSessionError> {
         require(
-            !matches!(self.phase, SessionPhase::Identification | SessionPhase::Closed),
+            !matches!(
+                self.phase,
+                SessionPhase::Identification | SessionPhase::Closed
+            ),
             "SSH packet outside a live identified session",
         )?;
         let mut reader = WireReader::new(payload);
@@ -86,14 +89,26 @@ impl SshServerSession {
             }
             msg::SERVICE_REQUEST => {
                 self.require_userauth_transport()?;
-                require(!self.userauth_service_accepted, "authentication service already accepted")?;
-                require(reader.read_utf8()? == "ssh-userauth", "unsupported SSH service")?;
+                require(
+                    !self.userauth_service_accepted,
+                    "authentication service already accepted",
+                )?;
+                require(
+                    reader.read_utf8()? == "ssh-userauth",
+                    "unsupported SSH service",
+                )?;
             }
             msg::USERAUTH_REQUEST => {
                 self.require_userauth_transport()?;
-                require(self.userauth_service_accepted, "authentication service was not requested")?;
+                require(
+                    self.userauth_service_accepted,
+                    "authentication service was not requested",
+                )?;
                 reader.read_utf8()?; // username is signed, never an authorization grant
-                require(reader.read_utf8()? == "ssh-connection", "unsupported authenticated service")?;
+                require(
+                    reader.read_utf8()? == "ssh-connection",
+                    "unsupported authenticated service",
+                )?;
                 let method = reader.read_utf8()?;
                 if method != "publickey" {
                     return Ok(()); // unsupported methods receive USERAUTH_FAILURE
@@ -116,11 +131,16 @@ impl SshServerSession {
             }
             msg::CHANNEL_REQUEST => {
                 self.validate_channel(&mut reader)?;
-                require(!self.channel_teardown.close_sent, "request after channel close")?;
+                require(
+                    !self.channel_teardown.close_sent,
+                    "request after channel close",
+                )?;
                 let request = reader.read_utf8()?;
                 reader.read_bool()?;
                 match request {
-                    "exec" => { reader.read_utf8()?; }
+                    "exec" => {
+                        reader.read_utf8()?;
+                    }
                     "env" => {
                         reader.read_utf8()?;
                         reader.read_string()?;
@@ -175,8 +195,10 @@ impl SshServerSession {
 
     fn require_authenticated_connection(&self) -> Result<(), SshSessionError> {
         require(
-            matches!(self.phase, SessionPhase::ChannelReady | SessionPhase::ActiveChannel)
-                && self.authenticated_key.is_some()
+            matches!(
+                self.phase,
+                SessionPhase::ChannelReady | SessionPhase::ActiveChannel
+            ) && self.authenticated_key.is_some()
                 && self.inbound_cipher.is_some()
                 && self.outbound_cipher.is_some(),
             "SSH connection message before authentication",
@@ -185,7 +207,10 @@ impl SshServerSession {
 
     fn validate_channel(&self, reader: &mut WireReader<'_>) -> Result<(), SshSessionError> {
         self.require_authenticated_connection()?;
-        require(self.client_channel_id.is_some(), "SSH channel has not been opened")?;
+        require(
+            self.client_channel_id.is_some(),
+            "SSH channel has not been opened",
+        )?;
         require(
             reader.read_u32()? == self.server_channel_id,
             "SSH message addressed to an unknown local channel",

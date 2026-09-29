@@ -17,7 +17,9 @@ fn fresh() -> SshServerSession {
 
 fn identified() -> SshServerSession {
     let mut session = fresh();
-    session.handle_incoming_bytes(b"SSH-2.0-test_1\r\n").expect("identification");
+    session
+        .handle_incoming_bytes(b"SSH-2.0-test_1\r\n")
+        .expect("identification");
     let _ = session.take_outgoing_bytes();
     session
 }
@@ -35,9 +37,16 @@ fn ready() -> SshServerSession {
 
 fn lists() -> [&'static str; 10] {
     [
-        KEX_CURVE25519_SHA256, SSH_ED25519_ALGORITHM,
-        CIPHER_CHACHA20_POLY1305, CIPHER_CHACHA20_POLY1305,
-        "hmac-sha2-256", "hmac-sha2-512", "none", "none", "", "",
+        KEX_CURVE25519_SHA256,
+        SSH_ED25519_ALGORITHM,
+        CIPHER_CHACHA20_POLY1305,
+        CIPHER_CHACHA20_POLY1305,
+        "hmac-sha2-256",
+        "hmac-sha2-512",
+        "none",
+        "none",
+        "",
+        "",
     ]
 }
 
@@ -45,7 +54,9 @@ fn kex(lists: [&str; 10], follows: bool) -> Vec<u8> {
     let mut w = WireWriter::new();
     w.write_u8(msg::KEXINIT);
     w.write_raw(&[0x5a; 16]);
-    for list in lists { w.write_utf8(list); }
+    for list in lists {
+        w.write_utf8(list);
+    }
     w.write_bool(follows);
     w.write_u32(0);
     w.into_bytes()
@@ -73,13 +84,20 @@ fn channel_data(bytes: &[u8]) -> Vec<u8> {
 #[test]
 fn every_required_algorithm_offer_is_enforced_before_creating_a_transcript() {
     for (index, unsupported) in [
-        (0, "diffie-hellman-group14-sha256"), (1, "ssh-rsa"),
-        (2, "aes256-ctr"), (3, "aes256-ctr"), (6, "zlib"), (7, "zlib"),
+        (0, "diffie-hellman-group14-sha256"),
+        (1, "ssh-rsa"),
+        (2, "aes256-ctr"),
+        (3, "aes256-ctr"),
+        (6, "zlib"),
+        (7, "zlib"),
     ] {
         let mut offer = lists();
         offer[index] = unsupported;
         let mut session = identified();
-        assert!(matches!(clear(&mut session, &kex(offer, false)), Err(SshSessionError::ProtocolViolation { .. })));
+        assert!(matches!(
+            clear(&mut session, &kex(offer, false)),
+            Err(SshSessionError::ProtocolViolation { .. })
+        ));
         assert!(session.client_kexinit_payload.is_none());
         assert!(session.ephemeral_kex.is_none());
         assert!(session.take_outgoing_bytes().is_empty());
@@ -95,9 +113,13 @@ fn every_required_algorithm_offer_is_enforced_before_creating_a_transcript() {
 #[test]
 fn empty_and_malformed_name_lists_and_extension_only_kex_are_refused() {
     for bad in [
-        "", "curve25519-sha256,", ",curve25519-sha256",
-        "curve25519-sha256,,other", "curve25519-sha256,bad name",
-        "curve25519-sha256,\u{03bb}", KEX_STRICT_CLIENT,
+        "",
+        "curve25519-sha256,",
+        ",curve25519-sha256",
+        "curve25519-sha256,,other",
+        "curve25519-sha256,bad name",
+        "curve25519-sha256,\u{03bb}",
+        KEX_STRICT_CLIENT,
     ] {
         let mut offer = lists();
         offer[0] = bad;
@@ -122,7 +144,10 @@ fn every_truncated_kex_and_invalid_tail_is_refused_without_partial_negotiation()
     let packet = kex(lists(), false);
     for end in 0..packet.len() {
         let mut session = identified();
-        assert!(clear(&mut session, &packet[..end]).is_err(), "truncation at {end}");
+        assert!(
+            clear(&mut session, &packet[..end]).is_err(),
+            "truncation at {end}"
+        );
         assert!(session.client_kexinit_payload.is_none());
         assert!(session.ephemeral_kex.is_none());
     }
@@ -146,11 +171,15 @@ fn wrong_guesses_discard_exactly_one_packet_and_correct_guesses_are_processed() 
             let mut offer = lists();
             offer[0] = if strict {
                 "unsupported,curve25519-sha256,kex-strict-c-v00@openssh.com"
-            } else { "unsupported,curve25519-sha256" };
+            } else {
+                "unsupported,curve25519-sha256"
+            };
             if wrong_host {
                 offer[0] = if strict {
                     "curve25519-sha256,kex-strict-c-v00@openssh.com"
-                } else { KEX_CURVE25519_SHA256 };
+                } else {
+                    KEX_CURVE25519_SHA256
+                };
                 offer[1] = "ssh-rsa,ssh-ed25519";
             }
             let mut session = identified();
@@ -176,8 +205,12 @@ fn wrong_guesses_discard_exactly_one_packet_and_correct_guesses_are_processed() 
 #[test]
 fn identification_is_validated_and_the_255_byte_limit_has_an_exact_twin() {
     for invalid in [
-        &b"not-ssh\r\n"[..], &b"SSH-1.5-old\r\n"[..], &b"SSH-2.0-\r\n"[..],
-        &b"SSH-2.0- version\r\n"[..], &b"SSH-2.0-x\0\r\n"[..], &b"SSH-2.0-x\ry\n"[..],
+        &b"not-ssh\r\n"[..],
+        &b"SSH-1.5-old\r\n"[..],
+        &b"SSH-2.0-\r\n"[..],
+        &b"SSH-2.0- version\r\n"[..],
+        &b"SSH-2.0-x\0\r\n"[..],
+        &b"SSH-2.0-x\ry\n"[..],
     ] {
         let mut session = fresh();
         assert!(session.handle_incoming_bytes(invalid).is_err());
@@ -190,35 +223,51 @@ fn identification_is_validated_and_the_255_byte_limit_has_an_exact_twin() {
     assert_eq!(exact.len(), MAX_IDENTIFICATION_BYTES);
     let mut session = fresh();
     for byte in &exact {
-        session.handle_incoming_bytes(&[*byte]).expect("fragmented exact-limit banner");
+        session
+            .handle_incoming_bytes(&[*byte])
+            .expect("fragmented exact-limit banner");
     }
     assert_eq!(session.phase, SessionPhase::KeyExchange);
     exact.insert(exact.len() - 2, b'A');
     assert!(fresh().handle_incoming_bytes(&exact).is_err());
-    fresh().handle_incoming_bytes(b"SSH-2.0-test comment\n").expect("legacy LF and printable comment");
+    fresh()
+        .handle_incoming_bytes(b"SSH-2.0-test comment\n")
+        .expect("legacy LF and printable comment");
 }
 
 #[test]
 fn huge_invalid_bursts_are_rejected_without_copying_the_body() {
     let mut banner = fresh();
-    assert!(banner.handle_incoming_bytes(&vec![b'A'; 1024 * 1024]).is_err());
+    assert!(
+        banner
+            .handle_incoming_bytes(&vec![b'A'; 1024 * 1024])
+            .is_err()
+    );
     assert!(banner.incoming_buffer.capacity() <= 2 * MAX_IDENTIFICATION_BYTES);
 
     let mut input = u32::MAX.to_be_bytes().to_vec();
     input.extend(vec![0; 1024 * 1024]);
     let mut session = identified();
-    assert!(matches!(session.handle_incoming_bytes(&input), Err(SshSessionError::Wire(WireError::PacketTooLarge { .. }))));
+    assert!(matches!(
+        session.handle_incoming_bytes(&input),
+        Err(SshSessionError::Wire(WireError::PacketTooLarge { .. }))
+    ));
     assert!(session.incoming_buffer.capacity() <= 2 * MAX_IDENTIFICATION_BYTES);
 
     // The encrypted header alone suffices to reject an oversized declaration.
     let mut cipher = OpenSshChaCha20Poly1305::new_with_sequence(&CLIENT_KEY, 0);
     let oversized = cipher.encrypt_packet(&vec![0; MAX_PACKET_BYTES + 1], &[0; 16]);
     let mut session = ready();
-    assert!(matches!(session.handle_incoming_bytes(&oversized[..4]), Err(SshSessionError::Wire(WireError::PacketTooLarge { .. }))));
+    assert!(matches!(
+        session.handle_incoming_bytes(&oversized[..4]),
+        Err(SshSessionError::Wire(WireError::PacketTooLarge { .. }))
+    ));
     assert!(session.incoming_buffer.capacity() <= 2 * MAX_IDENTIFICATION_BYTES);
 
     let mut session = identified();
-    session.handle_incoming_bytes(&(MAX_PACKET_BYTES as u32).to_be_bytes()).expect("legal incomplete frame waits for its body");
+    session
+        .handle_incoming_bytes(&(MAX_PACKET_BYTES as u32).to_be_bytes())
+        .expect("legal incomplete frame waits for its body");
     assert_eq!(session.incoming_buffer.len(), 4);
 }
 
@@ -229,9 +278,16 @@ fn banner_and_kex_are_independent_of_every_input_split() {
     wire.extend(encode_cleartext_packet(&offer, &[0; 16]));
     for split in 0..=wire.len() {
         let mut session = fresh();
-        session.handle_incoming_bytes(&wire[..split]).expect("prefix");
-        session.handle_incoming_bytes(&wire[split..]).expect("suffix");
-        assert_eq!(session.client_kexinit_payload.as_deref(), Some(offer.as_slice()));
+        session
+            .handle_incoming_bytes(&wire[..split])
+            .expect("prefix");
+        session
+            .handle_incoming_bytes(&wire[split..])
+            .expect("suffix");
+        assert_eq!(
+            session.client_kexinit_payload.as_deref(),
+            Some(offer.as_slice())
+        );
         assert!(session.incoming_buffer.is_empty());
         assert!(session.ephemeral_kex.is_some());
     }
@@ -252,13 +308,22 @@ fn newkeys_switches_framing_even_inside_one_burst_or_at_any_split() {
         session.pending_inbound_key = Some(CLIENT_KEY);
         session.outbound_cipher = Some(OpenSshChaCha20Poly1305::new_with_sequence(&SERVER_KEY, 0));
         session.strict_kex = true;
-        session.handle_incoming_bytes(&wire[..split]).expect("prefix across NEWKEYS");
-        session.handle_incoming_bytes(&wire[split..]).expect("suffix across NEWKEYS");
+        session
+            .handle_incoming_bytes(&wire[..split])
+            .expect("prefix across NEWKEYS");
+        session
+            .handle_incoming_bytes(&wire[split..])
+            .expect("suffix across NEWKEYS");
         assert!(session.userauth_service_accepted);
         assert!(session.incoming_buffer.is_empty());
         assert!(session.pending_inbound_key.is_none());
         let mut inbound = OpenSshChaCha20Poly1305::new_with_sequence(&SERVER_KEY, 0);
-        assert_eq!(inbound.decrypt_packet(&session.take_outgoing_bytes()).expect("service response")[0], msg::SERVICE_ACCEPT);
+        assert_eq!(
+            inbound
+                .decrypt_packet(&session.take_outgoing_bytes())
+                .expect("service response")[0],
+            msg::SERVICE_ACCEPT
+        );
     }
 }
 
@@ -269,8 +334,12 @@ fn encrypted_channel_frames_preserve_data_at_every_fragment_boundary() {
     wire.extend(cipher.encrypt_packet(&channel_data(b"second"), &[0; 16]));
     for split in 0..=wire.len() {
         let mut session = ready();
-        session.handle_incoming_bytes(&wire[..split]).expect("encrypted prefix");
-        session.handle_incoming_bytes(&wire[split..]).expect("encrypted suffix");
+        session
+            .handle_incoming_bytes(&wire[..split])
+            .expect("encrypted prefix");
+        session
+            .handle_incoming_bytes(&wire[split..])
+            .expect("encrypted suffix");
         assert_eq!(session.take_channel_input(), b"firstsecond".to_vec());
         assert!(session.incoming_buffer.is_empty());
     }
@@ -282,9 +351,13 @@ fn a_large_legal_coalesced_burst_retains_only_one_wire_frame_at_a_time() {
     let chunk = vec![0x61; 30 * 1024];
     let packet = channel_data(&chunk);
     let mut wire = Vec::new();
-    for _ in 0..64 { wire.extend(cipher.encrypt_packet(&packet, &[0; 16])); }
+    for _ in 0..64 {
+        wire.extend(cipher.encrypt_packet(&packet, &[0; 16]));
+    }
     let mut session = ready();
-    session.handle_incoming_bytes(&wire).expect("many legal frames in one caller burst");
+    session
+        .handle_incoming_bytes(&wire)
+        .expect("many legal frames in one caller burst");
     assert!(session.incoming_buffer.is_empty());
     assert!(session.incoming_buffer.capacity() <= MAX_PACKET_BYTES + 20);
     assert_eq!(session.take_channel_input().len(), 64 * chunk.len());
@@ -301,7 +374,10 @@ fn disconnect_remains_terminal_even_when_a_guessed_packet_is_pending() {
     disconnect.write_u32(11);
     disconnect.write_utf8("client finished");
     disconnect.write_utf8("");
-    assert!(matches!(clear(&mut session, &disconnect.into_bytes()), Err(SshSessionError::Disconnected { .. })));
+    assert!(matches!(
+        clear(&mut session, &disconnect.into_bytes()),
+        Err(SshSessionError::Disconnected { .. })
+    ));
     assert_eq!(session.phase, SessionPhase::Closed);
     assert!(!session.discard_next_kex_packet);
 }

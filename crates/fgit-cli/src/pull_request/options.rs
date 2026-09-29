@@ -496,15 +496,21 @@ mod saved_patch_tests {
     fn reopen_is_a_distinct_complete_mutation_in_both_hash_formats() {
         for width in [40, 64] {
             let mut args = arguments("reopen", width);
-            let version = args.iter().position(|arg| arg == "--expected-version").unwrap() + 1;
+            let version = args
+                .iter()
+                .position(|arg| arg == "--expected-version")
+                .unwrap()
+                + 1;
             args[version] = "2".into();
             let parsed = parse(&args).unwrap();
             let Operation::Mutate(reopened) = parsed.operation else {
                 panic!("reopening is a mutation");
             };
             assert_eq!(reopened.command.action, PullRequestAction::Reopen);
-            assert_eq!(reopened.command.expected_version,
-                ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap()));
+            assert_eq!(
+                reopened.command.expected_version,
+                ExpectedVersion::Exactly(AggregateVersion::try_new(2).unwrap())
+            );
             assert_eq!(reopened.principal, PrincipalId::from_bytes([0x33; 16]));
             assert_eq!(reopened.key, b"same-logical-command");
             assert_eq!(reopened.command.data.title, "Reviewed title");
@@ -514,16 +520,33 @@ mod saved_patch_tests {
                 panic!("update is a mutation");
             };
             assert_eq!(reopened.command.data, updated.command.data);
-            assert_ne!(reopened.command.proposed_event(reopened.principal, parsed.format).unwrap(),
-                updated.command.proposed_event(updated.principal, parsed.format).unwrap());
+            assert_ne!(
+                reopened
+                    .command
+                    .proposed_event(reopened.principal, parsed.format)
+                    .unwrap(),
+                updated
+                    .command
+                    .proposed_event(updated.principal, parsed.format)
+                    .unwrap()
+            );
         }
     }
 
     #[test]
     fn reopen_requires_every_precondition_and_never_infers_missing_metadata() {
         let good = arguments("reopen", 40);
-        for flag in ["--principal", "--idempotency-key", "--expected-version", "--source-ref",
-            "--target-ref", "--expected-source", "--expected-target", "--title", "--body"] {
+        for flag in [
+            "--principal",
+            "--idempotency-key",
+            "--expected-version",
+            "--source-ref",
+            "--target-ref",
+            "--expected-source",
+            "--expected-target",
+            "--title",
+            "--body",
+        ] {
             let mut missing = good.clone();
             let at = missing.iter().position(|arg| arg == flag).unwrap();
             missing.drain(at..at + 2);
@@ -531,7 +554,10 @@ mod saved_patch_tests {
         }
         for version in ["0", "02", "18446744073709551615"] {
             let mut args = good.clone();
-            let at = args.iter().position(|arg| arg == "--expected-version").unwrap();
+            let at = args
+                .iter()
+                .position(|arg| arg == "--expected-version")
+                .unwrap();
             args[at + 1] = version.into();
             assert!(parse(&args).is_err());
         }
@@ -550,8 +576,12 @@ mod saved_patch_tests {
             };
             let mut aliases = original.clone();
             for arg in &mut aliases {
-                if arg == "--expected-source" { *arg = "--source-tip".into(); }
-                if arg == "--expected-target" { *arg = "--target-tip".into(); }
+                if arg == "--expected-source" {
+                    *arg = "--source-tip".into();
+                }
+                if arg == "--expected-target" {
+                    *arg = "--target-tip".into();
+                }
             }
             let Operation::Mutate(actual) = parse(&aliases).unwrap().operation else {
                 panic!("mutation expected");
@@ -568,7 +598,10 @@ mod saved_patch_tests {
                 panic!("mutation expected");
             };
             assert_eq!(actual.command.action, PullRequestAction::Reopen);
-            assert_eq!(actual.body_file, Some(PathBuf::from("not-opened-during-parse.md")));
+            assert_eq!(
+                actual.body_file,
+                Some(PathBuf::from("not-opened-during-parse.md"))
+            );
             assert!(actual.command.data.body.is_empty());
         }
     }

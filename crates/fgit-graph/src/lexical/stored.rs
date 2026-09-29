@@ -8,9 +8,9 @@ mod refresh;
 pub mod scoped;
 pub use refresh::{LexicalRefreshStats, LexicalReuse, RefreshDocument};
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod scope_tests;
+#[cfg(test)]
+mod tests;
 
 use super::{
     BTreeMap, Digest, Entry, GitHashAlgorithm, GitOid, IndexedDocument, LexicalError, LexicalHit,

@@ -55,17 +55,33 @@ fn unqueryable_words_do_not_poison_other_words_or_change_native_identity() {
         assert_eq!(before.hits[0].document_id, 7);
         assert_eq!(before.hits[0].spans[0].byte_offset, 0);
         let after = search(&segment, LexicalChannel::Content, b"AFTER");
-        assert_eq!(after.hits[0].spans[0].byte_offset as usize, 7 + MAX_TERM_BYTES + 2);
+        assert_eq!(
+            after.hits[0].spans[0].byte_offset as usize,
+            7 + MAX_TERM_BYTES + 2
+        );
         assert_eq!(segment.documents()[0].content_bytes as usize, body.len());
         assert_eq!(
             segment.documents()[0].blob,
             git_object_id(format, GitObjectKind::Blob, &body)
         );
-        assert!(search(&segment, LexicalChannel::Content, &vec![b'x'; MAX_TERM_BYTES]).hits.is_empty());
-        assert!(search(&segment, LexicalChannel::Content, b"x").hits.is_empty());
+        assert!(
+            search(
+                &segment,
+                LexicalChannel::Content,
+                &vec![b'x'; MAX_TERM_BYTES]
+            )
+            .hits
+            .is_empty()
+        );
+        assert!(
+            search(&segment, LexicalChannel::Content, b"x")
+                .hits
+                .is_empty()
+        );
         let encoded = segment.encode(&mut || true).unwrap();
         let root = segment.root(&mut || true).unwrap();
-        let decoded = LexicalSegment::decode(&encoded, root, namespace(format), &mut || true).unwrap();
+        let decoded =
+            LexicalSegment::decode(&encoded, root, namespace(format), &mut || true).unwrap();
         assert_eq!(decoded, segment);
         assert_eq!(search(&decoded, LexicalChannel::Content, b"after"), after);
     }
@@ -86,7 +102,11 @@ fn every_byte_delimiter_and_boundary_length_agree_with_complete_word_oracle() {
                 expected.push((vec![b'Q'; len], 0));
             }
             expected.push((b"tail".to_vec(), (len + 1) as u32));
-            assert_eq!(collected(&input), expected, "delimiter={delimiter}, len={len}");
+            assert_eq!(
+                collected(&input),
+                expected,
+                "delimiter={delimiter}, len={len}"
+            );
             let eof = collected(&input[..len]);
             assert_eq!(eof.len(), usize::from((1..=MAX_TERM_BYTES).contains(&len)));
         }
@@ -119,9 +139,20 @@ fn long_paths_keep_path_channel_suffixes_and_all_original_byte_offsets() {
     let leaf = search(&segment, LexicalChannel::Path, b"leaf");
     assert_eq!(leaf.hits.len(), 1);
     assert_eq!(leaf.hits[0].path, path);
-    assert_eq!(leaf.hits[0].spans[0].byte_offset as usize, MAX_TERM_BYTES + 2);
-    assert!(search(&segment, LexicalChannel::Path, &vec![b'p'; MAX_TERM_BYTES]).hits.is_empty());
-    assert!(search(&segment, LexicalChannel::Content, b"leaf").hits.is_empty());
+    assert_eq!(
+        leaf.hits[0].spans[0].byte_offset as usize,
+        MAX_TERM_BYTES + 2
+    );
+    assert!(
+        search(&segment, LexicalChannel::Path, &vec![b'p'; MAX_TERM_BYTES])
+            .hits
+            .is_empty()
+    );
+    assert!(
+        search(&segment, LexicalChannel::Content, b"leaf")
+            .hits
+            .is_empty()
+    );
 }
 
 #[test]
@@ -146,7 +177,10 @@ fn a_document_with_no_queryable_words_still_survives_encoding_and_compaction() {
         let combined = LexicalSegment::concatenate(&[first, second], &mut || true).unwrap();
         assert_eq!(combined.documents().len(), 2);
         assert_eq!(combined.documents()[0].path, path);
-        assert_eq!(search(&combined, LexicalChannel::Content, b"needle").hits[0].document_id, 2);
+        assert_eq!(
+            search(&combined, LexicalChannel::Content, b"needle").hits[0].document_id,
+            2
+        );
     }
 }
 
@@ -177,7 +211,9 @@ fn cancellation_remains_bounded_inside_an_unqueryable_word_and_at_eof() {
 fn consumer_errors_after_long_words_are_not_swallowed() {
     let mut body = vec![b'x'; 129];
     body.extend_from_slice(b" word");
-    let result = tokens(&body, &mut || true, |_, _| Err(LexicalError::Limit("postings")));
+    let result = tokens(&body, &mut || true, |_, _| {
+        Err(LexicalError::Limit("postings"))
+    });
     assert!(matches!(result, Err(LexicalError::Limit("postings"))));
 }
 
@@ -191,7 +227,11 @@ fn long_words_do_not_bypass_file_budgets_or_native_identity_checks() {
         LexicalSegment::build(
             namespace(format),
             1,
-            [SourceDocument { path: b"a", blob, content: &changed }],
+            [SourceDocument {
+                path: b"a",
+                blob,
+                content: &changed
+            }],
             &mut || true,
         ),
         Err(LexicalError::NativeIdentityMismatch)
@@ -201,7 +241,11 @@ fn long_words_do_not_bypass_file_budgets_or_native_identity_checks() {
         LexicalSegment::build(
             namespace(format),
             1,
-            [SourceDocument { path: b"a", blob, content: &oversized }],
+            [SourceDocument {
+                path: b"a",
+                blob,
+                content: &oversized
+            }],
             &mut || true,
         ),
         Err(LexicalError::Limit("file bytes"))

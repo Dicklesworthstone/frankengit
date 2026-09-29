@@ -5,8 +5,8 @@ use super::super::json::{self, Object, Value, object, text};
 use super::super::protocol::{Tool, ToolError};
 use super::{NodeTools, require_fields};
 use super::{mutations as common, pull_writes, review_writes as candidate};
-use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_forge::event::review::{CandidateBinding, ReviewSubject};
+use fgit_forge::{AggregateVersion, ExpectedVersion, PullRequestNumber};
 use fgit_types::{DecisionOutcome, GitHashAlgorithm, PrincipalId};
 use std::collections::BTreeSet;
 
@@ -88,11 +88,7 @@ fn parse(
     })
 }
 
-pub(super) fn call(
-    backend: &NodeTools,
-    name: &str,
-    args: &Object,
-) -> Result<Value, ToolError> {
+pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
     if name == FAST_FORWARD_NAME {
         return call_fast_forward(backend, args);
     }
@@ -163,7 +159,6 @@ fn call_reviewed(backend: &NodeTools, args: &Object) -> Result<Value, ToolError>
     result.insert("delivery_acknowledged".into(), Value::Null);
     Ok(Value::Object(result))
 }
-
 
 struct FastForwardInput {
     number: PullRequestNumber,
@@ -240,9 +235,18 @@ fn call_fast_forward(backend: &NodeTools, args: &Object) -> Result<Value, ToolEr
     result.insert("type".into(), text("fast_forward_publication"));
     result.insert("method".into(), text("fast-forward-only/v1"));
     result.insert("number".into(), text(input.number.get().to_string()));
-    result.insert("expected_version".into(), text(input.version.get().to_string()));
-    result.insert("source_reference_hex".into(), text(super::hex(input.source_ref.as_bytes())));
-    result.insert("target_reference_hex".into(), text(super::hex(input.target_ref.as_bytes())));
+    result.insert(
+        "expected_version".into(),
+        text(input.version.get().to_string()),
+    );
+    result.insert(
+        "source_reference_hex".into(),
+        text(super::hex(input.source_ref.as_bytes())),
+    );
+    result.insert(
+        "target_reference_hex".into(),
+        text(super::hex(input.target_ref.as_bytes())),
+    );
     result.insert("expected_source".into(), text(input.source_tip.to_string()));
     result.insert("expected_target".into(), text(input.target_tip.to_string()));
     result.insert("complete".into(), Value::Bool(true));
@@ -258,7 +262,12 @@ fn call_fast_forward(backend: &NodeTools, args: &Object) -> Result<Value, ToolEr
 
 fn fast_forward_schema() -> Value {
     let mut properties = candidate::properties();
-    for name in ["policy_epoch", "merge_base", "candidate_commit", "bundle_hex_chunks"] {
+    for name in [
+        "policy_epoch",
+        "merge_base",
+        "candidate_commit",
+        "bundle_hex_chunks",
+    ] {
         properties.remove(name);
     }
     candidate::candidate_schema(
@@ -473,5 +482,4 @@ mod tests {
         assert!(is_tool(FAST_FORWARD_NAME));
         assert!(!is_tool("frankengit_pull_force"));
     }
-
 }

@@ -221,8 +221,7 @@ pub fn validate_transition(
         return Err(RefusalCode::ProtectedRefTransitionDenied);
     };
     if change.action == PullRequestAction::Open
-        || (old.action == PullRequestAction::Close)
-            != (change.action == PullRequestAction::Reopen)
+        || (old.action == PullRequestAction::Close) != (change.action == PullRequestAction::Reopen)
     {
         return Err(RefusalCode::ProtectedRefTransitionDenied);
     }

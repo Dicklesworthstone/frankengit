@@ -6,7 +6,7 @@ mod support;
 
 use fgit_node::OneNode;
 use fgit_node::source_retrieval::current_index::{
-    GenerationActivation, LexicalSource, RevalidatedIndexRequest, LexicalQuery, LexicalChannel,
+    GenerationActivation, LexicalChannel, LexicalQuery, LexicalSource, RevalidatedIndexRequest,
 };
 use fgit_types::{GitHashAlgorithm, RefName, RepositoryAuthorityHeadId};
 use std::process::{Command, Output};
@@ -66,12 +66,20 @@ fn body(output: &Output) -> &str {
 
 fn head_token(head: RepositoryAuthorityHeadId) -> String {
     let id = head.as_internal_object_id();
-    format!("alg:{}:{}", id.algorithm().code_point(), hex(id.digest().as_bytes()))
+    format!(
+        "alg:{}:{}",
+        id.algorithm().code_point(),
+        hex(id.digest().as_bytes())
+    )
 }
 
 fn generation_token(activation: &GenerationActivation) -> String {
     let id = activation.generation_id.as_internal_object_id();
-    format!("alg:{}:{}", id.algorithm().code_point(), hex(id.digest().as_bytes()))
+    format!(
+        "alg:{}:{}",
+        id.algorithm().code_point(),
+        hex(id.digest().as_bytes())
+    )
 }
 
 fn open_issue(root: &Scratch, format: GitHashAlgorithm) {
@@ -111,9 +119,10 @@ fn fg_binary_keeps_original_index_provenance_after_authenticated_metadata_write(
         open_issue(&root, format);
         let node = reopen(&root.config(format));
         let before = generation(&node);
-        let selected = node.runtime().block_on(node.materialize_admission_in(
-            &node.request_context(),
-        )).unwrap();
+        let selected = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&node.request_context()))
+            .unwrap();
         let current_head = selected.basis().id();
         assert_ne!(current_head, indexed.source_head);
         drop(selected);
@@ -133,7 +142,8 @@ fn fg_binary_keeps_original_index_provenance_after_authenticated_metadata_write(
         assert_eq!(text.matches(&format!("\"commit\":\"{commit}\"")).count(), 2);
         assert!(text.contains(&format!(
             "\"generation\":{{\"token\":\"{}\",\"number\":\"{}\"}}",
-            generation_token(&activation), activation.authority_generation.get(),
+            generation_token(&activation),
+            activation.authority_generation.get(),
         )));
         assert_eq!(text.matches("\"document_id\":").count(), 4);
         for id in [1, 2, 3, 5] {
@@ -141,14 +151,22 @@ fn fg_binary_keeps_original_index_provenance_after_authenticated_metadata_write(
         }
         assert!(text.contains(&format!("\"path_hex\":\"{}\"", hex(BINARY_PATH))));
         assert!(text.contains("\"complete\":true,\"next_after\":null"));
-        assert!(text.contains("\"node_closed\":true,\"repository_changed\":false,\"index_changed\":false"));
+        assert!(
+            text.contains(
+                "\"node_closed\":true,\"repository_changed\":false,\"index_changed\":false"
+            )
+        );
         let node = reopen(&root.config(format));
         assert_eq!(generation(&node), before);
         let reference = reference();
         let query = LexicalQuery::new(LexicalChannel::Content, &[b"needle".to_vec()], &[]).unwrap();
-        let checked = node.runtime().block_on(node.search_source_index_revalidated_local_in(
-            &node.request_context(), RevalidatedIndexRequest::new(&reference, &query),
-        )).unwrap();
+        let checked = node
+            .runtime()
+            .block_on(node.search_source_index_revalidated_local_in(
+                &node.request_context(),
+                RevalidatedIndexRequest::new(&reference, &query),
+            ))
+            .unwrap();
         assert_eq!(checked.index().generation, activation);
         assert_eq!(checked.index().selected_generation_head, activation);
         assert_eq!(checked.index().source, indexed);
@@ -169,13 +187,20 @@ fn fg_binary_paginates_exact_generation_and_refuses_a_stale_current_head() {
     assert!(body(&first).contains("\"complete\":false,\"next_after\":\"2\""));
     assert_eq!(body(&first).matches("\"document_id\":").count(), 2);
     args.extend([
-        "--expected-head".into(), head_token(source.source_head),
-        "--expected-commit".into(), commit.to_string(),
-        "--generation".into(), generation_token(&activation),
-        "--generation-number".into(), activation.authority_generation.get().to_string(),
-        "--minimum-generation".into(), generation_token(&activation),
-        "--minimum-number".into(), activation.authority_generation.get().to_string(),
-        "--after".into(), "2".into(),
+        "--expected-head".into(),
+        head_token(source.source_head),
+        "--expected-commit".into(),
+        commit.to_string(),
+        "--generation".into(),
+        generation_token(&activation),
+        "--generation-number".into(),
+        activation.authority_generation.get().to_string(),
+        "--minimum-generation".into(),
+        generation_token(&activation),
+        "--minimum-number".into(),
+        activation.authority_generation.get().to_string(),
+        "--after".into(),
+        "2".into(),
     ]);
     let last = invoke(&args, 0);
     assert!(body(&last).contains("\"complete\":true,\"next_after\":null"));
@@ -186,8 +211,9 @@ fn fg_binary_paginates_exact_generation_and_refuses_a_stale_current_head() {
     let stale = invoke(&args, 2);
     assert!(stale.stdout.is_empty());
     assert!(String::from_utf8_lossy(&stale.stderr).contains("SnapshotMoved"));
-    assert!(body(&invoke(&arguments(&root, format), 0))
-        .contains("\"distinct_index_provenance\":true"));
+    assert!(
+        body(&invoke(&arguments(&root, format), 0)).contains("\"distinct_index_provenance\":true")
+    );
 }
 
 #[test]

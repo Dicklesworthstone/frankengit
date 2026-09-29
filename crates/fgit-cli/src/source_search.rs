@@ -22,14 +22,19 @@ struct Options {
 }
 
 pub fn run(arguments: &[String]) -> Result<u8, String> {
-    if arguments.first().is_some_and(|arg| arg == "--indexed-current") {
+    if arguments
+        .first()
+        .is_some_and(|arg| arg == "--indexed-current")
+    {
         return indexed::run(&arguments[1..]);
     }
     if arguments.first().is_some_and(|arg| arg == "--symbols") {
         return symbols::run(&arguments[1..]);
     }
     if arguments == ["--help"] {
-        println!("{USAGE}\nFor persisted lexical search: fg search --indexed-current --help\nFor Rust declarations: fg search --symbols --help");
+        println!(
+            "{USAGE}\nFor persisted lexical search: fg search --indexed-current --help\nFor Rust declarations: fg search --symbols --help"
+        );
         return Ok(0);
     }
     let options = parse(arguments)?;

@@ -33,7 +33,9 @@ impl RekeyState {
 }
 
 fn refusal(reason: &'static str) -> SshSessionError {
-    SshSessionError::ProtocolViolation { reason: reason.to_owned() }
+    SshSessionError::ProtocolViolation {
+        reason: reason.to_owned(),
+    }
 }
 
 impl SshServerSession {
@@ -52,8 +54,10 @@ impl SshServerSession {
     }
 
     pub(super) fn can_start_rekey(&self) -> bool {
-        matches!(self.phase, SessionPhase::UserAuth | SessionPhase::ChannelReady | SessionPhase::ActiveChannel)
-            && self.rekey.phase == RekeyPhase::Idle
+        matches!(
+            self.phase,
+            SessionPhase::UserAuth | SessionPhase::ChannelReady | SessionPhase::ActiveChannel
+        ) && self.rekey.phase == RekeyPhase::Idle
             && self.inbound_cipher.is_some()
             && self.outbound_cipher.is_some()
             && self.session_id.is_some()
@@ -89,16 +93,22 @@ impl SshServerSession {
         if !self.rekey.blocks_output() || transport {
             return Ok(false);
         }
-        let bytes = self.rekey.deferred_bytes.checked_add(payload.len())
+        let bytes = self
+            .rekey
+            .deferred_bytes
+            .checked_add(payload.len())
             .filter(|total| *total <= MAX_DEFERRED_BYTES)
             .ok_or_else(|| refusal("deferred rekey output exceeds byte budget"))?;
         if self.rekey.deferred.len() >= MAX_DEFERRED_PACKETS {
             return Err(refusal("deferred rekey output exceeds packet budget"));
         }
-        self.rekey.deferred.try_reserve(1)
+        self.rekey
+            .deferred
+            .try_reserve(1)
             .map_err(|_| refusal("deferred rekey output allocation refused"))?;
         let mut packet = Vec::new();
-        packet.try_reserve_exact(payload.len())
+        packet
+            .try_reserve_exact(payload.len())
             .map_err(|_| refusal("deferred rekey output allocation refused"))?;
         packet.extend_from_slice(payload);
         self.rekey.deferred.push(packet);

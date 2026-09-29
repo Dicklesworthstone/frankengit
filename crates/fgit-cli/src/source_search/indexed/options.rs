@@ -36,7 +36,8 @@ impl Options {
 }
 
 pub(super) fn parse(args: &[String]) -> Result<Options, String> {
-    if args.len() < 4 || args.len() > 360
+    if args.len() < 4
+        || args.len() > 360
         || args.iter().any(|arg| arg.len() > 8192)
         || args.iter().map(String::len).sum::<usize>() > 128 * 1024
     {
@@ -66,15 +67,29 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
             trusted = true;
             continue;
         }
-        if !matches!(flag,
-            "--term" | "--path" | "--path-hex" | "--channel" | "--object-format"
-            | "--expected-head" | "--expected-commit" | "--generation"
-            | "--generation-number" | "--minimum-generation" | "--minimum-number"
-            | "--after" | "--max-results" | "--max-work" | "--max-index-bytes")
-        {
+        if !matches!(
+            flag,
+            "--term"
+                | "--path"
+                | "--path-hex"
+                | "--channel"
+                | "--object-format"
+                | "--expected-head"
+                | "--expected-commit"
+                | "--generation"
+                | "--generation-number"
+                | "--minimum-generation"
+                | "--minimum-number"
+                | "--after"
+                | "--max-results"
+                | "--max-work"
+                | "--max-index-bytes"
+        ) {
             return Err(format!("unknown indexed search option {flag}"));
         }
-        let value = args.get(cursor).ok_or_else(|| format!("missing value for {flag}"))?;
+        let value = args
+            .get(cursor)
+            .ok_or_else(|| format!("missing value for {flag}"))?;
         cursor += 1;
         match flag {
             "--term" => {
@@ -114,13 +129,19 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         _ => return Err("channel must be content or path".into()),
     };
     let query = LexicalQuery::new(channel, &terms, &paths).map_err(|e| e.to_string())?;
-    let expected_head = flags.get("--expected-head").map(|text| {
-        let (algorithm, digest) = parse_id(text)?;
-        Ok::<_, String>(RepositoryAuthorityHeadId::from_digest(
-            algorithm, CANONICAL_CODEC_VERSION, digest,
-        ))
-    }).transpose()?;
-    let expected_commit = flags.get("--expected-commit")
+    let expected_head = flags
+        .get("--expected-head")
+        .map(|text| {
+            let (algorithm, digest) = parse_id(text)?;
+            Ok::<_, String>(RepositoryAuthorityHeadId::from_digest(
+                algorithm,
+                CANONICAL_CODEC_VERSION,
+                digest,
+            ))
+        })
+        .transpose()?;
+    let expected_commit = flags
+        .get("--expected-commit")
         .map(|text| GitOid::from_hex(format, text).map_err(|e| e.to_string()))
         .transpose()?;
     if expected_commit.is_some_and(|commit| commit.is_zero()) {
@@ -129,14 +150,23 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
     let generation = activation(&flags, "--generation", "--generation-number")?;
     let minimum = activation(&flags, "--minimum-generation", "--minimum-number")?;
     let after = flags.get("--after").map(|text| decimal(text)).transpose()?;
-    if after.is_some() && (expected_head.is_none() || expected_commit.is_none() || generation.is_none()) {
+    if after.is_some()
+        && (expected_head.is_none() || expected_commit.is_none() || generation.is_none())
+    {
         return Err("--after requires --expected-head, --expected-commit, --generation and --generation-number".into());
     }
     let defaults = LexicalQueryLimits::default();
     let limits = LexicalQueryLimits {
-        max_results: flags.get("--max-results")
-            .map(|text| super::super::decimal(text)).transpose()?.unwrap_or(defaults.max_results),
-        max_work: flags.get("--max-work").map(|text| decimal(text)).transpose()?.unwrap_or(defaults.max_work),
+        max_results: flags
+            .get("--max-results")
+            .map(|text| super::super::decimal(text))
+            .transpose()?
+            .unwrap_or(defaults.max_results),
+        max_work: flags
+            .get("--max-work")
+            .map(|text| decimal(text))
+            .transpose()?
+            .unwrap_or(defaults.max_work),
     };
     limits.validate().map_err(|e| e.to_string())?;
     let mut read_limits = LexicalReadLimits::default();
@@ -148,20 +178,37 @@ pub(super) fn parse(args: &[String]) -> Result<Options, String> {
         read_limits.max_payload_bytes = limit;
     }
     Ok(Options {
-        storage: args[0].clone().into(), tenant, repository, reference, format, query,
-        expected_head, expected_commit, generation, minimum, after, limits, read_limits,
+        storage: args[0].clone().into(),
+        tenant,
+        repository,
+        reference,
+        format,
+        query,
+        expected_head,
+        expected_commit,
+        generation,
+        minimum,
+        after,
+        limits,
+        read_limits,
     })
 }
 
 fn activation(
-    flags: &BTreeMap<&str, &str>, token: &str, number: &str,
+    flags: &BTreeMap<&str, &str>,
+    token: &str,
+    number: &str,
 ) -> Result<Option<GenerationActivation>, String> {
     match (flags.get(token), flags.get(number)) {
         (None, None) => Ok(None),
         (Some(text), Some(number)) => {
             let (algorithm, digest) = parse_id(text)?;
             Ok(Some(GenerationActivation {
-                generation_id: GenerationId::from_digest(algorithm, CANONICAL_CODEC_VERSION, digest),
+                generation_id: GenerationId::from_digest(
+                    algorithm,
+                    CANONICAL_CODEC_VERSION,
+                    digest,
+                ),
                 authority_generation: fgit_types::HeadGeneration::try_new(decimal(number)?)
                     .map_err(|e| e.to_string())?,
             }))
@@ -173,12 +220,16 @@ fn activation(
 // Same algorithm-qualified snapshot-token spelling as fg tree/show. The kind
 // is selected by the option, never inferred from an unqualified hex digest.
 fn parse_id(text: &str) -> Result<(DigestAlgorithmId, DigestBytes), String> {
-    let (algorithm, digest) = text.strip_prefix("alg:")
+    let (algorithm, digest) = text
+        .strip_prefix("alg:")
         .and_then(|text| text.split_once(':'))
         .ok_or("expected an algorithm-qualified token: alg:<number>:<lowercase-hex>")?;
     let algorithm = u16::try_from(decimal(algorithm)?).map_err(|_| "algorithm overflow")?;
     let algorithm = DigestAlgorithmId::try_new(algorithm).map_err(|_| "invalid algorithm")?;
-    if !digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if !digest
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err("token digest must be lowercase hexadecimal".into());
     }
     let digest = DigestBytes::try_new(&super::super::unhex(digest, 64)?)

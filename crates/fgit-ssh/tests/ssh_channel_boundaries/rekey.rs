@@ -93,7 +93,10 @@ fn exchange_again(
     assert_eq!(r.read_u8().unwrap(), msg::KEX_ECDH_REPLY);
     let host_blob = r.read_string().unwrap();
     let host = SigningKey::from_bytes(&[0x11; 32]);
-    assert_eq!(host_blob, encode_ed25519_public_key(&host.verifying_key().to_bytes()).as_slice());
+    assert_eq!(
+        host_blob,
+        encode_ed25519_public_key(&host.verifying_key().to_bytes()).as_slice()
+    );
     let server_public: [u8; 32] = r.read_string().unwrap().try_into().unwrap();
     let signature = r.read_string().unwrap();
     assert_eq!(r.remaining(), 0);
@@ -113,9 +116,17 @@ fn exchange_again(
     let exchange_hash = sha256_digest(&h.into_bytes());
     verify_ed25519(&host.verifying_key().to_bytes(), &exchange_hash, signature).unwrap();
     // Crucially, key derivation uses the ORIGINAL session ID, not this H.
-    let client_key = derive_key(&k, &exchange_hash, b'C', &peer.session_id, 64).try_into().unwrap();
-    let server_key = derive_key(&k, &exchange_hash, b'D', &peer.session_id, 64).try_into().unwrap();
-    let next = if strict { 0 } else { peer.inbound.sequence_number() };
+    let client_key = derive_key(&k, &exchange_hash, b'C', &peer.session_id, 64)
+        .try_into()
+        .unwrap();
+    let server_key = derive_key(&k, &exchange_hash, b'D', &peer.session_id, 64)
+        .try_into()
+        .unwrap();
+    let next = if strict {
+        0
+    } else {
+        peer.inbound.sequence_number()
+    };
     peer.inbound = OpenSshChaCha20Poly1305::new_with_sequence(&server_key, next);
     let mut deferred = Vec::new();
     while !rest.is_empty() {
@@ -123,20 +134,38 @@ fn exchange_again(
     }
     assert_eq!(session.session_id(), Some(peer.session_id));
     assert_ne!(exchange_hash, peer.session_id);
-    assert!(session.is_rekeying(), "inbound NEWKEYS is still outstanding");
-    Exchanged { client_key, exchange_hash, server_public, deferred }
+    assert!(
+        session.is_rekeying(),
+        "inbound NEWKEYS is still outstanding"
+    );
+    Exchanged {
+        client_key,
+        exchange_hash,
+        server_public,
+        deferred,
+    }
 }
 
 /// The client's NEWKEYS is protected by its OLD send key. Only the following
 /// bytes use the new one, including when both packets share a network read.
 fn newkeys(peer: &mut Peer, keys: &Exchanged, strict: bool) -> Vec<u8> {
     let wire = peer.out.encrypt_packet(&[msg::NEWKEYS], &[0; 16]);
-    let next = if strict { 0 } else { peer.out.sequence_number() };
+    let next = if strict {
+        0
+    } else {
+        peer.out.sequence_number()
+    };
     peer.out = OpenSshChaCha20Poly1305::new_with_sequence(&keys.client_key, next);
     wire
 }
 
-pub(super) fn round_trip(session: &mut SshServerSession, peer: &mut Peer, strict: bool, server: bool, seed: u8) {
+pub(super) fn round_trip(
+    session: &mut SshServerSession,
+    peer: &mut Peer,
+    strict: bool,
+    server: bool,
+    seed: u8,
+) {
     let client = offer(false, false); // strict extension is deliberately absent
     let offered = begin(session, peer, server, &client);
     let keys = exchange_again(session, peer, strict, &client, &offered, seed);
@@ -152,7 +181,8 @@ fn repeated_peer_and_server_rekeys_keep_the_exact_command_windows_and_stream() {
     for strict in [false, true] {
         let (mut session, mut peer) = ready(strict, 37, 4096);
         peer.send(&mut session, &env_packet(0)).unwrap();
-        peer.send(&mut session, &exec_packet(0, "git-upload-pack 'repo.git'")).unwrap();
+        peer.send(&mut session, &exec_packet(0, "git-upload-pack 'repo.git'"))
+            .unwrap();
         peer.receive(&mut session);
         let principal = session.authenticated_principal();
         let command = session.active_command().unwrap().clone();
@@ -160,7 +190,11 @@ fn repeated_peer_and_server_rekeys_keep_the_exact_command_windows_and_stream() {
         let mut previous_public = [0; 32];
         let mut previous_cookie = Vec::new();
         for round in 0..4 {
-            peer.send(&mut session, &data_packet(0, b"preserved buffered Git input")).unwrap();
+            peer.send(
+                &mut session,
+                &data_packet(0, b"preserved buffered Git input"),
+            )
+            .unwrap();
             let client = offer(!strict, false); // no upgrade or downgrade after initial KEX
             let offered = begin(&mut session, &mut peer, round % 2 == 1, &client);
             assert_ne!(&offered[1..17], previous_cookie.as_slice());
@@ -168,7 +202,14 @@ fn repeated_peer_and_server_rekeys_keep_the_exact_command_windows_and_stream() {
             assert!(!String::from_utf8_lossy(&offered).contains("kex-strict"));
             assert_eq!(session.send_channel_data(b"blocked bulk"), 0);
             assert_eq!(session.client_window(), 4096 - round * 5);
-            let keys = exchange_again(&mut session, &mut peer, strict, &client, &offered, 0x40 + round as u8);
+            let keys = exchange_again(
+                &mut session,
+                &mut peer,
+                strict,
+                &client,
+                &offered,
+                0x40 + round as u8,
+            );
             assert_ne!(keys.exchange_hash, previous_hash);
             assert_ne!(keys.server_public, previous_public);
             previous_hash = keys.exchange_hash;
@@ -180,7 +221,11 @@ fn repeated_peer_and_server_rekeys_keep_the_exact_command_windows_and_stream() {
             assert_eq!(replies.len(), 1);
             assert_channel_reply(&replies[0], msg::CHANNEL_DATA, 37);
             let mut wire = newkeys(&mut peer, &keys, strict);
-            wire.extend_from_slice(&peer.out.encrypt_packet(&data_packet(0, b"after rekey"), &[0; 16]));
+            wire.extend_from_slice(
+                &peer
+                    .out
+                    .encrypt_packet(&data_packet(0, b"after rekey"), &[0; 16]),
+            );
             for chunk in wire.chunks(3) {
                 session.handle_incoming_bytes(chunk).unwrap();
             }
@@ -190,7 +235,10 @@ fn repeated_peer_and_server_rekeys_keep_the_exact_command_windows_and_stream() {
             assert_eq!(session.authenticated_principal(), principal);
             assert_eq!(session.active_command(), Some(&command));
             assert_eq!(session.git_protocol(), Some(b"version=2".as_slice()));
-            assert_eq!(session.take_channel_input(), b"preserved buffered Git inputafter rekey");
+            assert_eq!(
+                session.take_channel_input(),
+                b"preserved buffered Git inputafter rekey"
+            );
         }
     }
 }
@@ -203,8 +251,12 @@ fn server_initiation_accepts_in_flight_data_but_defers_application_replies() {
         let offered = peer.receive(&mut session).remove(0);
         // This env was in flight before the peer observed our KEXINIT.
         peer.send(&mut session, &env_packet(0)).unwrap();
-        peer.send(&mut session, &data_packet(0, b"in flight")).unwrap();
-        assert!(peer.receive(&mut session).is_empty(), "env response must wait");
+        peer.send(&mut session, &data_packet(0, b"in flight"))
+            .unwrap();
+        assert!(
+            peer.receive(&mut session).is_empty(),
+            "env response must wait"
+        );
         assert_eq!(session.take_channel_input(), b"in flight");
         let client = offer(false, false);
         peer.send(&mut session, &client).unwrap();
@@ -213,7 +265,8 @@ fn server_initiation_accepts_in_flight_data_but_defers_application_replies() {
         assert_channel_reply(&keys.deferred[0], msg::CHANNEL_SUCCESS, 37);
         let wire = newkeys(&mut peer, &keys, strict);
         session.handle_incoming_bytes(&wire).unwrap();
-        peer.send(&mut session, &data_packet(0, b"resumed")).unwrap();
+        peer.send(&mut session, &data_packet(0, b"resumed"))
+            .unwrap();
         assert_eq!(session.take_channel_input(), b"resumed");
     }
 }
@@ -221,11 +274,14 @@ fn server_initiation_accepts_in_flight_data_but_defers_application_replies() {
 #[test]
 fn no_application_packet_can_cross_the_peers_kexinit_to_newkeys_interval() {
     for strict in [false, true] {
-        for payload in [data_packet(0, b"too early"), env_packet(0),
+        for payload in [
+            data_packet(0, b"too early"),
+            env_packet(0),
             channel_packet(msg::CHANNEL_EOF, 0, &[]),
             channel_packet(msg::CHANNEL_WINDOW_ADJUST, 0, &1u32.to_be_bytes()),
-            vec![msg::USERAUTH_REQUEST], vec![msg::NEWKEYS]]
-        {
+            vec![msg::USERAUTH_REQUEST],
+            vec![msg::NEWKEYS],
+        ] {
             let (mut session, mut peer) = ready(strict, 37, 4096);
             begin(&mut session, &mut peer, false, &offer(false, false));
             assert!(peer.send(&mut session, &payload).is_err());
@@ -236,7 +292,8 @@ fn no_application_packet_can_cross_the_peers_kexinit_to_newkeys_interval() {
         // Every refused case has a real complete re-exchange counterpart.
         let (mut session, mut peer) = ready(strict, 37, 4096);
         round_trip(&mut session, &mut peer, strict, false, 0x56);
-        peer.send(&mut session, &data_packet(0, b"permitted")).unwrap();
+        peer.send(&mut session, &data_packet(0, b"permitted"))
+            .unwrap();
         assert_eq!(session.take_channel_input(), b"permitted");
     }
 }
@@ -254,7 +311,10 @@ fn deferred_stderr_eof_and_exit_status_follow_newkeys_in_order() {
         let keys = exchange_again(&mut session, &mut peer, strict, &client, &offered, 0x57);
         assert_eq!(keys.deferred.len(), 4);
         for (payload, kind) in keys.deferred.iter().zip([
-            msg::CHANNEL_EXTENDED_DATA, msg::CHANNEL_EOF, msg::CHANNEL_REQUEST, msg::CHANNEL_CLOSE,
+            msg::CHANNEL_EXTENDED_DATA,
+            msg::CHANNEL_EOF,
+            msg::CHANNEL_REQUEST,
+            msg::CHANNEL_CLOSE,
         ]) {
             assert_channel_reply(payload, kind, 37);
         }
@@ -262,8 +322,11 @@ fn deferred_stderr_eof_and_exit_status_follow_newkeys_in_order() {
         assert_eq!(exit.read_utf8().unwrap(), "exit-status");
         assert!(!exit.read_bool().unwrap());
         assert_eq!(exit.read_u32().unwrap(), 7);
-        session.handle_incoming_bytes(&newkeys(&mut peer, &keys, strict)).unwrap();
-        peer.send(&mut session, &channel_packet(msg::CHANNEL_CLOSE, 0, &[])).unwrap();
+        session
+            .handle_incoming_bytes(&newkeys(&mut peer, &keys, strict))
+            .unwrap();
+        peer.send(&mut session, &channel_packet(msg::CHANNEL_CLOSE, 0, &[]))
+            .unwrap();
         assert_eq!(*session.phase(), SessionPhase::Closed);
         assert!(peer.receive(&mut session).is_empty());
     }
@@ -300,12 +363,16 @@ fn authentication_after_rekey_still_signs_the_original_session_identifier() {
         let client = offer(false, false);
         let offered = begin(&mut session, &mut peer, false, &client);
         let keys = exchange_again(&mut session, &mut peer, strict, &client, &offered, 0x59);
-        session.handle_incoming_bytes(&newkeys(&mut peer, &keys, strict)).unwrap();
+        session
+            .handle_incoming_bytes(&newkeys(&mut peer, &keys, strict))
+            .unwrap();
         assert_eq!(*session.phase(), SessionPhase::UserAuth);
         authenticate(&mut session, &mut peer);
-        peer.send(&mut session, &open_packet(37, 1024, 1024)).unwrap();
+        peer.send(&mut session, &open_packet(37, 1024, 1024))
+            .unwrap();
         peer.receive(&mut session);
-        peer.send(&mut session, &exec_packet(0, "git-upload-pack 'repo.git'")).unwrap();
+        peer.send(&mut session, &exec_packet(0, "git-upload-pack 'repo.git'"))
+            .unwrap();
         assert!(session.authenticated_principal().is_some());
     }
 }
@@ -320,9 +387,12 @@ fn guessed_key_exchange_discards_exactly_one_packet_without_authentication_effec
         peer.send(&mut session, &auth).unwrap();
         assert!(peer.receive(&mut session).is_empty());
         let keys = exchange_again(&mut session, &mut peer, strict, &client, &offered, 0x5a);
-        session.handle_incoming_bytes(&newkeys(&mut peer, &keys, strict)).unwrap();
+        session
+            .handle_incoming_bytes(&newkeys(&mut peer, &keys, strict))
+            .unwrap();
         assert_eq!(*session.phase(), SessionPhase::ChannelReady);
-        peer.send(&mut session, &data_packet(0, b"only Git input")).unwrap();
+        peer.send(&mut session, &data_packet(0, b"only Git input"))
+            .unwrap();
         assert_eq!(session.take_channel_input(), b"only Git input");
     }
 }
@@ -333,7 +403,8 @@ fn a_crossed_peer_close_is_acknowledged_only_after_the_outbound_key_switch() {
         let (mut session, mut peer) = ready(strict, 37, 4096);
         session.request_rekey().unwrap();
         let offered = peer.receive(&mut session).remove(0);
-        peer.send(&mut session, &channel_packet(msg::CHANNEL_CLOSE, 0, &[])).unwrap();
+        peer.send(&mut session, &channel_packet(msg::CHANNEL_CLOSE, 0, &[]))
+            .unwrap();
         assert!(session.is_channel_closed());
         assert_ne!(*session.phase(), SessionPhase::Closed);
         assert!(peer.receive(&mut session).is_empty());
@@ -342,7 +413,9 @@ fn a_crossed_peer_close_is_acknowledged_only_after_the_outbound_key_switch() {
         let keys = exchange_again(&mut session, &mut peer, strict, &client, &offered, 0x5b);
         assert_eq!(keys.deferred.len(), 1);
         assert_channel_reply(&keys.deferred[0], msg::CHANNEL_CLOSE, 37);
-        session.handle_incoming_bytes(&newkeys(&mut peer, &keys, strict)).unwrap();
+        session
+            .handle_incoming_bytes(&newkeys(&mut peer, &keys, strict))
+            .unwrap();
         assert_eq!(*session.phase(), SessionPhase::Closed);
         assert!(session.terminal_error().is_none());
     }
@@ -355,7 +428,11 @@ fn control_queue_has_exact_byte_and_packet_bounds_and_fails_closed() {
             let (mut session, mut peer) = ready(true, 37, DEFAULT_WINDOW_SIZE);
             let client = offer(false, false);
             let offered = begin(&mut session, &mut peer, false, &client);
-            let (count, data) = if by_bytes { (2, vec![b'x'; 32755]) } else { (128, Vec::new()) };
+            let (count, data) = if by_bytes {
+                (2, vec![b'x'; 32755])
+            } else {
+                (128, Vec::new())
+            };
             for _ in 0..count {
                 session.send_channel_extended_data(37, &data);
             }
@@ -364,14 +441,22 @@ fn control_queue_has_exact_byte_and_packet_bounds_and_fails_closed() {
             if over {
                 session.send_channel_extended_data(37, b"one more");
                 assert_eq!(*session.phase(), SessionPhase::Closed);
-                assert!(session.terminal_error().unwrap().to_string().contains("budget"));
+                assert!(
+                    session
+                        .terminal_error()
+                        .unwrap()
+                        .to_string()
+                        .contains("budget")
+                );
                 assert!(session.authenticated_principal().is_none());
                 assert!(session.active_command().is_none());
                 assert_eq!(session.send_channel_data(b"no restart"), 0);
             } else {
                 let keys = exchange_again(&mut session, &mut peer, true, &client, &offered, 0x5c);
                 assert_eq!(keys.deferred.len(), count);
-                session.handle_incoming_bytes(&newkeys(&mut peer, &keys, true)).unwrap();
+                session
+                    .handle_incoming_bytes(&newkeys(&mut peer, &keys, true))
+                    .unwrap();
                 assert!(session.terminal_error().is_none());
             }
         }
@@ -389,7 +474,10 @@ fn unsupported_or_duplicate_rekey_offers_are_terminal_but_do_not_replace_identit
                 begin(&mut session, &mut peer, false, &client);
             } else {
                 // Same-length unsupported KEX name, with a complete valid frame.
-                let at = client.windows(b"curve25519-sha256".len()).position(|w| w == b"curve25519-sha256").unwrap();
+                let at = client
+                    .windows(b"curve25519-sha256".len())
+                    .position(|w| w == b"curve25519-sha256")
+                    .unwrap();
                 client[at] = b'x';
             }
             assert!(peer.send(&mut session, &client).is_err());
@@ -410,7 +498,10 @@ fn receive_window_credit_is_deferred_without_losing_consumed_input() {
     }
     let client = offer(false, false);
     let offered = begin(&mut session, &mut peer, false, &client);
-    assert_eq!(session.take_channel_input().len(), DEFAULT_WINDOW_SIZE as usize / 2);
+    assert_eq!(
+        session.take_channel_input().len(),
+        DEFAULT_WINDOW_SIZE as usize / 2
+    );
     assert!(peer.receive(&mut session).is_empty());
     let keys = exchange_again(&mut session, &mut peer, true, &client, &offered, 0x5d);
     assert_eq!(keys.deferred.len(), 1);
@@ -418,16 +509,22 @@ fn receive_window_credit_is_deferred_without_losing_consumed_input() {
     let mut credit = WireReader::new(&keys.deferred[0][5..]);
     assert_eq!(credit.read_u32().unwrap(), DEFAULT_WINDOW_SIZE / 2);
     assert_eq!(credit.remaining(), 0);
-    session.handle_incoming_bytes(&newkeys(&mut peer, &keys, true)).unwrap();
+    session
+        .handle_incoming_bytes(&newkeys(&mut peer, &keys, true))
+        .unwrap();
     assert!(session.take_channel_input().is_empty());
-    assert!(peer.receive(&mut session).is_empty(), "credit is not sent twice");
+    assert!(
+        peer.receive(&mut session).is_empty(),
+        "credit is not sent twice"
+    );
 }
 
 #[test]
 fn key_rotation_does_not_reopen_authentication_or_authorize_a_second_exec() {
     for strict in [false, true] {
         let (mut session, mut peer) = ready(strict, 37, 4096);
-        peer.send(&mut session, &exec_packet(0, "git-upload-pack 'repo.git'")).unwrap();
+        peer.send(&mut session, &exec_packet(0, "git-upload-pack 'repo.git'"))
+            .unwrap();
         peer.receive(&mut session);
         let principal = session.authenticated_principal();
         let command = session.active_command().unwrap().clone();
@@ -436,11 +533,13 @@ fn key_rotation_does_not_reopen_authentication_or_authorize_a_second_exec() {
         let auth = peer.authentication("ssh-connection");
         peer.send(&mut session, &auth).unwrap();
         assert!(peer.receive(&mut session).is_empty());
-        peer.send(&mut session, &exec_packet(0, "git-receive-pack 'repo.git'")).unwrap();
+        peer.send(&mut session, &exec_packet(0, "git-receive-pack 'repo.git'"))
+            .unwrap();
         assert_channel_reply(&peer.receive(&mut session)[0], msg::CHANNEL_FAILURE, 37);
         assert_eq!(session.authenticated_principal(), principal);
         assert_eq!(session.active_command(), Some(&command));
-        peer.send(&mut session, &data_packet(0, b"original stream")).unwrap();
+        peer.send(&mut session, &data_packet(0, b"original stream"))
+            .unwrap();
         assert_eq!(session.take_channel_input(), b"original stream");
     }
 }

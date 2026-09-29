@@ -311,7 +311,12 @@ impl OneNode {
                 self.current_symbol_source_in(
                     request,
                     reference,
-                    (head, rcr, selected.basis().body().forge_position_root, commit),
+                    (
+                        head,
+                        rcr,
+                        selected.basis().body().forge_position_root,
+                        commit,
+                    ),
                 )
                 .await?,
             )

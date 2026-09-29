@@ -223,18 +223,40 @@ fn opaque_unicode_tables_retain_complete_blob_identity_and_source_accounting() {
         let encoded = manifest.encode(&|| false).unwrap();
         let decoded = Manifest::decode(&encoded.bytes, encoded.root, &|| false).unwrap();
         assert_eq!(decoded.documents(), manifest.documents());
-        assert_eq!(decoded.source_bytes(), bytes.len() + b"struct KeepThree;\n".len());
+        assert_eq!(
+            decoded.source_bytes(),
+            bytes.len() + b"struct KeepThree;\n".len()
+        );
         assert_eq!(decoded.declarations(), 4);
-        let query = SymbolQuery::new(b"Keep", SymbolMatchMode::Prefix, &[], &[], engine::MAX_WORK).unwrap();
+        let query =
+            SymbolQuery::new(b"Keep", SymbolMatchMode::Prefix, &[], &[], engine::MAX_WORK).unwrap();
         let mut search = Query::new(&query, 10).unwrap();
-        assert!(!search.observe(&decoded.documents()[0], &pa.bytes, &|| false).unwrap());
-        assert!(!search.observe(&decoded.documents()[1], &pb.bytes, &|| false).unwrap());
-        assert_eq!(search.matches.iter().map(|m| m.name.as_slice()).collect::<Vec<_>>(),
-            vec![b"KeepOne".as_slice(), b"KeepTwo", b"KeepThree"]);
+        assert!(
+            !search
+                .observe(&decoded.documents()[0], &pa.bytes, &|| false)
+                .unwrap()
+        );
+        assert!(
+            !search
+                .observe(&decoded.documents()[1], &pb.bytes, &|| false)
+                .unwrap()
+        );
+        assert_eq!(
+            search
+                .matches
+                .iter()
+                .map(|m| m.name.as_slice())
+                .collect::<Vec<_>>(),
+            vec![b"KeepOne".as_slice(), b"KeepTwo", b"KeepThree"]
+        );
         assert!(!search.more);
         for hit in &search.matches[..2] {
             assert_eq!(hit.location.blob, decoded.documents()[0].blob);
-            assert_eq!(&bytes[hit.location.byte_offset..hit.location.byte_offset + hit.location.match_length], hit.name.as_slice());
+            assert_eq!(
+                &bytes[hit.location.byte_offset
+                    ..hit.location.byte_offset + hit.location.match_length],
+                hit.name.as_slice()
+            );
         }
     }
 }
@@ -246,9 +268,19 @@ fn ignored_opaque_declarations_never_enter_persisted_results() {
         let (doc, payload) = document(format, b"a.rs", body);
         let decoded = decode_table(&doc, &payload.bytes, &|| false).unwrap();
         assert_eq!(decoded.rows().len(), 2);
-        assert!(decoded.rows().iter().all(|row| row.name.as_slice() != b"Hidden"));
-        for (name, count) in [(b"Hidden".as_slice(), 0), (b"Visible".as_slice(), 1), (b"make".as_slice(), 1)] {
-            let query = SymbolQuery::new(name, SymbolMatchMode::Exact, &[], &[], engine::MAX_WORK).unwrap();
+        assert!(
+            decoded
+                .rows()
+                .iter()
+                .all(|row| row.name.as_slice() != b"Hidden")
+        );
+        for (name, count) in [
+            (b"Hidden".as_slice(), 0),
+            (b"Visible".as_slice(), 1),
+            (b"make".as_slice(), 1),
+        ] {
+            let query =
+                SymbolQuery::new(name, SymbolMatchMode::Exact, &[], &[], engine::MAX_WORK).unwrap();
             let mut search = Query::new(&query, 10).unwrap();
             assert!(!search.observe(&doc, &payload.bytes, &|| false).unwrap());
             assert_eq!(search.matches.len(), count);
@@ -265,7 +297,12 @@ fn long_opaque_tokens_allow_zero_row_documents_without_losing_source_bytes() {
         assert_eq!(doc.declarations, 0);
         assert_eq!(doc.source_bytes, body.len());
         assert!(decoded.rows().is_empty());
-        let manifest = Manifest { source: source(format), documents: vec![doc], unsupported: 0, non_regular: 0 };
+        let manifest = Manifest {
+            source: source(format),
+            documents: vec![doc],
+            unsupported: 0,
+            non_regular: 0,
+        };
         let encoded = manifest.encode(&|| false).unwrap();
         let roundtrip = Manifest::decode(&encoded.bytes, encoded.root, &|| false).unwrap();
         assert_eq!(roundtrip.documents().len(), 1);
@@ -279,7 +316,8 @@ fn raw_ascii_declarations_after_opaque_tokens_keep_persisted_exact_spans() {
     let bytes = "m!(r#名);\r\nfn r#type() {}\r\n".as_bytes();
     for format in [Format::Sha1, Format::Sha256] {
         let (doc, payload) = document(format, b"raw.rs", bytes);
-        let query = SymbolQuery::new(b"type", SymbolMatchMode::Exact, &[], &[], engine::MAX_WORK).unwrap();
+        let query =
+            SymbolQuery::new(b"type", SymbolMatchMode::Exact, &[], &[], engine::MAX_WORK).unwrap();
         let mut search = Query::new(&query, 1).unwrap();
         assert!(!search.observe(&doc, &payload.bytes, &|| false).unwrap());
         assert_eq!(search.matches.len(), 1);
@@ -287,7 +325,13 @@ fn raw_ascii_declarations_after_opaque_tokens_keep_persisted_exact_spans() {
         assert!(hit.raw_identifier);
         assert_eq!(hit.location.line, 2);
         assert_eq!(hit.location.byte_column, 6);
-        assert_eq!(&bytes[hit.location.byte_offset - 2..hit.location.byte_offset], b"r#");
-        assert_eq!(&bytes[hit.location.byte_offset..hit.location.byte_offset + 4], b"type");
+        assert_eq!(
+            &bytes[hit.location.byte_offset - 2..hit.location.byte_offset],
+            b"r#"
+        );
+        assert_eq!(
+            &bytes[hit.location.byte_offset..hit.location.byte_offset + 4],
+            b"type"
+        );
     }
 }

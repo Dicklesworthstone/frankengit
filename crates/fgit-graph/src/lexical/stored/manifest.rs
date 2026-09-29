@@ -1,8 +1,9 @@
 use super::{
-    Digest, IndexError, LexicalError, LexicalNamespace, LexicalQuery, LexicalSegment, LexicalSource,
-    MAX_DOCUMENTS, MAX_INDEX_BYTES, MAX_INDEX_DOCUMENTS, MAX_POSTINGS, MAX_SEGMENT_BYTES,
-    MAX_SEGMENTS, MAX_SOURCE_BYTES, MAX_TERMS, QueryBudget, RepositoryAuthorityHeadId,
-    RepositoryCommitId, SchemaFamily, SchemaId, bounded_add, check, path_valid,
+    Digest, IndexError, LexicalError, LexicalNamespace, LexicalQuery, LexicalSegment,
+    LexicalSource, MAX_DOCUMENTS, MAX_INDEX_BYTES, MAX_INDEX_DOCUMENTS, MAX_POSTINGS,
+    MAX_SEGMENT_BYTES, MAX_SEGMENTS, MAX_SOURCE_BYTES, MAX_TERMS, QueryBudget,
+    RepositoryAuthorityHeadId, RepositoryCommitId, SchemaFamily, SchemaId, bounded_add, check,
+    path_valid,
 };
 use crate::lexical::encoding::{
     count, decode_limits, namespace_read, namespace_write, oid_read, payload_root,
@@ -126,9 +127,15 @@ impl SegmentRef {
             budget.charge(4 * (prefix.len() as u64 + 1), live)?;
             let prefix = prefix.as_slice();
             if (first <= prefix && prefix <= last)
-                || (last.iter().copied().cmp(prefix.iter().copied().chain([b'/']))
+                || (last
+                    .iter()
+                    .copied()
+                    .cmp(prefix.iter().copied().chain([b'/']))
                     != std::cmp::Ordering::Less
-                    && first.iter().copied().cmp(prefix.iter().copied().chain([b'0']))
+                    && first
+                        .iter()
+                        .copied()
+                        .cmp(prefix.iter().copied().chain([b'0']))
                         == std::cmp::Ordering::Less)
             {
                 return Ok(true);

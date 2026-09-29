@@ -59,7 +59,10 @@ fn reopen_roundtrips_both_native_domains_and_can_update_close_and_reopen_again()
             let next = advance(&mut command, &previous, action, format);
             validate_transition(Some(&previous), &next).unwrap();
             let bytes = encode_body(&next).unwrap();
-            assert_eq!(decode_body::<ForgeEvent>(&bytes, DecodeLimits::DEFAULT).unwrap(), next);
+            assert_eq!(
+                decode_body::<ForgeEvent>(&bytes, DecodeLimits::DEFAULT).unwrap(),
+                next
+            );
             assert_eq!(command.proposed_event(actor(), format).unwrap(), next);
             previous = next;
         }
@@ -98,8 +101,13 @@ fn every_closed_and_active_transition_has_an_explicit_permitted_or_refused_resul
             };
             assert_eq!(
                 validate_transition(Some(&previous), &next),
-                if allowed { Ok(()) } else { Err(RefusalCode::ProtectedRefTransitionDenied) },
-                "{:?} -> {action:?}", old.action,
+                if allowed {
+                    Ok(())
+                } else {
+                    Err(RefusalCode::ProtectedRefTransitionDenied)
+                },
+                "{:?} -> {action:?}",
+                old.action,
             );
         }
     }
@@ -119,15 +127,26 @@ fn merged_native_and_legacy_streams_cannot_be_reopened() {
             base_tip: command.data.target_tip,
             merge_commit: GitOid::from_hex(format, &"d".repeat(format.digest_len() * 2)).unwrap(),
         });
-        assert_eq!(validate_transition(Some(&previous), &next), Err(RefusalCode::ProtectedRefTransitionDenied));
+        assert_eq!(
+            validate_transition(Some(&previous), &next),
+            Err(RefusalCode::ProtectedRefTransitionDenied)
+        );
         previous.payload = ForgeEventPayload::PullRequestClosed { withdrawn: true };
-        assert_eq!(validate_transition(Some(&previous), &next), Err(RefusalCode::ProtectedRefTransitionDenied));
+        assert_eq!(
+            validate_transition(Some(&previous), &next),
+            Err(RefusalCode::ProtectedRefTransitionDenied)
+        );
         let digest = fgit_codec::harness::digest_of(1);
         previous.payload = ForgeEventPayload::MergeCommitted {
-            merge_commit: digest, target_ref: b"refs/heads/main".to_vec(),
-            target_tip_before: digest, target_tip_after: digest,
+            merge_commit: digest,
+            target_ref: b"refs/heads/main".to_vec(),
+            target_tip_before: digest,
+            target_tip_after: digest,
         };
-        assert_eq!(validate_transition(Some(&previous), &next), Err(RefusalCode::ProtectedRefTransitionDenied));
+        assert_eq!(
+            validate_transition(Some(&previous), &next),
+            Err(RefusalCode::ProtectedRefTransitionDenied)
+        );
     }
 }
 
@@ -145,17 +164,32 @@ fn reopening_cannot_retarget_branches_or_skip_the_expected_version() {
             changed.data.target_ref = RefName::try_new(b"refs/heads/other").unwrap();
         }
         let next = changed.proposed_event(actor(), format).unwrap();
-        assert_eq!(validate_transition(Some(&previous), &next), Err(RefusalCode::ProtectedRefTransitionDenied));
+        assert_eq!(
+            validate_transition(Some(&previous), &next),
+            Err(RefusalCode::ProtectedRefTransitionDenied)
+        );
     }
     let mut stale = permitted.clone();
     stale.version = previous.version;
-    assert_eq!(validate_transition(Some(&previous), &stale), Err(RefusalCode::EvidenceStale));
+    assert_eq!(
+        validate_transition(Some(&previous), &stale),
+        Err(RefusalCode::EvidenceStale)
+    );
     stale.version = permitted.version.next().unwrap();
-    assert_eq!(validate_transition(Some(&previous), &stale), Err(RefusalCode::EvidenceStale));
-    assert_eq!(validate_transition(None, &permitted), Err(RefusalCode::EvidenceStale));
+    assert_eq!(
+        validate_transition(Some(&previous), &stale),
+        Err(RefusalCode::EvidenceStale)
+    );
+    assert_eq!(
+        validate_transition(None, &permitted),
+        Err(RefusalCode::EvidenceStale)
+    );
     stale = permitted;
     stale.aggregate = AggregateId::PullRequest(PullRequestNumber::try_new(2).unwrap());
-    assert_eq!(validate_transition(Some(&previous), &stale), Err(RefusalCode::EvidenceStale));
+    assert_eq!(
+        validate_transition(Some(&previous), &stale),
+        Err(RefusalCode::EvidenceStale)
+    );
 }
 
 #[test]
@@ -163,14 +197,21 @@ fn reopen_is_not_creation_and_first_version_forgery_cannot_encode() {
     let format = GitHashAlgorithm::Sha1;
     let mut command = command(format);
     command.action = PullRequestAction::Reopen;
-    assert_eq!(command.proposed_event(actor(), format), Err(RefusalCode::EvidenceInvalid));
+    assert_eq!(
+        command.proposed_event(actor(), format),
+        Err(RefusalCode::EvidenceInvalid)
+    );
     command.expected_version = ExpectedVersion::Exactly(AggregateVersion::FIRST);
     let mut event = command.proposed_event(actor(), format).unwrap();
     assert!(encode_body(&event).is_ok());
     event.version = AggregateVersion::FIRST;
     assert!(encode_body(&event).is_err());
-    command.expected_version = ExpectedVersion::Exactly(AggregateVersion::try_new(u64::MAX).unwrap());
-    assert_eq!(command.proposed_event(actor(), format), Err(RefusalCode::ResourceBudgetExceeded));
+    command.expected_version =
+        ExpectedVersion::Exactly(AggregateVersion::try_new(u64::MAX).unwrap());
+    assert_eq!(
+        command.proposed_event(actor(), format),
+        Err(RefusalCode::ResourceBudgetExceeded)
+    );
 }
 
 #[test]
@@ -179,13 +220,30 @@ fn action_actor_and_refreshed_data_remain_distinct_retry_identity_material() {
     let (mut command, previous) = closed(format);
     let reopen = advance(&mut command, &previous, PullRequestAction::Reopen, format);
     let bytes = encode_body(&reopen).unwrap();
-    assert_eq!(encode_body(&command.proposed_event(actor(), format).unwrap()).unwrap(), bytes);
+    assert_eq!(
+        encode_body(&command.proposed_event(actor(), format).unwrap()).unwrap(),
+        bytes
+    );
     for action in [PullRequestAction::Update, PullRequestAction::Close] {
         let mut different = command.clone();
         different.action = action;
-        assert_ne!(encode_body(&different.proposed_event(actor(), format).unwrap()).unwrap(), bytes);
+        assert_ne!(
+            encode_body(&different.proposed_event(actor(), format).unwrap()).unwrap(),
+            bytes
+        );
     }
-    assert_ne!(encode_body(&command.proposed_event(PrincipalId::from_bytes([8; 16]), format).unwrap()).unwrap(), bytes);
+    assert_ne!(
+        encode_body(
+            &command
+                .proposed_event(PrincipalId::from_bytes([8; 16]), format)
+                .unwrap()
+        )
+        .unwrap(),
+        bytes
+    );
     command.data.body.push('!');
-    assert_ne!(encode_body(&command.proposed_event(actor(), format).unwrap()).unwrap(), bytes);
+    assert_ne!(
+        encode_body(&command.proposed_event(actor(), format).unwrap()).unwrap(),
+        bytes
+    );
 }
