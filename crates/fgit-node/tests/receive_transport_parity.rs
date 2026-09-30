@@ -13,7 +13,9 @@ use fgit_types::{
     DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefName, RefusalCode, RepositoryId,
     TenantId,
 };
+use fgit_wire::receive::ReceiveError;
 use fgit_wire::receive::{ReceiveContext, ReceiveLimits, SignedPushProfile};
+use fgit_wire::smart_http::rpc::RpcError;
 use fgit_wire::smart_http::{HttpLimits, parse_head};
 use fgit_wire::{Capabilities, Packet, WireLimits, encode_packets};
 use std::collections::BTreeMap;
@@ -189,6 +191,32 @@ fn http(node: &OneNode, key: &[u8], bytes: &[u8], chunked: bool) -> AdmissionRes
         &mut Vec::new(),
     )
     .unwrap()
+}
+/// One HTTP receive, returning the node's result and the exact response bytes.
+fn http_reply(
+    node: &OneNode,
+    key: &[u8],
+    bytes: &[u8],
+) -> (Result<AdmissionResult, NodeSmartHttpRefusal>, String) {
+    let route = std::str::from_utf8(node.git_daemon_repository_path().as_bytes()).unwrap();
+    let head = format!(
+        "POST {route}/git-receive-pack HTTP/1.1\r\nHost: local\r\nContent-Type: application/x-git-receive-pack-request\r\nContent-Length: {}\r\n\r\n",
+        bytes.len()
+    );
+    let request = parse_head(head.as_bytes(), HttpLimits::default())
+        .unwrap()
+        .unwrap();
+    let mut written = Vec::new();
+    let result = node.smart_http_receive_stream_in(
+        &request,
+        &session(key),
+        &mut Cursor::new(bytes.to_vec()),
+        HttpLimits::default(),
+        AdmissionLimits::default(),
+        &mut || true,
+        &mut written,
+    );
+    (result, String::from_utf8_lossy(&written).into_owned())
 }
 fn mixed(result: &AdmissionResult) {
     assert!(!result.session.atomic);
@@ -520,6 +548,78 @@ fn authentication_cell_state_format_and_cancellation_guard_native_retention() {
                 .unwrap(),
             SessionRecovery::NotObserved
         ));
+        node.shutdown().unwrap();
+    }
+}
+
+/// frankengit-87c7: over Smart HTTP, a verdict on the received commands is a
+/// 200 report-status reply with `unpack ok` and one `ng` per command, and
+/// nothing publishes; the refusal is still returned. A framing refusal keeps
+/// its error path and writes no response. The permitted twin publishes.
+#[test]
+fn http_reports_command_verdicts_per_ref_and_keeps_framing_refusals_fatal() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let node = start(root.config(format), false);
+        let (oid, zero, pack) = pack(format);
+        let missing = GitOid::from_hex(format, &"1".repeat(format.digest_len() * 2)).unwrap();
+        let before = state(&node);
+
+        let verdict = body(
+            format,
+            &[(zero, missing, "refs/tags/missing")],
+            &pack,
+            false,
+        );
+        let (result, reply) = http_reply(&node, b"verdict", &verdict);
+        let code = match result {
+            Err(NodeSmartHttpRefusal::Rpc(error)) => match *error {
+                RpcError::Receive(ReceiveError::AuthoritativeRefusal(code)) => code,
+                other => panic!("expected an authoritative refusal, got {other:?}"),
+            },
+            other => panic!("expected an authoritative refusal, got {other:?}"),
+        };
+        assert_eq!(code, RefusalCode::ObjectClosureIncomplete, "{reply}");
+        assert!(reply.starts_with("HTTP/1.1 200 "), "{reply}");
+        assert!(
+            reply.contains("application/x-git-receive-pack-result"),
+            "{reply}"
+        );
+        assert!(reply.contains("unpack ok\n"), "{reply}");
+        assert!(
+            reply.contains(
+                "ng refs/tags/missing missing necessary objects (ObjectClosureIncomplete)"
+            ),
+            "{reply}"
+        );
+        assert!(!reply.contains("ok refs/"), "{reply}");
+        assert_eq!(state(&node), before, "a verdict publishes nothing");
+
+        let mut corrupt = pack.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        let framing = body(format, &[(zero, oid, "refs/tags/corrupt")], &corrupt, false);
+        let (result, reply) = http_reply(&node, b"framing", &framing);
+        assert!(result.is_err());
+        assert!(
+            !matches!(
+                &result,
+                Err(NodeSmartHttpRefusal::Rpc(error))
+                    if matches!(**error, RpcError::Receive(ReceiveError::AuthoritativeRefusal(code))
+                        if code == RefusalCode::ObjectClosureIncomplete)
+            ),
+            "{result:?}"
+        );
+        assert!(
+            reply.is_empty(),
+            "a framing refusal writes no report: {reply}"
+        );
+        assert_eq!(state(&node), before);
+
+        let permitted = body(format, &[(zero, oid, "refs/tags/blob")], &pack, false);
+        let (result, reply) = http_reply(&node, b"permitted", &permitted);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(reply.contains("ok refs/tags/blob"), "{reply}");
+        assert_eq!(state(&node).0, before.0 + 1);
         node.shutdown().unwrap();
     }
 }

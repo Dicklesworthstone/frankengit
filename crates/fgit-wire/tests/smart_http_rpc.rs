@@ -151,6 +151,7 @@ struct StructuralHandoff {
     calls: usize,
     receipt: Option<QuarantineReceipt>,
     reject: bool,
+    refuse: Option<fgit_types::RefusalCode>,
 }
 impl ReceiveQuarantineHandoff for StructuralHandoff {
     fn handoff(
@@ -163,6 +164,9 @@ impl ReceiveQuarantineHandoff for StructuralHandoff {
         assert_eq!(request.commands.len(), 1);
         assert_eq!(pack.is_none(), receipt.delete_only);
         self.receipt = Some(receipt.clone());
+        if let Some(code) = self.refuse {
+            return Err(ReceiveError::AuthoritativeRefusal(code));
+        }
         if self.reject {
             Err(ReceiveError::Cancelled)
         } else {
@@ -534,6 +538,77 @@ fn handoff_refusal_is_not_rewritten_as_success() {
         Err(RpcError::Receive(ReceiveError::Cancelled))
     ));
     assert_eq!(handoff.calls, 1);
+}
+
+/// frankengit-87c7: the parsed request is disclosed only after the handoff
+/// refused the fully received request with an authoritative verdict, so the
+/// gateway can report that verdict per command. Success, a non-authoritative
+/// handoff failure and cancellation disclose nothing, and a request finishes
+/// at most once.
+#[test]
+fn only_an_authoritative_handoff_refusal_discloses_the_received_request() {
+    use fgit_types::RefusalCode;
+    for format in [GitObjectFormat::Sha1, GitObjectFormat::Sha256] {
+        let body = receive_body(format, false);
+        let header = head(Service::ReceivePack, body.len(), false);
+        let request = parse_head(&header, HttpLimits::default()).unwrap().unwrap();
+        let received = || {
+            let mut rpc = ReceiveRpc::new(
+                &request,
+                ProtocolVersion::V0,
+                context(format),
+                HttpLimits::default(),
+            )
+            .unwrap();
+            rpc.push(&body, &mut || true).unwrap();
+            rpc
+        };
+        let mut rpc = received();
+        assert!(rpc.refused_request().is_none());
+        let mut handoff = StructuralHandoff {
+            refuse: Some(RefusalCode::EvidenceInvalid),
+            ..StructuralHandoff::default()
+        };
+        assert!(matches!(
+            rpc.finish_with_handoff(&mut handoff, &mut || true),
+            Err(RpcError::Receive(ReceiveError::AuthoritativeRefusal(
+                RefusalCode::EvidenceInvalid
+            )))
+        ));
+        let refused = rpc
+            .refused_request()
+            .expect("the refused request is disclosed");
+        assert_eq!(refused.commands.len(), 1);
+        assert!(matches!(
+            rpc.finish_with_handoff(&mut handoff, &mut || true),
+            Err(RpcError::FailedRequest)
+        ));
+        assert_eq!(handoff.calls, 1);
+
+        let mut rpc = received();
+        rpc.finish_with_handoff(&mut StructuralHandoff::default(), &mut || true)
+            .unwrap();
+        assert!(rpc.refused_request().is_none(), "success discloses nothing");
+        let mut rpc = received();
+        let mut failing = StructuralHandoff {
+            reject: true,
+            ..StructuralHandoff::default()
+        };
+        assert!(rpc.finish_with_handoff(&mut failing, &mut || true).is_err());
+        assert!(
+            rpc.refused_request().is_none(),
+            "a non-verdict failure discloses nothing"
+        );
+        let mut rpc = received();
+        assert!(matches!(
+            rpc.finish_with_handoff(&mut StructuralHandoff::default(), &mut || false),
+            Err(RpcError::Cancelled)
+        ));
+        assert!(
+            rpc.refused_request().is_none(),
+            "cancellation discloses nothing"
+        );
+    }
 }
 
 #[test]

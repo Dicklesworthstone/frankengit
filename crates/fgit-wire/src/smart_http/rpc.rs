@@ -15,8 +15,8 @@ use super::{
     RequestHead, Service, discovery_prefix,
 };
 use crate::receive::{
-    ReceiveCancellation, ReceiveCompletion, ReceiveContext, ReceiveError, ReceivePack,
-    ReceiveQuarantineHandoff, advertise_receive_pack,
+    ReceiveCancellation, ReceiveCompletion, ReceiveContext, ReceiveError, ReceiveEvent,
+    ReceivePack, ReceiveQuarantineHandoff, ReceiveRequest, advertise_receive_pack,
 };
 use crate::{
     AdvertisedRef, Capabilities, LegacyUploadPack, PackRequest, Packet, PktLineDecoder, Transition,
@@ -417,6 +417,10 @@ pub struct ReceiveRpc {
     body: BodyDecoder,
     machine: Option<ReceivePack>,
     chunk_bytes: usize,
+    /// The parsed command list. It is disclosed only once the handoff has
+    /// refused the fully received request (frankengit-87c7).
+    request: Option<Box<ReceiveRequest>>,
+    refused: bool,
 }
 impl ReceiveRpc {
     pub fn new(
@@ -439,6 +443,8 @@ impl ReceiveRpc {
             body,
             machine,
             chunk_bytes,
+            request: None,
+            refused: false,
         })
     }
     pub fn push<C: ReceiveCancellation>(
@@ -466,8 +472,13 @@ impl ReceiveRpc {
             consumed += step.consumed;
             for fragment in step.data.chunks(self.chunk_bytes) {
                 checkpoint(cancellation)?;
-                // RequestParsed remains private until HTTP and pack validation.
-                let _ = machine.push_bytes(fragment)?;
+                // The parsed request stays private until HTTP and pack
+                // validation, and is disclosed only to report a refusal.
+                for event in machine.push_bytes(fragment)?.events {
+                    if let ReceiveEvent::RequestReady(request) = event {
+                        self.request = Some(request);
+                    }
+                }
             }
         }
         checkpoint(cancellation)?;
@@ -479,16 +490,28 @@ impl ReceiveRpc {
     }
     /// The original handoff's outcome is returned unchanged. In particular,
     /// cancellation after a publishing handoff is not rewritten as non-commit.
+    /// A request finishes at most once; a second call is a failed request.
     pub fn finish_with_handoff<H: ReceiveQuarantineHandoff, C: ReceiveCancellation>(
-        mut self,
+        &mut self,
         handoff: &mut H,
         cancellation: &mut C,
     ) -> Result<ReceiveCompletion, RpcError> {
-        let machine = self.machine.as_mut().ok_or(RpcError::FailedRequest)?;
+        let mut machine = self.machine.take().ok_or(RpcError::FailedRequest)?;
         checkpoint(cancellation)?;
         self.body.finish()?;
         checkpoint(cancellation)?;
-        Ok(machine.finish_with_handoff(handoff, cancellation)?)
+        let finished = machine.finish_with_handoff(handoff, cancellation);
+        self.refused = matches!(finished, Err(ReceiveError::AuthoritativeRefusal(_)));
+        Ok(finished?)
+    }
+
+    /// The fully received request that the handoff refused with an
+    /// authoritative verdict, so the caller can report that verdict per
+    /// command. `None` before [`Self::finish_with_handoff`] and after every
+    /// other outcome: framing, cancellation and success disclose nothing.
+    #[must_use]
+    pub fn refused_request(&self) -> Option<&ReceiveRequest> {
+        self.request.as_deref().filter(|_| self.refused)
     }
 }
 

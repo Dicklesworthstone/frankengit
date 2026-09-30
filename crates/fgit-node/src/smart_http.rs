@@ -8,6 +8,7 @@
 mod ingress;
 mod receive_session;
 mod server;
+mod verdict;
 
 use std::cell::Cell;
 use std::error::Error;
@@ -938,7 +939,31 @@ impl OneNode {
             .map_err(ReceiveError::AuthoritativeRefusal)?;
         let mut handoff =
             ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
-        let completion = rpc.finish_with_handoff(&mut handoff, &mut live)?;
+        let completion = match rpc.finish_with_handoff(&mut handoff, &mut live) {
+            Err(RpcError::Receive(ReceiveError::AuthoritativeRefusal(code))) => {
+                // A verdict on the fully received commands reaches the client
+                // per ref in a 200 receive-pack result, as git-receive-pack
+                // answers over HTTP. The refusal is still returned: nothing is
+                // admitted and the request counts as refused (frankengit-87c7).
+                let report = rpc.refused_request().and_then(|refused| {
+                    verdict::command_verdict_report(refused, code, &receive_limits)
+                });
+                if let Some(report) = report {
+                    let body = fgit_wire::encode_packets(&report?, &receive_limits.wire)?;
+                    let length =
+                        u64::try_from(body.len()).map_err(|_| WireError::AllocationFailure)?;
+                    let head = success_head(request, Some(length));
+                    write_response_part(writer, head.as_bytes(), "write smart HTTP verdict head")?;
+                    write_response_part(writer, &body, "write smart HTTP receive verdict")?;
+                    writer.flush().map_err(|source| NodeSmartHttpRefusal::Io {
+                        operation: "flush smart HTTP receive verdict",
+                        source,
+                    })?;
+                }
+                return Err(RpcError::Receive(ReceiveError::AuthoritativeRefusal(code)).into());
+            }
+            completion => completion?,
+        };
         let validated = handoff.into_validated_receive()?;
         if !live() {
             return Err(RpcError::Cancelled.into());
