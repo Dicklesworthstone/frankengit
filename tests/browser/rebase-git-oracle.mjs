@@ -96,7 +96,7 @@ try {
       original_messages_preserved:true,original_signatures_copied:false,author_identity_verified:false,state:'clean',series_complete:true,
       provisional_steps:false,candidate_commit:candidate,root_tree:tree(candidate),generated_objects:packCount,pack_objects:packCount,borrowed_objects:0,
       bundle:{bytes:bundle.length,sha256},stopped_commit:null,conflicts:[],step_count:steps.length,steps};
-    const envelope=multipart(metadata,bundle,sha256);
+    const envelope=multipart(metadata,bundle,sha256,'candidate');
     const {artifact}=await prepared({status:200,type:envelope.type,value:envelope.value},selection,command,[],webcrypto,()=>{});checks++;
     const report={...common,...flags,type:'rebase_inspection',profile:'linear-v1',source_head:sourceHead,snapshot_token:snapshot,
       expected_source:source,onto,candidate_commit:candidate,approval_created:false,replay_equivalence_verified:false,complete:true,

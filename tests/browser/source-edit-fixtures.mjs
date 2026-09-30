@@ -9,8 +9,10 @@ export const href = 'http://127.0.0.1:9418/repo.git/ui/source/';
 export const metadata = { author: 'Alice <a@example.invalid>', committer: 'Alice <a@example.invalid>', timestamp: 1, message: 'Exact source edit\n' };
 export const edit = () => ({ path_hex: hex(utf8.encode('file.txt')), before: { mode: 0o100644, bytes: utf8.encode('before\r\n') }, after: { mode: 0o100755, bytes: utf8.encode('after') } });
 export function response(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } }); }
-export function multipart(metadata, bundle, sha256) {
-  const boundary = `fg-source-${sha256.slice(0, 48)}-0`;
+// `shape` is the boundary the node uses for the endpoint being faked: 'edit'
+// for source edits, 'candidate' for cherry-pick, revert and rebase.
+export function multipart(metadata, bundle, sha256, shape = 'edit') {
+  const boundary = shape === 'candidate' ? `fg-source-candidate-${sha256.slice(0, 40)}-0` : `fg-source-${sha256.slice(0, 48)}-0`;
   const opening = utf8.encode(`--${boundary}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Disposition: inline; name="metadata"\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: application/x-git-bundle\r\nContent-Disposition: attachment; name="bundle"; filename="candidate.bundle"\r\n\r\n`);
   const closing = utf8.encode(`\r\n--${boundary}--\r\n`);
   const body = new Uint8Array(opening.length + bundle.length + closing.length);

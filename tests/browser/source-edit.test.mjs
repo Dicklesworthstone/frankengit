@@ -150,3 +150,27 @@ test('multipart preparation refuses truncation, suffixes, and wrong framing', as
     { ...value, value: new Uint8Array([...value.value, 1]) }, { ...value, type: 'multipart/mixed; boundary=x' }]) assert.throws(() => sourceEnvelope(altered));
   assert.throws(() => sourceUpload(f.fields, utf8.encode('--collision'), 'patch', 'collision'));
 });
+test('both node boundaries decode and near misses are refused', async () => {
+  const f = await fixture();
+  // Source edits and cherry-pick/revert/rebase candidates: the two shapes the node sends.
+  for (const shape of ['edit', 'candidate']) {
+    const decoded = sourceEnvelope(multipart(f.prepared, f.bundle, f.sha256, shape));
+    assert.deepEqual(decoded.bundle, f.bundle);
+    assert.equal(decoded.metadata.type, f.prepared.type);
+  }
+  // The same exact framing under another boundary, spliced byte for byte.
+  const reframed = boundary => {
+    const value = multipart(f.prepared, f.bundle, f.sha256, 'candidate'), old = Buffer.from(value.type.split('boundary=')[1]);
+    const parts = []; let rest = Buffer.from(value.value), at;
+    while ((at = rest.indexOf(old)) !== -1) { parts.push(rest.subarray(0, at)); rest = rest.subarray(at + old.length); }
+    parts.push(rest);
+    const joined = Buffer.concat(parts.flatMap((part, index) => index ? [Buffer.from(boundary), part] : [part]));
+    return { ...value, type: `multipart/mixed; boundary=${boundary}`, value: new Uint8Array(joined) };
+  };
+  const hex40 = f.sha256.slice(0, 40), hex48 = f.sha256.slice(0, 48);
+  assert.doesNotThrow(() => sourceEnvelope(reframed(`fg-source-candidate-${hex40}-f`)));
+  for (const boundary of [`fg-source-candidate-${hex48}-0`, `fg-source-${hex40}-0`, `fg-source-candidate-${hex40.toUpperCase()}-0`,
+    `fg-source-candidate-${hex40}-10`, `fg-initial-candidate-${hex40}-0`, `fg-source-candidate-${hex40}`]) {
+    assert.throws(() => sourceEnvelope(reframed(boundary)), /Unsupported source preparation envelope/, boundary);
+  }
+});

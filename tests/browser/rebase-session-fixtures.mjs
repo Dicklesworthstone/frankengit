@@ -96,7 +96,7 @@ export async function fixture(algorithm = 'sha1') {
       }
       await config.prepare?.(r,decoded);
       if(r.state!=='clean')return response(r,409);
-      const e=multipart(r,bundle,sha256);return new Response(e.value,{status:200,headers:{'Content-Type':e.type}});
+      const e=multipart(r,bundle,sha256,'candidate');return new Response(e.value,{status:200,headers:{'Content-Type':e.type}});
     }
     if(endpoint==='source/rebase/inspect') { const r=structuredClone(inspected);await config.inspect?.(r,decoded);return response(r); }
     if(endpoint==='source/rebase/apply') {

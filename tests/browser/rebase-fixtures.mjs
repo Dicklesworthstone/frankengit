@@ -73,7 +73,7 @@ export async function fixture(algorithm = 'sha1', count = 2) {
     if (endpoint === 'source/rebase/prepare' || endpoint === 'source/rebase/resolve') {
       const r = structuredClone(prepared); await (endpoint.endsWith('resolve') ? config.resolve : config.prepare)?.(r, options);
       if (r.state !== 'clean') return response(r, 409);
-      const m = multipart(r, bundle, sha256); return new Response(m.value, { status: 200, headers: { 'Content-Type': m.type } });
+      const m = multipart(r, bundle, sha256, 'candidate'); return new Response(m.value, { status: 200, headers: { 'Content-Type': m.type } });
     }
     if (endpoint === 'source/rebase/inspect') {
       const r = structuredClone(inspection); await config.inspect?.(r, options); return response(r);

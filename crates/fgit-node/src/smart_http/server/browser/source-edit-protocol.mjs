@@ -46,8 +46,12 @@ export function sourceUpload(command, payload, kind, boundary) {
     `--${boundary}\r\nContent-Disposition: form-data; name="command"\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n${encoded}\r\n--${boundary}\r\nContent-Disposition: form-data; name="${kind}"\r\nContent-Type: ${kind === 'patch' ? 'application/octet-stream' : 'application/x-git-bundle'}\r\n\r\n`), payload, utf8.encode(`\r\n--${boundary}--\r\n`)) };
 }
 function at(bytes, marker, offset) { return offset >= 0 && offset + marker.length <= bytes.length && marker.every((b, i) => bytes[offset + i] === b); }
+// The node frames every source candidate identically, under one of exactly two
+// boundaries: source edits (source/changes/output.rs) use 48 hex digits of the
+// bundle digest, and cherry-pick, revert and rebase candidates
+// (source/artifact.rs) use `candidate-` and 40.
 export function sourceEnvelope(response) {
-  const found = /^multipart\/mixed; boundary=(fg-source-[0-9a-f]{48}-[0-9a-f])$/.exec(response.type);
+  const found = /^multipart\/mixed; boundary=(fg-source-(?:[0-9a-f]{48}|candidate-[0-9a-f]{40})-[0-9a-f])$/.exec(response.type);
   if (!found || response.status !== 200 || !(response.value instanceof Uint8Array) || response.value.length > PREPARE_LIMIT) fail('Unsupported source preparation envelope.');
   const b = found[1], bytes = response.value;
   const opening = utf8.encode(`--${b}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Disposition: inline; name="metadata"\r\n\r\n`);

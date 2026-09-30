@@ -77,7 +77,7 @@ export async function fixture(algorithm = 'sha1') {
       if (state === 'conflicted' || state === 'no_change') { r.candidate_commit = null; r.root_tree = null; r.bundle = null; delete r.parents; }
       await (resolving ? config.resolve : config.prepare)?.(r, call);
       if (state === 'conflicted' || state === 'no_change') return response(r, state === 'conflicted' ? 409 : 200);
-      const envelope = multipart(r, source.bundle, source.sha256);
+      const envelope = multipart(r, source.bundle, source.sha256, 'candidate');
       return new Response(envelope.value, { status: 200, headers: { 'Content-Type': envelope.type } });
     }
     if (pathName === 'source/inspect') { const r = structuredClone(inspection); await config.inspect?.(r, call); return response(r); }
