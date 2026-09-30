@@ -156,10 +156,12 @@ have, and that is full-history and unfiltered, is written with the
 `git-pack-compressed-v3-thin` profile.
 - An entry may then delta against a client-held object that the pack does not
   carry, emitted as REF_DELTA.
-- Candidates come from a bounded tree walk: each wanted commit is compared with
-  the client's first four permitted have commits, at the same paths and of the
-  same kind. Only differing subtrees are walked, up to 4096 tree reads, and
-  there are at most two bases per target.
+- Candidates come from a bounded tree walk: every commit the pack sends is
+  compared with the client's first four permitted have commits, at the same
+  paths and of the same kind. That means every sent commit, not only the tips:
+  a path's first version in pack order has no in-pack base, so it would
+  otherwise ship whole (NEG-034). Only differing subtrees are walked, up to 4096
+  commit and tree reads, and there are at most two bases per target.
 - Every base lies in the permitted closure of the client's haves. A have outside
   that closure, such as a hidden ref's commit, supplies none.
 - Bases are paid from the same per-target work budget as in-pack candidates.

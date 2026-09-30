@@ -3304,15 +3304,23 @@ impl PermittedClosureTraversalSource for CeiledFabricSource<'_, '_> {
 impl CeiledFabricSource<'_, '_> {
     /// Client-held delta bases for a thin fetch (frankengit-pazc).
     ///
-    /// For each wanted commit and each of the client's first
+    /// For each commit this pack sends and each of the client's first
     /// [`MAX_THIN_HAVE_COMMITS`] haves in `held`, entries at the same path of
     /// the two root trees are paired: same kind (tree with tree, file with
-    /// file; gitlinks never), different IDs, the wanted one sent in this pack
-    /// and the other in `held`. Only subtrees whose IDs differ are walked, so
-    /// the work follows the changed paths, and pairing stops after
-    /// [`MAX_THIN_TREE_READS`] tree reads. `held` is the permitted closure of
-    /// the client's haves, so nothing outside the permitted closure, and
-    /// nothing the client did not prove it holds, can become a base.
+    /// file; gitlinks never), different IDs, the sent one in this pack and the
+    /// other in `held`.
+    ///
+    /// Every sent commit is paired, not only the wanted tips. The pack orders
+    /// a path's versions by ID, so whichever version comes first in a chain
+    /// has no in-pack base before it; only a same-path base the client holds
+    /// keeps it from shipping whole. Sent commits are found from the wants
+    /// through parents that the pack also sends, newest first.
+    ///
+    /// Only subtrees whose IDs differ are walked, so the work follows the
+    /// changed paths, and pairing stops after [`MAX_THIN_TREE_READS`] reads of
+    /// commits and trees. `held` is the permitted closure of the client's
+    /// haves, so nothing outside the permitted closure, and nothing the client
+    /// did not prove it holds, can become a base.
     fn thin_base_hints(
         &self,
         wants: &[GitOid],
@@ -3331,12 +3339,26 @@ impl CeiledFabricSource<'_, '_> {
                 have_trees.push(tree);
             }
         }
+        let mut reads = 0_usize;
         let mut pending = VecDeque::new();
-        for want in wants.iter().filter(|want| !held.contains(want)) {
-            if let Some(tree) = self.commit_tree(want)? {
+        if !have_trees.is_empty() {
+            let mut commits: VecDeque<GitOid> = wants.iter().copied().collect();
+            let mut visited = BTreeSet::new();
+            while let Some(commit) = commits.pop_front() {
+                if !sent.contains(&commit) || !visited.insert(commit) {
+                    continue;
+                }
+                if reads == MAX_THIN_TREE_READS {
+                    break;
+                }
+                reads += 1;
+                let Some((tree, parents)) = self.commit_tree_and_parents(&commit)? else {
+                    continue;
+                };
                 for have in &have_trees {
                     pending.push_back((tree, *have));
                 }
+                commits.extend(parents);
             }
         }
         let mut bases: BTreeMap<GitOid, Vec<GitOid>> = BTreeMap::new();
@@ -3349,7 +3371,6 @@ impl CeiledFabricSource<'_, '_> {
             }
         };
         let mut diffed = BTreeSet::new();
-        let mut reads = 0_usize;
         while let Some((want, have)) = pending.pop_front() {
             if want == have || !diffed.insert((want, have)) {
                 continue;
@@ -3391,6 +3412,14 @@ impl CeiledFabricSource<'_, '_> {
 
     /// The root tree of a commit, or `None` for any other object.
     fn commit_tree(&self, id: &GitOid) -> Result<Option<GitOid>, PackWriteError> {
+        Ok(self.commit_tree_and_parents(id)?.map(|(tree, _)| tree))
+    }
+
+    /// The root tree and parents of a commit, or `None` for any other object.
+    fn commit_tree_and_parents(
+        &self,
+        id: &GitOid,
+    ) -> Result<Option<(GitOid, Vec<GitOid>)>, PackWriteError> {
         let (object_type, body) = self.inner.read_object_within(id, self.ceiling)?;
         if object_type != ObjectType::Commit {
             return Ok(None);
@@ -3406,7 +3435,12 @@ impl CeiledFabricSource<'_, '_> {
                 ObjectError::MissingOrDuplicateCommitTree,
             ))
         })?;
-        self.inner.native_reference_from_hex(tree).map(Some)
+        let tree = self.inner.native_reference_from_hex(tree)?;
+        let parents = commit
+            .parent_references()
+            .map(|parent| self.inner.native_reference_from_hex(parent))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some((tree, parents)))
     }
 
     /// `(name, is_tree, id)` for every non-gitlink entry of a tree.
@@ -9894,6 +9928,55 @@ mod tests {
             thin_hints(&node, &closure, &[held_commit], &[held_commit]).is_empty(),
             "a want the client already holds offers nothing"
         );
+    }
+
+    /// frankengit-pazc: every commit the pack sends is paired with the held
+    /// trees, not only the wanted tip. A middle version may come first in its
+    /// path's delta chain and would otherwise ship whole.
+    #[test]
+    fn thin_bases_cover_every_sent_commit_not_only_the_tip() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes an empty canonical state");
+        let blob = |text: &str| {
+            put_object(
+                &node,
+                fgit_git_object::ObjectType::Blob,
+                text.as_bytes().to_vec(),
+            )
+        };
+        let (held_file, middle_file, tip_file) = (
+            blob("version 1\n"),
+            blob("version 2\n"),
+            blob("version 3\n"),
+        );
+        let root = |file| put_tree(&node, &[(b"100644", b"file.txt", file)]);
+        let (held_root, middle_root, tip_root) =
+            (root(held_file), root(middle_file), root(tip_file));
+        let held = put_commit(&node, held_root, &[]);
+        let middle = put_commit(&node, middle_root, &[held]);
+        let tip = put_commit(&node, tip_root, &[middle]);
+        let closure = PermittedObjectClosure::new(BTreeSet::from([
+            held_file,
+            middle_file,
+            tip_file,
+            held_root,
+            middle_root,
+            tip_root,
+            held,
+            middle,
+            tip,
+        ]));
+        let mut expected = vec![
+            fgit_pack::ThinBase::new(tip_root, held_root),
+            fgit_pack::ThinBase::new(tip_file, held_file),
+            fgit_pack::ThinBase::new(middle_root, held_root),
+            fgit_pack::ThinBase::new(middle_file, held_file),
+        ];
+        expected.sort();
+        let mut offered = thin_hints(&node, &closure, &[tip], &[held]);
+        offered.sort();
+        assert_eq!(offered, expected);
     }
 
     #[test]
