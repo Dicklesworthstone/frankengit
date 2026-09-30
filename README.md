@@ -179,6 +179,12 @@ result replaces an independent batch gate.
     (2026-09-27). 1,731 of 1,752 fake-DOM unit tests passed throughout. Only
     the real-browser suites under `scripts/e2e/suites/{forge,browser}/` are
     evidence that a page works.
+  - The cherry-pick/revert and rebase pages could not publish in a real
+    browser from 2026-09-19/20 until `de463a48` (2026-09-30). Their decoder
+    accepted only the source-edit candidate boundary, and their fake replies
+    used that same boundary, so their unit tests passed. Found by
+    `scripts/e2e/suites/browser/pages.sh`, which drives all 13 served pages
+    through their own controls in Chrome against `fg serve-http`.
   - Forge publication stops at 16,384 events. Settled outbox entries are never
     removed.
   - Writers are serialized, one per process.
