@@ -1,4 +1,6 @@
 //! Read-only offline native bundle verification. No OneNode or credential exists here.
+mod anchors;
+
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{File, Metadata};
@@ -9,8 +11,10 @@ use std::time::{Duration, Instant};
 use fgit_crypto::lowercase_hex;
 use fgit_node::TerminationSignals;
 use fgit_node::source_retrieval::integrity::bundle_verify::{
-    BundleVerifyLimits, VerifiedGitBundle, verify_git_bundle,
+    BundleExpectations, BundleVerifyLimits, MAX_EXPECTED_REFS, VerifiedGitBundle,
+    verify_git_bundle, verify_git_bundle_against,
 };
+use fgit_types::GitHashAlgorithm;
 
 pub(super) const USAGE: &str = "usage: fg bundle verify <bundle-file> [OPTIONS]
   --max-input-mib N       Whole input ceiling, 1..128 (default 128)
@@ -18,6 +22,11 @@ pub(super) const USAGE: &str = "usage: fg bundle verify <bundle-file> [OPTIONS]
   --max-objects N         Included object count, 1..100000 (default 100000)
   --max-refs N            Direct refs plus optional HEAD, 1..4096 (default 4096)
   --timeout-secs N        Whole read/verification deadline, 1..3600 (default 300)
+  --expect-sha256 HEX     Separately trusted whole-bundle SHA-256 (64 lowercase hex)
+  --expect-format FORMAT Explicit sha1|sha256 domain, required for reference pins
+  --expect-ref REF=OID    Repeat for known full native branch/tag/reference tips
+  --expect-ref-hex HEX=OID Lossless raw-byte-name alternative
+  --exact-refs            Require precisely the supplied direct-reference set
   --                     Treat the remaining argument as a literal file path
 
 Uses the native Rust bundle, pack/DEFLATE/delta, object and graph implementations.
@@ -29,6 +38,12 @@ memory under the selected ceiling; this is not a streaming large-repository read
 
 Success emits one JSON content-verification report. It does not authenticate the
 origin, prove branch freshness, verify signatures or restore forge/authority state.
+Identity pins must come from a separately trusted record, not an adjacent unsigned
+manifest. A format alone is not an identity pin. Ref IDs must be full, not abbreviated;
+a matching sha1: or sha256: prefix is accepted. Without --exact-refs, additional refs
+are allowed but every included object still undergoes complete graph verification.
+Malformed pins refuse before input reads; mismatches refuse before decompression.
+Matching pins never skip native verification or imply freshness/signature authority.
 The input path must be a quiescent regular local file, not a symlink. Cancellation
 and deadlines are cooperative and cannot interrupt a blocking operating-system read.
 Exit 0: fully verified; 2: invalid/incomplete/unsupported input or interrupted work.";
@@ -38,6 +53,7 @@ struct Options {
     path: PathBuf,
     limits: BundleVerifyLimits,
     timeout: Duration,
+    expectations: Option<BundleExpectations>,
 }
 fn number(value: &str, maximum: usize) -> Result<usize, String> {
     if value.is_empty()
@@ -56,10 +72,12 @@ fn number(value: &str, maximum: usize) -> Result<usize, String> {
 }
 fn parse(args: &[String]) -> Result<Options, String> {
     if args.is_empty()
-        || args.len() > 16
+        || args.len() > 2 * MAX_EXPECTED_REFS + 32
+        || args.iter().try_fold(0_usize, |sum, arg| sum.checked_add(arg.len()))
+            .is_none_or(|sum| sum > 2 * 1024 * 1024)
         || args
             .iter()
-            .any(|arg| arg.len() > 8192 || arg.contains('\0'))
+            .any(|arg| arg.len() > 8300 || arg.contains('\0'))
     {
         return Err(USAGE.into());
     }
@@ -67,6 +85,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut limits = BundleVerifyLimits::default();
     let mut timeout = Duration::from_secs(300);
     let mut seen = BTreeSet::new();
+    let mut expected_hash = None;
+    let mut expected_format = None;
+    let mut expected_refs = Vec::new();
+    let mut exact_refs = false;
     let mut literal = false;
     let mut at = 0;
     while at < args.len() {
@@ -77,12 +99,34 @@ fn parse(args: &[String]) -> Result<Options, String> {
             continue;
         }
         if !literal && argument.starts_with('-') {
-            if !seen.insert(argument) {
+            if !matches!(argument, "--expect-ref" | "--expect-ref-hex") && !seen.insert(argument) {
                 return Err("duplicate bundle verify option".into());
+            }
+            if argument == "--exact-refs" {
+                exact_refs = true;
+                continue;
             }
             let value = args.get(at).ok_or("missing bundle verify option value")?;
             at += 1;
             match argument {
+                "--expect-sha256" => {
+                    expected_hash = Some(anchors::unhex(value, 32)?.try_into()
+                        .map_err(|_| "expected exactly 32 SHA-256 bytes")?);
+                }
+                "--expect-format" => {
+                    expected_format = Some(match value.as_str() {
+                        "sha1" => GitHashAlgorithm::Sha1,
+                        "sha256" => GitHashAlgorithm::Sha256,
+                        _ => return Err("expected native format must be sha1 or sha256".into()),
+                    });
+                }
+                "--expect-ref" | "--expect-ref-hex" => {
+                    if expected_refs.len() == MAX_EXPECTED_REFS {
+                        return Err("too many expected references".into());
+                    }
+                    expected_refs.try_reserve(1).map_err(|_| "expectation allocation refused")?;
+                    expected_refs.push((value.as_str(), argument == "--expect-ref-hex"));
+                }
                 "--max-input-mib" => {
                     let bytes = number(value, 128)? * 1024 * 1024;
                     limits.envelope.max_bundle_bytes = bytes;
@@ -114,7 +158,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
             return Err("bundle verify requires exactly one nonempty input path".into());
         }
     }
+    // Complete validation uses final limits, independent of option order,
+    // before opening the input or installing any runtime resources.
+    let expectations = anchors::assemble(expected_hash, expected_format, &expected_refs, exact_refs, &limits)?;
     Ok(Options {
+        expectations,
         path: path.ok_or("bundle verify requires an input path")?,
         limits,
         timeout,
@@ -248,10 +296,20 @@ fn execute(options: &Options, live: &mut impl FnMut() -> bool) -> Result<String,
         options.limits.envelope.max_bundle_bytes,
         live,
     )?;
-    let verified =
-        verify_git_bundle(&bytes, &options.limits, live).map_err(|error| error.to_string())?;
-    checkpoint(live)?;
-    report(&verified)
+    match &options.expectations {
+        Some(expected) => {
+            let result = verify_git_bundle_against(&bytes, &options.limits, expected, live)
+                .map_err(|error| error.to_string())?;
+            checkpoint(live)?;
+            anchors::report(&result)
+        }
+        None => {
+            let result = verify_git_bundle(&bytes, &options.limits, live)
+                .map_err(|error| error.to_string())?;
+            checkpoint(live)?;
+            report(&result)
+        }
+    }
 }
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
     if args == ["--help"] {
@@ -273,3 +331,6 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod anchor_tests;
