@@ -197,8 +197,18 @@ export function rootFor(href, suffix = '/ui/pulls/') {
   return { origin: page.origin, route, api: `${page.origin}${route}/api/v1/` };
 }
 export async function readBytes(response, signal, maximum) {
+  integer(maximum, 'response byte limit');
   const declared = response.headers.get('Content-Length');
-  if (declared !== null && (!/^(0|[1-9][0-9]*)$/.test(declared) || BigInt(declared) > BigInt(maximum))) { await response.body?.cancel(); fail('Response exceeds the browser byte limit.'); }
+  // Fetch exposes decoded bytes while retaining the encoded representation's
+  // Content-Length. Comparing those lengths rejects valid proxy-compressed
+  // replies (including mutation receipts). Coding overhead can also be larger
+  // than a small decoded budget. Keep framing checks for identity responses;
+  // for encoded responses Fetch owns wire framing and content decoding, and
+  // the streaming counter below always enforces the decoded allocation bound.
+  const encoded = (response.headers.get('Content-Encoding') ?? '').split(',')
+    .some(coding => coding.trim() !== '' && coding.trim().toLowerCase() !== 'identity');
+  if (declared !== null && (!/^(0|[1-9][0-9]*)$/.test(declared) ||
+      (!encoded && BigInt(declared) > BigInt(maximum)))) { await response.body?.cancel(); fail('Response exceeds the browser byte limit.'); }
   if (!response.body) fail('Missing response body.');
   const reader = response.body.getReader(), chunks = []; let size = 0;
   const cancel = () => { void reader.cancel().catch(() => {}); };
@@ -211,7 +221,7 @@ export async function readBytes(response, signal, maximum) {
       if (size > maximum) fail('Response exceeds the browser byte limit.');
       chunks.push(next.value);
     }
-    if (declared !== null && BigInt(declared) !== BigInt(size)) fail('Truncated or inconsistent HTTP response length.');
+    if (!encoded && declared !== null && BigInt(declared) !== BigInt(size)) fail('Truncated or inconsistent HTTP response length.');
     const bytes = new Uint8Array(size); let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
     return bytes;
