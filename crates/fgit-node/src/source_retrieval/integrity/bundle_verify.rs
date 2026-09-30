@@ -5,6 +5,12 @@
 //! The report covers every included object's typed local dependencies, not only
 //! objects reachable from current refs. Gitlinks remain external dependencies.
 
+mod expectations;
+pub use expectations::{
+    BundleExpectationError, BundleExpectations, MAX_EXPECTED_REFS, MatchedGitBundle,
+    verify_git_bundle_against,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -50,6 +56,7 @@ pub enum BundleVerifyError {
     Envelope(FullBundleError),
     Pack(PackError),
     Graph(GraphRefusal),
+    Expectation(BundleExpectationError),
     DuplicateObject(GitOid),
     ResolutionIncomplete,
     Allocation,
@@ -61,6 +68,7 @@ impl fmt::Display for BundleVerifyError {
             Self::Envelope(error) => write!(out, "bundle_envelope: {error}"),
             Self::Pack(error) => write!(out, "bundle_pack: {error}"),
             Self::Graph(error) => write!(out, "bundle_graph: {error}"),
+            Self::Expectation(error) => fmt::Display::fmt(error, out),
             Self::DuplicateObject(id) => write!(out, "duplicate_bundle_object: {id}"),
             Self::ResolutionIncomplete => {
                 out.write_str("bundle_delta_base_missing_or_unresolvable")
@@ -232,6 +240,15 @@ pub fn verify_git_bundle(
     limits: &BundleVerifyLimits,
     allow_work: &mut impl FnMut() -> bool,
 ) -> Result<VerifiedGitBundle, BundleVerifyError> {
+    verify_git_bundle_inner(input, limits, None, allow_work)
+}
+
+fn verify_git_bundle_inner(
+    input: &[u8],
+    limits: &BundleVerifyLimits,
+    expectations: Option<&BundleExpectations>,
+    allow_work: &mut impl FnMut() -> bool,
+) -> Result<VerifiedGitBundle, BundleVerifyError> {
     let mut stopped = false;
     let mut live = || {
         if !stopped && !allow_work() {
@@ -240,12 +257,21 @@ pub fn verify_git_bundle(
         !stopped
     };
     checkpoint(&mut live)?;
+    if let Some(expected) = expectations {
+        expected.validate_limits(limits).map_err(BundleVerifyError::Expectation)?;
+    }
     let result = FullBundleInput::parse(input, limits.envelope, &mut live);
     checkpoint(&mut live)?;
     let envelope = result.map_err(BundleVerifyError::Envelope)?;
     if envelope.references().len() > limits.graph.max_references {
         return Err(BundleVerifyError::Graph(GraphRefusal::Limit("references")));
     }
+    // A match here is only preflight. Never construct a content result until
+    // the ordinary native pack and graph checks below have completed.
+    let expected_digest = match expectations {
+        Some(expected) => expected.check(input, &envelope, &mut live)?,
+        None => None,
+    };
     let references = envelope
         .references()
         .iter()
@@ -290,7 +316,7 @@ pub fn verify_git_bundle(
     let result = graph.finish(&references, &mut live);
     checkpoint(&mut live)?;
     let graph = result.map_err(BundleVerifyError::Graph)?;
-    let sha256 = sha256_digest(input);
+    let sha256 = expected_digest.unwrap_or_else(|| sha256_digest(input));
     checkpoint(&mut live)?;
     Ok(VerifiedGitBundle {
         format: envelope.format(),
@@ -308,3 +334,6 @@ pub fn verify_git_bundle(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod expectation_tests;
