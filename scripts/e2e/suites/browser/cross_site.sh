@@ -64,8 +64,8 @@ fge_assert_eq CROSS-SITE-010 true \
   "$(fact 'twin["IssueClient"]["value"]["resolved"] is True and [(r["method"], r["status"], r["site"]) for r in twin["IssueClient"]["api"]] == [("POST", 200, "same-origin")]')" \
   "the served issue page's own client opened issue 1: a same-origin POST answered 200"
 fge_assert_eq CROSS-SITE-011 true \
-  "$(fact 'twin["HistoryClient"]["value"]["resolved"] is True and len(twin["HistoryClient"]["api"]) >= 1 and all(r["method"] == "POST" and r["status"] == 200 and r["site"] == "same-origin" and r["origin"] == "null" for r in twin["HistoryClient"]["api"])')" \
-  "the history client's same-origin POSTs, sent with Origin: null under no-referrer, were answered 200"
+  "$(fact 'twin["HistoryClient"]["value"]["resolved"] is True and len(twin["HistoryClient"]["api"]) >= 1 and all(r["method"] == "POST" and r["status"] == 200 and r["site"] == "same-origin" for r in twin["HistoryClient"]["api"])')" \
+  "the history client's same-origin POSTs (mode same-origin, no-referrer) were answered 200; the Origin Chrome sent is recorded in observed_twins"
 fge_assert_eq CROSS-SITE-012 true \
   "$(fact 's["issues"] == [{"number": 1, "title": "same-origin twin"}]')" \
   'a non-browser read lists exactly the twin issue; nothing forged was published'

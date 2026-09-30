@@ -857,9 +857,11 @@ fn write_error(writer: &mut impl Write, version: HttpVersion, status: Status) ->
 ///   operator's trusted origin (an external TLS terminator's public origin).
 /// - An opaque (`null`) or absent `Origin` is accepted only with a browser's
 ///   `same-origin` statement, and then the target's own authority, the `Host`,
-///   must name this listener or the trusted origin. Fetch serializes `Origin: null` for a same-origin
-///   POST whose mode is not `cors` under `Referrer-Policy: no-referrer`, as the
-///   shell's history client sends; a DNS-rebinding page fails the Host check.
+///   must name this listener or the trusted origin. The Fetch standard sends
+///   `Origin: null` for a POST whose mode is not `cors` under
+///   `Referrer-Policy: no-referrer`, the shell clients' request shape (Chrome
+///   154 was observed sending the serialized origin instead); a DNS-rebinding
+///   page fails the Host check.
 /// - With neither header the client is not a browser (stock Git, `curl`) and
 ///   authenticates explicitly; it is not refused here.
 ///
