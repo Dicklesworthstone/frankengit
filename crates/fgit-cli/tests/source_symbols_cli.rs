@@ -14,7 +14,12 @@ use std::process::{Command, Output};
 use support::*;
 
 const RUST: &[u8] = b"pub fn needle() {}\npub fn needle_more() {}\npub struct Shape;\nmacro_rules! needle_macro { () => { fn needle_generated() {} }; }\npub fn r#type() {}\nconst TEXT: &str = \"fn needle_string() {}\";\n";
-const RAW_PATH: &[u8] = b"b\xff\x1b.rs";
+// Non-UTF-8 and terminal-hostile (DEL), yet representable: TreeFS refuses
+// control bytes below 0x20 in any path component, so a name carrying ESC can
+// never be granted, listed or read. That refusal is pinned separately by
+// a_control_byte_root_name_is_a_typed_refusal_that_publishes_nothing
+// (frankengit-mkgq).
+const RAW_PATH: &[u8] = b"b\xff\x7f.rs";
 const OTHER: &[u8] = b"pub fn needle() {}\n";
 
 fn reference() -> RefName {
@@ -233,7 +238,7 @@ fn native_cli_scans_and_index_reads_agree_in_both_hash_domains() {
             assert!(text.contains("\"unsupported_language_files\":1"));
             assert!(text.contains("\"non_regular_entries\":2"));
             assert!(text.contains("\"repository_changed\":false,\"index_changed\":false"));
-            assert!(!text.contains('\x1b'));
+            assert!(!text.contains('\x1b') && !text.contains('\x7f'));
             let mut prefix = args.clone();
             prefix.extend(["--match", "prefix"].map(str::to_owned));
             assert!(body(&invoke(&prefix, 0)).contains("\"match_count\":4"));
@@ -397,6 +402,29 @@ fn missing_index_never_falls_back_and_budget_or_trust_refusals_do_not_publish() 
         let mut small = indexed;
         small.extend(["--max-index-bytes", "1"].map(str::to_owned));
         assert!(invoke(&small, 2).stdout.is_empty());
+        let node = reopen(&root.config(format));
+        assert_eq!(generation(&node), before);
+        node.shutdown().unwrap();
+    }
+}
+
+/// A root entry whose name TreeFS cannot represent (here an ESC byte) cannot
+/// be granted, listed or read, so the symbol search refuses the source with a
+/// typed error instead of silently skipping it, and publishes nothing. The
+/// permitted twin is native_cli_scans_and_index_reads_agree_in_both_hash_domains:
+/// the same fixture without this entry (frankengit-mkgq).
+#[test]
+fn a_control_byte_root_name_is_a_typed_refusal_that_publishes_nothing() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let (node, _) = native_fixture(&root, format, Some((b"e\x1b.rs", b"pub fn needle() {}")));
+        let before = generation(&node);
+        node.shutdown().unwrap();
+        let output = invoke(&arguments(&root, format, false), 2);
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("unsupported source root path"), "{error}");
+        assert!(!error.contains('\x1b'));
         let node = reopen(&root.config(format));
         assert_eq!(generation(&node), before);
         node.shutdown().unwrap();
