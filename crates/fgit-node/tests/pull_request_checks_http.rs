@@ -182,6 +182,13 @@ fn actual_workflow_observations_are_paged_by_exact_ids_without_evidence_bodies()
         let config = root.config(format);
         let (node, mut data) = fixture(&root, format);
         add_workflow(&root, &node, &mut data);
+        // The trusted runner requires a private, non-symlink run parent.
+        let runs = root.0.join("runs");
+        std::fs::create_dir(&runs).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&runs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let run = node
             .runtime()
             .block_on(node.run_trusted_workflow_in(
@@ -189,7 +196,7 @@ fn actual_workflow_observations_are_paged_by_exact_ids_without_evidence_bodies()
                 &data.source_ref,
                 b"workflow.yml",
                 [1; 16],
-                &root.0,
+                &runs,
                 &[b"workflow.yml".to_vec()],
                 (None, Some(data.source_tip)),
                 WorkflowLimits {
@@ -347,11 +354,24 @@ fn add_workflow(
         data.source_tip
     );
     data.source_tip = loose(GitObjectKind::Commit, "commit", body.as_bytes());
+    // Loose import is establish-if-absent: a source ref that already exists in
+    // the node is a canonical ExpectedOldRefMismatch refusal. Publish the
+    // workflow commit on a new ref from a source holding only that ref.
+    let imported_refs = root.0.join("imported-refs");
+    fs::create_dir_all(&imported_refs).unwrap();
+    for name in ["main", "topic"] {
+        fs::rename(
+            source.join("refs/heads").join(name),
+            imported_refs.join(name),
+        )
+        .unwrap();
+    }
     fs::write(
-        source.join("refs/heads/topic"),
+        source.join("refs/heads/workflow"),
         format!("{}\n", data.source_tip),
     )
     .unwrap();
+    data.source_ref = fgit_types::RefName::try_new(b"refs/heads/workflow").unwrap();
     let imported = node
         .runtime()
         .block_on(node.import_loose_git_directory_durable_in(
