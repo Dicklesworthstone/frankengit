@@ -791,7 +791,7 @@ impl OneNode {
                         Some((&disclosure, pack_request)),
                         Some(&pack_request.wants),
                         &pack_request.haves,
-                        crate::selected_write_profile(pack_request.options.ofs_delta()),
+                        crate::selected_fetch_write_profile(pack_request),
                         request.authority(),
                         &database_exhaustion,
                         Some(&session_is_live),

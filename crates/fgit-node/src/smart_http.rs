@@ -36,7 +36,7 @@ use super::{
     NodeGitDaemonServeRefusal, NodePackMaterializationRefusal, NodeReceiveTransportRefusal,
     OneNode, PackContextCheckpoint, ProductionReceiveQuarantineHandoff, SELECTED_PACK_BUDGET_CLASS,
     SELECTED_PACK_MATERIALIZATION_OPERATION, checkpoint_pack_context, git_daemon_capabilities,
-    selected_write_profile,
+    selected_fetch_write_profile,
 };
 
 /// Complete successful Smart HTTP discovery response.
@@ -623,7 +623,7 @@ impl OneNode {
                     Some((&disclosure, pack_request)),
                     Some(&pack_request.wants),
                     &pack_request.haves,
-                    selected_write_profile(pack_request.options.ofs_delta()),
+                    selected_fetch_write_profile(pack_request),
                     node_request.authority(),
                     &database_exhaustion,
                     Some(&session_is_live),

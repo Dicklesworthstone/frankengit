@@ -14,7 +14,7 @@
 //! same native type are considered; the smallest delta wins, then the nearest
 //! preceding entry, then its native object ID.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use fgit_crypto::{DigestHasher, Sha1Hasher, Sha256Hasher};
@@ -216,6 +216,11 @@ pub struct PackWriteProfile {
     /// Per-target ceiling on delta-search work; `None` searches the whole
     /// window for every target.
     pub delta_work: Option<DeltaWorkBudget>,
+    /// Whether a plan may delta an entry against a client-held object the pack
+    /// does not carry, emitted as REF_DELTA (a thin pack). Only a profile that
+    /// says so accepts [`ThinBase`]s, so every other profile's packs stay
+    /// self-contained (frankengit-pazc).
+    pub thin: bool,
 }
 
 impl PackWriteProfile {
@@ -232,6 +237,7 @@ impl PackWriteProfile {
         compression: DeflateProfile::FAST_STORED,
         delta_search: DeltaSearch::PrefixSuffix,
         delta_work: None,
+        thin: false,
     };
 
     /// Deterministic fixed-Huffman pack emission with bounded match search.
@@ -248,6 +254,7 @@ impl PackWriteProfile {
         compression: DeflateProfile::DEFAULT,
         delta_search: DeltaSearch::PrefixSuffix,
         delta_work: None,
+        thin: false,
     };
 
     /// [`Self::COMPRESSED_V1`]'s compression with delta emission disabled.
@@ -266,6 +273,7 @@ impl PackWriteProfile {
         compression: DeflateProfile::DEFAULT,
         delta_search: DeltaSearch::PrefixSuffix,
         delta_work: None,
+        thin: false,
     };
 
     /// [`Self::COMPRESSED_V1`] with interior-match delta search.
@@ -289,6 +297,7 @@ impl PackWriteProfile {
         compression: DeflateProfile::DEFAULT,
         delta_search: DeltaSearch::IndexedBlocks,
         delta_work: None,
+        thin: false,
     };
 
     /// [`Self::COMPRESSED_V2`] with a per-target delta-search work budget.
@@ -315,22 +324,90 @@ impl PackWriteProfile {
             floor_bytes: 4 << 20,
             target_multiple: 4,
         }),
+        thin: false,
+    };
+
+    /// [`Self::COMPRESSED_V3`] that may also delta against client-held objects
+    /// the pack does not carry, emitted as REF_DELTA: a thin pack.
+    ///
+    /// Only for a fetch whose client requested `thin-pack`. The caller supplies
+    /// the bounded client-held candidates ([`ThinBase`]) and owns proving that
+    /// the client holds each one. A separate profile because its packs are not
+    /// self-contained, so a receipt must say so. With no thin bases its plan
+    /// equals [`Self::COMPRESSED_V3`]'s entry for entry (frankengit-pazc).
+    pub const COMPRESSED_V3_THIN: Self = Self {
+        id: "git-pack-compressed-v3-thin",
+        thin: true,
+        ..Self::COMPRESSED_V3
     };
 }
 
-/// A selected OFS-delta relation in a deterministic plan.
+/// Maximum client-held bases a plan considers for one target.
+pub const MAX_THIN_BASES_PER_TARGET: usize = 2;
+
+/// A client-held object offered as a delta base for one pack target.
+///
+/// The caller proves the client holds `base`. In a served fetch that means
+/// `base` lies in the authenticated closure of the client's haves. The
+/// planner verifies both identities, refuses a base the pack itself carries,
+/// and never emits the base object.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ThinBase {
+    target: ObjectId,
+    base: ObjectId,
+}
+
+impl ThinBase {
+    /// Offers `base` as a candidate delta base for `target`.
+    #[must_use]
+    pub const fn new(target: ObjectId, base: ObjectId) -> Self {
+        Self { target, base }
+    }
+
+    /// The pack entry this base may serve.
+    #[must_use]
+    pub const fn target(&self) -> ObjectId {
+        self.target
+    }
+
+    /// The client-held base object.
+    #[must_use]
+    pub const fn base(&self) -> ObjectId {
+        self.base
+    }
+}
+
+/// Where a planned delta's base lives.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlannedDeltaBase {
+    /// An earlier entry of the same pack, emitted as OFS_DELTA.
+    Pack(usize),
+    /// A client-held object the pack does not carry, emitted as REF_DELTA.
+    Client(ObjectId),
+}
+
+/// A selected delta relation in a deterministic plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedDelta {
-    base_index: usize,
+    base: PlannedDeltaBase,
     depth: usize,
     program: Vec<u8>,
 }
 
 impl PlannedDelta {
-    /// Index of the earlier planned base entry.
+    /// Where the base of this delta lives.
     #[must_use]
-    pub const fn base_index(&self) -> usize {
-        self.base_index
+    pub const fn base(&self) -> PlannedDeltaBase {
+        self.base
+    }
+
+    /// Index of the earlier planned base entry, for an in-pack base.
+    #[must_use]
+    pub const fn base_index(&self) -> Option<usize> {
+        match self.base {
+            PlannedDeltaBase::Pack(index) => Some(index),
+            PlannedDeltaBase::Client(_) => None,
+        }
     }
 
     /// Delta-chain depth recorded by the profile.
@@ -492,7 +569,12 @@ impl PackPlanner {
             objects.push(object);
         }
 
-        self.finish_plan(objects, total_object_bytes, deadline)
+        self.finish_plan(
+            objects,
+            total_object_bytes,
+            &ExternalBases::default(),
+            deadline,
+        )
     }
 
     /// Plans exactly an authenticated caller-selected object set.
@@ -508,6 +590,27 @@ impl PackPlanner {
         selected: &[ObjectId],
         deadline: &mut impl Deadline,
     ) -> Result<PackPlan, PackWriteError> {
+        self.plan_selected_thin(source, selected, &[], deadline)
+    }
+
+    /// [`Self::plan_selected`] that may also delta an entry against a
+    /// client-held object the pack does not carry (frankengit-pazc).
+    ///
+    /// Only a [`PackWriteProfile::thin`] profile accepts `thin_bases`. Each
+    /// base is loaded and verified like a pack object but never emitted; the
+    /// caller owns proving that the client holds it. A thin base competes with
+    /// the in-pack window under the same work budget and is chosen only when
+    /// its program is strictly shorter; an in-pack base wins an equal length.
+    pub fn plan_selected_thin(
+        &self,
+        source: &impl CanonicalObjectSource,
+        selected: &[ObjectId],
+        thin_bases: &[ThinBase],
+        deadline: &mut impl Deadline,
+    ) -> Result<PackPlan, PackWriteError> {
+        if !thin_bases.is_empty() && !self.profile.thin {
+            return Err(PackWriteError::ThinBasesNotPermitted);
+        }
         self.validate_profile_depth()?;
         let selected_count =
             u32::try_from(selected.len()).map_err(|_| PackError::EntryCountLimit {
@@ -578,7 +681,107 @@ impl PackPlanner {
             )?;
             objects.push(object);
         }
-        self.finish_plan(objects, total_object_bytes, deadline)
+        let external = self.load_thin_bases(source, &objects, thin_bases, deadline)?;
+        self.finish_plan(objects, total_object_bytes, &external, deadline)
+    }
+
+    /// Loads and verifies the offered client-held bases, grouped by target.
+    fn load_thin_bases(
+        &self,
+        source: &impl CanonicalObjectSource,
+        objects: &[CanonicalPackObject],
+        thin_bases: &[ThinBase],
+        deadline: &mut impl Deadline,
+    ) -> Result<ExternalBases, PackWriteError> {
+        let mut external = ExternalBases::default();
+        if thin_bases.is_empty() {
+            return Ok(external);
+        }
+        let mut offers = Vec::new();
+        offers
+            .try_reserve_exact(thin_bases.len())
+            .map_err(|_| PackError::AllocationFailed {
+                requested: thin_bases.len(),
+            })?;
+        offers.extend_from_slice(thin_bases);
+        offers.sort_unstable();
+        let in_pack = |id: &ObjectId| objects.binary_search_by(|object| object.id.cmp(id)).is_ok();
+        let mut per_target = 0_usize;
+        for (index, offer) in offers.iter().enumerate() {
+            checkpoint(deadline)?;
+            ensure_format(self.format, offer.target)?;
+            ensure_format(self.format, offer.base)?;
+            let invalid = PackWriteError::InvalidThinBase {
+                target: offer.target,
+                base: offer.base,
+            };
+            let previous = index.checked_sub(1).map(|previous| offers[previous]);
+            per_target = match previous {
+                Some(previous) if previous == *offer => return Err(invalid),
+                Some(previous) if previous.target == offer.target => per_target + 1,
+                _ => 1,
+            };
+            if per_target > MAX_THIN_BASES_PER_TARGET
+                || !in_pack(&offer.target)
+                || in_pack(&offer.base)
+            {
+                return Err(invalid);
+            }
+        }
+        let mut bases: Vec<ObjectId> = offers.iter().map(ThinBase::base).collect();
+        bases.sort_unstable();
+        bases.dedup();
+        let mut total_base_bytes = 0_usize;
+        external
+            .objects
+            .try_reserve_exact(bases.len())
+            .map_err(|_| PackError::AllocationFailed {
+                requested: bases.len(),
+            })?;
+        for id in bases {
+            checkpoint(deadline)?;
+            let object = source.load(&id)?;
+            if object.id != id {
+                return Err(PackWriteError::SourceIdentityMismatch {
+                    requested: id,
+                    returned: object.id,
+                });
+            }
+            self.limits.object_size(object.body.len())?;
+            total_base_bytes = total_base_bytes.checked_add(object.body.len()).ok_or(
+                PackError::IntegerOverflow {
+                    context: "thin base total object bytes",
+                },
+            )?;
+            if total_base_bytes > self.limits.max_total_expanded_bytes {
+                return Err(PackError::TotalExpandedLimit {
+                    actual: total_base_bytes,
+                    limit: self.limits.max_total_expanded_bytes,
+                }
+                .into());
+            }
+            verify_native_object(
+                self.format,
+                object.object_type,
+                &object.body,
+                &object.id,
+                AcceptanceProfile::GitCompatibleImport,
+                &object_parse_limits(self.format, &self.limits),
+            )?;
+            external.objects.push(object);
+        }
+        for offer in offers {
+            let position = external
+                .objects
+                .binary_search_by(|object| object.id.cmp(&offer.base))
+                .map_err(|_| PackWriteError::MissingCanonicalObject(offer.base))?;
+            external
+                .by_target
+                .entry(offer.target)
+                .or_default()
+                .push(position);
+        }
+        Ok(external)
     }
 
     const fn validate_profile_depth(&self) -> Result<(), PackWriteError> {
@@ -595,10 +798,11 @@ impl PackPlanner {
         &self,
         mut objects: Vec<CanonicalPackObject>,
         total_object_bytes: usize,
+        external: &ExternalBases,
         deadline: &mut impl Deadline,
     ) -> Result<PackPlan, PackWriteError> {
         objects.sort_unstable_by(compare_pack_objects);
-        let entries = select_deltas(&objects, self.profile, &self.limits, deadline)?;
+        let entries = select_deltas(&objects, external, self.profile, &self.limits, deadline)?;
         Ok(PackPlan {
             format: self.format,
             profile: self.profile,
@@ -641,6 +845,18 @@ pub enum PackWriteError {
     PromotionRefused,
     /// A completed dependency encoder omitted its required immutable receipt.
     MissingCompressionReceipt,
+    /// Thin bases were offered to a profile that emits only self-contained
+    /// packs, or a self-contained profile's plan carries a client-held base.
+    ThinBasesNotPermitted,
+    /// A thin-base offer the planner cannot honour: its target is not in the
+    /// pack, its base is, the pair repeats, or the target already has
+    /// [`MAX_THIN_BASES_PER_TARGET`] bases.
+    InvalidThinBase {
+        /// The pack entry the base was offered for.
+        target: ObjectId,
+        /// The offered client-held base.
+        base: ObjectId,
+    },
 }
 
 impl From<PackError> for PackWriteError {
@@ -896,14 +1112,22 @@ impl PackWriter {
             offsets.push(offset);
             let payload = match entry.delta.as_ref() {
                 Some(delta) => {
-                    let base_offset = *offsets
-                        .get(delta.base_index)
-                        .ok_or(PackError::MissingDeltaBase)?;
-                    let distance = offset
-                        .checked_sub(base_offset)
-                        .ok_or(PackError::InvalidOfsDelta)?;
-                    emitter.emit_hashed(&encode_entry_header(6, delta.program.len())?)?;
-                    emitter.emit_hashed(&encode_ofs_delta_distance(distance)?)?;
+                    match delta.base {
+                        PlannedDeltaBase::Pack(base_index) => {
+                            let base_offset =
+                                *offsets.get(base_index).ok_or(PackError::MissingDeltaBase)?;
+                            let distance = offset
+                                .checked_sub(base_offset)
+                                .ok_or(PackError::InvalidOfsDelta)?;
+                            emitter.emit_hashed(&encode_entry_header(6, delta.program.len())?)?;
+                            emitter.emit_hashed(&encode_ofs_delta_distance(distance)?)?;
+                        }
+                        // REF_DELTA names the client-held base by its native ID.
+                        PlannedDeltaBase::Client(base) => {
+                            emitter.emit_hashed(&encode_entry_header(7, delta.program.len())?)?;
+                            emitter.emit_hashed(base.as_bytes())?;
+                        }
+                    }
                     delta_count = delta_count
                         .checked_add(1)
                         .ok_or(PackError::IntegerOverflow {
@@ -975,6 +1199,12 @@ fn validate_plan_for_writer(plan: &PackPlan, limits: &PackLimits) -> Result<(), 
         .map_err(|_| PackError::AllocationFailed {
             requested: plan.entries.len(),
         })?;
+    // Only a thin plan may name a client-held base, so only it pays for this set.
+    let in_pack: BTreeSet<ObjectId> = if plan.profile.thin {
+        plan.entries.iter().map(|entry| entry.object.id).collect()
+    } else {
+        BTreeSet::new()
+    };
     for (index, entry) in plan.entries.iter().enumerate() {
         limits.object_size(entry.object.body.len())?;
         fanout.push(0_usize);
@@ -982,7 +1212,32 @@ fn validate_plan_for_writer(plan: &PackPlan, limits: &PackLimits) -> Result<(), 
             continue;
         };
         limits.object_size(delta.program.len())?;
-        if delta.base_index >= index {
+        let base_index = match delta.base {
+            PlannedDeltaBase::Pack(base_index) => base_index,
+            PlannedDeltaBase::Client(base) => {
+                // A client-held base is legal only in a thin profile, and only
+                // for an object the pack itself does not carry.
+                if !plan.profile.thin {
+                    return Err(PackWriteError::ThinBasesNotPermitted);
+                }
+                ensure_format(plan.format, base)?;
+                if in_pack.contains(&base) {
+                    return Err(PackWriteError::InvalidThinBase {
+                        target: entry.object.id,
+                        base,
+                    });
+                }
+                if delta.depth > limits.max_delta_depth {
+                    return Err(PackError::DeltaDepthLimit {
+                        depth: delta.depth,
+                        limit: limits.max_delta_depth,
+                    }
+                    .into());
+                }
+                continue;
+            }
+        };
+        if base_index >= index {
             return Err(PackError::MissingDeltaBase.into());
         }
         if delta.depth > limits.max_delta_depth {
@@ -992,15 +1247,15 @@ fn validate_plan_for_writer(plan: &PackPlan, limits: &PackLimits) -> Result<(), 
             }
             .into());
         }
-        fanout[delta.base_index] =
-            fanout[delta.base_index]
+        fanout[base_index] =
+            fanout[base_index]
                 .checked_add(1)
                 .ok_or(PackError::IntegerOverflow {
                     context: "pack plan delta fanout",
                 })?;
-        if fanout[delta.base_index] > limits.max_delta_fanout {
+        if fanout[base_index] > limits.max_delta_fanout {
             return Err(PackError::DeltaFanoutLimit {
-                fanout: fanout[delta.base_index],
+                fanout: fanout[base_index],
                 limit: limits.max_delta_fanout,
             }
             .into());
@@ -1017,6 +1272,15 @@ fn object_parse_limits(format: ObjectFormat, pack_limits: &PackLimits) -> ParseL
     }
 }
 
+/// Verified client-held bases and the targets each may serve.
+#[derive(Default)]
+struct ExternalBases {
+    /// Distinct bases in object-ID order.
+    objects: Vec<CanonicalPackObject>,
+    /// Target ID to indices into `objects`, in base-ID order.
+    by_target: BTreeMap<ObjectId, Vec<usize>>,
+}
+
 fn compare_pack_objects(
     left: &CanonicalPackObject,
     right: &CanonicalPackObject,
@@ -1031,6 +1295,7 @@ fn compare_pack_objects(
 
 fn select_deltas(
     objects: &[CanonicalPackObject],
+    external: &ExternalBases,
     profile: PackWriteProfile,
     limits: &PackLimits,
     deadline: &mut impl Deadline,
@@ -1082,15 +1347,32 @@ fn select_deltas(
             }
             candidates.push((base_index, depth));
         }
+        // Client-held bases for this target (frankengit-pazc), same type only.
+        // Each is one link from a base the client already has.
+        let mut thin: Vec<usize> = Vec::new();
+        if profile.max_delta_depth >= 1 {
+            for &position in external
+                .by_target
+                .get(&object.id)
+                .map_or(&[][..], Vec::as_slice)
+            {
+                if external.objects[position].object_type == object.object_type {
+                    thin.push(position);
+                }
+            }
+        }
         // Every full scan may visit every target position, so the allowance
         // buys whole scans. Only when it cannot pay for every candidate does
         // the budget change anything: then the scans go to the candidates a
-        // cheap probe ranks most promising.
+        // cheap probe ranks most promising. Client-held bases are scanned
+        // first and are paid from the same allowance.
         if let Some(budget) = profile.delta_work {
-            let scans = budget
+            let allowance = budget
                 .allowance(object.body.len())
                 .checked_div(object.body.len())
                 .unwrap_or(usize::MAX);
+            thin.truncate(allowance);
+            let scans = allowance - thin.len();
             if candidates.len() > scans {
                 if profile.delta_search == DeltaSearch::IndexedBlocks {
                     candidates = rank_for_budget(
@@ -1107,6 +1389,39 @@ fn select_deltas(
             }
         }
         let mut selected: Option<PlannedDelta> = None;
+        for position in thin {
+            let base = &external.objects[position];
+            let index = match profile.delta_search {
+                DeltaSearch::PrefixSuffix => None,
+                DeltaSearch::IndexedBlocks => BaseDeltaIndex::build(&base.body, limits, deadline)?,
+            };
+            let bound = selected.as_ref().map_or(object.body.len(), |current| {
+                current.program.len().min(object.body.len())
+            });
+            let Some(program) = make_delta_program(
+                &base.body,
+                &object.body,
+                profile.delta_search,
+                index.as_ref(),
+                bound,
+                deadline,
+            )?
+            else {
+                continue;
+            };
+            // Strictly shorter only: among equal client-held bases the smaller
+            // base ID, visited first, keeps the choice.
+            if selected
+                .as_ref()
+                .is_none_or(|current| program.len() < current.program.len())
+            {
+                selected = Some(PlannedDelta {
+                    base: PlannedDeltaBase::Client(base.id),
+                    depth: 1,
+                    program,
+                });
+            }
+        }
         for (base_index, depth) in candidates {
             let base = &entries[base_index];
             let index = match profile.delta_search {
@@ -1141,16 +1456,19 @@ fn select_deltas(
                 continue;
             };
             let candidate = PlannedDelta {
-                base_index,
+                base: PlannedDeltaBase::Pack(base_index),
                 depth,
                 program,
             };
+            // An in-pack base wins an equal length against a client-held one.
             if selected.as_ref().is_none_or(|current| {
                 candidate.program.len() < current.program.len()
                     || (candidate.program.len() == current.program.len()
-                        && (candidate.base_index > current.base_index
-                            || (candidate.base_index == current.base_index
-                                && base.object.id < entries[current.base_index].object.id)))
+                        && current.base_index().is_none_or(|current_index| {
+                            base_index > current_index
+                                || (base_index == current_index
+                                    && base.object.id < entries[current_index].object.id)
+                        }))
             }) {
                 selected = Some(candidate);
             }
@@ -1160,9 +1478,13 @@ fn select_deltas(
             delta: selected,
         });
         fanout.push(0);
-        if let Some(delta) = entries.last().and_then(PackPlanEntry::delta) {
-            fanout[delta.base_index] =
-                fanout[delta.base_index]
+        if let Some(base_index) = entries
+            .last()
+            .and_then(PackPlanEntry::delta)
+            .and_then(PlannedDelta::base_index)
+        {
+            fanout[base_index] =
+                fanout[base_index]
                     .checked_add(1)
                     .ok_or(PackError::IntegerOverflow {
                         context: "planned delta fanout",
@@ -2079,16 +2401,19 @@ mod tests {
                         continue;
                     };
                     let candidate = PlannedDelta {
-                        base_index,
+                        base: PlannedDeltaBase::Pack(base_index),
                         depth,
                         program,
                     };
+                    let reference_index =
+                        |delta: &PlannedDelta| delta.base_index().unwrap_or(usize::MAX);
                     if selected.as_ref().is_none_or(|current| {
                         candidate.program.len() < current.program.len()
                             || (candidate.program.len() == current.program.len()
-                                && (candidate.base_index > current.base_index
-                                    || (candidate.base_index == current.base_index
-                                        && base.object.id < entries[current.base_index].object.id)))
+                                && (base_index > reference_index(current)
+                                    || (base_index == reference_index(current)
+                                        && base.object.id
+                                            < entries[reference_index(current)].object.id)))
                     }) {
                         selected = Some(candidate);
                     }
@@ -2098,12 +2423,17 @@ mod tests {
                     delta: selected,
                 });
                 fanout.push(0);
-                if let Some(delta) = entries.last().and_then(PackPlanEntry::delta) {
-                    fanout[delta.base_index] = fanout[delta.base_index].checked_add(1).ok_or(
-                        PackError::IntegerOverflow {
-                            context: "planned delta fanout",
-                        },
-                    )?;
+                if let Some(base_index) = entries
+                    .last()
+                    .and_then(PackPlanEntry::delta)
+                    .and_then(PlannedDelta::base_index)
+                {
+                    fanout[base_index] =
+                        fanout[base_index]
+                            .checked_add(1)
+                            .ok_or(PackError::IntegerOverflow {
+                                context: "planned delta fanout",
+                            })?;
                 }
             }
             Ok(entries)
@@ -2326,8 +2656,14 @@ mod tests {
                         max_index_entries: index_entries,
                         ..wide_limits()
                     };
-                    let optimized = select_deltas(&objects, profile, &limits, &mut always)
-                        .expect("optimized plan");
+                    let optimized = select_deltas(
+                        &objects,
+                        &ExternalBases::default(),
+                        profile,
+                        &limits,
+                        &mut always,
+                    )
+                    .expect("optimized plan");
                     let reference =
                         reference::select_deltas(&objects, profile, &limits, &mut always)
                             .expect("reference plan");
@@ -2383,7 +2719,14 @@ mod tests {
                 reference::select_deltas(&objects, profile, &limits, &mut always).expect("ref");
             let reference_b_time = started.elapsed();
             let started = std::time::Instant::now();
-            let bounded = select_deltas(&objects, profile, &limits, &mut always).expect("bounded");
+            let bounded = select_deltas(
+                &objects,
+                &ExternalBases::default(),
+                profile,
+                &limits,
+                &mut always,
+            )
+            .expect("bounded");
             let bounded_time = started.elapsed();
             assert_eq!(reference_a, reference_b);
             assert_eq!(reference_a, bounded);
@@ -2469,7 +2812,14 @@ mod tests {
                 .collect();
             let run = |profile: PackWriteProfile| {
                 let started = std::time::Instant::now();
-                let plan = select_deltas(&objects, profile, &limits, &mut always).expect("plan");
+                let plan = select_deltas(
+                    &objects,
+                    &ExternalBases::default(),
+                    profile,
+                    &limits,
+                    &mut always,
+                )
+                .expect("plan");
                 (started.elapsed(), plan)
             };
             // Interleaved rounds, so host load drifts over both arms alike.
@@ -3048,7 +3398,7 @@ mod tests {
         let target = object(ObjectType::Blob, b"aaaaaaaaaaaaaaaaaaaaXXsame-suffix", 2, 1);
         let plan = planned(vec![base, target]);
         let delta = plan.entries()[1].delta().expect("selected compact delta");
-        assert_eq!(delta.base_index(), 0);
+        assert_eq!(delta.base_index(), Some(0));
         assert_eq!(delta.depth(), 1);
         let (bytes, receipt) = PackWriter::new(limits())
             .write(&plan, &mut always)
@@ -3136,9 +3486,17 @@ mod tests {
         for objects in delta_corpora() {
             let largest = objects.iter().map(|object| object.body.len()).max();
             assert!(largest.expect("non-empty corpus") * profile.delta_window <= floor);
-            let bounded = select_deltas(&objects, profile, &limits, &mut always).expect("v3");
+            let bounded = select_deltas(
+                &objects,
+                &ExternalBases::default(),
+                profile,
+                &limits,
+                &mut always,
+            )
+            .expect("v3");
             let unbounded = select_deltas(
                 &objects,
+                &ExternalBases::default(),
                 PackWriteProfile::COMPRESSED_V2,
                 &limits,
                 &mut always,
@@ -3171,13 +3529,20 @@ mod tests {
             .collect();
         let limits = wide_limits();
         let target_delta = |profile| {
-            let plan = select_deltas(&objects, profile, &limits, &mut always).expect("plan");
+            let plan = select_deltas(
+                &objects,
+                &ExternalBases::default(),
+                profile,
+                &limits,
+                &mut always,
+            )
+            .expect("plan");
             plan[4].delta.clone()
         };
 
         let unbounded =
             target_delta(PackWriteProfile::COMPRESSED_V2).expect("v2 deltas the edited copy");
-        assert_eq!(unbounded.base_index(), 0);
+        assert_eq!(unbounded.base_index(), Some(0));
         assert_eq!(target_delta(scans(1)), Some(unbounded));
     }
 
@@ -3202,16 +3567,27 @@ mod tests {
             .collect();
         let limits = wide_limits();
         let target_delta = |profile| {
-            let plan = select_deltas(&objects, profile, &limits, &mut always).expect("plan");
+            let plan = select_deltas(
+                &objects,
+                &ExternalBases::default(),
+                profile,
+                &limits,
+                &mut always,
+            )
+            .expect("plan");
             plan[2].delta.clone().expect("the target is deltified")
         };
 
         let unbounded = target_delta(PackWriteProfile::COMPRESSED_V2);
-        assert_eq!(unbounded.base_index(), 0, "the one-edit base is shorter");
+        assert_eq!(
+            unbounded.base_index(),
+            Some(0),
+            "the one-edit base is shorter"
+        );
         let one_scan = target_delta(scans(1));
         assert_eq!(
             one_scan.base_index(),
-            1,
+            Some(1),
             "a tie in probe score keeps the nearer"
         );
         assert!(one_scan.program().len() > unbounded.program().len());
@@ -3248,7 +3624,7 @@ mod tests {
             )
             .expect("window-bounded plan");
         assert_eq!(
-            plan.entries()[2].delta().map(PlannedDelta::base_index),
+            plan.entries()[2].delta().and_then(PlannedDelta::base_index),
             Some(1)
         );
         assert_eq!(plan.entries()[2].delta().map(PlannedDelta::depth), Some(2));
@@ -3460,5 +3836,213 @@ mod tests {
                 assert_eq!(decoded, 12, "u64-range distance {distance} must round-trip");
             }
         }
+    }
+
+    fn thin_planner(profile: PackWriteProfile) -> PackPlanner {
+        PackPlanner::new(ObjectFormat::Sha1, profile, wide_limits())
+    }
+
+    /// frankengit-pazc: with no client-held bases the thin profile plans and
+    /// writes exactly what COMPRESSED_V3 does; only the receipt's profile id
+    /// differs.
+    #[test]
+    fn a_thin_profile_without_thin_bases_writes_the_v3_pack() {
+        for corpus in delta_corpora() {
+            let ids: Vec<_> = corpus.iter().map(CanonicalPackObject::id).collect();
+            let source = FixtureSource::with(corpus);
+            let write = |profile| {
+                let plan = thin_planner(profile)
+                    .plan_selected(&source, &ids, &mut always)
+                    .expect("plan");
+                let (bytes, receipt) = PackWriter::new(wide_limits())
+                    .write(&plan, &mut always)
+                    .expect("pack");
+                (plan, bytes, receipt)
+            };
+            let (v3, v3_bytes, v3_receipt) = write(PackWriteProfile::COMPRESSED_V3);
+            let (thin, thin_bytes, thin_receipt) = write(PackWriteProfile::COMPRESSED_V3_THIN);
+            assert_eq!(v3.entries(), thin.entries());
+            assert_eq!(v3_bytes, thin_bytes);
+            assert_eq!(v3_receipt.profile.id, "git-pack-compressed-v3");
+            assert_eq!(thin_receipt.profile.id, "git-pack-compressed-v3-thin");
+        }
+    }
+
+    /// frankengit-pazc: a client-held base that the pack does not carry
+    /// becomes a REF_DELTA base, and the pack round-trips against it. Another
+    /// entry may chain on the thin target. The twin without the offer ships
+    /// the target whole, so the thin pack is much smaller.
+    #[test]
+    fn a_client_held_base_is_emitted_as_ref_delta_and_round_trips() {
+        let held = object(ObjectType::Blob, &shifted_lines(0, 4000), 1, 7);
+        let target = object(ObjectType::Blob, &shifted_lines(3, 4000), 3, 7);
+        let chained = object(ObjectType::Blob, &shifted_lines(5, 4000), 2, 7);
+        let source = FixtureSource::with(vec![held.clone(), target.clone(), chained.clone()]);
+        let planner = thin_planner(PackWriteProfile::COMPRESSED_V3_THIN);
+        let selected = [target.id(), chained.id()];
+        let offer = ThinBase::new(target.id(), held.id());
+        let plan = planner
+            .plan_selected_thin(&source, &selected, &[offer], &mut always)
+            .expect("thin plan");
+        let entries = plan.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].object().id(), target.id(), "newer first");
+        let thin = entries[0]
+            .delta()
+            .expect("the target deltas against the held base");
+        assert_eq!(thin.base(), PlannedDeltaBase::Client(held.id()));
+        assert_eq!((thin.depth(), thin.base_index()), (1, None));
+        let chain = entries[1]
+            .delta()
+            .expect("the older version chains on the target");
+        assert_eq!(chain.base(), PlannedDeltaBase::Pack(0));
+        assert_eq!(chain.depth(), 2);
+
+        let (bytes, receipt) = PackWriter::new(wide_limits())
+            .write(&plan, &mut always)
+            .expect("thin pack");
+        assert_eq!(receipt.delta_count, 2);
+        let parsed = read_verified_pack(
+            &bytes,
+            ObjectFormat::Sha1,
+            &wide_limits(),
+            &mut always,
+            &NativeChecksumVerifier,
+        )
+        .expect("the reader accepts the thin pack");
+        let [first, second] = parsed.entries() else {
+            panic!("two entries");
+        };
+        assert_eq!(first.header.kind, crate::EntryKind::RefDelta);
+        assert!(matches!(
+            first.delta_base,
+            Some(crate::ParsedDeltaBase::Ref { base, .. }) if base == held.id()
+        ));
+        let rebuilt_target =
+            apply_delta(held.body(), &first.inflated, &wide_limits(), &mut always).unwrap();
+        assert_eq!(rebuilt_target, target.body());
+        assert_eq!(second.header.kind, crate::EntryKind::OfsDelta);
+        let rebuilt_chained = apply_delta(
+            &rebuilt_target,
+            &second.inflated,
+            &wide_limits(),
+            &mut always,
+        )
+        .unwrap();
+        assert_eq!(rebuilt_chained, chained.body());
+
+        let whole = planner
+            .plan_selected(&source, &selected, &mut always)
+            .expect("self-contained plan");
+        assert!(
+            whole.entries()[0].delta().is_none(),
+            "no in-pack base for the newest"
+        );
+        let (whole_bytes, _) = PackWriter::new(wide_limits())
+            .write(&whole, &mut always)
+            .expect("self-contained pack");
+        assert!(
+            bytes.len() * 4 < whole_bytes.len(),
+            "thin {} vs self-contained {}",
+            bytes.len(),
+            whole_bytes.len()
+        );
+    }
+
+    /// frankengit-pazc: client-held bases are paid from the same per-target
+    /// work budget, scanned first. When the budget buys one scan only the
+    /// client-held base is tried, even though an in-pack base is better; one
+    /// more scan lets the in-pack base win on length.
+    #[test]
+    fn client_held_bases_are_paid_from_the_per_target_work_budget() {
+        let held = object(ObjectType::Blob, &shifted_lines(0, 4000), 1, 7);
+        let near = object(ObjectType::Blob, &shifted_lines(2, 4000), 9, 7);
+        let target = object(ObjectType::Blob, &shifted_lines(3, 4000), 5, 7);
+        let source = FixtureSource::with(vec![held.clone(), near.clone(), target.clone()]);
+        let offer = ThinBase::new(target.id(), held.id());
+        let target_delta = |target_multiple| {
+            let profile = PackWriteProfile {
+                id: "thin-budget-test",
+                delta_work: Some(DeltaWorkBudget {
+                    floor_bytes: 0,
+                    target_multiple,
+                }),
+                ..PackWriteProfile::COMPRESSED_V3_THIN
+            };
+            let plan = thin_planner(profile)
+                .plan_selected_thin(&source, &[near.id(), target.id()], &[offer], &mut always)
+                .expect("plan");
+            let entry = plan
+                .entries()
+                .iter()
+                .find(|entry| entry.object().id() == target.id())
+                .expect("target entry");
+            entry.delta().expect("deltified").base()
+        };
+        assert_eq!(target_delta(1), PlannedDeltaBase::Client(held.id()));
+        assert!(matches!(target_delta(2), PlannedDeltaBase::Pack(_)));
+    }
+
+    /// frankengit-pazc: thin offers are typed refusals for a self-contained
+    /// profile and for any pair the planner cannot honour, each beside a
+    /// permitted twin; a thin plan cannot be written under a self-contained
+    /// profile.
+    #[test]
+    fn thin_offers_are_refused_unless_the_profile_and_the_pair_are_valid() {
+        let held = object(ObjectType::Blob, &shifted_lines(0, 400), 1, 7);
+        let target = object(ObjectType::Blob, &shifted_lines(3, 400), 2, 7);
+        let second = object(ObjectType::Blob, b"second held base", 1, 8);
+        let third = object(ObjectType::Blob, b"third held base", 1, 9);
+        let source = FixtureSource::with(vec![
+            held.clone(),
+            target.clone(),
+            second.clone(),
+            third.clone(),
+        ]);
+        let offer = ThinBase::new(target.id(), held.id());
+        assert!(matches!(
+            thin_planner(PackWriteProfile::COMPRESSED_V3).plan_selected_thin(
+                &source,
+                &[target.id()],
+                &[offer],
+                &mut always
+            ),
+            Err(PackWriteError::ThinBasesNotPermitted)
+        ));
+        let planner = thin_planner(PackWriteProfile::COMPRESSED_V3_THIN);
+        let over_cap = [
+            offer,
+            ThinBase::new(target.id(), second.id()),
+            ThinBase::new(target.id(), third.id()),
+        ];
+        for (selected, offers) in [
+            (vec![held.id()], vec![offer]),
+            (vec![target.id(), held.id()], vec![offer]),
+            (vec![target.id()], vec![offer, offer]),
+            (vec![target.id()], over_cap.to_vec()),
+        ] {
+            assert!(
+                matches!(
+                    planner.plan_selected_thin(&source, &selected, &offers, &mut always),
+                    Err(PackWriteError::InvalidThinBase { .. })
+                ),
+                "{selected:?} {offers:?}"
+            );
+        }
+        let permitted = planner
+            .plan_selected_thin(&source, &[target.id()], &over_cap[..2], &mut always)
+            .expect("two bases per target are permitted");
+        assert_eq!(
+            permitted.entries()[0].delta().map(PlannedDelta::base),
+            Some(PlannedDeltaBase::Client(held.id()))
+        );
+        let relabelled = PackPlan {
+            profile: PackWriteProfile::COMPRESSED_V3,
+            ..permitted
+        };
+        assert!(matches!(
+            PackWriter::new(wide_limits()).write(&relabelled, &mut always),
+            Err(PackWriteError::ThinBasesNotPermitted)
+        ));
     }
 }

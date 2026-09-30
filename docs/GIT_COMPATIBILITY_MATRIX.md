@@ -150,6 +150,30 @@ A clone of a few hundred MB therefore reads under a ceiling proportional to its
 size instead of failing at 15 s. The closure walk and the planner each read the
 selected blobs once.
 
+**Thin fetch packs** (frankengit-pazc). Upload-pack advertises `thin-pack` on
+every transport. A fetch that requested it, with `ofs-delta` and at least one
+have, and that is full-history and unfiltered, is written with the
+`git-pack-compressed-v3-thin` profile.
+- An entry may then delta against a client-held object that the pack does not
+  carry, emitted as REF_DELTA.
+- Candidates come from a bounded tree walk: each wanted commit is compared with
+  the client's first four permitted have commits, at the same paths and of the
+  same kind. Only differing subtrees are walked, up to 4096 tree reads, and
+  there are at most two bases per target.
+- Every base lies in the permitted closure of the client's haves. A have outside
+  that closure, such as a hidden ref's commit, supplies none.
+- Bases are paid from the same per-target work budget as in-pack candidates.
+  An in-pack base wins an equal-length tie.
+- Clones (no haves), shallow and filtered fetches, and clients without
+  `thin-pack` keep the self-contained `git-pack-compressed-v3` pack, byte for
+  byte.
+
+Measured in suites/transport/thin_fetch.sh (a 60,000-line file shifted by three
+lines): the one-commit fetch drops from about 254 KB, the size of a clone, to
+about 530 B, on protocols 0, 1 and 2 over `fg serve` and `fg serve-http`.
+Stock git completes the pack, and `fsck --strict` passes. That is one synthetic
+corpus, not a performance claim.
+
 `fg serve` selects the receive envelope explicitly: `--session-timeout-secs`,
 `--session-secs-per-mib`, `--session-max-extension-secs`,
 `--receive-max-input-mib`, `--receive-max-expanded-mib`; `fg serve` and

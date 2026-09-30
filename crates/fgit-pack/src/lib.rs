@@ -68,8 +68,9 @@ pub use verify::{
 };
 pub use writer::{
     CanonicalObjectSource, CanonicalPackObject, DeltaWorkBudget, DeterministicPackEncoder,
-    MaterializedPack, PackArtifactSink, PackEntryEncoder, PackPlan, PackPlanEntry, PackPlanner,
-    PackWriteError, PackWriteProfile, PackWriteReceipt, PackWriter, PlannedDelta,
+    MAX_THIN_BASES_PER_TARGET, MaterializedPack, PackArtifactSink, PackEntryEncoder, PackPlan,
+    PackPlanEntry, PackPlanner, PackWriteError, PackWriteProfile, PackWriteReceipt, PackWriter,
+    PlannedDelta, PlannedDeltaBase, ThinBase,
 };
 
 use std::error::Error;

@@ -1354,6 +1354,13 @@ impl PackOptions {
         self.contains(Self::OFS_DELTA)
     }
 
+    /// Whether the client accepts a thin pack: deltas against objects it
+    /// already holds, which the pack itself does not carry.
+    #[must_use]
+    pub const fn thin_pack(self) -> bool {
+        self.contains(Self::THIN_PACK)
+    }
+
     /// Whether annotated tags pointing at transmitted objects must accompany them.
     #[must_use]
     pub const fn include_tag(self) -> bool {

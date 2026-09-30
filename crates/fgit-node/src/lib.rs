@@ -15,7 +15,7 @@
 //! no synchronous request-path adapter is introduced around the async engine.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
@@ -81,7 +81,8 @@ use fgit_crypto::{
 };
 use fgit_forge::{ForgeEventBatch as CanonicalForgeEventBatch, HistoricalBatch};
 use fgit_git_object::{
-    AcceptanceProfile, ObjectError, ObjectType, ParseLimits, ParsedObject, parse_object_body,
+    AcceptanceProfile, ObjectError, ObjectType, ParseLimits, ParsedObject, parse_commit,
+    parse_object_body, parse_tree,
 };
 use fgit_object_fabric::fabric::{
     ImmutableObjectFabric, PlacementAdmission, PutIfAbsent, StoreRefusal, VerifiedObject,
@@ -89,8 +90,9 @@ use fgit_object_fabric::fabric::{
 use fgit_object_fabric::local::{LocalFilesystemConfig, LocalFilesystemFabric};
 use fgit_object_fabric::{ObjectEnvelope, ObjectKind, SegmentLimits};
 use fgit_pack::{
-    CanonicalObjectSource, CanonicalPackObject, PackBoundaryScanner, PackError, PackLimits,
-    PackPlanner, PackWriteError, PackWriteProfile, PackWriteReceipt, PackWriter, ScanStatus,
+    CanonicalObjectSource, CanonicalPackObject, MAX_THIN_BASES_PER_TARGET, PackBoundaryScanner,
+    PackError, PackLimits, PackPlanner, PackWriteError, PackWriteProfile, PackWriteReceipt,
+    PackWriter, ScanStatus, ThinBase,
 };
 use fgit_reference::intent::TransactionRequest;
 use fgit_resource::{
@@ -210,6 +212,11 @@ pub(crate) fn git_daemon_capabilities(
     // client never echoes the capability and every pack must ship full bases
     // (frankengit-x7ja measured that at ~62x upstream's clone egress).
     tokens.extend_from_slice(b" ofs-delta");
+    // `thin-pack` lets a v0/v1 fetch receive deltas against objects the client
+    // already holds; without it only a protocol-v2 fetch, which sends the
+    // argument unadvertised, could get a thin pack (frankengit-pazc). Clones
+    // never offer haves, so they stay self-contained either way.
+    tokens.extend_from_slice(b" thin-pack");
     if let Some(target) = head_target {
         tokens.extend_from_slice(b" symref=HEAD:");
         tokens.extend_from_slice(target);
@@ -3294,6 +3301,143 @@ impl PermittedClosureTraversalSource for CeiledFabricSource<'_, '_> {
     }
 }
 
+impl CeiledFabricSource<'_, '_> {
+    /// Client-held delta bases for a thin fetch (frankengit-pazc).
+    ///
+    /// For each wanted commit and each of the client's first
+    /// [`MAX_THIN_HAVE_COMMITS`] haves in `held`, entries at the same path of
+    /// the two root trees are paired: same kind (tree with tree, file with
+    /// file; gitlinks never), different IDs, the wanted one sent in this pack
+    /// and the other in `held`. Only subtrees whose IDs differ are walked, so
+    /// the work follows the changed paths, and pairing stops after
+    /// [`MAX_THIN_TREE_READS`] tree reads. `held` is the permitted closure of
+    /// the client's haves, so nothing outside the permitted closure, and
+    /// nothing the client did not prove it holds, can become a base.
+    fn thin_base_hints(
+        &self,
+        wants: &[GitOid],
+        haves: &[GitOid],
+        sent: &BTreeSet<GitOid>,
+        held: &BTreeSet<GitOid>,
+    ) -> Result<Vec<ThinBase>, PackWriteError> {
+        let mut have_trees = Vec::new();
+        for have in haves.iter().filter(|have| held.contains(have)) {
+            if have_trees.len() == MAX_THIN_HAVE_COMMITS {
+                break;
+            }
+            if let Some(tree) = self.commit_tree(have)?
+                && !have_trees.contains(&tree)
+            {
+                have_trees.push(tree);
+            }
+        }
+        let mut pending = VecDeque::new();
+        for want in wants.iter().filter(|want| !held.contains(want)) {
+            if let Some(tree) = self.commit_tree(want)? {
+                for have in &have_trees {
+                    pending.push_back((tree, *have));
+                }
+            }
+        }
+        let mut bases: BTreeMap<GitOid, Vec<GitOid>> = BTreeMap::new();
+        let mut offer = |target: GitOid, base: GitOid| {
+            if sent.contains(&target) && held.contains(&base) {
+                let list = bases.entry(target).or_default();
+                if list.len() < MAX_THIN_BASES_PER_TARGET && !list.contains(&base) {
+                    list.push(base);
+                }
+            }
+        };
+        let mut diffed = BTreeSet::new();
+        let mut reads = 0_usize;
+        while let Some((want, have)) = pending.pop_front() {
+            if want == have || !diffed.insert((want, have)) {
+                continue;
+            }
+            if reads + 2 > MAX_THIN_TREE_READS {
+                break;
+            }
+            reads += 2;
+            offer(want, have);
+            let held_entries = self.tree_entries(&have)?;
+            let held_by_name: BTreeMap<&[u8], (bool, GitOid)> = held_entries
+                .iter()
+                .map(|(name, is_tree, id)| (name.as_slice(), (*is_tree, *id)))
+                .collect();
+            for (name, is_tree, target) in self.tree_entries(&want)? {
+                let Some(&(held_is_tree, base)) = held_by_name.get(name.as_slice()) else {
+                    continue;
+                };
+                if held_is_tree != is_tree || base == target {
+                    continue;
+                }
+                if is_tree {
+                    if pending.len() < MAX_THIN_TREE_READS {
+                        pending.push_back((target, base));
+                    }
+                } else {
+                    offer(target, base);
+                }
+            }
+        }
+        Ok(bases
+            .into_iter()
+            .flat_map(|(target, list)| {
+                list.into_iter()
+                    .map(move |base| ThinBase::new(target, base))
+            })
+            .collect())
+    }
+
+    /// The root tree of a commit, or `None` for any other object.
+    fn commit_tree(&self, id: &GitOid) -> Result<Option<GitOid>, PackWriteError> {
+        let (object_type, body) = self.inner.read_object_within(id, self.ceiling)?;
+        if object_type != ObjectType::Commit {
+            return Ok(None);
+        }
+        let commit = parse_commit(
+            &body,
+            AcceptanceProfile::GitCompatibleImport,
+            &self.inner.parse_limits(),
+        )
+        .map_err(PackError::ObjectParse)?;
+        let tree = commit.tree_reference().ok_or_else(|| {
+            PackWriteError::from(PackError::ObjectParse(
+                ObjectError::MissingOrDuplicateCommitTree,
+            ))
+        })?;
+        self.inner.native_reference_from_hex(tree).map(Some)
+    }
+
+    /// `(name, is_tree, id)` for every non-gitlink entry of a tree.
+    fn tree_entries(&self, id: &GitOid) -> Result<Vec<(Vec<u8>, bool, GitOid)>, PackWriteError> {
+        let (object_type, body) = self.inner.read_object_within(id, self.ceiling)?;
+        if object_type != ObjectType::Tree {
+            return Ok(Vec::new());
+        }
+        let entries = parse_tree(
+            &body,
+            AcceptanceProfile::GitCompatibleImport,
+            &self.inner.parse_limits(),
+        )
+        .map_err(PackError::ObjectParse)?;
+        let mut named = Vec::new();
+        named
+            .try_reserve_exact(entries.len())
+            .map_err(|_| PackError::AllocationFailed {
+                requested: entries.len(),
+            })?;
+        for entry in entries {
+            if is_gitlink_tree_mode(&entry.mode) {
+                continue;
+            }
+            let id = self.inner.native_reference_from_bytes(&entry.object_id)?;
+            named.push((entry.name.clone(), entry.is_tree(), id));
+        }
+        Ok(named)
+    }
+}
+
 impl CanonicalObjectSource for CeiledFabricSource<'_, '_> {
     fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
         let (object_type, body) = self.inner.read_object_within(id, self.ceiling)?;
@@ -3486,20 +3630,39 @@ fn reachable_within_permitted_closure_bounded(
     Ok(visited)
 }
 
-/// Selects the pack-write profile the client's negotiated capabilities admit.
+/// Selects the pack-write profile a fetch's negotiated capabilities admit.
 ///
 /// `ofs-delta` gates the delta-capable interior-match profile; a client that
 /// never echoed it receives structurally delta-free full bases, because a
 /// v0/v1 pack may carry OFS_DELTA entries only under that capability. The
 /// delta profile bounds its search work per target, so a large repository's
 /// clone fits the session envelope (frankengit-77qh).
-pub(crate) const fn selected_write_profile(ofs_delta_negotiated: bool) -> PackWriteProfile {
-    if ofs_delta_negotiated {
-        PackWriteProfile::COMPRESSED_V3
+///
+/// The thin profile additionally needs the client's `thin-pack` and at least
+/// one have, and it needs a full-history, unfiltered fetch. Only there does a
+/// have prove that the client holds that object's whole closure, which is
+/// what makes a client-held object a sound delta base (frankengit-pazc).
+pub(crate) fn selected_fetch_write_profile(request: &fgit_wire::PackRequest) -> PackWriteProfile {
+    let options = request.options;
+    if !options.ofs_delta() {
+        return PackWriteProfile::COMPRESSED_NO_DELTA_V1;
+    }
+    let whole_closure = request.filter.is_none()
+        && request.shallows.is_empty()
+        && request.deepen.is_none()
+        && request.deepen_since.is_none()
+        && request.deepen_not.is_empty();
+    if options.thin_pack() && whole_closure && !request.haves.is_empty() {
+        PackWriteProfile::COMPRESSED_V3_THIN
     } else {
-        PackWriteProfile::COMPRESSED_NO_DELTA_V1
+        PackWriteProfile::COMPRESSED_V3
     }
 }
+
+/// Have commits whose trees supply thin-pack bases, in the client's order.
+const MAX_THIN_HAVE_COMMITS: usize = 4;
+/// Tree objects read while pairing thin-pack bases; pairing stops there.
+const MAX_THIN_TREE_READS: usize = 4096;
 
 fn selected_pack_ids(
     source: &impl PermittedClosureTraversalSource,
@@ -3508,6 +3671,20 @@ fn selected_pack_ids(
     client_haves: &[GitOid],
     limits: &PackLimits,
 ) -> Result<Vec<GitOid>, NodePackMaterializationRefusal> {
+    selected_pack_ids_and_held(source, closure, client_wants, client_haves, limits)
+        .map(|(ids, _)| ids)
+}
+
+/// [`selected_pack_ids`] together with the set it subtracts: every object
+/// reachable from the client's haves inside the permitted closure. That is the
+/// only set a thin pack may name as a client-held base (frankengit-pazc).
+fn selected_pack_ids_and_held(
+    source: &impl PermittedClosureTraversalSource,
+    closure: &PermittedObjectClosure,
+    client_wants: Option<&[GitOid]>,
+    client_haves: &[GitOid],
+    limits: &PackLimits,
+) -> Result<(Vec<GitOid>, BTreeSet<GitOid>), NodePackMaterializationRefusal> {
     // `None` is the explicit local authority-materialization mode. `Some`,
     // including `Some(&[])`, is the wire mode: an empty client want set selects
     // nothing and must never be mistaken for authority permission to copy P.
@@ -3557,7 +3734,7 @@ fn selected_pack_ids(
         }
         ids.push(id);
     }
-    Ok(ids)
+    Ok((ids, excluded))
 }
 
 fn admission_immutable_key(
@@ -7992,13 +8169,13 @@ impl OneNode {
             inner: &source,
             ceiling: ceiling.as_ref(),
         };
-        let mut ids =
+        let (mut ids, held) =
             if fetch.is_some_and(|(_, request)| upload_visibility::shallow::requested(request)) {
                 // A shallow have proves only history above the client's boundary.
                 // The visible scope below computes both clipped closures together.
-                Vec::new()
+                (Vec::new(), BTreeSet::new())
             } else {
-                selected_pack_ids(
+                selected_pack_ids_and_held(
                     &served,
                     disclosure_closure,
                     client_wants,
@@ -8013,9 +8190,18 @@ impl OneNode {
                 scope.tags.extend_selected(&mut ids, &limits, is_live)?;
             }
         }
+        // Thin bases only for the request the thin profile was selected for;
+        // the profile already excludes shallow and filtered fetches.
+        let thin_bases = match (write_profile.thin, fetch, client_wants) {
+            (true, Some(_), Some(wants)) if !held.is_empty() => {
+                let sent: BTreeSet<GitOid> = ids.iter().copied().collect();
+                served.thin_base_hints(wants, client_haves, &sent, &held)?
+            }
+            _ => Vec::new(),
+        };
         let planner = PackPlanner::new(self.object_format, write_profile, limits.clone());
         let plan = planner
-            .plan_selected(&served, &ids, is_live)
+            .plan_selected_thin(&served, &ids, &thin_bases, is_live)
             .map_err(NodePackMaterializationRefusal::from)?;
         let (bytes, receipt) = PackWriter::new(limits)
             .write(&plan, is_live)
@@ -8253,7 +8439,7 @@ impl OneNode {
                         Some((&disclosure, pack_request)),
                         Some(&pack_request.wants),
                         &pack_request.haves,
-                        selected_write_profile(pack_request.options.ofs_delta()),
+                        selected_fetch_write_profile(pack_request),
                         request.authority(),
                         &database_exhaustion,
                         Some(&session_is_live),
@@ -9541,6 +9727,37 @@ mod tests {
         super::selected_pack_ids(&source, closure, Some(wants), haves, &limits)
     }
 
+    /// The thin-pack bases a served fetch would offer (frankengit-pazc).
+    fn thin_hints(
+        node: &OneNode,
+        closure: &PermittedObjectClosure,
+        wants: &[GitOid],
+        haves: &[GitOid],
+    ) -> Vec<fgit_pack::ThinBase> {
+        let limits = fgit_pack::PackLimits::default();
+        let database_context = FsqliteCx::new();
+        let database_exhaustion = Cell::new(None);
+        let source = super::VerifiedFabricPackSource {
+            fabric: &node.fabric,
+            object_format: node.object_format,
+            maximum_object_bytes: limits.max_object_bytes,
+            database_context: &database_context,
+            database_exhaustion: &database_exhaustion,
+            session_is_live: None,
+        };
+        let served = super::CeiledFabricSource {
+            inner: &source,
+            ceiling: None,
+        };
+        let (ids, held) =
+            super::selected_pack_ids_and_held(&served, closure, Some(wants), haves, &limits)
+                .expect("selection");
+        let sent: BTreeSet<GitOid> = ids.into_iter().collect();
+        served
+            .thin_base_hints(wants, haves, &sent, &held)
+            .expect("thin hints")
+    }
+
     fn put_object(node: &OneNode, kind: fgit_git_object::ObjectType, body: Vec<u8>) -> GitOid {
         node.put_git_object(kind, body)
             .expect("fixture object enters the verified object fabric")
@@ -9608,6 +9825,75 @@ mod tests {
     fn graph_oid(byte: u8) -> GitOid {
         GitOid::from_hex(GitHashAlgorithm::Sha1, &format!("{byte:02x}").repeat(20))
             .expect("fixed native sha-1 object identity parses")
+    }
+
+    /// frankengit-pazc acceptance 4: a thin base is always the same-path entry
+    /// of a have commit inside the permitted closure. A have outside it, as a
+    /// hidden ref's commit is, supplies no base; listing it first changes
+    /// nothing; unchanged entries are never offered.
+    #[test]
+    fn thin_bases_come_only_from_permitted_haves_at_the_same_path() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes an empty canonical state");
+        let blob = |text: &str| {
+            put_object(
+                &node,
+                fgit_git_object::ObjectType::Blob,
+                text.as_bytes().to_vec(),
+            )
+        };
+        let (unchanged, old_file, new_file, hidden_file) = (
+            blob("unchanged\n"),
+            blob("old version of the file\n"),
+            blob("new version of the file\n"),
+            blob("hidden version of the file\n"),
+        );
+        let dir = |file| put_tree(&node, &[(b"100644", b"file.txt", file)]);
+        let (dir_old, dir_new, dir_hidden) = (dir(old_file), dir(new_file), dir(hidden_file));
+        let root = |dir| {
+            put_tree(
+                &node,
+                &[(b"100644", b"README", unchanged), (b"40000", b"dir", dir)],
+            )
+        };
+        let (root_old, root_new, root_hidden) = (root(dir_old), root(dir_new), root(dir_hidden));
+        let held_commit = put_commit(&node, root_old, &[]);
+        let wanted = put_commit(&node, root_new, &[held_commit]);
+        let hidden_commit = put_commit(&node, root_hidden, &[]);
+        let closure = PermittedObjectClosure::new(BTreeSet::from([
+            unchanged,
+            old_file,
+            new_file,
+            dir_old,
+            dir_new,
+            root_old,
+            root_new,
+            held_commit,
+            wanted,
+        ]));
+
+        let mut expected = vec![
+            fgit_pack::ThinBase::new(root_new, root_old),
+            fgit_pack::ThinBase::new(dir_new, dir_old),
+            fgit_pack::ThinBase::new(new_file, old_file),
+        ];
+        expected.sort_by_key(fgit_pack::ThinBase::target);
+        let permitted = thin_hints(&node, &closure, &[wanted], &[held_commit]);
+        assert_eq!(permitted, expected);
+        assert!(
+            thin_hints(&node, &closure, &[wanted], &[hidden_commit]).is_empty(),
+            "a have outside the permitted closure supplies no base"
+        );
+        assert_eq!(
+            thin_hints(&node, &closure, &[wanted], &[hidden_commit, held_commit]),
+            permitted,
+            "the unpermitted have is skipped, never used"
+        );
+        assert!(
+            thin_hints(&node, &closure, &[held_commit], &[held_commit]).is_empty(),
+            "a want the client already holds offers nothing"
+        );
     }
 
     #[test]
@@ -11052,13 +11338,13 @@ mod tests {
         );
         let mut expected = format!(
             "{:04x}",
-            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n"
+            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta thin-pack allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n"
                 .len()
                 + 4
         )
         .into_bytes();
         expected.extend_from_slice(
-            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n0000",
+            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 ofs-delta thin-pack allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n0000",
         );
         assert_eq!(
             response, expected,
@@ -11076,7 +11362,7 @@ mod tests {
         let sha1 = git_daemon_capabilities(GitHashAlgorithm::Sha1, None);
         assert_eq!(
             sha1.as_slice(),
-            b"object-format=sha1 ofs-delta allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node"
+            b"object-format=sha1 ofs-delta thin-pack allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node"
         );
         assert!(
             Capabilities::parse_v1(&sha1, &limits)
@@ -11091,7 +11377,7 @@ mod tests {
         let sha256 = git_daemon_capabilities(GitHashAlgorithm::Sha256, None);
         assert_eq!(
             sha256.as_slice(),
-            b"object-format=sha256 ofs-delta allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node"
+            b"object-format=sha256 ofs-delta thin-pack allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node"
         );
         let parsed = Capabilities::parse_v1(&sha256, &limits)
             .expect("the SHA-256 daemon capability list is wire-valid");
@@ -11107,7 +11393,7 @@ mod tests {
         let with_head = git_daemon_capabilities(GitHashAlgorithm::Sha1, Some(b"refs/heads/main"));
         assert_eq!(
             with_head.as_slice(),
-            b"object-format=sha1 ofs-delta symref=HEAD:refs/heads/main allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node"
+            b"object-format=sha1 ofs-delta thin-pack symref=HEAD:refs/heads/main allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node"
         );
         assert!(
             Capabilities::parse_v1(&with_head, &limits)
@@ -11168,7 +11454,7 @@ mod tests {
         // the SHA-1 domain and cannot parse this advertisement.
         let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
         let line = format!(
-            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n"
+            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta thin-pack allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n"
         );
         let mut expected = format!("{:04x}", line.len() + 4).into_bytes();
         expected.extend_from_slice(line.as_bytes());
@@ -11231,7 +11517,7 @@ mod tests {
 
         let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
         let advertisement = format!(
-            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n"
+            "{identity} capabilities^{{}}\0object-format=sha256 ofs-delta thin-pack allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n"
         );
         let packet = |payload: &str| {
             let mut out = format!("{:04x}", payload.len() + 4).into_bytes();
@@ -11359,7 +11645,7 @@ mod tests {
         let response = read_one_daemon_advertisement(node, b"\0host=loopback\0");
 
         let mut expected = packet(&format!(
-            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n"
+            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta thin-pack allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n"
         ));
         expected.extend_from_slice(b"0000");
         assert_eq!(
@@ -11377,7 +11663,7 @@ mod tests {
 
         let mut expected = packet("version 1\n");
         expected.extend_from_slice(&packet(&format!(
-            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n"
+            "{identity} refs/heads/sha256-main\0object-format=sha256 ofs-delta thin-pack allow-reachable-sha1-in-want shallow deepen-relative deepen-since deepen-not filter include-tag side-band-64k agent=frankengit-node\n"
         )));
         expected.extend_from_slice(b"0000");
         assert_eq!(
