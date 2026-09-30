@@ -620,3 +620,58 @@ fn valid_pr_credentials_cannot_enable_a_disabled_deployment() {
     assert_eq!(generation(&node), before + 1);
     node.shutdown().unwrap();
 }
+
+/// frankengit-root-doctrine-x2mv.4.31, acceptance 1 (pulls): a cross-origin
+/// form POST is a typed 403 with no effect; the same request carrying the
+/// server's own Origin commits.
+#[test]
+fn a_cross_origin_pr_post_is_refused_and_its_same_origin_twin_commits() {
+    let root = Scratch::new();
+    let config = root.config(GitHashAlgorithm::Sha1);
+    let (node, data) = fixture(&root, GitHashAlgorithm::Sha1);
+    let before = generation(&node);
+    let path = root.0.join("credentials");
+    grants(&node, &path);
+    let server = Server::start(node, &path, 3, true, false);
+    let client = &server.client;
+    let body = form(&data, 0);
+    let sourced = |origin: &str, key: &str| {
+        let headers = format!(
+            "Origin: {origin}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nIdempotency-Key: {key}\r\n",
+            body.len()
+        );
+        let wire = request(
+            client,
+            "POST",
+            "/api/v1/pulls/1/open",
+            'b',
+            &headers,
+            body.as_bytes(),
+        );
+        exchange(client, &wire, true)
+    };
+    let refused = sourced("http://evil.example", "cross-origin"); // 1
+    status(&refused, 403);
+    assert!(
+        refused.body.starts_with("cross-site request refused"),
+        "{}",
+        refused.raw
+    );
+    let absent = get(client, "/api/v1/pulls/1", 'a'); // 2
+    status(&absent, 404);
+    assert!(
+        absent
+            .body
+            .contains("\"found\":false,\"pull_request\":null")
+    );
+    committed(&sourced(
+        &format!("http://{}", client.address),
+        "same-origin",
+    )); // 3
+    let receipt = server.finish();
+    assert_eq!(receipt.accepted_sessions(), 3);
+    assert_eq!(receipt.refused_sessions(), 1);
+    let node = reopen(&config);
+    assert_eq!(generation(&node), before + 1);
+    node.shutdown().unwrap();
+}

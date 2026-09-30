@@ -661,3 +661,57 @@ fn scopes_default_branch_native_kind_and_complete_envelopes_precede_publication(
     assert_eq!(generation(&node), before);
     node.shutdown().unwrap();
 }
+
+/// frankengit-root-doctrine-x2mv.4.31, acceptance 1 (source publication): a
+/// cross-origin branch creation is a typed 403 with no effect; the same
+/// request carrying the server's own Origin commits.
+#[test]
+fn a_cross_origin_branch_creation_is_refused_and_its_same_origin_twin_commits() {
+    let format = GitHashAlgorithm::Sha1;
+    let root = Scratch::new();
+    let config = root.config(format);
+    let (node, tip) = fixture(&root, format);
+    let parent = base(&node, tip);
+    let before = generation(&node);
+    let path = root.0.join("credentials");
+    grants(&node, &path);
+    let server = BranchServer::start(node, &path, 4);
+    let creation = create(format, "refs/heads/topic", parent);
+    let sourced = |origin: &str, key: &str| {
+        let headers = format!(
+            "Origin: {origin}\r\nContent-Type: application/x-www-form-urlencoded\r\nIdempotency-Key: {key}\r\nContent-Length: {}\r\n",
+            creation.len()
+        );
+        let wire = request(
+            &server.client,
+            "/api/v1/source/branches/create",
+            'b',
+            &headers,
+            creation.as_bytes(),
+        );
+        exchange(&server.client, &wire, true)
+    };
+    let refused = sourced("http://evil.example", "cross-origin"); // 1
+    status(&refused, 403);
+    assert!(
+        refused.body.starts_with("cross-site request refused"),
+        "{}",
+        refused.raw
+    );
+    let rows = list(&server.client, format, ""); // 2
+    status(&rows, 200);
+    assert!(!rows.body.contains("\"ref\":\"refs/heads/topic\""));
+    accepted(&sourced(
+        &format!("http://{}", server.client.address),
+        "same-origin",
+    )); // 3
+    let rows = list(&server.client, format, ""); // 4
+    status(&rows, 200);
+    assert!(contains_ref(&rows, "refs/heads/topic", parent));
+    let receipt = server.finish();
+    assert_eq!(receipt.accepted_sessions(), 4);
+    assert_eq!(receipt.refused_sessions(), 1);
+    let node = reopen(&config);
+    assert_eq!(generation(&node), before + 1);
+    node.shutdown().unwrap();
+}

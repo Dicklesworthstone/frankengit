@@ -579,6 +579,124 @@ fn scope_denial_spoofed_identity_and_incomplete_http_never_publish_issue_state()
     node.shutdown().unwrap();
 }
 
+/// A browser-shaped state change: an explicit credential plus whatever the
+/// browser says about the request's source.
+fn sourced_open(server: &Server, host: &str, credential: &str, source: &str, key: &str) -> Reply {
+    let body = "expected_version=0&title=t&body=b";
+    let key_number = key.rsplit('-').next().unwrap();
+    let wire = format!(
+        "POST {}/api/v1/issues/{key_number}/open HTTP/1.1\r\nHost: {host}\r\n{credential}{source}Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nIdempotency-Key: {key}\r\n\r\n{body}",
+        server.route,
+        body.len()
+    );
+    exchange(server.address, wire.as_bytes(), false)
+}
+
+/// frankengit-root-doctrine-x2mv.4.31: a state change another site makes the
+/// browser send, or one riding a browser-cached Basic credential, is a typed
+/// 403/401 that publishes nothing; each refused shape has a permitted twin
+/// that commits through the same live server.
+#[test]
+fn cross_site_requests_and_ambient_basic_credentials_never_publish_issue_state() {
+    // `git:` plus writer token `c` as a Basic user-pass, as a browser caches it
+    // after a git route's Basic challenge.
+    const AMBIENT_BASIC: &str = "Authorization: Basic Z2l0OmNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=\r\n";
+    let root = Scratch::new();
+    let configuration = config(&root, GitHashAlgorithm::Sha1);
+    let node = start_node(configuration.clone());
+    let before = node
+        .runtime()
+        .block_on(node.materialize_admission())
+        .unwrap()
+        .basis()
+        .generation();
+    let path = root.0.join("credentials");
+    grants(&node, &path);
+    let server = Server::start(node, path, 12, true);
+    let own = server.address.to_string();
+    let port = server.address.port();
+    let writer = auth('c');
+    let rebound = format!("evil.example:{port}");
+    let neighbour = format!("Origin: http://127.0.0.2:{port}\r\n");
+    for (index, (host, source)) in [
+        (own.as_str(), "Origin: http://evil.example\r\n"),
+        (own.as_str(), neighbour.as_str()),
+        (own.as_str(), "Sec-Fetch-Site: cross-site\r\n"),
+        (own.as_str(), "Origin: null\r\n"),
+        (
+            rebound.as_str(),
+            "Origin: null\r\nSec-Fetch-Site: same-origin\r\n",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let reply = sourced_open(
+            &server,
+            host,
+            &writer,
+            source,
+            &format!("refused-{index}-1"),
+        );
+        status(&reply, 403);
+        assert!(
+            reply.body.starts_with("cross-site request refused"),
+            "{}",
+            reply.raw
+        ); // 1-5
+    }
+    let ambient = sourced_open(&server, &own, AMBIENT_BASIC, "", "ambient-1"); // 6
+    status(&ambient, 401);
+    assert!(ambient.raw.contains("WWW-Authenticate: Bearer"));
+    assert!(!ambient.raw.contains("WWW-Authenticate: Basic"));
+    // Reads are not refused by source; nothing above published anything.
+    let cross_site_read = format!(
+        "GET {}/api/v1/issues HTTP/1.1\r\nHost: {own}\r\n{}Origin: http://evil.example\r\nSec-Fetch-Site: cross-site\r\n\r\n",
+        server.route,
+        auth('a')
+    );
+    let empty = exchange(server.address, cross_site_read.as_bytes(), false); // 7
+    status(&empty, 200);
+    assert!(empty.body.contains("\"issues\":[]"));
+    let same_origin = format!("Origin: http://{own}\r\nSec-Fetch-Site: same-origin\r\n");
+    let localhost = format!("Origin: http://localhost:{port}\r\n");
+    for (source, key) in [
+        (same_origin.as_str(), "permitted-1"),
+        (localhost.as_str(), "permitted-2"),
+        // The shell's history client: mode same-origin under no-referrer.
+        (
+            "Origin: null\r\nSec-Fetch-Site: same-origin\r\n",
+            "permitted-3",
+        ),
+        // A non-browser client with the same token as an explicit Bearer.
+        ("", "permitted-4"),
+    ] {
+        committed(&sourced_open(&server, &own, &writer, source, key)); // 8-11
+    }
+    let listed = exchange(server.address, cross_site_read.as_bytes(), false); // 12
+    status(&listed, 200);
+    for number in 1..=4 {
+        assert!(
+            listed.body.contains(&format!("\"number\":{number}")),
+            "{}",
+            listed.body
+        );
+    }
+    let receipt = server.finish();
+    assert_eq!(receipt.accepted_sessions(), 12);
+    assert_eq!(receipt.refused_sessions(), 6);
+    let node = reopened(configuration);
+    assert!(
+        node.runtime()
+            .block_on(node.materialize_admission())
+            .unwrap()
+            .basis()
+            .generation()
+            > before
+    );
+    node.shutdown().unwrap();
+}
+
 #[test]
 fn legacy_server_entry_point_keeps_issue_endpoints_disabled() {
     let root = Scratch::new();

@@ -26,6 +26,12 @@ pub struct Envelope<'a> {
     pub consumed: usize,
     pub content_type: Option<&'a str>,
     pub git_protocol: Option<&'a str>,
+    /// The request's `Host` authority, syntax-checked; absent only on HTTP/1.0.
+    pub host: Option<&'a str>,
+    /// The browser-supplied `Origin`, if any. Stock Git never sends one.
+    pub origin: Option<&'a str>,
+    /// The browser-supplied `Sec-Fetch-Site`, if any.
+    pub sec_fetch_site: Option<&'a str>,
     pub(super) authorization: Option<&'a str>,
 }
 
@@ -98,6 +104,7 @@ pub(super) fn parse_with<'a, T>(
     let (mut host, mut length, mut transfer, mut media, mut protocol, mut authorization) =
         (None, None, None, None, None, None);
     let (mut encoding, mut expectation, mut connection) = (None, None, None);
+    let (mut origin, mut sec_fetch_site) = (None, None);
     for (index, line) in lines.enumerate() {
         if index >= limits.max_headers {
             return Err(HttpError::TooManyHeaders);
@@ -130,6 +137,10 @@ pub(super) fn parse_with<'a, T>(
             unique(&mut expectation, value)?;
         } else if name.eq_ignore_ascii_case("connection") {
             unique(&mut connection, value)?;
+        } else if name.eq_ignore_ascii_case("origin") {
+            unique(&mut origin, value)?;
+        } else if name.eq_ignore_ascii_case("sec-fetch-site") {
+            unique(&mut sec_fetch_site, value)?;
         } else if name.eq_ignore_ascii_case("trailer") {
             return Err(HttpError::TrailersNotSupported);
         }
@@ -206,6 +217,9 @@ pub(super) fn parse_with<'a, T>(
             consumed: end + 4,
             content_type: media,
             git_protocol: protocol,
+            host,
+            origin,
+            sec_fetch_site,
             authorization,
         },
         selected,
@@ -249,12 +263,29 @@ mod tests {
         );
     }
 
+    /// The browser's own statements about a request's source reach the
+    /// cross-site guard verbatim, and a client that sends neither leaves both
+    /// absent (frankengit-root-doctrine-x2mv.4.31).
+    #[test]
+    fn origin_fetch_metadata_and_host_are_captured_for_the_cross_site_guard() {
+        let bytes = b"POST /repo.git/api/v1/issues/1/open HTTP/1.1\r\nHost: 127.0.0.1:8123\r\norigin: null\r\nSEC-FETCH-SITE: same-origin\r\n\r\n";
+        let head = parse(bytes, HttpLimits::default()).unwrap().unwrap();
+        assert_eq!(head.host, Some("127.0.0.1:8123"));
+        assert_eq!(head.origin, Some("null"));
+        assert_eq!(head.sec_fetch_site, Some("same-origin"));
+        let bytes = b"POST /repo.git/git-upload-pack HTTP/1.1\r\nHost: local\r\n\r\n";
+        let head = parse(bytes, HttpLimits::default()).unwrap().unwrap();
+        assert_eq!((head.origin, head.sec_fetch_site), (None, None));
+    }
+
     #[test]
     fn ambiguous_framing_and_hop_by_hop_credentials_still_fail_closed() {
         for headers in [
             "Content-Length: 0\r\nTransfer-Encoding: chunked\r\n",
             "Content-Length: 0\r\ncontent-length: 0\r\n",
             "Authorization: a\r\nauthorization: b\r\n",
+            "Origin: http://a\r\norigin: http://b\r\n",
+            "Sec-Fetch-Site: same-origin\r\nsec-fetch-site: cross-site\r\n",
             "Connection: authorization\r\n",
             "Trailer: anything\r\n",
             "Content-Encoding: gzip\r\n",

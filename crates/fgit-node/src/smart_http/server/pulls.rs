@@ -137,7 +137,7 @@ pub(super) fn authenticate(
     };
     let grant = profile
         .credentials
-        .authenticate(envelope.authorization())
+        .authenticate(super::bearer_only(envelope.authorization()))
         .map_err(|error| ApiError::from_status(Status::from(error), false))?;
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::not_found());

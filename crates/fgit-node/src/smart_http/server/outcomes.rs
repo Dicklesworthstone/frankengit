@@ -150,7 +150,7 @@ fn authenticate(
 ) -> Result<LoopbackReceiveSession, ApiError> {
     let grant = profile
         .credentials
-        .authenticate(envelope.authorization())
+        .authenticate(super::bearer_only(envelope.authorization()))
         .map_err(|error| ApiError::from_status(Status::from(error)))?;
     if request.repository_route.as_bytes() != profile.route {
         return Err(ApiError::new(Status::NotFound, "not_found"));

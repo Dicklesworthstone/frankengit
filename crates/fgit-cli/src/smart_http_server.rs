@@ -10,7 +10,7 @@ use std::time::Duration;
 use fgit_crypto::sha256_digest;
 use fgit_node::{
     GitDaemonReceiveProcessingTimeout, GitDaemonServerLimits, GitDaemonServerReceipt,
-    GitDaemonSessionTimeout, NodeConfig, OneNode,
+    GitDaemonSessionTimeout, HttpTrustedOrigin, NodeConfig, OneNode,
 };
 use fgit_types::{PrincipalId, RepositoryId, RepositoryIncarnationId, TenantId};
 
@@ -26,6 +26,7 @@ const USAGE: &str = "usage: fg serve-http <storage-root> <tenant-id> <repository
   [--continuous --stop-file <path>]
   [--processing-timeout-secs <1..3600>] [--receive-max-input-mib <1..1024>]
   [--receive-max-expanded-mib <1..1024>] [--pack-max-expanded-mib <1..1024>]
+  [--trusted-origin <origin>]
 
 Continuous mode has no lifetime request cap or idle retirement. It requires an
 initially absent stop file in an existing operator-owned directory. Create that
@@ -60,7 +61,12 @@ regular files on Unix (0600 or stricter), not symlinks. Atomically replace the
 table to rotate/revoke credentials without restarting. Already authenticated
 in-flight requests retain their bounded grant.
 
-Every request authenticates with a Bearer token or Basic token-as-password.
+Git requests authenticate with a Bearer token or Basic token-as-password; the
+native APIs accept only an explicit Bearer token. Any request other than GET or
+HEAD whose Origin or Sec-Fetch-Site names another site is refused with 403.
+--trusted-origin names one more origin to accept, exactly as a browser sends it
+(for example https://git.example.com): the public origin of the external TLS
+terminator in front of this listener.
 Stock Git pushes obtain a discovery-scoped retry URL. Native metadata mutations
 need a client-selected Idempotency-Key; reuse it only for the identical command.
 Rotation to a new token for the same principal preserves its retry identity.
@@ -220,6 +226,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     | "--receive-max-input-mib"
                     | "--receive-max-expanded-mib"
                     | "--pack-max-expanded-mib"
+                    | "--trusted-origin"
             )
         {
             return Err("unknown serve-http option".into());
@@ -337,6 +344,11 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             Some(bytes("--receive-max-expanded-mib")?),
         )
         .with_selected_pack_byte_envelope(bytes("--pack-max-expanded-mib")?);
+    if let Some(origin) = flags.get("--trusted-origin") {
+        config = config.with_http_trusted_origin(
+            HttpTrustedOrigin::try_new(origin).map_err(|refusal| refusal.to_string())?,
+        );
+    }
     if let Some(incarnation) = flags.get("--expected-incarnation") {
         config = config.with_expected_repository_incarnation(
             RepositoryIncarnationId::from_hex(incarnation)
@@ -621,6 +633,32 @@ mod tests {
             args.extend([flag.into(), value.into()]);
             assert!(parse(&args).is_err(), "{flag}");
         }
+    }
+    /// frankengit-root-doctrine-x2mv.4.31: the one trusted browser origin
+    /// reaches the node configuration only in exact form, and only once.
+    #[test]
+    fn a_trusted_origin_is_exact_single_and_off_by_default() {
+        assert_eq!(
+            parse(&arguments()).unwrap().config.http_trusted_origin(),
+            None
+        );
+        let mut args = arguments();
+        args.extend(["--trusted-origin".into(), "https://git.example.com".into()]);
+        let options = parse(&args).unwrap();
+        assert_eq!(
+            options
+                .config
+                .http_trusted_origin()
+                .map(HttpTrustedOrigin::as_str),
+            Some("https://git.example.com")
+        );
+        for refused in ["https://git.example.com/", "https://Git.example.com", "*"] {
+            let mut args = arguments();
+            args.extend(["--trusted-origin".into(), refused.into()]);
+            assert!(parse(&args).is_err(), "{refused}");
+        }
+        args.extend(["--trusted-origin".into(), "https://other.example".into()]);
+        assert!(parse(&args).is_err());
     }
     #[test]
     fn duplicate_flags_cannot_change_the_security_profile() {

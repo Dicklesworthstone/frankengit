@@ -161,6 +161,106 @@ impl Display for NodeSmartHttpRefusal {
     }
 }
 
+/// One browser origin, besides the listener's own, whose state-changing
+/// requests the HTTP gateway accepts: the public origin of an authenticated
+/// external TLS terminator in front of the loopback listener
+/// (frankengit-root-doctrine-x2mv.4.31).
+///
+/// The value is one exact serialized origin, as browsers send it: `http://` or
+/// `https://`, a lowercase host name, IPv4 or bracketed IPv6 literal, and a
+/// port only when it is not the scheme's default. Nothing is normalized, so a
+/// value no browser sends is refused here instead of silently never matching.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpTrustedOrigin(String);
+
+/// A trusted origin that is not one exact serialized browser origin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HttpTrustedOriginRefusal;
+
+impl Display for HttpTrustedOriginRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "a trusted origin is one exact browser origin: http(s)://host[:port], lowercase, \
+             with no path, user information or default port",
+        )
+    }
+}
+
+impl Error for HttpTrustedOriginRefusal {}
+
+impl HttpTrustedOrigin {
+    /// Accepts `origin` only in the exact form a browser serializes it.
+    ///
+    /// # Errors
+    ///
+    /// [`HttpTrustedOriginRefusal`] for anything else.
+    pub fn try_new(origin: &str) -> Result<Self, HttpTrustedOriginRefusal> {
+        let (authority, default_port) = if let Some(rest) = origin.strip_prefix("https://") {
+            (rest, "443")
+        } else if let Some(rest) = origin.strip_prefix("http://") {
+            (rest, "80")
+        } else {
+            return Err(HttpTrustedOriginRefusal);
+        };
+        let (host, port) = match authority.strip_prefix('[') {
+            Some(literal) => {
+                let (inside, rest) = literal.split_once(']').ok_or(HttpTrustedOriginRefusal)?;
+                if inside.is_empty()
+                    || !inside
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f' | b':' | b'.'))
+                {
+                    return Err(HttpTrustedOriginRefusal);
+                }
+                (&authority[..inside.len() + 2], rest.strip_prefix(':'))
+            }
+            None => {
+                let (host, port) = authority
+                    .split_once(':')
+                    .map_or((authority, None), |(host, port)| (host, Some(port)));
+                if host.is_empty()
+                    || host.starts_with(['.', '-'])
+                    || host.ends_with(['.', '-'])
+                    || !host
+                        .bytes()
+                        .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
+                {
+                    return Err(HttpTrustedOriginRefusal);
+                }
+                (host, port)
+            }
+        };
+        let rest = &authority[host.len()..];
+        let port_ok = match port {
+            None => rest.is_empty(),
+            Some(port) => {
+                rest.len() == port.len() + 1
+                    && port != default_port
+                    && !port.starts_with('0')
+                    && port.bytes().all(|byte| byte.is_ascii_digit())
+                    && port.parse::<u16>().is_ok()
+            }
+        };
+        if !port_ok || authority.len() > 255 {
+            return Err(HttpTrustedOriginRefusal);
+        }
+        Ok(Self(origin.to_owned()))
+    }
+
+    /// The serialized origin, exactly as a browser sends it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The origin's host and optional port, as a same-origin `Host` names it.
+    pub(crate) fn authority(&self) -> &str {
+        self.0
+            .split_once("://")
+            .map_or(self.0.as_str(), |(_, authority)| authority)
+    }
+}
+
 impl Error for NodeSmartHttpRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {

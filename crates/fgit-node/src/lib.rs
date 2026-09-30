@@ -132,7 +132,10 @@ mod merge_delivery;
 mod node_lanes;
 mod smart_http;
 mod termination;
-pub use smart_http::{NodeSmartHttpDiscovery, NodeSmartHttpRefusal, NodeSmartHttpUploadReceipt};
+pub use smart_http::{
+    HttpTrustedOrigin, HttpTrustedOriginRefusal, NodeSmartHttpDiscovery, NodeSmartHttpRefusal,
+    NodeSmartHttpUploadReceipt,
+};
 pub use termination::TerminationSignals;
 mod quarantine_validator;
 mod ssh;
@@ -6174,6 +6177,11 @@ pub struct NodeConfig {
     /// FG-043) replaces this with authenticated principals on the
     /// authenticated transports.
     git_daemon_receive_principal: Option<PrincipalId>,
+    /// The one browser origin, besides the HTTP listener's own, whose
+    /// state-changing requests the HTTP gateway accepts; `None` accepts only
+    /// the listener's own origins. Runtime-only deployment policy
+    /// (frankengit-root-doctrine-x2mv.4.31).
+    http_trusted_origin: Option<HttpTrustedOrigin>,
     /// Which cell this process is, for answers it serves.
     ///
     /// `frankengit-1egm`. Unset by default and typed as such: a deployment that
@@ -6219,6 +6227,7 @@ impl NodeConfig {
             git_daemon_session_work_scaling: GitDaemonSessionWorkScaling::DEFAULT,
             git_daemon_receive_limits: ReceiveLimits::default(),
             git_daemon_receive_principal: None,
+            http_trusted_origin: None,
         }
     }
 
@@ -6324,6 +6333,23 @@ impl NodeConfig {
     pub const fn with_serving_cell(mut self, serving_cell: ServingCell) -> Self {
         self.serving_cell = serving_cell;
         self
+    }
+
+    /// Accepts browser state changes from `origin` as well as from the HTTP
+    /// listener's own origins: the public origin of an authenticated external
+    /// TLS terminator in front of the loopback listener. Every other origin a
+    /// browser reports stays refused (frankengit-root-doctrine-x2mv.4.31).
+    #[must_use]
+    pub fn with_http_trusted_origin(mut self, origin: HttpTrustedOrigin) -> Self {
+        self.http_trusted_origin = Some(origin);
+        self
+    }
+
+    /// The browser origin, besides the listener's own, that the HTTP gateway
+    /// accepts state changes from, if any.
+    #[must_use]
+    pub const fn http_trusted_origin(&self) -> Option<&HttpTrustedOrigin> {
+        self.http_trusted_origin.as_ref()
     }
 
     /// Opens the git-daemon receive-pack lane, publishing as `principal`.

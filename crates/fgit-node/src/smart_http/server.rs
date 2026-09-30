@@ -2,8 +2,10 @@
 //!
 //! This is an explicit loopback capability profile, not organization/team IAM.
 //! Operators grant principals independent Git, issue, PR and outcome scopes
-//! through token credentials (Bearer or Basic token-as-password). TLS
-//! terminates outside this listener; forwarded
+//! through token credentials: Git routes take Bearer or Basic
+//! token-as-password, the native APIs take Bearer only. A state-changing
+//! request a browser reports as coming from another origin is refused before
+//! any route runs. TLS terminates outside this listener; forwarded
 //! headers never authenticate. Git RPCs stream to native machines; metadata
 //! forms have a separate small envelope. Outcome queries never mutate state.
 
@@ -17,7 +19,7 @@ mod source;
 mod stock_receive;
 
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -33,6 +35,7 @@ use fgit_wire::smart_http::{
 };
 
 use super::NodeSmartHttpRefusal;
+use crate::HttpTrustedOrigin;
 use crate::node_lanes::NodeLanes;
 use crate::{
     DeadlineTcpStream, GitDaemonServerLimits, GitDaemonServerReceipt, GitDaemonSessionDeadline,
@@ -106,8 +109,10 @@ impl OneNode {
     ///
     /// `credential_digest` is SHA-256 of an operator-provisioned 64-character
     /// lowercase hexadecimal bearer secret. It grants access ONLY to this
-    /// repository incarnation and principal. The same token can be supplied as
-    /// a Basic password through an ordinary Git credential helper. Basic
+    /// repository incarnation and principal. On Git routes the same token can
+    /// be supplied as a Basic password through an ordinary Git credential
+    /// helper; native API routes accept it only as an explicit Bearer token,
+    /// so a browser-cached Basic credential never reaches them. Basic
     /// usernames are nonempty UTF-8, at most 256 bytes, with no ASCII control
     /// characters; they never select a principal or grant additional scopes.
     /// Receive discovery and RPC are
@@ -595,6 +600,8 @@ enum Status {
     Timeout,
     RateLimited,
     Unavailable,
+    /// A state-changing request from another site (frankengit-root-doctrine-x2mv.4.31).
+    CrossSite,
 }
 impl Status {
     const fn line(self) -> &'static str {
@@ -613,6 +620,7 @@ impl Status {
             Self::Timeout => "408 Request Timeout",
             Self::RateLimited => "429 Too Many Requests",
             Self::Unavailable => "503 Service Unavailable",
+            Self::CrossSite => "403 Forbidden",
         }
     }
 }
@@ -818,6 +826,8 @@ fn write_error(writer: &mut impl Write, version: HttpVersion, status: Status) ->
     };
     let body = if status == Status::Unavailable {
         "repository operation unavailable; a push may already be committed; retry with the same Idempotency-Key\n"
+    } else if status == Status::CrossSite {
+        "cross-site request refused: its Origin (or Sec-Fetch-Site) is not this server; nothing was changed\n"
     } else {
         "Smart HTTP request refused\n"
     };
@@ -836,6 +846,96 @@ fn write_error(writer: &mut impl Write, version: HttpVersion, status: Status) ->
     writer.flush()
 }
 
+/// Whether a request is a cross-site state change to refuse before any route
+/// runs (frankengit-root-doctrine-x2mv.4.31).
+///
+/// GET and HEAD are never refused here; every other method must come from this
+/// listener's own origin whenever a browser says anything about its source:
+/// - `Sec-Fetch-Site`, when present, must be `same-origin` or `none` (a
+///   user-initiated navigation); `same-site` and `cross-site` are refused.
+/// - A serialized `Origin` must be one of this listener's own origins, or the
+///   operator's trusted origin (an external TLS terminator's public origin).
+/// - An opaque (`null`) or absent `Origin` is accepted only with a browser's
+///   `same-origin` statement, and then the target's own authority, the `Host`,
+///   must name this listener or the trusted origin. Fetch serializes `Origin: null` for a same-origin
+///   POST whose mode is not `cors` under `Referrer-Policy: no-referrer`, as the
+///   shell's history client sends; a DNS-rebinding page fails the Host check.
+/// - With neither header the client is not a browser (stock Git, `curl`) and
+///   authenticates explicitly; it is not refused here.
+///
+/// Own origins come from the accepted socket's local address and the
+/// operator's configuration, never from a request header, so no request can
+/// name itself as this server.
+fn refuses_cross_site(
+    envelope: &head::Envelope<'_>,
+    local: Option<SocketAddr>,
+    trusted: Option<&HttpTrustedOrigin>,
+) -> bool {
+    if matches!(envelope.method, "GET" | "HEAD") {
+        return false;
+    }
+    let site = envelope.sec_fetch_site;
+    if site.is_some_and(|site| {
+        !site.eq_ignore_ascii_case("same-origin") && !site.eq_ignore_ascii_case("none")
+    }) {
+        return true;
+    }
+    let listener = |authority: &str| local.is_some_and(|local| is_own_authority(authority, local));
+    let own = |authority: &str| {
+        listener(authority)
+            || trusted.is_some_and(|trusted| authority.eq_ignore_ascii_case(trusted.authority()))
+    };
+    match envelope.origin {
+        Some(origin) if origin != "null" => {
+            !(origin.strip_prefix("http://").is_some_and(listener)
+                || trusted.is_some_and(|trusted| origin.eq_ignore_ascii_case(trusted.as_str())))
+        }
+        _ if site.is_some_and(|site| site.eq_ignore_ascii_case("same-origin")) => {
+            !envelope.host.is_some_and(own)
+        }
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// Whether `authority` names this listener: its literal address and port, or
+/// `localhost` and the port for a loopback listener. Port 80 may be omitted,
+/// as browsers do for the default port. Host names compare case-insensitively.
+fn is_own_authority(authority: &str, local: SocketAddr) -> bool {
+    let port = local.port();
+    let address = match local.ip() {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    let loopback = local.ip().is_loopback().then_some("localhost");
+    let names = |name: &str| {
+        [Some(address.as_str()), loopback]
+            .into_iter()
+            .flatten()
+            .any(|host| name.eq_ignore_ascii_case(host))
+    };
+    authority
+        .rsplit_once(':')
+        .is_some_and(|(name, digits)| digits == port.to_string() && names(name))
+        || (port == 80 && names(authority))
+}
+
+/// The native API accepts only explicit Bearer credentials.
+///
+/// A browser caches Basic credentials after a Basic challenge (git routes
+/// issue one for credential helpers) and replays them automatically on
+/// same-origin requests, including cross-site form posts. The shipped browser
+/// shell always sends an explicit Bearer header, so refusing the Basic scheme
+/// here removes ambient credentials from every issue, pull request, source and
+/// outcome route (frankengit-root-doctrine-x2mv.4.31).
+pub(super) fn bearer_only(authorization: Option<&str>) -> Option<&str> {
+    authorization.filter(|value| {
+        value
+            .split_once(' ')
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+    })
+}
+
 fn serve_connection(
     mut stream: TcpStream,
     deadline: GitDaemonSessionDeadline,
@@ -844,6 +944,7 @@ fn serve_connection(
     if stream.set_nonblocking(false).is_err() {
         return false;
     }
+    let local = stream.local_addr().ok();
     let Ok(mut output) = stream.try_clone() else {
         return false;
     };
@@ -869,6 +970,9 @@ fn serve_connection(
         };
         let envelope = head::parse(&bytes, profile.http)?.ok_or(Status::BadRequest)?;
         version = envelope.version;
+        if refuses_cross_site(&envelope, local, profile.config.http_trusted_origin()) {
+            return Err(Status::CrossSite);
+        }
         if browser::serve(profile, &envelope, &bytes[envelope.consumed..], &mut writer)? {
             return Ok(());
         }
@@ -1226,6 +1330,7 @@ fn log_cleanup(error: &NodeRefusal) {
 mod tests {
     use super::super::ingress::BodyInput;
     use super::*;
+    use crate::HttpTrustedOriginRefusal;
     use fgit_crypto::sha256_digest;
     use fgit_types::{RepositoryId, TenantId};
     use fgit_wire::smart_http::BodyDecoder;
@@ -1545,5 +1650,287 @@ mod tests {
         assert!(head.contains(&format!("Content-Length: {}", body.len())));
         assert!(head.contains("WWW-Authenticate: Bearer"));
         assert!(!response.contains(&"a".repeat(64)));
+    }
+
+    /// Every refused cross-site shape has a near-identical permitted twin
+    /// (frankengit-root-doctrine-x2mv.4.31).
+    #[test]
+    fn cross_site_state_changes_are_refused_and_their_same_origin_twins_are_not() {
+        let refuses = |local: Option<SocketAddr>, method: &str, host: &str, headers: &str| {
+            let bytes = format!(
+                "{method} /repo.git/api/v1/issues/1/open HTTP/1.1\r\nHost: {host}\r\n{headers}\r\n"
+            );
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            refuses_cross_site(&envelope, local, None)
+        };
+        let local = Some(SocketAddr::from(([127, 0, 0, 1], 8123)));
+        let own = "127.0.0.1:8123";
+        for (method, host, headers) in [
+            ("POST", own, "Origin: http://evil.example\r\n"),
+            ("POST", own, "Origin: http://127.0.0.1:8124\r\n"),
+            ("POST", own, "Origin: https://127.0.0.1:8123\r\n"),
+            (
+                "POST",
+                own,
+                "Origin: http://127.0.0.1:8123.evil.example\r\n",
+            ),
+            (
+                "POST",
+                own,
+                "Origin: http://127.0.0.1.evil.example:8123\r\n",
+            ),
+            ("POST", own, "Origin: http://localhost:81234\r\n"),
+            ("POST", own, "Origin: null\r\n"),
+            ("POST", own, "Origin: null\r\nSec-Fetch-Site: none\r\n"),
+            ("POST", own, "Sec-Fetch-Site: cross-site\r\n"),
+            ("POST", own, "Sec-Fetch-Site: same-site\r\n"),
+            (
+                "POST",
+                own,
+                "Origin: http://127.0.0.1:8123\r\nSec-Fetch-Site: cross-site\r\n",
+            ),
+            // DNS rebinding: the browser's same-origin is the attacker's name.
+            (
+                "POST",
+                "evil.example:8123",
+                "Origin: null\r\nSec-Fetch-Site: same-origin\r\n",
+            ),
+            (
+                "POST",
+                "evil.example:8123",
+                "Origin: http://evil.example:8123\r\nSec-Fetch-Site: same-origin\r\n",
+            ),
+            ("PUT", own, "Origin: http://evil.example\r\n"),
+            ("DELETE", own, "Sec-Fetch-Site: cross-site\r\n"),
+        ] {
+            assert!(
+                refuses(local, method, host, headers),
+                "{method} {host} {headers}"
+            );
+        }
+        for (method, host, headers) in [
+            ("POST", own, "Origin: http://127.0.0.1:8123\r\n"),
+            ("POST", own, "Origin: http://localhost:8123\r\n"),
+            ("POST", own, "Origin: http://LocalHost:8123\r\n"),
+            (
+                "POST",
+                own,
+                "Origin: http://127.0.0.1:8123\r\nSec-Fetch-Site: same-origin\r\n",
+            ),
+            // The shell's history client: mode same-origin under no-referrer.
+            (
+                "POST",
+                own,
+                "Origin: null\r\nSec-Fetch-Site: same-origin\r\n",
+            ),
+            (
+                "POST",
+                "localhost:8123",
+                "Origin: null\r\nSec-Fetch-Site: same-origin\r\n",
+            ),
+            ("POST", own, "Sec-Fetch-Site: none\r\n"),
+            // Stock Git, curl and other non-browser clients.
+            ("POST", own, ""),
+            ("POST", "evil.example", ""),
+            // Reads are not refused here; they authenticate per route.
+            (
+                "GET",
+                own,
+                "Origin: http://evil.example\r\nSec-Fetch-Site: cross-site\r\n",
+            ),
+            ("HEAD", own, "Sec-Fetch-Site: cross-site\r\n"),
+        ] {
+            assert!(
+                !refuses(local, method, host, headers),
+                "{method} {host} {headers}"
+            );
+        }
+        let v6 = Some(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 8123)));
+        assert!(!refuses(
+            v6,
+            "POST",
+            "[::1]:8123",
+            "Origin: http://[::1]:8123\r\n"
+        ));
+        assert!(!refuses(
+            v6,
+            "POST",
+            "[::1]:8123",
+            "Origin: http://localhost:8123\r\n"
+        ));
+        assert!(refuses(
+            v6,
+            "POST",
+            "[::1]:8123",
+            "Origin: http://127.0.0.1:8123\r\n"
+        ));
+        let default_port = Some(SocketAddr::from(([127, 0, 0, 1], 80)));
+        for origin in [
+            "http://127.0.0.1",
+            "http://localhost",
+            "http://127.0.0.1:80",
+        ] {
+            let headers = format!("Origin: {origin}\r\n");
+            assert!(
+                !refuses(default_port, "POST", "127.0.0.1", &headers),
+                "{origin}"
+            );
+        }
+        assert!(refuses(
+            default_port,
+            "POST",
+            "127.0.0.1",
+            "Origin: http://127.0.0.1:8123\r\n"
+        ));
+        // Only a loopback listener answers to `localhost`.
+        let routable = Some(SocketAddr::from(([10, 1, 2, 3], 8123)));
+        assert!(refuses(
+            routable,
+            "POST",
+            own,
+            "Origin: http://localhost:8123\r\n"
+        ));
+        assert!(!refuses(
+            routable,
+            "POST",
+            own,
+            "Origin: http://10.1.2.3:8123\r\n"
+        ));
+        // An unknown local address names no origin, so any Origin is refused.
+        assert!(refuses(
+            None,
+            "POST",
+            own,
+            "Origin: http://127.0.0.1:8123\r\n"
+        ));
+        assert!(!refuses(None, "POST", own, ""));
+    }
+
+    /// An external TLS terminator's public origin is accepted only when the
+    /// operator names it, and only exactly (frankengit-root-doctrine-x2mv.4.31).
+    #[test]
+    fn a_trusted_origin_admits_exactly_that_origin_and_nothing_wider() {
+        let trusted = HttpTrustedOrigin::try_new("https://git.example.com").unwrap();
+        let local = Some(SocketAddr::from(([127, 0, 0, 1], 8123)));
+        let refuses = |trusted: Option<&HttpTrustedOrigin>, host: &str, headers: &str| {
+            let bytes = format!(
+                "POST /repo.git/api/v1/issues/1/open HTTP/1.1\r\nHost: {host}\r\n{headers}\r\n"
+            );
+            let envelope = head::parse(bytes.as_bytes(), HttpLimits::default())
+                .unwrap()
+                .unwrap();
+            refuses_cross_site(&envelope, local, trusted)
+        };
+        let proxied = "Origin: https://git.example.com\r\nSec-Fetch-Site: same-origin\r\n";
+        assert!(!refuses(Some(&trusted), "git.example.com", proxied));
+        assert!(refuses(None, "git.example.com", proxied));
+        // The same host over another scheme or port, or a sibling host, is not it.
+        for origin in [
+            "http://git.example.com",
+            "https://git.example.com:8443",
+            "https://evil.git.example.com",
+            "https://git.example.com.evil.example",
+        ] {
+            let headers = format!("Origin: {origin}\r\n");
+            assert!(
+                refuses(Some(&trusted), "git.example.com", &headers),
+                "{origin}"
+            );
+        }
+        // The shell's opaque-origin clients behind the terminator: Host names it.
+        let opaque = "Origin: null\r\nSec-Fetch-Site: same-origin\r\n";
+        assert!(!refuses(Some(&trusted), "git.example.com", opaque));
+        assert!(refuses(Some(&trusted), "evil.example", opaque));
+        assert!(refuses(None, "git.example.com", opaque));
+        // The listener's own origins stay accepted beside it.
+        assert!(!refuses(
+            Some(&trusted),
+            "127.0.0.1:8123",
+            "Origin: http://127.0.0.1:8123\r\n"
+        ));
+    }
+
+    #[test]
+    fn trusted_origins_are_exact_browser_serializations() {
+        for accepted in [
+            "https://git.example.com",
+            "http://git.example.com:8080",
+            "https://git.example.com:8443",
+            "http://127.0.0.1:9000",
+            "https://[::1]:8443",
+            "https://[2001:db8::1]",
+        ] {
+            let origin = HttpTrustedOrigin::try_new(accepted).unwrap();
+            assert_eq!(origin.as_str(), accepted);
+        }
+        assert_eq!(
+            HttpTrustedOrigin::try_new("https://[::1]:8443")
+                .unwrap()
+                .authority(),
+            "[::1]:8443"
+        );
+        for refused in [
+            "",
+            "git.example.com",
+            "ftp://git.example.com",
+            "https://",
+            "https://Git.Example.com",
+            "https://git.example.com/",
+            "https://git.example.com/path",
+            "https://git.example.com?x",
+            "https://user@git.example.com",
+            "https://git.example.com:443",
+            "http://git.example.com:80",
+            "https://git.example.com:",
+            "https://git.example.com:0",
+            "https://git.example.com:08443",
+            "https://git.example.com:65536",
+            "https://git.example.com:84:43",
+            "https://.git.example.com",
+            "https://git.example.com.",
+            "https://[::1",
+            "https://[]",
+            "https://[::1]x",
+            "https://[::g]",
+            "null",
+        ] {
+            assert_eq!(
+                HttpTrustedOrigin::try_new(refused),
+                Err(HttpTrustedOriginRefusal),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_site_refusal_is_a_typed_self_delimiting_403() {
+        let mut response = Vec::new();
+        write_error(&mut response, HttpVersion::Http11, Status::CrossSite).unwrap();
+        let response = String::from_utf8(response).unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+        assert!(head.contains(&format!("Content-Length: {}", body.len())));
+        assert!(!head.contains("WWW-Authenticate"));
+        assert!(body.starts_with("cross-site request refused"));
+    }
+
+    /// The native API never takes an ambient (browser-cached) Basic credential;
+    /// only an explicit Bearer header reaches its credential lookup.
+    #[test]
+    fn native_routes_take_only_bearer_credentials() {
+        for accepted in ["Bearer abc", "bearer abc", "BEARER abc"] {
+            assert_eq!(bearer_only(Some(accepted)), Some(accepted));
+        }
+        for refused in [
+            "Basic Z2l0OmFhYQ==",
+            "basic Z2l0OmFhYQ==",
+            "Bearerabc",
+            "Digest x",
+        ] {
+            assert_eq!(bearer_only(Some(refused)), None, "{refused}");
+        }
+        assert_eq!(bearer_only(None), None);
     }
 }

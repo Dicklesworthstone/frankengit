@@ -294,7 +294,9 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - service or agent uses sponsor/admin ambient token;
 - weak auth used for high-impact override;
 - replayed signed request;
-- capability serialized into logs/context/cache.
+- capability serialized into logs/context/cache;
+- cross-site request forgery: a page in the operator's browser sends a
+  state-changing request that rides an ambient, browser-cached credential.
 
 **Controls**
 
@@ -304,7 +306,13 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - brokered secrets/effects; no ambient sponsor token/cloud metadata;
 - idempotency/nonces according to protocol;
 - redaction and secret-taint tests;
-- high-impact dual/independent approval policy and immutable overrides.
+- high-impact dual/independent approval policy and immutable overrides;
+- a request other than GET/HEAD whose browser-reported Origin or
+  Sec-Fetch-Site names another origin is refused before any route runs; own
+  origins derive from the listener's socket and one exact operator-declared
+  origin (an external TLS terminator's), never from request headers; native
+  APIs accept only explicit Bearer credentials, never ambient Basic ones
+  (frankengit-root-doctrine-x2mv.4.31).
 
 ### 7.5a Account takeover and interactive authentication lifecycle
 
