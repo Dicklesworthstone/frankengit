@@ -642,3 +642,57 @@ paragraph called for. Deferred:
 - a planner that reuses stored deltas;
 - path-aware candidate order. The served source supplies `path_hash = 0` and
   `recency = 0`, so the window is ordered by object ID.
+
+### NEG-034 — thin-pack bases chosen by program length, measured by bytes written, mislead in both directions (frankengit-pazc)
+
+**Hypothesis.** When the client requests thin-pack, letting pack entries delta
+against same-path objects the client holds (REF_DELTA) should cut the FG-028c
+stale fetch (3 commits behind, 4 shifted 300k-line files) from about a clone's
+bytes to the size of its deltas.
+
+**What the measurement showed.** The matched harness (pinned git 2.54,
+protocol 1; egress = bytes the fetch added to the stale repository) gave:
+
+| build | pairing | "egress" | wire pack |
+|---|---|---|---|
+| b1ffbc90 | no thin | 931,928 B | ~932 KB |
+| e0caaddb | wanted tip only | 654,465 B | 1,668 B |
+| d1a45802 | every sent commit | 1,305,835 B | 1,841 B |
+
+The wire column comes from GIT_TRACE_PACKFILE and a raw pack dissection of
+the same fetch. The d1a45802 row made E2E-030 (fetch < clone) fail.
+
+**Why.** Two separate effects.
+1. The harness metric counted bytes written. Stock git completes a thin pack
+   with index-pack --fix-thin, which appends every base the pack names, whole,
+   to the stored pack: about 650 KB per blob base here. So bytes written track
+   the number of distinct client bases, not the transfer.
+   - The same effect inflates upstream git daemon's fetch number: 1,957,035 B,
+     three times its own clone.
+2. d1a45802 chose client bases by program length alone. A REF_DELTA entry also
+   carries the 20-byte base ID, so middle versions took thin deltas one byte
+   shorter than in-pack ones. Each such entry got larger on the wire, and each
+   named another base that the client then stored whole.
+
+**Consequence.**
+- The planner now compares effective length, program plus base ID. A client
+  base must beat the best in-pack choice by more than the ID, so middle
+  versions chain in-pack and only a path's chain root goes thin.
+- The driver records wire_pack_bytes, and the harness gates the transfer on it
+  with a declared bound (E2E-036).
+- E2E-030 stays on bytes written: a thin fetch's stored cost includes its
+  bases, whatever crossed the wire.
+- Measured after the fix, in the matched lane (pinned git 2.54, protocol 1,
+  5 samples per variant, exact across samples; fg 77a0c0f3 sha256 143350ca,
+  driver fb32c305):
+  - fg clone: 933,177 B on the wire, 935,871 B written, in both builds;
+  - fg fetch: 930,515 B on the wire before (99.7% of clone), 1,818 B after
+    (0.19%); written drops from 931,927 to 654,591 B;
+  - upstream git daemon for comparison: fetch 1,899 B on the wire, its
+    "1,957,034 B egress" being fix-thin bases; clone 639,823 B.
+  - E2E-036 (wire <= 10% of clone) fails on the b1ffbc90 binary and passes on
+    77a0c0f3; E2E-030 passes on 77a0c0f3.
+
+**Revisit conditions:** a planner that prices distinct client bases by the
+whole object the client must store, or a harness metric for client storage
+growth.

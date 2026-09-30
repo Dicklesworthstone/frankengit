@@ -170,11 +170,23 @@ have, and that is full-history and unfiltered, is written with the
   `thin-pack` keep the self-contained `git-pack-compressed-v3` pack, byte for
   byte.
 
-Measured in suites/transport/thin_fetch.sh (a 60,000-line file shifted by three
-lines): the one-commit fetch drops from about 254 KB, the size of a clone, to
-about 530 B, on protocols 0, 1 and 2 over `fg serve` and `fg serve-http`.
-Stock git completes the pack, and `fsck --strict` passes. That is one synthetic
-corpus, not a performance claim.
+A client base must beat the best in-pack choice by more than its REF_DELTA
+base ID. Each client base it names is one more object that stock git stores
+whole (`index-pack --fix-thin`), so middle versions chain in-pack and only a
+path's chain root goes thin (NEG-034).
+
+Measured:
+- suites/transport/thin_fetch.sh, a 60,000-line file shifted by three lines:
+  the one-commit fetch drops from about 254 KB, the size of a clone, to about
+  520 B, on protocols 0, 1 and 2 over `fg serve` and `fg serve-http`. Stock git
+  completes the pack, and `fsck --strict` passes.
+- The FG-028c matched harness, stale fetch 3 commits behind, received pack
+  (`wire_pack_bytes`): 930,515 B before (99.7% of the clone) and 1,818 B after
+  (0.19%), against upstream git daemon's 1,899 B. FG-028C-E2E-036 gates this at
+  10% of the clone. Bytes written to the client (`egress_bytes`) fall only to
+  654,591 B, because git stores the fetched pack's bases whole.
+
+These are two corpora, not a general performance claim.
 
 `fg serve` selects the receive envelope explicitly: `--session-timeout-secs`,
 `--session-secs-per-mib`, `--session-max-extension-secs`,
