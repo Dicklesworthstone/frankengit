@@ -448,6 +448,14 @@ fn every_cli_refusal_variant() -> Vec<(&'static str, CliRefusal, Cause)> {
             Cause::Causeless,
         ),
         (
+            "SampleObjectFormat",
+            CliRefusal::SampleObjectFormat {
+                repository: fgit_types::GitHashAlgorithm::Sha256,
+                sample: fgit_types::GitHashAlgorithm::Sha1,
+            },
+            Cause::Causeless,
+        ),
+        (
             "Tenant",
             CliRefusal::Tenant(type_refusal),
             Cause::CarriesSource,
