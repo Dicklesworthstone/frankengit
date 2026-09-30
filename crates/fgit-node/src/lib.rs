@@ -7036,6 +7036,12 @@ impl OneNode {
         self.repository_id
     }
 
+    /// Returns the repository's permanent native object format.
+    #[must_use]
+    pub const fn object_format(&self) -> GitHashAlgorithm {
+        self.object_format
+    }
+
     /// Returns the exact incarnation selected by the authenticated
     /// configuration body.
     #[must_use]

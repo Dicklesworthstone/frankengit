@@ -120,8 +120,18 @@ pub enum CliRefusal {
     RepositoryIncarnation(fgit_types::TypeRefusal),
     /// The supplied caller principal identity was not canonical lowercase hex.
     Principal(fgit_types::TypeRefusal),
-    /// The supplied doctor sample was not a native SHA-1 object identity.
+    /// The supplied doctor sample was not a canonical native object identity:
+    /// 40 lowercase hex digits (SHA-1) or 64 (SHA-256).
     Object(fgit_types::TypeRefusal),
+    /// The doctor sample names an object in the other hash domain than the
+    /// repository's own. SHA-1 and SHA-256 are typed domains and a sample is
+    /// never reinterpreted across them (frankengit-root-doctrine-x2mv.4.48).
+    SampleObjectFormat {
+        /// The repository's permanent object format.
+        repository: GitHashAlgorithm,
+        /// The object format the sample's width names.
+        sample: GitHashAlgorithm,
+    },
     /// Node initialization refused before a usable service existed.
     Node(fgit_node::NodeRefusal),
     /// A verified loose source could not become an authenticated source-import
@@ -258,6 +268,12 @@ impl Display for CliRefusal {
                 formatter,
                 "unsupported object format `{token}`: expected `sha1` or `sha256`"
             ),
+            Self::SampleObjectFormat { repository, sample } => write!(
+                formatter,
+                "doctor sample is a {} object identity but the repository's object format is {}",
+                sample.as_str(),
+                repository.as_str()
+            ),
             Self::Tenant(error)
             | Self::Repository(error)
             | Self::RepositoryIncarnation(error)
@@ -381,6 +397,7 @@ impl Error for CliRefusal {
             Self::AtCleanup { inspection, .. } => Some(inspection.as_ref()),
             Self::Usage
             | Self::UnsupportedObjectFormat(_)
+            | Self::SampleObjectFormat { .. }
             | Self::ExportDestination
             | Self::ExportDestinationExists(_)
             | Self::ImportRefused(_)
@@ -581,8 +598,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             run_doctor(storage_root, tenant, repository, None, None)
         }
         [command, storage_root, tenant, repository, sample] if command == "doctor" => {
-            let sample =
-                GitOid::from_hex(GitHashAlgorithm::Sha1, sample).map_err(CliRefusal::Object)?;
+            let sample = parse_doctor_sample(sample)?;
             run_doctor(storage_root, tenant, repository, Some(sample), None)
         }
         [command, storage_root, tenant, repository, flag, incarnation]
@@ -608,8 +624,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             flag,
             incarnation,
         ] if command == "doctor" && flag == "--expected-incarnation" => {
-            let sample =
-                GitOid::from_hex(GitHashAlgorithm::Sha1, sample).map_err(CliRefusal::Object)?;
+            let sample = parse_doctor_sample(sample)?;
             run_doctor(
                 storage_root,
                 tenant,
@@ -1260,6 +1275,19 @@ fn abort_staged_export(
     }
 }
 
+/// Parses a doctor sample by its own width: 64 hex digits name a SHA-256
+/// object, anything else is parsed as SHA-1, so non-canonical input is still
+/// refused before any storage is opened. Whether that format is the
+/// repository's is checked once the node is open (frankengit-root-doctrine-x2mv.4.48).
+fn parse_doctor_sample(sample: &str) -> Result<GitOid, CliRefusal> {
+    let format = if sample.len() == 64 {
+        GitHashAlgorithm::Sha256
+    } else {
+        GitHashAlgorithm::Sha1
+    };
+    GitOid::from_hex(format, sample).map_err(CliRefusal::Object)
+}
+
 fn run_doctor(
     storage_root: &str,
     tenant: &str,
@@ -1275,6 +1303,16 @@ fn run_doctor(
         resolution_input,
     )?)
     .map_err(CliRefusal::Node)?;
+    if let Some(sample) = sampled_object
+        && sample.algorithm() != node.object_format()
+    {
+        let refusal = CliRefusal::SampleObjectFormat {
+            repository: node.object_format(),
+            sample: sample.algorithm(),
+        };
+        node.shutdown().map_err(CliRefusal::Node)?;
+        return Err(refusal);
+    }
     let inspection = node.runtime().block_on(node.doctor(sampled_object));
     let cleanup = node.shutdown();
     match (inspection, cleanup) {
@@ -2188,6 +2226,60 @@ mod tests {
         assert!(matches!(run(&init), Ok(CliOutcome::Initialized(_))));
         let doctor = vec!["doctor".to_owned(), storage_root, tenant, repository];
         assert!(matches!(run(&doctor), Ok(CliOutcome::Doctor(_))));
+    }
+
+    /// A doctor sample is parsed in the repository's own hash domain
+    /// (frankengit-root-doctrine-x2mv.4.48). A same-width sample passes the
+    /// format check and reaches the node's object lookup: here it is refused
+    /// as a missing object, not as a format. The other width is the typed
+    /// hash-domain refusal, in both directions.
+    #[test]
+    fn doctor_parses_its_sample_in_the_repository_object_format() {
+        for (format, other) in [
+            (GitHashAlgorithm::Sha256, GitHashAlgorithm::Sha1),
+            (GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256),
+        ] {
+            let scratch = ScratchDirectory::new();
+            let storage_root = scratch.0.join("node").to_string_lossy().into_owned();
+            let tenant = "11".repeat(16);
+            let repository = "22".repeat(16);
+            let init = vec![
+                "init".to_owned(),
+                storage_root.clone(),
+                tenant.clone(),
+                repository.clone(),
+                format.as_str().to_owned(),
+            ];
+            assert!(matches!(run(&init), Ok(CliOutcome::Initialized(_))));
+            let doctor = |width: usize| {
+                run(&[
+                    "doctor".to_owned(),
+                    storage_root.clone(),
+                    tenant.clone(),
+                    repository.clone(),
+                    "ab".repeat(width),
+                ])
+            };
+            let own_width = if format == GitHashAlgorithm::Sha1 {
+                20
+            } else {
+                32
+            };
+            let other_width = if other == GitHashAlgorithm::Sha1 {
+                20
+            } else {
+                32
+            };
+            assert!(
+                matches!(doctor(own_width), Err(CliRefusal::Node(_))),
+                "a same-domain sample reaches the node's object lookup"
+            );
+            assert!(matches!(
+                doctor(other_width),
+                Err(CliRefusal::SampleObjectFormat { repository, sample })
+                    if repository == format && sample == other
+            ));
+        }
     }
 
     #[test]
