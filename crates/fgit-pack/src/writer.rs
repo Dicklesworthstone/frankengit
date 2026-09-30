@@ -410,6 +410,16 @@ impl PlannedDelta {
         }
     }
 
+    /// Program bytes plus the base ID a REF_DELTA entry also carries: the
+    /// length a client-held base must beat. An in-pack base's OFS distance is
+    /// a few bytes and is not counted, so in-pack comparisons are unchanged.
+    fn effective_len(&self) -> usize {
+        match self.base {
+            PlannedDeltaBase::Pack(_) => self.program.len(),
+            PlannedDeltaBase::Client(base) => self.program.len() + base.as_bytes().len(),
+        }
+    }
+
     /// Delta-chain depth recorded by the profile.
     #[must_use]
     pub const fn depth(&self) -> usize {
@@ -1395,9 +1405,16 @@ fn select_deltas(
                 DeltaSearch::PrefixSuffix => None,
                 DeltaSearch::IndexedBlocks => BaseDeltaIndex::build(&base.body, limits, deadline)?,
             };
-            let bound = selected.as_ref().map_or(object.body.len(), |current| {
-                current.program.len().min(object.body.len())
-            });
+            // A REF_DELTA also carries the base ID, and every client-held base
+            // it names is one more object stock git appends to the stored pack
+            // (index-pack --fix-thin). So a client base must beat the best
+            // choice so far, or the whole target, by more than that ID.
+            let bound = selected
+                .as_ref()
+                .map_or(object.body.len(), |current| {
+                    current.effective_len().min(object.body.len())
+                })
+                .saturating_sub(base.id.as_bytes().len());
             let Some(program) = make_delta_program(
                 &base.body,
                 &object.body,
@@ -1409,12 +1426,12 @@ fn select_deltas(
             else {
                 continue;
             };
-            // Strictly shorter only: among equal client-held bases the smaller
-            // base ID, visited first, keeps the choice.
-            if selected
-                .as_ref()
-                .is_none_or(|current| program.len() < current.program.len())
-            {
+            // `program` is below `bound`, so this is strictly shorter in
+            // effective length; among equal client-held bases the smaller base
+            // ID, visited first, keeps the choice.
+            if selected.as_ref().is_none_or(|current| {
+                program.len() + base.id.as_bytes().len() < current.effective_len()
+            }) {
                 selected = Some(PlannedDelta {
                     base: PlannedDeltaBase::Client(base.id),
                     depth: 1,
@@ -1442,7 +1459,7 @@ fn select_deltas(
             // ever emitted when shorter than its target. Anything at or over
             // this bound is irrelevant, so the search may stop proving it.
             let bound = selected.as_ref().map_or(object.body.len(), |current| {
-                current.program.len().min(object.body.len())
+                current.effective_len().min(object.body.len())
             });
             let Some(program) = make_delta_program(
                 &base.object.body,
@@ -1460,10 +1477,11 @@ fn select_deltas(
                 depth,
                 program,
             };
-            // An in-pack base wins an equal length against a client-held one.
+            // Compared by effective length; an in-pack base also wins an equal
+            // effective length against a client-held one.
             if selected.as_ref().is_none_or(|current| {
-                candidate.program.len() < current.program.len()
-                    || (candidate.program.len() == current.program.len()
+                candidate.program.len() < current.effective_len()
+                    || (candidate.program.len() == current.effective_len()
                         && current.base_index().is_none_or(|current_index| {
                             base_index > current_index
                                 || (base_index == current_index

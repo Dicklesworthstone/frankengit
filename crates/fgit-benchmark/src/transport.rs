@@ -764,7 +764,17 @@ impl BenchmarkWorkload for TransportWorkload {
         let (mut server, port) = self.spawn_server()?;
         let remote = format!("git://127.0.0.1:{port}{}", self.remote_path());
 
+        // The received pack itself, as it crossed the wire. The bytes the
+        // operation writes also count the base objects stock git appends when
+        // it completes a thin pack, which the server never sent.
+        let wire_trace = destination.with_file_name(format!(
+            "{}.wire.pack",
+            destination
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+        ));
         let mut transfer = self.config.git();
+        transfer.env("GIT_TRACE_PACKFILE", &wire_trace);
         transfer.arg("-c").arg("protocol.version=1");
         match self.config.operation {
             Operation::Clone => {
@@ -895,10 +905,22 @@ impl BenchmarkWorkload for TransportWorkload {
         // measuring nothing about the transfer. The before/after difference is
         // the one formula correct for both operations.
         //
-        // It is bytes WRITTEN, a slight over-count of bytes on the wire: it
-        // includes index and ref updates, which are tens of KB against MB of
-        // objects. Named as such rather than presented as exact wire bytes.
+        // It is bytes WRITTEN, an over-count of bytes on the wire: it includes
+        // index and ref updates, which are tens of KB against MB of objects,
+        // and for a thin pack every base object stock git appends to complete
+        // it, whole (frankengit-pazc: about 650 KB per base on FG-028c, against
+        // a wire pack under 2 KB). `wire_pack_bytes` is the wire measure.
         let bytes_after = directory_bytes(&git_dir(&destination));
+        let wire_pack_bytes = fs::metadata(&wire_trace)
+            .map(|metadata| metadata.len())
+            .map_err(|error| {
+                format!(
+                    "{} from {} left no received pack trace at {}: {error}",
+                    self.config.operation.as_str(),
+                    self.kind.as_str(),
+                    wire_trace.display()
+                )
+            })?;
         let egress_bytes = bytes_after.saturating_sub(bytes_before);
         if egress_bytes == 0 {
             return Err(format!(
@@ -933,6 +955,7 @@ impl BenchmarkWorkload for TransportWorkload {
             object_requests: 1,
             object_request_bytes: egress_bytes,
             egress_bytes,
+            wire_pack_bytes,
             // A clone is read-only: it commits no authority decision and
             // issues no compare-and-exchange. Both are genuinely zero, and the
             // artifact now renders the ratio as null rather than the 0 ppm a

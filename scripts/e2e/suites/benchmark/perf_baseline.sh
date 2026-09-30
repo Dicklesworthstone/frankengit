@@ -424,7 +424,11 @@ if [ "$OPERATION" = fetch ] || [ "$OPERATION" = matched ]; then
       # rather than of what the server sent -- measured: every arm reported
       # exactly 4,559,168 bytes, identical to the byte, which is what a
       # server-independent quantity looks like. With unpackLimit=1 the pack is
-      # stored as received and its size tracks the wire.
+      # stored as received and its size tracks the wire -- EXCEPT for a thin
+      # pack: index-pack --fix-thin appends every base it names, whole, so the
+      # stored pack counts objects the server never sent (frankengit-pazc).
+      # The driver therefore also records wire_pack_bytes, the received pack
+      # itself (GIT_TRACE_PACKFILE); E2E-036 gates on that.
       "$GIT_BIN" -C "$d" config fetch.unpackLimit 1
       "$GIT_BIN" -C "$d" config transfer.unpackLimit 1
       "$GIT_BIN" -C "$d" fetch -q --no-tags "$SRC" "$STALE_AT:refs/heads/main"
@@ -589,6 +593,9 @@ for pair in \
     "the artifact carries the $label metric family" \
     grep -qF "\"$field\"" "$ARTIFACT"
 done
+fge_assert_cmd FG-028C-E2E-107 \
+  'the artifact carries the received-pack wire metric (wire_pack_bytes)' \
+  grep -qF '"wire_pack_bytes"' "$ARTIFACT"
 
 # x7ja's transfer claims are numeric gates, not merely a promise that the
 # artifact will contain metric-shaped fields. A full clone must retain less
@@ -646,6 +653,26 @@ def candidates(path):
 clone,fetch=candidates(sys.argv[1]),candidates(sys.argv[2])
 expected=int(sys.argv[3])
 raise SystemExit(0 if len(clone)==expected and len(fetch)==expected and max(fetch) < min(clone) else 1)' "$ARTIFACT" "$FETCH_ARTIFACT" "$SAMPLES"
+  # E2E-030 compares bytes WRITTEN. Stock git completes a thin fetch by
+  # appending its bases to the stored pack, so bytes written cannot fall much
+  # below a whole new version however little crossed the wire. The fetch's
+  # transfer claim (frankengit-pazc) is therefore a separate, declared bound
+  # on the received pack. Measured on this corpus (3 behind, pinned git 2.54,
+  # protocol 1): before thin packs the fetch's wire pack was ~99.6% of the
+  # clone's; with them it is well under 1%. The bound leaves a wide margin on
+  # both sides.
+  THIN_FETCH_WIRE_MAX_PERCENT=10
+  fge_context thin_fetch_wire_max_percent "$THIN_FETCH_WIRE_MAX_PERCENT"
+  fge_assert_cmd FG-028C-E2E-036 \
+    "every matched stale-fetch candidate receives at most ${THIN_FETCH_WIRE_MAX_PERCENT}% of the smallest matched clone candidate's pack, on the wire" \
+    "$PYTHON_BIN" -c 'import json,sys
+def wire(path):
+    rows=[json.loads(line) for line in open(path)]
+    return [row["metrics"]["wire_pack_bytes"] for row in rows if row.get("kind")=="sample" and row.get("variant")=="candidate"]
+clone,fetch=wire(sys.argv[1]),wire(sys.argv[2])
+expected,limit=int(sys.argv[3]),int(sys.argv[4])
+raise SystemExit(0 if len(clone)==expected and len(fetch)==expected and min(clone) > 0
+                 and max(fetch) * 100 <= min(clone) * limit else 1)' "$ARTIFACT" "$FETCH_ARTIFACT" "$SAMPLES" "$THIN_FETCH_WIRE_MAX_PERCENT"
 elif [ "$OPERATION" = fetch ]; then
   fge_unsupported FG-028C-E2E-031 \
     'a standalone stale-fetch artifact has no matched clone comparator; use the default matched lane for the egress inequality'

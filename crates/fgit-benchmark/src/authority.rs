@@ -300,6 +300,8 @@ impl BenchmarkWorkload for AuthorityPublicationWorkload {
             object_requests: 0,
             object_request_bytes: 0,
             egress_bytes: 0,
+            // An authority publication transfers no pack.
+            wire_pack_bytes: 0,
             // Reported by the operation, not inferred: `indexed` is the count
             // of outcome entries the publication made canonical.
             decisions: u64::try_from(indexed).unwrap_or(u64::MAX),

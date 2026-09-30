@@ -354,8 +354,14 @@ pub struct SystemMetrics {
     pub object_requests: u64,
     /// Logical bytes requested from object storage.
     pub object_request_bytes: u64,
-    /// Egress bytes.
+    /// Egress bytes: what the operation added to the client repository.
     pub egress_bytes: u64,
+    /// Bytes of the pack the client received, as it crossed the wire
+    /// (`GIT_TRACE_PACKFILE`). Unlike [`Self::egress_bytes`], it excludes the
+    /// base objects stock git appends when it completes a thin pack
+    /// (`index-pack --fix-thin`), which a thin fetch never sent
+    /// (frankengit-pazc). Zero for operations that transfer no pack.
+    pub wire_pack_bytes: u64,
     /// Authority decisions committed per compare-and-exchange attempt.
     pub decisions: u64,
     /// Authority compare-and-exchange attempts.
@@ -826,7 +832,7 @@ fn raw_sample_json(sample: &RawSample) -> String {
     let metrics = sample.metrics;
     let storage = metrics.storage;
     format!(
-        "{{\"schema\":\"{ARTIFACT_SCHEMA}\",\"schema_version\":{ARTIFACT_SCHEMA_VERSION},\"kind\":\"sample\",\"variant\":\"{}\",\"sample_index\":{},\"metrics\":{{\"latency_ns\":{},\"cpu_ns\":{},\"memory_bytes\":{},\"object_requests\":{},\"object_request_bytes\":{},\"egress_bytes\":{},\"decisions\":{},\"cas_attempts\":{},\"decisions_per_cas_ppm\":{},\"storage\":{{\"canonical_bytes\":{},\"repair_bytes\":{},\"replica_bytes\":{},\"retained_derived_bytes\":{},\"logical_reachable_git_bytes\":{},\"amplification_ppm\":{}}}}},\"oracle\":\"{}\"}}",
+        "{{\"schema\":\"{ARTIFACT_SCHEMA}\",\"schema_version\":{ARTIFACT_SCHEMA_VERSION},\"kind\":\"sample\",\"variant\":\"{}\",\"sample_index\":{},\"metrics\":{{\"latency_ns\":{},\"cpu_ns\":{},\"memory_bytes\":{},\"object_requests\":{},\"object_request_bytes\":{},\"egress_bytes\":{},\"wire_pack_bytes\":{},\"decisions\":{},\"cas_attempts\":{},\"decisions_per_cas_ppm\":{},\"storage\":{{\"canonical_bytes\":{},\"repair_bytes\":{},\"replica_bytes\":{},\"retained_derived_bytes\":{},\"logical_reachable_git_bytes\":{},\"amplification_ppm\":{}}}}},\"oracle\":\"{}\"}}",
         sample.variant.as_str(),
         sample.sample_index,
         metrics.latency_ns,
@@ -835,6 +841,7 @@ fn raw_sample_json(sample: &RawSample) -> String {
         metrics.object_requests,
         metrics.object_request_bytes,
         metrics.egress_bytes,
+        metrics.wire_pack_bytes,
         metrics.decisions,
         metrics.cas_attempts,
         optional_number(metrics.decisions_per_cas_parts_per_million()),
