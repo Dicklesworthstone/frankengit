@@ -56,6 +56,15 @@ fn tree(entries: &[(&str, &str, GitOid)]) -> Vec<u8> {
     result
 }
 fn fixture(scratch: &Scratch, format: Format) -> (OneNode, GitOid) {
+    fixture_with_root_entry(scratch, format, None)
+}
+/// The search fixture, optionally with one more root-level file whose name
+/// sorts between `binary` and `link`.
+fn fixture_with_root_entry(
+    scratch: &Scratch,
+    format: Format,
+    extra: Option<&str>,
+) -> (OneNode, GitOid) {
     let root = scratch.0.join("source");
     fs::create_dir_all(root.join("refs/heads")).unwrap();
     fs::write(root.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
@@ -93,18 +102,14 @@ fn fixture(scratch: &Scratch, format: Format) -> (OneNode, GitOid) {
         "tree",
         &tree(&[("100644", "secret.rs", other)]),
     );
-    let root_tree = loose(
-        &root,
-        format,
-        GitObjectKind::Tree,
-        "tree",
-        &tree(&[
-            ("100644", "binary", binary),
-            ("120000", "link", link),
-            ("40000", "src", src),
-            ("40000", "src2", src2),
-        ]),
-    );
+    let mut entries = vec![("100644", "binary", binary)];
+    entries.extend(extra.map(|name| ("100644", name, other)));
+    entries.extend([
+        ("120000", "link", link),
+        ("40000", "src", src),
+        ("40000", "src2", src2),
+    ]);
+    let root_tree = loose(&root, format, GitObjectKind::Tree, "tree", &tree(&entries));
     let commit=loose(&root,format,GitObjectKind::Commit,"commit",format!(
         "tree {root_tree}\nauthor Test <test@example.invalid> 1 +0000\ncommitter Test <test@example.invalid> 1 +0000\n\nsearch source\n").as_bytes());
     fs::write(root.join("refs/heads/main"), format!("{commit}\n")).unwrap();
@@ -291,6 +296,65 @@ fn matching_limit_uses_lookahead_and_budget_errors_never_claim_absence() {
     assert!(result.matches.is_empty());
     assert_eq!(result.completion, SearchCompletion::Complete);
     node.shutdown().unwrap();
+}
+
+/// frankengit-mkgq acceptance 2: a root entry whose name is not a valid
+/// TreePath (here a control byte) makes a search a typed refusal, never a
+/// partial answer:
+/// - the unscoped local search (what `fg source search` runs) refuses while
+///   narrowing root scopes, with "unsupported source root path";
+/// - a prefix query and a capability-scoped search refuse while listing the
+///   base tree, with the exact path refusal: the listing parses every root
+///   child before filtering. So an unrepresentable sibling currently refuses
+///   an unrelated scope; making that scope searchable is frankengit-ltkt, not
+///   a claim here.
+///
+/// The near-identical tree without that entry searches normally on every path.
+#[test]
+fn a_root_entry_that_is_not_a_tree_path_refuses_the_search_and_its_twin_succeeds() {
+    use fgit_treefs::{BaseError, PathRefusal};
+    let listing = |result: &Result<SourceSearchReport, NodeWorkspaceRefusal>| {
+        matches!(
+            result,
+            Err(NodeWorkspaceRefusal::SourceSearch(error))
+                if matches!(&**error, SearchError::Base(base)
+                    if matches!(**base, BaseError::Path(PathRefusal::ControlByte { byte: 0x1b, .. })))
+        )
+    };
+    let unsupported = |result: &Result<SourceSearchReport, NodeWorkspaceRefusal>| {
+        matches!(
+            result,
+            Err(NodeWorkspaceRefusal::Object(ObjectSourceError::Refused { reason }))
+                if reason == "unsupported source root path"
+        )
+    };
+    let whole_scoped = |node: &OneNode, format: Format| match format {
+        Format::Sha1 => scoped::<Sha1>(node, &mut cap(node.repository_id()), &RefVisibility::new()),
+        Format::Sha256 => {
+            scoped::<Sha256>(node, &mut cap(node.repository_id()), &RefVisibility::new())
+        }
+    };
+    for format in [Format::Sha1, Format::Sha256] {
+        let scratch = Scratch::new();
+        let (node, _) = fixture_with_root_entry(&scratch, format, Some("e\u{1b}.rs"));
+        let whole = local(&node, &query(&[]), SearchLimits::default());
+        assert!(unsupported(&whole), "{whole:?}");
+        let narrowed = whole_scoped(&node, format);
+        assert!(listing(&narrowed), "{narrowed:?}");
+        let prefixed = local(&node, &query(&[b"src".to_vec()]), SearchLimits::default());
+        assert!(listing(&prefixed), "{prefixed:?}");
+        node.shutdown().unwrap();
+
+        let twin = Scratch::new();
+        let (node, _) = fixture(&twin, format);
+        let whole = local(&node, &query(&[]), SearchLimits::default());
+        assert!(whole.is_ok(), "{whole:?}");
+        let narrowed = whole_scoped(&node, format);
+        assert!(narrowed.is_ok(), "{narrowed:?}");
+        let prefixed = local(&node, &query(&[b"src".to_vec()]), SearchLimits::default());
+        assert!(prefixed.is_ok(), "{prefixed:?}");
+        node.shutdown().unwrap();
+    }
 }
 
 #[test]
