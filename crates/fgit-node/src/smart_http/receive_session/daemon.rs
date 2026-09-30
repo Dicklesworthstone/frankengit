@@ -13,8 +13,12 @@ use fgit_authority::IdempotencyKey;
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
 use fgit_git_object::ParseLimits;
 use fgit_pack::{PackBoundaryScanner, ScanStatus};
+use fgit_types::RefusalCode;
 use fgit_types::cell::admits_staging_intake;
-use fgit_wire::receive::{ReceiveError, ReceiveEvent, ReceivePack, advertise_receive_pack};
+use fgit_wire::receive::{
+    ReceiveCommandStatus, ReceiveError, ReceiveEvent, ReceiveLimits, ReceivePack, ReceiveRequest,
+    UnpackStatus, advertise_receive_pack, report_status,
+};
 use fgit_wire::{Packet, WireLimits, encode_packets};
 
 use super::super::{NodeSmartHttpRefusal, drive_request_while};
@@ -112,6 +116,40 @@ fn is_receive(
         Err(error) => Err(error),
         Ok(value) => restored.map(|()| value),
     }
+}
+
+/// The reason text for an authoritative handoff refusal that is a verdict on
+/// the commands of a fully received pack, or `None` when it is not one.
+///
+/// Such a verdict means the pack framed and unpacked, the commands were judged,
+/// and none was admitted, so upstream-compatible clients get report-status:
+/// `unpack ok` and one `ng <ref> <reason>` per command, as git-receive-pack
+/// reports a connectivity failure (frankengit-root-doctrine-x2mv.4.49).
+/// Framing, resource, authority and cancellation codes are not verdicts; they
+/// keep the fatal pre-admission path and never fabricate a per-ref rejection.
+fn command_verdict_phrase(code: RefusalCode) -> Option<&'static str> {
+    Some(match code {
+        RefusalCode::ObjectClosureIncomplete => "missing necessary objects",
+        RefusalCode::EvidenceInvalid | RefusalCode::EvidenceMissing => {
+            "object graph failed validation"
+        }
+        RefusalCode::NonFastForwardRefused => "non-fast-forward",
+        RefusalCode::RefNameInvalid => "invalid ref name",
+        RefusalCode::HashAlgorithmDomainMismatch => "object format mismatch",
+        _ => return None,
+    })
+}
+
+/// Report-status packets rejecting every command of `request` for `code`.
+fn command_verdict_report(
+    request: &ReceiveRequest,
+    code: RefusalCode,
+    limits: &ReceiveLimits,
+) -> Option<Result<Vec<Packet>, ReceiveError>> {
+    let phrase = command_verdict_phrase(code)?;
+    let message = format!("{phrase} ({code:?})").into_bytes();
+    let statuses = vec![ReceiveCommandStatus::Rejected { message }; request.commands.len()];
+    Some(report_status(request, UnpackStatus::Ok, &statuses, limits))
 }
 
 fn fatal(writer: &mut impl Write, admission_started: bool, limits: &WireLimits) -> io::Result<()> {
@@ -277,6 +315,7 @@ impl OneNode {
     {
         let mut admission_started = false;
         let mut final_attempted = false;
+        let mut verdict_reported = false;
         let result = (|| {
             let principal = principal.ok_or(NodeSmartHttpRefusal::UnauthenticatedReceive)?;
             shared_quota
@@ -416,7 +455,25 @@ impl OneNode {
                 .map_err(ReceiveError::AuthoritativeRefusal)?;
             let mut handoff =
                 ProductionReceiveQuarantineHandoff::new(validator, selected.basis().clone());
-            let completion = machine.finish_with_handoff(&mut handoff, &mut live)?;
+            let completion = match machine.finish_with_handoff(&mut handoff, &mut live) {
+                Err(ReceiveError::AuthoritativeRefusal(code)) => {
+                    // A verdict on the received commands is reported to the
+                    // client per ref; the refusal itself is still returned, so
+                    // the session counts as refused and nothing is admitted.
+                    if let Some(report) = command_verdict_report(&ready, code, &receive_limits) {
+                        let bytes = encode_packets(&report?, &receive_limits.wire)?;
+                        writer
+                            .write_all(&bytes)
+                            .map_err(|e| io_error("write guarded receive verdict", e))?;
+                        writer
+                            .flush()
+                            .map_err(|e| io_error("flush guarded receive verdict", e))?;
+                        verdict_reported = true;
+                    }
+                    return Err(ReceiveError::AuthoritativeRefusal(code).into());
+                }
+                completion => completion?,
+            };
             let validated = handoff.into_validated_receive()?;
             drop(machine);
             admission_started = true;
@@ -445,7 +502,7 @@ impl OneNode {
                 }),
             }
         })();
-        if result.is_err() && !final_attempted {
+        if result.is_err() && !final_attempted && !verdict_reported {
             writer.restart_deadline(GitDaemonSessionDeadline::new(
                 self.git_daemon_session_timeout,
                 GitDaemonSessionWorkScaling::FLAT,
@@ -485,6 +542,37 @@ impl OneNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Only verdicts on received commands become per-ref rejections; framing,
+    /// resource, authority and cancellation codes keep the fatal path
+    /// (frankengit-root-doctrine-x2mv.4.49).
+    #[test]
+    fn only_command_verdicts_become_per_ref_rejections() {
+        for code in [
+            RefusalCode::ObjectClosureIncomplete,
+            RefusalCode::EvidenceInvalid,
+            RefusalCode::EvidenceMissing,
+            RefusalCode::NonFastForwardRefused,
+            RefusalCode::RefNameInvalid,
+            RefusalCode::HashAlgorithmDomainMismatch,
+        ] {
+            assert!(command_verdict_phrase(code).is_some(), "{code:?}");
+        }
+        for code in [
+            RefusalCode::PackFramingInvalid,
+            RefusalCode::ObjectHeaderInvalid,
+            RefusalCode::ResourceBudgetExceeded,
+            RefusalCode::DecompressionBudgetExceeded,
+            RefusalCode::DeltaBudgetExceeded,
+            RefusalCode::CancellationInProgress,
+            RefusalCode::AuthorityReceiptStale,
+            RefusalCode::AuthorityReceiptInvalid,
+            RefusalCode::ThinPackBaseMissing,
+            RefusalCode::NativeObjectIdMismatch,
+        ] {
+            assert!(command_verdict_phrase(code).is_none(), "{code:?}");
+        }
+    }
+
     #[test]
     fn fatal_interruption_never_fabricates_per_ref_rejection() {
         let mut bytes = Vec::new();
