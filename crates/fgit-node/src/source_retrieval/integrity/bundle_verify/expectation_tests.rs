@@ -19,12 +19,12 @@ fn reference(name: &[u8]) -> RefName {
 fn pins(format: GitHashAlgorithm) -> Vec<(RefName, GitOid)> {
     let (tip, tag) = match format {
         GitHashAlgorithm::Sha1 => (
-            "169c83412c5359c442925c858c152e4e6e4ccab7",
+            "169c83412c53e9c442925c858c152e4e6e4ccab7",
             "d41d0e19dbf400550087de77204882a839a94538",
         ),
         GitHashAlgorithm::Sha256 => (
             "3873e80a26b3babd9c8c59f893eec320625602ff09c1882277226420078b4295",
-            "0d32f470555ee181ed19a7dfe0412716853a764a082d7a652924bfb651251ea5",
+            "0d32f470555ee181eda9a7dfe0412716853a764a082d7a652924bfb651251ea5",
         ),
     };
     let tip = GitOid::from_hex(format, tip).unwrap();
