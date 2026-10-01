@@ -141,6 +141,7 @@
 //! [`AuthorityStore`]: fgit_authority::AuthorityStore
 //! [`FsqliteAuthorityStore`]: crate::FsqliteAuthorityStore
 
+mod body_cache;
 mod classify;
 mod engine;
 mod envelope;
@@ -152,6 +153,7 @@ mod retry;
 mod schema;
 mod token;
 
+pub use crate::body_cache::BodyCacheStats;
 pub use crate::classify::{classify_franken_error, is_retryable_engine_error};
 pub use crate::engine::portable_store::multihead::{
     MAX_MULTI_HEADS, MultiHeadLimits, MultiHeadSnapshot, decode_multi_head_snapshot,

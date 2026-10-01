@@ -52,6 +52,7 @@ use fsqlite_types::cx::{Cx, cap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::body_cache::BodyCache;
 use crate::classify::classify_franken_error;
 use crate::interpret::{
     CasStep, DisambiguationRefusal, HeadInitStep, ObservedHead, PutStep, compare_stored_body,
@@ -222,6 +223,8 @@ pub struct FsqliteAuthorityStore {
     operations: OperationGate,
     instance: StoreInstanceId,
     limits: AuthorityLimits,
+    /// Write-once bodies already read or accepted; see [`BodyCache`].
+    bodies: BodyCache,
 }
 
 impl FsqliteAuthorityStore {
@@ -256,6 +259,7 @@ impl FsqliteAuthorityStore {
             operations: OperationGate::new(),
             instance,
             limits,
+            bodies: BodyCache::new(),
         };
         let instance = store.establish(cx, instance).await?;
         Ok(Self { instance, ..store })
@@ -600,6 +604,11 @@ impl FsqliteAuthorityStore {
                 if let Err(cause) = self.commit(cx, &mut lease).await {
                     return Err(self.rollback_after(cx, &mut lease, cause).await);
                 }
+                // Committed as these exact bytes, or already present as these
+                // exact bytes: either way they are the key's bytes for good.
+                if matches!(outcome, PutOutcome::Created | PutOutcome::IdenticalRetry) {
+                    self.bodies.insert(key.as_bytes(), body);
+                }
                 Ok(outcome)
             }
             Err(cause) => Err(self.rollback_after(cx, &mut lease, cause).await),
@@ -656,6 +665,12 @@ impl FsqliteAuthorityStore {
         }
     }
 
+    /// Hit and retention counters of this store's immutable-body cache.
+    #[must_use]
+    pub fn body_cache_stats(&self) -> crate::BodyCacheStats {
+        self.bodies.stats()
+    }
+
     /// Read one immutable body by exact key.
     ///
     /// # Errors
@@ -670,11 +685,20 @@ impl FsqliteAuthorityStore {
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
+        // The lease is still taken on a hit: it serializes the worker and
+        // carries cancellation and recovery, which a hit must not skip.
         let _lease = self.operation(cx).await?;
+        if let Some(body) = self.bodies.get(key.as_bytes()) {
+            return Ok(ImmutableRead::Present(body));
+        }
         let rows = self.query(cx, "body.read", &[blob(key.as_bytes())]).await?;
         match rows.first() {
             None => Ok(ImmutableRead::Absent),
-            Some(row) => Ok(ImmutableRead::Present(read_blob(row, 0)?.to_vec())),
+            Some(row) => {
+                let body = read_blob(row, 0)?;
+                self.bodies.insert(key.as_bytes(), body);
+                Ok(ImmutableRead::Present(body.to_vec()))
+            }
         }
     }
 
