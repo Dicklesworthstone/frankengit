@@ -804,3 +804,73 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# revision identity in every .git layout
+#
+# Every record names the revision it was taken at, and SHA-bound evidence is
+# normally produced from a verifier's `git worktree add` checkout. There `.git`
+# is a `gitdir:` file: HEAD sits in the worktree's own directory, and branch
+# refs and packed-refs sit in the common directory that `commondir` names. The
+# harness used to read only `<root>/.git/HEAD`, so every record from a
+# worktree said "unknown" (observed 2026-09-30 for x2mv.4.46's run at
+# 1fe12f4b). Each layout below is built by hand, because PORT-020 forbids the
+# harness from shelling out to git, and each has a near-identical twin that
+# must stay unknown.
+# ---------------------------------------------------------------------------
+fge_phase action
+rev_a=1111111111111111111111111111111111111111
+rev_b=2222222222222222222222222222222222222222
+rev_c=3333333333333333333333333333333333333333
+rev_d=4444444444444444444444444444444444444444
+revs=$work/revision-layouts
+mkdir -p "$revs/plain/.git/refs/heads" "$revs/common/.git/refs/heads" \
+  "$revs/common/.git/worktrees/detached" "$revs/common/.git/worktrees/branch" \
+  "$revs/common/.git/worktrees/packed" "$revs/detached" "$revs/branch" "$revs/packed" \
+  "$revs/relative" "$revs/common/.git/worktrees/relative" "$revs/malformed" "$revs/dangling"
+printf 'ref: refs/heads/main\n' >"$revs/plain/.git/HEAD"
+printf '%s\n' "$rev_a" >"$revs/plain/.git/refs/heads/main"
+# The common repository's own branch ref, and one ref only in packed-refs.
+printf '%s\n' "$rev_c" >"$revs/common/.git/refs/heads/topic"
+printf '# pack-refs with: peeled fully-peeled sorted\n%s refs/heads/packed-only\n^%s\n' \
+  "$rev_d" "$rev_a" >"$revs/common/.git/packed-refs"
+# Linked worktrees: detached, on a loose branch, on a packed branch, and one
+# whose gitdir is relative to the worktree root.
+printf '%s\n' "$rev_b" >"$revs/common/.git/worktrees/detached/HEAD"
+printf 'ref: refs/heads/topic\n' >"$revs/common/.git/worktrees/branch/HEAD"
+printf 'ref: refs/heads/packed-only\n' >"$revs/common/.git/worktrees/packed/HEAD"
+printf '%s\n' "$rev_b" >"$revs/common/.git/worktrees/relative/HEAD"
+for wt in detached branch packed relative; do
+  printf '../..\n' >"$revs/common/.git/worktrees/$wt/commondir"
+done
+for wt in detached branch packed; do
+  printf 'gitdir: %s\n' "$revs/common/.git/worktrees/$wt" >"$revs/$wt/.git"
+done
+printf 'gitdir: ../common/.git/worktrees/relative\n' >"$revs/relative/.git"
+# Twins that must not resolve: a .git file without the gitdir: prefix, and a
+# gitdir that names a directory which does not exist.
+printf '%s\n' "$revs/common/.git/worktrees/detached" >"$revs/malformed/.git"
+printf 'gitdir: %s\n' "$revs/common/.git/worktrees/missing" >"$revs/dangling/.git"
+
+rev_plain=$(fge__git_revision "$revs/plain")
+rev_detached=$(fge__git_revision "$revs/detached")
+rev_branch=$(fge__git_revision "$revs/branch")
+rev_packed=$(fge__git_revision "$revs/packed")
+rev_relative=$(fge__git_revision "$revs/relative")
+rev_malformed=$(fge__git_revision "$revs/malformed")
+rev_dangling=$(fge__git_revision "$revs/dangling")
+rev_absent=$(fge__git_revision "$revs")
+
+fge_phase assert
+fge_assert_eq FG-000A-PORT-051 "$rev_a" "$rev_plain" \
+  'a plain .git directory on a loose branch ref resolves to that ref'
+fge_assert_eq FG-000A-PORT-052 "$rev_b" "$rev_detached" \
+  'a linked worktree (.git is a gitdir: file) with a detached HEAD resolves to that commit'
+fge_assert_eq FG-000A-PORT-053 "$rev_c" "$rev_branch" \
+  'a linked worktree on a branch resolves the ref through its commondir, where branch refs live'
+fge_assert_eq FG-000A-PORT-054 "$rev_d" "$rev_packed" \
+  'a linked worktree on a branch that exists only in the common packed-refs resolves it, skipping peeled lines'
+fge_assert_eq FG-000A-PORT-055 "$rev_b" "$rev_relative" \
+  'a gitdir: path relative to the worktree root resolves'
+fge_assert_eq FG-000A-PORT-056 'unknown unknown unknown' "$rev_malformed $rev_dangling $rev_absent" \
+  'a .git file without gitdir:, a gitdir naming a missing directory, and no .git at all stay unknown'
+
+# ---------------------------------------------------------------------------

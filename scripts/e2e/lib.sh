@@ -1395,26 +1395,63 @@ fge__repo_root() {
   printf '%s' "${1:-$PWD}"
 }
 
+# The git directory of a work tree: `.git` itself, or the directory named by a
+# `gitdir:` file. A linked worktree (`git worktree add`, which is how verifiers
+# pin a revision) has the file form. Prints nothing and fails when neither
+# form is present.
+fge__git_dir() {
+  local root=$1 line
+  if [ -d "$root/.git" ]; then
+    printf '%s' "$root/.git"
+    return 0
+  fi
+  [ -f "$root/.git" ] && [ -r "$root/.git" ] || return 1
+  read -r line <"$root/.git" 2>/dev/null || line=''
+  case $line in
+    'gitdir: '?*) line=${line#gitdir: } ;;
+    *) return 1 ;;
+  esac
+  case $line in
+    /*) ;;
+    *) line=$root/$line ;;
+  esac
+  [ -d "$line" ] || return 1
+  printf '%s' "$line"
+}
+
 # Reads the revision from .git directly. Shelling out to `git` for a *test
 # harness identity field* would still be a subprocess invocation of foreign
 # Git in a repository whose constitution bans exactly that reflex, and a
 # 40-byte read is cheaper anyway.
 fge__git_revision() {
-  local root=$1 head ref l
-  [ -r "$root/.git/HEAD" ] || {
+  local root=$1 dir common head ref l d
+  dir=$(fge__git_dir "$root") && [ -r "$dir/HEAD" ] || {
     printf 'unknown'
     return 0
   }
-  read -r head <"$root/.git/HEAD" 2>/dev/null || head=''
+  # A linked worktree keeps its own HEAD, while branch refs and packed-refs
+  # live in the common directory that its `commondir` file names.
+  common=$dir
+  if [ -r "$dir/commondir" ]; then
+    read -r l <"$dir/commondir" 2>/dev/null || l=''
+    case $l in
+      '') ;;
+      /*) common=$l ;;
+      *) common=$dir/$l ;;
+    esac
+  fi
+  read -r head <"$dir/HEAD" 2>/dev/null || head=''
   case $head in
     'ref: '*)
       ref=${head#ref: }
-      if [ -r "$root/.git/$ref" ]; then
-        read -r l <"$root/.git/$ref" || l=''
-        printf '%s' "$l"
-        return 0
-      fi
-      if [ -r "$root/.git/packed-refs" ]; then
+      for d in "$dir" "$common"; do
+        if [ -r "$d/$ref" ]; then
+          read -r l <"$d/$ref" || l=''
+          printf '%s' "$l"
+          return 0
+        fi
+      done
+      if [ -r "$common/packed-refs" ]; then
         while IFS= read -r l; do
           case $l in
             '#'* | '^'*) continue ;;
@@ -1423,7 +1460,7 @@ fge__git_revision() {
             printf '%s' "${l%% *}"
             return 0
           fi
-        done <"$root/.git/packed-refs"
+        done <"$common/packed-refs"
       fi
       printf 'unknown'
       ;;
