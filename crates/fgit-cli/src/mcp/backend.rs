@@ -190,6 +190,9 @@ impl ReadTools for NodeTools {
         if self.options.source && name == search::NAME {
             return search::call(self, args);
         }
+        if self.options.source && name == search::BATCH_NAME {
+            return search::call_batch(self, args);
+        }
         if review::permitted(self.options.source, self.options.pulls, name) {
             return review::call(self, name, args);
         }

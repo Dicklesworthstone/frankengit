@@ -51,3 +51,35 @@ apply. At most 32 slash-bounded path prefixes may contain 16 KiB of decoded
 bytes in total. The adapter refuses responses exceeding 256 KiB of retained
 path/excerpt bytes or 1 MiB of encoded tool-result JSON rather than silently
 truncating them. Narrow `path_prefixes_hex` or `max_matches` after this refusal.
+
+## Shared-read batch retrieval
+
+`frankengit_source_search_batch` takes the same source selection, scope, pins and
+work limits, but replaces `needle_hex` with an ordered `needles_hex` array:
+
+```json
+{
+  "reference": "refs/heads/main",
+  "needles_hex": ["546f6f6c4572726f72", "536f757263655175657279", "546f6f6c4572726f72"],
+  "path_prefixes_hex": ["637261746573"],
+  "max_matches": 5
+}
+```
+
+This performs one native multi-needle scan, not several independently selected
+searches. All slots share one authority head, source RCR, commit and tree.
+File reads and byte budgets are shared; reported work counters are batch totals.
+The first and third duplicate needles intentionally keep separate result slots.
+
+Each entry in `results` carries `query_index`, `needle_hex`, `matches`,
+`match_count`, `complete` and `truncated_reason`. The index is an exact decimal
+string in input order. An absent needle remains a complete zero-match answer
+even when another needle hits its limit. Top-level `complete` is true only when
+every slot is complete. The profile is `literal-bytes-batch-v1`.
+
+A batch contains 1–32 needles. `max_matches` applies to each needle and defaults
+to 5. The requested needle count multiplied by `max_matches` must not exceed
+200. The 256 KiB retained path/excerpt budget and 1 MiB encoded-result ceiling
+apply to the whole batch, not separately to each slot. A failed source read,
+snapshot precondition, cancellation or aggregate budget refuses the whole
+operation; the adapter never returns whatever subset happened to finish first.

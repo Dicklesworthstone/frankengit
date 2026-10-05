@@ -1,5 +1,7 @@
 //! Operator-granted source retrieval over the node's single-snapshot reader.
 //! Query paths narrow the launch grant; they never mint authority or host access.
+mod batch;
+
 use super::*;
 use fgit_forge::source_browse::SourceBrowseError;
 use fgit_forge::source_search::{
@@ -10,6 +12,7 @@ use fgit_node::NodeWorkspaceRefusal;
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryId};
 
 pub(super) const NAME: &str = "frankengit_source_search";
+pub(super) const BATCH_NAME: &str = "frankengit_source_search_batch";
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
 const MAX_RETAINED_BYTES: usize = 256 * 1024;
 const MAX_MATCHES: usize = 100;
@@ -19,7 +22,11 @@ pub(super) fn tools() -> Vec<Tool> {
         name: NAME,
         description: "Search exact literal bytes in regular files of a visible ref. One authority snapshot; optional ASCII case folding and slash-bounded path prefixes. No regex, checkout, host paths, symlink following, or implicit binary exclusion. A match ceiling returns an explicitly incomplete prefix, not an exhaustive answer.",
         schema: input_schema(),
-    }]
+    }, batch::tool()]
+}
+
+pub(super) fn call_batch(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
+    batch::call(backend, args)
 }
 
 struct Selection {
@@ -272,7 +279,7 @@ fn render_matches(
             || found.byte_offset.checked_add(found.match_length).is_none_or(|n| n > limits.max_file_bytes)
             || !query.prefixes().is_empty() && !query.prefixes().iter().any(|p| {
                 let prefix = p.as_bytes();
-                found.path == prefix || found.path.strip_prefix(prefix).is_some_and(|tail| tail.starts_with(b"/"))
+                found.path.as_slice() == prefix || found.path.strip_prefix(prefix).is_some_and(|tail| tail.starts_with(b"/"))
             })
             || !matched.iter().zip(query.needle()).all(|(a, b)| match query.case() {
                 SearchCase::Exact => a == b,
@@ -281,7 +288,7 @@ fn render_matches(
         {
             return Err(invalid_report());
         }
-        *retained = retained.checked_add(found.path.len() + found.excerpt.len())
+        *retained = (*retained).checked_add(found.path.len() + found.excerpt.len())
             .filter(|n| *n <= MAX_RETAINED_BYTES)
             .ok_or(ToolError::failed("resource_limit"))?;
         values.push(object([

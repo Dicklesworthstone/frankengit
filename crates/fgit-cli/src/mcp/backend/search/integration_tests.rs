@@ -121,3 +121,75 @@ fn reopened_sha1_and_sha256_search_is_pinned_complete_and_read_only() {
         backend.close().unwrap();
     }
 }
+
+#[test]
+fn reopened_batch_shares_source_work_preserves_slots_and_enforces_read_grants() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (_scratch, mut backend) = open(format);
+        let single = backend.call(NAME, &request()).unwrap();
+        let single = single.object().unwrap();
+        let mut arguments = fields([
+            ("reference", text("refs/heads/main")),
+            ("needles_hex", Value::Array(vec![text(hex(b"MCP")), text(hex(b"absent")), text(hex(b"MCP"))])),
+            ("expected_head", single["snapshot_token"].clone()),
+            ("expected_commit", single["source_commit"].clone()),
+            ("max_matches", json::number(1)),
+        ]);
+        let mut server = Server::new(&backend).unwrap();
+        server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"batch-test","version":"1"}}}"#).unwrap();
+        server.receive(&mut backend, br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+        let message = object([
+            ("jsonrpc", text("2.0")), ("id", json::number(2)),
+            ("method", text("tools/call")),
+            ("params", object([
+                ("name", text(BATCH_NAME)),
+                ("arguments", Value::Object(arguments.clone())),
+            ])),
+        ]);
+        let response = server.receive(&mut backend, message.encode(8192).unwrap().as_bytes()).unwrap();
+        let batch = result(&response);
+        assert_eq!(batch["snapshot_token"], single["snapshot_token"]);
+        assert_eq!(batch["source_commit"], single["source_commit"]);
+        assert_eq!(batch["source_tree"], single["source_tree"]);
+        assert_eq!(batch["source_rcr"], single["source_rcr"]);
+        assert_eq!(batch["bytes_read"], single["bytes_read"]);
+        assert_eq!(batch["files_read"], single["files_read"]);
+        assert_eq!(batch["complete"], Value::Bool(false));
+        assert_eq!(batch["read_only"], Value::Bool(true));
+        let Value::Array(slots) = &batch["results"] else { unreachable!() };
+        assert_eq!(slots.len(), 3);
+        assert_eq!(slots[0].object().unwrap()["matches"], slots[2].object().unwrap()["matches"]);
+        assert_eq!(slots[0].object().unwrap()["complete"], Value::Bool(false));
+        assert_eq!(slots[1].object().unwrap()["complete"], Value::Bool(true));
+        assert_eq!(slots[1].object().unwrap()["match_count"].text(), Some("0"));
+        arguments.insert("max_matches".into(), json::number(5));
+        assert_eq!(backend.call(BATCH_NAME, &arguments).unwrap().object().unwrap()["complete"], Value::Bool(true));
+        let mut stale = arguments.clone();
+        stale.insert("expected_commit".into(), text("ab".repeat(format.digest_len())));
+        assert_eq!(backend.call(BATCH_NAME, &stale).unwrap_err().code, "source_commit_moved");
+        let mut exhausted = arguments.clone();
+        exhausted.insert("max_total_bytes".into(), json::number(1));
+        assert_eq!(backend.call(BATCH_NAME, &exhausted).unwrap_err().code, "resource_limit");
+        // Also cover the protocol's fixed registry cap under all launch grants.
+        backend.options.issues = true;
+        backend.options.pulls = true;
+        backend.options.writes.issues = true;
+        backend.options.writes.pulls = true;
+        backend.options.writes.source = true;
+        backend.options.writes.reviews = true;
+        backend.options.writes.merges = true;
+        backend.options.outcomes = true;
+        backend.options.principal = Some(PrincipalId::from_bytes([0xa3; 16]));
+        assert!(backend.options.validate_access().is_ok());
+        assert!(Server::new(&backend).is_ok());
+        assert!(!backend.is_mutation(NAME));
+        assert!(!backend.is_mutation(BATCH_NAME));
+        assert!(backend.call(BATCH_NAME, &arguments).is_ok(), "reads and errors must not publish");
+        // A source-write grant never implies the source-read grant.
+        backend.options.source = false;
+        assert!(backend.tools().iter().all(|tool| tool.name != NAME && tool.name != BATCH_NAME));
+        assert_eq!(backend.call(BATCH_NAME, &arguments).unwrap_err().code, "tool_not_granted");
+        assert_eq!(call_batch(&backend, &arguments).unwrap_err().code, "tool_not_granted");
+        backend.close().unwrap();
+    }
+}

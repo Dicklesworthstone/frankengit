@@ -213,7 +213,7 @@ fn failures_are_sanitized_not_empty_searches() {
 #[test]
 fn tool_schema_disallows_unknown_authority_fields() {
     let descriptors = tools();
-    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors.len(), 2);
     assert_eq!(descriptors[0].name, NAME);
     let schema = descriptors[0].schema.object().unwrap();
     assert_eq!(schema["additionalProperties"], Value::Bool(false));
