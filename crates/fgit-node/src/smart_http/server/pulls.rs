@@ -5,6 +5,7 @@
 mod checks;
 mod collaboration;
 mod diff;
+mod fast_forward;
 mod inspection;
 mod output;
 mod preparation;
@@ -62,9 +63,13 @@ pub(super) enum Request<'a> {
     Inspection(inspection::Request<'a>),
     Diff(diff::Request<'a>),
     Checks(checks::Request<'a>),
+    FastForward(fast_forward::Request<'a>),
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
+        if let Some(request) = fast_forward::Request::parse(envelope)? {
+            return Ok(Some(Self::FastForward(request)));
+        }
         if let Some(request) = checks::Request::parse(envelope)? {
             return Ok(Some(Self::Checks(request)));
         }
@@ -84,6 +89,7 @@ impl<'a> Request<'a> {
     }
     pub(super) fn is_mutation(&self) -> bool {
         match self {
+            Self::FastForward(_) => true,
             Self::Metadata(request) => request.is_mutation(),
             Self::Collaboration(request) => request.is_mutation(),
             Self::Preparation(_) | Self::Inspection(_) | Self::Diff(_) | Self::Checks(_) => false,
@@ -132,6 +138,9 @@ pub(super) fn authenticate(
         }
         Request::Collaboration(request) => {
             return collaboration::authenticate(request, envelope, raw_head, profile);
+        }
+        Request::FastForward(request) => {
+            return fast_forward::authenticate(request, envelope, raw_head, profile);
         }
         Request::Metadata(request) => request,
     };
@@ -200,6 +209,16 @@ pub(super) fn execute(
         )
         .map(Reply::Preparation),
         Request::Collaboration(request) => collaboration::execute(
+            node,
+            request,
+            session,
+            framing,
+            reader,
+            limits,
+            maximum_response,
+        )
+        .map(Reply::Json),
+        Request::FastForward(request) => fast_forward::execute(
             node,
             request,
             session,
