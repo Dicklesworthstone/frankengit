@@ -1,5 +1,6 @@
 //! Read-only source discovery and exact file bytes through the node boundary.
 mod options;
+mod archive;
 use super::merge_apply::preparation::{publish_new_bundle, require_absent};
 use super::publication_support::quote;
 use fgit_forge::source_browse::{
@@ -17,7 +18,7 @@ const MAX_EXPORT_PAGES: usize = 4096;
 const USAGE: &str = "usage: fg tree <storage-root> <tenant-id> <repository-id> --trusted-local
   (--ref <full-ref> | --ref-hex <bytes>) [--path <path> | --path-hex <bytes>]
   [--limit <1..1000>] [--after-hex <child-name> --expected-head <snapshot-token>]
-  [--expected-commit <native-oid>] [--object-format sha1|sha256]
+  [--expected-commit <native-oid>] [--object-format sha1|sha256] [--output <new.tar>]
 usage: fg show <storage-root> <tenant-id> <repository-id> --trusted-local
   (--ref <full-ref> | --ref-hex <bytes>) (--path <path> | --path-hex <bytes>)
   [--max-bytes <1..1048576>] [--offset <byte-offset> --expected-head <snapshot-token>]
@@ -31,6 +32,16 @@ payloads are data and never followed. Gitlinks list as opaque IDs, not local fil
 Use snapshot_token from the first page for every continuation. If authority moved,
 restart instead of combining pages. --expected-commit pins independently reviewed
 source identity; it does not select historical state or reveal hidden references.
+
+tree --output exports the COMPLETE selected directory as a deterministic ustar
+archive under source/, following all pages and file ranges under one source pin.
+It preserves regular/executable bytes and contained symlinks, never follows links,
+and represents gitlinks as empty directories without fetching submodules. Ustar
+name/prefix limits and relative link targets of at most 100 bytes apply; absolute
+links and parent traversal refuse. --after-hex is not allowed for a full archive.
+The archive is bounded to 128 MiB, 100000 entries, 64 levels and 200000 reads.
+Owner IDs and timestamps are zero; Git attributes and substitutions are not run.
+See docs/SOURCE_TREE_ARCHIVES.md for the precise profile and refusal boundaries.
 
 show --output exports the COMPLETE verified file as a new regular file, preserving
 binary bytes rather than writing a JSON page. It requires offset zero and follows
@@ -52,7 +63,11 @@ pub fn run(args: &[String], file: bool) -> Result<u8, String> {
     let (args, destination) = export_arguments(args, file)?;
     let options = options::parse(&args, file)?;
     if let Some(destination) = destination {
-        return export_file(&options, &destination);
+        return if file {
+            export_file(&options, &destination)
+        } else {
+            archive::export_tree(&options, &destination)
+        };
     }
     let mut node = OneNode::open_existing(
         NodeConfig::new(options.storage.clone(), options.tenant, options.repository)
@@ -88,8 +103,9 @@ fn export_arguments(args: &[String], file: bool) -> Result<(Vec<String>, Option<
         let flag = &args[cursor];
         cursor += 1;
         if flag == "--output" {
-            if !file || destination.is_some() {
-                return Err("--output is accepted exactly once, by show only".into());
+            if destination.is_some() {
+                let command = if file { "show" } else { "tree" };
+                return Err(format!("--output is accepted exactly once by {command}"));
             }
             let value = args.get(cursor).ok_or("missing --output path")?;
             cursor += 1;
@@ -468,7 +484,9 @@ mod export_tests {
         let (ordinary, target) = export_arguments(&input, true).unwrap();
         assert_eq!(ordinary[7], "--output");
         assert_eq!(target, Some(PathBuf::from("new.bin")));
-        assert!(export_arguments(&input, false).is_err());
+        let (tree_args, tree_target) = export_arguments(&input, false).unwrap();
+        assert_eq!(tree_target, Some(PathBuf::from("new.bin")));
+        assert!(options::parse(&tree_args, false).is_err(), "tree still rejects --max-bytes");
         input.extend(["--output".into(), "other.bin".into()]);
         assert!(export_arguments(&input, true).is_err());
     }
