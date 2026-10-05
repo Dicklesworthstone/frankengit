@@ -65,6 +65,67 @@ The MCP adapter constructs response values directly: its small hostile-input
 JSON parser is not reused for large output frames and its request bounds are
 not relaxed.
 
+## HTTP integration
+
+The same filtered feed is available at
+`GET <repository-url>/api/v1/events?after=0&limit=20` through `fg serve-http`.
+Use `--credentials-file` with `--allow-issues` and/or `--allow-pulls`. Those
+existing endpoint switches are ceilings, not grants: each request also needs
+`issues-read` and/or `pulls-read` on its Bearer credential. The response reports
+the intersection. Static Git tokens, source reads, metadata writes, reviews,
+merge and outcome-recovery permissions never substitute for either read scope.
+
+```text
+GET /repo.git/api/v1/events?after=12%3A0&limit=20 HTTP/1.1
+Host: 127.0.0.1:9419
+Authorization: Bearer <operator-provisioned-token>
+```
+
+Use the repository URL from the service's readiness receipt, not the example
+route. `after`, `limit` and optional `expected_head` are the only query fields.
+The handler rejects duplicate decoded fields, malformed decimal cursors,
+unknown parameters, request bodies, `Expect: 100-continue`, and Git protocol
+headers. The endpoint accepts GET only and advertises `Allow: GET` on 405.
+Unauthorized responses challenge Bearer only; cached browser Basic credentials
+are not accepted. Existing cross-site and connection-lifetime handling remains
+unchanged, and no CORS permission or TLS implementation is introduced.
+
+The HTTP and MCP response data are identical (JSON key order is irrelevant).
+Typed HTTP errors use `type: event_error`, `read_only: true`, and
+`outcome_unknown: false`; no event or request body is echoed in a refusal.
+Bad input is 400, missing credentials 401, insufficient scope 403, a mismatched
+repository route 404, a moved snapshot 409, and an output limit 413. Internal
+history/authority errors remain sanitized 503 failures, never empty success.
+Responses are length-delimited JSON with `Cache-Control: no-store`,
+`Vary: Authorization`, and `X-Content-Type-Options: nosniff`.
+
+Authentication, endpoint ceilings, request validation and read quota precede
+node leasing. Event reads share the existing expensive-source-read quota, not
+the mutation or outcome-recovery quota. They do not acquire a writer permit.
+The handler uses the existing bounded node pool and request/drain lifecycle;
+a successfully completed response returns its node to the pool, while a read or
+response failure closes that node. A failed output never causes a second,
+contradictory response or a publication retry. Credential tables are reloaded by
+the existing authentication boundary on each request, including after rotation.
+
+### Real-binary campaign
+
+```bash
+FG_BIN=/absolute/path/to/fg scripts/e2e/suites/forge/scoped_event_feed.sh
+```
+
+The discovered suite calls `scripts/e2e/scoped_events_smoke.py` and drives only
+the supplied prebuilt binary. For SHA-1 and SHA-256 it creates and retries native
+issue events, compares exact CLI/HTTP/MCP frames, walks hidden pages, checks
+independent credential grants and malformed-query refusals with permitted twins,
+restarts both transports, polls after an append, refuses an old snapshot pin,
+and checks every HTTP service's drain accounting. Commands and HTTP operations
+record their paths, durations, outcomes and retained transcripts; the shared
+harness emits `EVENT-FEED-001` through `EVENT-FEED-005` acceptance records.
+Missing tooling is a non-pass disposition, never a mock replacement. The
+campaign's issue-only fixture does not establish live PR hidden-ref filtering;
+that boundary has native unit cases and still needs a real-binary PR campaign.
+
 ## Implementation and verification boundary
 
 Owning bead: `frankengit-root-doctrine-x2mv.4.35`; plan §§24 and 31.
@@ -78,6 +139,11 @@ Authored tests cover exact cursors, independent grants, hidden-ref filtering, fi
 encoding, empty-page progression, byte-budget continuation, cancellation,
 malformed pages, deterministic output, canonical-frame parity, full tool-registry
 capacity, large response frames, and persisted SHA-1/SHA-256 restart/append.
-They are **not executed evidence** in the toolchain-less editing environment.
-Native compilation, rustfmt, Clippy, real-binary E2E and independent batch
-verification remain required.
+HTTP tests also cover per-request credential reload, endpoint ceilings, typed
+response headers, successful reads from persisted SHA-1/SHA-256 nodes, output
+failure followed by a safe retry, and response-bound refusal/permitted twins.
+These Rust tests and the real-binary campaign are **authored, not executed
+evidence** in the toolchain-less editing environment. Python syntax and shell
+syntax checks do not establish that the native server compiles or the campaign
+passes. Native compilation, rustfmt, Clippy, real-binary execution and independent
+batch verification remain required.
