@@ -196,6 +196,13 @@ export function rootFor(href, suffix = '/ui/pulls/') {
   if (!/^\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+$/.test(route) || route.split('/').some(part => part === '.' || part === '..')) fail('Invalid repository route.');
   return { origin: page.origin, route, api: `${page.origin}${route}/api/v1/` };
 }
+// Cancelling a WHATWG stream closes local reads synchronously, but its source's
+// cleanup promise need not settle. Initiate cleanup and observe rejection without
+// letting it mask a refusal or outlive the request deadline. This says nothing
+// about server-side commit: mutation outcome recovery still uses the original key.
+function cancelBody(body) {
+  if (body) void body.cancel().catch(() => {});
+}
 export async function readBytes(response, signal, maximum) {
   integer(maximum, 'response byte limit');
   const declared = response.headers.get('Content-Length');
@@ -208,10 +215,10 @@ export async function readBytes(response, signal, maximum) {
   const encoded = (response.headers.get('Content-Encoding') ?? '').split(',')
     .some(coding => coding.trim() !== '' && coding.trim().toLowerCase() !== 'identity');
   if (declared !== null && (!/^(0|[1-9][0-9]*)$/.test(declared) ||
-      (!encoded && BigInt(declared) > BigInt(maximum)))) { await response.body?.cancel(); fail('Response exceeds the browser byte limit.'); }
+      (!encoded && BigInt(declared) > BigInt(maximum)))) { cancelBody(response.body); fail('Response exceeds the browser byte limit.'); }
   if (!response.body) fail('Missing response body.');
   const reader = response.body.getReader(), chunks = []; let size = 0;
-  const cancel = () => { void reader.cancel().catch(() => {}); };
+  const cancel = () => cancelBody(reader);
   signal.addEventListener('abort', cancel, { once: true });
   try {
     while (true) {
@@ -225,7 +232,7 @@ export async function readBytes(response, signal, maximum) {
     const bytes = new Uint8Array(size); let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
     return bytes;
-  } finally { signal.removeEventListener('abort', cancel); await reader.cancel().catch(() => {}); reader.releaseLock(); }
+  } finally { signal.removeEventListener('abort', cancel); cancelBody(reader); reader.releaseLock(); }
 }
 export function json(bytes) { return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)); }
 export function apiError(status) {
@@ -366,7 +373,7 @@ export class Transport {
     } catch (error) { if (epoch === this.#epoch && error.status === 401) this.disconnect(); throw error; }
     finally {
       clearTimeout(timer); this.#all.delete(controller); this.#reads.delete(controller);
-      if (response?.body && !response.body.locked) await response.body.cancel().catch(() => {});
+      if (response?.body && !response.body.locked) cancelBody(response.body);
     }
   }
 }
