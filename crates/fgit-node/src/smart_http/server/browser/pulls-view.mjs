@@ -2,8 +2,8 @@
 // preparing, inspecting and displaying approvals never submits a mutation.
 import { PullClient } from './pulls.mjs';
 import { markdownBody } from './markdown.mjs';
-import { decimal, oid, unhex, fail } from './pulls-core.mjs';
-import { RECEIPT_LIMIT } from './pulls-actions.mjs';
+import { decimal, oid, unhex, fail, showReply } from './pulls-core.mjs';
+import { RECEIPT_LIMIT, fastForwardCommand } from './pulls-actions.mjs';
 import { ResolutionEditor } from './pulls-resolution-view.mjs';
 import { appendChecksPanel } from './pulls-checks.mjs';
 
@@ -82,6 +82,19 @@ function renderComparison(doc, parent, comparison, kind) {
   if (clipped) item(doc, parent, 'p', `DISPLAY CLIPPED: not every hunk or byte is shown. Download the full ${kind} JSON before completing review. All changed path labels remain above.`);
   return { clipped, shownHunks };
 }
+// The selected show() observation, not the editable metadata/candidate forms,
+// supplies every fast-forward coordinate. This is a proposal, not proof that
+// the source descends from the target or that current protection permits it.
+export function fastForwardProposal(observed, scope) {
+  if (!scope || !observed || observed.head === null || observed.head === undefined) fail('Load a repository-bound PR snapshot first.');
+  const selected = showReply(observed.reply, observed.reply?.number, { head: observed.head, scope });
+  const row = selected.reply.pull_request;
+  if (!row || row.state !== 'open' || !row.data) fail('Fast-forward requires an open PR with recorded metadata.');
+  return { number: row.number, fields: fastForwardCommand({ object_format: selected.binding.format,
+    pull_request_version: row.version, source_ref: row.data.source_ref, target_ref: row.data.target_ref,
+    source_tip: row.data.source_tip, target_tip: row.data.target_tip }) };
+}
+
 function downloader(doc) {
   const view = doc.defaultView, urls = new Set();
   view.addEventListener('pagehide', () => { for (const url of urls) view.URL.revokeObjectURL(url); urls.clear(); });
@@ -110,7 +123,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   const nodes = Object.fromEntries(IDS.map(id => { const el = doc.getElementById(id); if (!el) fail(`Missing UI element: ${id}`); return [id, el]; }));
   const client = new PullClient({ href, fetchImpl, cryptoImpl }), download = downloadImpl ?? downloader(doc);
   const resolution = new ResolutionEditor(doc, nodes['resolution-paths'], displayBytes);
-  let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null;
+  let operation = null, generation = 0, selected = null, listPage = null, reviewPage = null, fastForward = null;
   const number = (id, min = 0) => decimal(nodes[id].value, id, min);
   const status = message => { nodes.status.textContent = displayText(message); };
   const button = (parent, label, handler) => { const el = element(doc, 'button', label); el.type = 'button';
@@ -122,6 +135,8 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     nodes['metadata-stage'].disabled = !connected || busy || Boolean(pending);
     nodes['prepare-candidate'].disabled = !connected || busy || !selected?.row?.data || selected.row.state !== 'open' || selected.row.data.source_ref === null || selected.row.data.target_ref === null;
     nodes['reviews-load'].disabled = !connected || busy || !selected;
+    if (fastForward) fastForward.button.disabled = !connected || busy || Boolean(pending) ||
+      !fastForward.available || selected?.row !== fastForward.row || Boolean(selected?.stale);
     const resolving = Boolean(client.conflict);
     nodes.resolution.hidden = !resolving;
     nodes['resolve-candidate'].disabled = !connected || busy || !resolving;
@@ -141,7 +156,7 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
       'Only Send/Retry dispatches these exact bytes. Edits elsewhere do not change this request. An absent outcome is not proof of failure.') : 'No prepared mutation.';
   }
   function clearViews() {
-    selected = null; listPage = null; reviewPage = null; resolution.clear();
+    selected = null; listPage = null; reviewPage = null; fastForward = null; resolution.clear();
     for (const id of ['selected', 'snapshot', 'pr-list', 'list-paging', 'reviews', 'review-paging', 'candidate']) nodes[id].replaceChildren();
     for (const id of ['select-number', 'pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body',
       'policy-epoch', 'author', 'committer', 'timestamp', 'message', 'review-version', 'reason', 'required-reviewers']) nodes[id].value = '';
@@ -196,13 +211,31 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
     for (const id of ['pr-number', 'expected-version', 'source-ref', 'target-ref', 'source-tip', 'target-tip', 'title', 'body']) nodes[id].value = '';
   }
   function renderSelected(result) {
-    clearProposal();
+    clearProposal(); fastForward = null;
     const row = result.reply.pull_request; nodes.selected.replaceChildren(); nodes['reviews'].replaceChildren(); nodes['review-paging'].replaceChildren(); reviewPage = null;
     nodes.snapshot.textContent = `Selected snapshot: ${result.head}`;
     if (!row) { selected = null; item(doc, nodes.selected, 'p', 'This PR was not found or is not disclosed.'); return; }
     selected = { row, head: result.head, format: result.binding.format };
     item(doc, nodes.selected, 'h2', `#${row.number} · ${row.state} · ${row.data?.title ?? '(merge-only record)'}`);
     item(doc, nodes.selected, 'p', `PR version ${row.version}. Opener: ${row.opened_by ?? '(not recorded)'}`);
+    const mergePanel = element(doc, 'section'); mergePanel.id = 'fast-forward-panel';
+    item(doc, mergePanel, 'h3', 'Fast-forward merge');
+    item(doc, mergePanel, 'p', 'Publish the recorded source tip and mark this PR merged together, without creating a new commit. The node must verify ancestry, the exact PR version and both live branch tips, and current branch protection. No force or alternative merge method is attempted.');
+    let unavailable = null;
+    try { fastForwardProposal(result, client.binding); }
+    catch (error) { unavailable = error.message; }
+    const mergeReason = item(doc, mergePanel, 'p', unavailable ??
+      'Preparing only saves an exact request locally. Review it below, save a recovery copy, then explicitly confirm and Send/Retry. No candidate, reviewer list or policy assertion is supplied.');
+    const mergeButton = button(mergePanel, 'Prepare fast-forward merge', () => run('stage', async guard => {
+      if (selected?.row !== row || selected.stale) fail('Reload and select the intended PR before preparing this merge.');
+      const proposal = fastForwardProposal(result, client.binding);
+      await client.stageMetadata(proposal.number, 'fast-forward', proposal.fields); guard();
+      invalidateCandidate(); nodes.confirm.checked = false;
+      status('Fast-forward request prepared from the selected PR version and recorded branch tips, not the editable forms. Nothing sent. Inspect the saved request and explicitly confirm Send/Retry; divergence or protection will refuse without a fallback.');
+    }));
+    mergeButton.id = 'fast-forward-stage'; mergeButton.disabled = true;
+    fastForward = { row, button: mergeButton, reason: mergeReason, available: unavailable === null };
+    nodes.selected.append(mergePanel);
     appendChecksPanel(doc, nodes.selected, { client, observed: result, run,
       current: () => client.connected && selected?.row === row, status, displayText });
     if (row.data) {
@@ -276,7 +309,11 @@ export function mountPulls(doc, { href = doc.defaultView.location.href, fetchImp
   function downloadText(name, text) { download(name, text); }
   function renderTerminal(result) {
     nodes.confirm.checked = false; nodes.candidate.replaceChildren();
-    if (result.terminal) resolution.clear();
+    if (result.terminal) {
+      resolution.clear();
+      if (selected) selected.stale = true;
+      if (fastForward) fastForward.reason.textContent = 'A terminal decision was observed. Reload the PR explicitly before preparing another merge from current coordinates.';
+    }
     status(result.terminal ? `Canonical ${result.outcome}: transaction ${result.tx}${result.rcr ? `, record ${result.rcr}` : `, refusal ${result.refusal}`}. ` +
       'External delivery acknowledgement is not established. Reload PR state explicitly.'
       : `Outcome unknown (${result.state}). No request was reexecuted. Absence never proves non-commit; keep and reuse the original request.`);
