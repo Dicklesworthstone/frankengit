@@ -1,6 +1,7 @@
 //! Real node operations, not fixtures or a CLI subprocess. Grants and principal
 //! are fixed at launch; repository text never selects an admission identity.
 mod checks;
+mod events;
 mod history;
 mod issue_writes;
 mod issues;
@@ -132,6 +133,9 @@ impl ReadTools for NodeTools {
         if self.options.outcomes {
             tools.extend(outcomes::tools());
         }
+        if self.options.issues || self.options.pulls {
+            tools.push(events::tool());
+        }
         tools.extend(review::tools(self.options.source, self.options.pulls));
         if self.options.source {
             tools.extend(history::tools());
@@ -154,6 +158,9 @@ impl ReadTools for NodeTools {
                 == Some("refused")
     }
     fn call(&mut self, name: &str, args: &Object) -> Result<Value, ToolError> {
+        if name == events::NAME && (self.options.issues || self.options.pulls) {
+            return events::call(self, args);
+        }
         if self.options.writes.issues && issue_writes::is_tool(name) {
             return issue_writes::call(self, name, args);
         }

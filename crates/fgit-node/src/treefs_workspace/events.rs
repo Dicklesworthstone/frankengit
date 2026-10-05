@@ -1,4 +1,6 @@
 //! Repository-wide canonical forge event feed for local integrations.
+mod scoped;
+
 use super::workspace_request_live;
 use crate::{AdmissionMaterializationRefusal, NodeRequestContext, OneNode};
 use fgit_admission::merge::native::feed::{self, ForgeEventCursor, ForgeEventPage};
@@ -10,6 +12,10 @@ pub enum ForgeEventReadRefusal {
     InvalidLimit,
     InvalidCursor,
     SnapshotMoved,
+    NoReadScope,
+    ResponseLimit,
+    InvalidPage,
+    Cancelled,
     Cell(CellRefusal),
     Authority(Box<AdmissionMaterializationRefusal>),
     Admission(Box<fgit_admission::AdmissionError>),
