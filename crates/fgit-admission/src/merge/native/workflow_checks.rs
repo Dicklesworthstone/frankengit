@@ -152,6 +152,10 @@ where
 /// Read one immutable observation through an authenticated selected forge root.
 /// This proves what was recorded, not execution truth or permission to merge.
 /// The serving boundary must apply current source-ref visibility before disclosure.
+///
+/// Only the selected forge frontier and observation batch are read. Unrelated
+/// outbox bodies and delivery acknowledgements are not prerequisites for reading
+/// workflow evidence; they remain mandatory on the delivery/settlement path.
 pub async fn read_at<S, C>(
     store: &S,
     cx: &S::Context,
@@ -166,10 +170,13 @@ where
     if cancelled() {
         return Err(unavailable(RefusalCode::CancellationInProgress));
     }
-    let selected = delivery::read_in(store, cx, basis, cancelled).await?;
+    let positions = storage::load_forge_positions(store, cx, basis).await?;
+    if cancelled() {
+        return Err(unavailable(RefusalCode::CancellationInProgress));
+    }
     let aggregate = AggregateId::WorkflowCheck(id);
     let label = storage::aggregate_label(aggregate)?;
-    let Some(frontier) = selected.forge.entry(label) else {
+    let Some(frontier) = positions.entry(label) else {
         return Ok(None);
     };
     if frontier.successor_position() != 1 {
@@ -185,6 +192,9 @@ where
     if cancelled() {
         return Err(unavailable(RefusalCode::CancellationInProgress));
     }
+    // Removing full outbox replay must not remove validation of the selected
+    // stream's predecessor, event count, aggregate identity and event versions.
+    delivery::validate_position_batch(frontier, &batch)?;
     let mut matches = batch
         .events
         .into_iter()
@@ -206,3 +216,5 @@ where
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod read_isolation;
