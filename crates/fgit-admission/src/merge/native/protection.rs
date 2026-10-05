@@ -233,20 +233,7 @@ where
         if has_protected {
             // Evaluated through fg043 PolicySnapshot via evaluate_protection
             let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
-            let branch_strings: Vec<String> = policy
-                .branches
-                .iter()
-                .filter_map(|b| {
-                    std::str::from_utf8(b.name.as_bytes())
-                        .ok()
-                        .map(ToOwned::to_owned)
-                })
-                .collect();
-            let branch_refs: Vec<&str> = branch_strings.iter().map(String::as_str).collect();
-            let compiled = crate::policy_bridge::compile_protected_branch_rules(branch_refs)
-                .map_err(|_| {
-                    ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied)
-                })?;
+            let compiled = compile_direct_branches(policy.branches.iter().map(|b| &b.name))?;
             let id = source.pin(compiled);
             let verdict = crate::policy_bridge::evaluate_effects_protection(
                 &source,
@@ -266,6 +253,25 @@ where
     }
     live(cancelled).map_err(infrastructure)
 }
+/// Preserve every authority-selected branch when lowering into the text policy
+/// profile. RefName is byte-oriented: filtering or replacing invalid UTF-8 can
+/// turn an installed deny rule into the compiler's default allow. A profile
+/// that cannot represent a protected name must refuse, never erase that name.
+fn compile_direct_branches<'a>(
+    branches: impl IntoIterator<Item = &'a fgit_types::RefName>,
+) -> Result<fgit_policy::PolicySnapshot, ProjectionFailure> {
+    let names = branches
+        .into_iter()
+        .map(|name| {
+            std::str::from_utf8(name.as_bytes()).map_err(|_| {
+                ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::policy_bridge::compile_protected_branch_rules(names)
+        .map_err(|_| ProjectionFailure::Refuse(RefusalCode::ProtectedRefTransitionDenied))
+}
+
 /// Required on every production native merge validation attempt. Reuse the
 /// exact-candidate gate, including opener/submitter independence and withdrawals.
 /// The request seal remains unchanged: this is current repository policy, not a
@@ -364,4 +370,74 @@ where
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
     live(cancelled)
+}
+
+#[cfg(test)]
+mod direct_policy_tests {
+    use super::*;
+    use fgit_authority::{ExpectedOld, ProposedNew, RefCommand};
+    use fgit_types::{GitOid, GitOidSha1, RefName};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn non_utf8_protection_cannot_disappear_into_default_allow() {
+        let raw = RefName::try_new(b"refs/heads/non-utf8-\xff").unwrap();
+        let ordinary = RefName::try_new(b"refs/heads/main").unwrap();
+        for names in [vec![&raw], vec![&ordinary, &raw], vec![&raw, &ordinary]] {
+            assert!(matches!(
+                compile_direct_branches(names),
+                Err(ProjectionFailure::Refuse(
+                    RefusalCode::ProtectedRefTransitionDenied
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn representable_protection_retains_identity_and_exact_denials() {
+        let names = [
+            RefName::try_new(b"refs/heads/main").unwrap(),
+            RefName::try_new(b"refs/heads/release\"or\"true").unwrap(),
+        ];
+        let compiled = compile_direct_branches(&names).unwrap();
+        let expected = crate::policy_bridge::compile_protected_branch_rules([
+            "refs/heads/main",
+            "refs/heads/release\"or\"true",
+        ])
+        .unwrap();
+        assert_eq!(compiled.id(), expected.id());
+        let mut source = crate::policy_bridge::InMemoryPolicySnapshots::new();
+        let id = source.pin(compiled);
+        let old = GitOid::Sha1(GitOidSha1::from_bytes([1; 20]));
+        let new = GitOid::Sha1(GitOidSha1::from_bytes([2; 20]));
+        for (name, protected) in [
+            (names[0].clone(), true),
+            (names[1].clone(), true),
+            (RefName::try_new(b"refs/heads/topic").unwrap(), false),
+        ] {
+            for proposed_new in [ProposedNew::Update(new), ProposedNew::Delete] {
+                let commands = [RefCommand {
+                    name: name.clone(),
+                    expected_old: ExpectedOld::Exactly(old),
+                    proposed_new,
+                    force: false,
+                }];
+                let verdict = crate::policy_bridge::evaluate_receive_pack_protection(
+                    &source,
+                    &id,
+                    &crate::policy_bridge::SubjectCodeMap::default(),
+                    PrincipalId::from_bytes([7; 16]),
+                    crate::policy_bridge::default_principal_snapshot_id(),
+                    &BTreeMap::from([(name.clone(), old)]),
+                    &commands,
+                    fgit_policy::PolicyInstant::from_seconds(0),
+                )
+                .unwrap();
+                assert_eq!(
+                    verdict.refusal,
+                    protected.then_some(RefusalCode::ProtectedRefTransitionDenied)
+                );
+            }
+        }
+    }
 }
