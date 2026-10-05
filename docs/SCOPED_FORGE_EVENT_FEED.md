@@ -129,11 +129,14 @@ that boundary has native unit cases and still needs a real-binary PR campaign.
 ## Implementation and verification boundary
 
 Owning bead: `frankengit-root-doctrine-x2mv.4.35`; plan §§24 and 31.
-The shared node read uses one existing authenticated event-page selection and
-never creates a second event database or changes canonical schemas. It remains
-bounded **O(history)** replay (including existing authority materialization),
-not the bead's O(limit) indexed-read acceptance. Indexed event lookup and optional
-long-poll remain outstanding. This change does not close the bead.
+The shared node read uses one authenticated head for configuration, disclosure
+policy and event history, without materializing unrelated source/outbox state.
+Recent-cursor reads walk only the verified decision suffix through that cursor;
+initial reads and old-cursor backfills can still be **O(history)**. See
+[the cursor-read contract](FORGE_EVENT_CURSOR_READS.md) for required-body checks,
+work bounds and explicit non-claims. No second event database or canonical
+schema is added. Indexed O(limit) lookup and optional long-poll remain
+outstanding. These changes do not close the bead.
 
 Authored tests cover exact cursors, independent grants, hidden-ref filtering, filtering before
 encoding, empty-page progression, byte-budget continuation, cancellation,

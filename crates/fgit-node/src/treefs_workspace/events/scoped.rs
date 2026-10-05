@@ -4,7 +4,6 @@
 use super::{ForgeEventCursor, ForgeEventPage, ForgeEventReadRefusal, feed, workspace_request_live};
 use crate::{NodeRequestContext, OneNode};
 use fgit_codec::encode_body;
-use fgit_types::cell::{ReadMode, admits_read};
 use fgit_forge::event::ForgeEventPayload;
 use fgit_forge::{AggregateId, AggregateVersion, ForgeEvent};
 use fgit_types::{
@@ -116,7 +115,8 @@ impl ForgeEventReadRefusal {
             Self::NoReadScope => "events_not_granted",
             Self::ResponseLimit => "event_response_limit",
             Self::Cancelled => "event_read_cancelled",
-            Self::InvalidPage | Self::Cell(_) | Self::Authority(_) | Self::Admission(_) =>
+            Self::InvalidPage | Self::Cell(_) | Self::Authority(_) | Self::Admission(_)
+                | Self::Boundary(_) | Self::RepositoryBindingMismatch =>
                 "event_read_unavailable",
         }
     }
@@ -166,17 +166,12 @@ impl OneNode {
         if !(1..=100).contains(&limit) { return Err(ForgeEventReadRefusal::InvalidLimit); }
         let cursor = after.map(|(sequence, index)| ForgeEventCursor::new(sequence, index)
             .map_err(|_| ForgeEventReadRefusal::InvalidCursor)).transpose()?;
-        admits_read(self.cell_state(), ReadMode::Current).map_err(ForgeEventReadRefusal::Cell)?;
-        let selected = self.materialize_admission_in(request).await
-            .map_err(|error| ForgeEventReadRefusal::Authority(Box::new(error)))?;
-        if expected_head.is_some_and(|head| head != selected.basis().id()) {
-            return Err(ForgeEventReadRefusal::SnapshotMoved);
-        }
-        // Select events and the hidden-ref policy from this SAME materialization.
-        // A preliminary or subsequent independent head read would introduce a
-        // disclosure TOCTOU race between policy and the returned history.
+        let selected = self.event_read_basis_in(request, expected_head).await?;
+        // Events and hidden-ref policy share ONE authenticated head, without
+        // reconstructing source objects, refs, outbox or outcome projections.
+        // A separate policy head read would introduce a disclosure TOCTOU race.
         let page = feed::read_page_at(
-            &self.authority, request.authority(), selected.basis(), cursor, limit,
+            &self.authority, request.authority(), &selected.basis, cursor, limit,
             &|| !workspace_request_live(request),
         ).await.map_err(|error| ForgeEventReadRefusal::Admission(Box::new(error)))?;
         let mut result = ScopedForgeEventPage {
@@ -192,7 +187,7 @@ impl OneNode {
             resume_after: after,
         };
         project(&mut result, page, after, limit,
-            &|reference| selected.snapshot().hidden_refs.hides(reference),
+            &|reference| selected.hidden_refs.hides(reference),
             &|| !workspace_request_live(request))?;
         Ok(result)
     }

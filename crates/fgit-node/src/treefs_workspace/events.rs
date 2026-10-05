@@ -1,11 +1,12 @@
 //! Repository-wide canonical forge event feed for local integrations.
 mod scoped;
+mod selection;
 
 use super::workspace_request_live;
 use crate::{AdmissionMaterializationRefusal, NodeRequestContext, OneNode};
 use fgit_admission::merge::native::feed::{self, ForgeEventCursor, ForgeEventPage};
 use fgit_types::RepositoryAuthorityHeadId;
-use fgit_types::cell::{CellRefusal, ReadMode, admits_read};
+use fgit_types::cell::CellRefusal;
 
 #[derive(Debug)]
 pub enum ForgeEventReadRefusal {
@@ -18,6 +19,8 @@ pub enum ForgeEventReadRefusal {
     Cancelled,
     Cell(CellRefusal),
     Authority(Box<AdmissionMaterializationRefusal>),
+    Boundary(Box<fgit_authority::OutcomeFailure>),
+    RepositoryBindingMismatch,
     Admission(Box<fgit_admission::AdmissionError>),
 }
 impl std::fmt::Display for ForgeEventReadRefusal {
@@ -49,18 +52,11 @@ impl OneNode {
                     .map_err(|_| ForgeEventReadRefusal::InvalidCursor)
             })
             .transpose()?;
-        admits_read(self.cell_state(), ReadMode::Current).map_err(ForgeEventReadRefusal::Cell)?;
-        let selected = self
-            .materialize_admission_in(request)
-            .await
-            .map_err(|error| ForgeEventReadRefusal::Authority(Box::new(error)))?;
-        if expected_head.is_some_and(|head| head != selected.basis().id()) {
-            return Err(ForgeEventReadRefusal::SnapshotMoved);
-        }
+        let selected = self.event_read_basis_in(request, expected_head).await?;
         feed::read_page_at(
             &self.authority,
             request.authority(),
-            selected.basis(),
+            &selected.basis,
             after,
             limit,
             &|| !workspace_request_live(request),
