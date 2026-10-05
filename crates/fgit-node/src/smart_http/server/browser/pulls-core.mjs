@@ -233,6 +233,20 @@ export function apiError(status) {
     404: 'PR or repository unavailable.', 409: 'Subject or snapshot changed; refresh explicitly.', 429: 'Quota exceeded; retry after the server quota window.' })[status] ?? `API request failed (HTTP ${status}).`);
   error.status = status; return error;
 }
+// A terminal publication must carry the caller's original recovery key and
+// stay outside the cancellable-view lane. These are transport preconditions,
+// not authorization: the server still decides every command. Never synthesize
+// a key, resubmit a body during outcome lookup, or turn a read into a write.
+function requirePublicationEnvelope(path, method, body, key, read) {
+  const route = path.split('?', 1)[0];
+  const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
+    /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
+  const recovery = route === 'outcomes';
+  if ((publication || recovery) && (path !== route || method !== 'POST' || read !== false ||
+      typeof key !== 'string' || !key || (recovery ? body !== undefined : body === undefined))) {
+    fail('Publication and outcome recovery require an explicit POST, recovery key and non-read lifecycle.');
+  }
+}
 // Abort an old view without cancelling a submitted mutation; disconnect cancels
 // both but never erases the pending request's responsibility.
 export class Transport {
@@ -312,6 +326,7 @@ export class Transport {
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
       : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|prepare|resolve|inspect|merge|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
+    requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);
     const timer = setTimeout(() => controller.abort(), this.#timeout);
     const headers = { Authorization: `Bearer ${this.#token}`, Accept: this.#transfers && binary ? 'application/x-git-bundle' : binary ? 'multipart/mixed, application/json' : 'application/json' };
