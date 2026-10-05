@@ -1,6 +1,6 @@
 // Exact commands and terminal decisions. Transport errors never prove rollback.
 import { keys, record, integer, principal, opaque, text, oid, binding, subject, SUBJECT_FIELDS, metadataCommand,
-  matchSubject, form, utf8, fail, hex } from './pulls-core.mjs';
+  matchSubject, form, utf8, fail, hex, format, branch, reference } from './pulls-core.mjs';
 import { BUNDLE_LIMIT, multipart, checkedBundle, digest } from './pulls-candidate.mjs';
 export const RECEIPT_LIMIT = 24 * 1024 * 1024;
 export function collaborationCommand(action, fields) {
@@ -18,12 +18,26 @@ export function collaborationCommand(action, fields) {
   }
   form(result); return result;
 }
+// Fast-forward publishes an existing native tip. It has no constructed candidate,
+// review assertion, policy-epoch claim or bundle; the native engine checks gates.
+export function fastForwardCommand(fields) {
+  keys(fields, ['object_format', 'pull_request_version', 'source_ref', 'source_tip', 'target_ref', 'target_tip']);
+  const algorithm = format(fields.object_format);
+  const result = { object_format: algorithm,
+    pull_request_version: integer(fields.pull_request_version, 'PR version', 1, Number.MAX_SAFE_INTEGER - 1),
+    source_ref: branch(fields.source_ref), source_tip: oid(fields.source_tip, algorithm),
+    target_ref: branch(fields.target_ref), target_tip: oid(fields.target_tip, algorithm) };
+  if (result.source_ref === result.target_ref || result.source_tip === result.target_tip) fail('Fast-forward requires distinct branches and tips.');
+  if (form(result).length > 8192) fail('Fast-forward command exceeds 8 KiB.');
+  return result;
+}
 export function command(action, fields) {
+  if (action === 'fast-forward') return fastForwardCommand(fields);
   return ['open', 'update', 'close', 'reopen'].includes(action) ? metadataCommand(action, fields) : collaborationCommand(action, fields);
 }
 export function requestPath(number, action) {
   integer(number, 'PR number', 1);
-  if (!['open', 'update', 'close', 'reopen', 'approve', 'request-changes', 'withdraw', 'merge'].includes(action)) fail('Unknown action.');
+  if (!['open', 'update', 'close', 'reopen', 'approve', 'request-changes', 'withdraw', 'merge', 'fast-forward'].includes(action)) fail('Unknown action.');
   return `pulls/${number}/${['approve', 'request-changes', 'withdraw'].includes(action) ? `reviews/${action}` : action}`;
 }
 export function requestBody(action, fields, bundle, nonce) {
@@ -48,6 +62,15 @@ export function publication(reply, pending, status) {
   const metadata = ['open', 'update', 'close', 'reopen'].includes(pending.action);
   if (metadata) {
     if (reply.type !== 'pull_request_publication' || reply.number !== pending.number || reply.expected_version !== pending.fields.expected_version) fail('Wrong terminal PR command.');
+  } else if (pending.action === 'fast-forward') {
+    const fields = pending.fields;
+    if (reply.type !== 'fast_forward_merge_publication' || reply.number !== pending.number ||
+        reply.pull_request_version !== fields.pull_request_version) fail('Wrong terminal fast-forward command.');
+    for (const side of ['source', 'target']) {
+      reference(reply, `${side}_ref`);
+      if (reply[`${side}_ref`] !== fields[`${side}_ref`] ||
+          oid(reply[`${side}_tip`], fields.object_format) !== fields[`${side}_tip`]) fail('Terminal fast-forward coordinates changed.');
+    }
   } else {
     const merge = pending.action === 'merge', fields = pending.fields;
     if (reply.type !== (merge ? 'reviewed_merge_publication' : 'candidate_review_publication') || reply.review_expected_version !== (merge ? null : fields.expected_version)) fail('Wrong review/merge terminal command.');

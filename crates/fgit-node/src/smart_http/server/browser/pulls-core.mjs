@@ -163,7 +163,7 @@ export function reviewsReply(reply, number, { after = null, limit = 20, head = n
     text(row.reason, 64 * 1024, 'review reason');
     if (row.freshness === 'current' && (row.subject.pull_request_version !== reply.pull_request_version || row.subject.policy_epoch !== reply.policy_epoch || row.decision === 'withdraw')) fail('Inconsistent review freshness.');
   }
-  if (reply.next_after !== null && (reply.reviews.length !== limit || reply.next_after !== previous)) fail('Invalid review continuation.');
+  if (reply.next_after !== null && (reply.reviews.length !== limit || reply.reviews.at(-1).reviewer !== reply.next_after)) fail('Invalid review continuation.');
   return { ...selected, reply };
 }
 export function form(fields) {
@@ -246,7 +246,7 @@ export function apiError(status) {
 // a key, resubmit a body during outcome lookup, or turn a read into a write.
 function requirePublicationEnvelope(path, method, body, key, read) {
   const route = path.split('?', 1)[0];
-  const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
+  const publication = /^pulls\/[1-9][0-9]*\/(?:open|update|close|reopen|merge|fast-forward|reviews\/(?:approve|request-changes|withdraw))$/.test(route) ||
     /^source\/(?:apply|initial\/apply|rebase\/apply|branches\/(?:create|update|delete|rename)|bundle\/(?:import|fetch)|tags\/(?:lightweight|annotated|delete))$/.test(route);
   const recovery = route === 'outcomes';
   if ((publication || recovery) && (path !== route || method !== 'POST' || read !== false ||
@@ -331,7 +331,7 @@ export class Transport {
       ? /^(?:source\/initial\/(?:prepare|apply)|outcomes)$/.test(path)
       : this.#source
       ? /^(?:source\/(?:tree|blob|prepare|inspect|apply)|outcomes)$/.test(path)
-      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|prepare|resolve|inspect|merge|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
+      : /^(pulls(?:\/[1-9][0-9]*(?:\/(?:open|update|close|reopen|diff|checks|prepare|resolve|inspect|merge|fast-forward|reviews(?:\/(?:approve|request-changes|withdraw))?))?)?(?:\?[^#]*)?|outcomes)$/.test(path);
     if (!allowed || url.origin !== this.root.origin || !url.pathname.startsWith(`${this.root.route}/api/v1/`)) fail('Invalid API route.');
     requirePublicationEnvelope(path, method, body, key, read);
     const epoch = this.#epoch, controller = new AbortController(); this.#all.add(controller); if (read) this.#reads.add(controller);

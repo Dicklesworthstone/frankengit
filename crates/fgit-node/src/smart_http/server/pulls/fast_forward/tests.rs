@@ -28,12 +28,12 @@ fn exact_coordinates_are_preserved_in_both_native_hash_domains() {
         assert_eq!(command.source_ref.as_bytes(), b"refs/heads/topic");
         assert_eq!(command.target_ref.as_bytes(), b"refs/heads/main");
         assert_eq!(
-            command.source_tip.to_string(),
-            "a".repeat(format.digest_len() * 2)
+            command.source_tip,
+            GitOid::from_hex(format, &"a".repeat(format.digest_len() * 2)).unwrap()
         );
         assert_eq!(
-            command.target_tip.to_string(),
-            "b".repeat(format.digest_len() * 2)
+            command.target_tip,
+            GitOid::from_hex(format, &"b".repeat(format.digest_len() * 2)).unwrap()
         );
     }
 }
