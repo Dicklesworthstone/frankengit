@@ -12,6 +12,7 @@ mod pull_writes;
 mod pulls;
 mod review;
 mod review_writes;
+mod search;
 mod source;
 mod source_writes;
 use super::Options;
@@ -111,6 +112,7 @@ impl ReadTools for NodeTools {
         }
         if self.options.source {
             tools.extend(source::tools());
+            tools.extend(search::tools());
         }
         if self.options.writes.issues {
             tools.extend(issue_writes::tools());
@@ -184,6 +186,9 @@ impl ReadTools for NodeTools {
             && matches!(name, "frankengit_source_tree" | "frankengit_source_blob")
         {
             return source::call(self, name, args);
+        }
+        if self.options.source && name == search::NAME {
+            return search::call(self, args);
         }
         if review::permitted(self.options.source, self.options.pulls, name) {
             return review::call(self, name, args);
