@@ -4,13 +4,13 @@
 use super::{storage, unavailable};
 use crate::AdmissionError;
 use fgit_authority::AsyncAuthorityStore;
-use fgit_chronicle::{PublicationBasis, verify_pair};
-use fgit_codec::{CryptoBodyIdentity, encode_body};
+use fgit_chronicle::PublicationBasis;
+use fgit_codec::encode_body;
 use fgit_forge::ForgeEvent;
 use fgit_types::{Digest, PolicyEpoch, RefusalCode, RepositoryAuthorityHeadId, TxId};
 
-const MAX_HISTORY_BATCHES: usize = 4096;
-const MAX_HISTORY_RECORDS: usize = 65_536;
+mod history;
+
 const MAX_PAGE: u16 = 100;
 const MAX_PAGE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -46,7 +46,7 @@ pub struct ForgeEventPage {
     pub next_after: Option<ForgeEventCursor>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Record {
     sequence: u64,
     tx_id: TxId,
@@ -87,6 +87,9 @@ const fn charge_page_bytes(total: &mut usize, next: usize) -> Result<bool, Admis
 /// sequence never rewinds. Callers that need one frozen page set separately pin
 /// `source_head` at the node boundary. A cursor must name an event that exists in
 /// the selected history; arbitrary sequence numbers are never treated as offsets.
+/// Cursor reads verify the linked suffix through the cursor's batch, not the
+/// unrelated prefix before it. Initial reads still verify back to genesis.
+/// This is not a repository integrity scan or an indexed random-access API.
 pub async fn read_page_at<S, C>(
     store: &S,
     cx: &S::Context,
@@ -105,66 +108,20 @@ where
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
     let repository = basis.body().repository_id;
-    let mut successor = basis.body().clone();
-    let mut reverse = Vec::<Record>::new();
-    let mut batches = 0usize;
-    let mut records = 0usize;
-    while let Some(batch_id) = successor.decision_tail_id {
-        checkpoint(cancelled)?;
-        if batches >= MAX_HISTORY_BATCHES {
-            return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
-        }
-        batches += 1;
-        let predecessor_id = successor
-            .predecessor_head_id
-            .ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
-        let predecessor =
-            fgit_authority::read_authority_head_body_async(store, cx, predecessor_id).await?;
-        checkpoint(cancelled)?;
-        let batch = fgit_authority::read_decision_batch_body_async(store, cx, batch_id).await?;
-        checkpoint(cancelled)?;
-        verify_pair(
-            &CryptoBodyIdentity,
-            &PublicationBasis::new(predecessor_id, predecessor.clone()),
-            &batch,
-            &successor,
-        )
-        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
-        records = records
-            .checked_add(batch.committed_rcrs.len())
-            .filter(|count| *count <= MAX_HISTORY_RECORDS)
-            .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        reverse
-            .try_reserve(batch.committed_rcrs.len())
-            .map_err(|_| unavailable(RefusalCode::ResourceBudgetExceeded))?;
-        for record in batch.committed_rcrs.iter().rev() {
-            if record.repository_id != repository {
-                return Err(unavailable(RefusalCode::EvidenceInvalid));
-            }
-            reverse.push(Record {
-                sequence: record.repository_sequence.get(),
-                tx_id: record.tx_id,
-                policy_epoch: record.policy_epoch,
-                event_root: record.forge_event_batch_root,
-            });
-        }
-        successor = predecessor;
-    }
-    if successor.repository_id != repository
-        || successor.generation != fgit_types::HeadGeneration::FIRST
-        || successor.predecessor_head_id.is_some()
-        || successor.latest_committed_rcr_id.is_some()
-        || successor.latest_decision_sequence.is_some()
-        || successor.latest_repository_sequence.is_some()
-    {
-        return Err(unavailable(RefusalCode::EvidenceInvalid));
-    }
-    reverse.reverse();
+    let records = history::read_records(
+        store,
+        cx,
+        basis,
+        after,
+        history::Limits::DEFAULT,
+        cancelled,
+    )
+    .await?;
     let mut cursor_seen = after.is_none();
     let mut output = Vec::with_capacity(limit);
     let mut page_bytes = 0usize;
     let mut has_more = false;
-    'records: for record in reverse {
+    'records: for record in records {
         checkpoint(cancelled)?;
         if after.is_some_and(|cursor| record.sequence < cursor.repository_sequence) {
             continue;
@@ -265,3 +222,6 @@ mod tests {
         assert!(charge_page_bytes(&mut 0, MAX_PAGE_EVENT_BYTES + 1).is_err());
     }
 }
+
+#[cfg(test)]
+mod history_tests;
