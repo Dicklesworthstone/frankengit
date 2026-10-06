@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Repository activity · FrankenGit</title>
+  <link rel="stylesheet" href="./browser.css">
+  <script type="module" src="./activity-view.mjs"></script>
+</head>
+<body>
+  <header>
+    <h1>Repository activity</h1>
+    <nav aria-label="Repository"><a href="../">Source</a> · <a href="../issues/">Issues</a> · <a href="../pulls/">Pull requests</a> · <a href="../history/">Git history</a></nav>
+    <p>Read the native, authenticated issue and pull-request event feed without changing repository state.</p>
+  </header>
+  <main>
+    <section aria-labelledby="connection-heading">
+      <h2 id="connection-heading">Connection</h2>
+      <label for="token">Bearer token with issues-read or pulls-read permission</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64">
+      <button id="connect" type="button">Connect</button>
+      <button id="disconnect" type="button" disabled>Disconnect and clear</button>
+      <p>Credentials stay in memory and are cleared on disconnect or navigation. The server authenticates each read independently; write or source-read grants do not imply activity access.</p>
+    </section>
+    <section aria-labelledby="read-heading">
+      <h2 id="read-heading">Read activity</h2>
+      <label for="after">Start after exact cursor (0 means the beginning)</label>
+      <input id="after" type="text" value="0" maxlength="31" spellcheck="false" disabled>
+      <label for="limit">Maximum canonical positions examined per page (1–100)</label>
+      <input id="limit" type="number" value="20" min="1" max="100" step="1" disabled>
+      <button id="load" type="button" disabled>Load from cursor</button>
+      <button id="next" type="button" disabled>Next page at same snapshot</button>
+      <button id="refresh" type="button" disabled>Refresh after watermark</button>
+      <button id="cancel" type="button" disabled>Cancel read</button>
+      <button id="save" type="button" disabled>Export displayed page</button>
+      <p>Load uses the entered cursor and size. Next preserves the selected snapshot and size. Refresh reads after the last successful watermark at a newly observed head, including after a snapshot conflict. Nothing polls or retries automatically.</p>
+      <p id="status" role="status" aria-live="polite">Connect and load an activity page.</p>
+    </section>
+    <section aria-labelledby="observation-heading">
+      <h2 id="observation-heading">Observed scope and activity</h2>
+      <p id="scope"></p>
+      <pre id="snapshot"></pre>
+      <p id="watermark"></p>
+      <p id="page-note"></p>
+      <p>This is a filtered observation, not a complete forge export or a live subscription. Event frames are preserved as opaque bytes; the browser does not decode their native payloads or verify inclusion proofs. A feed does not grant approval, check, merge or mutation authority.</p>
+      <ol id="events" aria-label="Disclosed canonical events" aria-busy="false"></ol>
+    </section>
+  </main>
+</body>
+</html>
