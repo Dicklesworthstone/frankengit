@@ -4,6 +4,7 @@
 
 mod pulls;
 
+mod activity;
 mod branches;
 mod export_verify;
 mod history;
@@ -107,6 +108,9 @@ pub(super) fn serve(
     trailing: &[u8],
     writer: &mut impl Write,
 ) -> Result<bool, Status> {
+    if activity::serve(profile, request, trailing, writer)? {
+        return Ok(true);
+    }
     if rebase::serve(profile, request, trailing, writer)? {
         return Ok(true);
     }
