@@ -44,6 +44,11 @@ pub(super) fn payload(args: &Object) -> Result<(Vec<u8>, MergeMetadata), ToolErr
         (None, Some(_)) => chunks(args, "patch_hex_chunks")?,
         _ => return Err(ToolError::invalid("exactly_one_patch_encoding_required")),
     };
+    Ok((patch, metadata(args)?))
+}
+
+/// Shared exact commit metadata; caller-specific parsers own allowed fields.
+pub(super) fn metadata(args: &Object) -> Result<MergeMetadata, ToolError> {
     let author = required(args, "author")?;
     let committer = required(args, "committer")?;
     if author.len() > 1024 || committer.len() > 1024 {
@@ -56,7 +61,7 @@ pub(super) fn payload(args: &Object) -> Result<(Vec<u8>, MergeMetadata), ToolErr
         message: unhex(required(args, "message_hex")?, MAX_MESSAGE)?,
     };
     metadata.validate().map_err(|_| ToolError::invalid("invalid_commit_metadata"))?;
-    Ok((patch, metadata))
+    Ok(metadata)
 }
 
 pub(super) fn schema() -> Value {
