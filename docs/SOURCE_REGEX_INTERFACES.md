@@ -57,3 +57,31 @@ missing final LF, long excerpts, match ceilings, work exhaustion, cancellation,
 reopen parity and the real MCP protocol. Compilation and these Rust tests were
 not executed in the implementation environment, which lacks Rust tools.
 Static checks are not a passing native gate or a performance claim.
+
+## CLI
+
+The same native reader is available through the explicit `fg search --regex`
+profile, separately from the default literal, indexed-current and symbol modes:
+
+```sh
+fg search --regex ./fgit-data TENANT_ID REPOSITORY_ID refs/heads/main \
+  --trusted-local --pattern '^(pub )?fn [a-z_]+' --path src --max-matches 20
+```
+
+Use `--pattern-hex` for arbitrary pattern bytes. `--expected-head` takes the
+returned algorithm-qualified `snapshot_token`; `--expected-commit` takes an
+exact nonzero native commit. Pins constrain the same selection that supplies
+all searched bytes. `--max-regex-steps` is an aggregate VM budget, while the
+existing file/count/total-byte limits remain independent. `--trusted-local`
+explicitly authorizes whole-repository reads; patterns and path filters cannot.
+
+The CLI returns bounded JSON only after the node has closed successfully. It
+preserves the exact line and excerpt semantics above and distinguishes exit 0
+for a complete answer (including zero matches), exit 3 for a match prefix, and
+exit 2 for parsing, source/work, output or shutdown failures. It never shells
+out to Git or a regex command. Standard global `--timeout-secs` remains in use.
+
+Additional authored tests exercise argument and output boundaries, and a real
+`CARGO_BIN_EXE_fg` integration target covers fresh-process SHA-1/SHA-256 searches,
+CRLF/blank/last lines, long spans, zero hits, truncation and failed work budgets.
+These tests and native compilation have not been executed in this environment.
