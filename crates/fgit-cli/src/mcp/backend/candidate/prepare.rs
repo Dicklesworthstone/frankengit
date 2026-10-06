@@ -27,6 +27,12 @@ pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, To
     }
     let reference = branch(args, "reference", "reference_hex")?;
     let base = oid(args, "expected_base", format)?;
+    let (patch, metadata) = payload(args)?;
+    Ok(Input { reference, base, patch, metadata })
+}
+
+// Shared hostile-input contract; each operation separately checks its field set.
+pub(super) fn payload(args: &Object) -> Result<(Vec<u8>, MergeMetadata), ToolError> {
     let patch = match (args.get("patch"), args.get("patch_hex_chunks")) {
         (Some(value), None) => {
             let value = value.text().ok_or(ToolError::invalid("patch_must_be_string"))?;
@@ -50,11 +56,18 @@ pub(super) fn parse(args: &Object, format: GitHashAlgorithm) -> Result<Input, To
         message: unhex(required(args, "message_hex")?, MAX_MESSAGE)?,
     };
     metadata.validate().map_err(|_| ToolError::invalid("invalid_commit_metadata"))?;
-    Ok(Input { reference, base, patch, metadata })
+    Ok((patch, metadata))
 }
 
 pub(super) fn schema() -> Value {
     let mut properties = common_properties("prepare_patch");
+    payload_properties(&mut properties);
+    input_schema(properties, &[
+        "operation", "expected_base", "author", "committer", "timestamp", "message_hex",
+    ], vec![exactly_one("patch", "patch_hex_chunks")])
+}
+
+pub(super) fn payload_properties(properties: &mut Object) {
     properties.insert("patch".into(), text_schema(MAX_TEXT_PATCH));
     properties.insert("patch_hex_chunks".into(), chunk_schema());
     for name in ["author", "committer"] {
@@ -62,9 +75,6 @@ pub(super) fn schema() -> Value {
     }
     properties.insert("timestamp".into(), super::super::decimal_schema());
     properties.insert("message_hex".into(), hex_schema(MAX_MESSAGE));
-    input_schema(properties, &[
-        "operation", "expected_base", "author", "committer", "timestamp", "message_hex",
-    ], vec![exactly_one("patch", "patch_hex_chunks")])
 }
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
@@ -136,7 +146,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     Ok(Value::Object(result))
 }
 
-fn preparation_error(error: NodeWorkspaceRefusal) -> ToolError {
+pub(super) fn preparation_error(error: NodeWorkspaceRefusal) -> ToolError {
     match error {
         NodeWorkspaceRefusal::StaleWorkspaceBase => ToolError::failed("source_commit_moved"),
         NodeWorkspaceRefusal::RefUnavailable => ToolError::failed("reference_unavailable"),

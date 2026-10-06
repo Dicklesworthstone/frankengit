@@ -2,6 +2,7 @@
 //! profile. Repository bytes and commit metadata never select a principal.
 mod prepare;
 mod inspect;
+mod initial;
 
 use super::super::json::{self, Object, Value, object, text};
 use super::super::protocol::{MAX_TOOL_RESULT, Tool, ToolError};
@@ -19,10 +20,10 @@ const MAX_BUNDLE_BYTES: usize = CHUNK_BYTES * MAX_CHUNKS;
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Prepare an exact patch into a bounded native Git bundle, or inspect an uploaded single-parent candidate at an exact visible branch/base. Inspection returns the actual full-tree diff and commit metadata, optionally snapshot-pinned. Read-only: no object import, checkout, shell, approval or publication. Publication requires the independent source-write tool and an original retry key.",
+        description: "Prepare an exact patch into a bounded native Git bundle (prepare_initial creates zero-parent history at an absent branch), or inspect an uploaded single-parent candidate at an exact visible branch/base. Inspection returns the actual full-tree diff and commit metadata, optionally snapshot-pinned. Read-only: no object import, checkout, shell, approval or publication. Publication requires the independent source-write tool and an original retry key.",
         schema: object([
             ("type", text("object")),
-            ("oneOf", Value::Array(vec![prepare::schema(), inspect::schema()])),
+            ("oneOf", Value::Array(vec![prepare::schema(), inspect::schema(), initial::schema()])),
         ]),
     }
 }
@@ -34,6 +35,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     }
     let result = match required(args, "operation")? {
         "prepare_patch" => prepare::call(backend, args)?,
+        "prepare_initial" => initial::call(backend, args)?,
         "inspect" => inspect::call(backend, args)?,
         _ => return Err(ToolError::invalid("unsupported_candidate_operation")),
     };
