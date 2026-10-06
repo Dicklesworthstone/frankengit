@@ -3,6 +3,8 @@
 #[cfg(test)]
 mod integration_tests;
 mod output;
+mod pull_candidate;
+pub(super) use pull_candidate::render as render_pull_candidate;
 #[cfg(test)]
 mod tests;
 
