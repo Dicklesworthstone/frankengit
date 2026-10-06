@@ -3,6 +3,7 @@
 mod prepare;
 mod inspect;
 mod initial;
+mod inspect_initial;
 mod pull;
 
 use super::super::json::{self, Object, Value, object, text};
@@ -21,10 +22,10 @@ const MAX_BUNDLE_BYTES: usize = CHUNK_BYTES * MAX_CHUNKS;
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Prepare an exact patch into a bounded native Git bundle (prepare_initial creates zero-parent history at an absent branch), prepare_pull_merge constructs an exact two-parent PR candidate and additionally requires the PR read grant, or inspect an uploaded single-parent candidate at an exact visible branch/base. Inspection returns the actual full-tree diff and commit metadata, optionally snapshot-pinned. Read-only: no object import, checkout, shell, approval or publication. Publication requires the independent source-write tool and an original retry key.",
+        description: "Prepare an exact patch into a bounded native Git bundle (prepare_initial creates zero-parent history at an absent branch), prepare_pull_merge constructs an exact two-parent PR candidate and additionally requires the PR read grant, or inspect an uploaded single-parent candidate (inspect) or zero-parent initial bundle (inspect_initial). Initial inspection previews every file and empty directory at an absent branch. Inspection returns the actual full-tree diff and commit metadata, optionally snapshot-pinned. Read-only: no object import, checkout, shell, approval or publication. Publication requires the independent source-write tool and an original retry key.",
         schema: object([
             ("type", text("object")),
-            ("oneOf", Value::Array(vec![prepare::schema(), inspect::schema(), initial::schema(), pull::schema()])),
+            ("oneOf", Value::Array(vec![prepare::schema(), inspect::schema(), initial::schema(), inspect_initial::schema(), pull::schema()])),
         ]),
     }
 }
@@ -38,6 +39,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
         "prepare_patch" => prepare::call(backend, args)?,
         "prepare_initial" => initial::call(backend, args)?,
         "inspect" => inspect::call(backend, args)?,
+        "inspect_initial" => inspect_initial::call(backend, args)?,
         pull::PREPARE => pull::call(backend, args)?,
         _ => return Err(ToolError::invalid("unsupported_candidate_operation")),
     };

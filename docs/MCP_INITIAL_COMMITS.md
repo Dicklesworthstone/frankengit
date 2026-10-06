@@ -85,11 +85,72 @@ the semantic seal, not a newly supplied pack encoding. A transport or runtime
 failure after entering admission remains outcome-unknown; use the original key
 or separately granted outcome recovery, not an inferred non-commit.
 
-The existing `inspect` candidate operation remains single-parent only. Initial
-preparation's complete native preview is not an independent uploaded-root-bundle
-inspection API.
+The existing `inspect` candidate operation remains single-parent only. Use
+`inspect_initial` below for independent inspection of uploaded root bundles;
+neither operation is a substitute for original-key publication recovery.
 
 Parser/schema, exact-byte preview and persisted SHA-1/SHA-256 MCP tests cover
 preparation, separately granted publication, original-key retry, restart,
 competing creators, malformed-bundle twins and later incremental publication. The implementation environment has no Rust toolchain or built
 `fg`; authored tests are not a passing native-test or agent-day claim.
+
+## Independently inspect the uploaded root bundle
+
+Call `frankengit_source_candidate` with `operation: "inspect_initial"`, the
+independently chosen branch and `expected_candidate`, and complete
+`bundle_hex_chunks`. The initial preparation's `publication_arguments` can be
+used directly after adding the operation; its `initial: true` field is accepted,
+while false or null is refused. Do not add an idempotency key. Arbitrary uploads
+within the native root profile are supported without their producer's patch,
+construction plan, or claimed file listing.
+
+Optional `expected_bundle_sha256` binds the exact transport bytes. Optional
+`expected_head` binds the current metadata selection. The native reader checks
+branch absence and both caller and canonical hidden-ref policy at one head.
+A stale pin or an occupied branch refuses inspection, even when the uploaded
+candidate is already stored. Successful inspection is not a reservation of
+branch absence, nor permission to bypass later protection.
+
+The response contains `candidate_commit_body_hex`, its optional UTF-8 rendering,
+all file bytes/modes/blob identities, and `directories` with exact paths/tree
+identities. The root directory uses an empty `path_hex`. Empty directories and
+subtree aliases are retained. A valid empty root has zero files and one root
+directory; it is not represented as missing data. No patch digest, construction
+provenance, approval, or publication receipt is invented for an uploaded bundle.
+The selecting snapshot token is returned by the same native inspection.
+
+The native verifier authenticates the pack trailer, hashes every object, requires
+one zero-parent commit and exactly its typed tree/blob closure, and refuses
+extra objects, duplicate packed identities, missing dependencies, kind-confused
+edges, unsafe names, tags, symlinks, gitlinks and delta entries. New publication
+uses this same precheck before ordinary quarantine; it does not replace native
+admission. Historical recovery remains before pack decoding. In particular,
+a missing blob cannot be compensated for by an unrelated packed object with
+the same total count. The verifier never borrows a dependency from the node's
+existing object fabric, and inspection stages nothing.
+
+MCP retains the three 8 KiB chunks / 24 KiB decoded input envelope and 2 MiB
+result ceiling. `max_files` (64), `max_tree_entries` (256), `max_file_bytes`
+(128 KiB), and `max_output_bytes` (128 KiB) can be narrowed using positive JSON
+integers. Commit preview bytes are bounded at 64 KiB; depth at 64 components;
+paths at 4096 bytes. Output accounting includes every file's bytes and every
+path plus commit metadata. Shared blob and subtree identities do not discount
+repeated paths. Exhaustion refuses the whole inspection, never a prefix labelled
+complete. The underlying pack decoder separately retains its native input,
+inflation/work and 32 MiB expanded-body bounds; preview limits do not authorize
+unbounded decoding. The shared closure verifier bounds unique tree edges at
+1,000,000 before retaining its adjacency vectors.
+
+Review the complete result, then pass its `publication_arguments` to
+`frankengit_source_publish` under the independent source-write grant and your
+original key. A write-only grant cannot inspect, and source-read cannot publish.
+This additional operation occupies the existing candidate tool slot, leaving
+the 32-tool registry limit unchanged. No host paths, URLs, shell, mutable
+workspace, or additional authority database are introduced.
+
+The added tests exercise real native pack reads, same-count missing-object and
+wrong-kind attacks, duplicate entries, binary/raw paths, empty directories,
+alias/output bounds, cancellation, persisted node restart and protection, and
+MCP prepare/inspect/separately-publish/retry/reopen. They are authored coverage,
+not an executed native-test claim: compilation, Rust tests, rustfmt, Clippy and
+real-binary end-to-end verification remain required.
