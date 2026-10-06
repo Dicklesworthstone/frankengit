@@ -2650,7 +2650,21 @@ mod command_time_policy_tests {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
-                    visit(&path, offenders);
+                    // A `tests/` directory is skipped only when its parent
+                    // module declares it `#[cfg(test)] mod tests;`.
+                    let gated_tests_dir = path.file_name().is_some_and(|name| name == "tests")
+                        && std::fs::read_to_string(path.parent().unwrap().with_extension("rs"))
+                            .is_ok_and(|parent| {
+                                parent
+                                    .lines()
+                                    .map(str::trim)
+                                    .collect::<Vec<_>>()
+                                    .windows(2)
+                                    .any(|pair| pair == ["#[cfg(test)]", "mod tests;"])
+                            });
+                    if !gated_tests_dir {
+                        visit(&path, offenders);
+                    }
                     continue;
                 }
                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
