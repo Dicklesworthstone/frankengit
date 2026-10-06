@@ -1,6 +1,7 @@
 //! Operator-granted source retrieval over the node's single-snapshot reader.
 //! Query paths narrow the launch grant; they never mint authority or host access.
 mod batch;
+mod regex;
 
 use super::*;
 use fgit_forge::source_browse::SourceBrowseError;
@@ -20,8 +21,8 @@ const MAX_MATCHES: usize = 100;
 pub(super) fn tools() -> Vec<Tool> {
     vec![Tool {
         name: NAME,
-        description: "Search exact literal bytes in regular files of a visible ref. One authority snapshot; optional ASCII case folding and slash-bounded path prefixes. No regex, checkout, host paths, symlink following, or implicit binary exclusion. A match ceiling returns an explicitly incomplete prefix, not an exhaustive answer.",
-        schema: input_schema(),
+        description: "Without operation, search literal bytes; operation regex searches one native leftmost-longest byte span per LF-delimited line. Both read regular files of a visible ref. One authority snapshot; optional ASCII case folding and slash-bounded path prefixes. No backtracking engine, checkout, host paths, symlink following, or implicit binary exclusion. Regex work exhaustion refuses the whole read. A match ceiling returns an explicitly incomplete prefix, not an exhaustive answer.",
+        schema: regex::schema(input_schema()),
     }, batch::tool()]
 }
 
@@ -40,6 +41,9 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     // This defense remains in the adapter as well as the immutable registry.
     if !backend.options.source {
         return Err(ToolError::invalid("tool_not_granted"));
+    }
+    if args.contains_key("operation") {
+        return regex::call(backend, args);
     }
     let (selection, query) = parse(args, backend.options.format)?;
     let request = fgit_cli::command_request_context(&backend.node);
