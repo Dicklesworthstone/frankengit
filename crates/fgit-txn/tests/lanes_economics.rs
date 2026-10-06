@@ -306,6 +306,8 @@ fn metrics(decisions: u64, cas_attempts: u64, capsules: &[PreparedCapsule]) -> S
         object_requests: 0,
         object_request_bytes: 0,
         egress_bytes: 0,
+        // These lanes move no Git pack over a wire.
+        wire_pack_bytes: 0,
         decisions,
         cas_attempts,
         storage: StorageClasses {

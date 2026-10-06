@@ -154,7 +154,7 @@ fn shared_renderer_rejects_pr_ref_commit_head_and_path_misbinding() {
         let wrong_mode = ReviewOptions { mode: ComparisonMode::MergeBase, ..ReviewOptions::default() };
         assert!(render(&report, wrong_mode).is_err());
         assert!(render(&report, ReviewOptions::default()).is_ok());
-        request.authority().cancel();
+        request.cancel();
         assert!(node.runtime().block_on(node.inspect_pull_request_bundle_in(
             &request, &subject, candidate, &bytes, &Default::default(), &ReviewOptions::default(),
         )).is_err());

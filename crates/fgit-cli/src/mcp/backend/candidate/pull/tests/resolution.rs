@@ -117,7 +117,7 @@ fn resolution_and_nested_inspection_never_reset_the_request_or_infer_read_grants
     let result = f.call(NAME, &args).unwrap();
     let inspection = inspection(result.object().unwrap());
     let request = f.backend().node.request_context();
-    request.authority().cancel();
+    request.cancel();
     assert!(inspect::call_in(f.backend(), &inspection, &request).is_err());
     assert!(f.call(NAME, &inspection).is_ok(), "only a genuinely new request owns a fresh budget");
     for (source, pulls) in [(true, false), (false, true), (false, false)] {

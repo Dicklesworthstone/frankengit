@@ -76,8 +76,11 @@ impl Fixture {
             let candidate = node.runtime().block_on(node.prepare_trusted_patch_in(
                 &request, reference, base, [0xc3; 16], patch.as_bytes(), &metadata(), Default::default(),
             )).unwrap();
+            // `topic` already keys the branch creation above; reusing it for
+            // a different transaction is an idempotency-key reuse refusal.
+            let key = format!("publish-{name}");
             let published = node.runtime().block_on(node.apply_workspace_bundle_durable_in(
-                &request, actor(1), name.as_bytes(), reference, base,
+                &request, actor(1), key.as_bytes(), reference, base,
                 candidate.candidate_commit, candidate.bundle_bytes(),
             )).unwrap();
             assert!(matches!(published.commands[0].terminal.outcome, DecisionOutcome::Committed { .. }));

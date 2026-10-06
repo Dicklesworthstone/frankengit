@@ -261,6 +261,7 @@ impl FsqliteAuthorityStore {
             operations: OperationGate::new(),
             instance: StoreInstanceId::from_raw(0),
             limits,
+            bodies: crate::body_cache::BodyCache::new(),
         };
         let identity = async {
             live(cx)?;
