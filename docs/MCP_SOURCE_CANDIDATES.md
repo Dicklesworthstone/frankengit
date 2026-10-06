@@ -52,19 +52,54 @@ refresh is performed. A lost preparation response is safe to repeat with the
 same explicit inputs while that base remains current. A lost *publication*
 response still requires the original publication key and existing recovery rules.
 
+## Inspect the actual candidate before publication
+
+Call the same tool with `operation: "inspect"` and the preparation result's
+`publication_arguments` (reference/base/candidate/bundle), without adding an
+idempotency key. Optional `expected_bundle_sha256` pins the exact transport;
+optional `expected_head` pins the current authority snapshot. These are
+preconditions, not selectors that authorize hidden objects or an older branch.
+
+The native inspector verifies the bundle, candidate identity, single parent,
+visible base closure and complete base-to-candidate tree comparison without
+staging any uploaded objects. The result includes the actual commit body in
+hex (and UTF-8 when valid), ordered parents, transport measurements, and the
+existing MCP review schema with exact byte/line hunks. Binary and object-only
+changes retain their explicit representations. The authenticated snapshot token
+comes from this very inspection, not a separate head read.
+
+Inspection does not accept path filters, merge-base comparison, replacement
+commit metadata, PR/reviewer identities, or publication fields. `max_changes`,
+`max_blob_bytes`, `max_output_bytes`, `max_diff_work` and `context_lines` only
+narrow its bounded work/output profile. Exhaustion fails the whole inspection;
+there is no successful truncated diff. The shared renderer rechecks repository,
+refs, head and commit pins, entry order, types, spans and output bounds.
+
+Review `candidate_commit_body_hex` and `review`, then use the inspected result's
+`publication_arguments` with `frankengit_source_publish`, adding your own
+original `idempotency_key`. Inspection grants no approval or publication right.
+The independent source-write grant, launch-bound sponsor, exact predecessor,
+quarantine and branch policy still govern publication. Repeat an ambiguous
+publication with identical semantic fields and the original key, never with a
+newest-tip refresh. A successful historical retry is not a new inspection.
+
 ## Bounds and evidence
 
 Plain patch text is at most 16 KiB; byte-oriented patches and candidate bundles
 are at most three 8 KiB chunks (24 KiB decoded). Message bytes are at most 4 KiB,
 metadata identities 1024 bytes each, path receipts 64, result bytes 2 MiB. The
-MCP parser's aggregate 64 KiB request bound also applies. Native planner read,
+MCP parser's aggregate 64 KiB request bound also applies. Inspection permits
+at most 64 changes, 32 text files, 256 hunks, 1 MiB per blob, 128 KiB diff
+output and 64 KiB candidate commit metadata; its schema lists narrower defaults. Native planner read,
 object, expansion and request-context budgets are retained. Oversized results
 are refused, never returned as truncated publishable candidates.
 
 The candidate operations share one fixed registry entry; all existing grants
 still fit the 32-tool registry. Tests include strict parsing and exact byte
-round trips plus persisted SHA-1/SHA-256 MCP preparation and independent-grant
-regressions. These are authored coverage, not an executed native-test claim:
+round trips plus persisted SHA-1/SHA-256 MCP preparation, inspection,
+publication, same-key retry, reopen, sibling preservation and independent-grant
+regressions. Corrupt bundles, mismatched pins and deliberately too-small diff
+budgets are paired with successful reads of the same native candidate. These are authored coverage, not an executed native-test claim:
 this implementation session had no Rust toolchain or built `fg`. Independent
 compilation, native and real-binary verification remain required; no agent-day
 or bead closure is asserted.

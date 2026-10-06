@@ -133,3 +133,139 @@ fn candidate_fits_the_existing_full_registry_without_gaining_mutation_annotation
     assert!(backend.call(NAME, &input(base)).is_ok());
     backend.close().unwrap();
 }
+
+fn inspection(prepared: &Object) -> Object {
+    let mut args = prepared["publication_arguments"].object().unwrap().clone();
+    args.insert("operation".into(), text("inspect"));
+    args.insert("expected_bundle_sha256".into(), prepared["bundle_sha256"].clone());
+    args
+}
+fn blob(backend: &mut NodeTools, path: &[u8]) -> Value {
+    backend.call("frankengit_source_blob", &fields([
+        ("reference", text("refs/heads/main")), ("path_hex", text(hex(path))),
+    ])).unwrap()
+}
+#[test]
+fn prepare_inspect_publish_and_lost_reply_retry_preserve_exact_bytes_and_siblings() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (_scratch, mut backend, base) = setup(format);
+        let before = head_bytes(&backend);
+        let original = blob(&mut backend, b"README");
+        let prepared = backend.call(NAME, &input(base)).unwrap();
+        let mut arguments = inspection(prepared.object().unwrap());
+        arguments.insert("expected_head".into(), original.object().unwrap()["snapshot_token"].clone());
+        let mut server = server(&mut backend);
+        let response = invoke(&mut server, &mut backend, 2, NAME, arguments.clone());
+        let inspected = content(&response);
+        assert_eq!(inspected["snapshot_token"], original.object().unwrap()["snapshot_token"]);
+        assert_eq!(inspected["published"], Value::Bool(false));
+        assert_eq!(inspected["approval_granted"], Value::Bool(false));
+        assert_eq!(inspected["bundle_sha256"], prepared.object().unwrap()["bundle_sha256"]);
+        let review = inspected["review"].object().unwrap();
+        assert_eq!(review["entry_count"].text(), Some("1"));
+        assert_eq!(review["completion_scope"].text(), Some("entire_candidate_tree"));
+        let Value::Array(entries) = &review["entries"] else { unreachable!() };
+        let entry = entries[0].object().unwrap();
+        assert_eq!(entry["path_hex"].text(), Some(hex(b"README").as_str()));
+        let Value::Array(hunks) = &entry["content"].object().unwrap()["hunks"] else { unreachable!() };
+        assert!(hunks.iter().any(|h| h.object().unwrap()["before_hex"].text() == Some(hex(b"before\n").as_str())));
+        assert!(hunks.iter().any(|h| h.object().unwrap()["after_hex"].text() == Some(hex(b"after\n").as_str())));
+        let body = inspected["candidate_commit_text_utf8"].text().unwrap();
+        assert!(body.contains("author Author <author@example.invalid> 2 +0000\n"));
+        assert!(body.ends_with("edit through MCP\n"));
+        let candidate = oid(&arguments, "expected_candidate", format).unwrap();
+        assert!(backend.node.read_git_object(candidate).is_err());
+        let mut publication = inspected["publication_arguments"].object().unwrap().clone();
+        publication.insert("idempotency_key".into(), text("explicit-inspected-publication"));
+        assert_eq!(backend.call("frankengit_source_publish", &publication).unwrap_err().code, "tool_not_granted");
+        assert_eq!(head_bytes(&backend), before);
+
+        // A separately launched operator grant, not tool arguments or mutable
+        // repository text, enables publication as the sponsor principal.
+        let mut options = backend.options.clone();
+        options.writes.source = true;
+        options.principal = Some(sponsor());
+        backend.close().unwrap();
+        let mut backend = NodeTools::open(options.clone()).unwrap();
+        let mut server = self::server(&mut backend);
+        let response = invoke(&mut server, &mut backend, 2, "frankengit_source_publish", publication.clone());
+        let committed = content(&response);
+        assert_eq!(committed["outcome"].text(), Some("committed"));
+        let after = head_bytes(&backend);
+        assert_ne!(after, before);
+        let retry = invoke(&mut server, &mut backend, 3, "frankengit_source_publish", publication);
+        assert_eq!(content(&retry), committed);
+        assert_eq!(head_bytes(&backend), after, "lost replies do not duplicate publication");
+        assert_eq!(blob(&mut backend, b"README").object().unwrap()["bytes_hex"].text(), Some(hex(b"after\n").as_str()));
+        assert_eq!(blob(&mut backend, b"sibling").object().unwrap()["bytes_hex"].text(), Some(hex(b"untouched\n").as_str()));
+        assert!(backend.call(NAME, &arguments).is_err(), "old inspection pins cannot survive a ref move");
+        backend.close().unwrap();
+        options.writes.source = false;
+        options.principal = None;
+        let mut backend = NodeTools::open(options).unwrap();
+        assert_eq!(head_bytes(&backend), after);
+        assert_eq!(blob(&mut backend, b"README").object().unwrap()["bytes_hex"].text(), Some(hex(b"after\n").as_str()));
+        backend.close().unwrap();
+    }
+}
+#[test]
+fn corrupt_candidates_stale_pins_and_incomplete_diffs_never_disclose_success() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let (_scratch, mut backend, base) = setup(format);
+        let before = head_bytes(&backend);
+        let mut command = input(base);
+        command.insert("patch".into(), text(format!("{PATCH}diff --git a/sibling b/sibling\n--- a/sibling\n+++ b/sibling\n@@ -1 +1 @@\n-untouched\n+also changed\n")));
+        let prepared = backend.call(NAME, &command).unwrap();
+        let arguments = inspection(prepared.object().unwrap());
+        let full = backend.call(NAME, &arguments).unwrap();
+        assert_eq!(full.object().unwrap()["review"].object().unwrap()["entry_count"].text(), Some("2"));
+        let mut budget = arguments.clone();
+        budget.insert("max_changes".into(), json::number(1));
+        assert_eq!(backend.call(NAME, &budget).unwrap_err().code, "candidate_inspection_failed");
+        budget = arguments.clone();
+        budget.insert("max_output_bytes".into(), json::number(1));
+        assert!(backend.call(NAME, &budget).is_err());
+        let mut corrupt = arguments.clone();
+        let mut bytes = chunks(&corrupt, "bundle_hex_chunks").unwrap();
+        let last = bytes.last_mut().unwrap(); *last ^= 1;
+        corrupt.remove("expected_bundle_sha256");
+        corrupt.insert("bundle_hex_chunks".into(), encoded_chunks(&bytes).unwrap());
+        assert_eq!(backend.call(NAME, &corrupt).unwrap_err().code, "candidate_inspection_failed");
+        let mut wrong = arguments.clone();
+        wrong.insert("expected_candidate".into(), text("ef".repeat(format.digest_len())));
+        assert!(backend.call(NAME, &wrong).is_err());
+        wrong = arguments.clone();
+        wrong.insert("expected_head".into(), text(format!("alg:1:{}", "ef".repeat(32))));
+        assert!(backend.call(NAME, &wrong).is_err());
+        assert_eq!(backend.call(NAME, &arguments).unwrap(), full);
+        assert_eq!(head_bytes(&backend), before);
+        backend.options.source = false;
+        backend.options.writes.source = true;
+        assert_eq!(call(&backend, &arguments).unwrap_err().code, "tool_not_granted");
+        backend.close().unwrap();
+    }
+}
+#[test]
+fn candidate_review_reuses_ref_snapshot_and_span_validation_without_a_filtered_escape() {
+    use fgit_forge::review::{ComparisonMode, ReviewOptions};
+    let (_scratch, mut backend, base) = setup(GitHashAlgorithm::Sha1);
+    let prepared = backend.call(NAME, &input(base)).unwrap();
+    let args = inspection(prepared.object().unwrap());
+    let reference = branch(&args, "reference", "reference_hex").unwrap();
+    let candidate = oid(&args, "expected_candidate", GitHashAlgorithm::Sha1).unwrap();
+    let bytes = chunks(&args, "bundle_hex_chunks").unwrap();
+    let request = backend.node.request_context();
+    let options = || ReviewOptions { mode: ComparisonMode::Direct, ..ReviewOptions::default() };
+    let mut native = backend.node.runtime().block_on(backend.node.inspect_workspace_bundle_in(
+        &request, &reference, base, candidate, &bytes, &Default::default(), None, &options(),
+    )).unwrap();
+    assert!(super::super::review::render_candidate(&backend, &reference, base, candidate, None, options(), &native.review).is_ok());
+    let mut filtered = options(); filtered.paths.push(b"README".to_vec());
+    assert!(super::super::review::render_candidate(&backend, &reference, base, candidate, None, filtered, &native.review).is_err());
+    native.review.comparison.requested_after = base;
+    assert!(super::super::review::render_candidate(&backend, &reference, base, candidate, None, options(), &native.review).is_err());
+    native.review.comparison.requested_after = candidate;
+    native.review.before_reference = RefName::try_new(b"refs/heads/wrong").unwrap();
+    assert!(super::super::review::render_candidate(&backend, &reference, base, candidate, None, options(), &native.review).is_err());
+    backend.close().unwrap();
+}

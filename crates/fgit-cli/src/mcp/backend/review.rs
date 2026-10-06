@@ -330,3 +330,30 @@ fn input_schema(pr: bool) -> Value {
     }
     Value::Object(schema)
 }
+
+/// Encode a full, already inspected workspace candidate through the same
+/// source-span validator as ordinary MCP comparisons. No second diff schema
+/// and no path-filtered candidate can masquerade as a full review.
+pub(super) fn render_candidate(
+    backend: &NodeTools,
+    reference: &RefName,
+    base: GitOid,
+    candidate: GitOid,
+    expected_head: Option<RepositoryAuthorityHeadId>,
+    options: ReviewOptions,
+    report: &SourceReview,
+) -> Result<Object, ToolError> {
+    if !backend.options.source {
+        return Err(ToolError::invalid("tool_not_granted"));
+    }
+    if options.mode != ComparisonMode::Direct || !options.paths.is_empty() {
+        return Err(ToolError::invalid("full_candidate_review_required"));
+    }
+    let query = Query {
+        selection: ReviewSelection::References { before: reference.clone(), after: reference.clone() },
+        expected_head, expected_before: Some(base), expected_after: Some(candidate), options,
+    };
+    let mut fields = output::render(backend.options.repository, backend.options.format, &query, report)?;
+    fields.insert("completion_scope".into(), text("entire_candidate_tree"));
+    Ok(fields)
+}

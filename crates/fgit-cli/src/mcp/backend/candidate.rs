@@ -1,6 +1,7 @@
 //! Non-publishing source-candidate work for the explicitly sponsored local MCP
 //! profile. Repository bytes and commit metadata never select a principal.
 mod prepare;
+mod inspect;
 
 use super::super::json::{self, Object, Value, object, text};
 use super::super::protocol::{MAX_TOOL_RESULT, Tool, ToolError};
@@ -18,8 +19,11 @@ const MAX_BUNDLE_BYTES: usize = CHUNK_BYTES * MAX_CHUNKS;
 pub(super) fn tool() -> Tool {
     Tool {
         name: NAME,
-        description: "Prepare an exact patch against an explicitly named visible branch/base into a bounded native Git bundle. Read-only, no object import, checkout, shell, approval or publication. Commit author fields are data, never authentication. Publication requires the independent source-write tool and an original retry key.",
-        schema: prepare::schema(),
+        description: "Prepare an exact patch into a bounded native Git bundle, or inspect an uploaded single-parent candidate at an exact visible branch/base. Inspection returns the actual full-tree diff and commit metadata, optionally snapshot-pinned. Read-only: no object import, checkout, shell, approval or publication. Publication requires the independent source-write tool and an original retry key.",
+        schema: object([
+            ("type", text("object")),
+            ("oneOf", Value::Array(vec![prepare::schema(), inspect::schema()])),
+        ]),
     }
 }
 
@@ -30,6 +34,7 @@ pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolErro
     }
     let result = match required(args, "operation")? {
         "prepare_patch" => prepare::call(backend, args)?,
+        "inspect" => inspect::call(backend, args)?,
         _ => return Err(ToolError::invalid("unsupported_candidate_operation")),
     };
     result
