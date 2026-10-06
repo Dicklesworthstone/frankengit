@@ -1,5 +1,6 @@
 //! Source mutations are ordinary native receive admission, not MCP-local refs.
 //! The launch sponsor grants writes explicitly; source bytes grant no authority.
+mod initial;
 use super::super::json::{self, Object, Value, object, text};
 use super::super::protocol::{Tool, ToolError};
 use super::{NodeTools, hex, require_fields, unhex};
@@ -28,7 +29,7 @@ pub(super) fn tools() -> Vec<Tool> {
         (UPDATE, "Move a branch from an exact expected tip to an already-visible commit through non-forced native admission. No implicit latest tip or protection bypass."),
         (DELETE, "Delete a branch at its exact expected tip. The native default-branch and current protection checks remain mandatory. Does not rewrite PR metadata."),
         (RENAME, "Atomically delete an exact-tip branch and create an absent destination at that SAME tip. No partial rename, overwrite, default-branch rename or PR retargeting."),
-        (PUBLISH, "Publish a reviewed single-parent native Git bundle with an explicit branch, base and candidate commit. At most 24 KiB in three hex chunks. Native quarantine verifies objects before ordinary admission; no merge approval."),
+        (PUBLISH, "Publish a reviewed native Git bundle. The default requires an exact base and single parent; initial:true explicitly creates zero-parent history at an absent branch and forbids expected_base. At most 24 KiB in three hex chunks. Native quarantine verifies objects before ordinary admission; no merge approval."),
     ].into_iter().map(|(name, description)| Tool { name, description, schema: schema(name) }).collect()
 }
 fn schema(name: &str) -> Value {
@@ -91,7 +92,7 @@ fn schema(name: &str) -> Value {
             ),
         );
     }
-    result
+    if name == PUBLISH { initial::schema(result) } else { result }
 }
 #[derive(Debug)]
 struct Input {
@@ -228,6 +229,9 @@ fn parse(name: &str, args: &Object, format: GitHashAlgorithm) -> Result<Input, T
 pub(super) fn call(backend: &NodeTools, name: &str, args: &Object) -> Result<Value, ToolError> {
     if !backend.options.writes.source || !is_tool(name) {
         return Err(ToolError::invalid("tool_not_granted"));
+    }
+    if name == PUBLISH && args.contains_key("initial") {
+        return initial::call(backend, args);
     }
     let key = common::key(args)?;
     let input = parse(name, args, backend.options.format)?;

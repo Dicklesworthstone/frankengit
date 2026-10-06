@@ -32,11 +32,64 @@ path or URL is accepted as a source of bytes.
 
 `publication_arguments` names `frankengit_source_publish` with `initial: true`,
 an exact candidate, branch and full bundle. It deliberately contains no retry
-key. The initial-publication adapter must be installed before submitting this
-shape; legacy publishers reject it. Publication requires the independent
-source-write grant and the caller's own original idempotency key. A preparation
-snapshot never reserves branch absence or bypasses later admission policy.
+key. Publication requires the independent source-write grant and the caller's
+own original idempotency key. A preparation snapshot never reserves branch
+absence or bypasses later admission policy.
 
-Parser, exact-byte preview and persisted SHA-1/SHA-256 MCP tests accompany the
-implementation. The implementation environment has no Rust toolchain or built
+## Publish the reviewed first commit
+
+Call `frankengit_source_publish` with the returned `publication_arguments`,
+adding the original `idempotency_key`. The shape is explicitly disjoint from
+ordinary incremental publication:
+
+```json
+{
+  "initial": true,
+  "reference": "refs/heads/main",
+  "expected_candidate": "<exact reviewed native commit>",
+  "bundle_hex_chunks": ["<complete full bundle in bounded hex chunks>"],
+  "idempotency_key": "<caller-chosen original key>"
+}
+```
+
+Exactly one plain/hex branch encoding is required. `initial` must be the JSON
+boolean `true`; false, null, a missing flag without a base, and a synthetic zero
+base never infer creation. `expected_base`, `expected_head`, principal, force,
+host-path and URL arguments are refused in this profile. Incremental publication
+omits `initial` and still requires its exact existing `expected_base`.
+
+The launch-bound principal and ordinary node admission own publication. The
+native engine checks the full bundle's independent branch/candidate bindings,
+zero-parent commit, regular-file tree/blob closure, current protection, and
+expected branch absence. Competing creations yield one winner; an existing
+branch is not overwritten, even when its tip equals the offered commit. Other
+branches and the default HEAD remain unchanged. The tool does not manufacture
+an approval or a special first-commit protection exception.
+
+A source-write-only session may submit the reviewed bytes without also gaining
+source read or preparation. Preparation alone never enables publication. Both
+modes reuse existing tool names, keeping the fixed 32-tool registry unchanged.
+
+## Retry and recovery
+
+After a lost response, repeat identical branch/candidate semantics with the
+same `initial: true` flag and original key, using a new JSON-RPC request ID.
+Native terminal recovery occurs before current intake and object checks. It
+still returns the original decision when the branch now exists or has advanced;
+it does not restore the old tip or publish a second decision. Reusing the key
+for a different candidate fails. A new key is a new request, not a retry.
+
+Returned `historical_outcome` is explicit and `current_refs_asserted` is false.
+`bundle_validation_receipt` remains null because a historical retry verifies
+the semantic seal, not a newly supplied pack encoding. A transport or runtime
+failure after entering admission remains outcome-unknown; use the original key
+or separately granted outcome recovery, not an inferred non-commit.
+
+The existing `inspect` candidate operation remains single-parent only. Initial
+preparation's complete native preview is not an independent uploaded-root-bundle
+inspection API.
+
+Parser/schema, exact-byte preview and persisted SHA-1/SHA-256 MCP tests cover
+preparation, separately granted publication, original-key retry, restart,
+competing creators, malformed-bundle twins and later incremental publication. The implementation environment has no Rust toolchain or built
 `fg`; authored tests are not a passing native-test or agent-day claim.
