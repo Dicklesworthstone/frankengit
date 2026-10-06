@@ -283,3 +283,6 @@ impl OneNode {
 
 #[cfg(test)]
 mod tests;
+
+/// Model-free multi-channel reads with current-source revalidation.
+pub mod initial;
