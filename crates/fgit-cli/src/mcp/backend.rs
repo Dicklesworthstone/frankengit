@@ -1,5 +1,6 @@
 //! Real node operations, not fixtures or a CLI subprocess. Grants and principal
 //! are fixed at launch; repository text never selects an admission identity.
+mod candidate;
 mod checks;
 mod events;
 mod history;
@@ -114,6 +115,7 @@ impl ReadTools for NodeTools {
         if self.options.source {
             tools.extend(source::tools());
             tools.extend(search::tools());
+            tools.push(candidate::tool());
         }
         if self.options.writes.issues {
             tools.extend(issue_writes::tools());
@@ -193,6 +195,9 @@ impl ReadTools for NodeTools {
             && matches!(name, "frankengit_source_tree" | "frankengit_source_blob")
         {
             return source::call(self, name, args);
+        }
+        if self.options.source && name == candidate::NAME {
+            return candidate::call(self, args);
         }
         if self.options.source && name == search::NAME {
             return search::call(self, args);
