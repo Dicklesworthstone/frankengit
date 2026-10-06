@@ -10,22 +10,25 @@ use fgit_authority::{
     ExpectedOld, OutcomeLookup, ProposedNew, RECEIVE_ADMISSION_SCHEMA, RefCommand, SealAttempt,
     SemanticRequest,
 };
-use fgit_crypto::{GitObjectKind, git_object_id};
+use fgit_crypto::GitObjectKind;
+#[cfg(test)]
+use fgit_crypto::git_object_id;
 use fgit_forge::initial_commit::{InitialCommitPlan, MAX_INITIAL_OBJECTS};
 use fgit_forge::{patch::PatchLimits, preparation::MergeMetadata};
 use fgit_git_object::{
     AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, parse_object_body, parse_tree,
 };
-use fgit_pack::full_bundle::{FullBundle, FullBundleInput, FullBundleLimits};
+use fgit_pack::full_bundle::{FullBundle, FullBundleLimits};
 use fgit_pack::{
-    BundleReference, CanonicalObjectSource, CanonicalPackObject, EntryKind, NativeChecksumVerifier,
-    PackLimits, PackPlanner, PackWriteError, PackWriteProfile, PackWriter, read_verified_pack,
+    BundleReference, CanonicalObjectSource, CanonicalPackObject, PackLimits, PackPlanner,
+    PackWriteError, PackWriteProfile, PackWriter,
 };
 use fgit_types::cell::{ReadMode, admits_read};
 use fgit_types::{GitOid, RefName, RepositoryAuthorityHeadId};
 use std::collections::BTreeMap;
 
 mod binary;
+mod inspection;
 
 const fn invalid(reason: &'static str) -> NodeWorkspaceRefusal {
     NodeWorkspaceRefusal::InvalidWorkspaceCandidate(reason)
@@ -205,26 +208,9 @@ impl OneNode {
             return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
         }
         let mut live = || workspace_request_live(request);
-        let envelope = FullBundleInput::parse(
-            input,
-            FullBundleLimits {
-                max_references: 1,
-                ..FullBundleLimits::default()
-            },
-            &mut live,
-        )
-        .map_err(pack_error)?;
-        if envelope.format() != self.object_format {
-            return Err(NodeWorkspaceRefusal::ObjectFormatMismatch);
-        }
-        let [advertised] = envelope.references() else {
-            return Err(invalid("one initial branch is required"));
-        };
-        if advertised.name() != reference || advertised.target() != &expected_commit {
-            return Err(invalid(
-                "initial bundle differs from independent branch/commit expectations",
-            ));
-        }
+        let envelope = inspection::envelope(
+            input, self.object_format, reference, expected_commit, &mut live,
+        )?;
         let semantic = SemanticRequest::build(
             RECEIVE_ADMISSION_SCHEMA,
             self.object_format,
@@ -276,122 +262,12 @@ impl OneNode {
             .evaluate(&authenticated.principal_id())
             .map_err(receive_error)?;
         let pack_limits = self.initial_commit_pack_limits();
-        let parsing = ParseLimits {
-            tree_reference_bytes: self.object_format.digest_len(),
-            max_object_bytes: pack_limits.max_object_bytes,
-            ..ParseLimits::default()
-        };
-        // This complete, bounded read is quarantined local data only. The owning
-        // receive validator below independently proves closure before staging.
-        {
-            let pack = read_verified_pack(
-                envelope.pack_bytes(),
-                self.object_format,
-                &pack_limits,
-                &mut live,
-                &NativeChecksumVerifier,
-            )
-            .map_err(pack_error)?;
-            let mut commits = 0usize;
-            let mut root_tree = None;
-            let mut trees = BTreeMap::new();
-            for entry in pack.entries() {
-                if !live() {
-                    return Err(NodeWorkspaceRefusal::Cancelled { exhaustion: None });
-                }
-                match entry.header.kind {
-                    EntryKind::Commit => {
-                        commits += 1;
-                        if commits != 1
-                            || git_object_id(
-                                self.object_format,
-                                GitObjectKind::Commit,
-                                &entry.inflated,
-                            ) != expected_commit
-                        {
-                            return Err(invalid(
-                                "initial bundle must contain only its reviewed root commit",
-                            ));
-                        }
-                        let ParsedObject::Commit(commit) = parse_object_body(
-                            ObjectType::Commit,
-                            &entry.inflated,
-                            AcceptanceProfile::StrictCreate,
-                            &parsing,
-                        )
-                        .map_err(|_| invalid("invalid initial commit bytes"))?
-                        else {
-                            return Err(invalid("initial object is not a commit"));
-                        };
-                        if commit.parent_references().next().is_some() {
-                            return Err(invalid("initial commit has a parent"));
-                        }
-                        let tree_ref = commit
-                            .tree_reference()
-                            .ok_or_else(|| invalid("initial commit has no tree"))?;
-                        let tree_str = std::str::from_utf8(tree_ref)
-                            .map_err(|_| invalid("invalid initial tree reference"))?;
-                        let tree_oid = GitOid::from_hex(self.object_format, tree_str)
-                            .map_err(|_| invalid("invalid initial tree reference oid"))?;
-                        root_tree = Some(tree_oid);
-                    }
-                    EntryKind::Tree => {
-                        let parsed =
-                            parse_tree(&entry.inflated, AcceptanceProfile::StrictCreate, &parsing)
-                                .map_err(|_| invalid("invalid initial tree"))?;
-                        let mut children = Vec::with_capacity(parsed.len());
-                        for child in parsed {
-                            if !matches!(child.mode.as_slice(), b"40000" | b"100644" | b"100755")
-                                || fgit_treefs::TreePath::parse_default(&child.name).is_err()
-                            {
-                                return Err(invalid(
-                                    "initial tree contains a non-regular file or gitlink",
-                                ));
-                            }
-                            let hex: String =
-                                child.object_id.iter().map(|b| format!("{b:02x}")).collect();
-                            let child_oid = GitOid::from_hex(self.object_format, &hex)
-                                .map_err(|_| invalid("invalid tree child reference"))?;
-                            children.push((child_oid, child.is_tree()));
-                        }
-                        let tree_oid =
-                            git_object_id(self.object_format, GitObjectKind::Tree, &entry.inflated);
-                        trees.insert(tree_oid, children);
-                    }
-                    EntryKind::Blob => {}
-                    _ => return Err(invalid("initial profile excludes tags and delta entries")),
-                }
-            }
-            if commits != 1 {
-                return Err(invalid("initial root commit is missing"));
-            }
-            let Some(root_tree_oid) = root_tree else {
-                return Err(invalid("initial root commit has no tree"));
-            };
-            let mut reachable = std::collections::BTreeSet::new();
-            reachable.insert(expected_commit);
-            let mut frontier = vec![root_tree_oid];
-            while let Some(tree_oid) = frontier.pop() {
-                if !reachable.insert(tree_oid) {
-                    continue;
-                }
-                let children = trees
-                    .get(&tree_oid)
-                    .ok_or_else(|| invalid("initial bundle tree missing"))?;
-                for (child_oid, is_tree) in children {
-                    if *is_tree {
-                        frontier.push(*child_oid);
-                    } else {
-                        reachable.insert(*child_oid);
-                    }
-                }
-            }
-            if pack.entries().len() != reachable.len() {
-                return Err(invalid(
-                    "initial bundle must contain only reachable reviewed objects",
-                ));
-            }
-        }
+        // Inspection and new publication share exact typed closure validation.
+        // Drop quarantine bytes before the independent admission validator runs.
+        // Historical terminal recovery above still precedes all pack decoding.
+        drop(inspection::read_pack(
+            envelope.pack_bytes(), self.object_format, expected_commit, &pack_limits, &mut live,
+        )?);
         self.import_full_git_bundle_durable_in(request, session, input, limits)
             .await
     }

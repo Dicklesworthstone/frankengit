@@ -1,6 +1,8 @@
 //! Root-commit construction from an exact creation-only patch. No repository
 //! reads, synthetic parent, mutable checkout, or publication authority.
 
+pub mod inspection;
+
 use crate::patch::{FileChange, IndexExpectation, PatchError, PatchLimits, UnifiedPatch};
 use crate::preparation::{MergeMetadata, PlannedMergeObject, PreparationError};
 use fgit_crypto::{GitObjectKind, git_object_id, sha256_digest};
