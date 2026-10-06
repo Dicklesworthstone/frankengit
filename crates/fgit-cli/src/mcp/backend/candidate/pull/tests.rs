@@ -1,6 +1,7 @@
 use super::*;
 mod support;
 mod inspection;
+mod resolution;
 use support::*;
 
 #[test]

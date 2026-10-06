@@ -91,13 +91,24 @@ pub(super) fn schema() -> Value {
 
 pub(super) fn call(backend: &NodeTools, args: &Object) -> Result<Value, ToolError> {
     permitted(backend)?;
-    let input = parse(args, backend.options.format)?;
     let request = fgit_cli::command_request_context(&backend.node);
+    call_in(backend, args, &request)
+}
+
+// Composed preparation/inspection retains the caller's SAME request context;
+// entering another adapter must not reset cancellation or its server-work budget.
+pub(super) fn call_in(
+    backend: &NodeTools,
+    args: &Object,
+    request: &fgit_node::NodeRequestContext,
+) -> Result<Value, ToolError> {
+    permitted(backend)?;
+    let input = parse(args, backend.options.format)?;
     // This native API ties PR metadata, both visible parents and the uploaded
     // result to one exact head. No separate latest-PR lookup precedes it.
     let inspected = backend.node.runtime().block_on(
         backend.node.inspect_pull_request_bundle_in(
-            &request, &input.selection.subject, input.candidate, &input.bundle,
+            request, &input.selection.subject, input.candidate, &input.bundle,
             &Default::default(), &input.options,
         ),
     ).map_err(|_| ToolError::failed("pull_candidate_inspection_failed"))?;
