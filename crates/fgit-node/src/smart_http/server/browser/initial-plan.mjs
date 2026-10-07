@@ -1,9 +1,9 @@
 // Reconstruct the complete initial Git closure from explicit file bytes. This
 // verifies a native preparation artifact; only native admission can publish it.
 import { fail, keys, record, copy, format, branch, snapshot, oid, integer, opaque,
-  principal, pinned, binding, utf8, hex, unhex, json } from './pulls-core.mjs';
+  principal, pinned, binding, utf8, hex, unhex, json, text } from './pulls-core.mjs';
 import { digest, joinBytes, findBytes, checkedBundle } from './pulls-candidate.mjs';
-import { fullFilePatch, sourcePath, EDIT_LIMIT } from './source-edit-patch.mjs';
+import { fullFilePatch, sourcePath, fileMode, FILE_LIMIT, PATCH_LIMIT, EDIT_LIMIT } from './source-edit-patch.mjs';
 import { commitMetadata, noEffects, matchReference, PREPARE_LIMIT, METADATA_LIMIT } from './source-edit-protocol.mjs';
 export { PREPARE_LIMIT };
 export function initialFields(value, applying = false) {
@@ -23,15 +23,88 @@ export async function nativeHash(kind, bytes, algorithm, crypto) {
 }
 const same = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
 const lexical = (a, b) => a < b ? -1 : a > b ? 1 : 0;
-export async function initialPlan(files, suppliedMetadata, algorithm, crypto, checkpoint = () => {}) {
-  format(algorithm); checkpoint();
+// Binary regular files use the existing native byte-hunk profile. Keep the
+// shared encoder's default text-only profile unchanged for other consumers.
+export function initialFilePatch(files) {
   if (!Array.isArray(files) || !files.length || files.length > EDIT_LIMIT) fail('Choose 1 through 64 initial files.');
-  // Validate/copy every file before the first await. Later editor changes must
-  // not alter either the generated patch or the closure being checked.
-  const patch = fullFilePatch(files.map(file => {
+  return fullFilePatch(files.map(file => {
     keys(file, ['path_hex', 'bytes', 'mode']);
     return { path_hex: file.path_hex, before: null, after: { bytes: file.bytes, mode: file.mode } };
-  }));
+  }), { allowBinary: true });
+}
+function disjointPaths(paths) {
+  const selected = new Set();
+  for (const path of paths) {
+    sourcePath(path);
+    if (selected.has(path)) fail('Import would replace an existing or duplicate path. Remove it explicitly first.');
+    selected.add(path);
+  }
+  for (const path of paths) {
+    const bytes = sourcePath(path);
+    for (let i = 0; i < bytes.length; i++) if (bytes[i] === 47 && selected.has(hex(bytes.subarray(0, i)))) fail('Import contains overlapping file and directory paths.');
+  }
+}
+// Directory selection removes exactly ONE checked common top-level folder.
+// It never follows a host path, strips unsafe components, or flattens subtrees.
+export function initialImportDescriptors(selected, options = {}) {
+  keys(options, ['directory', 'prefix', 'mode']);
+  const directory = options.directory ?? false, prefix = options.prefix ?? '', mode = fileMode(options.mode ?? 0o100644);
+  if (typeof directory !== 'boolean' || !Array.isArray(selected) || !selected.length || selected.length > EDIT_LIMIT) fail('Select 1 through 64 files and an explicit import mode.');
+  text(prefix, 4096, 'import prefix'); if (prefix) sourcePath(hex(utf8.encode(prefix)));
+  let root = null;
+  const descriptors = selected.map(file => {
+    if (!file || typeof file.name !== 'string') fail('Missing selected file.');
+    text(file.name, 4096, 'file name');
+    if (!file.name || file.name.includes('/')) fail('Invalid selected file name.');
+    let path = file.name;
+    if (directory) {
+      text(file.webkitRelativePath, 4096, 'selected directory path');
+      sourcePath(hex(utf8.encode(file.webkitRelativePath)));
+      const parts = file.webkitRelativePath.split('/');
+      if (parts.length < 2 || parts.at(-1) !== file.name) fail('Directory selection does not match its file names.');
+      root ??= parts[0]; if (root !== parts[0]) fail('Select files from exactly one directory root.');
+      path = parts.slice(1).join('/');
+    }
+    const path_hex = hex(utf8.encode(prefix ? `${prefix}/${path}` : path));
+    sourcePath(path_hex);
+    return { path_hex, mode, file };
+  });
+  disjointPaths(descriptors.map(row => row.path_hex));
+  return descriptors;
+}
+// A batch is returned only after EVERY file and the complete encoded patch
+// passes. Callers replace their queue once; a later failure cannot keep a prefix.
+export async function importInitialFiles(retained, incoming, checkpoint = () => {}) {
+  checkpoint();
+  if (!Array.isArray(retained) || !Array.isArray(incoming) || !incoming.length || retained.length + incoming.length > EDIT_LIMIT) fail('The complete initial queue must contain at most 64 files.');
+  const existing = retained.length ? initialFilePatch(retained).edits.map(edit => ({ path_hex: edit.path_hex, ...edit.after })) : [];
+  let size = existing.reduce((n, file) => n + file.bytes.length, 0);
+  // Capture every descriptor, original File object, declared size and read method
+  // before awaiting anything. Metadata changes cannot retarget a pending read.
+  const captured = incoming.map(row => {
+    keys(row, ['path_hex', 'mode', 'file']); sourcePath(row.path_hex); fileMode(row.mode);
+    const file = row.file;
+    if (!file || typeof file.arrayBuffer !== 'function' || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > FILE_LIMIT) fail('Selected file exceeds the 256 KiB import limit.');
+    size += file.size;
+    if (size > PATCH_LIMIT) fail('Combined initial file bytes exceed 1 MiB before reading uploads.');
+    return { path_hex: row.path_hex, mode: row.mode, file, size: file.size, read: file.arrayBuffer };
+  });
+  disjointPaths([...existing, ...captured].map(row => row.path_hex));
+  checkpoint();
+  const next = [...existing];
+  for (const row of captured) {
+    checkpoint(); const buffer = await row.read.call(row.file); checkpoint();
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength !== row.size) fail('Selected file length changed while reading.');
+    // Never retain a mutable ArrayBuffer owned by an injected reader.
+    next.push({ path_hex: row.path_hex, mode: row.mode, bytes: new Uint8Array(buffer).slice() });
+  }
+  const result = initialFilePatch(next); checkpoint();
+  return result.edits.map(edit => ({ path_hex: edit.path_hex, ...edit.after }));
+}
+export async function initialPlan(files, suppliedMetadata, algorithm, crypto, checkpoint = () => {}) {
+  format(algorithm); checkpoint();
+  // Copy all source bytes before the first hash await.
+  const patch = initialFilePatch(files);
   const metadata = commitMetadata(suppliedMetadata), root = new Map(), objects = new Map(), manifest = [];
   let total = 0;
   async function emit(kind, body) {
