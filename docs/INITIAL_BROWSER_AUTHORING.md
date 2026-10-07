@@ -29,8 +29,10 @@ operations. The initial client's transport permits only `source/initial/prepare`
    A missing/hidden branch response is never used to infer creation authority.
 2. Queue exact regular-file bytes with mode `100644` or `100755`. Paths may be
    UTF-8 text or exact lowercase hexadecimal bytes. Uploads preserve arbitrary
-   non-NUL bytes, line endings, and final-newline presence. Text edits explicitly
-   select LF or CRLF. Empty files and nested directories are supported.
+   bytes, including NUL, line endings, and final-newline presence. Text edits
+   explicitly select LF or CRLF; hexadecimal entry bypasses text conversion.
+   Empty hex input creates an empty file, not a deletion. Multiple files or one
+   directory can be imported as an atomic local batch, as described below.
 3. Enter author, committer, Unix timestamp, and message. Preparation submits a
    creation-only patch to the native `source/initial/prepare` endpoint. An
    optional authority snapshot is a preparation comparison, not a branch lease.
@@ -43,6 +45,48 @@ operations. The initial client's transport permits only `source/initial/prepare`
    `source/initial/apply` owns quarantine, closure validation, sealed admission,
    and the atomic expected-absent ref transition. The application request has
    no parent, current-head refresh, force option, or default-branch side effect.
+
+## Binary project import
+
+Use **Queue selected files atomically** for multiple files, or **Queue directory
+contents atomically** for a browser directory selection. Choose a common regular
+or executable mode and an optional repository directory prefix explicitly. The
+browser does not expose original executable bits; imported file names never
+infer them. The single-file editor can replace an individual queued file with
+an explicitly chosen mode or byte content before preparation.
+
+Directory import validates the complete browser-supplied relative paths and one
+common top-level folder, removes exactly that folder, and preserves the nested
+path suffix. A prefix such as `vendor/project` is prepended without path
+normalization. The application applies no ignore rules or hidden-file filters to
+selected files. A selected `.git` component, traversal component, duplicated
+name, file/directory overlap, or already queued destination rejects the entire
+batch. Use a source-only directory rather than silently dropping Git metadata.
+For individual non-UTF-8 paths, use the existing hexadecimal path control;
+browser directory names are supplied as text.
+
+Before the first read, the importer checks the selected FileList count, every
+path and mode, every file size, and the combined retained/new byte budget. It
+captures file identities and descriptors, reads exact bytes, then validates the
+complete generated patch. Only a complete result replaces the queue. A late read
+failure, truncation, encoded-patch overflow, disconnect or changed selection
+cannot leave a successful prefix behind. Cancellation waits for an in-progress
+File read to settle, discards its result and prevents subsequent reads; it does
+not claim to abort the browser's underlying file operation.
+
+Imports are local queue operations: no API request, history discovery, repository
+creation or publication occurs. All files still enter one creation-only native
+preparation and the existing separately confirmed publication. An outstanding
+publication blocks imports; its original-key recovery remains unchanged. Failed
+replacement/import attempts invalidate any older candidate and confirmation
+without destroying the previously queued files. Byte previews are inert, escaped
+and limited to 4,096 bytes per file; they are not evidence of full-file content.
+
+The file picker supplies selected regular-file bytes, not a host filesystem
+manifest. Symlink identities, empty directories, permissions beyond the explicit
+regular/executable mode, unselected files and existing Git history are not
+imported or claimed complete. Directory selection requires browser support for
+`webkitdirectory`; the ordinary multiple-file control remains separate.
 
 ## Verification before publication
 
@@ -92,43 +136,57 @@ Receipts contain repository bytes and must be protected separately from tokens.
 ## Bounds and unsupported operations
 
 The browser narrows, never widens, the native ceilings: 64 paths; 256 KiB per
-file; 1 MiB generated patch; 4,096-byte paths with at most 64 components; at most
+file; 1 MiB combined input bytes and 1 MiB generated patch; 4,096-byte paths with at most 64 components; at most
 8,192 unique Git objects and 8 MiB of unique object bodies; 1 MiB metadata,
 16 MiB bundle, and 24 MiB recovery receipt. Command encoding retains the
 existing 256 KiB ceiling. All coordinates use exactly representable integers.
 File sizes and aggregate draft budgets are checked before file reads.
 
-NUL-containing files, symlinks, gitlinks, binary patches, copies, renames,
+Symlinks, gitlinks, compressed Git-binary-patch uploads, copies, renames,
 modifications/deletions of existing history, and parented commits are unsupported
 here. Source bytes are DOM text, never HTML. Credentials are memory-only and
 cleared on disconnect/page exit; late reads cannot restore cleared draft data.
-The page warns before losing local files or outstanding publication responsibility.
+The page warns before losing queued files or outstanding publication responsibility.
 
 ## Local evidence and remaining gates
 
 Repository-owned focused commands:
 
 ```sh
-node --test tests/browser/initial.test.mjs tests/browser/initial-view.test.mjs
-node --test tests/browser/*.test.mjs
-node tests/browser/initial-git-oracle.mjs
+node --test tests/browser/initial.test.mjs tests/browser/initial-view.test.mjs \
+  tests/browser/initial-import.test.mjs tests/browser/initial-import-view.test.mjs \
+  tests/browser/initial-import-http.test.mjs
+node tests/browser/initial-import-git-oracle.mjs \
+  /absolute/path/to/git 'git version <exact-version>' <executable-sha256>
 ```
 
-The implementation run passed 107 new client/UI tests (79 client, 28 UI) and
-339 tests in the restored selected-file browser fixture, with zero failures or
-skips. Tests cover both hash domains, hostile manifests and envelopes,
-missing/extra files, complete closure construction, independent profile routing,
-file and network cancellation, frozen creation-only requests, canonical
-refusals, all recovery states, and tampered saved receipts.
+The binary-import increment's selected-file run contains 197 passing tests:
+59 new client/import cases, 29 new HTML-derived DOM cases, two new real loopback
+HTTP/default-Node-Fetch cases, and 107 existing initial-client/UI regressions.
+The enclosing implementation commit records the exact tested local revision.
+The two former NUL-refusal expectations now distinguish supported byte content
+from malformed byte containers and still reject unsupported file modes. Other
+initial-publication/recovery assertions are retained. These are not the full
+current repository or browser suite.
 
-The explicitly non-production Git oracle pins Git 2.47.3 and reports its binary
-SHA-256. Its 140 checks exercise real index patch application, blob/tree/commit
-identities, exact root commit bytes, and file-order determinism across both
-hash formats, including non-UTF-8 paths/content, virtual-slash tree ordering,
-empty files, modes, and final-newline variants. It does not run in production.
+The pinned non-production Git 2.47.3 executable (SHA-256
+`356db14e102d68a1a37d8a1ac577dfd678d45d46e92f468bef8b7154e7bfdc60`)
+passed 16 scenarios and 720 checks across SHA-1/SHA-256: actual patch/index
+application, exact blob/tree/root-commit identities, content/modes, deduplicated
+objects, byte-path ordering and strict fsck. Corpora include all 256 byte values,
+embedded patch-marker lines, 64-file and 256-KiB-file boundaries, raw paths,
+empty files and executable files. This validates generated-patch interoperability,
+not the native Rust initial-commit algorithm or its publication pipeline.
 
-The JavaScript suite uses DOM/File/HTTP doubles in a selected-file fixture, not
-a current full checkout or a live native node. Three Rust static-handler tests
-are supplied but were not executed because Rust/Cargo was unavailable. Native
-compilation, live-browser and live-node interoperability, full-workspace,
-Clippy, independent batch verification, and release gates remain unverified.
+The HTTP tests use actual sockets and default Fetch, but their server returns
+explicit synthetic native-wire replies. They check exact binary patch uploads,
+creation-only fields, lost replies, unchanged restored retries and bodyless
+outcome lookup. DOM/File tests do not establish real-browser rendering. The
+Chromium attempt was blocked at its first navigation by
+`ERR_BLOCKED_BY_ADMINISTRATOR`; zero browser scenarios executed.
+
+No Rust or shared transport/publication source changes are part of this import
+increment. Native compilation, live `fg serve-http` interoperability, Rust
+static-handler tests, full-workspace tests, Clippy, independent verification and
+release gates remain unverified. The native service may refuse work within the
+browser's declared limits; no production-readiness or bead closure is claimed.

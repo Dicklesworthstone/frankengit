@@ -117,3 +117,9 @@ test('encoded patch overflow after complete reads leaves the retained queue unch
  const selectedFiles=Array.from({length:4},(_,i)=>selected(String(i),new Uint8Array(FILE_LIMIT-1)));
  await assert.rejects(importInitialFiles([],selectedFiles.map(input)),/Encoded patch/);assert(selectedFiles.every(f=>f.reads===1));
 });
+test('incoming size and read method getters are captured once before asynchronous work',async()=>{
+ let sizes=0,methods=0;
+ const f={get size(){assert.equal(++sizes,1);return 2;},get arrayBuffer(){assert.equal(++methods,1);return async()=>new Uint8Array([0,255]).buffer;}};
+ const result=await importInitialFiles([],[{path_hex:'61',mode:0o100644,file:f}]);
+ assert.deepEqual(result[0].bytes,new Uint8Array([0,255]));assert.equal(sizes,1);assert.equal(methods,1);
+});

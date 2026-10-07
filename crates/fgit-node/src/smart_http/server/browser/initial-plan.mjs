@@ -82,12 +82,13 @@ export async function importInitialFiles(retained, incoming, checkpoint = () => 
   // Capture every descriptor, original File object, declared size and read method
   // before awaiting anything. Metadata changes cannot retarget a pending read.
   const captured = incoming.map(row => {
-    keys(row, ['path_hex', 'mode', 'file']); sourcePath(row.path_hex); fileMode(row.mode);
-    const file = row.file;
-    if (!file || typeof file.arrayBuffer !== 'function' || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > FILE_LIMIT) fail('Selected file exceeds the 256 KiB import limit.');
-    size += file.size;
+    keys(row, ['path_hex', 'mode', 'file']);
+    const { path_hex, mode, file } = row; sourcePath(path_hex); fileMode(mode);
+    const declared = file?.size, read = file?.arrayBuffer;
+    if (!file || typeof read !== 'function' || !Number.isSafeInteger(declared) || declared < 0 || declared > FILE_LIMIT) fail('Selected file exceeds the 256 KiB import limit.');
+    size += declared;
     if (size > PATCH_LIMIT) fail('Combined initial file bytes exceed 1 MiB before reading uploads.');
-    return { path_hex: row.path_hex, mode: row.mode, file, size: file.size, read: file.arrayBuffer };
+    return { path_hex, mode, file, size: declared, read };
   });
   disjointPaths([...existing, ...captured].map(row => row.path_hex));
   checkpoint();

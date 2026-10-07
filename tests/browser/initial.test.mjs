@@ -66,7 +66,7 @@ for (const [name, files] of [
   ['empty', []], ['duplicate', [file(), file()]], ['overlap', [file('a'), file('a/b')]],
   ['nonadjacent overlap', [file('a'), file('a-'), file('a/b')]], ['dotgit', [file('a/.GiT/config')]],
   ['traversal', [file('../x')]], ['symlink', [file('x', 'y', 0o120000)]],
-  ['NUL content', [file('x', '\0')]], ['too large', [file('x', 'x'.repeat(256 * 1024 + 1))]],
+  ['non-byte content', [{ ...file('x'), bytes: new Uint16Array([0]) }]], ['too large', [file('x', 'x'.repeat(256 * 1024 + 1))]],
 ]) test(`invalid initial files (${name}) refuse before network work`, async () => {
   const f = await fixture(), c = await connected(f); await assert.rejects(c.prepare(f.fields, files, metadata)); assert.equal(f.calls.length, 0);
 });

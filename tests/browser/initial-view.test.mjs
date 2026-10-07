@@ -126,9 +126,11 @@ test('explicit replacement is local, while overlapping paths refuse without dama
   await queue(s, file('a/b', 'bad')); assert.equal(s.app.queued.length, 1); assert.match(s.el('status').textContent, /overlap/i);
   const remove = s.el('files').children[0].children[1]; await remove.fire(); assert.equal(s.app.queued.length, 0); assert(s.el('prepare').disabled);
 });
-test('NUL and unsupported modes refuse locally, rather than silently producing an empty or regular file', async () => {
-  const s = await setup(); await queue(s, file('x', '\0')); assert.equal(s.app.queued.length, 0);
-  s.el('file-mode').value = '120000'; await s.el('queue').fire(); assert.equal(s.app.queued.length, 0);
+test('binary NUL files queue exactly while unsupported modes cannot alter the queued file', async () => {
+  const s = await setup(); await queue(s, file('x', '\0')); assert.equal(s.app.queued.length, 1);
+  assert.deepEqual(s.app.queued[0].bytes, new Uint8Array([0]));
+  s.el('file-mode').value = '120000'; await s.el('queue').fire(); assert.equal(s.app.queued.length, 1);
+  assert.deepEqual(s.app.queued[0].bytes, new Uint8Array([0])); assert.equal(s.app.queued[0].mode, 0o100644);
   assert.equal(s.f.calls.length, 0);
 });
 test('cancel during native preparation cannot render a returned candidate or publish anything', async () => {
