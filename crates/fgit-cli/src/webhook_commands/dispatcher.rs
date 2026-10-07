@@ -19,6 +19,7 @@ use fgit_types::{AsciiSlug, Digest, GitHashAlgorithm, HeadGeneration, Repository
 use crate::publication_support::quote;
 use super::subscription::require_subscription;
 mod journal;
+mod status;
 use journal::{Journal, Plan, State, hex};
 
 const USAGE: &str = "usage: fg webhook dispatch <storage-root> <tenant-id> <repository-id> --trusted-local
@@ -131,6 +132,7 @@ fn now_millis() -> Result<u64, String> {
 }
 
 pub(super) fn run_migration(args: &[String]) -> Result<u8, String> { journal::migrate(args) }
+pub(super) fn run_status(args: &[String]) -> Result<u8, String> { status::run(args) }
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
     let mut output = std::io::stdout().lock();
@@ -168,9 +170,13 @@ fn snapshot(options: &Options) -> Result<Snapshot, String> {
         Ok(Snapshot { incarnation: node.repository_incarnation_id(), head: page.source_head, entries: page.entries })
     })
 }
-fn registration(options: &Options) -> Result<(WebhookStore, WebhookRegistration), String> {
+fn registration_snapshot(options: &Options) -> Result<(WebhookStore, WebhookRegistration), String> {
     let store = WebhookStore::open(options.storage.join("webhooks"))?;
     let registration = store.get(options.id).ok_or("dispatch webhook registration is missing")?;
+    Ok((store, registration))
+}
+fn registration(options: &Options) -> Result<(WebhookStore, WebhookRegistration), String> {
+    let (store, registration) = registration_snapshot(options)?;
     if !registration.active { return Err("dispatch webhook registration is inactive".into()); }
     let validated = options.policy().validate_url(registration.url.raw()).map_err(|e| e.to_string())?;
     if validated.scheme() != "http" { return Err("dispatch HTTPS is not supported; no TLS downgrade is permitted".into()); }

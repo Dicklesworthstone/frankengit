@@ -430,3 +430,101 @@ fn checkpoint_checks_count_floor_order_completeness_and_state_not_only_checksums
         assert!(checkpoint::encode(&header, &entries, 100, 3).is_err());
     }
 }
+
+#[test]
+fn live_inspection_is_non_owning_paged_and_keeps_uncertainty_separate_from_latest_rejection() {
+    let scratch = Scratch::new();
+    let mut journal = scratch.open();
+    varied_entries(&mut journal);
+    let old = fs::read(scratch.path()).unwrap();
+    let old_fence = fs::read(checkpoint::fence_path(&scratch.path())).unwrap();
+    let first = inspect(&scratch.path(), None, 2, None).unwrap();
+    assert!(first.present);
+    assert_eq!(first.counts.total, 5);
+    assert_eq!(first.counts.accepted, 1);
+    assert_eq!(first.counts.rejected, 2);
+    assert_eq!(first.counts.unresolved, 2);
+    assert_eq!(first.rows.len(), 2);
+    let second = inspect(&scratch.path(), first.next_after, 2, first.tail).unwrap();
+    assert_eq!(first.tail, second.tail);
+    assert_eq!(second.rows.len(), 2);
+    assert_eq!(second.rows[1].state, State::Rejected);
+    assert!(second.rows[1].outcome_unknown);
+    let third = inspect(&scratch.path(), second.next_after, 2, first.tail).unwrap();
+    assert_eq!(third.rows.len(), 1);
+    assert!(third.rows[0].outcome_unknown);
+    assert!(third.next_after.is_none());
+    assert_eq!(fs::read(scratch.path()).unwrap(), old);
+    assert_eq!(fs::read(checkpoint::fence_path(&scratch.path())).unwrap(), old_fence);
+    assert!(Journal::open(&scratch.path(), [4; 32], 3).is_err(), "inspection must not release the worker fence");
+}
+
+#[test]
+fn inspection_during_each_checkpoint_phase_reads_only_a_complete_selected_snapshot() {
+    let scratch = Scratch::new();
+    let mut journal = scratch.open();
+    varied_entries(&mut journal);
+    let before = inspect(&scratch.path(), None, 100, None).unwrap();
+    journal.compact_with(&mut |stage| {
+        let observed = inspect(&scratch.path(), None, 100, None)?;
+        assert_eq!(observed.rows, before.rows);
+        assert_eq!(observed.counts, before.counts);
+        assert_eq!(observed.clock_floor, before.clock_floor);
+        if stage == checkpoint::Stage::Staged { assert_eq!(observed.tail, before.tail); }
+        else { assert_ne!(observed.tail, before.tail); }
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn inspection_continuations_refuse_appends_and_compactions_instead_of_mixing_snapshots() {
+    let scratch = Scratch::new();
+    let mut journal = scratch.open();
+    varied_entries(&mut journal);
+    let first = inspect(&scratch.path(), None, 1, None).unwrap();
+    journal.compact().unwrap();
+    assert!(inspect(&scratch.path(), first.next_after, 1, first.tail).is_err());
+    let compacted = inspect(&scratch.path(), None, 1, None).unwrap();
+    journal.reserve(numbered_key(2), payload(), 1000, 1010).unwrap();
+    assert!(inspect(&scratch.path(), compacted.next_after, 1, compacted.tail).is_err());
+    assert!(inspect(&scratch.path(), compacted.next_after, 1, None).is_err());
+    assert!(inspect(&scratch.path(), None, 0, None).is_err());
+    assert!(inspect(&scratch.path(), None, 101, None).is_err());
+}
+
+#[test]
+fn inspection_reports_absence_without_creation_but_refuses_missing_half_and_partial_tail() {
+    let scratch = Scratch::new();
+    let missing = scratch.0.join("not-created").join("journal");
+    let absent = inspect(&missing, None, 20, None).unwrap();
+    assert!(!absent.present);
+    assert!(absent.scope.is_none());
+    assert!(!missing.parent().unwrap().exists());
+    assert!(inspect(&missing, None, 20, Some([0; 32])).is_err());
+    let mut journal = scratch.open();
+    journal.reserve(key(), payload(), 100, 200).unwrap();
+    journal.file.write_all(b"event\tpartial").unwrap();
+    assert!(inspect(&scratch.path(), None, 20, None).is_err());
+    drop(journal);
+    fs::remove_file(scratch.path()).unwrap();
+    assert!(inspect(&scratch.path(), None, 20, None).is_err());
+    assert!(!scratch.path().exists());
+}
+
+#[test]
+fn inspection_preserves_full_width_timestamps_and_an_exhausted_unknown() {
+    let scratch = Scratch::new();
+    let mut journal = scratch.open();
+    for attempt in 1..=3 {
+        assert_eq!(journal.reserve(key(), payload(), u64::MAX, u64::MAX).unwrap(), attempt);
+        journal.observe(key(), State::Unknown, u64::MAX, u64::MAX, b"lost ack").unwrap();
+    }
+    journal.compact().unwrap();
+    let page = inspect(&scratch.path(), None, 100, None).unwrap();
+    assert_eq!(page.clock_floor, Some(u64::MAX));
+    assert_eq!(page.rows[0].next_at, u64::MAX);
+    assert_eq!(page.rows[0].attempt, 3);
+    assert!(page.rows[0].exhausted && page.rows[0].outcome_unknown);
+    assert_eq!(page.counts.exhausted, 1);
+    assert_eq!(page.counts.unresolved, 1);
+}

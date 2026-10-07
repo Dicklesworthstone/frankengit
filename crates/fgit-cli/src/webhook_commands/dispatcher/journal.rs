@@ -14,6 +14,8 @@ use fgit_types::AsciiSlug;
 
 mod checkpoint;
 pub(super) use checkpoint::migration::run as migrate;
+mod inspection;
+pub(super) use inspection::{Inspection, inspect};
 
 const MAGIC: &str = "fgit-webhook-dispatch-v2";
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -30,7 +32,7 @@ pub(super) fn hex(bytes: &[u8]) -> String {
     text
 }
 
-fn unhex(text: &str) -> Result<[u8; 32], String> {
+pub(super) fn unhex(text: &str) -> Result<[u8; 32], String> {
     if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
         return Err("invalid dispatch journal digest".into());
     }

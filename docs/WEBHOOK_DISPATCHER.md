@@ -119,6 +119,8 @@ cumulative uncertainty flag, next-attempt time, latest evidence digest and clock
 floor is retained. No acceptance is dropped to make space and no budget resets.
 Superseded per-attempt log frames are not retained by this local profile; this
 is a compacted retry state, not a complete audit archive or receiver proof.
+A process crash can leave a private staging file; such files are never selected
+on reopen. The data-file bound is not a total-directory or orphan-cleanup claim.
 
 A failure before replacement leaves the old selected file intact. An unknown
 replacement/directory-sync result poisons the owner: it cannot send again until
@@ -205,6 +207,56 @@ selected on reopen and is not a delivery source.
 The migration and checkpoint Rust tests still require native execution before
 an operational upgrade. Source inspection and a checksum match are not evidence
 of crash durability on an untested filesystem.
+## Inspect status without pausing a worker
+
+```sh
+fg webhook dispatch-status ./fgit-data TENANT_ID REPOSITORY_ID --trusted-local \
+  --id WEBHOOK_ID --destination CANONICAL_DESTINATION --limit 20
+```
+
+This command authenticates the existing local repository binding, closes its
+node runtime, then reads a bounded journal prefix without taking the dispatch
+fence, syncing records, reserving retries or contacting a receiver. It is usable
+while a dispatcher owns the journal. `--at-least-once`, `--attempt`, continuous
+mode, stop controls and egress options are refused on this read-only command.
+
+The result includes the retained attempt ordinal, last state and evidence digest,
+next-attempt timestamp, exhausted-budget flag and cumulative uncertainty for each
+listed delivery. Counts cover the entire observed journal, not just its page.
+`rejected` counts latest recorded rejections; `unresolved` also counts earlier
+unknown attempts that such a rejection cannot erase. An accepted observation
+resolves local at-least-once delivery, not the possibility of duplicate effects.
+Full-width timestamps and webhook IDs are decimal strings, without JSON-number
+rounding. `payload_binding_sha256` is the journal's algorithm-bound root hash,
+not a replacement canonical payload root. Raw response prose and secrets are
+never returned.
+
+For continuation, pass `--after NEXT_AFTER --expected-tail JOURNAL_TAIL_SHA256`.
+The tail commits the exact observed prefix. Append or compaction may change it;
+a changed token refuses rather than combining different journal snapshots.
+Start a new listing explicitly after that refusal. Configuration diagnostics are
+refreshed independently; the token pins journal records, not live registration state.
+Pages admit 1–100 entries
+and responses are capped at 256 KiB. A torn concurrent append or corrupt data
+also refuses; the reader never trims bytes and presents a fabricated clean status.
+
+The command can show retained failures after registration disablement, an
+endpoint/schedule change, or configuration failure. `configuration_available`
+and `scope_matches_current` distinguish those cases; false/null scope agreement
+must not be interpreted as current configuration authorizing the old records.
+A missing journal reports `journal_present:false`, not an empty canonical queue.
+One missing half of a journal/fence pair is a refusal, not a fresh empty journal.
+`clock_behind_floor` exposes a clock rollback that would fence retries.
+
+This is an observation, not a retry permit, receiver proof, or authoritative
+pending-queue view. A complete live append may still await its owner's sync,
+so `durability_verified` is always false. `transport_attempted`, `journal_modified`
+and `canonical_settled` are also false. Exit 0 means the status read completed,
+not that the displayed deliveries succeeded. It never clears failures or resets
+attempt counters. Native status tests cover reads during checkpoint replacement,
+pinned pagination, missing/corrupt state, full-width values, SHA-1/SHA-256 native
+node bindings, disabled/changed/unavailable configuration, and output failure.
+These Rust tests remain unexecuted in this environment.
 
 ## Source selection and limits
 

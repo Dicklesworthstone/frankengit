@@ -406,3 +406,99 @@ fn a_one_poll_stop_pulse_cannot_resume_a_continuous_dispatcher_after_drain() {
     assert!(output.lines().last().unwrap().contains("\"stopped\":true"));
     assert!(output.contains("\"attempts\":1"));
 }
+
+fn status_args(fixture: &Fixture) -> Vec<String> {
+    vec![fixture.options.storage.to_string_lossy().into_owned(), fixture.options.tenant.to_string(),
+        fixture.options.repository.to_string(), "--trusted-local".into(), "--id".into(), fixture.options.id.0.to_string(),
+        "--destination".into(), fixture.options.destination.as_str().to_owned(), "--object-format".into(),
+        fixture.options.format.as_str().to_owned()]
+}
+
+#[test]
+fn live_status_reads_persisted_native_nodes_without_sending_or_changing_authority_or_journal() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let fixture = Fixture::new(format);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let registration = fixture.register(&format!("http://{}/hook", listener.local_addr().unwrap()), WebhookEventFilter::Wildcard);
+        let before = snapshot(&fixture.options).unwrap();
+        let key = before.entries[0].delivery_key();
+        let path = journal_path(&fixture.options);
+        let mut journal = Journal::open(&path, scope(&fixture.options, before.incarnation, &registration), 3).unwrap();
+        journal.reserve(key, payload_hash(before.entries[0].payload_root()), 10_000, 10_000).unwrap();
+        journal.observe(key, State::Unknown, 10_000, 10_000, b"lost receiver acknowledgement").unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let mut output = Vec::new();
+        assert_eq!(status::execute(&status_args(&fixture), &|| Ok(9_999), &mut output).unwrap(), 0);
+        let output = String::from_utf8(output).unwrap();
+        for expected in ["\"journal_present\":true", "\"scope_matches_current\":true", "\"unknown\":1",
+            "\"clock_behind_floor\":true", "\"transport_attempted\":false", "\"journal_modified\":false",
+            "\"durability_verified\":false", "\"canonical_settled\":false", "\"node_closed\":true"]
+        { assert!(output.contains(expected), "{expected}: {output}"); }
+        assert!(!output.contains("lost receiver acknowledgement"), "only the evidence digest is disclosed");
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(listener.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        let after = snapshot(&fixture.options).unwrap();
+        assert_eq!(after.head, before.head);
+        assert_eq!(after.entries, before.entries);
+    }
+}
+
+#[test]
+fn status_keeps_old_unknowns_visible_when_configuration_is_disabled_changed_or_unavailable() {
+    let fixture = Fixture::new(GitHashAlgorithm::Sha1);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut registration = fixture.register(&format!("http://{}/hook", listener.local_addr().unwrap()), WebhookEventFilter::Wildcard);
+    let page = snapshot(&fixture.options).unwrap();
+    let key = page.entries[0].delivery_key();
+    let path = journal_path(&fixture.options);
+    let mut journal = Journal::open(&path, scope(&fixture.options, page.incarnation, &registration), 3).unwrap();
+    journal.reserve(key, payload_hash(page.entries[0].payload_root()), 10_000, 10_000).unwrap();
+    journal.observe(key, State::Unknown, 10_000, 10_000, b"unknown").unwrap();
+    let original = fs::read(&path).unwrap();
+    let args = status_args(&fixture);
+    registration.active = false;
+    fixture.store().register(registration.clone()).unwrap();
+    let mut output = Vec::new();
+    status::execute(&args, &|| Ok(10_000), &mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("\"registration_active\":false"));
+    assert!(output.contains("\"scope_matches_current\":true"));
+    assert!(output.contains("\"unresolved\":1"));
+    registration.url = SsrfPolicy::PERMISSIVE_FOR_TESTS.validate_url("http://127.0.0.1:9/changed").unwrap();
+    fixture.store().register(registration).unwrap();
+    let mut output = Vec::new();
+    status::execute(&args, &|| Ok(10_000), &mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("\"scope_matches_current\":false"));
+    assert!(output.contains("\"unresolved\":1"));
+    fs::write(fixture.options.storage.join("webhooks/registrations.json"), "corrupt configuration\n").unwrap();
+    let mut output = Vec::new();
+    status::execute(&args, &|| Err("clock unavailable".into()), &mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("\"configuration_available\":false"));
+    assert!(output.contains("\"scope_matches_current\":null"));
+    assert!(output.contains("\"wall_clock_millis\":null"));
+    assert!(output.contains("\"unresolved\":1"));
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(listener.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn status_output_failure_does_not_reserve_or_rewrite_a_delivery() {
+    struct FailedStatusOutput;
+    impl Write for FailedStatusOutput {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> { Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed status reader")) }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+    let fixture = Fixture::new(GitHashAlgorithm::Sha1);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    fixture.register(&format!("http://{}/hook", listener.local_addr().unwrap()), WebhookEventFilter::Wildcard);
+    let before = snapshot(&fixture.options).unwrap();
+    assert!(status::execute(&status_args(&fixture), &|| Ok(10_000), &mut FailedStatusOutput).is_err());
+    assert!(!journal_path(&fixture.options).exists());
+    assert_eq!(snapshot(&fixture.options).unwrap().head, before.head);
+    assert_eq!(listener.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+}

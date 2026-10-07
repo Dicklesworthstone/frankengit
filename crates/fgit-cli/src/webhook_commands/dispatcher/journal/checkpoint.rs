@@ -111,7 +111,7 @@ pub(super) fn encode(header: &str, entries: &BTreeMap<AsciiSlug, Entry>, clock_f
 pub(super) fn header(scope: [u8; 32], max_attempts: u32) -> String {
     format!("{MAGIC}\t{}\t{max_attempts}\n", hex(&scope))
 }
-fn fence_header(header: &str) -> String {
+pub(super) fn fence_header(header: &str) -> String {
     format!("{MAGIC}-fence\t{}\n", hex(&sha256_digest(header.as_bytes())))
 }
 pub(super) fn fence_path(path: &Path) -> PathBuf {
@@ -121,7 +121,7 @@ pub(super) fn fence_path(path: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn private_slot(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
+pub(super) fn private_slot(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.is_file() && meta.nlink() == 1 && meta.permissions().mode() & 0o077 == 0
             && meta.len() <= MAX_BYTES => Ok(Some(meta)),
