@@ -26,6 +26,13 @@
 <p>Conflict sides are relative to each original commit: ours is onto plus the already replayed prefix; theirs is the original change. Missing sides are not deletions. Choose every path explicitly. Exact files and hex support binary/empty content; text applies the selected LF/CRLF conversion. Each resolved file is at most 256 KiB; all cumulative recipes share 1 MiB and 64 choices.</p>
 <button id="resolve" type="button" disabled>Resolve this original commit and continue</button>
 <div id="empty-stop" hidden><label>Explicit policy for the stopped empty commit <select id="empty-policy"><option value="">Choose a policy</option><option value="drop">Drop commits that become empty</option><option value="keep">Keep commits that become empty</option></select></label><button id="continue-empty" type="button" disabled>Continue with this policy</button></div></section>
+<section><h2>Save and resume unsent rebase work</h2>
+<p>Save a draft before closing this page. It contains exact branch pins, commit settings and accepted earlier resolutions, including binary bytes. To save the current conflict too, choose every path and check the option below. Partial current choices are not saved.</p>
+<label><input id="include-choices" type="checkbox" disabled>Include every current conflict choice without submitting it</label>
+<button id="save-draft" type="button" disabled>Save rebase draft</button>
+<label>Saved draft (at most 3 MiB) <input id="draft-file" type="file" disabled></label>
+<button id="load-draft" type="button" disabled>Load draft locally</button><button id="resume-draft" type="button" disabled>Resume saved draft (read only)</button>
+<p>Drafts are unsigned repository data, not authorization or publication receipts. Loading sends nothing and restores no candidate. Resume rechecks both original branch pins, then prepares and inspects again. Stale snapshots refuse. Save the original-request receipt instead after preparing or sending a publication. No draft is stored automatically.</p></section>
 <section><div id="inspection"></div><button id="stage" type="button" disabled>Prepare exact history-rewrite request</button></section>
 <section><h2>Confirm publication or recover its original outcome</h2><pre id="pending">No outstanding history rewrite.</pre>
 <label><input id="confirm-send" type="checkbox" disabled>I inspected the complete series and confirm rewriting exactly the displayed source branch from its expected old tip to this candidate. An unchanged retry may recover an already committed operation.</label>

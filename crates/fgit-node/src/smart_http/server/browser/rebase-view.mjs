@@ -1,5 +1,5 @@
 // Explicit interactive history rewrite. Repository bytes enter text nodes only.
-import { RebaseClient, RECEIPT_BYTES as RECEIPT_LIMIT } from './rebase.mjs';
+import { RebaseClient, RECEIPT_BYTES as RECEIPT_LIMIT, DRAFT_BYTES } from './rebase.mjs';
 import { decimal, fail, text, utf8, unhex } from './pulls-core.mjs';
 import { FILE_BYTES as FILE_LIMIT, RESOLUTION_BYTES as RESOLUTION_LIMIT, MAX_CHOICES } from './rebase-data.mjs';
 export function display(bytes, maximum = 4096) {
@@ -64,18 +64,32 @@ export function mountRebase(doc, options = {}) {
   const get = id => { const e = doc.getElementById(id); if (!e) fail(`Missing rebase control ${id}.`); return e; };
   const ids = ['token','connect','disconnect','source','onto','format','select','selection','upstream','empty','committer','timestamp',
     'max-commits','prepare','cancel','report','conflicts','resolve','empty-stop','empty-policy','continue-empty','inspection',
-    'stage','confirm-send','send','recover','discard','save-receipt','restore-file','restore','pending','status'];
+    'stage','confirm-send','send','recover','discard','save-receipt','restore-file','restore','pending','status',
+    'save-draft','include-choices','draft-file','load-draft','resume-draft'];
   const c = Object.fromEntries(ids.map(id => [id,get(id)]));
   const element = (tag,value) => { const e=doc.createElement(tag); if(value !== undefined)e.textContent=value;return e; };
   let busy=false, revision=0, rows=[], draftDirty=false;
   const urls=options.urls ?? globalThis.URL, timers=options.timers ?? globalThis, downloads=new Map();
   function clearDownloads() { for(const [url,timer] of downloads){timers.clearTimeout(timer);urls.revokeObjectURL(url);} downloads.clear(); }
   function status(value) { c.status.textContent=value; }
+  function saveFile(value, name, override) {
+    if (override) return override(value);
+    const url=urls.createObjectURL(new Blob([value],{type:'application/json'}));
+    try {
+      const a=element('a');a.href=url;a.download=name;a.click();
+      const timer=timers.setTimeout(()=>{urls.revokeObjectURL(url);downloads.delete(url);},30_000);
+      timer?.unref?.();downloads.set(url,timer);
+    } catch(error) { urls.revokeObjectURL(url);throw error; }
+  }
   function sync() {
     const pending=client.pending, s=client.state;
-    for(const id of ['source','onto','format','upstream','empty','committer','timestamp','max-commits','empty-policy','restore-file'])c[id].disabled=busy||!client.connected||!!pending;
+    for(const id of ['source','onto','format','upstream','empty','committer','timestamp','max-commits','empty-policy','restore-file','draft-file'])c[id].disabled=busy||!client.connected||!!pending;
     c.token.disabled=busy;c.connect.disabled=busy;c.select.disabled=busy||!client.connected||!!pending;
-    c.prepare.disabled=busy||!client.connected||!!pending||!s.selection;
+    c.prepare.disabled=busy||!client.connected||!!pending||!s.selection||s.resumeRequired;
+    c['save-draft'].disabled=busy||!client.connected||!!pending||!s.command;
+    c['include-choices'].disabled=busy||!client.connected||!!pending||s.report?.state!=='conflicted';
+    c['load-draft'].disabled=busy||!client.connected||!!pending;
+    c['resume-draft'].disabled=busy||!client.connected||!!pending||!s.resumeRequired;
     c.cancel.disabled=!busy||!!pending;
     c.resolve.disabled=busy||!client.connected||!!pending||s.report?.state!=='conflicted';
     c['empty-stop'].hidden=s.report?.state!=='became_empty';c['continue-empty'].disabled=busy||!client.connected||!!pending||s.report?.state!=='became_empty';
@@ -89,7 +103,7 @@ export function mountRebase(doc, options = {}) {
   }
   function clearViews() {
     rows=[];draftDirty=false;clearDownloads();c.report.replaceChildren();c.conflicts.replaceChildren();c.inspection.replaceChildren();
-    c.selection.textContent='';c['confirm-send'].checked=false;
+    c.selection.textContent='';c['confirm-send'].checked=false;c['include-choices'].checked=false;
   }
   function showDiff(value, target, heading) {
     target.append(element('h3',heading),element('p',`${value.requested_before} → ${value.requested_after}; ${value.entry_count} changed paths.`));
@@ -107,6 +121,12 @@ export function mountRebase(doc, options = {}) {
   function changedResolution() { revision++;draftDirty=true;client.cancel();c['confirm-send'].checked=false;status('Resolution changed. Validate the complete choices again before continuing.'); }
   function paint() {
     clearViews();const s=client.state;c.selection.textContent=s.selection?JSON.stringify(s.selection,null,2):'';
+    if(s.resumeRequired) {
+      c.report.append(element('h2','Saved draft loaded — native revalidation required'),
+        element('pre',JSON.stringify(s.command,null,2)),
+        element('p',`${s.resolutionCommits.length} saved original commits; ${s.resolutionPaths} choices; ${s.resolutionBytes} path/file bytes. No candidate or publication request was restored.`),
+        element('p','Resume checks the original branch pins before submitting saved resolutions to native preparation and inspection. A changed snapshot refuses; no tips are refreshed.'));
+    }
     if(!s.report){sync();return;}
     const r=s.report;
     c.report.append(element('h2',r.state==='clean'?'Complete rebased series':`Stopped: ${r.state}`),element('pre',JSON.stringify(s.command,null,2)));
@@ -144,7 +164,7 @@ export function mountRebase(doc, options = {}) {
     try{await work(start);}catch(error){if(start===revision)status(`${error.outcomeUnknown?'Outcome unknown. Preserve the original request and key. ':''}${error.message}`);}
     finally{busy=false;if(!client.connected)clearViews();sync();}
   }
-  function disconnect() {revision++;client.disconnect();c.token.value='';c['restore-file'].value='';clearViews();status(client.pending?'Disconnected. Original publication retained; save its recovery receipt.':'Disconnected; credentials, recipes and source views cleared.');sync();}
+  function disconnect() {revision++;client.disconnect();c.token.value='';c['restore-file'].value='';c['draft-file'].value='';clearViews();status(client.pending?'Disconnected. Original publication retained; save its recovery receipt.':'Disconnected; credentials, recipes and source views cleared.');sync();}
   c.connect.addEventListener('click',()=>perform(async()=>{const token=c.token.value;c.token.value='';clearViews();await client.connect(token);status('Connected. Select both branch tips or restore an original request.');}));
   c.disconnect.addEventListener('click',disconnect);
   c.select.addEventListener('click',()=>perform(async()=>{clearViews();await client.select(c.source.value,c.onto.value,c.format.value);paint();status('Both branches selected at one snapshot. Enter the exact upstream boundary and explicit committer.');}));
@@ -170,13 +190,37 @@ export function mountRebase(doc, options = {}) {
       status('Token-free original-request receipt saved. It contains repository candidate bytes; it is not authorization.');sync();
     }catch(error){status(error.message);}
   });
+  c['save-draft'].addEventListener('click',()=>perform(async start=>{
+    const include=c['include-choices'].checked;
+    const choices=include?await collectResolutions(rows,client.state,()=>start===revision&&client.connected):null;
+    if(start!==revision||!client.connected)fail('Draft selection changed.');
+    const value=await client.exportDraft(choices);
+    if(start!==revision||!client.connected)fail('Draft selection changed.');
+    await saveFile(value,'frankengit-rebase-draft.json',options.saveDraft);
+    if(start===revision)status(include?'Draft download started with all current conflict choices. Nothing submitted or published.':'Draft download started with accepted earlier resolutions. Current unsubmitted choices are not included. Nothing published.');
+  }));
+  c['include-choices'].addEventListener('change',()=>{revision++;client.cancel();sync();});
+  c['draft-file'].addEventListener('change',()=>{revision++;client.cancel();sync();});
+  c['load-draft'].addEventListener('click',()=>perform(async start=>{
+    const file=c['draft-file'].files?.[0],bytes=await chosenFile(file,DRAFT_BYTES,()=>start===revision&&client.connected&&c['draft-file'].files?.[0]===file);
+    await client.restoreDraft(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes));
+    const {command,selection}=client.state;
+    c.source.value=selection.source.ref;c.onto.value=selection.onto.ref;c.format.value=selection.scope.format;
+    for(const id of ['upstream','empty','committer','timestamp'])c[id].value=String(command[id]);
+    c['max-commits'].value=String(command.max_commits);paint();
+    status('Draft loaded locally; no repository request made. Resume explicitly to revalidate. It is not an original-publication recovery receipt.');
+  }));
+  c['resume-draft'].addEventListener('click',()=>perform(async()=>{
+    await client.resumeDraft();paint();
+    status(client.candidate?'Saved draft revalidated and complete candidate inspected. Review it before preparing any publication.':'Saved resolutions revalidated. Continue from the displayed native stop; nothing published.');
+  }));
   c['restore-file'].addEventListener('change',()=>{revision++;client.cancel();});
   c.restore.addEventListener('click',()=>perform(async start=>{
     const file=c['restore-file'].files?.[0],bytes=await chosenFile(file,RECEIPT_LIMIT,()=>start===revision&&client.connected&&c['restore-file'].files?.[0]===file);
     await client.restoreReceipt(new TextDecoder('utf-8',{fatal:true}).decode(bytes));clearViews();status('Original request restored, not executed. Look up its outcome or separately confirm an unchanged retry.');}));
   const events=options.events ?? globalThis;
   events.addEventListener?.('pagehide',disconnect);
-  events.addEventListener?.('beforeunload',event=>{if(client.pending||client.state.report||draftDirty){event.preventDefault();event.returnValue='';}});
+  events.addEventListener?.('beforeunload',event=>{if(client.pending||client.state.report||client.state.resumeRequired||draftDirty){event.preventDefault();event.returnValue='';}});
   sync();return {client,disconnect,get rows(){return rows;}};
 }
 if(typeof document!=='undefined')mountRebase(document);
