@@ -1,15 +1,16 @@
 // One immutable rebase series and one outstanding exact publication. Native
 // admission owns history rewriting; this session has no automatic write/retry.
-import { Transport, fail, keys, record, copy, integer, branch, format, form, hex, utf8, opaque, principal } from './pulls-core.mjs';
+import { Transport, fail, keys, record, copy, integer, branch, format, form, hex, utf8, opaque, principal, snapshot, unhex } from './pulls-core.mjs';
 import { digest, makeBoundary } from './pulls-candidate.mjs';
 import { recovery, receiptScope, base64, fromBase64 } from './pulls-actions.mjs';
 import { rootReply, prepareCommand, prepared, addResolutions, resolutionUpload, applyFields,
-  publication, retryKey, sourceUpload, PREPARE_BYTES, READ_BYTES, BUNDLE_BYTES } from './rebase-data.mjs';
+  publication, retryKey, sourceUpload, PREPARE_BYTES, READ_BYTES, BUNDLE_BYTES, exactOid, MAX_CHOICES, FILE_BYTES, RESOLUTION_BYTES } from './rebase-data.mjs';
+import { sourcePath } from './source-edit-patch.mjs';
 import { INSPECT_OPTIONS, inspectReply } from './rebase-inspection.mjs';
 export const RECEIPT_BYTES = 12 * 1024 * 1024;
 export class RebaseClient {
   #transport; #selection = null; #scope = null; #report = null; #artifact = null; #recipes = [];
-  #command = null; #pending = null; #busy = false; #serial = 0; #timeout;
+  #resumeRequired = false; #command = null; #pending = null; #busy = false; #serial = 0; #timeout;
   constructor(options) {
     this.#transport = new Transport({ ...options, pageSuffix: '/ui/rebase/' });
     this.#timeout = integer(options.operationTimeoutMs ?? 60_000, 'whole rebase read timeout', 1, 300_000);
@@ -20,7 +21,7 @@ export class RebaseClient {
   // Detached display data, not mutable recipes, bundle bytes or credentials.
   get state() {
     return { selection: this.selection, report: this.report, candidate: this.candidate,
-      command: copy(this.#command), resolutionCommits: this.#recipes.map(r => r.original),
+      command: copy(this.#command), resumeRequired: this.#resumeRequired, resolutionCommits: this.#recipes.map(r => r.original),
       resolutionPaths: this.#recipes.reduce((n, r) => n + r.paths.length, 0),
       resolutionBytes: this.#recipes.reduce((n, r) => n + r.paths.reduce((m, p) =>
         m + p.conflict.path_hex.length / 2 + (p.bytes?.length ?? 0), 0), 0) };
@@ -43,11 +44,11 @@ export class RebaseClient {
   }
   disconnect() {
     this.#serial++; this.#transport.disconnect(); this.#scope = null; this.#selection = null;
-    this.#artifact = null; this.#report = null; this.#command = null; this.#recipes = [];
+    this.#artifact = null; this.#report = null; this.#command = null; this.#recipes = []; this.#resumeRequired = false;
     // Uncertain publication responsibility survives credential loss.
   }
   cancel() { this.#serial++; this.#transport.cancelReads(); this.#artifact = null; }
-  invalidate() { this.cancel(); this.#report = null; this.#recipes = []; this.#command = null; }
+  invalidate() { this.cancel(); this.#report = null; this.#recipes = []; this.#command = null; this.#resumeRequired = false; }
   clearSelection() { this.invalidate(); this.#selection = null; }
   #noPending() { if (this.#pending) fail('Resolve the saved rebase publication before starting another operation.'); }
   async #run(action, boundedRead = true) {
@@ -87,6 +88,7 @@ export class RebaseClient {
   }
   async prepare(input) {
     this.#noPending();
+    if (this.#resumeRequired) fail('Resume the loaded draft before preparing different inputs.');
     if (this.#busy) fail('A rebase operation is already running.');
     this.invalidate();
     if (!this.#selection) fail('Select both immutable branch tips first.');
@@ -140,6 +142,66 @@ export class RebaseClient {
     }
     check(); this.#report = result.metadata; this.#command = copy(command); this.#recipes = recipes; this.#artifact = artifact;
     return { report: this.report, candidate: this.candidate };
+  }
+  // A draft is read-side work, never an alternative recovery file for a write.
+  // Optional complete choices capture the currently edited conflict without
+  // submitting it. Native resolution must rediscover the same conflict later.
+  async exportDraft(choices = null) {
+    this.#noPending();
+    return this.#run(async check => {
+      if (!this.#selection || !this.#command) fail('Prepare a rebase session before saving its draft.');
+      const selection = copy(this.#selection), command = copy(this.#command);
+      const recipes = choices === null ? copy(this.#recipes)
+        : await addResolutions(this.#report, choices, this.#recipes, this.#transport.crypto, check);
+      check();
+      if (recipes.length > command.max_commits) fail('Saved resolution commits exceed the selected limit.');
+      const payload = JSON.stringify({ selection, input: draftInput(command), recipes: recipes.map(r => ({
+        original: r.original, paths: r.paths.map(p => ({ conflict: p.conflict, choice: p.choice,
+          ...(p.choice === 'file' ? { mode: p.mode, bytes_hex: hex(p.bytes) } : {}) })) })) });
+      const draft = { schema: DRAFT_SCHEMA, origin: this.#transport.root.origin, route: this.#transport.root.route, payload };
+      const sha256 = await draftHash(draft, this.#transport.crypto); check();
+      const saved = JSON.stringify({ ...draft, sha256 });
+      if (utf8.encode(saved).length > DRAFT_BYTES) fail('Rebase draft exceeds its byte limit.');
+      return saved;
+    });
+  }
+  // Decode and swap atomically. No saved report, candidate, approval, token or
+  // publication key is accepted. Invalid imports preserve the previous session.
+  async restoreDraft(value) {
+    this.#noPending();
+    return this.#run(async check => {
+      const draft = await readDraft(value, this.#transport.root, this.#transport.crypto, check);
+      const scope = draft.selection.scope;
+      if (this.#scope && Object.keys(scope).some(k => scope[k] !== this.#scope[k])) fail('Draft repository identity differs from this session.');
+      check();
+      this.#selection = draft.selection; this.#scope = scope; this.#command = draft.command;
+      this.#recipes = draft.recipes; this.#report = null; this.#artifact = null; this.#resumeRequired = true;
+      return this.state;
+    });
+  }
+  async resumeDraft() {
+    this.#noPending();
+    if (!this.#resumeRequired || !this.#selection || !this.#command) fail('Load a saved rebase draft first.');
+    return this.#run(async check => {
+      const selection = copy(this.#selection), command = copy(this.#command), recipes = copy(this.#recipes);
+      this.#artifact = null;
+      // Reauthenticate both branch coordinates BEFORE uploading saved contents.
+      // A stale draft remains recoverable as a file, not silently rebased on new tips.
+      for (const side of [selection.source, selection.onto]) {
+        const { value } = await this.#transport.request('source/tree', { method: 'POST', maximum: 32768,
+          body: form({ ref: side.ref, object_format: selection.scope.format, limit: 1, expected_head: selection.head }) });
+        check();
+        const actual = rootReply(value, side.ref, selection.scope.format, selection.scope, selection.head);
+        if (actual.commit !== side.commit || actual.tree !== side.tree || actual.sourceHead !== selection.sourceHead) fail('Saved rebase branch or snapshot changed. Start a new session explicitly.');
+      }
+      check();
+      const upload = recipes.length
+        ? resolutionUpload(command, recipes, hex(this.#transport.crypto.getRandomValues(new Uint8Array(16))))
+        : { body: form(command), contentType: 'application/x-www-form-urlencoded' };
+      const result = await this.#prepare(command, recipes, upload, check);
+      this.#resumeRequired = false;
+      return result;
+    });
   }
   #applyFields(a) {
     return applyFields({ object_format: a.scope.format, profile: 'linear-v1', ref: a.command.source_ref,
@@ -225,4 +287,99 @@ export class RebaseClient {
       return this.pending;
     });
   }
+}
+
+// Deliberately separate from frankengit-rebase-retry-v1. The checksum detects
+// accidental changes, not authorship. All imported fields are untrusted until
+// the native read path validates them; no saved result can authorize a write.
+const DRAFT_SCHEMA = 'frankengit-rebase-draft-v1';
+export const DRAFT_BYTES = 3 * 1024 * 1024;
+function draftKeys(value, names) {
+  keys(value, names);
+  if (Object.keys(value).length !== names.length) fail('Incomplete rebase draft record.');
+}
+function draftInput(command) {
+  return { upstream: command.upstream, empty: command.empty, committer: command.committer,
+    timestamp: command.timestamp, max_commits: command.max_commits };
+}
+async function draftHash(draft, crypto) {
+  return digest(utf8.encode(JSON.stringify([draft.schema, draft.origin, draft.route, draft.payload])), crypto);
+}
+function draftSelection(value) {
+  draftKeys(value, ['scope', 'head', 'sourceHead', 'source', 'onto']);
+  const scope = receiptScope(value.scope);
+  const side = value => {
+    draftKeys(value, ['ref', 'commit', 'tree']);
+    return { ref: branch(value.ref), commit: exactOid(value.commit, scope.format), tree: exactOid(value.tree, scope.format) };
+  };
+  const result = { scope, head: snapshot(value.head), sourceHead: opaque(value.sourceHead), source: side(value.source), onto: side(value.onto) };
+  if (result.source.ref === result.onto.ref) fail('Draft requires distinct source and onto branches.');
+  return result;
+}
+function draftConflict(value, algorithm) {
+  draftKeys(value, ['path_hex', 'kind', 'base', 'ours', 'theirs']); sourcePath(value.path_hex);
+  if (!['content', 'binary', 'modify_delete', 'type_change', 'mode', 'opaque', 'attributes_require_driver'].includes(value.kind)) fail('Invalid saved conflict kind.');
+  const entry = value => {
+    if (value === null) return null;
+    draftKeys(value, ['mode', 'oid']);
+    if (![0o040000, 0o100644, 0o100755, 0o120000, 0o160000].includes(value.mode)) fail('Invalid saved conflict mode.');
+    return { mode: value.mode, oid: exactOid(value.oid, algorithm) };
+  };
+  return { path_hex: value.path_hex, kind: value.kind, base: entry(value.base), ours: entry(value.ours), theirs: entry(value.theirs) };
+}
+async function readDraft(value, root, crypto, check) {
+  if (typeof value !== 'string' || value.length > DRAFT_BYTES || utf8.encode(value).length > DRAFT_BYTES) fail('Oversized rebase draft.');
+  const outer = JSON.parse(value);
+  if (JSON.stringify(outer) !== value) fail('Noncanonical or duplicate-key rebase draft.');
+  draftKeys(outer, ['schema', 'origin', 'route', 'payload', 'sha256']);
+  if (outer.schema !== DRAFT_SCHEMA || outer.origin !== root.origin || outer.route !== root.route ||
+      typeof outer.payload !== 'string' || !/^[0-9a-f]{64}$/.test(outer.sha256)) fail('Draft belongs to another profile or repository route.');
+  check();
+  if (await draftHash(outer, crypto) !== outer.sha256) fail('Rebase draft checksum mismatch.');
+  check();
+  const data = JSON.parse(outer.payload);
+  draftKeys(data, ['selection', 'input', 'recipes']);
+  if (JSON.stringify(data) !== outer.payload) fail('Noncanonical or duplicate-key rebase draft.');
+  const selection = draftSelection(data.selection);
+  draftKeys(data.input, ['upstream', 'empty', 'committer', 'timestamp', 'max_commits']);
+  const command = prepareCommand(selection, data.input);
+  if (!Array.isArray(data.recipes) || data.recipes.length > command.max_commits) fail('Too many saved resolution commits.');
+  let totalPaths = 0, totalBytes = 0;
+  const originals = new Set();
+  // Validate the complete count/byte envelope before decoding replacement files
+  // or hashing results. Reusing the same path at different commits is legitimate.
+  const descriptors = data.recipes.map(raw => {
+    check(); draftKeys(raw, ['original', 'paths']);
+    const original = exactOid(raw.original, selection.scope.format);
+    if (original === command.upstream || originals.has(original)) fail('Duplicate or invalid saved original commit.');
+    originals.add(original);
+    if (!Array.isArray(raw.paths) || !raw.paths.length || (totalPaths += raw.paths.length) > MAX_CHOICES) fail('Saved conflict-choice limit exceeded.');
+    let previous = ''; const ancestors = [];
+    const paths = raw.paths.map(p => {
+      const custom = p?.choice === 'file';
+      draftKeys(p, custom ? ['conflict', 'choice', 'mode', 'bytes_hex'] : ['conflict', 'choice']);
+      const conflict = draftConflict(p.conflict, selection.scope.format);
+      if (conflict.path_hex <= previous || ancestors.some(path => conflict.path_hex.startsWith(`${path}2f`))) fail('Duplicate, overlapping or unordered saved conflict paths.');
+      previous = conflict.path_hex; ancestors.push(previous);
+      if (!['base', 'ours', 'theirs', 'delete', 'file'].includes(p.choice)) fail('Invalid saved resolution choice.');
+      if (!custom && p.choice !== 'delete' && conflict[p.choice] === null) fail('Saved side is absent; deletion must be explicit.');
+      if (custom && (![0o100644, 0o100755].includes(p.mode) || typeof p.bytes_hex !== 'string' ||
+          p.bytes_hex.length > FILE_BYTES * 2 || p.bytes_hex.length % 2 || !/^[0-9a-f]*$/.test(p.bytes_hex))) fail('Invalid saved replacement bytes or mode.');
+      totalBytes += conflict.path_hex.length / 2 + (custom ? p.bytes_hex.length / 2 : 0);
+      if (totalBytes > RESOLUTION_BYTES) fail('Saved resolution byte limit exceeded.');
+      return { ...p, conflict };
+    });
+    return { original, paths };
+  });
+  let recipes = [];
+  for (const r of descriptors) {
+    check();
+    const choices = r.paths.map(p => ({ path_hex: p.conflict.path_hex, choice: p.choice,
+      ...(p.choice === 'file' ? { mode: p.mode, bytes: unhex(p.bytes_hex, FILE_BYTES) } : {}) }));
+    // This reconstructs local expected blob IDs; it does not validate that a
+    // conflict really exists. Resume compares every native conflict receipt.
+    recipes = await addResolutions({ state: 'conflicted', object_format: selection.scope.format,
+      stopped_commit: r.original, conflicts: r.paths.map(p => p.conflict) }, choices, recipes, crypto, check);
+  }
+  check(); return { selection, command, recipes };
 }
