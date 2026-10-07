@@ -50,6 +50,7 @@ pub struct SelectedForgeDelivery {
     source_head: RepositoryAuthorityHeadId,
     entry: CanonicalOutboxStateEntry,
     events: ForgeEventBatch,
+    unclaimed: bool,
 }
 
 impl SelectedForgeDelivery {
@@ -61,6 +62,13 @@ impl SelectedForgeDelivery {
     #[must_use]
     pub fn entry(&self) -> &CanonicalOutboxStateEntry {
         &self.entry
+    }
+
+    /// Whether this exact source observation still has an unclaimed obligation.
+    /// This is not a lease or a fence against later canonical settlement.
+    #[must_use]
+    pub const fn is_unclaimed(&self) -> bool {
+        self.unclaimed
     }
 
     /// Preserve every original outbox parameter, including its destination and
@@ -115,6 +123,32 @@ impl OneNode {
         .map_err(|error| ForgeDeliveryReadRefusal::Admission(Box::new(error)))?;
         checkpoint(request)?;
         Ok((selected.basis().id(), state))
+    }
+
+    /// Read one bounded, COMPLETE retained outbox snapshot for a local dispatcher.
+    /// Refuse before returning any entries if the caller's scan ceiling is too
+    /// small. Delivery keys are not append-ordered: a worker must rescan rather
+    /// than use an unpinned cursor as a durable high-water mark. This verifies
+    /// the existing whole-outbox representation once; no indexed/O(limit) claim.
+    pub async fn read_forge_outbox_snapshot_in(
+        &self,
+        request: &NodeRequestContext,
+        maximum_entries: usize,
+        expected_head: Option<RepositoryAuthorityHeadId>,
+    ) -> Result<ForgeOutboxPage, ForgeDeliveryReadRefusal> {
+        if maximum_entries == 0 || maximum_entries > fgit_codec::MAX_OUTBOX_STATE_ENTRIES {
+            return Err(ForgeDeliveryReadRefusal::InvalidLimit);
+        }
+        let (source_head, state) = self.selected_forge_outbox_in(request, expected_head).await?;
+        if state.outbox.entries().len() > maximum_entries {
+            return Err(ForgeDeliveryReadRefusal::BudgetExceeded);
+        }
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(state.outbox.entries().len())
+            .map_err(|_| ForgeDeliveryReadRefusal::BudgetExceeded)?;
+        entries.extend_from_slice(state.outbox.entries());
+        checkpoint(request)?;
+        Ok(ForgeOutboxPage { source_head, entries, next_after: None })
     }
 
     /// List retained canonical deliveries in their codec-defined key order.
@@ -186,6 +220,15 @@ impl OneNode {
         if entry.effect_class() != AsciiSlug::from_static("forge-event") {
             return Err(ForgeDeliveryReadRefusal::UnsupportedEffectClass);
         }
+        let effect = delivery::read_effect_in(
+            &self.authority,
+            request.authority(),
+            self.repository_id,
+            entry,
+            &|| checkpoint(request).is_err(),
+        )
+        .await
+        .map_err(|error| ForgeDeliveryReadRefusal::Admission(Box::new(error)))?;
         let events: ForgeEventBatch = read_evidence_body_in(
             &self.authority,
             request.authority(),
@@ -201,9 +244,13 @@ impl OneNode {
             source_head,
             entry: entry.clone(),
             events,
+            unclaimed: effect.state() == fgit_resource::ObligationState::Committed,
         })
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod snapshot_tests;
