@@ -14,6 +14,9 @@ use super::{
     bounded_add, check, key_prefix, path_valid,
 };
 
+mod refresh;
+pub use refresh::ScopedLexicalReuse;
+
 const MAX_PREFIXES: usize = 128;
 const MAX_PREFIX_BYTES: usize = 32 * 1024;
 const DOMAIN: &[u8] = b"frankengit/source-lexical-scope/v1\0";
