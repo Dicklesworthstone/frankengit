@@ -1,5 +1,5 @@
 use super::*;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -159,6 +159,7 @@ fn checksum_valid_illegal_lifecycles_still_refuse() {
     let scratch = Scratch::new();
     let mut journal = scratch.open();
     let original = fs::read(scratch.path()).unwrap();
+    let initial_tail = journal.tail;
     let invalid = Entry { payload: payload(), attempt: 1, observed_at: 100, next_at: 200,
         state: State::Accepted, uncertain: false, evidence: [6; 32] };
     assert!(journal.append(key(), invalid).is_err());
@@ -170,9 +171,9 @@ fn checksum_valid_illegal_lifecycles_still_refuse() {
     drop(journal);
     // Integrity alone must not admit an acceptance without a reservation.
     // Build a correctly chained but semantically invalid first record.
-    let body = format!("{}\t{}\t1\t100\t200\taccepted\t0\t{}",
+    let body = format!("event\t{}\t{}\t1\t100\t200\taccepted\t0\t{}",
         key().as_str(), hex(&payload()), hex(&[6; 32]));
-    let checksum = chained(sha256_digest(&original), body.as_bytes());
+    let checksum = chained(initial_tail, body.as_bytes());
     let mut forged = original;
     forged.extend_from_slice(format!("{body}\t{}\n", hex(&checksum)).as_bytes());
     scratch.bytes(&forged);
@@ -215,4 +216,217 @@ fn links_directories_public_files_and_oversized_files_refuse() {
     fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o600)).unwrap();
     OpenOptions::new().write(true).open(scratch.path()).unwrap().set_len(MAX_BYTES + 1).unwrap();
     assert!(Journal::open(&scratch.path(), [4; 32], 3).is_err());
+}
+
+fn numbered_key(index: usize) -> AsciiSlug {
+    AsciiSlug::try_new("test key", format!("delivery-{index:05}").as_bytes()).unwrap()
+}
+
+fn varied_entries(journal: &mut Journal) {
+    for (index, state) in [State::Accepted, State::Rejected, State::Retryable, State::Unknown, State::InFlight].into_iter().enumerate() {
+        let now = 100 + index as u64 * 100;
+        journal.reserve(numbered_key(index), payload(), now, now + 10).unwrap();
+        if state != State::InFlight {
+            journal.observe(numbered_key(index), state, now + 1, now + 11, b"retained observation").unwrap();
+        }
+    }
+    // A later rejection must preserve the earlier unknown even in a checkpoint.
+    journal.reserve(numbered_key(3), payload(), 600, 610).unwrap();
+    journal.observe(numbered_key(3), State::Rejected, 601, 611, b"later rejection").unwrap();
+}
+
+#[test]
+fn checkpoint_preserves_every_state_counter_commitment_clock_and_uncertainty() {
+    let scratch = Scratch::new();
+    let mut journal = scratch.open();
+    varied_entries(&mut journal);
+    let original = journal.entries.clone();
+    let floor = journal.clock_floor;
+    let old_bytes = journal.bytes;
+    let plans: Vec<_> = original.keys().map(|k| (*k, journal.plan(*k, payload(), 1000).unwrap())).collect();
+    journal.compact().unwrap();
+    assert!(journal.bytes < old_bytes);
+    assert_eq!(journal.entries, original);
+    assert_eq!(journal.clock_floor, floor);
+    let encoded = fs::read(scratch.path()).unwrap();
+    journal.compact().unwrap();
+    assert_eq!(fs::read(scratch.path()).unwrap(), encoded, "identical state has identical checkpoint bytes");
+    assert!(Journal::open(&scratch.path(), [4; 32], 3).is_err(), "replacement must not release the stable fence");
+    drop(journal);
+    let mut journal = scratch.open();
+    assert_eq!(journal.entries, original);
+    for (k, plan) in plans { assert_eq!(journal.plan(k, payload(), 1000).unwrap(), plan); }
+    assert!(journal.plan(key(), payload(), floor - 1).is_err());
+    assert_eq!(journal.reserve(numbered_key(2), payload(), 1000, 1010).unwrap(), 2);
+    journal.observe(numbered_key(2), State::Accepted, 1001, 1011, b"retry accepted").unwrap();
+    drop(journal);
+    assert_eq!(scratch.open().plan(numbered_key(2), payload(), 2000).unwrap(),
+        Plan::Settled { state: State::Accepted, outcome_unknown: false });
+}
+
+#[test]
+fn checkpoint_faults_never_select_incomplete_state_or_lose_the_fence() {
+    for stage in [checkpoint::Stage::Staged, checkpoint::Stage::Renamed, checkpoint::Stage::Synced] {
+        let scratch = Scratch::new();
+        let mut journal = scratch.open();
+        varied_entries(&mut journal);
+        let before = journal.entries.clone();
+        let original = fs::read(scratch.path()).unwrap();
+        assert!(journal.compact_with(&mut |observed| {
+            if observed == stage { Err("injected checkpoint interruption".into()) } else { Ok(()) }
+        }).is_err());
+        assert_eq!(journal.poisoned, stage != checkpoint::Stage::Staged);
+        assert!(Journal::open(&scratch.path(), [4; 32], 3).is_err());
+        if stage == checkpoint::Stage::Staged {
+            assert_eq!(fs::read(scratch.path()).unwrap(), original);
+            assert!(journal.plan(numbered_key(0), payload(), 2000).is_ok());
+        } else {
+            assert!(journal.plan(numbered_key(0), payload(), 2000).is_err());
+        }
+        assert!(!fs::read_dir(&scratch.0).unwrap().any(|row| row.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        drop(journal);
+        let reopened = scratch.open();
+        assert_eq!(reopened.entries, before, "stage {stage:?}");
+        assert_eq!(reopened.plan(numbered_key(0), payload(), 2000).unwrap(),
+            Plan::Settled { state: State::Accepted, outcome_unknown: false });
+        assert_eq!(reopened.plan(numbered_key(3), payload(), 2000).unwrap(),
+            Plan::Settled { state: State::Rejected, outcome_unknown: true });
+    }
+}
+
+#[test]
+fn reservation_compacts_automatically_without_resetting_any_attempt_limit() {
+    let scratch = Scratch::new();
+    let mut journal = scratch.open();
+    let mut now = 100;
+    let mut compactions = 0;
+    for index in 0..12 {
+        for attempt in 1..=3 {
+            let old_bytes = journal.bytes;
+            assert_eq!(journal.reserve_with_limit(numbered_key(index), payload(), now, now + 10, 8192).unwrap(), attempt);
+            if journal.bytes < old_bytes { compactions += 1; }
+            journal.observe(numbered_key(index), State::Retryable, now + 1, now + 11, b"503").unwrap();
+            assert!(journal.bytes <= 8192);
+            now += 20;
+        }
+    }
+    assert!(compactions >= 2, "the test must exercise repeated automatic replacement");
+    assert_eq!(journal.entries.len(), 12);
+    drop(journal);
+    let mut journal = scratch.open();
+    for index in 0..12 {
+        assert_eq!(journal.plan(numbered_key(index), payload(), now).unwrap(), Plan::Exhausted { outcome_unknown: false });
+        assert!(journal.reserve(numbered_key(index), payload(), now, now + 10).is_err());
+    }
+}
+
+#[test]
+fn maximum_key_checkpoint_fits_without_dropping_acceptances_or_unknowns() {
+    let mut entries = BTreeMap::new();
+    for index in 0..MAX_KEYS {
+        let state = if index % 2 == 0 { State::Accepted } else { State::Unknown };
+        entries.insert(numbered_key(index), Entry { payload: payload(), attempt: 3,
+            observed_at: index as u64, next_at: index as u64 + 100, state,
+            uncertain: state == State::Unknown, evidence: [8; 32] });
+    }
+    let header = checkpoint::header([4; 32], 3);
+    let floor = MAX_KEYS as u64 - 1;
+    let (bytes, _) = checkpoint::encode(&header, &entries, floor, 3).unwrap();
+    assert!(fits(bytes.len() as u64, 2 * MAX_RECORD, MAX_BYTES));
+    assert_eq!(checkpoint::decode(&bytes, &header, 3).unwrap().entries, entries);
+    entries.insert(numbered_key(MAX_KEYS), entries[&numbered_key(0)]);
+    assert!(checkpoint::encode(&header, &entries, floor, 3).is_err());
+}
+
+#[test]
+fn losing_only_the_journal_or_its_fence_cannot_initialize_a_fresh_retry_budget() {
+    for remove_data in [true, false] {
+        let scratch = Scratch::new();
+        let mut journal = scratch.open();
+        journal.reserve(key(), payload(), 100, 200).unwrap();
+        journal.observe(key(), State::Accepted, 101, 201, b"204").unwrap();
+        drop(journal);
+        let missing = if remove_data { scratch.path() } else { checkpoint::fence_path(&scratch.path()) };
+        fs::remove_file(&missing).unwrap();
+        assert!(Journal::open(&scratch.path(), [4; 32], 3).is_err());
+        assert!(!missing.exists(), "opening must not replace the missing responsibility record");
+    }
+}
+
+#[test]
+fn replacing_same_length_data_or_fence_is_detected_before_another_reservation() {
+    for replace_fence in [true, false] {
+        let scratch = Scratch::new();
+        let mut journal = scratch.open();
+        let target = if replace_fence { checkpoint::fence_path(&scratch.path()) } else { scratch.path() };
+        let bytes = fs::read(&target).unwrap();
+        let replacement = scratch.0.join("replacement");
+        fs::write(&replacement, bytes).unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::rename(replacement, &target).unwrap();
+        assert!(journal.reserve(key(), payload(), 100, 200).is_err());
+        assert!(journal.poisoned);
+        assert!(journal.entries.is_empty());
+    }
+}
+
+#[test]
+fn hard_links_cannot_split_data_ownership_across_independent_sidecars() {
+    for link_fence in [true, false] {
+        let scratch = Scratch::new();
+        let mut journal = scratch.open();
+        let target = if link_fence { checkpoint::fence_path(&scratch.path()) } else { scratch.path() };
+        fs::hard_link(&target, scratch.0.join("alias")).unwrap();
+        assert!(journal.reserve(key(), payload(), 100, 200).is_err());
+        assert!(journal.poisoned);
+        drop(journal);
+        assert!(Journal::open(&scratch.path(), [4; 32], 3).is_err());
+    }
+}
+
+#[test]
+fn legacy_unfenced_journals_are_preserved_and_refused_not_silently_migrated() {
+    let scratch = Scratch::new();
+    let old = format!("fgit-webhook-dispatch-v1\t{}\t3\n", hex(&[4; 32]));
+    scratch.bytes(old.as_bytes());
+    assert!(Journal::open(&scratch.path(), [4; 32], 3).is_err());
+    assert_eq!(fs::read(scratch.path()).unwrap(), old.as_bytes());
+    assert!(!checkpoint::fence_path(&scratch.path()).exists());
+}
+
+fn framed(mut bytes: Vec<u8>, mut tail: [u8; 32], bodies: &[String]) -> Vec<u8> {
+    for body in bodies {
+        tail = chained(tail, body.as_bytes());
+        bytes.extend_from_slice(format!("{body}\t{}\n", hex(&tail)).as_bytes());
+    }
+    bytes
+}
+
+#[test]
+fn checkpoint_checks_count_floor_order_completeness_and_state_not_only_checksums() {
+    let header = checkpoint::header([4; 32], 3);
+    let entry = Entry { payload: payload(), attempt: 1, observed_at: 100, next_at: 200,
+        state: State::Accepted, uncertain: false, evidence: [7; 32] };
+    let a = format!("snapshot\t{}", record_body(numbered_key(0), &entry));
+    let b = format!("snapshot\t{}", record_body(numbered_key(1), &entry));
+    for bodies in [
+        vec![a.clone()],
+        vec![a.clone(), "checkpoint\t2\t100".into()],
+        vec![a.clone(), "checkpoint\t1\t99".into()],
+        vec![a.clone(), a.clone(), "checkpoint\t2\t100".into()],
+        vec![b.clone(), a.clone(), "checkpoint\t2\t100".into()],
+        vec!["checkpoint\t0\t0".into(), a.clone()],
+        vec!["checkpoint\t0\t0".into(), "checkpoint\t0\t0".into()],
+    ] {
+        let bytes = framed(header.as_bytes().to_vec(), sha256_digest(header.as_bytes()), &bodies);
+        assert!(checkpoint::decode(&bytes, &header, 3).is_err(), "{bodies:?}");
+    }
+    let mut entries = BTreeMap::from([(numbered_key(0), entry)]);
+    for invalid in [Entry { attempt: 0, ..entry }, Entry { attempt: 4, ..entry },
+        Entry { state: State::Unknown, ..entry }, Entry { uncertain: true, ..entry },
+        Entry { state: State::InFlight, ..entry }, Entry { next_at: 99, ..entry }]
+    {
+        entries.insert(numbered_key(0), invalid);
+        assert!(checkpoint::encode(&header, &entries, 100, 3).is_err());
+    }
 }

@@ -38,6 +38,7 @@ usage: fg webhook inspect <storage-root> <tenant-id> <repository-id> --trusted-l
          [--object-format sha1|sha256] [--expected-head <snapshot-token>]
 
 usage: fg webhook dispatch --help
+usage: fg webhook dispatch-migrate --help
 
 Manual deliver/replay can duplicate an effect and never settle its canonical
 obligation. Replay contacts the receiver; diagnostic dead letters are retained.
@@ -52,6 +53,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
 
     match args[0].as_str() {
         "dispatch" => dispatcher::run(&args[1..]),
+        "dispatch-migrate" => dispatcher::run_migration(&args[1..]),
         "register" => run_register(&args[1..]),
         "list" => run_list(&args[1..]),
         "rotate" => run_rotate(&args[1..]),

@@ -1,17 +1,21 @@
 //! A local transport-attempt journal, NOT a canonical outbox or delivery proof.
-//! One stable, exclusively locked inode fences cooperating local dispatchers.
-//! Every reservation is synced before HTTP; a torn tail refuses, never rewinds.
+//! One stable sidecar fence excludes cooperating dispatchers across checkpoint
+//! replacement. Every reservation is synced before HTTP; a torn tail refuses,
+//! never rewinds. Checkpoints retain all keys, counters and uncertainty.
 //! Operator-owned directories and retained journal files are trust assumptions.
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::fs::File;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use fgit_crypto::sha256_digest;
 use fgit_types::AsciiSlug;
 
-const MAGIC: &str = "fgit-webhook-dispatch-v1";
+mod checkpoint;
+pub(super) use checkpoint::migration::run as migrate;
+
+const MAGIC: &str = "fgit-webhook-dispatch-v2";
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RECORD: usize = 1024;
 const MAX_KEYS: usize = 16_384;
@@ -105,11 +109,15 @@ impl Plan {
     }
 }
 
-/// The file and its advisory lock live exactly as long as the dispatcher.
-/// Never unlink/replace it while any dispatcher may hold it. Lost journals may
-/// cause duplicates; the checksum chain is not protection against operator rollback.
+/// A stable sidecar, not the replaceable data file, fences the dispatcher.
+/// Neither file may be deleted to reset attempts. Missing data with a retained
+/// fence refuses. Checksums are not protection against operator rollback.
 pub(super) struct Journal {
     file: File,
+    fence: File,
+    directory: File,
+    path: PathBuf,
+    header: String,
     entries: BTreeMap<AsciiSlug, Entry>,
     tail: [u8; 32],
     bytes: u64,
@@ -120,64 +128,7 @@ pub(super) struct Journal {
 
 impl Journal {
     pub(super) fn open(path: &Path, scope: [u8; 32], max_attempts: u32) -> Result<Self, String> {
-        if !(2..=16).contains(&max_attempts) {
-            return Err("dispatch retry limit must be 2..16".into());
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (path, scope);
-            Err("durable webhook dispatch requires the Unix directory-sync profile".into())
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            let present = match std::fs::symlink_metadata(path) {
-                Ok(meta) if meta.is_file() => true,
-                Ok(_) => return Err("dispatch journal must be a regular file, not a link or special file".into()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                Err(e) => return Err(format!("cannot inspect dispatch journal: {e}")),
-            };
-            let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-            let directory = File::open(parent).map_err(|e| format!("dispatch directory unavailable: {e}"))?;
-            directory.sync_all().map_err(|e| format!("dispatch directory durability unavailable: {e}"))?;
-            let mut file = OpenOptions::new().read(true).write(true).create_new(!present)
-                .truncate(false).mode(0o600).open(path)
-                .map_err(|e| format!("cannot open dispatch journal: {e}"))?;
-            file.try_lock().map_err(|e| format!("another dispatcher owns this local journal: {e}"))?;
-            let metadata = file.metadata().map_err(|e| e.to_string())?;
-            if !metadata.is_file() || metadata.len() > MAX_BYTES || metadata.permissions().mode() & 0o077 != 0 {
-                return Err("dispatch journal must be private, regular and at most 16 MiB".into());
-            }
-            let header = format!("{MAGIC}\t{}\t{max_attempts}\n", hex(&scope));
-            if !present {
-                file.write_all(header.as_bytes()).and_then(|()| file.sync_all())
-                    .and_then(|()| directory.sync_all())
-                    .map_err(|e| format!("dispatch journal initialization incomplete; retain file and inspect before retry: {e}"))?;
-            }
-            file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-            let mut bytes = Vec::new();
-            Read::by_ref(&mut file).take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-            if bytes.len() as u64 > MAX_BYTES {
-                return Err("dispatch journal exceeds 16 MiB".into());
-            }
-            let text = std::str::from_utf8(&bytes).map_err(|_| "dispatch journal is not UTF-8")?;
-            if !text.starts_with(&header) || !text.ends_with('\n') || text.contains('\r') {
-                return Err("dispatch journal is incomplete or its repository, endpoint or retry policy changed".into());
-            }
-            let mut journal = Self {
-                file, entries: BTreeMap::new(), tail: sha256_digest(header.as_bytes()),
-                bytes: bytes.len() as u64, clock_floor: 0, max_attempts, poisoned: false,
-            };
-            for line in text[header.len()..].split_terminator('\n') {
-                journal.replay(line)?;
-            }
-            // A complete frame may have survived a writer's reported sync error.
-            // Re-sync observed bytes before using them to suppress or retry I/O.
-            journal.file.sync_all().and_then(|()| directory.sync_all())
-                .map_err(|e| format!("cannot confirm reopened dispatch journal durability: {e}"))?;
-            journal.file.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
-            Ok(journal)
-        }
+        checkpoint::open(path, scope, max_attempts)
     }
 
     pub(super) fn plan(&self, key: AsciiSlug, payload: [u8; 32], now: u64) -> Result<Plan, String> {
@@ -208,11 +159,28 @@ impl Journal {
     /// Returns only after the reservation is synced. Failed sync poisons this
     /// owner; it may not dispatch or reinterpret an uncertain append as absent.
     pub(super) fn reserve(&mut self, key: AsciiSlug, payload: [u8; 32], now: u64, retry_at: u64) -> Result<u32, String> {
+        self.reserve_with_limit(key, payload, now, retry_at, MAX_BYTES)
+    }
+
+    // The production ceiling is fixed. A smaller ceiling exercises the exact
+    // compaction path in tests without thousands of filesystem sync calls.
+    fn reserve_with_limit(&mut self, key: AsciiSlug, payload: [u8; 32], now: u64,
+        retry_at: u64, maximum_bytes: u64) -> Result<u32, String>
+    {
+        if maximum_bytes > MAX_BYTES || maximum_bytes < (2 * MAX_RECORD) as u64 {
+            return Err("invalid dispatch journal capacity".into());
+        }
         let Plan::Due { attempt, outcome_unknown } = self.plan(key, payload, now)? else {
             return Err("dispatch attempt is settled, exhausted or not yet due".into());
         };
-        // Guarantee room for a bounded observation before consuming the attempt.
-        self.capacity(2 * MAX_RECORD)?;
+        // Compact BEFORE reservation, retaining every acknowledgement and
+        // unresolved attempt. Reserve enough room for its later observation.
+        if !fits(self.bytes, 2 * MAX_RECORD, maximum_bytes) {
+            self.compact()?;
+        }
+        if !fits(self.bytes, 2 * MAX_RECORD, maximum_bytes) {
+            return Err("dispatch checkpoint and next attempt exceed the byte budget".into());
+        }
         let entry = Entry { payload, attempt, observed_at: now, next_at: retry_at,
             state: State::InFlight, uncertain: outcome_unknown, evidence: [0; 32] };
         self.append(key, entry)?;
@@ -243,42 +211,30 @@ impl Journal {
     }
     fn validate(&self, key: AsciiSlug, next: &Entry) -> Result<(), String> {
         self.live(next.observed_at)?;
-        if key.as_str().contains(['\t', '\n', '\r']) || key.len() > 256
-            || next.attempt == 0 || next.attempt > self.max_attempts || next.next_at < next.observed_at
-        { return Err("invalid dispatch journal record".into()); }
-        let valid = match self.entries.get(&key) {
-            None => self.entries.len() < MAX_KEYS && next.attempt == 1
-                && next.state == State::InFlight && !next.uncertain,
-            Some(old) if old.payload != next.payload => false,
-            Some(old) if matches!(old.state, State::Accepted | State::Rejected) => false,
-            Some(old) if next.state == State::InFlight => {
-                next.attempt == old.attempt + 1 && next.observed_at >= old.next_at
-                    && next.uncertain == (old.uncertain || matches!(old.state, State::InFlight | State::Unknown))
-            }
-            Some(old) => old.state == State::InFlight && next.attempt == old.attempt
-                && next.next_at >= old.next_at
-                && next.uncertain == (old.uncertain || next.state == State::Unknown),
-        };
-        if !valid || (next.state == State::InFlight && next.evidence != [0; 32]) {
-            return Err("dispatch journal lifecycle or payload discontinuity".into());
-        }
-        Ok(())
+        validate_transition(&self.entries, self.clock_floor, self.max_attempts, key, next)
     }
+
+    /// Replace only transport history, never its meaning. The fence stays held
+    /// across stage/sync/rename/directory-sync. Failed publication poisons this
+    /// owner; reopening verifies the whole selected file, with no old-file fallback.
+    pub(super) fn compact(&mut self) -> Result<(), String> {
+        self.compact_with(&mut |_| Ok(()))
+    }
+
+    fn compact_with(&mut self, barrier: &mut impl FnMut(checkpoint::Stage) -> Result<(), String>) -> Result<(), String> {
+        self.live(self.clock_floor)?;
+        checkpoint::replace(self, barrier)
+    }
+
     fn append(&mut self, key: AsciiSlug, entry: Entry) -> Result<(), String> {
         self.validate(key, &entry)?;
-        let record = format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            key.as_str(), hex(&entry.payload), entry.attempt, entry.observed_at, entry.next_at,
-            entry.state.name(), u8::from(entry.uncertain), hex(&entry.evidence));
+        let record = format!("event\t{}", record_body(key, &entry));
         let tail = chained(self.tail, record.as_bytes());
         let line = format!("{record}\t{}\n", hex(&tail));
         if line.len() > MAX_RECORD { return Err("dispatch record exceeds its byte ceiling".into()); }
         self.capacity(line.len())?;
         self.poisoned = true;
-        // Detect replacement/truncation by cooperative callers. Parent-directory
-        // mutation by hostile actors remains outside this trusted-local profile.
-        if self.file.metadata().map_err(|e| e.to_string())?.len() != self.bytes {
-            return Err("dispatch journal changed while owned; outcome unknown".into());
-        }
+        checkpoint::verify_owned(self)?;
         self.file.write_all(line.as_bytes()).and_then(|()| self.file.sync_all())
             .map_err(|e| format!("dispatch journal append outcome unknown; retain journal, do not reset attempts: {e}"))?;
         self.bytes += line.len() as u64;
@@ -288,26 +244,61 @@ impl Journal {
         self.poisoned = false;
         Ok(())
     }
-    fn replay(&mut self, line: &str) -> Result<(), String> {
-        if line.is_empty() || line.len() + 1 > MAX_RECORD { return Err("invalid dispatch journal frame size".into()); }
-        let (body, checksum) = line.rsplit_once('\t').ok_or("dispatch journal checksum missing")?;
-        let tail = chained(self.tail, body.as_bytes());
-        if unhex(checksum)? != tail { return Err("dispatch journal checksum chain mismatch".into()); }
-        let fields: Vec<_> = body.split('\t').collect();
-        if fields.len() != 8 { return Err("dispatch journal field count mismatch".into()); }
-        let key = AsciiSlug::try_new("dispatch key", fields[0].as_bytes()).map_err(|e| e.to_string())?;
-        let uncertain = match fields[6] { "0" => false, "1" => true, _ => return Err("invalid dispatch uncertainty flag".into()) };
-        let entry = Entry {
-            payload: unhex(fields[1])?, attempt: u32::try_from(decimal(fields[2])?).map_err(|_| "dispatch attempt overflow")?,
-            observed_at: decimal(fields[3])?, next_at: decimal(fields[4])?, state: State::parse(fields[5])?,
-            uncertain, evidence: unhex(fields[7])?,
-        };
-        self.validate(key, &entry)?;
-        self.tail = tail;
-        self.clock_floor = entry.observed_at;
-        self.entries.insert(key, entry);
-        Ok(())
+}
+
+fn fits(bytes: u64, additional: usize, maximum: u64) -> bool {
+    bytes.checked_add(additional as u64).is_some_and(|size| size <= maximum)
+}
+
+fn record_body(key: AsciiSlug, entry: &Entry) -> String {
+    format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        key.as_str(), hex(&entry.payload), entry.attempt, entry.observed_at, entry.next_at,
+        entry.state.name(), u8::from(entry.uncertain), hex(&entry.evidence))
+}
+
+fn parse_record(body: &str) -> Result<(AsciiSlug, Entry), String> {
+    let fields: Vec<_> = body.split('\t').collect();
+    if fields.len() != 8 { return Err("dispatch journal field count mismatch".into()); }
+    let key = AsciiSlug::try_new("dispatch key", fields[0].as_bytes()).map_err(|e| e.to_string())?;
+    let uncertain = match fields[6] { "0" => false, "1" => true, _ => return Err("invalid dispatch uncertainty flag".into()) };
+    Ok((key, Entry {
+        payload: unhex(fields[1])?, attempt: u32::try_from(decimal(fields[2])?).map_err(|_| "dispatch attempt overflow")?,
+        observed_at: decimal(fields[3])?, next_at: decimal(fields[4])?, state: State::parse(fields[5])?,
+        uncertain, evidence: unhex(fields[7])?,
+    }))
+}
+
+fn validate_saved(key: AsciiSlug, next: &Entry, max_attempts: u32) -> Result<(), String> {
+    if key.as_str().contains(['\t', '\n', '\r']) || key.len() > 256
+        || next.attempt == 0 || next.attempt > max_attempts || next.next_at < next.observed_at
+        || (next.state == State::InFlight && next.evidence != [0; 32])
+        || (next.state == State::Unknown && !next.uncertain)
+        || (next.attempt == 1 && next.uncertain && next.state != State::Unknown)
+    { return Err("invalid dispatch journal record".into()); }
+    Ok(())
+}
+
+fn validate_transition(entries: &BTreeMap<AsciiSlug, Entry>, clock_floor: u64,
+    max_attempts: u32, key: AsciiSlug, next: &Entry) -> Result<(), String>
+{
+    validate_saved(key, next, max_attempts)?;
+    if next.observed_at < clock_floor {
+        return Err("dispatch journal clock moved backwards".into());
     }
+    let valid = match entries.get(&key) {
+        None => entries.len() < MAX_KEYS && next.attempt == 1
+            && next.state == State::InFlight && !next.uncertain,
+        Some(old) if old.payload != next.payload => false,
+        Some(old) if matches!(old.state, State::Accepted | State::Rejected) => false,
+        Some(old) if next.state == State::InFlight => {
+            next.attempt == old.attempt + 1 && next.observed_at >= old.next_at
+                && next.uncertain == (old.uncertain || matches!(old.state, State::InFlight | State::Unknown))
+        }
+        Some(old) => old.state == State::InFlight && next.attempt == old.attempt
+            && next.next_at >= old.next_at
+            && next.uncertain == (old.uncertain || next.state == State::Unknown),
+    };
+    if valid { Ok(()) } else { Err("dispatch journal lifecycle or payload discontinuity".into()) }
 }
 
 fn chained(previous: [u8; 32], record: &[u8]) -> [u8; 32] {

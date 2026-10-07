@@ -75,8 +75,8 @@ rather than interpreting the exit status as proof that nothing happened.
 ## What is durable, and what is not
 
 The journal is `webhooks/dispatch-ID-DESTINATION_HASH.journal` under the supplied
-storage root. A stable inode is held under an exclusive nonblocking file lock
-for the invocation's entire lifetime. It is created privately, synced, and its
+storage root. Its `.lock` sidecar is a stable inode held under an exclusive
+nonblocking file lock for the invocation's entire lifetime, including checkpoint replacement. It is created privately, synced, and its
 directory is synced before use. Reopened valid journals are re-synced before
 retry decisions. Each reservation and result is appended and synced. A write
 or sync error poisons that owner and forbids further sends.
@@ -109,23 +109,102 @@ backoff. Separate process invocations never reset the retry ceiling. Manual
 `deliver`/`dead-letter replay` remain explicitly separate operations and do not
 consult or modify this dispatch journal.
 
-The bounded journal admits 16,384 keys and 16 MiB of framed records; space for
-both reservation and observation is checked before a send. Full journals refuse
-before another reservation. There is no automatic compaction or deletion in
-this profile. **Do not delete, replace, truncate, or copy a journal while a
-worker may own it, and do not delete it to clear a retry limit.** Replacing a
-locked file can create two owners on different inodes; deleting a retained
-journal can duplicate earlier effects. All parent directories must be owned
-and controlled by the operator. Locks fence cooperating dispatchers on the
-same filesystem, not another machine, an unrelated manual sender, or the
-canonical strong-settlement worker. Do not run competing delivery profiles for
-the same subscription.
+The bounded journal admits 16,384 keys and a 16 MiB data file. Before reserving
+an attempt, the worker guarantees room for both its reservation and observation.
+When the append log reaches that bound, it writes a complete checkpoint into a
+private file in the same directory, syncs the body, atomically replaces the data
+file, and syncs the directory. The stable `.lock` fence remains held throughout.
+Every delivery key, payload commitment, attempt ordinal, terminal result,
+cumulative uncertainty flag, next-attempt time, latest evidence digest and clock
+floor is retained. No acceptance is dropped to make space and no budget resets.
+Superseded per-attempt log frames are not retained by this local profile; this
+is a compacted retry state, not a complete audit archive or receiver proof.
+
+A failure before replacement leaves the old selected file intact. An unknown
+replacement/directory-sync result poisons the owner: it cannot send again until
+reopening and verifying the selected file. Reopen never chooses a scratch file,
+an older checkpoint, or a valid prefix of corrupt data. Compaction is deterministic
+for identical retained state. The journal version is now `fgit-webhook-dispatch-v2`,
+with an ordered, count-bound checkpoint followed by ordinary lifecycle records.
+Version 1 journals, including those produced by `c64d6df`, require the explicit
+offline migration below. Ordinary dispatch never converts a journal implicitly
+or resets its counters. New installations use v2.
+
+**Retain both the `.journal` and `.journal.lock` files.** Losing either one alone
+refuses rather than initializing a new budget. Do not replace or remove either
+file while a worker may own it. Files must be private, singly-linked regular
+files. The owner checks inode identity and length before appends and checkpoint
+publication. These checks are not confinement against hostile directory mutation
+or authenticated protection against an operator rolling both files back.
+All parent directories must be controlled by the operator. Locks fence
+cooperating dispatchers on the same filesystem, not another machine, an unrelated
+manual sender, or the canonical strong-settlement worker. Do not run competing
+delivery profiles for the same subscription.
 
 The checksum chain detects corrupt, truncated, reordered, or semantically
 invalid records. A torn tail refuses; it is never silently discarded. This is
 not authentication, malicious-rollback detection, a receiver receipt proof, or
 repository authority. A complete older valid prefix can represent a legitimate
 crash point; deliberate rollback to such a prefix is outside the trust profile.
+
+## Upgrade an existing v1 journal without losing delivery responsibility
+
+Stop the old dispatcher and disable its automatic restart before upgrading.
+Keep the original journal. The file is below the node storage directory at
+`webhooks/dispatch-WEBHOOK_ID-SHA256_OF_DESTINATION_BYTES.journal`; use the exact
+slot for the original subscription, not a new empty path.
+
+First inspect the stopped file without changing it:
+
+```sh
+fg webhook dispatch-migrate /path/to/dispatch-7-DESTINATION_HASH.journal --trusted-local
+```
+
+The preview validates the entire original v1 checksum chain and legal lifecycle,
+then reports `original_sha256`, the intended v2 checkpoint hash, retained-key
+count, retry limit, scope digest and exact clock floor. It acquires an exclusive
+data-file lock to exclude the old worker, but creates no file, fence or backup.
+This is an operator-owned local-file operation: it needs no registration, secret,
+node runtime or network, and it cannot change the retained repository binding.
+
+Apply only to the exact previewed bytes:
+
+```sh
+fg webhook dispatch-migrate /path/to/dispatch-7-DESTINATION_HASH.journal --trusted-local \
+  --apply --expected-sha256 ORIGINAL_SHA256_FROM_PREVIEW
+```
+
+The migrator holds the old data-inode lock and the new stable sidecar lock.
+It preserves an exact private `.v1-backup`, syncs that backup and its directory,
+then uses the worker's existing stage/sync/replace/directory-sync protocol to
+install v2. It verifies complete retained-state equivalence before replacement.
+All delivery keys, payload hashes, consumed ordinals, outcomes, cumulative
+uncertainty, next-attempt times, latest evidence hashes and the clock floor are
+preserved. No request is sent, no canonical obligation is settled, and no failed
+or potentially delivered attempt becomes a fresh attempt one.
+
+An interrupted conversion can be repeated with the **same original checksum**.
+Before replacement it revalidates v1; after replacement it verifies the exact
+installed v2 checkpoint against the retained v1 backup. A complete previously
+visible result is resynchronized before success. An exact partial initialization
+prefix of the new fence may be completed only while the original checksum-pinned
+v1 file remains locked. Wrong scopes, malformed records, torn journals, mismatched
+backups, missing migrated data/fences and public, linked or special files refuse.
+The backup is not overwritten and is never a fallback source for the worker.
+
+If an old worker restarted and changed v1 after the preview, the checksum pin
+refuses. If a new worker has already appended to v2, reapplying migration also
+refuses rather than rolling it back. Inspect the current v2 state instead.
+A lost stdout receipt does not undo migration: retain the files and repeat with
+the original checksum before restarting delivery. Do not delete the backup,
+fence or current journal to clear a refusal. Operator rollback, hostile parent
+mutation, noncooperating writers and multi-host fencing remain outside this
+local profile. A process crash may leave private staging residue; it is never
+selected on reopen and is not a delivery source.
+
+The migration and checkpoint Rust tests still require native execution before
+an operational upgrade. Source inspection and a checksum match are not evidence
+of crash durability on an untested filesystem.
 
 ## Source selection and limits
 
@@ -175,3 +254,20 @@ and endpoint/subscription refusal. These tests were **authored, not executed**
 in the implementation environment: Cargo, rustc and rustfmt were unavailable.
 No bead closure, native test pass, real-binary campaign, or production-readiness
 claim is made by this document.
+
+### Checkpoint continuation validation
+
+Additional native tests cover deterministic checkpoint/reopen equivalence,
+interruption before and after rename and after directory sync, repeated automatic
+compaction, preservation of exhausted/unknown/accepted entries, maximum-key
+snapshots, missing data or fences, inode replacement, hard links, legacy refusal,
+and checksum-valid malformed checkpoints. These tests are authored but have not
+been executed in this environment; no Cargo, rustc or rustfmt is available.
+This change removes the local append-history stop, not the canonical outbox's
+16,384-entry ceiling, canonical retention requirements, or whole-history read cost.
+
+Migration regressions also cover stopped-file preview, original-checksum changes,
+all 2..16 retry ceilings, exact uncertainty preservation, old/new live-owner
+exclusion, interrupted fence/backup/checkpoint boundaries, idempotent recovery,
+corrupt or progressed v2 without backup fallback, conflicting backups, and lost
+stdout. These are authored Rust tests, not an executed gate result.

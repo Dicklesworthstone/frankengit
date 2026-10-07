@@ -33,7 +33,7 @@ A complete outbox snapshot is selected on every sweep; no append-ordered key
 cursor is assumed. The private local journal is locked and synced BEFORE each
 send. Restarted in-flight attempts remain unknown and consume the next ordinal.
 A retry can duplicate an effect. Local HTTP acceptance NEVER settles canonical
-outbox state. No fan-out, HTTPS, journal compaction or exactly-once guarantee.
+outbox state. Checkpoints retain all outcomes and budgets. No fan-out, HTTPS or exactly-once guarantee.
 Continuous mode drains on SIGTERM/SIGINT or a regular stop file. Blocking DNS
 and filesystem calls cannot be preempted. All directories must be operator-owned.
 Exit 0: no pending/failed selected work; 1: pending/backoff/bound; 2: refusal or
@@ -129,6 +129,8 @@ fn now_millis() -> Result<u64, String> {
     u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)
         .map_err(|_| "dispatch clock precedes epoch")?.as_millis()).map_err(|_| "dispatch clock overflow".into())
 }
+
+pub(super) fn run_migration(args: &[String]) -> Result<u8, String> { journal::migrate(args) }
 
 pub(super) fn run(args: &[String]) -> Result<u8, String> {
     let mut output = std::io::stdout().lock();
