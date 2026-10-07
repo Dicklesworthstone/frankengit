@@ -32,7 +32,7 @@ use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder,
     RepositoryAuthorityHeadBody, RepositoryConfigurationBody, RepositoryDecision,
     RepositoryIncarnationConfigurationBody, RepositoryIncarnationConfigurationBodyV2_1, body_id,
-    decode_body, encode_body,
+    RepositoryIncarnationConfigurationBodyV2_2, decode_body, encode_body,
 };
 use fgit_crypto::{
     MerkleProof, MerkleRefusal, ObjectClosureNeighbour, ObjectClosureNonMembershipProof,
@@ -427,7 +427,7 @@ pub struct AuthorizedObjectAbsence {
 }
 
 impl AuthorizedObjectAbsence {
-    /// The object identity whose authorized lookup found no object.
+    /// The object identity whose absence was authorized for disclosure.
     #[must_use]
     pub const fn oid(&self) -> &GitOid {
         &self.oid
@@ -565,6 +565,11 @@ pub enum VerifiedReadConfiguration {
     /// a 2.0 body, but a different canonical identity.  Keeping the exact
     /// minor here prevents either body from impersonating the other.
     RepositoryIncarnationV2_1(RepositoryIncarnationConfigurationBodyV2_1),
+    /// Revocation-aware schema 2.2, including the exact optional generation root.
+    ///
+    /// Neither an absent revocation root nor a matching normalized projection
+    /// permits downgrading this body to 2.1. Its schema is part of its identity.
+    RepositoryIncarnationV2_2(RepositoryIncarnationConfigurationBodyV2_2),
 }
 
 impl VerifiedReadConfiguration {
@@ -575,6 +580,7 @@ impl VerifiedReadConfiguration {
             Self::RepositoryV1(configuration) => configuration.root_layout,
             Self::RepositoryIncarnationV2(configuration) => configuration.root_layout,
             Self::RepositoryIncarnationV2_1(configuration) => configuration.root_layout,
+            Self::RepositoryIncarnationV2_2(configuration) => configuration.root_layout,
         }
     }
 }
@@ -686,7 +692,8 @@ impl VerifiedReadEnvelope {
             Some(VerifiedReadConfiguration::RepositoryV1(configuration)) => Some(configuration),
             Some(
                 VerifiedReadConfiguration::RepositoryIncarnationV2(_)
-                | VerifiedReadConfiguration::RepositoryIncarnationV2_1(_),
+                | VerifiedReadConfiguration::RepositoryIncarnationV2_1(_)
+                | VerifiedReadConfiguration::RepositoryIncarnationV2_2(_),
             )
             | None => None,
         }
@@ -989,6 +996,10 @@ fn write_configuration(
             out.write_raw_byte(3);
             configuration.write_payload(out)
         }
+        VerifiedReadConfiguration::RepositoryIncarnationV2_2(configuration) => {
+            out.write_raw_byte(4);
+            configuration.write_payload(out)
+        }
     })
 }
 
@@ -1004,6 +1015,8 @@ fn read_configuration(
                 .map(VerifiedReadConfiguration::RepositoryIncarnationV2),
             3 => RepositoryIncarnationConfigurationBodyV2_1::read_payload(input)
                 .map(VerifiedReadConfiguration::RepositoryIncarnationV2_1),
+            4 => RepositoryIncarnationConfigurationBodyV2_2::read_payload(input)
+                .map(VerifiedReadConfiguration::RepositoryIncarnationV2_2),
             observed => Err(CodecRefusal::VariantUnknown {
                 field: "VerifiedReadConfiguration",
                 observed: u32::from(observed),
@@ -1342,6 +1355,9 @@ fn selected_ref_layout(
             body_id(&CryptoBodyIdentity, configuration)
         }
         VerifiedReadConfiguration::RepositoryIncarnationV2_1(configuration) => {
+            body_id(&CryptoBodyIdentity, configuration)
+        }
+        VerifiedReadConfiguration::RepositoryIncarnationV2_2(configuration) => {
             body_id(&CryptoBodyIdentity, configuration)
         }
     }
