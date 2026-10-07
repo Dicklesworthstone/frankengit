@@ -11,6 +11,8 @@ use fgit_types::{RepositoryId, TenantId};
 use crate::publication_support::quote;
 
 mod delivery;
+mod dispatcher;
+mod subscription;
 
 const USAGE: &str =
     "usage: fg webhook register <storage-root> <tenant-id> <repository-id> --trusted-local
@@ -35,6 +37,8 @@ usage: fg webhook inspect <storage-root> <tenant-id> <repository-id> --trusted-l
          --delivery-id <delivery-id> --destination <canonical-destination>
          [--object-format sha1|sha256] [--expected-head <snapshot-token>]
 
+usage: fg webhook dispatch --help
+
 Manual deliver/replay can duplicate an effect and never settle its canonical
 obligation. Replay contacts the receiver; diagnostic dead letters are retained.
 Exit 0: acceptance observed; 1: transient failure; 2: refusal; 3: outcome unknown.
@@ -47,6 +51,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, String> {
     }
 
     match args[0].as_str() {
+        "dispatch" => dispatcher::run(&args[1..]),
         "register" => run_register(&args[1..]),
         "list" => run_list(&args[1..]),
         "rotate" => run_rotate(&args[1..]),
