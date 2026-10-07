@@ -67,3 +67,58 @@ protocol access and private bare repositories. Native Rust execution is a separa
 test, explicitly skipped unless `FG_NATIVE_BIN` names an available built binary.
 No repository-wide, native-build, durability or bead-closure claim follows from
 adapter-test success.
+
+## Signed backup verification through the existing command
+
+The existing operator entry point now offers an explicit native selection:
+
+```sh
+node scripts/verify_git_bundle.mjs ./backup.bundle \
+  --native-fg "$PWD/target/release/fg" \
+  --attestation ./backup.dsse.json --trust-key ./trusted-ed25519.pem \
+  --repository Dicklesworthstone/frankengit --minimum-sequence 42 \
+  --expect-format sha256 --expect-ref "refs/heads/main=$KNOWN_COMMIT"
+```
+
+The four attestation arguments are still an all-or-nothing group. The existing
+Ed25519/DSSE verifier authenticates the external key, repository, full-width
+sequence floor, lifetime and exact artifact bytes before a native process is
+launched. The native adapter receives only those owned bytes; it never reopens
+the original source path after authentication. Signature files and trust-key
+paths are not passed to the child. Native content checks and independent identity
+pins are still required even when the signature is valid. After the child and
+its temporary files have been finalized, approval lifetime is checked again
+before output. An expired approval cannot ride through on a successful native
+content-verification report.
+
+Both signed and unsigned invocations of this existing command retain a 16 MiB
+input ceiling. The separate `verify_git_bundle_native.mjs` command supports the
+128 MiB native input profile but does not itself consume detached approvals.
+`--native-timeout-secs` selects one 1..3600-second native operation deadline,
+including authentication, snapshot staging and child processing. Authentication
+time is subtracted from the child's allowance; it does not earn a fresh budget.
+This remains cooperative for operating-system filesystem calls.
+
+The returned `source_attestation` is independent of the native report: its
+signature covers portable source bytes, not Git commit signatures, forge state,
+current authority, branch freshness or a complete capsule. A report's native
+`signatures_verified` and `origin_authenticated` fields remain false. This does
+not turn an unsigned artifact hash into signer authentication.
+
+Native selection does not load the JavaScript Git decoder, even to parse native
+pins, and a missing/refusing native executable never triggers legacy fallback.
+Without `--native-fg`, the command keeps its existing legacy backend, input
+profile and report shape. No browser route or decoder is modified.
+
+Additional integration tests:
+
+```sh
+node --test tests/operator/native-bundle-verifier.test.mjs \
+  tests/operator/native-source-backup.test.mjs
+```
+
+The signed tests use real Ed25519 keys and the unchanged production attestation
+module, while a deliberately fake `fg` exercises process/report composition.
+An import sentinel proves native selection never loads the legacy decoder;
+a separate sentinel verifies default dispatch, not legacy Git semantics.
+Neither constitutes a native Rust execution or full compatibility gate.

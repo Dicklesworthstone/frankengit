@@ -82,7 +82,10 @@ export function normalizeNativeBundleExpectation(value = null, maximumRefs = 409
   result.refs.sort((a, b) => a.ref_hex < b.ref_hex ? -1 : a.ref_hex > b.ref_hex ? 1 : 0);
   return result;
 }
-function configuration(options) {
+/** Validate/copy a native invocation before authenticating or reading inputs.
+ * No file, executable, signal listener or other resource is opened here.
+ */
+export function normalizeNativeBundleOptions(options) {
   if (!onlyKeys(options, ['fg', 'expected', 'signal', ...Object.keys(NATIVE_BUNDLE_LIMITS)]) || typeof options.fg !== 'string' || !isAbsolute(options.fg)
     || options.fg.length > 4096 || /[\0\r\n]/.test(options.fg)) throw fail('native_absolute_fg_path_required');
   const result = { ...NATIVE_BUNDLE_LIMITS, ...options };
@@ -294,7 +297,7 @@ async function verifyOwned(bytes, options, live) {
  * report attests native content checks only, not signer/origin/currentness.
  */
 export async function verifyNativeGitBundle(bytes, options) {
-  const config = configuration(options), live = lifetime(config); live.check();
+  const config = normalizeNativeBundleOptions(options), live = lifetime(config); live.check();
   if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > config.maxInputMiB * MIB) throw fail('native_input_size_or_type');
   if (bytes.buffer instanceof SharedArrayBuffer) throw fail('native_shared_input_refused');
   const owned = Buffer.from(bytes); live.check();
@@ -305,7 +308,7 @@ export async function verifyNativeGitBundle(bytes, options) {
  * No fallback, source-path reopening by fg, Git executable, or node mutation.
  */
 export async function verifyNativeGitBundleFile(path, options) {
-  const config = configuration(options), live = lifetime(config); live.check();
+  const config = normalizeNativeBundleOptions(options), live = lifetime(config); live.check();
   const bytes = await readInput(path, config, live);
   return await verifyOwned(bytes, config, live);
 }
