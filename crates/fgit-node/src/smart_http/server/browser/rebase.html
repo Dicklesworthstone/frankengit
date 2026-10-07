@@ -8,6 +8,10 @@
 <p><strong>This rewrites the selected source branch’s history.</strong> Choose the upstream commit to exclude and the branch to replay onto. Nothing is published until the complete series has been inspected and a separate exact request has been confirmed. Native permissions and branch protection remain authoritative.</p>
 <section><h2>Select two immutable branch tips</h2>
 <label>Repository token <input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="64"></label>
+<label><input id="recovery-only" type="checkbox">Connect for outcome recovery only (replacement credential)</label>
+<label>Original principal ID for recovery (32 lowercase hex digits) <input id="recovery-principal" maxlength="32" spellcheck="false" autocomplete="off" disabled></label>
+<p>When the original token is lost or revoked, use a separately provisioned token for the same principal with outcomes-read. Name the original principal explicitly; this input grants no access. Recovery-only mode never sends a candidate or retries a write. Changing the mode or principal disconnects and clears the token without discarding an outstanding request.</p>
+<p id="connection-status" role="status" aria-live="polite">Disconnected.</p>
 <button id="connect" type="button">Connect</button><button id="disconnect" type="button">Disconnect and clear views</button>
 <label>Source branch to rewrite <input id="source" value="refs/heads/topic" spellcheck="false" maxlength="1024"></label>
 <label>Onto branch <input id="onto" value="refs/heads/main" spellcheck="false" maxlength="1024"></label>
@@ -38,7 +42,7 @@
 <label><input id="confirm-send" type="checkbox" disabled>I inspected the complete series and confirm rewriting exactly the displayed source branch from its expected old tip to this candidate. An unchanged retry may recover an already committed operation.</label>
 <button id="send" type="button" disabled>Send / retry exact rewrite</button><button id="recover" type="button" disabled>Look up original outcome (read only)</button>
 <button id="discard" type="button" disabled>Discard unsent, unexported request</button><button id="save-receipt" type="button" disabled>Save original-request receipt</button>
-<p>Lost replies remain unknown. Recovery never reruns the rebase or rereads branch presence. Receipts contain candidate bytes, but no access token; they are not authorization. Use the original token for this bounded recovery profile.</p>
+<p>Lost replies remain unknown. Recovery never reruns the rebase or rereads branch presence. Receipts contain candidate bytes, but no access token; they are not authorization. Sending or retrying still requires the original token. A recovery-only connection may read the original outcome with a replacement token for the explicitly named original principal; it never rekeys or resubmits the request.</p>
 <label>Original-request receipt <input id="restore-file" type="file"></label><button id="restore" type="button" disabled>Restore without executing</button></section>
 <p id="status" role="status" aria-live="polite">Connect to begin.</p>
 </main></body></html>

@@ -51,7 +51,8 @@ idempotency key. Read-only outcome lookup sends no mutation body and never treat
 absence as rollback. Token-free receipts preserve publication across reloads;
 restoring one neither repeats rebase nor rereads moved branch tips. A sent or
 exported request cannot be discarded as locally unsent. The original credential
-fingerprint is required; rotation-aware same-principal recovery is not provided.
+fingerprint is required for sending or retrying. An explicit recovery-only
+connection can instead read outcomes with a replacement credential, as below.
 
 Disconnect/page exit clears credentials, recipes and candidate views, preserving
 an outstanding publication in memory for receipt export. Closing the page needs
@@ -59,6 +60,48 @@ a saved original-request receipt for publication recovery. Unsent work can be
 saved separately as an explicit draft, described below; nothing is persisted
 automatically. Read cancellation never claims non-commit. No automatic retries,
 local storage, third-party requests or credentials in URLs are introduced.
+
+## Outcome recovery after the original token is unavailable
+
+Choose **Connect for outcome recovery only (replacement credential)**, enter the
+original principal's 32-digit lowercase hexadecimal ID, and supply a separately
+provisioned valid token for that principal with `outcomes-read`. The original
+principal must come from the original operation's identity or operator records,
+not a guess based on whichever principal the replacement token authenticates.
+The UI does not issue credentials, rotate keys, bypass revocation, or grant scopes.
+The existing native outcome endpoint authenticates every read independently.
+
+Connect sends no request. Load the ORIGINAL-REQUEST receipt or retain the already
+pending request, then explicitly choose **Look up original outcome**. The only
+network operation is a bodyless POST to `outcomes` with the unchanged original
+idempotency key. The supplied principal is a local equality check, not a parameter
+sent to the server. Before retaining any observation or settling any terminal
+result, the response must match that expected principal, repository scope, and
+any previously observed original transaction/principal. Wrong-principal replies,
+invalid credentials, missing scopes and inconsistent receipts leave the request
+unresolved. Key absence or an undecided result is not permission to start over.
+
+The old receipt's fingerprint, bundle bytes, multipart body and key are retained
+exactly. Loading under a new token still recomputes the key from the OLD fingerprint
+and exact body; no new key or credential binding is substituted. Saving again
+retains that original request and may include newly authenticated outcome
+observations, but never a token. Receipts are unsigned local data, not proofs of
+intent or origin; their integrity commitment does not authenticate their author.
+
+In recovery-only mode the client and UI both disable sending, retries, branch
+selection, preparation, conflict resolution, draft operations and discarding the
+outstanding request. Even a terminal recovery does not promote the connection to
+a writer. New ordinary work requires an explicit ordinary reconnect after the
+original outcome is resolved. Retrying an unresolved write still requires its
+original token; this feature does not provide replacement-token resubmission.
+
+Changing connection intent or the expected principal disconnects the current
+credential, cancels obsolete reads and clears candidate/confirmation views while
+retaining pending responsibility. Disconnect/page exit also clears the original
+principal input and file controls. A failed or interrupted lookup cannot rewrite
+the saved request or adopt the replacement token's principal. Previously recorded
+principal identity cannot be replaced by a new input. The existing 12 MiB receipt,
+32 KiB outcome-response and request timeout bounds remain unchanged.
 
 ## Portable drafts for unsent work
 
@@ -139,6 +182,7 @@ node --test tests/browser/rebase-session.test.mjs tests/browser/rebase-view.test
 node tests/browser/rebase-git-oracle.mjs \
   /absolute/path/to/git 'git version <exact-version>' <executable-sha256>
 node --test tests/browser/rebase-drafts*.test.mjs
+node --test tests/browser/rebase-credential-*.test.mjs
 node tests/browser/rebase-drafts-browser.mjs /absolute/path/to/chromium
 ```
 
@@ -148,6 +192,17 @@ plus 232 retained source/issue/PR/authoring regressions: 272 passed, no failures
 or skips. HTTP/DOM/File fixtures were explicit test doubles; commit hashes used
 actual WebCrypto. That selected fixture was NOT the full repository/browser suite.
 These historical results are not a current workspace gate.
+
+The replacement-credential suite uses the actual client, WebCrypto and controls
+from the served HTML. Its loopback cases use default Node Fetch over real sockets
+and deliberately synthetic native-wire replies. A small in-memory test map models
+principal-scoped outcomes; it is not a production store or native admission.
+The scenarios cover a dropped publication reply, invalidated old credentials,
+missing read scopes, wrong principals, unchanged receipt restoration, nonterminal
+observations, terminal refusal/commit, redirects and disconnects. Ordinary rebase
+and draft controls retain regression coverage. No Rust source, shared transport,
+publication request schema or native authorization rule changes in this feature.
+These tests do not execute a real browser, the Rust node or the full workspace.
 
 The draft client at local fixture `910e3309113fc3d27dfccfb06c60e0feaf2219a7`
 (published byte-identically at `d1b94ffe`) passed 66 new tests. The UI increment

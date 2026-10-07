@@ -65,7 +65,8 @@ export function mountRebase(doc, options = {}) {
   const ids = ['token','connect','disconnect','source','onto','format','select','selection','upstream','empty','committer','timestamp',
     'max-commits','prepare','cancel','report','conflicts','resolve','empty-stop','empty-policy','continue-empty','inspection',
     'stage','confirm-send','send','recover','discard','save-receipt','restore-file','restore','pending','status',
-    'save-draft','include-choices','draft-file','load-draft','resume-draft'];
+    'save-draft','include-choices','draft-file','load-draft','resume-draft',
+    'recovery-only','recovery-principal','connection-status'];
   const c = Object.fromEntries(ids.map(id => [id,get(id)]));
   const element = (tag,value) => { const e=doc.createElement(tag); if(value !== undefined)e.textContent=value;return e; };
   let busy=false, revision=0, rows=[], draftDirty=false;
@@ -82,7 +83,12 @@ export function mountRebase(doc, options = {}) {
     } catch(error) { urls.revokeObjectURL(url);throw error; }
   }
   function sync() {
-    const pending=client.pending, s=client.state;
+    const pending=client.pending, s=client.state, recoveryOnly=client.recoveryOnly;
+    c['recovery-only'].disabled=busy;
+    c['recovery-principal'].disabled=busy||!c['recovery-only'].checked;
+    c['connection-status'].textContent=!client.connected?'Disconnected.':recoveryOnly
+      ?`Recovery only. Expected original principal: ${client.recoveryPrincipal}. Each outcome reply must authenticate this principal. Sending, retrying and authoring are disabled.`
+      :'Ordinary connection. Native grants still govern each operation.';
     for(const id of ['source','onto','format','upstream','empty','committer','timestamp','max-commits','empty-policy','restore-file','draft-file'])c[id].disabled=busy||!client.connected||!!pending;
     c.token.disabled=busy;c.connect.disabled=busy;c.select.disabled=busy||!client.connected||!!pending;
     c.prepare.disabled=busy||!client.connected||!!pending||!s.selection||s.resumeRequired;
@@ -94,12 +100,16 @@ export function mountRebase(doc, options = {}) {
     c.resolve.disabled=busy||!client.connected||!!pending||s.report?.state!=='conflicted';
     c['empty-stop'].hidden=s.report?.state!=='became_empty';c['continue-empty'].disabled=busy||!client.connected||!!pending||s.report?.state!=='became_empty';
     c.stage.disabled=busy||!client.connected||!!pending||!s.candidate||s.candidate.fields.expected_source===s.candidate.fields.candidate_commit;
-    c.send.disabled=busy||!client.connected||!pending;c.recover.disabled=c.send.disabled;
-    c['confirm-send'].disabled=busy||!pending;
-    c.discard.disabled=busy||!pending||pending.sent||pending.exported;c['save-receipt'].disabled=busy||!pending;
+    c.send.disabled=busy||!client.connected||!pending||recoveryOnly;
+    c.recover.disabled=busy||!client.connected||!pending;
+    c['confirm-send'].disabled=busy||!pending||recoveryOnly;
+    if(recoveryOnly)c['confirm-send'].checked=false;
+    c.discard.disabled=busy||!pending||pending.sent||pending.exported||recoveryOnly;c['save-receipt'].disabled=busy||!pending;
     c.restore.disabled=busy||!client.connected||!!pending;
+    if(recoveryOnly)for(const id of ['source','onto','format','select','upstream','empty','committer','timestamp','max-commits',
+      'prepare','resolve','empty-policy','continue-empty','stage','draft-file','save-draft','include-choices','load-draft','resume-draft'])c[id].disabled=true;
     c.pending.textContent=pending?JSON.stringify(pending,null,2):'No outstanding history rewrite.';
-    for(const row of rows)for(const control of [row.choice,row.mode,row.content,row.file,row.endings])control.disabled=busy||!!pending||!client.connected;
+    for(const row of rows)for(const control of [row.choice,row.mode,row.content,row.file,row.endings])control.disabled=busy||!!pending||!client.connected||recoveryOnly;
   }
   function clearViews() {
     rows=[];draftDirty=false;clearDownloads();c.report.replaceChildren();c.conflicts.replaceChildren();c.inspection.replaceChildren();
@@ -164,9 +174,24 @@ export function mountRebase(doc, options = {}) {
     try{await work(start);}catch(error){if(start===revision)status(`${error.outcomeUnknown?'Outcome unknown. Preserve the original request and key. ':''}${error.message}`);}
     finally{busy=false;if(!client.connected)clearViews();sync();}
   }
-  function disconnect() {revision++;client.disconnect();c.token.value='';c['restore-file'].value='';c['draft-file'].value='';clearViews();status(client.pending?'Disconnected. Original publication retained; save its recovery receipt.':'Disconnected; credentials, recipes and source views cleared.');sync();}
-  c.connect.addEventListener('click',()=>perform(async()=>{const token=c.token.value;c.token.value='';clearViews();await client.connect(token);status('Connected. Select both branch tips or restore an original request.');}));
-  c.disconnect.addEventListener('click',disconnect);
+  function disconnect(clearPrincipal=true) {
+    revision++;client.disconnect();c.token.value='';c['restore-file'].value='';c['draft-file'].value='';
+    if(clearPrincipal)c['recovery-principal'].value='';
+    clearViews();status(client.pending?'Disconnected. Original publication retained; save its recovery receipt.':'Disconnected; credentials, recipes and source views cleared.');sync();
+  }
+  c.connect.addEventListener('click',()=>perform(async()=>{
+    const token=c.token.value, recoveryOnly=c['recovery-only'].checked, expectedPrincipal=c['recovery-principal'].value;
+    c.token.value='';clearViews();
+    if(recoveryOnly)await client.connectForRecovery(token,expectedPrincipal);
+    else await client.connect(token);
+    status(recoveryOnly?'Recovery-only credential loaded. Restore the original receipt or look up its outcome. No request was sent; each reply must match the named original principal.'
+      :'Connected. Select both branch tips or restore an original request.');
+  }));
+  c.disconnect.addEventListener('click',()=>disconnect());
+  // Changing connection intent cannot promote the active token or change the
+  // identity expected by an in-flight lookup. It disconnects, preserving writes.
+  c['recovery-only'].addEventListener('change',()=>disconnect(false));
+  for(const event of ['input','change'])c['recovery-principal'].addEventListener(event,()=>disconnect(false));
   c.select.addEventListener('click',()=>perform(async()=>{clearViews();await client.select(c.source.value,c.onto.value,c.format.value);paint();status('Both branches selected at one snapshot. Enter the exact upstream boundary and explicit committer.');}));
   for(const id of ['source','onto','format'])for(const event of ['input','change'])c[id].addEventListener(event,()=>{if(client.pending)return;revision++;client.clearSelection();clearViews();sync();status('Branch selection changed. Select both current tips explicitly.');});
   for(const id of ['upstream','empty','committer','timestamp','max-commits'])for(const event of ['input','change'])c[id].addEventListener(event,()=>{if(client.pending)return;revision++;client.invalidate();paint();status('Rebase inputs changed; previous recipes and candidate discarded. Branch pins remain selected.');});
@@ -217,9 +242,10 @@ export function mountRebase(doc, options = {}) {
   c['restore-file'].addEventListener('change',()=>{revision++;client.cancel();});
   c.restore.addEventListener('click',()=>perform(async start=>{
     const file=c['restore-file'].files?.[0],bytes=await chosenFile(file,RECEIPT_LIMIT,()=>start===revision&&client.connected&&c['restore-file'].files?.[0]===file);
-    await client.restoreReceipt(new TextDecoder('utf-8',{fatal:true}).decode(bytes));clearViews();status('Original request restored, not executed. Look up its outcome or separately confirm an unchanged retry.');}));
+    await client.restoreReceipt(new TextDecoder('utf-8',{fatal:true}).decode(bytes));clearViews();status(client.recoveryOnly?'Original request restored unchanged for read-only recovery. Sending and retrying remain disabled.'
+      :'Original request restored, not executed. Look up its outcome or separately confirm an unchanged retry.');}));
   const events=options.events ?? globalThis;
-  events.addEventListener?.('pagehide',disconnect);
+  events.addEventListener?.('pagehide',()=>disconnect());
   events.addEventListener?.('beforeunload',event=>{if(client.pending||client.state.report||client.state.resumeRequired||draftDirty){event.preventDefault();event.returnValue='';}});
   sync();return {client,disconnect,get rows(){return rows;}};
 }
