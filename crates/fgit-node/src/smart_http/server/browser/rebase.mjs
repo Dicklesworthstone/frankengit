@@ -10,12 +10,15 @@ import { INSPECT_OPTIONS, inspectReply } from './rebase-inspection.mjs';
 export const RECEIPT_BYTES = 12 * 1024 * 1024;
 export class RebaseClient {
   #transport; #selection = null; #scope = null; #report = null; #artifact = null; #recipes = [];
+  #recoveryPrincipal = null;
   #resumeRequired = false; #command = null; #pending = null; #busy = false; #serial = 0; #timeout;
   constructor(options) {
     this.#transport = new Transport({ ...options, pageSuffix: '/ui/rebase/' });
     this.#timeout = integer(options.operationTimeoutMs ?? 60_000, 'whole rebase read timeout', 1, 300_000);
   }
   get connected() { return this.#transport.connected; }
+  get recoveryOnly() { return this.#recoveryPrincipal !== null; }
+  get recoveryPrincipal() { return this.#recoveryPrincipal; }
   get selection() { return copy(this.#selection); }
   get report() { return copy(this.#report); }
   // Detached display data, not mutable recipes, bundle bytes or credentials.
@@ -42,7 +45,22 @@ export class RebaseClient {
     this.disconnect();
     await this.#transport.connect(token, this.#pending?.fingerprint ?? null);
   }
+  // Native outcome lookup is principal-scoped, not token-fingerprint-scoped.
+  // The operator names the ORIGINAL principal explicitly; never infer it from
+  // the replacement token's response. This connection cannot submit any body.
+  async connectForRecovery(token, expectedPrincipal) {
+    const original = principal(expectedPrincipal);
+    if (this.#pending?.observedPrincipal && this.#pending.observedPrincipal !== original) {
+      fail('Recovery principal differs from the original authenticated observation.');
+    }
+    this.disconnect();
+    // Latch before asynchronous token hashing. A competing connect/disconnect
+    // retains Transport's epoch checks and cannot promote this connection.
+    this.#recoveryPrincipal = original;
+    await this.#transport.connect(token);
+  }
   disconnect() {
+    this.#recoveryPrincipal = null;
     this.#serial++; this.#transport.disconnect(); this.#scope = null; this.#selection = null;
     this.#artifact = null; this.#report = null; this.#command = null; this.#recipes = []; this.#resumeRequired = false;
     // Uncertain publication responsibility survives credential loss.
@@ -50,6 +68,9 @@ export class RebaseClient {
   cancel() { this.#serial++; this.#transport.cancelReads(); this.#artifact = null; }
   invalidate() { this.cancel(); this.#report = null; this.#recipes = []; this.#command = null; this.#resumeRequired = false; }
   clearSelection() { this.invalidate(); this.#selection = null; }
+  #authoring() {
+    if (this.recoveryOnly) fail('Recovery-only connection: look up the original outcome; sending, retrying and authoring are disabled.');
+  }
   #noPending() { if (this.#pending) fail('Resolve the saved rebase publication before starting another operation.'); }
   async #run(action, boundedRead = true) {
     if (this.#busy) fail('A rebase operation is already running.');
@@ -66,6 +87,7 @@ export class RebaseClient {
     finally { if (timer !== null) clearTimeout(timer); this.#busy = false; }
   }
   async select(sourceRef, ontoRef, algorithm) {
+    this.#authoring();
     this.#noPending();
     if (this.#busy) fail('A rebase operation is already running.');
     this.clearSelection();
@@ -87,6 +109,7 @@ export class RebaseClient {
     });
   }
   async prepare(input) {
+    this.#authoring();
     this.#noPending();
     if (this.#resumeRequired) fail('Resume the loaded draft before preparing different inputs.');
     if (this.#busy) fail('A rebase operation is already running.');
@@ -96,6 +119,7 @@ export class RebaseClient {
     return this.#run(check => this.#prepare(command, [], { body: form(command), contentType: 'application/x-www-form-urlencoded' }, check));
   }
   async resolve(choices) {
+    this.#authoring();
     this.#noPending();
     const report = this.#report, command = copy(this.#command);
     if (!report || report.state !== 'conflicted' || !command) fail('Resolve a reported original commit first.');
@@ -110,6 +134,7 @@ export class RebaseClient {
   // upstream, committer or earlier resolutions. This remains a read and the
   // complete resulting bundle must pass inspection again before publication.
   async continueEmpty(policy) {
+    this.#authoring();
     this.#noPending();
     if (!['drop', 'keep'].includes(policy)) fail('Choose Drop or Keep explicitly.');
     if (this.#report?.state !== 'became_empty' || !this.#command || !this.#selection) {
@@ -147,6 +172,7 @@ export class RebaseClient {
   // Optional complete choices capture the currently edited conflict without
   // submitting it. Native resolution must rediscover the same conflict later.
   async exportDraft(choices = null) {
+    this.#authoring();
     this.#noPending();
     return this.#run(async check => {
       if (!this.#selection || !this.#command) fail('Prepare a rebase session before saving its draft.');
@@ -168,6 +194,7 @@ export class RebaseClient {
   // Decode and swap atomically. No saved report, candidate, approval, token or
   // publication key is accepted. Invalid imports preserve the previous session.
   async restoreDraft(value) {
+    this.#authoring();
     this.#noPending();
     return this.#run(async check => {
       const draft = await readDraft(value, this.#transport.root, this.#transport.crypto, check);
@@ -180,6 +207,7 @@ export class RebaseClient {
     });
   }
   async resumeDraft() {
+    this.#authoring();
     this.#noPending();
     if (!this.#resumeRequired || !this.#selection || !this.#command) fail('Load a saved rebase draft first.');
     return this.#run(async check => {
@@ -208,6 +236,7 @@ export class RebaseClient {
       expected_source: a.command.expected_source, onto: a.command.expected_onto, candidate_commit: a.metadata.candidate_commit });
   }
   async stage() {
+    this.#authoring();
     this.#noPending();
     return this.#run(async check => {
       const a = this.#artifact;
@@ -231,6 +260,7 @@ export class RebaseClient {
     return result;
   }
   async send() {
+    this.#authoring();
     return this.#run(async () => {
       const p = this.#pending;
       if (!p || p.fingerprint !== this.#transport.fingerprint) fail('Use the original prepared request and credential.');
@@ -243,14 +273,18 @@ export class RebaseClient {
     }, false);
   }
   async recover() {
-    return this.#run(async () => {
-      const p = this.#pending;
-      if (!p || p.fingerprint !== this.#transport.fingerprint) fail('Use the original unresolved request and credential.');
+    return this.#run(async check => {
+      const p = this.#pending, expectedPrincipal = this.#recoveryPrincipal;
+      if (!p || (!this.recoveryOnly && p.fingerprint !== this.#transport.fingerprint)) fail('Use the original unresolved request and credential.');
+      if (this.recoveryOnly && p.observedPrincipal && p.observedPrincipal !== this.#recoveryPrincipal) fail('Original recovery principal changed.');
       const { value } = await this.#transport.request('outcomes', { method: 'POST', key: p.key, read: false, maximum: 32768 });
+      check();
+      if (expectedPrincipal !== null && value.principal_id !== expectedPrincipal) fail('Replacement credential does not authenticate the explicitly selected original principal.');
       return this.#settle(recovery(value, p), p);
     }, false);
   }
   discardUnsent() {
+    this.#authoring();
     if (this.#busy || !this.#pending || this.#pending.sent || this.#pending.exported) fail('Only an unsent, unexported request may be discarded.');
     this.#pending = null;
   }
@@ -270,7 +304,9 @@ export class RebaseClient {
       const r = record(JSON.parse(value));
       keys(r, ['schema', 'origin', 'route', 'scope', 'fields', 'fingerprint', 'nonce', 'key', 'bundle_base64', 'observedTx', 'observedPrincipal']);
       if (r.schema !== 'frankengit-rebase-retry-v1' || r.origin !== this.#transport.root.origin || r.route !== this.#transport.root.route ||
-          r.fingerprint !== this.#transport.fingerprint || !/^[0-9a-f]{32}$/.test(r.nonce)) fail('Recovery file belongs to another profile, route, or credential.');
+          typeof r.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(r.fingerprint) ||
+          (!this.recoveryOnly && r.fingerprint !== this.#transport.fingerprint) || !/^[0-9a-f]{32}$/.test(r.nonce)) fail('Recovery file belongs to another profile, route, or credential.');
+      if (this.recoveryOnly && r.observedPrincipal !== null && r.observedPrincipal !== this.#recoveryPrincipal) fail('Receipt principal differs from the explicitly selected original principal.');
       const scope = receiptScope(r.scope), fields = applyFields(r.fields);
       if (scope.format !== fields.object_format || (this.#scope && Object.keys(scope).some(k => scope[k] !== this.#scope[k]))) fail('Recovered repository identity changed.');
       const bundle = fromBase64(r.bundle_base64);
