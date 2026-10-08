@@ -81,3 +81,63 @@ and SHA-256 materializations, runs strict fsck and checks contents and tag peeli
 The SHA-256 index fixture matches the pre-existing metadata.json SHA-256 golden.
 This demonstrates fixture interoperability, not Rust execution. The separate
 actual-fg test is explicitly skipped unless a built `FG_NATIVE_BIN` is supplied.
+
+## Operator command, including signed recovery
+
+```sh
+node scripts/recover_git_bundle.mjs backup.bundle ./restored.git \
+  --native-fg "$PWD/target/release/fg" --head refs/heads/main \
+  --native-timeout-secs 300 \
+  --attestation backup.dsse.json --trust-key trusted-ed25519.pem \
+  --repository owner/project --minimum-sequence 42
+```
+
+The four approval arguments remain an all-or-nothing group. The unchanged
+Ed25519/DSSE verifier checks the independently trusted key, source repository,
+full-width sequence floor, lifetime, length and artifact hash before any native
+process or destination write. The native engine receives only an owned snapshot
+of those authenticated bytes, never the original input or approval/key paths.
+Independent `--expect-*` pins still apply. To recover unsigned source, omit the
+entire approval group; the content checks are identical but do not authenticate
+an origin. Without `--native-fg`, legacy preparation remains the default.
+
+One 1..300-second deadline (default 60) covers authentication, reads, native
+preparation and filesystem publication. Expired or cancelled work does not gain a
+fresh budget at a stage boundary. Native child cancellation terminates, escalates
+and waits for closure; filesystem work is cooperative. Approval is checked again
+after native verification and at the last prepublication notification, after
+readback and immediately before the final liveness check and HEAD link. There is
+no claim of atomic wall-clock expiry enforcement across a blocking kernel call.
+
+Add `--resume` with the **same source, branch, pins and approval arguments** to
+continue an interrupted operation. Native signed plans additionally bind the
+verified approval statement, trusted-key identity and exact repository/sequence
+policy into the saved plan. An omitted approval, different signer, changed
+statement or lowered floor cannot regenerate that plan. A marker supplies no
+trust: every signed invocation reauthenticates against the explicitly supplied
+key and policy. Library callers can provide `nativeApprovalBinding` (a SHA-256
+hex digest) for this identity binding, but the digest itself is not verification
+or permission; only the signed command composes it with authentication checks.
+
+Native plans made by the earlier unsigned library entry retain the same bytes.
+Signed native plans cannot be resumed as unsigned or as legacy plans. No automatic
+backend migration or retry exists. A failure before inspecting a resume target
+reports `existing_unknown`; it never claims the existing HEAD was rolled back.
+A failed or expired signature cannot undo a prior published HEAD.
+
+After HEAD becomes visible, expiry, cancellation or a throwing progress observer
+cannot skip the owner's remaining directory synchronization and staging/lease
+cleanup. Observer errors are reported after finalization; the published directory
+is retained. A failed output pipe reports failure, not non-publication.
+
+```sh
+node --test tests/operator/native-recovery-command.test.mjs \
+  tests/operator/native-source-layout.test.mjs \
+  tests/operator/native-source-recovery.test.mjs
+```
+
+Command tests run the actual CLI, filesystem owner and real Ed25519 operations,
+with a deliberately fake native-report process. A throwing import sentinel
+establishes that explicit native selection never loads the legacy decoder. The
+legacy-dispatch sentinel tests selection only, not Git semantics. These checks
+are not Rust build/execution, power-loss or full repository verification evidence.

@@ -54,6 +54,8 @@ else {
   Object.assign(report, settings.report ?? {});
   if (settings.layout) Object.assign(report.recovery, settings.layout);
   if (settings.mode === 'missing-layout') delete report.recovery;
+  if (settings.mutateSource) writeFileSync(settings.mutateSource, 'changed after native snapshot selection');
+  if (settings.delayMs) await new Promise(resolve => setTimeout(resolve, settings.delayMs));
   if (settings.mode === 'huge') process.stdout.write('x'.repeat(17 * 1024 * 1024));
   else process.stdout.write(JSON.stringify(report) + '\n');
 }

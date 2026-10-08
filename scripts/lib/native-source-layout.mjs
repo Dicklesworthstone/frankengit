@@ -20,8 +20,10 @@ export function normalizeNativeRecoveryRequest(request) {
  */
 export async function prepareNativeGitBundleRecovery(input, request, options) {
   const head = normalizeNativeRecoveryRequest(request);
-  if (!record(options) || Object.keys(options).some(key => !['fg', 'signal', 'timeoutMs'].includes(key))) fail('native_invalid_recovery_options');
-  const config = normalizeNativeBundleOptions({ ...options, recoveryHead: head,
+  if (!record(options) || Object.keys(options).some(key => !['fg', 'signal', 'timeoutMs', 'approvalBinding'].includes(key))) fail('native_invalid_recovery_options');
+  const { approvalBinding, ...native } = options;
+  if (approvalBinding !== undefined && (typeof approvalBinding !== 'string' || !/^[0-9a-f]{64}$/.test(approvalBinding))) fail('native_invalid_approval_binding');
+  const config = normalizeNativeBundleOptions({ ...native, recoveryHead: head,
     expected: request.expectations ?? null, maxInputMiB: 16 });
   // Capture all mutable inputs/constraints before the first await. The caller
   // cannot change the snapshot after validation or extend a copied deadline.
@@ -70,6 +72,10 @@ export async function prepareNativeGitBundleRecovery(input, request, options) {
     artifact_sha256: report.artifact_sha256, artifact_bytes: bytes.length, head_ref_hex: head,
     references, expectations: config.expected, directories,
     files: files.map(file => ({ path: file.path, bytes: file.bytes.length, sha256: sha256(file.bytes) })) };
+  // A local resume identity, NOT proof of approval. The signed CLI supplies
+  // this only after authenticating and repeats authentication on every resume.
+  // Unsigned plans retain their existing exact bytes.
+  if (approvalBinding !== undefined) receipt.approval_sha256 = approvalBinding;
   const plan_sha256 = sha256(Buffer.from(JSON.stringify(receipt)));
   // Large hex payloads are not copied into the durable marker or user receipt.
   const { recovery: _layout, ...verification } = report;

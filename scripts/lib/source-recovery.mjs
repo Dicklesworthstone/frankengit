@@ -311,10 +311,14 @@ async function resumePlan(plan, target, parent, parentIdentity, check, progress,
     for (const [relative, file] of final.found) await validateExisting(join(target, relative), file.bytes, file.identity, check, true);
     if (final.found.has('HEAD') || plan.files.some(file => !final.found.has(file.path === 'HEAD' ? HEAD_STAGE : file.path))) { setState('existing_unknown'); failure('recovery_publication_changed'); }
     for (const [path, identity] of observed.directories) await checkedDirectory(path, identity);
-    await checkLease(); check(); setState('publication_unknown');
+    await checkLease();
+    await progress('publication_ready');
+    check(); setState('publication_unknown');
     await link(join(target, HEAD_STAGE), join(target, 'HEAD')); setState('published');
   }
-  await onProgress(Object.freeze({ phase: alreadyPublished ? 'already_published' : 'published', destination: target }));
+  let observerError = null;
+  try { await onProgress(Object.freeze({ phase: alreadyPublished ? 'already_published' : 'published', destination: target })); }
+  catch (error) { observerError = { error }; }
   // Finish an already-visible operation without cancellation-induced rollback.
   await syncDirectory(target, rootIdentity); await syncDirectory(parent, parentIdentity);
   const headBytes = plan.files.find(file => file.path === 'HEAD').bytes;
@@ -325,6 +329,7 @@ async function resumePlan(plan, target, parent, parentIdentity, check, progress,
     await verifyFile(join(target, HEAD_STAGE), headBytes, () => {}, headIdentity); await unlink(join(target, HEAD_STAGE));
   }
   await syncDirectory(target, rootIdentity);
+  if (observerError !== null) throw observerError.error;
   return { type: 'frankengit-source-recovery-v1', state: 'complete', destination: target, bare: true,
     resumed: true, already_published: alreadyPublished, owner_sequence: sequence, reused_bytes: reusedBytes, appended_bytes: appendedBytes,
     head_ref_hex: plan.receipt.head_ref_hex, plan_sha256: plan.plan_sha256,
@@ -371,7 +376,7 @@ export async function recoverGitBundle(input, destination, request, options = {}
   let state = 'not_created', target = null, releaseLock = null;
   try {
     if (!options || typeof options !== 'object' || Array.isArray(options) ||
-        Object.keys(options).some(key => !['signal', 'timeoutMs', 'verificationLimits', 'onProgress', 'resume', 'nativeFg'].includes(key))) failure('invalid_recovery_options');
+        Object.keys(options).some(key => !['signal', 'timeoutMs', 'verificationLimits', 'onProgress', 'resume', 'nativeFg', 'nativeApprovalBinding'].includes(key))) failure('invalid_recovery_options');
     const { signal, onProgress = () => {}, timeoutMs = 60000, verificationLimits = {}, resume = false } = options;
     if (typeof resume !== 'boolean' || (signal !== undefined && !(signal instanceof AbortSignal)) || typeof onProgress !== 'function' ||
         !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) failure('invalid_recovery_options');
@@ -391,8 +396,10 @@ export async function recoverGitBundle(input, destination, request, options = {}
       if (Object.hasOwn(options, 'verificationLimits')) failure('native_recovery_limits_not_supported');
       if (resume) state = 'existing_unknown';
       plan = await prepareNativeGitBundleRecovery(input, request,
-        { fg: options.nativeFg, signal, timeoutMs });
+        { fg: options.nativeFg, signal, timeoutMs,
+          ...(Object.hasOwn(options, 'nativeApprovalBinding') ? { approvalBinding: options.nativeApprovalBinding } : {}) });
     } else {
+      if (Object.hasOwn(options, 'nativeApprovalBinding')) failure('native_recovery_backend_required');
       // Preserve owned input across the lazy import. Bound/copy plain request
       // data before yielding; semantic validation remains with the old engine.
       if (!(input instanceof Uint8Array) || !input.length || input.length > 16 * 1024 * 1024
@@ -454,19 +461,23 @@ export async function recoverGitBundle(input, destination, request, options = {}
     for (const file of installed) await verifyFile(join(target, file.path), file.bytes, check, file.identity);
     await verifyFile(join(target, MARKER), receiptBytes, check);
     for (const [path, identity] of directories) { check(); await checkedDirectory(path, identity); }
+    await progress('publication_ready');
     check(); state = 'publication_unknown';
     // A hard-link install is atomic and fails if HEAD already exists. Do not
     // use rename(), which can replace another writer's destination on POSIX.
     await link(join(target, HEAD_STAGE), join(target, 'HEAD')); state = 'published';
     // Publication acquired responsibility. Drain/finalize despite cancellation;
     // failures now report published, never pretend to roll the repository back.
-    await onProgress(Object.freeze({ phase: 'published', destination: target }));
+    let observerError = null;
+    try { await onProgress(Object.freeze({ phase: 'published', destination: target })); }
+    catch (error) { observerError = { error }; }
     await syncDirectory(target, rootIdentity); await syncDirectory(parent, parentIdentity);
     const head = installed.find(file => file.path === HEAD_STAGE);
     await verifyFile(join(target, 'HEAD'), head.bytes, () => {}, head.identity);
     await verifyFile(join(target, HEAD_STAGE), head.bytes, () => {}, head.identity);
     await unlink(join(target, HEAD_STAGE)); await syncDirectory(target, rootIdentity);
     await releaseLock(); state = 'complete';
+    if (observerError !== null) throw observerError.error;
     return { type: 'frankengit-source-recovery-v1', state, destination: target, bare: true,
       head_ref_hex: plan.receipt.head_ref_hex, plan_sha256: plan.plan_sha256,
       files_synced: true, directories_synced: true, cancellation_requested: Boolean(signal?.aborted),
