@@ -1,7 +1,7 @@
 //! Bounded lossless operator JSON; raw repository paths never become JSON text.
 use super::options::{Options, invalid};
 use fgit_graph::lexical::scoped::ScopedLexicalReport;
-use fgit_graph::lexical::{LexicalChannel, LexicalSource};
+use fgit_graph::lexical::{LexicalChannel, LexicalRefreshStats, LexicalSource};
 use fgit_graph::{GenerationActivation, GenerationRecovery, GraphGenerationId};
 use fgit_types::{InternalObjectId, RepositoryIncarnationId};
 use std::io;
@@ -150,6 +150,37 @@ pub fn built(
     out.flag("freshness_at_delivery_claimed", false)?;
     out.finish()
 }
+/// Completed native preparation counters, not a speedup or source freshness claim.
+pub fn refreshed(
+    options: &Options,
+    incarnation: RepositoryIncarnationId,
+    source: &LexicalSource,
+    activation: &GenerationActivation,
+    stats: &LexicalRefreshStats,
+) -> io::Result<String> {
+    let mut out = start("scoped_index_refresh", options, incarnation)?;
+    out.source(source)?;
+    out.activation("index", activation)?;
+    out.flag("index_published", true)?;
+    out.flag("freshness_at_delivery_claimed", false)?;
+    refresh_counts(&mut out, stats)?;
+    out.finish()
+}
+fn refresh_counts(out: &mut Output, stats: &LexicalRefreshStats) -> io::Result<()> {
+    for (key, value) in [
+        ("reused_documents", stats.reused_documents),
+        ("rebuilt_documents", stats.rebuilt_documents),
+        ("prior_documents_not_reused", stats.prior_documents_not_reused),
+        ("reused_source_bytes", stats.reused_source_bytes),
+        ("rebuilt_source_bytes", stats.rebuilt_source_bytes),
+        ("previous_payload_bytes_read", stats.previous_payload_bytes_read),
+        ("previous_generation_bytes_read", stats.previous_generation_bytes_read),
+        ("build_work_bytes", stats.build_work_bytes),
+    ] {
+        out.number(key, value as u64)?;
+    }
+    Ok(())
+}
 pub fn searched(
     options: &Options,
     incarnation: RepositoryIncarnationId,
@@ -264,6 +295,32 @@ mod tests {
         let mut out = Output("{".into());
         out.number("id", u64::MAX).unwrap();
         assert!(out.0.ends_with("\"id\":\"18446744073709551615\""));
+    }
+    #[test]
+    fn refresh_counters_preserve_zeroes_and_full_width_without_fabricating_counts() {
+        let stats = LexicalRefreshStats {
+            reused_documents: 2,
+            rebuilt_documents: 0,
+            prior_documents_not_reused: 1,
+            reused_source_bytes: usize::MAX,
+            rebuilt_source_bytes: 0,
+            previous_payload_bytes_read: 42,
+            previous_generation_bytes_read: 17,
+            build_work_bytes: 99,
+        };
+        let mut out = Output("{".into());
+        refresh_counts(&mut out, &stats).unwrap();
+        assert!(out.0.contains("\"reused_documents\":\"2\""));
+        assert!(out.0.contains("\"rebuilt_documents\":\"0\""));
+        assert!(out.0.contains("\"prior_documents_not_reused\":\"1\""));
+        assert!(out.0.contains(&format!("\"reused_source_bytes\":\"{}\"", usize::MAX)));
+        assert!(out.0.contains("\"rebuilt_source_bytes\":\"0\""));
+        assert!(out.0.contains("\"previous_payload_bytes_read\":\"42\""));
+        assert!(out.0.contains("\"previous_generation_bytes_read\":\"17\""));
+        assert!(out.0.ends_with("\"build_work_bytes\":\"99\""));
+        let mut full = Output("x".repeat(MAX_OUTPUT));
+        assert!(refresh_counts(&mut full, &stats).is_err());
+        assert_eq!(full.0.len(), MAX_OUTPUT);
     }
     #[test]
     fn output_ceiling_refuses_before_growing_the_buffer() {

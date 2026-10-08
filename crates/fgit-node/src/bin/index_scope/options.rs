@@ -13,12 +13,13 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::PathBuf;
 
-pub const USAGE: &str = "fg-index-scope build|search|recover ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF --trusted-local --prefix PATH [--prefix PATH | --prefix-hex HEX ...]\n\
+pub const USAGE: &str = "fg-index-scope build|refresh|search|recover ROOT TENANT_HEX REPOSITORY_HEX sha1|sha256 FULL_REF --trusted-local --prefix PATH [--prefix PATH | --prefix-hex HEX ...]\n\
 Build: --candidate-file NEW_PRIVATE_FILE [--predecessor-token TOKEN] [--max-file-bytes N --max-source-bytes N --max-files N --max-entries N --max-depth N]\n\
+Refresh: --candidate-file NEW_PRIVATE_FILE --predecessor-token TOKEN [build limits] [--max-payload-bytes N]\n\
 Search: --term WORD [--term WORD | --term-hex HEX ...] [--channel content|path] [--filter-prefix PATH | --filter-prefix-hex HEX ...] [--limit N --max-work N --max-payload-bytes N]\n\
 Search continuation: --after ID --expected-head TOKEN --expected-commit HEX --index-token TOKEN --index-number N\n\
 Search/recover floor: --minimum-index-token TOKEN --minimum-index-number N\n\
-Build/search pins: --expected-head TOKEN --expected-commit HEX\n\
+Build/refresh/search pins: --expected-head TOKEN --expected-commit HEX\n\
 Recover: --candidate TOKEN. Tokens use alg:2:<64 lowercase hex>.\n\
 All counts are canonical decimal integers. Scope is explicit coverage, not whole-repository search. No scan fallback or automatic retry.";
 
@@ -100,6 +101,12 @@ pub enum Command {
         record: PathBuf,
         limits: SearchLimits,
     },
+    Refresh {
+        predecessor: GraphGenerationId,
+        record: PathBuf,
+        limits: SearchLimits,
+        reads: LexicalReadLimits,
+    },
     Search {
         query: LexicalQuery,
         generation: Option<GenerationActivation>,
@@ -160,7 +167,7 @@ pub fn parse(args: &[OsString]) -> io::Result<Options> {
         return Err(invalid(USAGE));
     }
     let op = text(&args[0])?;
-    if !matches!(op, "build" | "search" | "recover") {
+    if !matches!(op, "build" | "refresh" | "search" | "recover") {
         return Err(invalid(USAGE));
     }
     let id = |at: usize| -> io::Result<[u8; 16]> {
@@ -247,7 +254,7 @@ pub fn parse(args: &[OsString]) -> io::Result<Options> {
         )
     };
     let command = match op {
-        "build" => {
+        "build" | "refresh" => {
             let predecessor = take(&mut scalars, "--predecessor-token")?
                 .map(|v| generation(&v))
                 .transpose()?;
@@ -256,7 +263,7 @@ pub fn parse(args: &[OsString]) -> io::Result<Options> {
                 .map(PathBuf::from)
                 .filter(|p| !p.as_os_str().is_empty())
                 .ok_or_else(|| {
-                    invalid("Build requires --candidate-file in an existing private directory.")
+                    invalid("Build/refresh requires --candidate-file in an existing private directory.")
                 })?;
             let mut limits = SearchLimits::default();
             limits.max_file_bytes = number(
@@ -290,10 +297,32 @@ pub fn parse(args: &[OsString]) -> io::Result<Options> {
                 limits.max_depth as u64,
             )? as usize;
             limits.validate().map_err(failure)?;
-            Command::Build {
-                predecessor,
-                record,
-                limits,
+            if op == "refresh" {
+                let predecessor = predecessor.ok_or_else(|| {
+                    invalid("Refresh requires the exact --predecessor-token; use build for genesis.")
+                })?;
+                let defaults = LexicalReadLimits::default();
+                let reads = LexicalReadLimits {
+                    max_payload_bytes: number(
+                        &mut scalars,
+                        "--max-payload-bytes",
+                        defaults.max_payload_bytes as u64,
+                        defaults.max_payload_bytes as u64,
+                    )? as usize,
+                    ..defaults
+                };
+                Command::Refresh {
+                    predecessor,
+                    record,
+                    limits,
+                    reads,
+                }
+            } else {
+                Command::Build {
+                    predecessor,
+                    record,
+                    limits,
+                }
             }
         }
         "search" => {
@@ -374,3 +403,7 @@ pub fn parse(args: &[OsString]) -> io::Result<Options> {
 #[cfg(test)]
 #[path = "options_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "refresh_options_tests.rs"]
+mod refresh_tests;

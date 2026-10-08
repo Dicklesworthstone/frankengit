@@ -53,3 +53,67 @@ source/index ceilings, foreign/stale predecessors, source pins, cancellation,
 candidate barriers, original-candidate recovery and a real HTTP forge-only write.
 Their presence is not execution evidence. The implementation environment has no
 Rust toolchain; compilation and these native test targets remain to be run.
+
+## Operator command
+
+The existing `fg-index-scope` binary now accepts `refresh` alongside `build`,
+`search` and `recover`. This is the native operation above, not a build alias or
+an external scheduler. First create a scoped generation with `build`, then pass
+its `index_token` as the required predecessor:
+
+```sh
+fg-index-scope refresh "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" sha1 \
+  refs/heads/main --trusted-local --prefix src --prefix crates \
+  --predecessor-token "$INDEX_TOKEN" \
+  --candidate-file "$PRIVATE_DIR/refresh-1.json"
+```
+
+Repeat exactly the same canonical coverage as the original generation. Use
+`--prefix-hex` for raw repository path bytes. Source movement may be independently
+pinned with `--expected-head` and `--expected-commit`; these pins are enforced
+rather than silently relaxed after loading the old index. Missing/stale/foreign
+predecessors refuse. `build` remains the only command that can select genesis.
+
+The candidate file must be new, in an existing private 0700 directory under the
+existing Unix recording profile. The command synchronizes its candidate before
+any successor index effect and retains it after publication, failure, or lost
+stdout. An existing file is never replaced. A successful response must identify
+that same recorded candidate. An uncertain result is inspected using the existing
+read-only recovery command, not a new build or a changed predecessor:
+
+```sh
+fg-index-scope recover "$NODE_ROOT" "$TENANT_HEX" "$REPOSITORY_HEX" sha1 \
+  refs/heads/main --trusted-local --prefix src --prefix crates \
+  --candidate "$RECORDED_CANDIDATE"
+```
+
+`refresh` accepts the build-side `--max-file-bytes`, `--max-source-bytes`,
+`--max-files`, `--max-entries` and `--max-depth` ceilings plus the independent
+`--max-payload-bytes` prior-index read ceiling. Options only lower defaults.
+Search terms, query filters, cursors and query-work flags do not select a partial
+refresh and are rejected. The full option grammar is validated before node I/O;
+candidate-path preflight also precedes node opening.
+
+The `scoped_index_refresh` JSON report includes namespace, coverage, selected
+source and generation identities. It separately reports `reused_documents`,
+`rebuilt_documents`, `prior_documents_not_reused`, reused/rebuilt source bytes,
+prior payload/generation bytes read, and preparation work bytes. Like the other
+scope commands, all counters are decimal strings, not potentially rounded JSON
+numbers. These are actual preparation counts, not measured speedups, guaranteed
+freshness at delivery, or canonical repository mutations.
+
+Additional regression targets:
+
+```sh
+cargo test --locked -p fgit-node --bin fg-index-scope
+cargo test --locked -p fgit-node --test source_index_scoped_refresh_cli
+```
+
+Five new parser tests and one output test cover mandatory inputs, explicit raw
+coverage, both native hash domains, independent limits, wrong pins, inapplicable
+options and full-width counters. Two Unix integration tests invoke the real built
+binary against real native fixtures, checking build/refresh/search/recovery,
+record identity/permissions, persisted reopen, stale predecessors and refusal
+without publication. These eight tests, like the preceding native tests, have
+not been executed in the implementation environment. No Rust build, rustfmt,
+Clippy, native test or workspace gate is claimed.

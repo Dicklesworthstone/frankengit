@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Explicit scoped lexical build, query and original-candidate recovery.
+//! Explicit scoped lexical build, refresh, query and original-candidate recovery.
 //! No server, scanner fallback, subprocess, second runtime or remote grant.
 #[path = "index_scope/checkpoint.rs"]
 mod checkpoint;
@@ -66,6 +66,58 @@ fn execute(node: &OneNode, options: &Options) -> io::Result<(String, bool)> {
                 true,
             ))
         }
+        Command::Refresh {
+            predecessor,
+            record,
+            limits,
+            reads,
+        } => {
+            let request = node.outbox_delivery_context();
+            let mut saved = None;
+            let mut recording_error = None;
+            let result = node
+                .runtime()
+                .block_on(node.refresh_scoped_source_index_guarded_local_in(
+                    &request,
+                    &options.reference,
+                    &options.scope,
+                    options.head,
+                    options.commit,
+                    *predecessor,
+                    *limits,
+                    *reads,
+                    &mut |candidate| {
+                        let result =
+                            output::candidate(options, incarnation, candidate, Some(*predecessor))
+                                .and_then(|json| checkpoint::record(record, json.as_bytes()));
+                        match result {
+                            Ok(()) => {
+                                saved = Some(candidate);
+                                Ok(())
+                            }
+                            Err(error) => {
+                                recording_error = Some(error);
+                                // The exact I/O error remains owned by this command.
+                                // Any barrier error prevents native index effects.
+                                Err(NodeWorkspaceRefusal::RefUnavailable)
+                            }
+                        }
+                    },
+                ));
+            if let Some(error) = recording_error {
+                return Err(error);
+            }
+            let (source, activation, stats) = result.map_err(failure)?;
+            if saved != Some(activation.generation_id) {
+                return Err(io::Error::other(
+                    "Confirmed index differs from the recorded candidate; inspect the retained record.",
+                ));
+            }
+            Ok((
+                output::refreshed(options, incarnation, &source, &activation, &stats)?,
+                true,
+            ))
+        }
         Command::Search {
             query,
             generation,
@@ -112,7 +164,7 @@ fn execute(node: &OneNode, options: &Options) -> io::Result<(String, bool)> {
     }
 }
 fn run(options: &Options) -> io::Result<(String, bool)> {
-    if let Command::Build { record, .. } = &options.command {
+    if let Command::Build { record, .. } | Command::Refresh { record, .. } = &options.command {
         checkpoint::preflight(record)?;
     }
     let mut node = OneNode::open_existing(
