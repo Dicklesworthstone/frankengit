@@ -1,0 +1,68 @@
+{
+  "oracle": "git 2.47.3",
+  "native_fg_executed": false,
+  "fixtures": [
+    {
+      "format": "sha1",
+      "pack_offset": 128,
+      "bundle_sha256": "75a9f11dac3c09ba75e158048e1951b0b39f00c20da3b9798f4d5611e963fb7e",
+      "index_sha256": "7e81389280215f9a9139920f12a94d807d55cb83accd723799bc70919b010ec7",
+      "locations": [
+        [
+          "ec20141f0267805d3db1349c4701ed1f84f3ee61",
+          12
+        ],
+        [
+          "4a58007052a65fbc2fc3f910f2855f45a4058e74",
+          58
+        ],
+        [
+          "af05a70f13bc2fba5597c7aa79022b367d4ef140",
+          76
+        ],
+        [
+          "8e66527465821b289d8ad275784255bc8825617a",
+          122
+        ],
+        [
+          "fdf36c252d4e297cc62a161ba48176f6dcafa08a",
+          293
+        ]
+      ],
+      "commit": "8e66527465821b289d8ad275784255bc8825617a",
+      "tag": "fdf36c252d4e297cc62a161ba48176f6dcafa08a",
+      "pack_checksum": "2c774238758f7919f693d532f8eeea2abed537dc"
+    },
+    {
+      "format": "sha256",
+      "pack_offset": 198,
+      "bundle_sha256": "057a170fb5e3ae1aeee7f22e70b60efe8cf3d3891f0f28eb5fc7ee316260f287",
+      "index_sha256": "ad9f3bf1c1c2dc4d5483a02bda8dbae512d5e369ba4fc481d4a45d8f5afc2579",
+      "locations": [
+        [
+          "7f159d843933f44185df4dcaab90c6eda9595d849d31ac3122fa3857fab799c6",
+          12
+        ],
+        [
+          "9f8bf964b2f278e643f6ee93dd5980698a5f515048b2a27134a294e5e3376180",
+          70
+        ],
+        [
+          "4672839c4a5ff4dc4778627c88122511b4d8da2f781beb99202c9e6dd2978321",
+          88
+        ],
+        [
+          "c2a1cfc79b851e01921198e44377712b8ce0593cafe564873b9de729af20ec78",
+          146
+        ],
+        [
+          "91cf791e6e424d4f8449c7f57012ce46de9c7053ed326b0c34744d522c9da04d",
+          341
+        ]
+      ],
+      "commit": "c2a1cfc79b851e01921198e44377712b8ce0593cafe564873b9de729af20ec78",
+      "tag": "91cf791e6e424d4f8449c7f57012ce46de9c7053ed326b0c34744d522c9da04d",
+      "pack_checksum": "fa21f8dd38157fa90ab57fbe341e9404c1a9d25c3bd8709a7ca607647b14214d"
+    }
+  ]
+}

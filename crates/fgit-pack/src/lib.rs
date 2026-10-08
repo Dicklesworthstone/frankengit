@@ -13,6 +13,7 @@ mod commit_graph;
 mod delta;
 pub mod full_bundle;
 mod idx;
+mod idx_write;
 mod midx;
 mod pack;
 mod reader;
@@ -52,6 +53,7 @@ pub use idx::{
     IdxChecksumVerifier, IdxEntry, IdxV2, validate_idx_checksum, validate_idx_entry_crc,
     validate_idx_pack_count,
 };
+pub use idx_write::build_pack_index_v2;
 pub use midx::{
     MidxCompleteness, MidxLimits, MidxLocation, MidxProfile, MidxRefusal, MidxSource, MidxV1,
     MidxV1Receipt, MidxVerification,

@@ -1,5 +1,6 @@
 //! Read-only offline native bundle verification. No OneNode or credential exists here.
 mod anchors;
+mod recovery;
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -14,7 +15,7 @@ use fgit_node::source_retrieval::integrity::bundle_verify::{
     BundleExpectations, BundleVerifyLimits, MAX_EXPECTED_REFS, VerifiedGitBundle,
     verify_git_bundle, verify_git_bundle_against,
 };
-use fgit_types::GitHashAlgorithm;
+use fgit_types::{GitHashAlgorithm, RefName};
 
 pub(super) const USAGE: &str = "usage: fg bundle verify <bundle-file> [OPTIONS]
   --max-input-mib N       Whole input ceiling, 1..128 (default 128)
@@ -27,6 +28,7 @@ pub(super) const USAGE: &str = "usage: fg bundle verify <bundle-file> [OPTIONS]
   --expect-ref REF=OID    Repeat for known full native branch/tag/reference tips
   --expect-ref-hex HEX=OID Lossless raw-byte-name alternative
   --exact-refs            Require precisely the supplied direct-reference set
+  --recovery-head-hex HEX Add a native bare-source layout for this advertised branch
   --                     Treat the remaining argument as a literal file path
 
 Uses the native Rust bundle, pack/DEFLATE/delta, object and graph implementations.
@@ -46,6 +48,9 @@ Malformed pins refuse before input reads; mismatches refuse before decompression
 Matching pins never skip native verification or imply freshness/signature authority.
 The input path must be a quiescent regular local file, not a symlink. Cancellation
 and deadlines are cooperative and cannot interrupt a blocking operating-system read.
+Recovery layout output is opt-in, bounded to 16 MiB, and writes no repository.
+It preserves the input pack and derives idx-v2, packed-refs, config and HEAD.
+The filesystem owner must stage and synchronize all bodies, then publish HEAD last.
 Exit 0: fully verified; 2: invalid/incomplete/unsupported input or interrupted work.";
 
 #[derive(Debug)]
@@ -54,6 +59,7 @@ struct Options {
     limits: BundleVerifyLimits,
     timeout: Duration,
     expectations: Option<BundleExpectations>,
+    recovery_head: Option<RefName>,
 }
 fn number(value: &str, maximum: usize) -> Result<usize, String> {
     if value.is_empty()
@@ -89,6 +95,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut expected_format = None;
     let mut expected_refs = Vec::new();
     let mut exact_refs = false;
+    let mut recovery_head = None;
     let mut literal = false;
     let mut at = 0;
     while at < args.len() {
@@ -109,6 +116,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
             let value = args.get(at).ok_or("missing bundle verify option value")?;
             at += 1;
             match argument {
+                "--recovery-head-hex" => {
+                    let name = anchors::unhex(value, 4096)?;
+                    let reference = RefName::try_new(&name).map_err(|error| error.to_string())?;
+                    if !reference.as_bytes().starts_with(b"refs/heads/") {
+                        return Err("recovery head must name an advertised branch".into());
+                    }
+                    recovery_head = Some(reference);
+                }
                 "--expect-sha256" => {
                     expected_hash = Some(anchors::unhex(value, 32)?.try_into()
                         .map_err(|_| "expected exactly 32 SHA-256 bytes")?);
@@ -162,6 +177,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     // before opening the input or installing any runtime resources.
     let expectations = anchors::assemble(expected_hash, expected_format, &expected_refs, exact_refs, &limits)?;
     Ok(Options {
+        recovery_head,
         expectations,
         path: path.ok_or("bundle verify requires an input path")?,
         limits,
@@ -296,6 +312,9 @@ fn execute(options: &Options, live: &mut impl FnMut() -> bool) -> Result<String,
         options.limits.envelope.max_bundle_bytes,
         live,
     )?;
+    if let Some(head) = &options.recovery_head {
+        return recovery::execute(&bytes, &options.limits, options.expectations.as_ref(), head, live);
+    }
     match &options.expectations {
         Some(expected) => {
             let result = verify_git_bundle_against(&bytes, &options.limits, expected, live)

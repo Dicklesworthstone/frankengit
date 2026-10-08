@@ -6,6 +6,8 @@
 //! objects reachable from current refs. Gitlinks remain external dependencies.
 
 mod expectations;
+mod recovery;
+pub use recovery::{BundleRecoveryError, GitBundleRecovery, prepare_git_bundle_recovery};
 pub use expectations::{
     BundleExpectationError, BundleExpectations, MAX_EXPECTED_REFS, MatchedGitBundle,
     verify_git_bundle_against,
@@ -157,7 +159,7 @@ const fn set_id(object: &mut PackObject, value: GitOid) {
         PackObject::Delta(delta) => delta.id = Some(value),
     }
 }
-type Resolved = BTreeMap<GitOid, (ObjectKind, Vec<u8>)>;
+type Resolved = BTreeMap<GitOid, (ObjectKind, Vec<u8>, u64)>;
 
 // REF_DELTA identities are learned only from reconstructed native bytes. Rebuild
 // the native resolver's immutable index between discovery passes, as receive
@@ -218,7 +220,7 @@ fn resolve(
             checkpoint(live)?;
             let id = git_object_id(format, kind, &body);
             checkpoint(live)?;
-            if verified.insert(id, (kind, body)).is_some() {
+            if verified.insert(id, (kind, body, offset(&objects[index]))).is_some() {
                 return Err(BundleVerifyError::DuplicateObject(id));
             }
             set_id(&mut objects[index], id);
@@ -247,6 +249,18 @@ fn verify_git_bundle_inner(
     input: &[u8],
     limits: &BundleVerifyLimits,
     expectations: Option<&BundleExpectations>,
+    allow_work: &mut impl FnMut() -> bool,
+) -> Result<VerifiedGitBundle, BundleVerifyError> {
+    verify_git_bundle_with_locations(input, limits, expectations, None, allow_work)
+}
+
+// Recovery consumes locations from the SAME bounded framing/resolution pass.
+// Ordinary verification keeps its public report and does not retain this table.
+fn verify_git_bundle_with_locations(
+    input: &[u8],
+    limits: &BundleVerifyLimits,
+    expectations: Option<&BundleExpectations>,
+    mut locations: Option<&mut Vec<(GitOid, u64)>>,
     allow_work: &mut impl FnMut() -> bool,
 ) -> Result<VerifiedGitBundle, BundleVerifyError> {
     let mut stopped = false;
@@ -295,6 +309,11 @@ fn verify_git_bundle_inner(
     if pack.entries().len() > limits.graph.max_objects {
         return Err(BundleVerifyError::Graph(GraphRefusal::Limit("objects")));
     }
+    if let Some(entries) = &mut locations {
+        entries
+            .try_reserve_exact(pack.entries().len())
+            .map_err(|_| BundleVerifyError::Allocation)?;
+    }
     let pack_checksum = pack.trailer;
     let objects = pack
         .into_scalar_objects(|_| None)
@@ -308,10 +327,13 @@ fn verify_git_bundle_inner(
     let result = ObjectGraphAudit::new(&ids, envelope.format(), limits.graph, &mut live);
     checkpoint(&mut live)?;
     let mut graph = result.map_err(BundleVerifyError::Graph)?;
-    for (id, (kind, body)) in verified {
+    for (id, (kind, body, position)) in verified {
         let result = graph.observe(id, kind, &body, &mut live);
         checkpoint(&mut live)?;
         result.map_err(BundleVerifyError::Graph)?;
+        if let Some(entries) = &mut locations {
+            entries.push((id, position));
+        }
     }
     let result = graph.finish(&references, &mut live);
     checkpoint(&mut live)?;

@@ -66,11 +66,19 @@ pub(super) fn assemble(
 }
 
 pub(super) fn report(result: &MatchedGitBundle<'_>) -> Result<String, String> {
-    let mut out = super::report(result.verified())?;
+    report_matched(result.verified(), result.expectations())
+}
+
+// Only call after the native verifier has checked these exact expectations.
+// Recovery uses the same verification pass and the same report representation.
+pub(super) fn report_matched(
+    verified: &super::VerifiedGitBundle,
+    expected: &BundleExpectations,
+) -> Result<String, String> {
+    let mut out = super::report(verified)?;
     if out.pop() != Some('}') {
         return Err("invalid native verification report".into());
     }
-    let expected = result.expectations();
     let sha256 = expected.sha256().map_or_else(|| "null".into(), |hash| format!("\"{}\"", lowercase_hex(hash)));
     let format = expected.format().map_or_else(|| "null".into(), |format| format!("\"{}\"", format.as_str()));
     let ref_set = if expected.references().is_empty() { "null" }
