@@ -1,196 +1,19 @@
-//! Native delta intake: fully enumerate the new tree, read only changed blobs,
-//! and reuse checked postings for exact prior path/blob pairs. Neither the
-//! previous index nor a caller supplies the new tree's membership or grants.
-mod scoped;
-
-use super::super::super::{search_error, workspace_request_live};
-use super::super::{index_error, live};
+//! Refresh the exact scoped generation from authenticated native TreeFS.
+//! Reuse, discovery and payload publication stay on their existing paths;
+//! coverage is never inferred from query hits or promoted to whole-tree truth.
 use super::*;
-use crate::{NodeRequestContext, NodeWorkspaceRefusal, OneNode};
-use fgit_crypto::{Sha1, Sha256};
-use fgit_forge::source_browse::SourceBrowseError;
-use fgit_forge::source_search::SearchCase;
-use fgit_graph::lexical::scoped::ScopedLexicalReuse;
-use fgit_graph::lexical::{
-    LexicalError, LexicalIndexStore, LexicalReadLimits, LexicalRefreshStats, LexicalReuse,
-    LexicalSource, RefreshDocument,
-};
-use fgit_graph::{GenerationActivation, GenerationAuthorityError, GraphGenerationId};
-use fgit_types::cell::{ReadMode, admits_read, admits_staging_intake};
-use fgit_types::{RefName, RepositoryAuthorityHeadId};
-
-struct Row {
-    path: Vec<u8>,
-    blob: GitOid,
-    bytes: Option<Vec<u8>>,
-}
-struct Inventory {
-    source: SourceSearchReport,
-    rows: Vec<Row>,
-}
-// Keep each reuse value opaque: scoped postings cannot be converted into a
-// whole-tree index. Both intake paths share native membership and accounting.
-enum Reuse<'a> {
-    Whole(&'a LexicalReuse),
-    Scoped(&'a ScopedLexicalReuse),
-}
-impl Reuse<'_> {
-    fn document_bytes(&self, path: &[u8], blob: GitOid) -> Option<usize> {
-        match self {
-            Self::Whole(reuse) => reuse.document_bytes(path, blob),
-            Self::Scoped(reuse) => reuse.document_bytes(path, blob),
-        }
-    }
-}
-struct Request<'a> {
-    scope: SourceQuery,
-    reuse: Reuse<'a>,
-}
-
-impl LocalSearch for Request<'_> {
-    type Report = Inventory;
-    fn scope(&self) -> &SourceQuery {
-        &self.scope
-    }
-    fn empty(&self, source: SourceSearchReport) -> Inventory {
-        Inventory {
-            source,
-            rows: Vec::new(),
-        }
-    }
-    fn run<A: GitHashAlgorithm, S: ObjectSource<A>>(
-        &self,
-        base: &BaseView<A>,
-        source: &S,
-        capability: &mut TreeCapability,
-        now: u64,
-        limits: SearchLimits,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<Inventory, SearchError> {
-        limits.validate()?;
-        check(cancelled)?;
-        capability
-            .authorize_root(now)
-            .map_err(SearchError::Capability)?;
-        // The original whole-tree path is unchanged. Scoped intake uses the
-        // SAME prefix-pruning walker as scoped builds, before any blob read.
-        // A match ceiling never truncates the complete selected inventory.
-        let mut discovery = Discovery {
-            files: BTreeMap::new(),
-            entries: 0,
-            path_bytes: 0,
-            excluded: 0,
-        };
-        match &self.reuse {
-            Reuse::Whole(_) => discover(
-                base, source, capability, now, limits, cancelled, None, 0, &mut discovery,
-            ),
-            Reuse::Scoped(reuse) => {
-                // Refuse an accidentally mismatched internal selector rather
-                // than admitting an incomplete successor under the old scope.
-                if self.scope.prefixes().len() != reuse.scope().prefixes().len() {
-                    return Err(SearchError::Budget("refresh scope mismatch"));
-                }
-                // Compare normalized prefix sets without imposing an ordering
-                // contract on TreePath versus the raw-byte scope identity.
-                for prefix in self.scope.prefixes() {
-                    check(cancelled)?;
-                    if !reuse
-                        .scope()
-                        .prefixes()
-                        .iter()
-                        .any(|p| p.as_slice() == prefix.as_bytes())
-                    {
-                        return Err(SearchError::Budget("refresh scope mismatch"));
-                    }
-                }
-                discover_selected(
-                    self.scope.prefixes(),
-                    base,
-                    source,
-                    capability,
-                    now,
-                    limits,
-                    cancelled,
-                    None,
-                    0,
-                    &mut discovery,
-                )
-            }
-        }?;
-        let mut result = self.empty(SourceSearchReport {
-            repository: base.repository_id(),
-            source_rcr: base.base_rcr_id(),
-            source_commit: native::<A>(base.base_commit_oid())?,
-            source_tree: native::<A>(base.base_tree_oid())?,
-            matches: Vec::new(),
-            completion: SearchCompletion::Complete,
-            files_selected: discovery.files.len(),
-            files_read: 0,
-            bytes_read: 0,
-            bytes_searched: 0,
-            non_regular_entries: discovery.excluded,
-        });
-        let mut corpus_bytes = 0usize;
-        for (path, oid) in discovery.files {
-            check(cancelled)?;
-            // Reuse never bypasses the independently selected path grant.
-            let grant = capability
-                .authorize_read(&path, now)
-                .map_err(SearchError::Capability)?;
-            let blob = native::<A>(&oid)?;
-            let (bytes, length) =
-                if let Some(length) = self.reuse.document_bytes(path.as_bytes(), blob) {
-                    (None, length)
-                } else {
-                    let body = base
-                        .read_object(source, &oid, GitObjectKind::Blob, &grant)
-                        .map_err(|error| SearchError::Source(Box::new(error)))?;
-                    check(cancelled)?;
-                    capability
-                        .charge_fetch(body.len() as u64)
-                        .map_err(SearchError::Capability)?;
-                    result.source.files_read += 1;
-                    result.source.bytes_read = result
-                        .source
-                        .bytes_read
-                        .checked_add(body.len())
-                        .filter(|n| *n <= limits.max_total_bytes)
-                        .ok_or(SearchError::Budget("index source bytes"))?;
-                    let length = body.len();
-                    (Some(body), length)
-                };
-            // Source-size ceilings include reused rows, even though fetch
-            // counters and capability fetch charges include only actual I/O.
-            if length > limits.max_file_bytes {
-                return Err(SearchError::Budget("index file bytes"));
-            }
-            corpus_bytes = corpus_bytes
-                .checked_add(length)
-                .filter(|n| *n <= limits.max_total_bytes)
-                .ok_or(SearchError::Budget("index source bytes"))?;
-            result.rows.push(Row {
-                path: path.as_bytes().to_vec(),
-                blob,
-                bytes,
-            });
-        }
-        check(cancelled)?;
-        result.rows.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-        check(cancelled)?;
-        Ok(result)
-    }
-}
+use fgit_graph::lexical::scoped::{LexicalScope, ScopedLexicalIndexStore};
 
 impl OneNode {
-    /// Refresh a complete persistent index while avoiding source reads and
-    /// tokenization for unchanged raw-path/native-blob pairs. Trusted local
+    /// Refresh every regular file in the explicit persistent coverage, avoiding
+    /// reads and tokenization for unchanged raw-path/native-blob pairs. Trusted local
     /// operator API, never an HTTP read capability or an automatic query effect.
     ///
     /// `predecessor` must name the current index exactly. Source is authorized
     /// before index disclosure, then pinned through the complete tree selection.
     /// Every previous segment verifies before reuse, every new path comes from
-    /// TreeFS, and deleted rows are absent from the complete successor manifest.
+    /// TreeFS. Deleted and out-of-scope renamed rows leave the successor manifest.
+    /// Newly covered paths must supply native bytes, even for a previously seen blob.
     /// A concurrent writer cannot refresh either source/index precondition.
     ///
     /// The receipt names the source selected for the build, which may become
@@ -200,10 +23,11 @@ impl OneNode {
         clippy::too_many_arguments,
         reason = "source pins, required index predecessor and independent build/read budgets are separate contracts"
     )]
-    pub async fn refresh_source_index_local_in(
+    pub async fn refresh_scoped_source_index_local_in(
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
+        scope: &LexicalScope,
         expected_head: Option<RepositoryAuthorityHeadId>,
         expected_commit: Option<GitOid>,
         predecessor: GraphGenerationId,
@@ -211,9 +35,10 @@ impl OneNode {
         read_limits: LexicalReadLimits,
     ) -> Result<(LexicalSource, GenerationActivation, LexicalRefreshStats), NodeWorkspaceRefusal>
     {
-        self.refresh_source_index_guarded_local_in(
+        self.refresh_scoped_source_index_guarded_local_in(
             request,
             reference,
+            scope,
             expected_head,
             expected_commit,
             predecessor,
@@ -225,7 +50,7 @@ impl OneNode {
     }
 
     /// Refresh with the same pre-staging write-ahead barrier as
-    /// `build_source_index_guarded_local_in`. Every old segment and the complete
+    /// `build_scoped_source_index_guarded_local_in`. Every old segment and the complete
     /// new inventory are checked before the original candidate is handed out.
     /// A failed barrier stages nothing; after it succeeds, only recovery can
     /// determine publication. Existing explicit-predecessor APIs remain intact.
@@ -233,10 +58,11 @@ impl OneNode {
         clippy::too_many_arguments,
         reason = "write-ahead barrier, source pins, predecessor and resource budgets are independent"
     )]
-    pub async fn refresh_source_index_guarded_local_in(
+    pub async fn refresh_scoped_source_index_guarded_local_in(
         &self,
         request: &NodeRequestContext,
         reference: &RefName,
+        scope: &LexicalScope,
         expected_head: Option<RepositoryAuthorityHeadId>,
         expected_commit: Option<GitOid>,
         predecessor: GraphGenerationId,
@@ -282,9 +108,13 @@ impl OneNode {
             }
             (head, commit)
         };
-        let store =
-            LexicalIndexStore::new(&self.authority, self.lexical_namespace(), reference.clone())
-                .map_err(index_error)?;
+        let store = ScopedLexicalIndexStore::new(
+            &self.authority,
+            self.lexical_namespace(),
+            reference.clone(),
+            scope.clone(),
+        )
+        .map_err(index_error)?;
         let mut request_live = || workspace_request_live(request);
         let previous = store
             .select_async(
@@ -313,8 +143,9 @@ impl OneNode {
             .map_err(index_error)?;
         drop(previous);
         let query = Request {
-            scope: SourceQuery::new(b"index", SearchCase::Exact, &[]).map_err(search_error)?,
-            reuse: Reuse::Whole(&reuse),
+            scope: SourceQuery::new(b"index", SearchCase::Exact, reuse.scope().prefixes())
+                .map_err(search_error)?,
+            reuse: Reuse::Scoped(&reuse),
         };
         let (head, forge_position_root, inventory) = match self.object_format {
             Format::Sha1 => {
@@ -372,7 +203,7 @@ impl OneNode {
             || stats.rebuilt_documents + stats.reused_documents != inventory.source.files_selected
         {
             return Err(index_error(LexicalError::Invalid(
-                "native refresh accounting",
+                "native scoped refresh accounting",
             )));
         }
         drop(rows);
