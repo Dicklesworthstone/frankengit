@@ -6,7 +6,7 @@ import { constants } from 'node:fs';
 import { resolve, dirname, basename, join } from 'node:path';
 import { webcrypto, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { prepareGitBundleRecovery } from '../../crates/fgit-node/src/smart_http/server/browser/bundle-verify.mjs';
+import { prepareNativeGitBundleRecovery } from './native-source-layout.mjs';
 
 export class SourceRecoveryError extends Error {
   constructor(code, state, destination, cause = null) {
@@ -332,6 +332,38 @@ async function resumePlan(plan, target, parent, parentIdentity, check, progress,
     verification: plan.verification, forge_state_restored: false, native_authority_restored: false };
 }
 
+// Copy only bounded, plain request data. This is not Git ref/expectation
+// semantics; the legacy preparer still validates its complete original grammar.
+function captureLegacyRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).some(key => !['head_ref_hex', 'expectations'].includes(key))
+    || typeof value.head_ref_hex !== 'string' || value.head_ref_hex.length > 8192) failure('invalid_recovery_request');
+  const captured = { ...value };
+  if (Object.hasOwn(value, 'expectations')) {
+    const expected = value.expectations;
+    if (!expected || typeof expected !== 'object' || Array.isArray(expected)
+      || Object.keys(expected).some(key => !['sha256', 'object_format', 'refs', 'exact_refs'].includes(key))) failure('invalid_recovery_request');
+    for (const key of ['sha256', 'object_format', 'exact_refs']) {
+      if (Object.hasOwn(expected, key) && !['string', 'boolean'].includes(typeof expected[key])) failure('invalid_recovery_request');
+      if (typeof expected[key] === 'string' && expected[key].length > 128) failure('invalid_recovery_request');
+    }
+    captured.expectations = { ...expected };
+    if (Object.hasOwn(expected, 'refs')) {
+      if (!Array.isArray(expected.refs) || expected.refs.length > 4096) failure('invalid_recovery_request');
+      let bytes = 0;
+      captured.expectations.refs = expected.refs.map(row => {
+        if (!row || typeof row !== 'object' || Array.isArray(row)
+          || Object.keys(row).some(key => !['ref_hex', 'object_id'].includes(key))
+          || typeof row.ref_hex !== 'string' || typeof row.object_id !== 'string'
+          || row.ref_hex.length > 8192 || row.object_id.length > 128
+          || (bytes += row.ref_hex.length + row.object_id.length) > 2 * 1024 * 1024) failure('invalid_recovery_request');
+        return { ...row };
+      });
+    }
+  }
+  return captured;
+}
+
 // Every invocation re-verifies the supplied bundle; a saved JSON report cannot
 // substitute for verified objects. The parent directory is operator-controlled
 // and must remain quiescent: Node's path APIs are not an openat-based sandbox.
@@ -339,7 +371,7 @@ export async function recoverGitBundle(input, destination, request, options = {}
   let state = 'not_created', target = null, releaseLock = null;
   try {
     if (!options || typeof options !== 'object' || Array.isArray(options) ||
-        Object.keys(options).some(key => !['signal', 'timeoutMs', 'verificationLimits', 'onProgress', 'resume'].includes(key))) failure('invalid_recovery_options');
+        Object.keys(options).some(key => !['signal', 'timeoutMs', 'verificationLimits', 'onProgress', 'resume', 'nativeFg'].includes(key))) failure('invalid_recovery_options');
     const { signal, onProgress = () => {}, timeoutMs = 60000, verificationLimits = {}, resume = false } = options;
     if (typeof resume !== 'boolean' || (signal !== undefined && !(signal instanceof AbortSignal)) || typeof onProgress !== 'function' ||
         !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) failure('invalid_recovery_options');
@@ -352,8 +384,25 @@ export async function recoverGitBundle(input, destination, request, options = {}
       if (performance.now() >= deadline) failure('recovery_deadline');
     };
     check();
-    const plan = await prepareGitBundleRecovery(input, request, { cryptoImpl: webcrypto, signal,
-      checkpoint: check, limits: verificationLimits });
+    let plan;
+    if (Object.hasOwn(options, 'nativeFg')) {
+      // An explicitly selected native backend never imports the legacy decoder,
+      // falls back, or accepts legacy-only verification limits silently.
+      if (Object.hasOwn(options, 'verificationLimits')) failure('native_recovery_limits_not_supported');
+      if (resume) state = 'existing_unknown';
+      plan = await prepareNativeGitBundleRecovery(input, request,
+        { fg: options.nativeFg, signal, timeoutMs });
+    } else {
+      // Preserve owned input across the lazy import. Bound/copy plain request
+      // data before yielding; semantic validation remains with the old engine.
+      if (!(input instanceof Uint8Array) || !input.length || input.length > 16 * 1024 * 1024
+        || input.buffer instanceof SharedArrayBuffer) failure('recovery_input_limit');
+      const captured = Buffer.from(input), query = captureLegacyRequest(request);
+      const { prepareGitBundleRecovery } = await import('../../crates/fgit-node/src/smart_http/server/browser/bundle-verify.mjs');
+      check();
+      plan = await prepareGitBundleRecovery(captured, query, { cryptoImpl: webcrypto, signal,
+        checkpoint: check, limits: verificationLimits });
+    }
     check();
     const requested = resolve(destination), parent = await realpath(dirname(requested));
     if (dirname(requested) === requested) failure('invalid_recovery_destination');

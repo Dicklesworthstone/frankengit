@@ -82,11 +82,21 @@ export function normalizeNativeBundleExpectation(value = null, maximumRefs = 409
   result.refs.sort((a, b) => a.ref_hex < b.ref_hex ? -1 : a.ref_hex > b.ref_hex ? 1 : 0);
   return result;
 }
+// Only the framing of the explicit byte-name parameter is checked here. Rust
+// remains responsible for RefName semantics and advertised-branch membership.
+export function normalizeNativeRecoveryHead(value) {
+  if (typeof value !== 'string' || value.length > 8192 || value.length % 2
+    || !/^726566732f68656164732f[0-9a-f]+$/.test(value)
+    || Buffer.from(value, 'hex').some(byte => byte === 0 || byte === 10 || byte === 13)) {
+    throw fail('native_invalid_recovery_head');
+  }
+  return value;
+}
 /** Validate/copy a native invocation before authenticating or reading inputs.
  * No file, executable, signal listener or other resource is opened here.
  */
 export function normalizeNativeBundleOptions(options) {
-  if (!onlyKeys(options, ['fg', 'expected', 'signal', ...Object.keys(NATIVE_BUNDLE_LIMITS)]) || typeof options.fg !== 'string' || !isAbsolute(options.fg)
+  if (!onlyKeys(options, ['fg', 'expected', 'signal', 'recoveryHead', ...Object.keys(NATIVE_BUNDLE_LIMITS)]) || typeof options.fg !== 'string' || !isAbsolute(options.fg)
     || options.fg.length > 4096 || /[\0\r\n]/.test(options.fg)) throw fail('native_absolute_fg_path_required');
   const result = { ...NATIVE_BUNDLE_LIMITS, ...options };
   integer(result.maxInputMiB, 1, 128, 'native_input_limit');
@@ -94,7 +104,13 @@ export function normalizeNativeBundleOptions(options) {
   integer(result.maxObjects, 1, 100000, 'native_object_limit');
   integer(result.maxRefs, 1, 4096, 'native_ref_limit');
   integer(result.timeoutMs, 1, 3600000, 'native_timeout_limit');
-  integer(result.maxReportBytes, 256, 8 * MIB, 'native_report_limit');
+  if (result.recoveryHead !== undefined) {
+    normalizeNativeRecoveryHead(result.recoveryHead);
+    // Recovery carries a bounded idx and metadata; ordinary reports keep their
+    // existing budget. This matches the native CLI's explicit layout envelope.
+    if (options.maxReportBytes === undefined) result.maxReportBytes = 16 * MIB;
+  }
+  integer(result.maxReportBytes, 256, (result.recoveryHead === undefined ? 8 : 16) * MIB, 'native_report_limit');
   if (result.signal !== undefined && !(result.signal instanceof AbortSignal)) throw fail('native_invalid_signal');
   result.expected = normalizeNativeBundleExpectation(result.expected ?? null, result.maxRefs);
   return result;
@@ -144,6 +160,7 @@ function argumentsFor(path, digest, options, live) {
   if (options.expected.object_format !== undefined) args.push('--expect-format', options.expected.object_format);
   for (const pin of options.expected.refs) args.push('--expect-ref-hex', `${pin.ref_hex}=${pin.object_id}`);
   if (options.expected.exact_refs) args.push('--exact-refs');
+  if (options.recoveryHead !== undefined) args.push('--recovery-head-hex', options.recoveryHead);
   args.push('--', path);
   if (args.reduce((total, argument) => total + Buffer.byteLength(argument), 0) > 2 * MIB) throw fail('native_argument_bytes');
   return args;
@@ -218,7 +235,7 @@ function validateReport(raw, digest, size, options) {
   } catch { throw fail('native_invalid_report'); }
   // Native profile v1 emits compact JSON. Round-trip equality also refuses
   // duplicate object keys, trailing documents and lossy numeric spellings.
-  if (!record(result) || JSON.stringify(result) !== text || Object.keys(result).some(key => !REPORT_KEYS.has(key))
+  if (!record(result) || JSON.stringify(result) !== text || Object.keys(result).some(key => !REPORT_KEYS.has(key) && !(key === 'recovery' && options.recoveryHead !== undefined))
     || result.type !== 'git_bundle_verification' || result.schema_version !== 1
     || result.profile !== 'native-full-bundle-graph-v1'
     || !['sha1', 'sha256'].includes(result.object_format)
@@ -240,6 +257,16 @@ function validateReport(raw, digest, size, options) {
   const echoed = validateReferences(echo.references, result.object_format, options.maxRefs);
   if (echoed.size !== expected.refs.length || (expected.exact_refs && actual.size !== expected.refs.length)
     || expected.refs.some(ref => actual.get(ref.ref_hex) !== ref.object_id || echoed.get(ref.ref_hex) !== ref.object_id)) throw fail('native_expectation_report_mismatch');
+  if (options.recoveryHead !== undefined) {
+    const layout = result.recovery;
+    if (!onlyKeys(layout, ['profile', 'pack_offset', 'head_ref_hex', 'index_hex', 'packed_refs_hex', 'config_hex', 'head_hex'])
+      || layout.profile !== 'native-bare-source-layout-v1' || layout.head_ref_hex !== options.recoveryHead
+      || !actual.has(layout.head_ref_hex) || !Number.isSafeInteger(layout.pack_offset)
+      || layout.pack_offset < 1 || layout.pack_offset !== size - result.pack_bytes
+      || ['index_hex', 'packed_refs_hex', 'config_hex', 'head_hex'].some(key =>
+        typeof layout[key] !== 'string' || !layout[key].length || layout[key].length % 2
+        || !/^[0-9a-f]+$/.test(layout[key]))) throw fail('native_invalid_recovery_report');
+  }
   return { ...result, verifier_backend: 'native-fg',
     caller_identity_pins_supplied: expected.sha256 !== undefined || expected.refs.length !== 0,
     input_snapshot_sha256: digest };
