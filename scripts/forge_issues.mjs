@@ -2,18 +2,25 @@
 // Authenticated issue mutations and explicit recovery; no local node is opened.
 import { pathToFileURL } from 'node:url';
 import { decimal } from '../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
+import { issueReadOptions, runIssueRead } from './lib/forge-issue-reader.mjs';
 import { issueOperatorOptions, runIssueOperation } from './lib/forge-issue-operator.mjs';
 import { operatorError, operatorJson, readPrivateOperatorFile, operatorPath } from './lib/forge-operator-io.mjs';
 
 export const HELP = `Usage: node scripts/forge_issues.mjs OPERATION
   --url https://HOST/REPOSITORY_ROUTE/ui/issues/
-  --tenant-id HEX --repository-id HEX --token-file PRIVATE_FILE --record PRIVATE_NEW_FILE
+  --tenant-id HEX --repository-id HEX --token-file PRIVATE_FILE [--record PRIVATE_NEW_FILE]
 
 open: --number N --expected-version 0 --title TEXT [--body TEXT | --body-file PRIVATE_FILE] [--label TEXT ...]
 edit: --number N --expected-version N [--title TEXT] [--body TEXT | --body-file PRIVATE_FILE] [--label TEXT ... | --clear-labels]
 comment: --number N --expected-version N (--body TEXT | --body-file PRIVATE_FILE)
 close|reopen: --number N --expected-version N
 status|retry: use only the connection options and the ORIGINAL --record.
+list|show|search: read only, no --record. show requires --number N.
+  [--after N --expected-head TOKEN] [--limit 1..100 --max-pages 1..100]
+  [--max-output-bytes 1..8388608]
+search filters: [--state open|closed|all] [--opened-by HEX] [--query TEXT]
+  [--case-sensitive] [--label TEXT ...] [--max-scan 1..1000]
+Reads default to one page; continuations pin the original snapshot and predicate.
 All commands accept --timeout-ms 1..300000 (whole operation, default 30000).
 
 HTTPS is required except for explicit loopback HTTP. The token file contains a
@@ -25,22 +32,45 @@ path is accepted. A fresh mutation first checks the exact repository/version,
 synchronizes its token-free recovery record, then sends once. Keep the record:
 status only observes; retry observes first and may resend the SAME request/key
 once. Missing outcome is NOT non-commit. No automatic retry or record overwrite.
-Exit 0: committed terminal outcome; 3: terminal refusal; 2: unknown or error.
+Exit 0: committed terminal outcome or complete read; 3: terminal refusal;
+4: bounded read prefix with continuation; 2: unknown or error.
 `;
 export function issueArguments(args) {
   if (!Array.isArray(args) || args.length > 140 || args.some(a => typeof a !== 'string' || a.includes('\0') || a.length > 65536) ||
       args.reduce((n, a) => n + Buffer.byteLength(a), 0) > 256 * 1024) throw operatorError('issue_operator_argument_limit');
-  const operation = args[0], map = new Map(), labels = []; let clear = false;
+  const operation = args[0], map = new Map(), labels = []; let clear = false, caseSensitive = false;
   const allowed = ['--url', '--tenant-id', '--repository-id', '--token-file', '--record', '--number', '--expected-version',
-    '--title', '--body', '--body-file', '--timeout-ms'];
+    '--title', '--body', '--body-file', '--timeout-ms', '--after', '--expected-head', '--limit', '--max-pages',
+    '--max-output-bytes', '--state', '--opened-by', '--query', '--max-scan'];
   for (let i = 1; i < args.length; i++) {
     const flag = args[i];
+    if (flag === '--case-sensitive') { if (caseSensitive) throw operatorError('issue_operator_duplicate_option'); caseSensitive = true; continue; }
     if (flag === '--clear-labels') { if (clear) throw operatorError('issue_operator_duplicate_option'); clear = true; continue; }
     if (flag !== '--label' && (!allowed.includes(flag) || map.has(flag))) throw operatorError('issue_operator_unknown_or_duplicate_option');
     const value = args[++i]; if (value === undefined) throw operatorError('issue_operator_missing_value');
     if (flag === '--label') labels.push(value); else map.set(flag, value);
   }
   if ((clear && labels.length) || (map.has('--body') && map.has('--body-file'))) throw operatorError('issue_operator_conflicting_fields');
+  const reading = ['list', 'show', 'search'].includes(operation);
+  if (reading) {
+    if (clear || ['--record', '--expected-version', '--title', '--body', '--body-file'].some(k => map.has(k))) throw operatorError('issue_read_mutation_option');
+    if (operation !== 'search' && (labels.length || caseSensitive || ['--state', '--opened-by', '--query', '--max-scan'].some(k => map.has(k)))) throw operatorError('issue_read_search_inapplicable');
+    const query = {};
+    if (map.has('--state') && map.get('--state') !== 'all') query.state = map.get('--state');
+    if (map.has('--opened-by')) query.opened_by = map.get('--opened-by');
+    if (map.has('--query')) query.text = map.get('--query');
+    if (caseSensitive) query.case_sensitive = true;
+    if (labels.length) query.labels = labels;
+    const raw = { operation, href: map.get('--url'), tenant: map.get('--tenant-id'), repository: map.get('--repository-id'),
+      tokenFile: map.get('--token-file'), ...(operation === 'search' ? { query } : {}) };
+    for (const [flag, field] of [['--number', 'number'], ['--after', 'after'], ['--limit', 'limit'], ['--max-pages', 'maxPages'],
+      ['--max-output-bytes', 'maxOutputBytes'], ['--max-scan', 'maxScan'], ['--timeout-ms', 'timeoutMs']]) {
+      if (map.has(flag)) raw[field] = decimal(map.get(flag), field, field === 'after' ? 0 : 1);
+    }
+    if (map.has('--expected-head')) raw.head = map.get('--expected-head');
+    return { options: issueReadOptions(raw), bodyFile: null, reading: true };
+  }
+  if (caseSensitive || ['--after', '--expected-head', '--limit', '--max-pages', '--max-output-bytes', '--state', '--opened-by', '--query', '--max-scan'].some(k => map.has(k))) throw operatorError('issue_operator_read_option');
   const fields = {};
   if (map.has('--title')) fields.title = map.get('--title');
   if (map.has('--body')) fields.body = map.get('--body');
@@ -57,13 +87,17 @@ export function issueArguments(args) {
 }
 export async function runIssueCommand(args, signal) {
   if (args.length === 1 && args[0] === '--help') return { text: HELP, exitCode: 0 };
-  const { options, bodyFile } = issueArguments(args);
+  const { options, bodyFile, reading } = issueArguments(args);
   // Include private-body intake in the same finite command deadline.
   const deadline = AbortSignal.timeout(options.timeoutMs), combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
   if (bodyFile !== null) {
     const bytes = await readPrivateOperatorFile(bodyFile, 65536, () => combined.throwIfAborted(), 0);
     try { options.fields.body = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
     finally { bytes.fill(0); }
+  }
+  if (reading) {
+    const result = await runIssueRead({ ...options, signal: combined });
+    return { text: operatorJson(result), exitCode: result.complete ? 0 : 4 };
   }
   const result = await runIssueOperation({ ...options, signal: combined });
   return { text: operatorJson(result), exitCode: result.state !== 'terminal_observed' ? 2 : result.result.outcome === 'committed' ? 0 : 3 };

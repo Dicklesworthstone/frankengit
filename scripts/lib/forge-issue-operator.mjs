@@ -8,11 +8,9 @@ const ACTIONS = ['open', 'edit', 'comment', 'close', 'reopen'];
 const exact = (v, keys) => v !== null && typeof v === 'object' && !Array.isArray(v) &&
   Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
 const fail = code => { throw operatorError(code); };
-export function issueOperatorOptions(raw) {
-  const keys = ['operation', 'href', 'tenant', 'repository', 'tokenFile', 'record', 'number', 'expectedVersion', 'fields', 'timeoutMs', 'signal', 'onProgress'];
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !keys.includes(k))) fail('issue_operator_options');
+// Shared connection validation; each entrypoint checks its own closed grammar.
+export function issueConnectionOptions(raw) {
   const o = { ...raw, timeoutMs: raw.timeoutMs ?? 30000, onProgress: raw.onProgress ?? (() => {}) };
-  if (![...ACTIONS, 'status', 'retry'].includes(o.operation)) fail('issue_operator_operation');
   for (const key of ['tenant', 'repository']) if (typeof o[key] !== 'string' || !/^[0-9a-f]{32}$/.test(o[key])) fail('issue_operator_identity');
   if (typeof o.href !== 'string' || o.href.length > 4096 || /[\u0000-\u0020\u007f-\u009f\uD800-\uDFFF]/u.test(o.href)) fail('issue_operator_url');
   // The shipped client validates HTTPS/loopback, origin, path and no credentials.
@@ -20,6 +18,21 @@ export function issueOperatorOptions(raw) {
   if (new URL(o.href).href !== o.href) fail('issue_operator_url');
   new IssueClient({ href: o.href, timeoutMs: o.timeoutMs });
   if ((o.signal !== undefined && !(o.signal instanceof AbortSignal)) || typeof o.onProgress !== 'function') fail('issue_operator_lifetime');
+  o.tokenFile = operatorPath(o.tokenFile);
+  return o;
+}
+export async function connectIssueToken(client, o, check) {
+  const token = await readPrivateOperatorFile(o.tokenFile, 65, check);
+  try {
+    if (!/^[0-9a-f]{64}\n?$/.test(token.toString('ascii')) || token.some(b => b > 127)) fail('issue_operator_invalid_token');
+    await client.connect(token.toString('ascii').replace(/\n$/, '')); check();
+  } finally { token.fill(0); }
+}
+export function issueOperatorOptions(raw) {
+  const keys = ['operation', 'href', 'tenant', 'repository', 'tokenFile', 'record', 'number', 'expectedVersion', 'fields', 'timeoutMs', 'signal', 'onProgress'];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(k => !keys.includes(k))) fail('issue_operator_options');
+  const o = issueConnectionOptions(raw);
+  if (![...ACTIONS, 'status', 'retry'].includes(o.operation)) fail('issue_operator_operation');
   o.tokenFile = operatorPath(o.tokenFile); o.record = operatorPath(o.record);
   if (o.tokenFile === o.record) fail('issue_operator_separate_record');
   if (ACTIONS.includes(o.operation)) {
@@ -50,15 +63,12 @@ export async function runIssueOperation(raw) {
   const client = new IssueClient({ href: o.href, timeoutMs: o.timeoutMs,
     fetchImpl: (url, init) => fetch(url, { ...init, signal: AbortSignal.any([signal, init.signal]) }) });
   let state = ACTIONS.includes(o.operation) ? 'not_submitted' : 'existing_unknown';
-  let path = o.record, digest = null, bytes, token;
+  let path = o.record, digest = null, bytes;
   try {
     check(); path = await privateRecordPath(path); check();
     if (ACTIONS.includes(o.operation)) await absentRecord(path);
     else { bytes = await readPrivateOperatorFile(path, MAX_RECEIPT_BYTES * 2, check); digest = recordDigest(bytes); readRecord(bytes, o); }
-    token = await readPrivateOperatorFile(o.tokenFile, 65, check);
-    // Exactly one optional final LF; no trimming or ambient token fallback.
-    if (!/^[0-9a-f]{64}\n?$/.test(token.toString('ascii')) || token.some(b => b > 127)) fail('issue_operator_invalid_token');
-    await client.connect(token.toString('ascii').replace(/\n$/, '')); token.fill(0); check();
+    await connectIssueToken(client, o, check);
     if (ACTIONS.includes(o.operation)) {
       const observed = await client.read(o.number, { limit: 1 }); check();
       checkedBinding(observed.binding, o);
@@ -89,8 +99,9 @@ export async function runIssueOperation(raw) {
     // A parsed terminal decision wins over a later cancellation or output error.
     return { type: 'forge_issue_operator_result', operation: o.operation, state: 'terminal_observed',
       record: path, record_sha256: digest, result, mutation_submitted: true, absence_proves_non_commit: false };
-  } catch (error) {
+  } catch (cause) {
+    const error = cause instanceof Error ? cause : operatorError('issue_operator_failed');
     error.operator_state = state; error.record = path; error.record_sha256 = digest;
     throw error;
-  } finally { token?.fill(0); clearTimeout(timer); client.disconnect(); }
+  } finally { clearTimeout(timer); client.disconnect(); }
 }

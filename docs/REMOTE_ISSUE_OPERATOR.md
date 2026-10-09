@@ -117,3 +117,62 @@ after the simulated server receives a mutation. Their HTTP authority is explicit
 simulated. They are not native Rust/node/authority integration or a power-loss
 campaign, and do not close the broader CLI/MCP authentication work. No Rust,
 server permission, dependency, codec or authority changes are introduced.
+
+## Read, inspect and search before choosing a version
+
+The same entrypoint now supports `list`, `show` and native issue `search`. These
+operations need `issues-read`, not issue-write scope, and neither accept nor
+create mutation records. No idempotency key is generated or attached to a read.
+`search` uses the native read-only POST endpoint; it does not scan issue bodies
+locally or broaden the native title/body/label/principal predicate.
+
+```sh
+node scripts/forge_issues.mjs show \
+  --url "$ISSUE_PAGE_URL" --tenant-id "$TENANT_HEX" \
+  --repository-id "$REPOSITORY_HEX" --token-file "$PRIVATE_DIR/token" \
+  --number 1 --limit 20 --max-pages 5
+
+node scripts/forge_issues.mjs search \
+  --url "$ISSUE_PAGE_URL" --tenant-id "$TENANT_HEX" \
+  --repository-id "$REPOSITORY_HEX" --token-file "$PRIVATE_DIR/token" \
+  --state open --query 'release blocker' --label bug \
+  --max-scan 200 --limit 20 --max-pages 5
+```
+
+`list` enumerates issue snapshots. `show --number N` reads the issue snapshot and
+its event history. Their `--after` values are, respectively, the last issue number
+and last event version. Search cursors identify the last **examined candidate**,
+not the last match. A page with no matching issues can still have a continuation;
+the command advances it instead of silently terminating early.
+
+By default a read returns at most one page. `--max-pages` explicitly authorizes
+up to 100 pages; `--limit` is 1..100, and search `--max-scan` is 1..1000 per page.
+There is no unbounded `--all`. The original query is captured before yielding.
+The first verified reply selects a snapshot; every subsequent request supplies
+that exact expected head, with the same query and original identity. A changed
+head/identity, inconsistent ordering/predicate, bad response or cancelled later
+page fails the whole operation without printing a success-looking prefix.
+
+Successful output includes the native pages, exact snapshot, completion flag,
+stopping reason and a continuation object. `complete: false` with exit **4** is
+an intentional page-budget prefix, not a complete list or history. Continue with
+its `--after` and `--expected-head` and the same operation, number (for history),
+query and limits (for search). Nonzero `--after` without a snapshot is refused
+before I/O. These caller-visible tokens are not authorization or proof of data
+retention; the server reauthorizes each request and can refuse an old snapshot.
+
+`--max-output-bytes` (default and ceiling 8 MiB) limits the combined JSON response,
+including its envelope and terminal escaping, independently of page/scan limits.
+Exhaustion is an error, not omitted pages. All pages share the command deadline.
+Complete reads exit **0**; read errors exit **2**, without changing repository
+state. Native JSON and safe-integer limits of the existing client are unchanged.
+
+Read-specific tests execute the unchanged client over real sockets with a
+simulated authority. They cover empty search pages, cross-page pins and predicate
+checks, history/list ordering, whole-operation deadlines, output bounds, explicit
+partial results, cancellation and real CLI processes. They are not a native
+Rust server or authenticated-root conformance result:
+
+```sh
+node --test tests/operator/forge-issues.test.mjs tests/operator/forge-issues-read.test.mjs
+```
