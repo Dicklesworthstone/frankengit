@@ -44,10 +44,19 @@ export function repositoryBackupReceipt(process, operation, statement, instance,
 }
 export function repositoryBackupOptions(value) {
   const keys = ['operation', 'fg', 'input', 'approval', 'trustKey', 'policy', 'verificationInstance', 'destination',
-    'destinationInstance', 'approvalRecord', 'resume', 'trustedLocal', 'maximumBytes', 'timeoutMs', 'signal', 'onProgress'];
+    'destinationInstance', 'approvalRecord', 'resume', 'trustedLocal', 'maximumBytes', 'timeoutMs', 'signal', 'onProgress', 'checkpoint'];
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !keys.includes(k))
     || !['verify', 'restore'].includes(value.operation) || value.trustedLocal !== true) fail('backup_explicit_local_operation_required');
   const result = { ...value, policy: backupPolicy(value.policy), resume: value.resume ?? false, onProgress: value.onProgress ?? (() => {}) };
+  // Optional equality pins from a prior selection only NARROW this operation.
+  // They never replace independent key/signature/policy or native verification.
+  if (value.checkpoint !== undefined) {
+    const pin = value.checkpoint;
+    if (!exact(pin, ['approval_sha256', 'trusted_key_id'])
+      || typeof pin.approval_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(pin.approval_sha256)
+      || typeof pin.trusted_key_id !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(pin.trusted_key_id)) fail('backup_invalid_checkpoint');
+    result.checkpoint = Object.freeze({ approval_sha256: pin.approval_sha256, trusted_key_id: pin.trusted_key_id });
+  }
   if (typeof result.resume !== 'boolean' || typeof result.onProgress !== 'function') fail('backup_invalid_options');
   for (const k of ['fg', 'input', 'approval', 'trustKey']) result[k] = backupPath(result[k]);
   if (!isAbsolute(result.fg)) fail('backup_absolute_fg_required');
@@ -90,10 +99,12 @@ export async function runApprovedRepositoryBackup(raw) {
   const progress = async phase => { await options.onProgress(Object.freeze({ phase })); live.check(); };
   try {
     const encoded = await readBackupControl(options.approval, BACKUP_LIMITS.envelopeBytes, live);
+    if (options.checkpoint && createHash('sha256').update(encoded).digest('hex') !== options.checkpoint.approval_sha256) fail('backup_selected_approval_changed');
     const key = await readBackupControl(options.trustKey, BACKUP_LIMITS.keyBytes, live);
     const verified = await authenticateRepositoryBackupFile(options.input, encoded, key, options.policy,
       { maximumBytes: live.maximumBytes, timeoutMs: live.remaining(), signal: live.signal });
     const authentication = verified.authentication, statement = authentication.statement;
+    if (options.checkpoint && authentication.trusted_key_id !== options.checkpoint.trusted_key_id) fail('backup_selected_signer_changed');
     await progress('authenticated'); verified.checkCurrent();
     // Resolve the actual trusted parent names before binding a destination.
     if (options.operation === 'restore') {

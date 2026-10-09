@@ -65,3 +65,85 @@ old unavailable archives, forged/foreign approvals, cancellation, one deadline,
 mutable callers and over-16-MiB hashing. Artifacts are explicitly opaque bytes,
 not native archive fixtures. These tests do not establish Rust execution, native
 restore correctness, catalog completeness or power-loss durability.
+
+## Operator selection, native verification and restore
+
+The executable entrypoint provides three operations over the same selection:
+
+```sh
+node scripts/select_repository_backup_native.mjs select \
+  --candidate /backup/checkpoint-a.fgit /backup/checkpoint-a.approval.json \
+  --candidate /backup/checkpoint-b.fgit /backup/checkpoint-b.approval.json \
+  --trust-key /independent/backup-public.pem \
+  --tenant-id "$TENANT_HEX" --repository-id "$REPOSITORY_HEX" \
+  --incarnation-id "$INCARNATION_HEX" --object-format sha256 \
+  --minimum-head-generation "$EXTERNALLY_RETAINED_FLOOR"
+```
+
+`select` authenticates the explicit set and winning artifact, prints its report,
+and performs no native invocation or destination writes. It does not verify the
+archive's internal graph or authority. Use `verify` to additionally run the
+existing native preflight, with these extra arguments:
+
+```sh
+  --fg "$PWD/target/release/fg" --trusted-local --verification-instance 900000001
+```
+
+Use `restore` to preflight and restore the selected checkpoint, adding:
+
+```sh
+  --destination /private/restored-node --destination-instance 900000002 \
+  --approval-record /private/restore-approval.json
+```
+
+The last two snippets are arguments appended to the first command, replacing its
+`select` operation. Native instance IDs must satisfy the native engine's existing
+positive-SQL-integer and source-instance rules. Destination and approval-record
+parents must already be owner-private. `--max-archive-bytes` sets the selected
+artifact budget; `--timeout-secs` sets one 1..3600-second allowance for selection,
+reauthentication, native preflight, approval recording and restoration combined.
+SIGINT/SIGTERM request cancellation through the existing child owner, which
+terminates, escalates and reaps rather than dropping the active process.
+
+`runSelectedRepositoryBackup` validates the full native grammar for EVERY
+possible candidate before source I/O, then selects once. It passes the exact
+selected raw approval hash and independently authenticated key ID as additional
+constraints to `runApprovedRepositoryBackup`. That existing runner reauthenticates
+key, statement, policy and artifact, rejects changed selection pins, and performs
+all native checks. A different valid lower artifact and its valid signature at
+the same filenames cannot pass this boundary. These equality constraints never
+substitute for a current signature or native validation. Native preflight refusal
+also never triggers another selection or a lower-checkpoint retry.
+
+Add `--resume` to `restore` to use the native exact-intent recovery protocol.
+The set is freshly authenticated and selected on every invocation. A different
+highest statement, signer, destination or generation floor cannot match the
+original private restore-approval record and refuses before restore. Identical
+signed statements at another path may still describe the same original operation.
+This does not silently switch an interrupted destination to a newer checkpoint.
+A newly observed unusable higher checkpoint still blocks fallback on resume.
+
+The existing restore record, authority-last publication, uncertain-outcome and
+post-completion rules remain unchanged. Lost replies/cancellation retain state;
+failed stdout after confirmed completion preserves the complete result. There is
+no automatic repair, record replacement, destination deletion or external-effect
+replay. Approval expiry gates submission, not the exact native publication
+instruction. Never serve incomplete roots. See `SIGNED_REPOSITORY_BACKUPS.md`
+for the existing restore envelope and retained-state limitations.
+
+Run the composition tests with the core tests:
+
+```sh
+node --test tests/operator/repository-backup-selection.test.mjs \
+  tests/operator/repository-backup-selected.test.mjs
+```
+
+Composition tests use real Ed25519, CLI/child processes and filesystem operations,
+but reuse the explicitly fake native contract process and opaque JSON artifacts.
+They do not run the Rust engine. They cover both hash formats, full-u64 receipts,
+valid-checkpoint substitution, native refusal/contradictory reports, exact resume,
+changed floors, cancellation/reaping and failed output after completion. Removing
+only the two new equality guards makes three targeted regressions fail while the
+artifact-corruption test still passes; ordinary signature/hash checks alone do
+not enforce selection continuity. No Rust build, backend, power-loss, global
+catalog completeness or performance claim follows from these adapter tests.
