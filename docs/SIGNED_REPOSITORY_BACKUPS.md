@@ -77,3 +77,94 @@ resource/cancellation refusals, generation-floor boundaries and no-replace
 publication. Their opaque archive fixture is deliberately not valid native
 repository state. These are signing/I/O tests, not native recovery, Rust,
 full-workspace, power-loss, performance or bead-closure evidence.
+
+## Approved native verification and restore
+
+The native operator path now composes the detached approval with the existing
+`fg backup verify` and `fg backup restore` commands. It does not change their
+archive format, authority implementation, quarantine, graph validation,
+original-payload commitments, or authority-last publication.
+
+```sh
+node scripts/restore_repository_backup_native.mjs restore backup.fgit \
+  --fg "$PWD/target/release/fg" --trusted-local \
+  --approval backup.approval.json --trust-key /independent/backup-public.pem \
+  --tenant-id "$TENANT_HEX" --repository-id "$REPOSITORY_HEX" \
+  --incarnation-id "$INCARNATION_HEX" --object-format sha256 \
+  --minimum-head-generation "$EXTERNALLY_RETAINED_FLOOR" \
+  --verification-instance 900000001 --destination-instance 900000002 \
+  --destination /private/restored-node \
+  --approval-record /private/restore-approval-record.json
+```
+
+Use `verify` instead of `restore` and omit the three destination/record arguments
+for verification without destination changes. Both native instance IDs must be
+positive signed-SQL integers and must differ from the original archive's store
+instance, as enforced by the native engine. The wrapper does not infer the source
+instance. The executable is an explicitly trusted absolute path, never a PATH
+lookup, shell command, Git subprocess or fallback implementation.
+
+The full signature/namespace/incarnation/format/generation policy and streamed
+artifact hash are verified before launching even the native preflight. A fresh
+private scratch root holds native verification metadata, not copied Git payloads.
+The preflight receipt must agree with every signed identity, generation, artifact
+hash and size. It must report successful native authority import, graph checking,
+original commitments, node close and scratch removal, while keeping its explicit
+non-claims. Only then may a restore begin. A valid signature cannot bless false
+operator identity declarations or skip native content validation.
+
+One shared monotonic deadline covers authentication, hashing, preflight, record
+synchronization and restore. Native calls receive the remaining budget and the
+signed digest. Each native operation revalidates that digest against its own
+pinned input handle, before directory creation and across its passes. A source
+path replaced after preflight cannot substitute different bytes. The wrapper
+never implements a parallel archive decoder and never passes keys or approval
+paths to the child.
+
+### Interrupted restore and explicit resume
+
+The approval record is synchronized outside the destination before native restore
+submission. It binds the exact destination, destination instance, verified signer,
+signed statement and externally supplied generation-floor policy. Its parent and
+the destination parent must be existing current-user, owner-private directories.
+Existing records are never overwritten. Add `--resume` with the same arguments
+to invoke the native exact-intent resume protocol. Every resume reauthenticates
+and verifies the archive; a changed signer, floor, namespace, statement, destination
+or instance refuses before the native restore. The record itself is not authority
+and cannot substitute for a valid signature from the separately trusted key.
+
+A native failure, malformed reply, cancellation, lost output or failed cleanup
+can occur after authority publication. The wrapper reports
+`restore_attempted_unknown` rather than rollback, keeps the approval record, never
+deletes destination state and never automatically resubmits. Native cancellation
+owns its child through termination, escalation and process/pipe closure. Explicit
+resume continues only the native `.restore-intent`; it never merges newer state.
+An interruption between approval recording and native intent creation can leave
+a record without a resumable destination. Preserve and inspect that boundary;
+this adapter does not promise automatic recovery from every crash point.
+
+Approval expiry is rechecked after preflight and immediately before submission.
+It is a submission gate, NOT a lease enforced at the native authority publication
+instruction. `approval_effect_time_enforced` remains false. Confirmed native
+completion is not retroactively rolled back by later expiry or lost wrapper
+stdout. This is not a canonical authorization or instant-revocation mechanism.
+Do not serve partial roots or automatically replay restored outbox/external effects.
+
+### Integration evidence boundary
+
+```sh
+node --test tests/operator/repository-backup-approval.test.mjs \
+  tests/operator/repository-backup-native.test.mjs
+FG_NATIVE_BIN="$PWD/target/release/fg" \
+  node --test tests/operator/repository-backup-native.test.mjs
+```
+
+Default adapter tests use real Ed25519, filesystem and process operations with a
+DELIBERATELY FAKE native contract process and opaque JSON archive fixtures. They
+cover native receipt mismatches, exact full-width counters, changed source paths,
+expired approval during preflight, preserved unknown publication, cancellation
+and reaping, no-fallback behavior, changed resume policy and failed stdout after
+confirmed completion. They are not native archive, Rust, durable-backend or
+power-loss evidence. The separate actual-`fg` test exports an empty native node,
+signs its archive, restores it, and calls native doctor; it is explicitly skipped
+unless `FG_NATIVE_BIN` is supplied. No full service/capsule or bead closure claim.
