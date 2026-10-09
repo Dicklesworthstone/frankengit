@@ -2,7 +2,7 @@
 // No local node principal, database access, parallel mutation codec or authority.
 import { IssueClient, mutationRequest, MAX_RECEIPT_BYTES } from '../../crates/fgit-node/src/smart_http/server/browser/issues.mjs';
 import { operatorError, operatorPath, privateRecordPath, absentRecord, readPrivateOperatorFile,
-  saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
+  readSynchronizedOperatorRecord, saveOperatorRecord, recordDigest } from './forge-operator-io.mjs';
 
 const ACTIONS = ['open', 'edit', 'comment', 'close', 'reopen'];
 const exact = (v, keys) => v !== null && typeof v === 'object' && !Array.isArray(v) &&
@@ -90,9 +90,10 @@ export async function runIssueOperation(raw) {
         record: path, record_sha256: digest, result: outcome, mutation_submitted: false, absence_proves_non_commit: false };
       progress('recovery_observed'); // Only explicit retry proceeds after lookup.
     }
-    // Recheck the immutable recovery bytes immediately before submission. Never
-    // replace an uncertain key, reread a new issue version, or recreate a record.
-    const current = await readPrivateOperatorFile(path, MAX_RECEIPT_BYTES * 2, check);
+    // Every sender, including a retry racing the original creator, establishes
+    // its own exact-file and directory sync barrier before any HTTP mutation.
+    // Never replace an uncertain key, refresh a version, or recreate a record.
+    const current = await readSynchronizedOperatorRecord(path, MAX_RECEIPT_BYTES * 2, check);
     if (!current.equals(bytes)) fail('issue_operator_record_changed');
     state = 'submitted_unknown';
     const result = await client.send();

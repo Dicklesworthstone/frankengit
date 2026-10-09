@@ -31,7 +31,16 @@ export async function absentRecord(path) {
   try { await lstat(path); throw operatorError('operator_record_exists'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
-export async function readPrivateOperatorFile(value, maximum, check = () => {}, minimum = 1) {
+export function readPrivateOperatorFile(value, maximum, check = () => {}, minimum = 1) {
+  return readOperatorFile(value, maximum, check, minimum, false);
+}
+// A submitting retry cannot rely on the original creator having finished its
+// sync: a complete record can be readable before that creator's barrier ends.
+// Synchronize the exact descriptor read here and its private parent ourselves.
+export function readSynchronizedOperatorRecord(value, maximum, check = () => {}) {
+  return readOperatorFile(value, maximum, check, 1, true);
+}
+async function readOperatorFile(value, maximum, check, minimum, synchronize) {
   supported(); const path = operatorPath(value); check();
   if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 1024 * 1024 || ![0, 1].includes(minimum)) throw operatorError('operator_file_limit');
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -49,9 +58,24 @@ export async function readPrivateOperatorFile(value, maximum, check = () => {}, 
     if ((await file.read(tail, 0, 1, at)).bytesRead) throw operatorError('operator_file_changed');
     const after = await file.stat({ bigint: true }), named = await lstat(path, { bigint: true });
     if (!named.isFile() || !unchanged(before, after) || !unchanged(after, named)) throw operatorError('operator_file_changed');
+    if (synchronize) await synchronizeRecord(file, path, before, check);
     check(); return bytes;
   } catch (error) { bytes?.fill(0); throw error; }
   finally { await file.close(); }
+}
+async function synchronizeRecord(file, path, before, check) {
+  const parent = dirname(path);
+  const directory = await open(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const parentId = await directory.stat({ bigint: true }); privateOwner(parentId);
+    if (!parentId.isDirectory()) throw operatorError('operator_directory_required');
+    check(); await file.sync(); check(); await directory.sync();
+    const after = await file.stat({ bigint: true }), named = await lstat(path, { bigint: true });
+    if (!named.isFile() || !unchanged(before, after) || !unchanged(after, named)) throw operatorError('operator_record_changed');
+    const namedParent = await lstat(parent, { bigint: true }); privateOwner(namedParent);
+    if (!namedParent.isDirectory() || !same(parentId, namedParent)) throw operatorError('operator_parent_changed');
+    check();
+  } finally { await directory.close(); }
 }
 export const recordDigest = bytes => createHash('sha256').update(bytes).digest('hex');
 export async function saveOperatorRecord(path, bytes, check = () => {}) {

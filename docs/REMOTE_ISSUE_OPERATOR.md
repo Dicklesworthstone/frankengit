@@ -50,9 +50,15 @@ issue text: do not publish it. Existing records, partial records and symlinks ar
 not overwritten. The existing parent must be owner-private and trusted. This
 Unix filesystem profile is not a sandbox against a malicious same-UID writer.
 
-The command rechecks the saved bytes immediately before submission. It keeps
-the record on success as well as failure. No automatic retry follows a network
-failure, cancellation, malformed reply or nonterminal HTTP 409. A valid canonical
+Every submitting invocation rechecks the saved bytes and independently
+synchronizes that same opened file and its private parent before sending. This
+includes a retry that sees a complete record while its creator is still syncing:
+readability alone never proves the creator completed its persistence barrier.
+A file-sync, directory-sync, identity-check or close failure prevents that
+invocation's submission. Read-only status and already-terminal recovery do not
+need a persistence barrier and remain available when synchronization fails.
+The command keeps the record on success as well as failure. No automatic retry
+follows a network failure, cancellation, malformed reply or nonterminal HTTP 409. A valid canonical
 refusal is a terminal result, not success and not a missing reply.
 
 ## Recovery after lost replies or process death
@@ -114,9 +120,12 @@ node --test tests/operator/forge-issues.test.mjs
 The tests execute the unchanged shipped issue client, real fetch/HTTP sockets,
 private filesystem operations and separate CLI processes, including SIGKILL
 after the simulated server receives a mutation. Their HTTP authority is explicitly
-simulated. They are not native Rust/node/authority integration or a power-loss
-campaign, and do not close the broader CLI/MCP authentication work. No Rust,
-server permission, dependency, codec or authority changes are introduced.
+simulated. Additional deterministic fault-injection tests require both file and
+parent synchronization before retry submission and pause a creator in `fsync`
+while a concurrent retry establishes its own barrier. They are not native
+Rust/node/authority integration or a power-loss campaign, and do not close the
+broader CLI/MCP authentication work. No Rust, server permission, dependency,
+codec or authority changes are introduced.
 
 ## Read, inspect and search before choosing a version
 

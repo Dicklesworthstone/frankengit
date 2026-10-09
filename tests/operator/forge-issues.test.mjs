@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, writeFile, readFile, chmod, rm, lstat, symlink, link, readdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, chmod, rm, lstat, symlink, link, readdir, open } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -248,4 +248,80 @@ test('simultaneous fresh preparations cannot both publish under one record path'
   const attempts = await Promise.allSettled([runIssueOperation(f.options()), runIssueOperation(f.options())]);
   assert.equal(attempts.filter(r => r.status === 'fulfilled').length, 1);
   assert.equal(mutations(f).length, 1); assert.equal(f.version, 1);
+});
+
+for (const target of ['file', 'directory']) {
+  test('retry requires its own ' + target + ' durability barrier before submission', async t => {
+    const f = await fixture(t);
+    await assert.rejects(runIssueOperation({ ...f.options(), onProgress: ({ phase }) => {
+      if (phase === 'receipt_saved') throw Error('creator stopped before submission');
+    } }));
+    const saved = await readFile(f.options().record);
+    const original = JSON.parse(saved).receipt.request;
+    const probe = await open(f.options().record, 'r');
+    const prototype = Object.getPrototypeOf(probe), originalSync = prototype.sync;
+    await probe.close();
+    let failures = 0;
+    prototype.sync = async function () {
+      const stat = await this.stat();
+      if (target === 'file' ? stat.isFile() : stat.isDirectory()) {
+        failures++;
+        const error = new Error('injected durability failure'); error.code = 'EIO'; throw error;
+      }
+      return originalSync.call(this);
+    };
+    try {
+      // Read-only lookup stays available even when synchronization would fail.
+      assert.equal((await runIssueOperation(f.options('status'))).state, 'unresolved');
+      assert.equal(failures, 0);
+      await assert.rejects(runIssueOperation(f.options('retry')), e => e.code === 'EIO');
+      assert.equal(failures, 1);
+      assert.equal(mutations(f).length, 0);
+    } finally { prototype.sync = originalSync; }
+    // The same saved operation is permitted when its own barrier succeeds.
+    assert.equal((await runIssueOperation(f.options('retry'))).result.outcome, 'committed');
+    assert.equal(mutations(f).length, 1);
+    assert.equal(mutations(f)[0].key, original.key);
+    assert.equal(mutations(f)[0].body, original.body);
+    assert.deepEqual(await readFile(f.options().record), saved);
+  });
+}
+
+test('concurrent retry synchronizes independently while the creator is blocked in fsync', async t => {
+  const f = await fixture(t), stop = new AbortController();
+  const probe = await open(f.tokenFile, 'r');
+  const prototype = Object.getPrototypeOf(probe), originalSync = prototype.sync;
+  await probe.close();
+  let signalBlocked, releaseCreator;
+  const blocked = new Promise(resolve => { signalBlocked = resolve; });
+  const release = new Promise(resolve => { releaseCreator = resolve; });
+  let creatorBlocked = false, retryFileSynced = false, retryParentSynced = false, observed = null;
+  prototype.sync = async function () {
+    const stat = await this.stat();
+    if (stat.isFile() && !creatorBlocked) {
+      creatorBlocked = true; signalBlocked(); await release;
+      return originalSync.call(this);
+    }
+    await originalSync.call(this);
+    if (stat.isFile()) retryFileSynced = true;
+    else if (stat.isDirectory()) retryParentSynced = true;
+  };
+  const preparing = runIssueOperation({ ...f.options(), signal: stop.signal }).then(
+    result => ({ result }), error => ({ error }));
+  try {
+    await Promise.race([blocked, preparing.then(() => { throw Error('creator stopped before fsync'); })]);
+    f.onMutation = () => { observed = { retryFileSynced, retryParentSynced }; };
+    const retry = await runIssueOperation(f.options('retry'));
+    assert.equal(retry.result.outcome, 'committed');
+    assert.deepEqual(observed, { retryFileSynced: true, retryParentSynced: true });
+    assert.equal(f.version, 1);
+  } finally {
+    stop.abort(); releaseCreator();
+    await preparing; prototype.sync = originalSync;
+  }
+  assert.ok((await preparing).error);
+  assert.equal(mutations(f).length, 1);
+  const recorded = JSON.parse(await readFile(f.options().record)).receipt.request;
+  assert.equal(mutations(f)[0].key, recorded.key);
+  assert.equal(mutations(f)[0].body, recorded.body);
 });
