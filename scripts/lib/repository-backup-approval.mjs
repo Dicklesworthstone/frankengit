@@ -97,7 +97,10 @@ export async function signRepositoryBackupFile(path, privatePem, declarations, o
     statement: signed, trusted_key_id: keyId(key), native_content_verified: false,
     streaming: { read_calls: artifact.read_calls, maximum_read_bytes: artifact.maximum_read_bytes } };
 }
-export async function verifyRepositoryBackupApproval(encoded, publicPem, expected, options = {}) {
+// Signature-only inspection is for comparing candidate generations, NOT approval
+// to restore. An expired higher signed checkpoint must block fallback to older
+// material. The separate checkCurrent() gate enforces time and the external floor.
+export async function inspectRepositoryBackupApproval(encoded, publicPem, expected, options = {}) {
   const live = backupLifetime(options), policy = backupPolicy(expected);
   const bytes = copy(encoded, BACKUP_LIMITS.envelopeBytes), key = pem(publicPem, false), trusted = keyId(key);
   let envelope;
@@ -116,11 +119,17 @@ export async function verifyRepositoryBackupApproval(encoded, publicPem, expecte
   const data = repositoryBackupDeclarations(Object.fromEntries([...IDENTITY, 'head_generation', 'issued_at', 'expires_at'].map(k => [k, parsed[k]])), live.now());
   const signed = statement(data, parsed.artifact, live.maximumBytes);
   if (!Buffer.from(JSON.stringify(signed)).equals(payload)) fail('backup_noncanonical_statement');
-  const checkCurrent = () => { live.check(); fresh(signed, policy, live.now()); };
-  checkCurrent();
+  if (IDENTITY.some(k => signed[k] !== policy[k])) fail('backup_approval_identity_mismatch');
   const authentication = Object.freeze({ signature_verified: true, trusted_key_id: trusted, policy, statement: signed,
     native_content_verified: false, newest_checkpoint_verified: false, complete_capsule_verified: false });
-  return Object.freeze({ authentication, checkCurrent });
+  const checkCurrent = () => { live.check(); fresh(signed, policy, live.now()); return authentication; };
+  // Deliberately no `authentication` member on an unchecked inspection result.
+  return Object.freeze({ checkpoint: Object.freeze({ ...authentication, approval_validity_checked: false }), checkCurrent });
+}
+export async function verifyRepositoryBackupApproval(encoded, publicPem, expected, options = {}) {
+  const inspected = await inspectRepositoryBackupApproval(encoded, publicPem, expected, options);
+  const authentication = inspected.checkCurrent();
+  return Object.freeze({ authentication, checkCurrent: inspected.checkCurrent });
 }
 export async function authenticateRepositoryBackupFile(path, encoded, publicPem, expected, options = {}) {
   const live = backupLifetime(options);
