@@ -538,49 +538,113 @@ fn canonical_edits_make_old_index_stale_until_an_explicit_predecessor_bound_buil
     node.shutdown().unwrap();
 }
 #[test]
-fn malformed_source_cannot_publish_a_partial_successor_index() {
-    let root = Scratch::new();
-    let (node, commit) = symbols(&root, GitHashAlgorithm::Sha1);
-    let first = build(&node, None);
-    add_files(
-        &node,
-        commit,
-        &[(b"broken.rs", b"fn Broken() {\n")],
-        b"stored-symbol-broken-source",
-    );
-    let error = node
-        .runtime()
-        .block_on(node.build_source_symbol_index_local_in(
-            &node.outbox_delivery_context(),
-            &reference(),
-            None,
-            None,
-            Some(first.generation_id),
-            Default::default(),
-        ))
-        .unwrap_err();
-    assert!(matches!(error, AccessError::Index(data::Error::Table(_))));
-    let recovered = node
-        .runtime()
-        .block_on(node.recover_source_symbol_index_local_in(
-            &node.request_context(),
-            &reference(),
-            first.generation_id,
-            None,
-            Default::default(),
-        ))
-        .unwrap();
-    assert!(matches!(recovered, GenerationRecovery::Active { .. }));
-    assert!(matches!(
-        search(
+fn malformed_files_publish_authenticated_omissions_without_discarding_valid_symbols() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let config = root.config(format);
+        let (node, commit) = symbols(&root, format);
+        let first = build(&node, None);
+        let original = search(
             &node,
             &ordinary(),
             Default::default(),
-            data::MAX_INDEX_BYTES
-        ),
-        Err(AccessError::Stale)
-    ));
-    node.shutdown().unwrap();
+            data::MAX_INDEX_BYTES,
+        )
+        .unwrap();
+        const BROKEN: &[u8] = b"fn ThingDiscarded() {} fn Broken() {\n";
+        let next = add_files(
+            &node,
+            commit,
+            &[(b"broken.rs", BROKEN), (b"invalid.rs", b"// \xff\n")],
+            b"stored-symbol-omitted-source",
+        );
+        let canonical = generation(&node);
+        let second = build(&node, Some(&first));
+        let report = search(
+            &node,
+            &ordinary(),
+            Default::default(),
+            data::MAX_INDEX_BYTES,
+        )
+        .unwrap();
+        assert_eq!(report.source.commit, next);
+        assert_eq!(report.matches, original.matches);
+        assert!(report.complete);
+        assert!(!report.coverage_complete);
+        assert_eq!(report.indexed_files, 3);
+        assert_eq!(report.omissions.len(), 2);
+        assert_eq!(report.omissions[0].path, b"broken.rs");
+        assert_eq!(
+            report.omissions[0].reason,
+            data::OmissionReason::UnbalancedDelimiter
+        );
+        assert_eq!(
+            report.omissions[0].blob,
+            fgit_crypto::git_object_id(format, fgit_crypto::GitObjectKind::Blob, BROKEN)
+        );
+        assert_eq!(report.omissions[0].source_bytes, BROKEN.len());
+        assert_eq!(report.omissions[1].path, b"invalid.rs");
+        assert_eq!(
+            report.omissions[1].reason,
+            data::OmissionReason::InvalidUtf8
+        );
+        assert_eq!(
+            report.validate_coverage().unwrap(),
+            BROKEN.len() + b"// \xff\n".len()
+        );
+        let limited = search(
+            &node,
+            &ordinary(),
+            SearchLimits {
+                max_matches: 1,
+                ..Default::default()
+            },
+            data::MAX_INDEX_BYTES,
+        )
+        .unwrap();
+        assert!(!limited.complete);
+        assert!(!limited.coverage_complete);
+        assert_eq!(limited.omissions, report.omissions);
+        let absent = search(
+            &node,
+            &query(b"ThingDiscarded", SymbolMatchMode::Exact, &[], &[]),
+            Default::default(),
+            data::MAX_INDEX_BYTES,
+        )
+        .unwrap();
+        assert!(absent.matches.is_empty());
+        assert!(absent.complete);
+        assert!(!absent.coverage_complete);
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.recover_source_symbol_index_local_in(
+                    &node.request_context(),
+                    &reference(),
+                    first.generation_id,
+                    None,
+                    Default::default(),
+                ))
+                .unwrap(),
+            GenerationRecovery::Superseded { .. }
+        ));
+        assert_eq!(generation(&node), canonical);
+        node.shutdown().unwrap();
+        let node = reopen(&config);
+        let reopened = search(
+            &node,
+            &ordinary(),
+            Default::default(),
+            data::MAX_INDEX_BYTES,
+        )
+        .unwrap();
+        assert_eq!(reopened.omissions, report.omissions);
+        assert_eq!(reopened.matches, report.matches);
+        assert_eq!(
+            reopened.generation,
+            *second.generation_id.as_internal_object_id()
+        );
+        node.shutdown().unwrap();
+    }
 }
 #[test]
 fn invalid_refs_formats_cancelled_and_unpolled_operations_do_not_initialize_an_index() {
@@ -706,6 +770,78 @@ fn http_distinguishes_an_unbuilt_index_from_an_authenticated_empty_inventory() {
         node.shutdown().unwrap();
     }
 }
+#[test]
+fn authenticated_http_reports_whole_corpus_omissions_separately_from_match_limits() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let (node, commit) = symbols(&root, format);
+        add_files(
+            &node,
+            commit,
+            &[(b"broken.rs", b"fn Broken() {\n")],
+            b"symbol-http-omissions",
+        );
+        build(&node, None);
+        let path = root.0.join("credentials");
+        credentials(&node, &path);
+        let server = Server::start(node, &path, 5, true, false);
+        let input = form(format) + &format!("&path_prefix_hex={}", hex(b"src"));
+        let first = post(&server.client, "search-symbols-index", 'a', &input, false);
+        status(&first, 200);
+        assert_eq!(number(&first.body, "schema_version"), 2);
+        assert_eq!(number(&first.body, "omitted_files"), 1);
+        assert_eq!(number(&first.body, "source_blobs_read"), 0);
+        assert!(first.body.contains("\"complete\":true"));
+        assert!(first.body.contains("\"coverage_complete\":false"));
+        assert!(
+            first
+                .body
+                .contains("\"coverage_scope\":\"recorded-rust-files\"")
+        );
+        assert!(first.body.contains("\"reason\":\"unbalanced_delimiter\""));
+        // The authenticated coverage inventory remains explicit even when the
+        // omitted path lies outside the requested match path-prefix scope.
+        assert!(first.body.contains(&hex(b"broken.rs")));
+        let chunked = post(&server.client, "search-symbols-index", 'a', &input, true);
+        status(&chunked, 200);
+        assert_eq!(chunked.body, first.body);
+        let limited = post(
+            &server.client,
+            "search-symbols-index",
+            'a',
+            &(input.clone() + "&max_matches=1"),
+            false,
+        );
+        status(&limited, 200);
+        assert!(
+            limited
+                .body
+                .contains("\"complete\":false,\"completion\":\"match_limit\"")
+        );
+        assert!(limited.body.contains("\"coverage_complete\":false"));
+        assert_eq!(number(&limited.body, "omitted_files"), 1);
+        let refused = post(&server.client, "search-symbols-index", 'b', &input, false);
+        status(&refused, 403);
+        assert!(!refused.body.contains("omissions"));
+        assert!(!refused.body.contains(&hex(b"broken.rs")));
+        let current = post(
+            &server.client,
+            "search-symbols-index",
+            'a',
+            &(input + "&source_mode=revalidated"),
+            false,
+        );
+        status(&current, 200);
+        assert!(
+            current.body.contains(
+                "\"result\":{\"type\":\"source_search_symbols_index\",\"schema_version\":2"
+            )
+        );
+        assert!(current.body.contains("\"coverage_complete\":false"));
+        server.finish();
+    }
+}
+
 #[test]
 fn authenticated_indexed_http_preserves_native_results_scopes_budgets_and_revocation() {
     for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {

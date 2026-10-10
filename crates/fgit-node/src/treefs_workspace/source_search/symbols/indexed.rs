@@ -191,6 +191,7 @@ impl OneNode {
         let (manifest, tables, directory) = corpus
             .finish_with_directory(source.clone(), &cancelled)
             .map_err(Failure::Index)?;
+        let omissions = !manifest.omissions().is_empty();
         let manifest = manifest.encode(&cancelled).map_err(Failure::Index)?;
         // The additional lookup is optional only at build time. A smaller host
         // ceiling retains an explicitly identified legacy generation layout.
@@ -207,6 +208,7 @@ impl OneNode {
             manifest.root,
             directory.as_ref().map(|p| p.root),
             predecessor,
+            omissions,
         )?;
         let candidate = body.generation_id().map_err(Failure::Generation)?;
         let head_key = self.symbol_head_key(reference)?;
@@ -345,7 +347,7 @@ impl OneNode {
         let cancelled = || !workspace_request_live(request);
         let manifest = data::Manifest::decode(&raw, root, &cancelled).map_err(Failure::Index)?;
         let source = manifest.source();
-        self.validate_symbol_source(source, body, reference)?;
+        self.validate_symbol_source(&manifest, body, reference)?;
         if let Some(current) = &current_source {
             if !current::revalidates(source, current) {
                 return Err(Failure::Stale);
@@ -423,11 +425,13 @@ impl OneNode {
     }
     fn validate_symbol_source(
         &self,
-        source: &data::Source,
+        manifest: &data::Manifest,
         body: &GraphGenerationBody,
         reference: &RefName,
     ) -> Result<(), Failure> {
-        if source.tenant != self.tenant_id
+        let source = manifest.source();
+        if directory::has_omissions(body) != !manifest.omissions().is_empty()
+            || source.tenant != self.tenant_id
             || source.repository != self.repository_id
             || source.incarnation != self.repository_incarnation_id()
             || source.format != self.object_format

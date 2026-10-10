@@ -316,7 +316,7 @@ fn genesis_and_refresh_barriers_preserve_original_candidates_on_failure_and_canc
 }
 
 #[test]
-fn malformed_source_pins_limits_and_unpolled_operations_never_publish() {
+fn pins_limits_and_unpolled_operations_refuse_while_malformed_files_are_explicit_omissions() {
     let root = Scratch::new();
     let (node, commit) = symbols(&root, GitHashAlgorithm::Sha256);
     let request = node.outbox_delivery_context();
@@ -368,10 +368,19 @@ fn malformed_source_pins_limits_and_unpolled_operations_never_publish() {
         pinned,
         Err(AccessError::Source(NodeWorkspaceRefusal::SourceBrowse(_)))
     ));
-    assert!(matches!(
-        reconcile(&node, Some(&first.1)),
-        Err(AccessError::Index(data::Error::Table(_)))
-    ));
+    let expected = candidate(&node, Some(&first.1));
+    let partial = reconcile(&node, Some(&first.1)).unwrap();
+    assert_eq!(partial.1.generation_id, expected);
+    let report = search(&node).unwrap();
+    assert!(report.complete);
+    assert!(!report.coverage_complete);
+    assert_eq!(report.matches.len(), 1);
+    assert_eq!(report.omissions.len(), 1);
+    assert_eq!(report.omissions[0].path, b"broken.rs");
+    assert_eq!(
+        report.omissions[0].reason,
+        data::OmissionReason::UnbalancedDelimiter
+    );
     request.cancel();
     assert!(matches!(
         node.runtime()
@@ -379,7 +388,7 @@ fn malformed_source_pins_limits_and_unpolled_operations_never_publish() {
                 &request,
                 &reference,
                 None,
-                Some(&first.1),
+                Some(&partial.1),
                 Default::default(),
                 Default::default()
             )),
@@ -390,7 +399,7 @@ fn malformed_source_pins_limits_and_unpolled_operations_never_publish() {
             .block_on(node.recover_source_symbol_index_local_in(
                 &node.request_context(),
                 &reference,
-                first.1.generation_id,
+                partial.1.generation_id,
                 None,
                 Default::default()
             ))

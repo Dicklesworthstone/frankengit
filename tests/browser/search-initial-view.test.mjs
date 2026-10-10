@@ -6,6 +6,7 @@ import { mount, readQuery } from '../../crates/fgit-node/src/smart_http/server/b
 import { initialQuery } from '../../crates/fgit-node/src/smart_http/server/browser/search-index.mjs';
 import { dom, tick } from './search-dom-fixture.mjs';
 import { clone, fixture, hex, response, fileReply, webcrypto } from './search-initial-fixtures.mjs';
+import { partialReply } from './search-symbol-omission-fixtures.mjs';
 
 function setup(f = fixture(), handler = null, combined = true) {
   const d = dom(), calls = [];
@@ -90,6 +91,19 @@ test('submitting the actual form makes one request and renders a checked generat
   assert.match(d.get('results').textContent, /successful-channel/); assert.match(d.get('snapshot').textContent, /Retained symbol checkpoint 4/);
   for (const channel of ['content', 'path', 'symbols']) assert.equal(h.hitButtons(channel).length, 2);
   assert.equal(d.get('file').children.length, 0); assert.equal(d.document.downloads.length, 0);
+});
+
+test('combined available symbols with omissions remain visibly incomplete without hiding useful hits', async () => {
+  const f = fixture({ policy: 'required' }); partialReply(f.reply.symbols.result);
+  f.reply.complete = false;
+  f.reply.retained_result_bytes += f.reply.symbols.result.omissions[0].path_hex.length / 2 + 96;
+  const h = setup(f); await h.connect(); await h.actions.search();
+  assert.equal(h.calls.length, 1);
+  assert.match(h.d.get('status').textContent, /Combined answer is incomplete/);
+  assert.match(h.section('symbols').textContent, /1 omitted Rust files/);
+  assert.match(h.section('symbols').textContent, /source coverage is incomplete/);
+  for (const channel of ['content', 'path', 'symbols']) assert.equal(h.hitButtons(channel).length, 2);
+  h.actions.disconnect();
 });
 
 for (const format of ['sha1', 'sha256']) test(`${format} channel buttons verify full files and expose downloads only afterwards`, async () => {

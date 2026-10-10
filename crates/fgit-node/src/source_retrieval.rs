@@ -190,7 +190,7 @@ impl InitialReport {
     pub const fn result_bytes(&self) -> usize {
         self.result_bytes
     }
-    /// True only if every requested channel was available and untruncated.
+    /// True only if every requested channel was available, fully covered and untruncated.
     #[must_use]
     pub fn complete(&self) -> bool {
         self.content.results.complete
@@ -198,7 +198,7 @@ impl InitialReport {
             && match &self.symbols {
                 SymbolChannel::NotRequested => true,
                 SymbolChannel::Unavailable(_) => false,
-                SymbolChannel::Available(report) => report.complete,
+                SymbolChannel::Available(report) => report.complete && report.coverage_complete,
             }
     }
     /// Successful-channel receipts only. An unavailable channel may have read
@@ -414,6 +414,14 @@ impl OneNode {
                                 + row.name.len()
                                 + row.location.excerpt.len()
                                 + 96,
+                            limits.max_result_bytes,
+                        )?;
+                    }
+                    for omission in &report.omissions {
+                        live(request)?;
+                        add_result(
+                            &mut result_bytes,
+                            omission.path.len() + 96,
                             limits.max_result_bytes,
                         )?;
                     }

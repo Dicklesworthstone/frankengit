@@ -195,11 +195,28 @@ fn execute(node: &OneNode, options: &Options) -> Result<String, Failure> {
                         Default::default(),
                         MAX_INDEX_BYTES,
                     ))?;
+            let omitted_bytes = report.validate_coverage().map_err(AccessError::Index)?;
+            let coverage = if report.coverage_complete {
+                String::new()
+            } else {
+                let omissions = report.omissions.iter().map(|entry| format!(
+                    "{{\"path_hex\":\"{}\",\"blob\":\"{}\",\"source_bytes\":{},\"reason\":\"{}\",\"byte_offset\":{},\"limit\":{}}}",
+                    hex(&entry.path), entry.blob, entry.source_bytes, entry.reason.as_str(),
+                    entry.byte_offset.map_or_else(|| "null".to_owned(), |n| n.to_string()),
+                    entry.limit.map_or_else(|| "null".to_owned(), |n| n.to_string())
+                )).collect::<Vec<_>>().join(",");
+                format!(
+                    ",\"schema_version\":2,\"coverage_complete\":false,\"coverage_scope\":\"recorded-rust-files\",\"omitted_files\":{},\"omitted_source_bytes\":{},\"omissions\":[{}]",
+                    report.omissions.len(),
+                    omitted_bytes,
+                    omissions
+                )
+            };
             let matches=report.matches.iter().map(|row|format!("{{\"name_hex\":\"{}\",\"kind\":\"{}\",\"path_hex\":\"{}\",\"blob\":\"{}\",\"byte_offset\":{},\"line\":{},\"byte_column\":{},\"match_length\":{}}}",
                 hex(&row.name),row.kind.as_str(),hex(&row.location.path),row.location.blob,row.location.byte_offset,
                 row.location.line,row.location.byte_column,row.location.match_length)).collect::<Vec<_>>().join(",");
             Ok(format!(
-                "{{\"type\":\"symbol_index_query\",\"index_token\":\"{}\",\"index_number\":{},\"snapshot_token\":\"{}\",\"source_commit\":\"{}\",\"complete\":{},\"source_blobs_read\":0,\"read_only\":true,\"matches\":[{}]}}",
+                "{{\"type\":\"symbol_index_query\",\"index_token\":\"{}\",\"index_number\":{},\"snapshot_token\":\"{}\",\"source_commit\":\"{}\",\"complete\":{},\"source_blobs_read\":0,\"read_only\":true{coverage},\"matches\":[{}]}}",
                 token(&report.generation),
                 report.generation_number,
                 token(report.source.head.as_internal_object_id()),

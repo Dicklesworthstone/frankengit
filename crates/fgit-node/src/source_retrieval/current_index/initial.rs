@@ -62,7 +62,7 @@ impl RevalidatedInitialReport {
             && match &self.symbols {
                 SymbolChannel::NotRequested => true,
                 SymbolChannel::Unavailable(_) => false,
-                SymbolChannel::Available(report) => report.complete,
+                SymbolChannel::Available(report) => report.complete && report.coverage_complete,
             }
     }
     /// Successful-channel receipts, not total physical I/O. An unavailable
@@ -185,6 +185,11 @@ impl OneNode {
                         live(request)?;
                         add_result(&mut result_bytes,
                             row.location.path.len() + row.name.len() + row.location.excerpt.len() + 96,
+                            limits.max_result_bytes)?;
+                    }
+                    for omission in &report.omissions {
+                        live(request)?;
+                        add_result(&mut result_bytes, omission.path.len() + 96,
                             limits.max_result_bytes)?;
                     }
                     SymbolChannel::Available(Box::new(report))

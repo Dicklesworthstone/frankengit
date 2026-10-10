@@ -7,6 +7,7 @@ import { mount, readQuery } from '../../crates/fgit-node/src/smart_http/server/b
 import { symbolQuery } from '../../crates/fgit-node/src/smart_http/server/browser/search-index.mjs';
 import { dom, tick } from './search-dom-fixture.mjs';
 import { fixture, hex, transport, response, token, href, deferred } from './search-symbol-fixtures.mjs';
+import { omission, partialReply } from './search-symbol-omission-fixtures.mjs';
 async function setup(f = fixture(), intercept) {
   const page = dom(), env = transport(f, intercept);
   const ui = mount(page.document, { href }, { ...env.options, urlApi: page.urlApi });
@@ -59,6 +60,28 @@ test('truncated declarations never expose a fake server continuation', async () 
   assert.match(p.get('results').textContent, /no continuation cursor/);
   assert.equal(p.buttons('results').length, 1); assert.equal(p.buttons('results').some(b => b.textContent.includes('Next')), false);
   assert.match(p.get('status').textContent, /truncated/); assert.equal(p.calls.length, 1); p.ui.disconnect();
+});
+test('omitted files are escaped, visibly incomplete and locally paged without source requests', async () => {
+  const f = fixture('sha256'), omissions = Array.from({ length: 55 }, (_, i) => omission('sha256',
+    Buffer.from(`bad/${String(i).padStart(5, '0')}${i === 0 ? '<img>\x1b\xff' : ''}.rs`, 'latin1')));
+  partialReply(f.reply, omissions);
+  const p = await setup(f); await p.ui.search();
+  assert.equal(p.calls.length, 1);
+  assert.match(p.get('status').textContent, /source coverage is incomplete: 55 Rust files omitted/);
+  assert.match(p.get('status').textContent, /Matching declarations from indexed files are complete/);
+  assert.match(p.get('results').textContent, /whole recorded corpus/);
+  assert.match(p.get('results').textContent, /No matching declarations does not establish absence/);
+  assert.equal(p.get('results').descendants().filter(el => el.tagName === 'LI').length, 50);
+  assert.equal(p.get('results').descendants().some(el => el.tagName === 'IMG'), false);
+  assert.equal(p.get('results').textContent.includes('\x1b'), false);
+  assert.ok(p.get('results').textContent.includes('\\x1b\\xff'));
+  const next = p.buttons('results').find(button => button.textContent === 'Next omitted files');
+  assert.ok(next); next.click();
+  assert.equal(p.get('results').descendants().filter(el => el.tagName === 'LI').length, 5);
+  assert.match(p.get('results').textContent, /51–55 of 55/);
+  assert.equal(p.calls.length, 1);
+  p.ui.refresh(); next.click(); assert.equal(p.get('results').textContent, '');
+  p.ui.disconnect();
 });
 test('stale index diagnosis does not release pins, rebuild, retry or present an empty result', async () => {
   let stale = false; const p = await setup(fixture(), () => stale ? response({ error: 'symbol_index_stale', message: '<img>' }, 409) : null);

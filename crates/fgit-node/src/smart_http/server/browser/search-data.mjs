@@ -85,8 +85,12 @@ export function searchCommand(selected, pin, q) {
   else values.needle_hex = q.needlesHex;
   return { path: `source/${{ literal: 'search', batch: 'search-batch', regex: 'search-regex' }[q.mode]}`, body: form(values) };
 }
-export function coordinates(reply, selected, previousScope = null, previousPin = null) {
-  const scope = binding(reply, previousScope);
+export function coordinates(reply, selected, previousScope = null, previousPin = null, schemaVersion = 1) {
+  record(reply);
+  if (![1, 2].includes(schemaVersion) || reply.schema_version !== schemaVersion) fail('Unsupported source response version.');
+  // Symbol v2 keeps the exact v1 source envelope. The caller must first select
+  // its closed v2 profile; only shared envelope validation uses this projection.
+  const scope = binding(schemaVersion === 1 ? reply : { ...reply, schema_version: 1 }, previousScope);
   if (scope.format !== selected.format || reply.ref !== selected.reference || reply.ref_hex !== hex(utf8.encode(selected.reference)) ||
       reply.read_only !== true || reply.transaction_created !== false || reply.published !== false) fail('Wrong source selection or non-read response.');
   const pin = { head: snapshot(reply.snapshot_token), sourceHead: opaque(reply.source_head), rcr: opaque(reply.source_rcr),

@@ -54,6 +54,8 @@ fn report() -> data::Report {
         source,
         matches: Vec::new(),
         complete: true,
+        coverage_complete: true,
+        omissions: Vec::new(),
         generation: generation.as_internal_object_id().clone(),
         generation_number: u64::MAX,
         indexed_files: 4,
@@ -128,6 +130,54 @@ fn current_source_does_not_relabel_original_index_provenance_or_u64_values() {
             .unwrap()
             .contains("\"distinct_index_provenance\":false")
     );
+}
+
+#[test]
+fn explicit_coverage_omissions_select_v2_and_exit_incomplete_even_for_complete_matches() {
+    let options = parse(&args()).unwrap();
+    let mut report = report();
+    report.coverage_complete = false;
+    report.omissions.push(data::Omission {
+        path: b"raw\xff.rs".to_vec(),
+        blob: git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, b"\xff"),
+        source_bytes: 1,
+        reason: data::OmissionReason::InvalidUtf8,
+        byte_offset: Some(0),
+        limit: None,
+    });
+    let current = source(b"current");
+    let mut out = Vec::new();
+    assert_eq!(
+        finish(
+            &mut out,
+            &options,
+            Ok((current.clone(), report.clone())),
+            None
+        )
+        .unwrap(),
+        3
+    );
+    let body = String::from_utf8(out).unwrap();
+    for fragment in [
+        "\"schema_version\":2",
+        "\"index_profile\":\"rust-declaration-omissions-v1\"",
+        "\"complete\":true,\"truncated_reason\":null",
+        "\"coverage_complete\":false",
+        "\"coverage_scope\":\"recorded-rust-files\"",
+        "\"omitted_files\":1",
+        "\"omitted_source_bytes\":1",
+        "\"reason\":\"invalid_utf8\"",
+        "\"byte_offset\":0,\"limit\":null",
+    ] {
+        assert!(body.contains(fragment), "{fragment}: {body}");
+    }
+    assert!(body.contains(&hex(b"raw\xff.rs")));
+    assert!(body.contains(&head_token(current.head)));
+    assert!(body.contains(&head_token(report.source.head)));
+    report.coverage_complete = true;
+    let mut rejected = Vec::new();
+    assert!(finish(&mut rejected, &options, Ok((current, report)), None).is_err());
+    assert!(rejected.is_empty());
 }
 
 #[test]

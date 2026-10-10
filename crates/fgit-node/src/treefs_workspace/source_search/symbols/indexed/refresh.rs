@@ -103,7 +103,7 @@ impl OneNode {
             .await?;
         let cancelled = || !workspace_request_live(request);
         let manifest = data::Manifest::decode(&raw, root, &cancelled).map_err(Failure::Index)?;
-        self.validate_symbol_source(manifest.source(), body, reference)?;
+        self.validate_symbol_source(&manifest, body, reference)?;
         self.verify_symbol_directory_in(
             request,
             body,

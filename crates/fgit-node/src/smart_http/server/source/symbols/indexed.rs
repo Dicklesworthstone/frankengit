@@ -179,6 +179,9 @@ fn render(
     check(live)?;
     let source = &report.source;
     let query = &command.query;
+    let omitted_bytes = report
+        .validate_coverage()
+        .map_err(|_| ApiError::unavailable())?;
     if source.tenant != node.tenant_id
         || source.repository != node.repository_id
         || source.incarnation != node.repository_incarnation_id()
@@ -221,7 +224,7 @@ fn render(
         &mut out,
         &format!(
             concat!(
-                "{{\"type\":\"source_search_symbols_index\",\"schema_version\":1,",
+                "{{\"type\":\"source_search_symbols_index\",\"schema_version\":{},",
                 "\"profile\":{},\"index_profile\":{},\"authority_class\":\"deterministic-derived\",",
                 "\"compiler_resolved\":false,\"macro_expansion\":false,\"cfg_evaluated\":false,",
                 "\"tenant_id\":{},\"repository_id\":{},\"repository_incarnation\":{},\"object_format\":{},{},",
@@ -233,8 +236,13 @@ fn render(
                 "\"unsupported_language_files\":{},\"non_regular_entries\":{},\"tables_read\":{},",
                 "\"payload_bytes_read\":{},\"max_work\":{},\"work_units\":{},\"kinds\":["
             ),
+            if report.coverage_complete { 1 } else { 2 },
             quote(PROFILE),
-            quote(data::INDEX_PROFILE),
+            quote(if report.coverage_complete {
+                data::INDEX_PROFILE
+            } else {
+                data::OMISSION_INDEX_PROFILE
+            }),
             quote(&source.tenant.to_string()),
             quote(&source.repository.to_string()),
             quote(&source.incarnation.to_string()),
@@ -293,7 +301,41 @@ fn render(
             maximum,
         )?;
     }
-    append(&mut out, "],\"matches\":[", maximum)?;
+    append(&mut out, "]", maximum)?;
+    if !report.coverage_complete {
+        append(
+            &mut out,
+            &format!(
+                ",\"coverage_complete\":false,\"coverage_scope\":\"recorded-rust-files\",\"omitted_files\":{},\"omitted_source_bytes\":{},\"omissions\":[",
+                report.omissions.len(),
+                omitted_bytes,
+            ),
+            maximum,
+        )?;
+        for (index, omission) in report.omissions.iter().enumerate() {
+            check(live)?;
+            append(
+                &mut out,
+                &format!(
+                    "{}{{\"path_hex\":{},\"blob\":{},\"source_bytes\":{},\"reason\":{},\"byte_offset\":{},\"limit\":{}}}",
+                    if index == 0 { "" } else { "," },
+                    quote(&hex(&omission.path)),
+                    quote(&omission.blob.to_string()),
+                    omission.source_bytes,
+                    quote(omission.reason.as_str()),
+                    omission
+                        .byte_offset
+                        .map_or_else(|| "null".into(), |n| n.to_string()),
+                    omission
+                        .limit
+                        .map_or_else(|| "null".into(), |n| n.to_string()),
+                ),
+                maximum,
+            )?;
+        }
+        append(&mut out, "]", maximum)?;
+    }
+    append(&mut out, ",\"matches\":[", maximum)?;
     for (i, row) in report.matches.iter().enumerate() {
         check(live)?;
         if i != 0 {

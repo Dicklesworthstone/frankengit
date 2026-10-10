@@ -317,10 +317,6 @@ fn whole_corpus_limits_cannot_be_bypassed_by_a_zero_blob_read_refresh() {
     let bytes = A.len() + B.len() + RAW.len();
     for limits in [
         SearchLimits {
-            max_file_bytes: A.len() - 1,
-            ..Default::default()
-        },
-        SearchLimits {
             max_file_bytes: bytes - 1,
             max_total_bytes: bytes - 1,
             ..Default::default()
@@ -371,6 +367,104 @@ fn whole_corpus_limits_cannot_be_bypassed_by_a_zero_blob_read_refresh() {
     .unwrap();
     assert_eq!(stats.reused_files, 3);
     assert_eq!(stats.source_blobs_read, 0);
+    node.shutdown().unwrap();
+}
+
+#[test]
+fn reused_declarations_cannot_hide_global_exhaustion_behind_a_later_local_omission() {
+    let root = Scratch::new();
+    let (node, base) = fixture(&root, GitHashAlgorithm::Sha256);
+    // Ten individually small tables share one native blob. Their declarations
+    // still count at each current path, exactly as a full rebuild counts them.
+    let body = b"fn A() {}\n".repeat(1_990);
+    let paths: Vec<_> = (0..10)
+        .map(|n| format!("a-{n:02}.rs").into_bytes())
+        .collect();
+    let files: Vec<_> = paths
+        .iter()
+        .map(|path| (path.as_slice(), body.as_slice()))
+        .collect();
+    let commit = add_files(&node, base, &files, b"symbol-near-global-limit");
+    let first = build(&node, None);
+    assert_eq!(
+        search(
+            &node,
+            &ordinary(),
+            Default::default(),
+            data::MAX_INDEX_BYTES
+        )
+        .unwrap()
+        .indexed_declarations,
+        19_900
+    );
+    let malformed = [b"fn New() {}\n".repeat(200), b"fn Broken() {\n".to_vec()].concat();
+    add_files(
+        &node,
+        commit,
+        &[(b"z-broken.rs", &malformed)],
+        b"symbol-global-limit-before-omission",
+    );
+    for incremental in [false, true] {
+        let mut called = false;
+        let mut barrier = |_| {
+            called = true;
+            Ok(())
+        };
+        let result = if incremental {
+            node.runtime()
+                .block_on(node.refresh_source_symbol_index_guarded_local_in(
+                    &node.outbox_delivery_context(),
+                    &reference(),
+                    None,
+                    None,
+                    first.generation_id,
+                    Default::default(),
+                    &mut barrier,
+                ))
+                .map(|_| ())
+        } else {
+            node.runtime()
+                .block_on(node.build_source_symbol_index_guarded_local_in(
+                    &node.outbox_delivery_context(),
+                    &reference(),
+                    None,
+                    None,
+                    Some(first.generation_id),
+                    Default::default(),
+                    &mut barrier,
+                ))
+                .map(|_| ())
+        };
+        assert!(matches!(result,
+            Err(AccessError::Index(data::Error::Table(data::TableError::Syntax(error))))
+                if error.kind == fgit_forge::source_symbols::SymbolSyntaxErrorKind::DeclarationLimit
+        ));
+        assert!(
+            !called,
+            "resource refusal precedes staging for incremental={incremental}"
+        );
+    }
+    assert!(matches!(
+        node.runtime()
+            .block_on(node.recover_source_symbol_index_local_in(
+                &node.request_context(),
+                &reference(),
+                first.generation_id,
+                None,
+                Default::default(),
+            ))
+            .unwrap(),
+        GenerationRecovery::Active { .. }
+    ));
+    assert!(matches!(
+        search(
+            &node,
+            &ordinary(),
+            Default::default(),
+            data::MAX_INDEX_BYTES
+        ),
+        Err(AccessError::Stale)
+    ));
     node.shutdown().unwrap();
 }
 
@@ -514,64 +608,159 @@ fn failed_or_cancelled_refresh_barriers_preserve_the_original_candidate_and_root
 }
 
 #[test]
-fn malformed_new_source_and_unpolled_refresh_do_not_publish_partial_indexes() {
-    let root = Scratch::new();
-    let (node, commit) = symbols(&root, GitHashAlgorithm::Sha1);
-    let first = build(&node, None);
-    let request = node.outbox_delivery_context();
-    let reference = reference();
-    let future = node.refresh_source_symbol_index_local_in(
-        &request,
-        &reference,
-        None,
-        None,
-        first.generation_id,
-        Default::default(),
-    );
-    drop(future);
-    request.cancel();
-    assert!(
-        node.runtime()
-            .block_on(node.refresh_source_symbol_index_local_in(
-                &request,
-                &reference,
-                None,
-                None,
-                first.generation_id,
-                Default::default()
-            ))
-            .is_err()
-    );
-    add_files(
-        &node,
-        commit,
-        &[(b"broken.rs", b"fn Broken() {\n")],
-        b"symbol-refresh-malformed",
-    );
-    assert!(matches!(
-        refresh(&node, &first, Default::default()),
-        Err(AccessError::Index(data::Error::Table(_)))
-    ));
-    assert!(matches!(
-        node.runtime()
-            .block_on(node.recover_source_symbol_index_local_in(
-                &node.request_context(),
-                &reference,
-                first.generation_id,
-                None,
-                Default::default()
-            ))
-            .unwrap(),
-        GenerationRecovery::Active { .. }
-    ));
-    assert!(matches!(
-        search(
+fn unpolled_and_cancelled_refresh_refuse_but_omissions_are_rescanned_and_repaired() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let (node, commit) = symbols(&root, format);
+        let first = build(&node, None);
+        let request = node.outbox_delivery_context();
+        let reference = reference();
+        drop(node.refresh_source_symbol_index_local_in(
+            &request,
+            &reference,
+            None,
+            None,
+            first.generation_id,
+            Default::default(),
+        ));
+        request.cancel();
+        assert!(
+            node.runtime()
+                .block_on(node.refresh_source_symbol_index_local_in(
+                    &request,
+                    &reference,
+                    None,
+                    None,
+                    first.generation_id,
+                    Default::default(),
+                ))
+                .is_err()
+        );
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.recover_source_symbol_index_local_in(
+                    &node.request_context(),
+                    &reference,
+                    first.generation_id,
+                    None,
+                    Default::default(),
+                ))
+                .unwrap(),
+            GenerationRecovery::Active { .. }
+        ));
+        const BROKEN: &[u8] = b"fn ThingDiscarded() {} fn Broken() {\n";
+        const REPAIRED: &[u8] = b"fn ThingRepaired() {}\n";
+        let broken = add_files(
+            &node,
+            commit,
+            &[(b"broken.rs", BROKEN)],
+            b"symbol-refresh-malformed",
+        );
+        let expected = full_candidate(&node, &first);
+        let (_, partial, stats) = refresh(&node, &first, Default::default()).unwrap();
+        assert_eq!(partial.generation_id, expected);
+        assert_eq!(stats.reused_files, 3);
+        assert_eq!(stats.source_blobs_read, 1);
+        assert_eq!(stats.source_bytes_read, BROKEN.len());
+        let report = search(
             &node,
             &ordinary(),
             Default::default(),
-            data::MAX_INDEX_BYTES
-        ),
-        Err(AccessError::Stale)
-    ));
-    node.shutdown().unwrap();
+            data::MAX_INDEX_BYTES,
+        )
+        .unwrap();
+        assert!(report.complete);
+        assert!(!report.coverage_complete);
+        assert_eq!(report.omissions.len(), 1);
+        assert_eq!(report.omissions[0].path, b"broken.rs");
+        assert_eq!(report.matches.len(), 5);
+        let expected = full_candidate(&node, &partial);
+        let (_, repeated, stats) = refresh(&node, &partial, Default::default()).unwrap();
+        assert_eq!(repeated.generation_id, expected);
+        assert_eq!(stats.reused_files, 3);
+        // Same native blob is fetched and scanned again: an omission is not a
+        // reusable declaration table, even after a successful activation.
+        assert_eq!(stats.source_blobs_read, 1);
+        assert_eq!(stats.source_bytes_read, BROKEN.len());
+        assert_eq!(
+            search(
+                &node,
+                &ordinary(),
+                Default::default(),
+                data::MAX_INDEX_BYTES
+            )
+            .unwrap()
+            .omissions,
+            report.omissions
+        );
+        edit_files(
+            &node,
+            broken,
+            &[(b"broken.rs", Some(BROKEN), Some(REPAIRED))],
+            b"symbol-refresh-repaired",
+        );
+        let expected = full_candidate(&node, &repeated);
+        let (source, repaired, stats) = refresh(&node, &repeated, Default::default()).unwrap();
+        assert_eq!(repaired.generation_id, expected);
+        assert_eq!(stats.reused_files, 3);
+        assert_eq!(stats.source_blobs_read, 1);
+        let report = assert_live_equivalent(&node, &source);
+        assert!(report.coverage_complete);
+        assert!(report.omissions.is_empty());
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|row| row.name == b"ThingRepaired")
+        );
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn narrowed_file_limits_omit_verified_current_blobs_and_restoring_limits_rescans_them() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let (node, _) = symbols(&root, format);
+        let first = build(&node, None);
+        let narrow = SearchLimits {
+            max_file_bytes: A.len() - 1,
+            ..Default::default()
+        };
+        let (_, partial, stats) = refresh(&node, &first, narrow).unwrap();
+        assert_eq!(stats.reused_files, 2);
+        assert_eq!(stats.source_blobs_read, 1);
+        assert_eq!(stats.source_bytes_read, A.len());
+        let report = search(
+            &node,
+            &ordinary(),
+            Default::default(),
+            data::MAX_INDEX_BYTES,
+        )
+        .unwrap();
+        assert!(report.complete);
+        assert!(!report.coverage_complete);
+        assert_eq!(report.omissions.len(), 1);
+        let omitted = &report.omissions[0];
+        assert_eq!(omitted.path, b"src/a.rs");
+        assert_eq!(omitted.reason, data::OmissionReason::FileBytes);
+        assert_eq!(omitted.source_bytes, A.len());
+        assert_eq!(omitted.limit, Some(A.len() - 1));
+        assert_eq!(omitted.byte_offset, None);
+        assert!(
+            report
+                .matches
+                .iter()
+                .all(|row| row.location.path != b"src/a.rs")
+        );
+        let expected = full_candidate(&node, &partial);
+        let (source, restored, stats) = refresh(&node, &partial, Default::default()).unwrap();
+        assert_eq!(restored.generation_id, expected);
+        assert_eq!(stats.reused_files, 2);
+        assert_eq!(stats.source_blobs_read, 1);
+        let complete = assert_live_equivalent(&node, &source);
+        assert!(complete.coverage_complete);
+        assert!(complete.omissions.is_empty());
+        node.shutdown().unwrap();
+    }
 }

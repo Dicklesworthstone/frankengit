@@ -446,6 +446,96 @@ fn shared_limits_truncation_and_cancellation_have_no_publication_side_effects() 
 }
 
 #[test]
+fn omitted_rust_files_make_initial_incomplete_and_share_its_retained_result_budget() {
+    for format in [GitHashAlgorithm::Sha1, GitHashAlgorithm::Sha256] {
+        let root = Scratch::new();
+        let (node, commit) = corpus(&root, format);
+        edit(
+            &node,
+            commit,
+            &[("broken.rs", "fn Broken() {\n")],
+            b"initial-omitted-rust",
+        );
+        let floors = build(&node, true);
+        let q = query(SymbolPolicy::Required, &[b"src".to_vec()]);
+        let limits = InitialLimits::default();
+        let report = initial(&node, &q, &floors, limits).unwrap();
+        assert!(report.content().results.complete);
+        assert!(report.path().results.complete);
+        let SymbolChannel::Available(found) = report.symbols() else {
+            panic!("a partial corpus remains an explicit available channel")
+        };
+        assert!(found.complete);
+        assert!(!found.coverage_complete);
+        assert_eq!(found.omissions.len(), 1);
+        assert_eq!(found.omissions[0].path, b"broken.rs");
+        assert!(!report.complete());
+        let lexical_bytes: usize = [report.content(), report.path()]
+            .into_iter()
+            .flat_map(|channel| &channel.results.hits)
+            .map(|hit| hit.path.len() + hit.spans.len() * 24 + 64)
+            .sum();
+        let symbol_bytes: usize = found
+            .matches
+            .iter()
+            .map(|row| row.location.path.len() + row.name.len() + row.location.excerpt.len() + 96)
+            .sum();
+        assert_eq!(
+            report.result_bytes(),
+            lexical_bytes + symbol_bytes + b"broken.rs".len() + 96
+        );
+        assert!(matches!(
+            initial(
+                &node,
+                &q,
+                &floors,
+                InitialLimits {
+                    max_result_bytes: lexical_bytes + symbol_bytes,
+                    ..limits
+                }
+            ),
+            Err(RetrievalError::Limit("retained result bytes"))
+        ));
+        let exact = InitialLimits {
+            max_result_bytes: report.result_bytes(),
+            ..limits
+        };
+        assert!(initial(&node, &q, &floors, exact).is_ok());
+        let current = node
+            .runtime()
+            .block_on(node.search_source_initial_revalidated_local_in(
+                &node.outbox_delivery_context(),
+                &reference(),
+                None,
+                None,
+                &floors,
+                &q,
+                exact,
+            ))
+            .unwrap();
+        assert!(!current.complete());
+        assert_eq!(current.result_bytes(), report.result_bytes());
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.search_source_initial_revalidated_local_in(
+                    &node.outbox_delivery_context(),
+                    &reference(),
+                    None,
+                    None,
+                    &floors,
+                    &q,
+                    InitialLimits {
+                        max_result_bytes: report.result_bytes() - 1,
+                        ..limits
+                    },
+                )),
+            Err(RetrievalError::Limit("retained result bytes"))
+        ));
+        node.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn missing_lexical_index_never_becomes_a_source_scan_or_implicit_build() {
     let root = Scratch::new();
     let (node, _) = corpus(&root, GitHashAlgorithm::Sha1);

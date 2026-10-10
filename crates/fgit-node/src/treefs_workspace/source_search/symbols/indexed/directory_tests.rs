@@ -213,7 +213,7 @@ fn legacy_build(node: &OneNode) -> GenerationActivation {
         GenerationAuthority::new(&node.authority, node.symbol_head_key(&reference()).unwrap())
             .stage_and_activate_async(
                 request.authority(),
-                &generation_body(&source, manifest.root, None, None).unwrap(),
+                &generation_body(&source, manifest.root, None, None, false).unwrap(),
             )
             .await
             .unwrap()
@@ -304,6 +304,7 @@ fn missing_or_substituted_directory_never_falls_back_in_queries_refresh_or_recon
             root,
             Some(selected_root),
             Some(first.1.generation_id),
+            false,
         )
         .unwrap();
         let activation = node

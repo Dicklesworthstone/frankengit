@@ -211,6 +211,7 @@ mod tests {
                 source: source(format),
                 documents: vec![doc],
                 unsupported: 0,
+                omissions: Vec::new(),
                 non_regular: 0,
             },
             payload,

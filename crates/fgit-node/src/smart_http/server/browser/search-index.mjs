@@ -186,9 +186,13 @@ export function symbolReply(reply, selected, q, scope = null, pin = null, minimu
   return { ...result, ...current, sources };
 }
 function exactSymbolReply(reply, selected, q, scope = null, pin = null, minimum = null) {
-  const source = coordinates(reply, selected, scope, pin);
+  record(reply);
+  const partial = reply.schema_version === 2;
+  if (reply.schema_version !== (partial ? 2 : 1) ||
+      reply.index_profile !== (partial ? 'rust-declaration-omissions-v1' : 'rust-declaration-tables-v1')) fail('Unsupported declaration coverage profile.');
+  const source = coordinates(reply, selected, scope, pin, partial ? 2 : 1);
   if (reply.type !== 'source_search_symbols_index' || reply.profile !== 'rust-declaration-heads-v1' ||
-      reply.index_profile !== 'rust-declaration-tables-v1' || reply.authority_class !== 'deterministic-derived' ||
+      reply.authority_class !== 'deterministic-derived' ||
       reply.compiler_resolved !== false || reply.macro_expansion !== false || reply.cfg_evaluated !== false ||
       reply.source_blobs_read !== 0 || reply.source_bytes_read !== 0 ||
       reply.name_hex !== q.nameHex || reply.match !== q.match || reply.max_work !== q.maxWork || reply.max_matches !== q.maxMatches ||
@@ -246,7 +250,52 @@ function exactSymbolReply(reply, selected, q, scope = null, pin = null, minimum 
     return previous;
   });
   if (blobs.size > stats.tables) fail('Declaration matches exceed the tables read.');
-  return { ...source, query: copy(q), index, stats, hits, complete: reply.complete };
+  const omissions = symbolOmissions(reply, selected.format, partial, stats, blobs);
+  return { ...source, query: copy(q), index, stats, hits, complete: reply.complete,
+    coverageComplete: !partial, omissions };
+}
+
+const omissionReasons = new Set(['file_bytes', 'invalid_utf8', 'unsupported_identifier', 'unterminated_comment',
+  'unterminated_literal', 'unbalanced_delimiter', 'depth_limit', 'name_limit', 'table_bytes']);
+function symbolOmissions(reply, format, partial, stats, matchedBlobs) {
+  const fields = ['coverage_complete', 'coverage_scope', 'omitted_files', 'omitted_source_bytes', 'omissions'];
+  if (!partial) {
+    if (fields.some(field => Object.hasOwn(reply, field))) fail('A v1 declaration result cannot carry omission metadata.');
+    return [];
+  }
+  if (reply.coverage_complete !== false || reply.coverage_scope !== 'recorded-rust-files' ||
+      !Array.isArray(reply.omissions) || !reply.omissions.length || reply.omissions.length > 20_000 ||
+      reply.omitted_files !== reply.omissions.length || stats.files + stats.unsupported + reply.omissions.length > 20_000) {
+    fail('Invalid declaration coverage inventory.');
+  }
+  let previous = '', bytes = 0, retained = 0;
+  const omissions = reply.omissions.map(raw => {
+    keys(raw, ['path_hex', 'blob', 'source_bytes', 'reason', 'byte_offset', 'limit']);
+    pathHex(raw.path_hex);
+    const path = unhex(raw.path_hex, 4096), blob = oid(raw.blob, format);
+    const sourceBytes = integer(raw.source_bytes, 'omitted source bytes', 1, 64 * 1024 * 1024);
+    if (!raw.path_hex.endsWith('2e7273') || path.filter(byte => byte === 47).length >= 64 ||
+        raw.path_hex <= previous || matchedBlobs.has(raw.path_hex) || !omissionReasons.has(raw.reason) || /^0+$/.test(blob)) {
+      fail('Invalid omitted Rust path, identity or reason.');
+    }
+    let offset = null, limit = null;
+    if (raw.reason === 'file_bytes') {
+      limit = integer(raw.limit, 'omitted file limit', 1, FILE_LIMIT);
+      if (raw.byte_offset !== null || sourceBytes <= limit) fail('Invalid file-size omission.');
+    } else if (raw.reason === 'table_bytes') {
+      if (raw.byte_offset !== null || raw.limit !== 1024 * 1024 || sourceBytes > FILE_LIMIT) fail('Invalid table-size omission.');
+      limit = raw.limit;
+    } else {
+      offset = integer(raw.byte_offset, 'omitted source offset', 0, sourceBytes);
+      if (raw.limit !== null || sourceBytes > FILE_LIMIT) fail('Invalid scanner omission.');
+    }
+    bytes += sourceBytes; retained += path.length + 96;
+    if (bytes + stats.sourceBytes > 64 * 1024 * 1024 || retained > 2 * 1024 * 1024) fail('Omission metadata exceeds its corpus budget.');
+    previous = raw.path_hex;
+    return { pathHex: raw.path_hex, blob, sourceBytes, reason: raw.reason, offset, limit };
+  });
+  if (reply.omitted_source_bytes !== bytes) fail('Omitted source-byte accounting changed.');
+  return omissions;
 }
 
 // One native Initial invocation owns the source and generation join. Never
@@ -373,9 +422,14 @@ export function initialReply(reply, selected, q, scope = null, pin = null, minim
           hit.excerptOffset + hit.excerptHex.length / 2 > doc.contentBytes)) fail('Combined declaration disagrees with the indexed file.');
       retained += (hit.pathHex.length + hit.nameHex.length + hit.excerptHex.length) / 2 + 96;
     }
+    for (const omission of symbols.result.omissions) {
+      const doc = documents.get(omission.pathHex);
+      if (doc && (doc.blob !== omission.blob || doc.contentBytes !== omission.sourceBytes)) fail('Combined omission disagrees with the indexed file.');
+      retained += omission.pathHex.length / 2 + 96;
+    }
   }
   const complete = content.complete && path.complete && (symbols.state === 'not_requested' ||
-    (symbols.state === 'available' && symbols.result.complete));
+    (symbols.state === 'available' && symbols.result.complete && symbols.result.coverageComplete));
   if (integer(reply.retained_result_bytes, 'combined retained bytes', 0, q.maxResultBytes) !== retained ||
       integer(reply.completed_payload_bytes_read, 'successful channel payload bytes', 0, q.maxPayloadBytes) !== payload ||
       integer(reply.completed_work_units, 'successful channel work', 0, q.maxWork) !== work || reply.complete !== complete) {
