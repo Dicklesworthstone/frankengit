@@ -25,6 +25,7 @@ fgit-identity.workspace = true
 fgit-node.workspace = true
 fgit-ssh.workspace = true
 fgit-types.workspace = true
+fgit-verified-read.workspace = true
 
 [lints]
 workspace = true

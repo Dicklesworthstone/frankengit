@@ -737,6 +737,7 @@ dependencies = [
  "fgit-node",
  "fgit-ssh",
  "fgit-types",
+ "fgit-verified-read",
 ]
 
 [[package]]
@@ -1114,6 +1115,7 @@ dependencies = [
  "fgit-codec",
  "fgit-codec-verify",
  "fgit-crypto",
+ "fgit-git-object",
  "fgit-types",
 ]
 

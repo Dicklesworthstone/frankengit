@@ -477,6 +477,49 @@ Promotion is by verified identity and canonical retention root, never mutable di
 
 Partial clone/promisor state is a transfer/materialization optimization. Canonical retention remains complete. Probabilistic have summaries may reduce first-round bytes but cannot prove closure; final exact verification requests missing objects.
 
+### 16.4 Ref-anchored complete blob proofs
+
+The `verified-blob` schema 1.0, domain
+`frankengit/verified-blob/v1`, carries one canonical `VerifiedReadEnvelope`
+ref-membership frame, the exact repository byte path, the original commit body,
+the original tree bodies in root-to-parent order, and the complete blob body.
+It uses the canonical codec's byte strings and ordered sequence framing. It
+MUST NOT change the existing verified-read envelope's bytes or identity.
+
+The consumer supplies an independently trusted `RepositoryAuthorityHeadId`,
+ref name, and path. The verifier MUST recompute the response head identity and
+match that exact pin, authenticate the selected configuration and ref inclusion
+under that head, then verify every original Git commit/tree/blob identity in
+the repository's selected SHA-1 or SHA-256 domain. The response cannot supply
+its own trust pin. A valid old proof establishes content at the supplied head;
+it does not establish currentness, authorship, signatures, or authorization.
+
+The selected ref tip MUST be a commit with one unambiguous tree header. Each
+path component MUST select exactly one immediate child in its corresponding
+tree. Intermediate entries MUST be directories. The final entry MUST be a
+regular file, executable file, or symlink blob; symlink bytes remain data and
+MUST NOT be followed or materialized as a host symlink. Directories, gitlinks,
+partial byte ranges, missing or extra tree bodies, and mismatched native hash
+domains cannot satisfy this profile. Repository paths preserve raw bytes and
+MUST NOT be interpreted as host paths or normalized.
+
+The closed v1 limits are 4,096 path bytes, 255 bytes per component, 64
+components, 64 KiB for the nested ref proof, 16 MiB for all commit/tree bodies
+combined, 16 MiB for the complete blob, and 100,000 tree entries combined.
+The complete canonical frame is bounded to 32 MiB plus 128 KiB and MUST be
+fully consumed. Hashing checks caller cancellation at least every 64 KiB;
+bounded parsing checks it before and after. No verified bytes may be returned
+after cancellation or failed verification. Full original trees are carried,
+so Git-path witness size includes all sibling entries in traversed directories.
+
+A server MUST apply the authenticated source-read grant and canonical ref
+visibility policy before disclosure, and construct the complete proof from
+one selected authority basis. A current read with a different expected head
+MUST refuse. Whole-body legacy ref layouts MUST NOT be silently reinterpreted
+as Merkle layouts or disclosed as a fallback. Selecting an existing supported
+Merkle layout during new repository initialization is distinct from migrating
+an existing repository.
+
 ## 17. Object fabric and segmentation
 
 Canonical Git objects preserve native OIDs and exact logical bytes. Internal envelopes may add strong digest/type/length. Object-aware segments provide:
