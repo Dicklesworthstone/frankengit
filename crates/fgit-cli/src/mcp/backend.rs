@@ -10,6 +10,7 @@ mod merge_writes;
 mod mutations;
 mod outcomes;
 pub(super) mod protection;
+mod pull_comments;
 mod pull_writes;
 mod pulls;
 mod review;
@@ -111,6 +112,7 @@ impl ReadTools for NodeTools {
         if self.options.pulls {
             tools.extend(pulls::tools());
             tools.push(checks::tool());
+            tools.push(pull_comments::read_tool());
         }
         if self.options.source {
             tools.extend(source::tools());
@@ -122,6 +124,7 @@ impl ReadTools for NodeTools {
         }
         if self.options.writes.pulls {
             tools.extend(pull_writes::tools());
+            tools.push(pull_comments::write_tool());
         }
         if self.options.writes.source {
             tools.extend(source_writes::tools());
@@ -147,6 +150,7 @@ impl ReadTools for NodeTools {
     fn is_mutation(&self, name: &str) -> bool {
         (self.options.writes.issues && issue_writes::is_tool(name))
             || (self.options.writes.pulls && pull_writes::is_tool(name))
+            || (self.options.writes.pulls && name == pull_comments::WRITE)
             || (self.options.writes.source && source_writes::is_tool(name))
             || (self.options.writes.reviews && name == review_writes::NAME)
             || (self.options.writes.merges && merge_writes::is_tool(name))
@@ -169,6 +173,9 @@ impl ReadTools for NodeTools {
         if self.options.writes.pulls && pull_writes::is_tool(name) {
             return pull_writes::call(self, name, args);
         }
+        if self.options.writes.pulls && name == pull_comments::WRITE {
+            return pull_comments::append(self, args);
+        }
         if self.options.writes.source && source_writes::is_tool(name) {
             return source_writes::call(self, name, args);
         }
@@ -190,6 +197,9 @@ impl ReadTools for NodeTools {
         }
         if self.options.pulls && name == checks::NAME {
             return checks::call(self, args);
+        }
+        if self.options.pulls && name == pull_comments::READ {
+            return pull_comments::read(self, args);
         }
         if self.options.source
             && matches!(name, "frankengit_source_tree" | "frankengit_source_blob")

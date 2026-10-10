@@ -197,6 +197,11 @@ pub enum ForgeEventKind {
         check: ForgeEntityId,
         source: RefName,
     },
+    /// Append-only PR discussion in a separate stream. The accepted event
+    /// batch binds its actor and text; this marker grants no ref effect.
+    PullRequestCommented {
+        conversation: ForgeEntityId,
+    },
 }
 
 impl ForgeEventKind {
@@ -211,7 +216,8 @@ impl ForgeEventKind {
             | Self::PullRequestReviewed { .. }
             | Self::IssueChanged { .. }
             | Self::ReviewProtectionChanged { .. }
-            | Self::WorkflowCheckObserved { .. } => None,
+            | Self::WorkflowCheckObserved { .. }
+            | Self::PullRequestCommented { .. } => None,
         }
     }
 
@@ -227,6 +233,7 @@ impl ForgeEventKind {
             Self::IssueChanged { issue } => *issue,
             Self::ReviewProtectionChanged { policy } => *policy,
             Self::WorkflowCheckObserved { check, .. } => *check,
+            Self::PullRequestCommented { conversation } => *conversation,
         }
     }
 }

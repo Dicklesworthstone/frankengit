@@ -7,6 +7,9 @@ use std::io::{self, BufRead, Write};
 pub const VERSION: &str = "2025-06-18";
 pub const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 pub const MAX_TOOL_RESULT: usize = 2 * 1024 * 1024;
+// The complete native tool registry includes independent conversation reads
+// and appends. Discovery remains finite and subject to MAX_RESPONSE.
+const MAX_TOOLS: usize = 64;
 
 pub struct Tool {
     pub name: &'static str,
@@ -84,7 +87,7 @@ impl Server {
         let tools = backend.tools();
         let mut names = BTreeSet::new();
         if tools.is_empty()
-            || tools.len() > 32
+            || tools.len() > MAX_TOOLS
             || tools.iter().any(|tool| {
                 tool.name.is_empty() || !names.insert(tool.name) || tool.schema.object().is_none()
             })

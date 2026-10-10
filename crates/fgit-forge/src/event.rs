@@ -17,6 +17,7 @@ use crate::aggregate::{
 pub mod issue;
 pub mod protection;
 pub mod pull_request;
+pub mod pull_request_comment;
 pub mod queue;
 pub mod review;
 pub mod workflow_check;
@@ -36,6 +37,7 @@ const KIND_NATIVE_ISSUE_CHANGED: u32 = 8;
 const KIND_REVIEW_PROTECTION_CHANGED: u32 = 9;
 const KIND_NATIVE_MERGE_QUEUE_CHANGED: u32 = 10;
 const KIND_WORKFLOW_CHECK_OBSERVED: u32 = 11;
+const KIND_NATIVE_PULL_REQUEST_COMMENTED: u32 = 12;
 
 /// Complete native coordinates of one merge. The resulting target is always
 /// `merge_commit`; there is no independently writable, contradictory after-tip.
@@ -151,6 +153,8 @@ pub enum ForgeEventPayload {
     MergeQueueChangedNative(NativeQueueEvent),
     /// Immutable reported job evidence, never a successful protected check.
     WorkflowCheckObservedNative(workflow_check::NativeWorkflowCheck),
+    /// Append-only PR conversation text in its independent stream, wire kind 12.
+    PullRequestCommentedNative(pull_request_comment::NativePullRequestComment),
 }
 
 impl ForgeEventPayload {
@@ -168,6 +172,7 @@ impl ForgeEventPayload {
             Self::ReviewProtectionChanged(_) => KIND_REVIEW_PROTECTION_CHANGED,
             Self::MergeQueueChangedNative(_) => KIND_NATIVE_MERGE_QUEUE_CHANGED,
             Self::WorkflowCheckObservedNative(_) => KIND_WORKFLOW_CHECK_OBSERVED,
+            Self::PullRequestCommentedNative(_) => KIND_NATIVE_PULL_REQUEST_COMMENTED,
         }
     }
 }
@@ -181,6 +186,11 @@ pub struct ForgeEvent {
 
 fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
     match aggregate {
+        AggregateId::PullRequestConversation(number) => {
+            out.write_scalar(0_u64);
+            out.write_scalar(crate::aggregate::AGGREGATE_KIND_PULL_REQUEST_CONVERSATION);
+            out.write_scalar(number.get());
+        }
         AggregateId::WorkflowCheck(id) => {
             out.write_scalar(0_u64);
             out.write_scalar(crate::aggregate::AGGREGATE_KIND_WORKFLOW_CHECK);
@@ -231,6 +241,12 @@ fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> 
     let kind_offset = input.offset();
     let kind = input.read_scalar::<u32>("aggregate.kind")?;
     match kind {
+        crate::aggregate::AGGREGATE_KIND_PULL_REQUEST_CONVERSATION => {
+            Ok(AggregateId::PullRequestConversation(counter(
+                "aggregate.conversation",
+                input.read_scalar::<u64>("aggregate.conversation")?,
+            )?))
+        }
         crate::aggregate::AGGREGATE_KIND_WORKFLOW_CHECK => {
             let mut bytes = [0_u8; 32];
             bytes.copy_from_slice(input.take("aggregate.workflow_check", 32)?);
@@ -338,6 +354,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
     validate_issue(event)?;
     validate_queue(event)?;
     workflow_check::validate_event(event)?;
+    pull_request_comment::validate_event(event)?;
     if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
         != matches!(
             event.payload,
@@ -394,6 +411,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
         }
         ForgeEventPayload::MergeQueueChangedNative(queue_event) => queue_event.write(out)?,
         ForgeEventPayload::WorkflowCheckObservedNative(change) => change.write(out)?,
+        ForgeEventPayload::PullRequestCommentedNative(comment) => comment.write(out)?,
     }
     Ok(())
 }
@@ -443,6 +461,9 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         KIND_WORKFLOW_CHECK_OBSERVED => ForgeEventPayload::WorkflowCheckObservedNative(
             workflow_check::NativeWorkflowCheck::read(input)?,
         ),
+        KIND_NATIVE_PULL_REQUEST_COMMENTED => ForgeEventPayload::PullRequestCommentedNative(
+            pull_request_comment::NativePullRequestComment::read(input)?,
+        ),
         KIND_NATIVE_MERGE_QUEUE_CHANGED => {
             ForgeEventPayload::MergeQueueChangedNative(NativeQueueEvent::read(input)?)
         }
@@ -462,6 +483,7 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
     validate_issue(&event)?;
     validate_queue(&event)?;
     workflow_check::validate_event(&event)?;
+    pull_request_comment::validate_event(&event)?;
     if matches!(event.aggregate, AggregateId::PullRequestReview { .. })
         != matches!(
             event.payload,

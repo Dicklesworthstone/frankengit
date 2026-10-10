@@ -55,6 +55,9 @@ pub use treefs_workspace::{PatchPathReceipt, WorkspacePatchCandidate};
 pub use treefs_workspace::{
     PullRequestChecksPage, PullRequestChecksReadRefusal, WorkflowCheckSummary,
 };
+pub use treefs_workspace::{
+    PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
+};
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, HeadInit, HeadKey,

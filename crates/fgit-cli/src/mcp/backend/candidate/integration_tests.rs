@@ -123,7 +123,7 @@ fn candidate_fits_the_existing_full_registry_without_gaining_mutation_annotation
     backend.options.outcomes = true;
     backend.options.principal = Some(sponsor());
     backend.options.validate_access().unwrap();
-    assert_eq!(backend.tools().len(), 32);
+    assert_eq!(backend.tools().len(), 34);
     let mut server = server(&mut backend);
     let tools = server.receive(&mut backend, br#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
     let Value::Array(tools) = &tools.object().unwrap()["result"].object().unwrap()["tools"] else { unreachable!() };

@@ -3,8 +3,12 @@
 //! use the node's existing exact-basis projection and verified object fabric.
 
 mod checks;
+mod conversation;
 mod fast_forward;
 pub use checks::{PullRequestChecksPage, PullRequestChecksReadRefusal, WorkflowCheckSummary};
+pub use conversation::{
+    PullRequestCommentView, PullRequestCommentsPage, PullRequestCommentsReadRefusal,
+};
 mod preparation;
 #[path = "reviews.rs"]
 mod reviews;

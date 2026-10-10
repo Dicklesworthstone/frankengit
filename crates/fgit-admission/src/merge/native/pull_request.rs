@@ -2,6 +2,7 @@
 //! This owns no mutable PR table: event bodies, forge positions and deliveries
 //! are selected together by the same repository authority head as Git refs.
 
+pub mod comments;
 #[path = "reviews.rs"]
 pub mod reviews;
 

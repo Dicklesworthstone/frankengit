@@ -540,6 +540,7 @@ const fn named_ref(intent: &Intent) -> Option<&RefName> {
             ForgeEventKind::WorkflowCheckObserved { source, .. } => Some(source),
             ForgeEventKind::PullRequestClosed { .. }
             | ForgeEventKind::IssueChanged { .. }
+            | ForgeEventKind::PullRequestCommented { .. }
             | ForgeEventKind::ReviewProtectionChanged { .. } => None,
         },
         Intent::Retention(_) | Intent::Outbox(_) => None,
@@ -1468,5 +1469,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod pull_request_comment_tests;
 #[cfg(test)]
 mod workflow_check_tests;

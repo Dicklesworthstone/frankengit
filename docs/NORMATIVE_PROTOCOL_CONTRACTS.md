@@ -532,6 +532,33 @@ Read models, counters, notifications, web views, search, and graphs are projecti
 
 Outbox delivery is at least once unless a downstream protocol proves stronger semantics. Stable delivery IDs and obligations prevent canonical event duplication. A failed webhook never rolls back an RCR.
 
+### 20.1 Native PR conversation streams
+
+Append-only PR conversation comments advance `PullRequestConversation(number)`,
+independently of PR metadata and reviewer streams. A comment cannot change a PR's
+content version, invalidate a review, move a Git ref, or change the policy epoch.
+Admission resolves the native PR at the exact publication basis and checks both
+branches against current disclosure policy; closed and merged native PRs remain
+valid conversation subjects. An absent or legacy-only PR cannot be invented by
+posting a comment. Exact discussion versions, the authenticated actor, PR number,
+and original text form the sealed command; retries never refresh these values.
+
+The canonical owner is `fgit-forge/src/event/pull_request_comment.rs`. The new
+required aggregate kind is **8** after the existing zero escape, followed by the
+positive PR number; its stream label is `conversation/N`. Required event kind
+**12** carries the exact 16-byte actor and bounded UTF-8 body. The reference trace
+and transaction normal form append marker **9**, `PullRequestCommented`, naming
+the conversation entity with no required ref effect. Existing tags and canonical
+bytes retain their meanings and identities. Earlier readers refuse unfamiliar
+required tags rather than silently treating comments as PR lifecycle or review
+events. There is no reinterpretation of historical bytes or implicit migration.
+
+Conversation projections carry the selected authority head, discussion high-water
+version and exact version cursor. Missing accepted history, conflicting events at
+one version, or resource/cancellation failure cannot become a complete empty or
+partial timeline. Source-line anchors, comment editing/deletion, thread resolution
+and comment federation are outside this append-only event type.
+
 ## 21. Graph and search generations
 
 Graph/search generations follow anti-rollback activation and `GRAPH_INTELLIGENCE_ARCHITECTURE.md`.

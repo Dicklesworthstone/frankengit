@@ -4,6 +4,7 @@
 
 mod checks;
 mod collaboration;
+mod conversation;
 mod diff;
 mod fast_forward;
 mod inspection;
@@ -59,6 +60,7 @@ use request::Operation;
 pub(super) enum Request<'a> {
     Metadata(request::Request<'a>),
     Collaboration(collaboration::Request<'a>),
+    Conversation(conversation::Request<'a>),
     Preparation(preparation::Request<'a>),
     Inspection(inspection::Request<'a>),
     Diff(diff::Request<'a>),
@@ -67,6 +69,9 @@ pub(super) enum Request<'a> {
 }
 impl<'a> Request<'a> {
     pub(super) fn parse(envelope: &Envelope<'a>) -> Result<Option<Self>, ApiError> {
+        if let Some(request) = conversation::Request::parse(envelope)? {
+            return Ok(Some(Self::Conversation(request)));
+        }
         if let Some(request) = fast_forward::Request::parse(envelope)? {
             return Ok(Some(Self::FastForward(request)));
         }
@@ -92,6 +97,7 @@ impl<'a> Request<'a> {
             Self::FastForward(_) => true,
             Self::Metadata(request) => request.is_mutation(),
             Self::Collaboration(request) => request.is_mutation(),
+            Self::Conversation(request) => request.is_mutation(),
             Self::Preparation(_) | Self::Inspection(_) | Self::Diff(_) | Self::Checks(_) => false,
         }
     }
@@ -126,6 +132,9 @@ pub(super) fn authenticate(
     profile: &Profile,
 ) -> Result<LoopbackReceiveSession, ApiError> {
     let request = match request {
+        Request::Conversation(request) => {
+            return conversation::authenticate(request, envelope, raw_head, profile);
+        }
         Request::Checks(request) => {
             return checks::authenticate(request, envelope, raw_head, profile);
         }
@@ -175,6 +184,16 @@ pub(super) fn execute(
     maximum_response: u64,
 ) -> Result<Reply, ApiError> {
     match request {
+        Request::Conversation(request) => conversation::execute(
+            node,
+            request,
+            session,
+            framing,
+            reader,
+            limits,
+            maximum_response,
+        )
+        .map(Reply::Json),
         Request::Checks(request) => {
             checks::execute(node, request, session, maximum_response).map(Reply::Json)
         }

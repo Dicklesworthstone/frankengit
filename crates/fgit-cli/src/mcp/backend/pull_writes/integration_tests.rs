@@ -339,9 +339,9 @@ fn pull_write_grants_do_not_imply_reads_issues_or_recovery_and_descriptors_are_m
     let mut options = fixture.options.clone();
     options.outcomes = false;
     let mut backend = NodeTools::open(options).unwrap();
-    assert_eq!(backend.tools().len(), 3);
+    assert_eq!(backend.tools().len(), 4);
     for tool in backend.tools() {
-        assert!(is_tool(tool.name));
+        assert!(is_tool(tool.name) || tool.name == super::super::pull_comments::WRITE);
         assert!(backend.is_mutation(tool.name));
     }
     let mut server = start(&mut backend);

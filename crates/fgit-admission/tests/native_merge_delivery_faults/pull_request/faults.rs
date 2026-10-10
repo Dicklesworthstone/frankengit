@@ -4,6 +4,9 @@
 //! The projection reuses this harness's verified native object graph; it does
 //! not exercise the production node's selected-closure adapter.
 
+#[path = "comments.rs"]
+mod comments;
+
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::*;
