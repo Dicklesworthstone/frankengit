@@ -154,10 +154,8 @@ where
     }
 }
 
-/// Read the exact event selected for one aggregate. Both callers first resolve
-/// the full delivery state, whose shared reader validates the batch's entire
-/// range. The repeat read here verifies the same immutable event commitment;
-/// no private duplicate of that reader's range validator is maintained.
+/// Read the exact event selected for one aggregate, validating its entire
+/// selected range through the same validator used by delivery processing.
 async fn frontier_event<S: AsyncAuthorityStore + ?Sized>(
     store: &S,
     cx: &S::Context,
@@ -176,6 +174,7 @@ async fn frontier_event<S: AsyncAuthorityStore + ?Sized>(
         entry.event_batch_root(),
     )
     .await?;
+    delivery::validate_position_batch(entry, &events)?;
     let event = events
         .events
         .into_iter()
@@ -238,7 +237,7 @@ where
         return Err(unavailable(RefusalCode::ResourceBudgetExceeded));
     }
     checkpoint(cancelled)?;
-    let state = delivery::read_in(store, cx, basis, cancelled).await?;
+    let state = delivery::read_roots_in(store, cx, basis, cancelled).await?;
     let mut numbers = BTreeSet::new();
     for entry in state.forge.entries() {
         checkpoint(cancelled)?;
@@ -328,6 +327,7 @@ where
                 obligation.payload_root(),
             )
             .await?;
+            delivery::validate_payload_positions(&state.forge, &batch)?;
             events_read = events_read
                 .checked_add(batch.events.len())
                 .filter(|count| *count <= MAX_READ_EVENTS)

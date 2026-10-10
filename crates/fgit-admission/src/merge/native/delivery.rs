@@ -79,6 +79,38 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    let state = read_roots_in(store, cx, basis, cancelled).await?;
+    let repository = basis.body().repository_id;
+    for position in state.forge.entries() {
+        checkpoint(cancelled)?;
+        let events =
+            storage::read_events(store, cx, repository, position.event_batch_root()).await?;
+        validate_position_batch(position, &events)?;
+    }
+    for entry in state.outbox.entries() {
+        read_effect_in(store, cx, repository, entry, cancelled).await?;
+        checkpoint(cancelled)?;
+        let payload = storage::read_events(store, cx, repository, entry.payload_root()).await?;
+        validate_payload_positions(&state.forge, &payload)?;
+    }
+    checkpoint(cancelled)?;
+    Ok(state)
+}
+
+/// Authenticate the two maps selected by one head without resolving delivery
+/// effects or unrelated frontier events. Read models must verify the event
+/// commitments and position ranges they consume. This is not a delivery or
+/// publication preflight: those callers retain the complete `read_in` check.
+pub(super) async fn read_roots_in<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    cancelled: &C,
+) -> Result<DeliveryState, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     checkpoint(cancelled)?;
     let repository = basis.body().repository_id;
     let forge = storage::load_forge_positions(store, cx, basis).await?;
@@ -108,21 +140,8 @@ where
                 .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
         }
     };
-    let state = DeliveryState { forge, outbox };
-    for position in state.forge.entries() {
-        checkpoint(cancelled)?;
-        let events =
-            storage::read_events(store, cx, repository, position.event_batch_root()).await?;
-        validate_position_batch(position, &events)?;
-    }
-    for entry in state.outbox.entries() {
-        read_effect_in(store, cx, repository, entry, cancelled).await?;
-        checkpoint(cancelled)?;
-        let payload = storage::read_events(store, cx, repository, entry.payload_root()).await?;
-        validate_payload_positions(&state.forge, &payload)?;
-    }
     checkpoint(cancelled)?;
-    Ok(state)
+    Ok(DeliveryState { forge, outbox })
 }
 
 async fn verify_legacy_empty_outbox<S, C>(
@@ -462,7 +481,7 @@ where
     checkpoint(cancelled)
 }
 
-fn validate_payload_positions(
+pub(super) fn validate_payload_positions(
     forge: &CanonicalForgePositionState,
     payload: &ForgeEventBatch,
 ) -> Result<(), AdmissionError> {

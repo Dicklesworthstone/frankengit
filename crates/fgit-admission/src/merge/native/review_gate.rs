@@ -2,7 +2,7 @@
 //! Requirements are immutable request semantics, not an approval boolean supplied
 //! by the CLI. Repository-wide protected-ref policy remains a separate owner.
 use super::super::super::{
-    NativeMergeIntent, NativeMergeProjection, admit_merge_attempt_async, delivery, unavailable,
+    NativeMergeIntent, NativeMergeProjection, admit_merge_attempt_async, storage, unavailable,
 };
 use crate::merge::NativeMergeBasis;
 use crate::{
@@ -313,15 +313,19 @@ where
             RefusalCode::ProtectedRefTransitionDenied,
         ));
     }
-    let state = delivery::read_in(store, cx, basis, cancelled)
+    // The exact authenticated frontier selects each named review. Replaying
+    // every unrelated delivery cannot strengthen this candidate precondition;
+    // review_frontier validates the selected batch's complete position range.
+    let positions = storage::load_forge_positions(store, cx, basis)
         .await
         .map_err(infrastructure)?;
+    super::super::checkpoint(cancelled).map_err(infrastructure)?;
     for reviewer in &required.reviewers {
         super::super::checkpoint(cancelled).map_err(infrastructure)?;
         let event = super::review_frontier(
             store,
             cx,
-            &state.forge,
+            &positions,
             AggregateId::PullRequestReview {
                 pull_request: number,
                 reviewer: *reviewer,
@@ -330,6 +334,7 @@ where
         .await
         .map_err(infrastructure)?
         .ok_or(ProjectionFailure::Refuse(RefusalCode::EvidenceMissing))?;
+        super::super::checkpoint(cancelled).map_err(infrastructure)?;
         let ForgeEventPayload::PullRequestReviewedNative(review) = event.payload else {
             return Err(ProjectionFailure::Unavailable(RefusalCode::EvidenceInvalid));
         };

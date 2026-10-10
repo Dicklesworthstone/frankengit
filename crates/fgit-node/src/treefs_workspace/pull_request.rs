@@ -138,13 +138,13 @@ impl OneNode {
         }
         admits_read(self.cell_state(), ReadMode::Current).map_err(PullRequestReadRefusal::Cell)?;
         let current = self
-            .materialize_admission_in(request)
+            .event_read_basis_in(request, None)
             .await
-            .map_err(|error| PullRequestReadRefusal::Authority(Box::new(error)))?;
+            .map_err(|error| PullRequestReadRefusal::Selection(Box::new(error)))?;
         let selected = snapshots::select(
             &self.authority,
             request.authority(),
-            current.basis(),
+            &current.basis,
             expected_head,
             &|| !super::workspace_request_live(request),
         )
@@ -158,7 +158,7 @@ impl OneNode {
         let visible = |source: &fgit_types::RefName, target: &fgit_types::RefName| {
             [source, target].iter().all(|reference| {
                 !visibility.hides(reference.as_bytes())
-                    && !current.snapshot().hidden_refs.hides(reference.as_bytes())
+                    && !current.hidden_refs.hides(reference.as_bytes())
             })
         };
         pull_request::read_page_at(
@@ -181,6 +181,7 @@ pub enum PullRequestReadRefusal {
     /// The requested snapshot is not an available ancestor in this read epoch.
     SnapshotMoved,
     Cell(CellRefusal),
+    Selection(Box<super::events::ForgeEventReadRefusal>),
     Authority(Box<AdmissionMaterializationRefusal>),
     Admission(Box<AdmissionError>),
 }

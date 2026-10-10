@@ -643,3 +643,6 @@ fn closed_pr_cannot_authorize_a_merge_and_serving_gate_precedes_mutation() {
 
 #[path = "snapshot_tests.rs"]
 mod snapshot_tests;
+
+#[path = "metadata_read_tests.rs"]
+mod metadata_read_tests;

@@ -108,13 +108,13 @@ impl OneNode {
         validate_page(after, limit, expected_head)?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(IssueReadRefusal::Cell)?;
         let current = self
-            .materialize_admission_in(request)
+            .event_read_basis_in(request, None)
             .await
-            .map_err(|source| IssueReadRefusal::Authority(Box::new(source)))?;
+            .map_err(|source| IssueReadRefusal::Selection(Box::new(source)))?;
         let selected = snapshots::select(
             &self.authority,
             request.authority(),
-            current.basis(),
+            &current.basis,
             expected_head,
             &|| !super::workspace_request_live(request),
         )
@@ -145,13 +145,13 @@ impl OneNode {
         validate_page(after_version, limit, expected_head)?;
         admits_read(self.cell_state(), ReadMode::Current).map_err(IssueReadRefusal::Cell)?;
         let current = self
-            .materialize_admission_in(request)
+            .event_read_basis_in(request, None)
             .await
-            .map_err(|source| IssueReadRefusal::Authority(Box::new(source)))?;
+            .map_err(|source| IssueReadRefusal::Selection(Box::new(source)))?;
         let selected = snapshots::select(
             &self.authority,
             request.authority(),
-            current.basis(),
+            &current.basis,
             expected_head,
             &|| !super::workspace_request_live(request),
         )
@@ -190,6 +190,7 @@ pub enum IssueReadRefusal {
     /// Ordinary intervening publications alone no longer cause this refusal.
     SnapshotMoved,
     Cell(CellRefusal),
+    Selection(Box<super::events::ForgeEventReadRefusal>),
     Authority(Box<AdmissionMaterializationRefusal>),
     Admission(Box<AdmissionError>),
 }

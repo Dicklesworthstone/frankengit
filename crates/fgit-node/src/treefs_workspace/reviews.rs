@@ -143,13 +143,13 @@ impl OneNode {
         admits_read(self.cell_state(), ReadMode::Current)
             .map_err(|error| ReviewReadRefusal::Read(error.to_string()))?;
         let current = self
-            .materialize_admission_in(request)
+            .event_read_basis_in(request, None)
             .await
             .map_err(|error| ReviewReadRefusal::Read(error.to_string()))?;
         let selected = snapshots::select(
             &self.authority,
             request.authority(),
-            current.basis(),
+            &current.basis,
             expected_head,
             &|| !workspace_request_live(request),
         )
@@ -158,32 +158,23 @@ impl OneNode {
             snapshots::SnapshotReadRefusal::Unavailable => ReviewReadRefusal::SnapshotMoved,
             snapshots::SnapshotReadRefusal::Admission(error) => ReviewReadRefusal::Admission(error),
         })?;
-        let historical_refs = if selected.id() == current.basis().id() {
-            None
-        } else {
-            Some(
-                crate::read_historical_ref_state_in(
-                    &self.authority,
-                    request.authority(),
-                    self.repository_id,
-                    selected.body(),
-                )
-                .await
-                .map_err(|error| ReviewReadRefusal::Read(error.to_string()))?,
-            )
-        };
+        let ref_state = crate::read_historical_ref_state_in(
+            &self.authority,
+            request.authority(),
+            self.repository_id,
+            selected.body(),
+        )
+        .await
+        .map_err(|error| ReviewReadRefusal::Read(error.to_string()))?;
         if !workspace_request_live(request) {
             return Err(ReviewReadRefusal::Admission(Box::new(
                 AdmissionError::AsyncProjectionUnavailable(RefusalCode::CancellationInProgress),
             )));
         }
-        let refs = historical_refs
-            .as_ref()
-            .map_or(&current.snapshot().refs, |state| state.refs());
+        let refs = ref_state.refs();
         let visible = |source: &fgit_types::RefName, target: &fgit_types::RefName| {
             [source, target].iter().all(|name| {
-                !visibility.hides(name.as_bytes())
-                    && !current.snapshot().hidden_refs.hides(name.as_bytes())
+                !visibility.hides(name.as_bytes()) && !current.hidden_refs.hides(name.as_bytes())
             })
         };
         reviews::read_page_at(

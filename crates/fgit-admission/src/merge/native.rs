@@ -30,6 +30,8 @@ pub mod feed;
 pub mod history;
 pub mod issues;
 mod metadata;
+#[cfg(test)]
+mod metadata_read_tests;
 pub mod objects;
 pub mod prepare;
 pub mod progress;

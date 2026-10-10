@@ -1,9 +1,10 @@
 # Page-scoped forge replay
 
 Owning bridge work: `frankengit-root-doctrine-x2mv.4.7` (the repository-wide
-4,096-event read cliff). Consumers are the existing node, HTTP and CLI issue/PR
-read surfaces and issue-command admission. This documents an implementation
-slice, not a persisted projection service or completion of the bridge bead.
+4,096-event read cliff). Consumers are the existing node, HTTP and CLI issue/PR/
+review read surfaces, named-reviewer gates and issue-command admission. This
+documents an implementation slice, not a persisted projection service or
+completion of the bridge bead.
 
 ## Issue pages, history and writes
 
@@ -25,14 +26,16 @@ missing predecessors, missing selected bodies, and invalid final versions still
 refuse. All limits are checked with overflow-safe arithmetic. The canonical v1
 forge/outbox map limits remain 16,384 entries each; no schema or identity changes.
 
-This is not constant-time lookup or unbounded history. The existing delivery
-reader still authenticates the complete selected delivery state and its retained
-dependencies before replay. That verification work is additional to the replay
-budget. Replay still scans retained payload roots to find selected events; it
-cannot trust a local index or object presence as authority. A selected issue or
-page beyond its envelope refuses, and a missing stream is not invented from
-unpublished objects. Independent full-history consistency auditing is not the
-same operation as reading one selected page.
+This is not constant-time lookup or unbounded history. Projection reads
+authenticate the forge and outbox maps selected by the head, then validate the
+event commitments and complete frontier ranges they consume. They do not load
+delivery effects or receipts, or validate unrelated frontier batches. Full
+delivery and publication preflight retain those checks. Replay still scans
+retained payload roots to find selected events; it cannot trust a local index or
+object presence as authority. Missing or corrupt scanned payloads still refuse,
+even if the payload would have contained only unrelated events. A selected issue
+or page beyond its envelope refuses, and a missing stream is not invented from
+unpublished objects.
 
 ## Pull-request pages
 
@@ -58,6 +61,37 @@ supply missing provenance. The existing explicitly merge-only receipt profile
 remains distinct and does not invent metadata. Cancellation is checked within
 batch replay as well as at the existing read boundaries.
 
+## Review pages and required reviewers
+
+Review enumeration uses the authenticated forge map's existing canonical bound;
+it no longer imposes a separate 4,096-entry ceiling on the repository. After the
+PR metadata lookup, a review page reads only the selected reviewer frontiers.
+The named-reviewer gate likewise reads exactly the required reviewers, with no
+second delivery replay. Each selected batch must contain the entire range
+claimed by its frontier, including the exact predecessor and successor versions.
+A matching final event alone is insufficient. Cancellation after the final
+selected read still prevents a successful partial response or approval.
+
+Numeric PR ordering, reviewer-ID ordering, page limits, freshness, opener
+exclusion and source-only vote separation are unchanged. The canonical map's
+16,384-entry ceiling still applies; this slice does not compact retained outbox
+entries or increase publication capacity.
+
+## Node selection and retained snapshots
+
+Node issue, PR, review and workflow-check reads share the forge event feed's
+lightweight authenticated head selector. It authenticates the head receipt,
+repository/incarnation, native object format and current hidden-ref policy;
+source-object materialization and retention/delivery projections are not
+prerequisites for a metadata page. Missing or corrupt disclosure policy still
+refuses.
+
+An explicit snapshot continues through the existing retained-snapshot selector.
+Review and workflow-check freshness use refs committed by that selected head,
+while current hidden-ref policy controls disclosure. A historic token cannot
+restore access to a branch that is hidden now. Mutation, delivery settlement and
+recovery paths retain their complete admission materialization.
+
 ## Verification boundary
 
 `cargo test -p fgit-admission merge::native::issues::replay_tests` exercises the
@@ -72,6 +106,25 @@ long SHA-1/SHA-256 PR histories, superseded and unrelated large descriptions,
 shared-payload fan-out, merge metadata, numeric/visibility paging, unselected
 opening objects, conflicting versions, cancellation and invalid limits.
 
-The implementation session has no Rust toolchain: these tests were added, not
-executed. Source/blob identity and patch whitespace checks do not establish a
-Rust compilation, test, formatting or release gate pass.
+`cargo test -p fgit-admission --lib merge::native::metadata_read_tests` exercises
+the real projection readers through the asynchronous reference authority store:
+effect/receipt isolation, missing/corrupt/wrongly committed maps and payloads,
+selected versus unselected malformed ranges, cancellation at every immutable
+read, numeric pagination, visibility and unchanged heads in both native hash
+domains. Full delivery refuses the same incomplete effects until they are
+staged. These genesis-seeded fixtures are not durability or restart evidence.
+
+`cargo test -p fgit-admission --lib merge::native::pull_request::reviews::read_tests`
+covers a frontier with 4,097 unrelated streams, exact selected-review read counts,
+paging and freshness, complete-range validation, missing/corrupt bodies and
+cancellation after the final read.
+
+The native-node regression
+`native_current_and_retained_metadata_survive_an_unavailable_admission_cache`
+publishes real PR/issue history, poisons only the derived admission cache, and
+checks current/retained pages, caller visibility, cancellation, unchanged
+authority and reopen behavior. Full materialization continues to refuse the
+poisoned cache. This is separate from the reference authority fault fixtures.
+
+Focused test results do not establish a complete workspace or release gate,
+50,000-event publication capacity, or history-independent lookup cost.

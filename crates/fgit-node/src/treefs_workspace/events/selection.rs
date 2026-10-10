@@ -1,4 +1,4 @@
-//! Event reads need a head and disclosure policy, not source/outbox projections.
+//! Forge reads need a head and disclosure policy, not source/outbox projections.
 //! All immutable coordinates below descend from ONE authenticated head read.
 
 use super::{ForgeEventReadRefusal, workspace_request_live};
@@ -9,12 +9,14 @@ use fgit_authority::{
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_types::cell::{ReadMode, admits_read};
-use fgit_types::{GitHashAlgorithm, RepositoryAuthorityHeadId, RepositoryId, RepositoryIncarnationId};
+use fgit_types::{
+    GitHashAlgorithm, RepositoryAuthorityHeadId, RepositoryId, RepositoryIncarnationId,
+};
 use fgit_wire::{WireLimits, visibility::RefVisibility};
 
-pub(super) struct EventReadBasis {
-    pub(super) basis: PublicationBasis,
-    pub(super) hidden_refs: RefVisibility,
+pub(in crate::treefs_workspace) struct EventReadBasis {
+    pub(in crate::treefs_workspace) basis: PublicationBasis,
+    pub(in crate::treefs_workspace) hidden_refs: RefVisibility,
 }
 
 #[derive(Clone, Copy)]
@@ -25,7 +27,7 @@ struct Binding {
 }
 
 impl OneNode {
-    pub(super) async fn event_read_basis_in(
+    pub(in crate::treefs_workspace) async fn event_read_basis_in(
         &self,
         request: &NodeRequestContext,
         expected_head: Option<RepositoryAuthorityHeadId>,
@@ -54,7 +56,11 @@ fn boundary(error: impl Into<OutcomeFailure>) -> ForgeEventReadRefusal {
 }
 
 fn checkpoint(cancelled: &impl Fn() -> bool) -> Result<(), ForgeEventReadRefusal> {
-    if cancelled() { Err(ForgeEventReadRefusal::Cancelled) } else { Ok(()) }
+    if cancelled() {
+        Err(ForgeEventReadRefusal::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 /// The storage boundary is generic only to run its exact I/O through the
@@ -76,9 +82,14 @@ where
     let read = store.read_head(cx, key).await.map_err(boundary)?;
     checkpoint(cancelled)?;
     let HeadRead::Present(receipt) = read else {
-        return Err(boundary(OutcomeFailure::StreamBodyMissing { link: "authority head" }));
+        return Err(boundary(OutcomeFailure::StreamBodyMissing {
+            link: "authority head",
+        }));
     };
-    let authenticated = store.authenticate_head_receipt(cx, &receipt).await.map_err(boundary)?;
+    let authenticated = store
+        .authenticate_head_receipt(cx, &receipt)
+        .await
+        .map_err(boundary)?;
     checkpoint(cancelled)?;
     if receipt.key() != key
         || authenticated.receipt() != &receipt
@@ -94,9 +105,10 @@ where
     if expected_head.is_some_and(|expected| expected != id) {
         return Err(ForgeEventReadRefusal::SnapshotMoved);
     }
-    let configuration = read_repository_incarnation_configuration_async(
-        store, cx, &body.configuration_root,
-    ).await.map_err(boundary)?;
+    let configuration =
+        read_repository_incarnation_configuration_async(store, cx, &body.configuration_root)
+            .await
+            .map_err(boundary)?;
     checkpoint(cancelled)?;
     if configuration.repository_incarnation_id != binding.incarnation
         || configuration.object_format != binding.format
@@ -107,24 +119,31 @@ where
     if let Some(root) = configuration.policy_root {
         // Missing or corrupt policy is not an empty policy. Bind its decoded
         // bytes to the selected root before any rule can affect disclosure.
-        let policy = read_hidden_ref_policy_async(store, cx, &root).await.map_err(boundary)?;
+        let policy = read_hidden_ref_policy_async(store, cx, &root)
+            .await
+            .map_err(boundary)?;
         checkpoint(cancelled)?;
         let identity = fgit_authority::canonical_body_id(
             fgit_crypto::IdentityDomain::HiddenRefPolicy,
             fgit_types::CANONICAL_CODEC_VERSION,
             &policy,
-        ).map_err(boundary)?;
+        )
+        .map_err(boundary)?;
         if identity.algorithm() != root.algorithm() || identity.digest() != root.bytes() {
             return Err(ForgeEventReadRefusal::InvalidPage);
         }
         for rule in &policy.rules {
             checkpoint(cancelled)?;
-            hidden_refs.push_rule(rule, &WireLimits::default())
+            hidden_refs
+                .push_rule(rule, &WireLimits::default())
                 .map_err(|_| ForgeEventReadRefusal::InvalidPage)?;
         }
     }
     checkpoint(cancelled)?;
-    Ok(EventReadBasis { basis: PublicationBasis::new(id, body), hidden_refs })
+    Ok(EventReadBasis {
+        basis: PublicationBasis::new(id, body),
+        hidden_refs,
+    })
 }
 
 #[cfg(test)]

@@ -39,13 +39,13 @@ impl OneNode {
         admits_read(self.cell_state(), ReadMode::Current)
             .map_err(PullRequestChecksReadRefusal::Cell)?;
         let current = self
-            .materialize_admission_in(request)
+            .event_read_basis_in(request, None)
             .await
-            .map_err(|error| PullRequestChecksReadRefusal::Authority(Box::new(error)))?;
+            .map_err(|error| PullRequestChecksReadRefusal::Selection(Box::new(error)))?;
         let selected = snapshots::select(
             &self.authority,
             request.authority(),
-            current.basis(),
+            &current.basis,
             expected_head,
             &|| !super::super::workspace_request_live(request),
         )
@@ -58,32 +58,23 @@ impl OneNode {
                 PullRequestChecksReadRefusal::Admission(error)
             }
         })?;
-        let historical_refs = if selected.id() == current.basis().id() {
-            None
-        } else {
-            Some(
-                crate::read_historical_ref_state_in(
-                    &self.authority,
-                    request.authority(),
-                    self.repository_id,
-                    selected.body(),
-                )
-                .await
-                .map_err(|error| PullRequestChecksReadRefusal::Authority(Box::new(error)))?,
-            )
-        };
+        let ref_state = crate::read_historical_ref_state_in(
+            &self.authority,
+            request.authority(),
+            self.repository_id,
+            selected.body(),
+        )
+        .await
+        .map_err(|error| PullRequestChecksReadRefusal::Authority(Box::new(error)))?;
         if !super::super::workspace_request_live(request) {
             return Err(PullRequestChecksReadRefusal::Admission(Box::new(
                 AdmissionError::AsyncProjectionUnavailable(RefusalCode::CancellationInProgress),
             )));
         }
-        let refs = historical_refs
-            .as_ref()
-            .map_or(&current.snapshot().refs, |state| state.refs());
+        let refs = ref_state.refs();
         let visible = |source: &fgit_types::RefName, target: &fgit_types::RefName| {
             [source, target].iter().all(|name| {
-                !visibility.hides(name.as_bytes())
-                    && !current.snapshot().hidden_refs.hides(name.as_bytes())
+                !visibility.hides(name.as_bytes()) && !current.hidden_refs.hides(name.as_bytes())
             })
         };
         workflow_checks::read_pull_request_page_at(
@@ -108,6 +99,7 @@ pub enum PullRequestChecksReadRefusal {
     UnpinnedContinuation,
     SnapshotMoved,
     Cell(CellRefusal),
+    Selection(Box<super::super::events::ForgeEventReadRefusal>),
     Authority(Box<AdmissionMaterializationRefusal>),
     Admission(Box<AdmissionError>),
 }
