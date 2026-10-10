@@ -146,7 +146,8 @@ where
             return Err(unavailable(RefusalCode::PublicationPolicyRefused));
         }
         let latest =
-            history::latest_progress(store, cx, &basis, key, &|| checkpoint().is_err()).await?;
+            history::latest_progress_for_entry(store, cx, &basis, entry, &|| checkpoint().is_err())
+                .await?;
         let Some(mut progress) = latest else {
             let initial = CanonicalOutboxProgress::start(
                 context.repository_id,
@@ -405,10 +406,8 @@ where
             return Ok(false);
         }
         let previous =
-            history::latest_progress(store, cx, &basis, original.delivery_key(), &|| {
-                checkpoint().is_err()
-            })
-            .await?;
+            history::latest_progress_for_entry(store, cx, &basis, entry, &|| checkpoint().is_err())
+                .await?;
         if previous.as_ref().map(storage::root).transpose()?
             != mutation.predecessor_progress_root()?
         {

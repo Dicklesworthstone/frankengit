@@ -144,7 +144,7 @@ where
     Ok(DeliveryState { forge, outbox })
 }
 
-async fn verify_legacy_empty_outbox<S, C>(
+pub(super) async fn verify_legacy_empty_outbox<S, C>(
     store: &S,
     cx: &S::Context,
     basis: &PublicationBasis,

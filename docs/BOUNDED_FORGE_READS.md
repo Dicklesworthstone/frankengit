@@ -92,6 +92,42 @@ while current hidden-ref policy controls disclosure. A historic token cannot
 restore access to a branch that is hidden now. Mutation, delivery settlement and
 recovery paths retain their complete admission materialization.
 
+## Outbox reconciliation suffix
+
+The runtime settlement reader now uses `history::latest_progress_for_entry`.
+It authenticates the supplied entry against the exact selected outbox map and
+verifies its stable delivery identity and lifecycle chain. It then verifies the
+decision suffix through the transaction that created that entry. The creating
+RCR must bind the original transaction, predecessor RCR and payload, and its
+batch must select the same delivery binding, absent from the preceding outbox
+map. The entire boundary microbatch, including any lifecycle/progress records in it, remains verified. A staged
+creation or progress body cannot replace a missing canonical record.
+
+The 4,096-batch / 65,536-record history limits are unchanged. They bound the
+examined suffix rather than the repository's age, so recent obligations can be
+reconciled even after more than 4,096 older decisions. An unresolved obligation
+whose own suffix exceeds the budget still refuses. Historical genesis-seeded
+obligations use a verified genesis fallback. A missing historical empty-outbox
+sentinel retains the existing full-prefix bootstrap needed to prove its
+unchanged authority history. The original `latest_progress` function remains the complete-history audit path; corruption before the selected
+creation boundary is outside the runtime suffix lookup but remains visible to
+that audit.
+
+This changes neither canonical v1 bytes nor retention. It does not remove the
+16,384-entry publication ceiling, compact settled obligations, or eliminate
+complete outbox materialization or cumulative outcome collection elsewhere.
+Outcome collection retains its own 65,536-batch limit. The owning bridge bead
+remains open.
+
+Model-store regressions count actual immutable reads and exercise a recent
+obligation after 4,100 older batches, the exact suffix resource boundary,
+full-audit equivalence, mixed creation/lifecycle microbatches, all terminal
+dispositions and receipt dependencies, creation-coordinate tampering, missing
+canonical progress, missing/corrupt boundary objects, and interruption at every
+read boundary followed by retry. These are production-reader tests over
+cryptographically linked fixture bodies, not runtime delivery, outcome-index,
+filesystem durability, or latency evidence.
+
 ## Verification boundary
 
 `cargo test -p fgit-admission merge::native::issues::replay_tests` exercises the

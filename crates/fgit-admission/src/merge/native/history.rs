@@ -7,8 +7,9 @@
 use fgit_authority::AsyncAuthorityStore;
 use fgit_chronicle::{PublicationBasis, verify_pair};
 use fgit_codec::{
-    CanonicalBody, CanonicalOutboxDeliveryReceipt, CanonicalOutboxEffectState, CryptoBodyIdentity,
-    DecodeLimits, OutboxDeliveryDisposition, RepositoryCommitRecord, decode_body,
+    CanonicalBody, CanonicalOutboxDeliveryReceipt, CanonicalOutboxEffectState,
+    CanonicalOutboxState, CanonicalOutboxStateEntry, CryptoBodyIdentity, DecodeLimits,
+    OutboxDeliveryDisposition, RepositoryAuthorityHeadBody, RepositoryCommitRecord, decode_body,
 };
 use fgit_resource::{ObligationState, ReconcileState};
 use fgit_types::{AsciiSlug, Digest, RefusalCode, RepositoryId};
@@ -50,6 +51,70 @@ where
     S: AsyncAuthorityStore + ?Sized,
     C: Fn() -> bool + Sync,
 {
+    read_progress(store, cx, basis, key, None, cancelled).await
+}
+
+/// Resolve one selected obligation's progress without auditing decisions before
+/// its creation. The supplied entry must exactly match the authenticated head's
+/// outbox map. The verified suffix must contain its creating transaction, with
+/// the exact predecessor RCR and payload, and that creation batch must select
+/// the same immutable delivery binding, absent from the preceding outbox map.
+/// Staged objects alone cannot provide the boundary. The complete boundary
+/// microbatch is still checked.
+///
+/// Genesis-seeded obligations retain the full genesis verification path. The
+/// 4,096-batch / 65,536-record budgets apply to the examined suffix; a genuinely
+/// old unresolved obligation can still exhaust them. Use [`latest_progress`]
+/// when the requested operation is a complete history audit.
+pub async fn latest_progress_for_entry<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    entry: &CanonicalOutboxStateEntry,
+    cancelled: &C,
+) -> Result<Option<CanonicalOutboxProgress>, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    checkpoint(cancelled)?;
+    if fgit_authority::authority_head_identity(basis.body())
+        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?
+        != basis.id()
+    {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    let selected =
+        read_selected_entry(store, cx, basis.body(), entry.delivery_key(), cancelled).await?;
+    if selected != *entry {
+        return Err(unavailable(RefusalCode::EvidenceStale));
+    }
+    // This proves the stable key and the immutable lifecycle predecessor chain,
+    // including any terminal receipt, before they can shorten a history read.
+    delivery::read_effect_in(store, cx, basis.body().repository_id, entry, cancelled).await?;
+    read_progress(
+        store,
+        cx,
+        basis,
+        entry.delivery_key(),
+        Some(entry),
+        cancelled,
+    )
+    .await
+}
+
+async fn read_progress<S, C>(
+    store: &S,
+    cx: &S::Context,
+    basis: &PublicationBasis,
+    key: AsciiSlug,
+    boundary: Option<&CanonicalOutboxStateEntry>,
+    cancelled: &C,
+) -> Result<Option<CanonicalOutboxProgress>, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
     checkpoint(cancelled)?;
     let repository = basis.body().repository_id;
     let mut successor = basis.body().clone();
@@ -83,8 +148,23 @@ where
             .ok_or_else(|| unavailable(RefusalCode::ResourceBudgetExceeded))?;
         // verify_pair proves that this is repository sequence order, including
         // batches containing several commits interleaved with refusals.
+        let mut creation_found = false;
         for record in batch.committed_rcrs.iter().rev() {
-            match verify_record_evidence(store, cx, repository, record, cancelled).await? {
+            let evidence = verify_record_evidence(store, cx, repository, record, cancelled).await?;
+            if let Some(entry) = boundary
+                && record.tx_id == entry.tx_id()
+            {
+                if creation_found
+                    || record.parent_rcr_id != entry.predecessor_rcr_id()
+                    || record.forge_event_batch_root != entry.payload_root()
+                    || evidence != OutboxRecordEvidence::Ordinary
+                {
+                    return Err(unavailable(RefusalCode::EvidenceInvalid));
+                }
+                creation_found = true;
+                chain.created()?;
+            }
+            match evidence {
                 OutboxRecordEvidence::Ordinary => {}
                 OutboxRecordEvidence::Progress(progress) => chain.progress(progress)?,
                 OutboxRecordEvidence::Effect(effect) => {
@@ -98,6 +178,20 @@ where
                 }
             }
         }
+        if creation_found {
+            let entry = boundary.ok_or_else(|| unavailable(RefusalCode::EvidenceInvalid))?;
+            verify_creation_binding(store, cx, &successor, entry, cancelled).await?;
+            verify_before_creation(
+                store,
+                cx,
+                &PublicationBasis::new(predecessor_id, predecessor),
+                entry.delivery_key(),
+                cancelled,
+            )
+            .await?;
+            checkpoint(cancelled)?;
+            return chain.finish();
+        }
         successor = predecessor;
     }
     if successor.repository_id != repository
@@ -109,8 +203,121 @@ where
     {
         return Err(unavailable(RefusalCode::EvidenceInvalid));
     }
+    if let Some(entry) = boundary {
+        // Some historical/model genesis heads select an initial obligation.
+        // This is distinct from failing to find a non-genesis creation RCR.
+        if entry.predecessor_rcr_id().is_some() {
+            return Err(unavailable(RefusalCode::EvidenceMissing));
+        }
+        verify_creation_binding(store, cx, &successor, entry, cancelled).await?;
+        let seeded = read_selected_entry(store, cx, &successor, key, cancelled).await?;
+        if seeded.predecessor_effect_state_root().is_some()
+            || seeded.effect_state_root()
+                != storage::root(&CanonicalOutboxEffectState::committed(
+                    repository,
+                    key,
+                    entry.tx_id(),
+                    entry.payload_root(),
+                ))?
+        {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
+        }
+    }
     checkpoint(cancelled)?;
     chain.finish()
+}
+
+async fn read_selected_entry<S, C>(
+    store: &S,
+    cx: &S::Context,
+    head: &RepositoryAuthorityHeadBody,
+    key: AsciiSlug,
+    cancelled: &C,
+) -> Result<CanonicalOutboxStateEntry, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    let outbox: CanonicalOutboxState = read_body(
+        store,
+        cx,
+        head.repository_id,
+        delivery::OUTBOX_NAMESPACE,
+        head.outbox_root,
+        cancelled,
+    )
+    .await?;
+    if outbox.repository_id() != head.repository_id {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    outbox
+        .entry(key)
+        .copied()
+        .ok_or_else(|| unavailable(RefusalCode::EvidenceMissing))
+}
+
+async fn verify_creation_binding<S, C>(
+    store: &S,
+    cx: &S::Context,
+    head: &RepositoryAuthorityHeadBody,
+    entry: &CanonicalOutboxStateEntry,
+    cancelled: &C,
+) -> Result<(), AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    let created = read_selected_entry(store, cx, head, entry.delivery_key(), cancelled).await?;
+    if created.effect_class() != entry.effect_class()
+        || created.destination() != entry.destination()
+        || created.payload_root() != entry.payload_root()
+        || created.tx_id() != entry.tx_id()
+        || created.predecessor_rcr_id() != entry.predecessor_rcr_id()
+    {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    // A microbatch can contain later lifecycle transitions as well as creation;
+    // checking the chain permits those while still requiring the exact initial
+    // committed body. Every record in that microbatch was checked above.
+    delivery::read_effect_in(store, cx, head.repository_id, &created, cancelled).await?;
+    let events = storage::read_events(store, cx, head.repository_id, entry.payload_root()).await?;
+    if events.events.is_empty() {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    checkpoint(cancelled)
+}
+
+async fn verify_before_creation<S, C>(
+    store: &S,
+    cx: &S::Context,
+    predecessor: &PublicationBasis,
+    key: AsciiSlug,
+    cancelled: &C,
+) -> Result<(), AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    C: Fn() -> bool + Sync,
+{
+    checkpoint(cancelled)?;
+    let repository = predecessor.body().repository_id;
+    let root = predecessor.body().outbox_root;
+    let frame =
+        storage::read_frame(store, cx, repository, delivery::OUTBOX_NAMESPACE, root).await?;
+    let Some(frame) = frame else {
+        // A historical missing genesis sentinel is not itself an absence
+        // witness. Keep the existing authenticated unchanged-root bootstrap;
+        // this compatibility case can require a complete prefix replay.
+        return delivery::verify_legacy_empty_outbox(store, cx, predecessor, cancelled).await;
+    };
+    let outbox: CanonicalOutboxState = decode_body(&frame, DecodeLimits::DEFAULT)
+        .map_err(|_| unavailable(RefusalCode::EvidenceInvalid))?;
+    if outbox.repository_id() != repository || storage::root(&outbox)? != root {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    if outbox.entry(key).is_some() {
+        return Err(unavailable(RefusalCode::EvidenceInvalid));
+    }
+    checkpoint(cancelled)
 }
 
 /// Verify the evidence body selected by an already authenticated RCR. Typed
@@ -345,6 +552,7 @@ struct ReverseProgress {
     count: u32,
     passed_origin: bool,
     terminal: Option<(CanonicalOutboxEffectState, CanonicalOutboxDeliveryReceipt)>,
+    passed_creation: bool,
 }
 
 impl ReverseProgress {
@@ -356,6 +564,7 @@ impl ReverseProgress {
             count: 0,
             passed_origin: false,
             terminal: None,
+            passed_creation: false,
         }
     }
 
@@ -363,7 +572,7 @@ impl ReverseProgress {
         if progress.delivery_key() != self.key {
             return Ok(());
         }
-        if self.passed_origin {
+        if self.passed_origin || self.passed_creation {
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
         // The initial body has ordinal zero and does not consume a transition.
@@ -394,7 +603,7 @@ impl ReverseProgress {
             return Ok(());
         }
         // Progress after a terminal lifecycle result cannot reopen its budget.
-        if self.latest.is_some() || self.passed_origin {
+        if self.latest.is_some() || self.passed_origin || self.passed_creation {
             return Err(unavailable(RefusalCode::EvidenceInvalid));
         }
         if self.terminal.is_none() {
@@ -404,9 +613,13 @@ impl ReverseProgress {
     }
 
     fn effect(&mut self, effect: &CanonicalOutboxEffectState) -> Result<(), AdmissionError> {
-        if effect.delivery_key() != self.key
-            || effect.state() != ObligationState::DeferredExternally
-        {
+        if effect.delivery_key() != self.key {
+            return Ok(());
+        }
+        if self.passed_creation {
+            return Err(unavailable(RefusalCode::EvidenceInvalid));
+        }
+        if effect.state() != ObligationState::DeferredExternally {
             return Ok(());
         }
         if self.passed_origin {
@@ -419,6 +632,14 @@ impl ReverseProgress {
             validate_progress_origin(oldest, effect)?;
         }
         self.passed_origin = true;
+        Ok(())
+    }
+
+    fn created(&mut self) -> Result<(), AdmissionError> {
+        if self.passed_creation || (self.latest.is_some() && !self.passed_origin) {
+            return Err(unavailable(RefusalCode::EvidenceMissing));
+        }
+        self.passed_creation = true;
         Ok(())
     }
 
